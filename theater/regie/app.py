@@ -368,13 +368,13 @@ class RegieApp(App):
             )
             if is_cursor and is_staged:
                 prefix = Text("▸ ", style="bold yellow on blue")
-                out.append((prefix.append(label, style="on blue"), node))
+                out.append((prefix + label.stylize("on blue"), node))
             elif is_cursor:
-                out.append((Text("▸ ", style="bold yellow").append(label), node))
+                out.append((Text("▸ ", style="bold yellow") + label, node))
             elif is_staged:
-                out.append((Text("  ").append(label, style="on blue"), node))
+                out.append((Text("  ") + label.stylize("on blue"), node))
             else:
-                out.append((Text("  ").append(label), node))
+                out.append((Text("  ") + label, node))
         return out
 
 
