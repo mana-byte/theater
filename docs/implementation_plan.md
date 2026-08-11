@@ -277,7 +277,7 @@ Phase 1a built the minimum spawner needed for identity. This completes it.
 
 ---
 
-## Phase 5a — Jobs and await (2–3 days) — UNBLOCKED
+## Phase 5a — Jobs and await (2–3 days) — **DONE**
 
 The core orchestration loop, over spawned children only. No keystroke injection anywhere in this phase: a spawned child receives its prompt on argv, so `spawn` is itself a complete delivery mechanism.
 
@@ -288,6 +288,23 @@ The core orchestration loop, over spawned children only. No keystroke injection 
 - Error codes: `crashed`, `killed`, `budget_exceeded`, `timeout`
 
 **Exit criteria:** a Vibe agent spawns a worker, awaits it, receives the result, and uses it. Fan-out of three spawned workers awaited together completes correctly. This is most of the acceptance test's second half.
+
+### Delivered
+
+194 tests green (184 + 10 new). New and modified:
+
+| Module | What it does |
+|---|---|
+| `theater/daemon/jobs.py` | `Job` dataclass, `JobState` enum (running/done/crashed/killed), `JobKind` enum (spawn). `JobManager` owns job state + asyncio Events for await. `await_jobs` waits on events with timeout; returns current state of each job. |
+| `theater/daemon/store.py` | `create_job`, `get_job`, `finish_job`, `list_jobs_for_caller`, `running_jobs_for_target`. The `jobs` table was already created in phase 1a's schema. |
+| `theater/daemon/observer.py` | Turn-end events now finish running jobs via `_finish_jobs_for_turn`. Works both in `_drain` (live tailing) and `_on_attach` (pre-existing records at attach time). |
+| `theater/daemon/server.py` | `spawn` now creates a job and returns `handle` alongside the participant record. `jobs.await` and `jobs.status` daemon methods. Reaper crashes running jobs when a pane vanishes. |
+| `theater/mcp/tools.py` | `await_sessions` tool: blocks the caller's MCP request until jobs finish or timeout. |
+| `theater/mcp/server.py` | `await_sessions` MCP tool registered with full docstring. |
+
+**How it works:** `spawn` creates a participant and a job (handle = participant id). The observer tails the child's transcript; when it detects a turn-end, it finishes the job with the assistant's text as the result. The caller calls `await_sessions(handles, max_wait)` which blocks on asyncio Events set by `JobManager.finish`. If the timeout expires, jobs still running are returned with `state="running"` — the caller re-awaits. If the child's pane dies, the reaper crashes the job with `error_code="crashed"`.
+
+**The handle is the participant id.** This avoids a separate id namespace and makes `jobs.status <participant_id>` work directly.
 
 ---
 

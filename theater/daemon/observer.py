@@ -96,6 +96,7 @@ class Observer:
         poll: float = POLL_INTERVAL,
         search: float = SEARCH_INTERVAL,
         sync: float = SYNC_INTERVAL,
+        jobs=None,
     ):
         self.registry = registry
         self.store = registry.store
@@ -106,6 +107,10 @@ class Observer:
         self.poll = poll
         self.search = search
         self.sync = sync
+        #: Optional JobManager. When set, turn-end events for a participant
+        #: with a running job finish that job with the assistant text as
+        #: the result.
+        self.jobs = jobs
         self._tasks: dict[str, asyncio.Task] = {}
         #: Participants whose watcher ended by itself. Not restarted: whatever
         #: stopped it will stop it again, and a respawn loop would be worse
@@ -251,6 +256,8 @@ class Observer:
         if last_line is not None:
             for event in harness.parse(last_line, skipped - 1):
                 self._settle(pid, status_after(event))
+                if event.turn_end and self.jobs is not None:
+                    self._finish_jobs_for_turn(pid, event.text)
 
     def _drain(
         self,
@@ -307,6 +314,10 @@ class Observer:
 
         if last is not None:
             self._settle(pid, status_after(last))
+            # If this event ended a turn and the participant has a running
+            # job, finish it with the assistant text as the result.
+            if last.turn_end and self.jobs is not None:
+                self._finish_jobs_for_turn(pid, last.text)
         return offset, index, mtime
 
     def _settle(self, pid: str, desired: Status) -> None:
@@ -319,3 +330,22 @@ class Observer:
             self.registry.touch(pid)
         else:
             self.registry.set_status(pid, desired)
+
+    def _finish_jobs_for_turn(self, pid: str, result_text: str) -> None:
+        """Finish any running jobs for this participant with the result text.
+
+        Called when the observer detects a turn_end. The result is the
+        assistant's text from the turn-end event — clipped to MAX_TEXT by
+        the harness parser already. If the participant has no running jobs
+        (e.g. it's a hand-started session nobody spawned), this is a no-op.
+        """
+        if self.jobs is None:
+            return
+        from theater.daemon.jobs import JobState
+        running = self.store.running_jobs_for_target(pid)
+        for job in running:
+            self.jobs.finish(
+                job.handle,
+                state=JobState.DONE,
+                result=result_text or "",
+            )

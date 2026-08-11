@@ -21,6 +21,7 @@ import signal
 from typing import Any, Awaitable, Callable
 
 from theater import paths, protocol
+from theater.daemon.jobs import JobManager, JobState
 from theater.daemon.observer import Observer
 from theater.daemon.registry import Registry
 from theater.daemon.spawner import SpawnRequest, Spawner
@@ -72,10 +73,11 @@ class Daemon:
         self.store = store or Store(paths.db_path())
         self.registry = Registry(self.store)
         self.spawner = Spawner(self.registry)
+        self.jobs = JobManager(self.store)
         #: `harnesses={}` disables observation entirely, which is what tests
         #: that only exercise the socket want: the real harnesses read the
         #: user's own ~/.claude and ~/.vibe.
-        self.observer = Observer(self.registry, harnesses)
+        self.observer = Observer(self.registry, harnesses, jobs=self.jobs)
         self._server: asyncio.Server | None = None
         self._reaper: asyncio.Task | None = None
         self._stopping = asyncio.Event()
@@ -189,6 +191,12 @@ class Daemon:
             if p.tmux_pane not in alive:
                 logger.info("participant %s lost its pane %s", p.id, p.tmux_pane)
                 self.registry.mark_dead(p.id)
+                # Crash any running jobs for this participant.
+                running = self.store.running_jobs_for_target(p.id)
+                for job in running:
+                    self.jobs.finish(
+                        job.handle, state=JobState.CRASHED, error_code="crashed"
+                    )
 
     # ---- connection handling -------------------------------------------
 
@@ -455,7 +463,44 @@ async def _spawn(daemon: Daemon, params: dict) -> dict:
         background=params.get("background", True),
     )
     participant = await daemon.spawner.spawn(req)
-    return participant.to_dict()
+    # Create a job for this spawn so the caller can await the result.
+    handle = participant.id  # the handle is the participant id itself.
+    daemon.jobs.create(
+        handle=handle,
+        caller_id=params.get("parent_id") or "cli",
+        target_id=participant.id,
+        kind="spawn",
+        prompt=req.prompt or "",
+    )
+    result = participant.to_dict()
+    result["handle"] = handle
+    return result
+
+
+@method("jobs.await")
+async def _jobs_await(daemon: Daemon, params: dict) -> list[dict]:
+    """Wait for one or more jobs to finish, up to max_wait seconds.
+
+    Returns the current state of each job. A job that is still running when
+    the timeout expires is returned with state="running" — the caller should
+    re-await if it wants to keep waiting.
+    """
+    handles = params.get("handles") or []
+    if not handles:
+        raise BadRequest("at least one handle is required")
+    max_wait = float(params.get("max_wait", 60.0))
+    jobs = await daemon.jobs.await_jobs(handles, max_wait=max_wait)
+    return [j.to_dict() for j in jobs]
+
+
+@method("jobs.status")
+async def _jobs_status(daemon: Daemon, params: dict) -> dict:
+    """Get the current state of a single job."""
+    handle = _require(params, "handle")
+    job = daemon.jobs.get(handle)
+    if job is None:
+        raise BadRequest(f"no job {handle!r}")
+    return job.to_dict()
 
 
 @method("bus.tail")

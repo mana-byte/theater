@@ -127,3 +127,25 @@ async def register_pane(session: Session, *, pane: str) -> dict:
     session.participant_id = record["id"]
     session._resolved = True
     return _summarise(record)
+
+
+async def await_sessions(
+    session: Session, *, handles: list[str], max_wait: float = 60.0
+) -> list[dict]:
+    """Wait for spawned child sessions to finish, up to max_wait seconds.
+
+    Returns the current state of each job. A job that is still running when
+    the timeout expires is returned with state="running" — re-await if you
+    want to keep waiting. The result text is the assistant's final response
+    from the child's turn.
+
+    This blocks the current MCP request only; the daemon and every other
+    participant continue running.
+    """
+    if not session._resolved:
+        await session.identify()
+    jobs = await session.client.call(
+        "jobs.await", handles=handles, max_wait=max_wait
+    )
+    assert isinstance(jobs, list)
+    return jobs

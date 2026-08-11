@@ -158,6 +158,56 @@ class Store:
             "UPDATE participants SET last_activity = ? WHERE id = ?", (now(), pid)
         )
 
+    # ---- jobs ----------------------------------------------------------
+
+    def create_job(self, job) -> None:
+        self.db.execute(
+            "INSERT INTO jobs (handle, caller_id, target_id, kind, prompt, "
+            "state, result, error_code, created_at, finished_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                job.handle, job.caller_id, job.target_id, job.kind,
+                job.prompt, job.state, job.result, job.error_code,
+                job.created_at, job.finished_at,
+            ),
+        )
+
+    def get_job(self, handle: str):
+        row = self.db.execute(
+            "SELECT * FROM jobs WHERE handle = ?", (handle,)
+        ).fetchone()
+        if row is None:
+            return None
+        from theater.daemon.jobs import Job
+        return Job.from_row(row)
+
+    def finish_job(
+        self, handle: str, *, state: str, result: str | None = None,
+        error_code: str | None = None, finished_at: float | None = None,
+    ) -> None:
+        self.db.execute(
+            "UPDATE jobs SET state = ?, result = ?, error_code = ?, "
+            "finished_at = ? WHERE handle = ?",
+            (state, result, error_code, finished_at, handle),
+        )
+
+    def list_jobs_for_caller(self, caller_id: str) -> list:
+        from theater.daemon.jobs import Job
+        rows = self.db.execute(
+            "SELECT * FROM jobs WHERE caller_id = ? ORDER BY created_at DESC",
+            (caller_id,),
+        ).fetchall()
+        return [Job.from_row(r) for r in rows]
+
+    def running_jobs_for_target(self, target_id: str) -> list:
+        from theater.daemon.jobs import Job
+        rows = self.db.execute(
+            "SELECT * FROM jobs WHERE target_id = ? AND state = ? "
+            "ORDER BY created_at DESC",
+            (target_id, "running"),
+        ).fetchall()
+        return [Job.from_row(r) for r in rows]
+
     # ---- bus ----------------------------------------------------------
 
     def bus_append(

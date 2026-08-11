@@ -77,6 +77,27 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         """
         return await tools.register_pane(session, pane=pane)
 
+    @mcp.tool()
+    async def await_sessions(
+        handles: list[str], max_wait: float = 60.0
+    ) -> list[dict]:
+        """Wait for spawned child sessions to finish.
+
+        handles:   the handle values returned by spawn_session (same as the
+                   participant id).
+        max_wait:  maximum seconds to block. Default 60. If the timeout
+                   expires, jobs still running are returned with state="running"
+                   and you should re-await.
+
+        Returns one entry per handle with state ("done", "crashed", "running"),
+        result (the assistant's final response text), and error_code.
+        This blocks your current request only; the daemon and other agents
+        continue running.
+        """
+        return await tools.await_sessions(
+            session, handles=handles, max_wait=max_wait
+        )
+
     return mcp
 
 
