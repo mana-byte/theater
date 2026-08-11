@@ -125,6 +125,26 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
             session, target_id=target_id, prompt=prompt
         )
 
+    @mcp.tool()
+    async def read_transcript(target_id: str, last_n: int = 5) -> dict:
+        """Read the transcript of a participant, returning full unclipped text.
+
+        The job result from spawn/send is clipped to 2000 chars. This
+        method reads the full transcript from disk and returns the last
+        `last_n` events (user, assistant, tool_call, tool_result) with
+        complete, unclipped text.
+
+        target_id: the participant id to read.
+        last_n:    number of events to return, newest. Default 5. Set to
+                   0 for all events in the current transcript.
+
+        Returns {"id": ..., "events": [...], "path": ...}. Each event
+        has "role", "text" (full), "tool_name", and "turn_end".
+        """
+        return await tools.read_transcript(
+            session, target_id=target_id, last_n=last_n
+        )
+
     return mcp
 
 

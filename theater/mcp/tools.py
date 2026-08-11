@@ -182,3 +182,25 @@ async def send_prompt(
     )
     assert isinstance(record, dict)
     return record
+
+
+async def read_transcript(
+    session: Session, *, target_id: str, last_n: int = 5
+) -> dict:
+    """Read the transcript of a participant, returning full unclipped text.
+
+    The job result from spawn/send is clipped to 2000 chars. This method
+    returns the full assistant responses from the transcript on disk,
+    so a caller that needs the complete text can get it.
+
+    Returns the last `last_n` events (user, assistant, tool_call,
+    tool_result) from the transcript, in chronological order. Each entry
+    has `role`, `text` (full, unclipped), `tool_name`, and `turn_end`.
+    """
+    if not session._resolved:
+        await session.identify()
+    record = await session.client.call(
+        "read_transcript", id=target_id, last_n=last_n
+    )
+    assert isinstance(record, dict)
+    return record

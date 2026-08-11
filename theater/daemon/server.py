@@ -683,6 +683,68 @@ async def _shutdown(daemon: Daemon, params: dict) -> dict:
     return {"stopping": True}
 
 
+@method("read_transcript")
+async def _read_transcript(daemon: Daemon, params: dict) -> dict:
+    """Read the transcript of a participant, returning normalized events.
+
+    The job result from spawn/send is clipped to MAX_TEXT (2000 chars).
+    This method returns the full, unclipped assistant responses from the
+    transcript, so a caller that needs the complete text can get it.
+
+    Returns the last `last_n` assistant messages from the transcript,
+    newest first. Each entry has `role`, `text`, and `tool_name` (for
+    tool calls). The transcript on disk remains the full record.
+    """
+    from theater.harness import HARNESSES
+
+    pid = _require(params, "id")
+    last_n = int(params.get("last_n", 5))
+
+    p = daemon.registry.get(pid)
+    if p is None:
+        raise BadRequest(f"no participant {pid!r}")
+
+    harness_name = normalize(p.harness)
+    harness = HARNESSES.get(harness_name)
+    if harness is None:
+        raise BadRequest(f"cannot read transcript: harness {p.harness!r} is not known")
+
+    # Find the transcript. Use no `after` floor — the caller wants history.
+    import asyncio as _asyncio
+    path = await _asyncio.to_thread(
+        harness.find_transcript,
+        cwd=p.cwd,
+        session_id=p.session_id,
+        after=None,
+    )
+    if path is None or not path.exists():
+        return {"id": pid, "events": [], "path": None}
+
+    # Read and parse, collecting assistant messages.
+    events: list[dict] = []
+    try:
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            for index, line in enumerate(fh):
+                line = line.strip()
+                if not line:
+                    continue
+                for event in harness.parse(line, index):
+                    if event.kind.value in ("assistant", "user", "tool_call", "tool_result"):
+                        events.append({
+                            "index": event.raw_index,
+                            "role": str(event.kind),
+                            "text": event.text or "",
+                            "tool_name": event.tool_name,
+                            "turn_end": event.turn_end,
+                        })
+    except OSError:
+        return {"id": pid, "events": [], "path": str(path)}
+
+    # Return the last `last_n` events, newest last (chronological order).
+    events = events[-last_n:] if last_n > 0 else events
+    return {"id": pid, "events": events, "path": str(path)}
+
+
 # ---- entrypoint --------------------------------------------------------
 
 

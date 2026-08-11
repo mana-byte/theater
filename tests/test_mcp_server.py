@@ -48,6 +48,7 @@ async def test_tools_are_registered(daemon):
         "register_pane",
         "await_sessions",
         "send",
+        "read_transcript",
     }
 
 
