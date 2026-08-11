@@ -728,7 +728,7 @@ async def _read_transcript(daemon: Daemon, params: dict) -> dict:
                 line = line.strip()
                 if not line:
                     continue
-                for event in harness.parse(line, index):
+                for event in harness.parse(line, index, clip_text=False):
                     if event.kind.value in ("assistant", "user", "tool_call", "tool_result"):
                         events.append({
                             "index": event.raw_index,

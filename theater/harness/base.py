@@ -206,13 +206,17 @@ class Harness(ABC):
         """
 
     @abstractmethod
-    def parse(self, line: str, index: int) -> list[Event]:
+    def parse(self, line: str, index: int, *, clip_text: bool = True) -> list[Event]:
         """Turn one transcript line into zero or more events.
 
         Zero is normal and common: both harnesses write bookkeeping records
         that mean nothing to an observer. Malformed lines yield zero too rather
         than raising — a transcript being appended to as we read it is an
         expected condition, not an error.
+
+        When clip_text is True (the default), event text is clipped to
+        MAX_TEXT for the bus. When False, the full text is returned —
+        used by read_transcript so an agent can read the complete response.
         """
 
     @abstractmethod

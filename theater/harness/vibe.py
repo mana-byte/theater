@@ -164,7 +164,7 @@ class VibeHarness(Harness):
         name = transcript.parent.name
         return name.rsplit("_", 1)[-1] if name.startswith("session_") else None
 
-    def parse(self, line: str, index: int) -> list[Event]:
+    def parse(self, line: str, index: int, *, clip_text: bool = True) -> list[Event]:
         line = line.strip()
         if not line:
             return []
@@ -175,14 +175,15 @@ class VibeHarness(Harness):
         if not isinstance(record, dict):
             return []
 
+        def _clip(text):
+            return clip(text) if clip_text else (text or "")
+
         role = record.get("role")
         if role == "user":
-            # `injected` marks context the harness inserted rather than a human
-            # keystroke. Both are input to the agent, so both are USER here.
             return [
                 Event(
                     kind=EventKind.USER,
-                    text=clip(record.get("content")),
+                    text=_clip(record.get("content")),
                     raw_index=index,
                 )
             ]
@@ -190,7 +191,7 @@ class VibeHarness(Harness):
             return [
                 Event(
                     kind=EventKind.TOOL_RESULT,
-                    text=clip(record.get("content")),
+                    text=_clip(record.get("content")),
                     tool_name=record.get("name"),
                     raw_index=index,
                 )
@@ -203,7 +204,7 @@ class VibeHarness(Harness):
         content = record.get("content")
         if content:
             out.append(
-                Event(kind=EventKind.ASSISTANT, text=clip(content), raw_index=index)
+                Event(kind=EventKind.ASSISTANT, text=_clip(content), raw_index=index)
             )
         for call in calls:
             if not isinstance(call, dict):

@@ -176,7 +176,7 @@ class ClaudeCodeHarness(Harness):
         """The filename is the session id. Verified, not assumed."""
         return transcript.stem or None
 
-    def parse(self, line: str, index: int) -> list[Event]:
+    def parse(self, line: str, index: int, *, clip_text: bool = True) -> list[Event]:
         line = line.strip()
         if not line:
             return []
@@ -193,16 +193,16 @@ class ClaudeCodeHarness(Harness):
         message = message if isinstance(message, dict) else {}
 
         if kind == "assistant":
-            return self._assistant(record, message, ts, index)
+            return self._assistant(record, message, ts, index, clip_text=clip_text)
         if kind == "user":
-            return self._user(message, ts, index)
+            return self._user(message, ts, index, clip_text=clip_text)
         if kind == "system" and record.get("level") == "error":
             err = record.get("error")
             text = err if isinstance(err, str) else json.dumps(err, default=str)
             return [
                 Event(
                     kind=EventKind.ERROR,
-                    text=clip(text),
+                    text=clip(text) if clip_text else (text or ""),
                     ts=ts,
                     raw_index=index,
                     # An API error ends the attempt; the agent is waiting again.
@@ -212,8 +212,12 @@ class ClaudeCodeHarness(Harness):
         return []
 
     def _assistant(
-        self, record: dict, message: dict, ts: float | None, index: int
+        self, record: dict, message: dict, ts: float | None, index: int,
+        *, clip_text: bool = True,
     ) -> list[Event]:
+        def _clip(text):
+            return clip(text) if clip_text else (text or "")
+
         stop = message.get("stop_reason")
         turn_end = stop is not None and stop != "tool_use"
         out: list[Event] = []
@@ -225,7 +229,7 @@ class ClaudeCodeHarness(Harness):
                 out.append(
                     Event(
                         kind=EventKind.ASSISTANT,
-                        text=clip(block.get("text")),
+                        text=_clip(block.get("text")),
                         ts=ts,
                         raw_index=index,
                     )
@@ -263,13 +267,16 @@ class ClaudeCodeHarness(Harness):
                 )
         return out
 
-    def _user(self, message: dict, ts: float | None, index: int) -> list[Event]:
+    def _user(self, message: dict, ts: float | None, index: int, *, clip_text: bool = True) -> list[Event]:
+        def _clip(text):
+            return clip(text) if clip_text else (text or "")
+
         content = message.get("content")
         if isinstance(content, str):
             return [
                 Event(
                     kind=EventKind.USER,
-                    text=clip(content),
+                    text=_clip(content),
                     ts=ts,
                     raw_index=index,
                 )
@@ -283,10 +290,7 @@ class ClaudeCodeHarness(Harness):
                 out.append(
                     Event(
                         kind=EventKind.TOOL_RESULT,
-                        # The block carries tool_use_id but not the tool name,
-                        # and parse() is stateless per line, so the name stays
-                        # None. The matching TOOL_CALL event already named it.
-                        text=clip(
+                        text=_clip(
                             body if isinstance(body, str) else json.dumps(body, default=str)
                         ),
                         ts=ts,
