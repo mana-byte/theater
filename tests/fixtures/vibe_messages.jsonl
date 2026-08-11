@@ -1,0 +1,4 @@
+{"role": "user", "content": "<user content 10677 chars>", "injected": true, "message_id": "18a38665-717b-4edc-8725-d9fbc1d6ba7e"}
+{"role": "assistant", "content": "<assistant content 2644 chars>", "injected": false, "message_id": "0de5eb95-c953-4929-870b-a80fbf7a9b86"}
+{"role": "assistant", "content": "<assistant content 135 chars>", "injected": false, "reasoning_content": "<reasoning 325 chars>", "reasoning_message_id": "25417c9d-d468-4619-a15b-a499dff0cea5", "tool_calls": [{"id": "chatcmpl-tool-ad6d248698aa1cfe", "index": 0, "function": {"name": "read_file", "arguments": "{\"scrubbed\": true}"}}], "message_id": "909fc4f0-79f9-474a-abd4-672157e90e18"}
+{"role": "tool", "content": "<tool content 17249 chars>", "injected": false, "name": "read_file", "tool_call_id": "chatcmpl-tool-ad6d248698aa1cfe", "tool_result": {"scrubbed": true}}

@@ -1,0 +1,34 @@
+[project]
+name = "theater"
+version = "0.1.0"
+description = "Cross-harness orchestration layer for coding agents"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # 2.0 renamed FastMCP to MCPServer; theater/mcp/server.py uses the new name,
+    # so 1.x will not import. Interop with 1.x *clients* (Vibe ships 1.28.1) is
+    # unaffected: an `initialize` offering 2025-11-25 is echoed back verbatim
+    # (mcp/server/runner.py:425), and the 2026-07-28 revision this SDK also
+    # speaks is only reachable via server/discover, never via the handshake.
+    "mcp>=2.0.0",
+]
+
+[project.scripts]
+theater = "theater.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["theater"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

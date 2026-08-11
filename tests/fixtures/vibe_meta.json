@@ -1,0 +1,19 @@
+{
+  "session_id": "162fd4d9-3186-908c-1285-f24efa09f02d",
+  "parent_session_id": null,
+  "start_time": "2026-08-11T08:21:26.846506+00:00",
+  "end_time": "2026-08-11T12:00:32.954326+00:00",
+  "git_branch": null,
+  "environment": {
+    "working_directory": "/tmp/theater-fixture"
+  },
+  "child_sessions": [
+    {
+      "session_id": "9edd3dbf-b456-76cf-2f16-ea386d9c5cf2",
+      "tool_call_id": "toolu_vrtx_01J5EvnmNixBeX8jm9sZXPma",
+      "agent": "explore",
+      "relative_path": "agents/explore_20260811_095837_9edd3dbf"
+    }
+  ],
+  "title": "<scrubbed>"
+}

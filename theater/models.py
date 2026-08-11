@@ -1,0 +1,99 @@
+"""Core domain types shared by the daemon, the MCP server and the CLI."""
+
+from __future__ import annotations
+
+import time
+import uuid
+from dataclasses import asdict, dataclass, field
+from enum import StrEnum
+
+
+class Tier(StrEnum):
+    """How a participant reached the registry. See init_idea_grilled.md §6."""
+
+    SPAWNED = "spawned"  # daemon created the pane; identity by construction
+    ADOPTED = "adopted"  # pre-existing pane, self-registered
+    EXTERNAL = "external"  # no pane at all; emit-only, never addressable
+
+
+class Status(StrEnum):
+    STARTING = "starting"
+    IDLE = "idle"
+    WORKING = "working"
+    AWAITING_INPUT = "awaiting_input"
+    DEAD = "dead"
+
+
+def new_id() -> str:
+    return uuid.uuid4().hex[:12]
+
+
+def now() -> float:
+    return time.time()
+
+
+@dataclass(slots=True)
+class Participant:
+    id: str = field(default_factory=new_id)
+    harness: str = "unknown"
+    tier: Tier = Tier.EXTERNAL
+    tmux_pane: str | None = None
+    cwd: str | None = None
+    branch: str | None = None
+    session_id: str | None = None
+    parent_id: str | None = None
+    pid: int | None = None
+    status: Status = Status.STARTING
+    last_activity: float = field(default_factory=now)
+    created_at: float = field(default_factory=now)
+
+    @property
+    def addressable(self) -> bool:
+        """External participants can call out but can never be called.
+
+        This is a consequence of MCP having no server-initiated turn primitive:
+        inbound delivery needs a tmux pane, and External has none.
+        """
+        return self.tier is not Tier.EXTERNAL and self.status is not Status.DEAD
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        d["tier"] = str(self.tier)
+        d["status"] = str(self.status)
+        d["addressable"] = self.addressable
+        return d
+
+    @classmethod
+    def from_row(cls, row) -> Participant:
+        return cls(
+            id=row["id"],
+            harness=row["harness"],
+            tier=Tier(row["tier"]),
+            tmux_pane=row["tmux_pane"],
+            cwd=row["cwd"],
+            branch=row["branch"],
+            session_id=row["session_id"],
+            parent_id=row["parent_id"],
+            pid=row["pid"],
+            status=Status(row["status"]),
+            last_activity=row["last_activity"],
+            created_at=row["created_at"],
+        )
+
+
+class TheaterError(Exception):
+    """Base for errors that should reach a client as a structured code."""
+
+    code = "error"
+
+
+class NotFound(TheaterError):
+    code = "not_found"
+
+
+class BadRequest(TheaterError):
+    code = "bad_request"
+
+
+class NotAddressable(TheaterError):
+    code = "not_addressable"
