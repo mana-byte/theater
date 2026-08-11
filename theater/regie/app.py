@@ -261,14 +261,16 @@ class RegieApp(App):
         try:
             await panes.join_pane(pane, target_window=self.my_window)
             self.staged_pane = pane
-            # Resize the staged pane to fill the area right of the sidebar.
-            # The sidebar is 52 cols; the stage gets the rest.
-            try:
-                width, height = self._stage_dimensions()
-                if width > 10 and height > 3:
-                    await panes.resize_pane(pane, width=width, height=height)
-            except Exception as exc:
-                logger.debug("resize after stage failed: %s", exc)
+            # Resize the *régie* pane down to sidebar width; tmux
+            # automatically gives the rest to the staged pane. This is
+            # more reliable than resizing the staged pane to a calculated
+            # width, because it does not depend on knowing the window's
+            # actual column count.
+            if self.my_pane:
+                try:
+                    await panes.resize_pane(self.my_pane, width=52)
+                except Exception as exc:
+                    logger.debug("resize after stage failed: %s", exc)
             self.notify(f"staged {node.get('harness', '?')} ({pane})")
         except Exception as exc:
             self.notify(f"stage failed: {exc}", severity="error")
