@@ -105,7 +105,12 @@ class ClaudeCodeHarness(Harness):
                 }
             }
         }
-        argv = ["claude", "--mcp-config", str(config_path)]
+        # `--mcp-config` is variadic in Claude Code 2.x (<configs...>,
+        # space-separated). The space-separated form greedily consumes the
+        # prompt positional as a second config path, so claude exits with
+        # "MCP config file not found: <cwd>/<prompt>" and the pane dies before
+        # the observer ever attaches. The `=` form binds the value tightly.
+        argv = ["claude", f"--mcp-config={config_path}"]
         if approval == "yolo":
             argv.append("--dangerously-skip-permissions")
         elif approval == "edits":

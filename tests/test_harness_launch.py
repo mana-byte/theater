@@ -26,7 +26,7 @@ def test_claude_carries_the_id_in_the_config_file(tmp_path):
         approval="manual",
     )
 
-    assert plan.argv[:3] == ["claude", "--mcp-config", str(config)]
+    assert plan.argv[:2] == ["claude", f"--mcp-config={config}"]
     assert plan.argv[-1] == "say hello"
 
     written = json.loads(plan.files[config])
