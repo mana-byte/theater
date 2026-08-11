@@ -219,6 +219,21 @@ class Harness(ABC):
     def native_children(self, transcript: Path) -> list[NativeChild]:
         """Sub-agents this session spawned on its own. Often empty."""
 
+    @abstractmethod
+    def is_idle_screen(self, capture: str) -> bool:
+        """Does the rendered screen show a bare prompt (agent waiting for input)?
+
+        `capture` is the output of `tmux capture-pane -p` — the pane's
+        rendered content as plain text. Each harness recognizes its own
+        prompt format. Used by the observer to detect AWAITING_INPUT:
+        if the transcript says WORKING but the screen shows a bare prompt,
+        the agent is blocked on a permission prompt or waiting for input.
+
+        Tuned to accept false negatives (return False when unsure) and
+        never false positives: a false positive would mark a working agent
+        as idle, hiding activity from the régie.
+        """
+
 
 def status_after(event: Event) -> Status:
     """The status implied by having just seen this event.

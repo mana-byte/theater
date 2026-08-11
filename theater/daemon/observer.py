@@ -51,6 +51,14 @@ POLL_INTERVAL = 0.25
 #: is locked onto the old file, it needs to re-scan to find the new one.
 RELOCATE_TIMEOUT = 5.0
 
+#: How long to wait with no transcript growth before checking the screen
+#: for a bare prompt. If the transcript says WORKING but the screen shows
+#: a prompt, the agent is AWAITING_INPUT (blocked on a permission prompt
+#: or waiting for human input). Tuned to avoid false positives: 10s is
+#: long enough that a slow tool call won't trigger it, short enough that
+#: a human watching the régie sees the status change before getting bored.
+AWAITING_INPUT_TIMEOUT = 10.0
+
 #: How often to look for a transcript we have not found yet. Slower, because
 #: it is a directory scan rather than a stat.
 SEARCH_INTERVAL = 2.0
@@ -220,33 +228,53 @@ class Observer:
                 if new_offset != offset:
                     # The file grew; reset the stale timer.
                     last_growth = None
+                    # If the agent was AWAITING_INPUT, new transcript bytes
+                    # mean it's working again — revert to WORKING.
+                    p = self.store.get_participant(pid)
+                    if p and p.status is Status.AWAITING_INPUT:
+                        self.registry.set_status(pid, Status.WORKING)
                 else:
-                    # No growth this tick. An idle agent (waiting for input)
-                    # will never grow — that's normal. Only re-locate if we
-                    # have been stale long enough that Vibe may have rotated
-                    # to a new session directory in response to a send-keys.
+                    # No growth this tick. Two checks, by escalating timeout:
+                    #
+                    # 1. RELOCATE_TIMEOUT (5s): re-locate to find a rotated
+                    #    session directory (Vibe starts a new one per turn).
+                    # 2. AWAITING_INPUT_TIMEOUT (10s): check the rendered
+                    #    screen for a bare prompt. If the transcript says
+                    #    WORKING but the screen shows a prompt, the agent
+                    #    is blocked on a permission prompt or waiting for
+                    #    input — set AWAITING_INPUT.
                     if last_growth is None:
                         last_growth = time.monotonic()
-                    elif time.monotonic() - last_growth > RELOCATE_TIMEOUT:
-                        # Re-locate. If _locate returns a different path,
-                        # the agent rotated to a new session directory —
-                        # re-attach. If it returns the same path, the agent
-                        # is idle, not rotated — stay put and reset the
-                        # timer so we don't re-locate every 5 seconds.
-                        new_path = await self._locate(pid, harness)
-                        if new_path is not None and new_path != path:
-                            logger.info(
-                                "transcript for %s rotated: %s -> %s",
-                                pid, path, new_path,
-                            )
-                            path = new_path
-                            offset, index, mtime, last_line = await asyncio.to_thread(_attach_point, path)
-                            self._on_attach(pid, harness, path, index, last_line)
-                            last_growth = None
-                        else:
-                            # Same path or not found — reset the timer
-                            # so we don't spin on re-locate every 5s.
-                            last_growth = time.monotonic()
+                    else:
+                        elapsed = time.monotonic() - last_growth
+                        if elapsed > RELOCATE_TIMEOUT:
+                            # Re-locate. If _locate returns a different path,
+                            # the agent rotated to a new session directory —
+                            # re-attach. If it returns the same path, the agent
+                            # is idle, not rotated — stay put and reset the
+                            # timer so we don't re-locate every 5 seconds.
+                            new_path = await self._locate(pid, harness)
+                            if new_path is not None and new_path != path:
+                                logger.info(
+                                    "transcript for %s rotated: %s -> %s",
+                                    pid, path, new_path,
+                                )
+                                path = new_path
+                                offset, index, mtime, last_line = await asyncio.to_thread(_attach_point, path)
+                                self._on_attach(pid, harness, path, index, last_line)
+                                last_growth = None
+                            else:
+                                # Same path or not found.
+                                if elapsed > AWAITING_INPUT_TIMEOUT:
+                                    # Check the rendered screen for a bare
+                                    # prompt. Only escalate to AWAITING_INPUT
+                                    # if the transcript currently says WORKING
+                                    # (IDLE is already correct; AWAITING_INPUT
+                                    # would be a no-op).
+                                    await self._check_idle_screen(pid, harness)
+                                # Reset the timer either way — we don't want
+                                # to call capture-pane every tick.
+                                last_growth = time.monotonic()
                 offset, index, mtime = new_offset, new_index, new_mtime
             except asyncio.CancelledError:
                 raise
@@ -371,6 +399,32 @@ class Observer:
             self.registry.touch(pid)
         else:
             self.registry.set_status(pid, desired)
+
+    async def _check_idle_screen(self, pid: str, harness: Harness) -> None:
+        """Check the rendered screen for a bare prompt.
+
+        If the transcript says WORKING but the screen shows a bare prompt,
+        the agent is blocked on a permission prompt or waiting for input —
+        set AWAITING_INPUT. If the screen shows agent output, the agent is
+        genuinely working — leave as WORKING. If capture-pane fails, leave
+        as WORKING (accept false negatives).
+        """
+        from theater.tmux import client as tmux
+
+        p = self.store.get_participant(pid)
+        if p is None or p.status is not Status.WORKING:
+            return  # only check if transcript says WORKING
+        if not p.tmux_pane:
+            return
+        try:
+            capture = await tmux.run(
+                "capture-pane", "-p", "-t", p.tmux_pane, check=False
+            )
+        except Exception:
+            return
+        if harness.is_idle_screen(capture):
+            self.registry.set_status(pid, Status.AWAITING_INPUT)
+            logger.info("participant %s awaiting input (bare prompt on screen)", pid)
 
     def _finish_jobs_for_turn(self, pid: str, result_text: str) -> None:
         """Finish any running jobs for this participant with the result text.

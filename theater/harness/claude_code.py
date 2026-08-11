@@ -331,3 +331,17 @@ class ClaudeCodeHarness(Harness):
         except OSError:
             return []
         return out
+
+    def is_idle_screen(self, capture: str) -> bool:
+        """Claude Code shows a `>` prompt when waiting for input.
+
+        When idle, the last non-empty line of the rendered pane is just
+        the prompt character. When working, the last line is agent
+        output. When a human is typing, the last line has text after
+        the prompt.
+        """
+        lines = [line for line in capture.splitlines() if line.strip()]
+        if not lines:
+            return False
+        last = lines[-1].strip()
+        return last in (">", "> ")

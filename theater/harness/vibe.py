@@ -252,3 +252,20 @@ class VibeHarness(Harness):
                 )
             )
         return out
+
+    def is_idle_screen(self, capture: str) -> bool:
+        """Vibe shows a bare `❯` prompt when waiting for input.
+
+        The capture-pane output ends with the current input line. If the
+        last non-empty line is just the prompt symbol (with optional
+        whitespace), the agent is idle. If there is text after the prompt,
+        someone is typing — but that's human presence, not idle. If the
+        last line is agent output, the agent is still rendering.
+        """
+        lines = [line for line in capture.splitlines() if line.strip()]
+        if not lines:
+            return False
+        last = lines[-1].strip()
+        # Vibe's prompt is `❯` (U+276F). When idle, the last line is
+        # just the prompt with nothing after it.
+        return last in ("❯", "❯ ", "> ❯")
