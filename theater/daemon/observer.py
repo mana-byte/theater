@@ -210,6 +210,7 @@ class Observer:
         index = 0
         mtime = 0
         last_growth: float | None = None
+        last_screen_check: float | None = None
         import time
 
         while not self._stopping.is_set():
@@ -222,59 +223,63 @@ class Observer:
                     offset, index, mtime, last_line = await asyncio.to_thread(_attach_point, path)
                     self._on_attach(pid, harness, path, index, last_line)
                     last_growth = None
+                    last_screen_check = None
                 new_offset, new_index, new_mtime = self._drain(
                     pid, harness, path, offset, index, mtime
                 )
                 if new_offset != offset:
-                    # The file grew; reset the stale timer.
+                    # The file grew; reset both timers.
                     last_growth = None
+                    last_screen_check = None
                     # If the agent was AWAITING_INPUT, new transcript bytes
                     # mean it's working again — revert to WORKING.
                     p = self.store.get_participant(pid)
                     if p and p.status is Status.AWAITING_INPUT:
                         self.registry.set_status(pid, Status.WORKING)
                 else:
-                    # No growth this tick. Two checks, by escalating timeout:
-                    #
-                    # 1. RELOCATE_TIMEOUT (5s): re-locate to find a rotated
-                    #    session directory (Vibe starts a new one per turn).
-                    # 2. AWAITING_INPUT_TIMEOUT (10s): check the rendered
-                    #    screen for a bare prompt. If the transcript says
-                    #    WORKING but the screen shows a prompt, the agent
-                    #    is blocked on a permission prompt or waiting for
-                    #    input — set AWAITING_INPUT.
+                    # No growth this tick.
+                    now = time.monotonic()
                     if last_growth is None:
-                        last_growth = time.monotonic()
-                    else:
-                        elapsed = time.monotonic() - last_growth
-                        if elapsed > RELOCATE_TIMEOUT:
-                            # Re-locate. If _locate returns a different path,
-                            # the agent rotated to a new session directory —
-                            # re-attach. If it returns the same path, the agent
-                            # is idle, not rotated — stay put and reset the
-                            # timer so we don't re-locate every 5 seconds.
-                            new_path = await self._locate(pid, harness)
-                            if new_path is not None and new_path != path:
-                                logger.info(
-                                    "transcript for %s rotated: %s -> %s",
-                                    pid, path, new_path,
-                                )
-                                path = new_path
-                                offset, index, mtime, last_line = await asyncio.to_thread(_attach_point, path)
-                                self._on_attach(pid, harness, path, index, last_line)
-                                last_growth = None
-                            else:
-                                # Same path or not found.
-                                if elapsed > AWAITING_INPUT_TIMEOUT:
-                                    # Check the rendered screen for a bare
-                                    # prompt. Only escalate to AWAITING_INPUT
-                                    # if the transcript currently says WORKING
-                                    # (IDLE is already correct; AWAITING_INPUT
-                                    # would be a no-op).
-                                    await self._check_idle_screen(pid, harness)
-                                # Reset the timer either way — we don't want
-                                # to call capture-pane every tick.
-                                last_growth = time.monotonic()
+                        last_growth = now
+                    if last_screen_check is None:
+                        last_screen_check = now
+
+                    elapsed = now - last_growth
+
+                    # Check 1: re-locate after RELOCATE_TIMEOUT (5s).
+                    # Uses _relocate (cwd scan, no session_id) so Vibe's
+                    # session rotation is found.
+                    if elapsed > RELOCATE_TIMEOUT:
+                        new_path = await self._relocate(pid, harness)
+                        if new_path is not None and new_path != path:
+                            logger.info(
+                                "transcript for %s rotated: %s -> %s",
+                                pid, path, new_path,
+                            )
+                            path = new_path
+                            offset, index, mtime, last_line = await asyncio.to_thread(_attach_point, path)
+                            self._on_attach(pid, harness, path, index, last_line)
+                            last_growth = None
+                            last_screen_check = None
+                        else:
+                            # Same path — the agent is idle, not rotated.
+                            # Don't reset last_growth (that would prevent
+                            # the screen check from ever firing). Instead,
+                            # throttle the re-locate by resetting only
+                            # last_screen_check if the screen check hasn't
+                            # fired yet.
+                            pass
+
+                    # Check 2: after AWAITING_INPUT_TIMEOUT (10s) of no
+                    # growth, check the screen for a bare prompt. This uses
+                    # a SEPARATE timer so the 5s re-locate doesn't prevent
+                    # the 10s screen check from firing.
+                    screen_elapsed = now - last_screen_check
+                    if screen_elapsed > AWAITING_INPUT_TIMEOUT:
+                        await self._check_idle_screen(pid, harness)
+                        # Throttle: don't check again until another
+                        # AWAITING_INPUT_TIMEOUT has passed.
+                        last_screen_check = now
                 offset, index, mtime = new_offset, new_index, new_mtime
             except asyncio.CancelledError:
                 raise
@@ -284,23 +289,41 @@ class Observer:
                 path = None
                 offset = index = mtime = 0
                 last_growth = None
+                last_screen_check = None
             except Exception:
                 logger.exception("observing %s failed", pid)
             await self._sleep(self.poll)
 
     async def _locate(self, pid: str, harness: Harness) -> Path | None:
+        """Find the transcript by session_id (fast) or cwd scan (fallback)."""
         p = self.store.get_participant(pid)
         if p is None or not p.cwd:
             return None
-        # A spawned participant's transcript cannot predate the participant, so
-        # its creation time is a safe floor. An adopted one's transcript almost
-        # certainly does predate our first sight of it, so there is no floor to
-        # apply — see Harness.find_transcript.
         after = p.created_at if p.tier is Tier.SPAWNED else None
         return await asyncio.to_thread(
             harness.find_transcript,
             cwd=p.cwd,
             session_id=p.session_id,
+            after=after,
+        )
+
+    async def _relocate(self, pid: str, harness: Harness) -> Path | None:
+        """Find the newest transcript by cwd only, ignoring session_id.
+
+        Vibe starts a new session directory on each turn. The session_id
+        stored on the participant pins find_transcript to the FIRST
+        session directory, which never grows after the agent rotates.
+        Re-locating must scan by cwd only, so the newest matching
+        directory is found regardless of the stored session id.
+        """
+        p = self.store.get_participant(pid)
+        if p is None or not p.cwd:
+            return None
+        after = p.created_at if p.tier is Tier.SPAWNED else None
+        return await asyncio.to_thread(
+            harness.find_transcript,
+            cwd=p.cwd,
+            session_id=None,
             after=after,
         )
 
