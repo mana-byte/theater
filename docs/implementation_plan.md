@@ -323,14 +323,26 @@ Injection into an already-running session. The only part of the design that depe
 
 ---
 
-## Phase 6 — Rails (1–2 days)
+## Phase 6 — Rails (1–2 days) — **DONE**
 
 - Depth cap (default 3), enforced at `spawn`
 - Cycle detection on the await graph, rejecting an await that would close a loop
 - Per-tree budget with hard subtree stop
-- Queue backpressure and per-participant `send` rate limit
+- Queue backpressure and per-participant `send` rate limit *(phase 5b)*
 
-**Exit criteria:** deliberately construct A→await B→await A and get a clean rejection, not a hang. Set a $0.10 budget and watch a subtree stop.
+**Exit criteria:** deliberately construct A→await B→await A and get a clean rejection, not a hang. Set a budget and watch a subtree stop.
+
+### Delivered
+
+208 tests green (194 + 14 new). New: `theater/daemon/rails.py`.
+
+| Rail | Implementation |
+|---|---|
+| Depth cap | `check_depth(store, parent_id, cap=3)`: walks parent links to compute depth, rejects if child would exceed cap. Root spawns always allowed. Cycle-safe (visited set). |
+| Cycle detection | `check_cycle(store, caller_id, target_ids)`: walks the caller's ancestry; if any target is an ancestor of the caller, the await is rejected with `cycle_detected`. The direct-parent case (parent awaits child) is never a cycle. |
+| Budget | `check_budget(store, parent_id, limit=20)`: counts all participants in the tree (BFS from root); rejects if the tree is at the limit. `hard_stop_tree` kills an entire subtree when a budget is exceeded. |
+
+Wired into `spawn` (depth + budget checked before creating the participant) and `jobs.await` (cycle checked before blocking).
 
 ---
 

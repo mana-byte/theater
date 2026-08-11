@@ -23,6 +23,7 @@ from typing import Any, Awaitable, Callable
 from theater import paths, protocol
 from theater.daemon.jobs import JobManager, JobState
 from theater.daemon.observer import Observer
+from theater.daemon.rails import check_budget, check_cycle, check_depth
 from theater.daemon.registry import Registry
 from theater.daemon.spawner import SpawnRequest, Spawner
 from theater.daemon.store import Store
@@ -462,6 +463,10 @@ async def _spawn(daemon: Daemon, params: dict) -> dict:
         window_name=params.get("window_name"),
         background=params.get("background", True),
     )
+    # Safety rails: reject before creating anything.
+    check_depth(daemon.store, req.parent_id)
+    check_budget(daemon.store, req.parent_id)
+
     participant = await daemon.spawner.spawn(req)
     # Create a job for this spawn so the caller can await the result.
     handle = participant.id  # the handle is the participant id itself.
@@ -489,6 +494,11 @@ async def _jobs_await(daemon: Daemon, params: dict) -> list[dict]:
     if not handles:
         raise BadRequest("at least one handle is required")
     max_wait = float(params.get("max_wait", 60.0))
+    # Cycle detection: reject if the caller appears in the await chain
+    # of any target.
+    caller_id = params.get("caller_id")
+    if caller_id:
+        check_cycle(daemon.store, caller_id, handles)
     jobs = await daemon.jobs.await_jobs(handles, max_wait=max_wait)
     return [j.to_dict() for j in jobs]
 
