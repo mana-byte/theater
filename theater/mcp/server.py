@@ -52,7 +52,8 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
 
     @mcp.tool()
     async def spawn_session(
-        harness: str, prompt: str, approval: str, cwd: str | None = None
+        harness: str, prompt: str, approval: str, cwd: str | None = None,
+        worktree: bool = False, base_branch: str | None = None,
     ) -> dict:
         """Start a new agent in its own tmux window as your child.
 
@@ -62,9 +63,15 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
                   the only thing standing between an unattended child and your
                   filesystem, so choose it deliberately.
         cwd:      where the child works. Defaults to your own directory.
+        worktree: if True, create a git worktree for the child with its own
+                  isolated index and HEAD. The branch name theater/<child-id>
+                  is in the result so you can merge it explicitly. The child's
+                  repo must be a git repo for this to work.
+        base_branch: the branch to base the worktree on. Defaults to current HEAD.
         """
         return await tools.spawn_session(
-            session, harness=harness, prompt=prompt, approval=approval, cwd=cwd
+            session, harness=harness, prompt=prompt, approval=approval, cwd=cwd,
+            worktree=worktree, base_branch=base_branch,
         )
 
     @mcp.tool()

@@ -72,6 +72,16 @@ def _parser() -> argparse.ArgumentParser:
     spawn.add_argument("--cwd", default=None)
     spawn.add_argument("--parent", dest="parent_id", default=None)
     spawn.add_argument(
+        "--worktree",
+        action="store_true",
+        help="Create a git worktree for the child with isolated index and HEAD.",
+    )
+    spawn.add_argument(
+        "--base-branch",
+        default=None,
+        help="Base branch for the worktree. Defaults to current HEAD.",
+    )
+    spawn.add_argument(
         "--foreground",
         action="store_true",
         help="Switch to the new window instead of leaving it in the background.",
@@ -229,6 +239,8 @@ def cmd_spawn(args) -> int:
         parent_id=args.parent_id,
         tmux_session=tmux.current_session_sync(),
         background=not args.foreground,
+        worktree=args.worktree,
+        base_branch=args.base_branch,
     )
     if args.json:
         print(json.dumps(record, indent=2))

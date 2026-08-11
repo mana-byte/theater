@@ -263,7 +263,7 @@ Layout: régie left (~40 cols), stage right. Agents park in hidden windows. Sele
 
 ---
 
-## Phase 4 — Spawn, complete (1–2 days)
+## Phase 4 — Spawn, complete (1–2 days) — **DONE**
 
 Phase 1a built the minimum spawner needed for identity. This completes it.
 
@@ -274,6 +274,24 @@ Phase 1a built the minimum spawner needed for identity. This completes it.
 - `approval` is required, no default; surfaced in the régie when a child blocks on a prompt
 
 **Exit criteria:** an agent calls `spawn`, a new window appears in the tree as its child, the child works in its own worktree, and killing the parent from the régie offers to strike the subtree.
+
+### Delivered
+
+234 tests green (223 + 11 new). New: `theater/daemon/worktree.py`.
+
+| What | Implementation |
+|---|---|
+| `create_worktree(repo_root, child_id, base_branch)` | `git worktree add -b theater/<child-id> .theater/worktrees/<child-id>`. Returns the path. |
+| `remove_worktree(repo_root, child_id)` | `git worktree remove --force` + `git branch -D`. Called on kill. |
+| `is_git_repo`, `repo_root` | Helper queries. |
+| `SpawnRequest.worktree` | When True, the spawner creates a worktree before launching and uses the worktree path as the child's cwd. The branch name is stored on the participant. |
+| Kill cleanup | `Spawner.kill` now calls `remove_worktree` if the participant had a Theater-managed branch. |
+| MCP tool | `spawn_session` accepts `worktree: bool` and `base_branch: str | None`. |
+| CLI | `theater spawn --worktree --base-branch <branch>` |
+
+**Isolation is real:** a commit in a child's worktree does not appear in the parent's HEAD (verified by `test_create_worktree_isolates_commits`). Each child gets its own index and HEAD, so concurrent staging and commits do not corrupt each other.
+
+**Merge-back:** the child's branch name (`theater/<child-id>`) is stored on the participant and visible in the tree. The parent decides whether to merge.
 
 ---
 

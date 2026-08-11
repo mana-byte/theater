@@ -89,11 +89,17 @@ async def spawn_session(
     prompt: str,
     approval: str,
     cwd: str | None = None,
+    worktree: bool = False,
+    base_branch: str | None = None,
 ) -> dict:
     """Create a child agent in a new tmux window and return its record.
 
     The prompt is delivered on the child's argv, not by typing into its pane, so
     this path does not depend on keystroke injection working at all.
+
+    If `worktree` is True, a git worktree is created for the child so it has
+    its own isolated index and HEAD. The branch name `theater/<child-id>` is
+    reported in the result so the parent can merge it explicitly.
     """
     if not session._resolved:
         await session.identify()
@@ -105,6 +111,8 @@ async def spawn_session(
         cwd=cwd or os.getcwd(),
         parent_id=session.participant_id,
         tmux_session=os.environ.get("THEATER_TMUX_SESSION"),
+        worktree=worktree,
+        base_branch=base_branch,
     )
     assert isinstance(record, dict)
     return _summarise(record)

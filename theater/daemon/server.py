@@ -518,6 +518,8 @@ async def _spawn(daemon: Daemon, params: dict) -> dict:
         tmux_session=params.get("tmux_session"),
         window_name=params.get("window_name"),
         background=params.get("background", True),
+        worktree=bool(params.get("worktree", False)),
+        base_branch=params.get("base_branch"),
     )
     # Safety rails: reject before creating anything.
     check_depth(daemon.store, req.parent_id)
