@@ -58,8 +58,9 @@ class TreePanel(VerticalScroll):
     """A scrollable list of participant tree lines.
 
     Each line is a separate Label widget, so the panel scrolls natively when
-    the list is longer than the viewport. The cursor and staged-pane
-    highlighting are applied as Rich Text styles on each label.
+    the list is longer than the viewport. Cursor and staged highlighting are
+    done via Textual CSS classes (which respect the user's theme) rather than
+    hardcoded Rich colors.
     """
 
     lines: reactive[list[tuple[Text, dict]]] = reactive([])
@@ -71,8 +72,19 @@ class TreePanel(VerticalScroll):
     }
     TreePanel > Label {
         height: 1;
-        padding: 0 0;
+        padding: 0 1;
         margin: 0 0;
+    }
+    TreePanel > Label.tree-cursor {
+        background: $accent 20%;
+        text-style: bold;
+    }
+    TreePanel > Label.tree-staged {
+        background: $primary 20%;
+    }
+    TreePanel > Label.tree-cursor.tree-staged {
+        background: $accent 30%;
+        text-style: bold;
     }
     """
 
@@ -84,6 +96,22 @@ class TreePanel(VerticalScroll):
             return
         widgets = [Label(label) for label, _ in lines]
         self.mount(*widgets)
+
+    def apply_cursor(self, cursor: int, staged_pane: str | None) -> None:
+        """Add CSS classes to the cursor and staged lines, remove from others."""
+        for i, child in enumerate(self.children):
+            child.remove_class("tree-cursor")
+            child.remove_class("tree-staged")
+            # Need to find the node for this line to check staged
+            if i < len(self._lines_data):
+                _, node = self._lines_data[i]
+                if staged_pane and node.get("tmux_pane") == staged_pane:
+                    child.add_class("tree-staged")
+            if i == cursor:
+                child.add_class("tree-cursor")
+
+    #: Set by the app so apply_cursor can map line index to node.
+    _lines_data: list[tuple[Text, dict]] = []
 
     def scroll_to_cursor(self, cursor: int) -> None:
         """Ensure the cursor line is visible."""
@@ -227,16 +255,21 @@ class RegieApp(App):
 
     def _render_tree(self) -> None:
         panel = self.query_one("#tree-panel", TreePanel)
-        panel.lines = self._highlight_cursor(self.tree_lines)
+        panel._lines_data = self.tree_lines
+        panel.lines = self.tree_lines
+        panel.apply_cursor(self.cursor, self.staged_pane)
         panel.scroll_to_cursor(self.cursor)
 
     def watch_cursor(self, cursor: int) -> None:
         """Redraw the tree with the cursor highlighted."""
-        self._render_tree()
+        panel = self.query_one("#tree-panel", TreePanel)
+        panel.apply_cursor(cursor, self.staged_pane)
+        panel.scroll_to_cursor(cursor)
 
     def watch_staged_pane(self, _pane: str | None) -> None:
         """Redraw the tree so the staged pane gets its background."""
-        self._render_tree()
+        panel = self.query_one("#tree-panel", TreePanel)
+        panel.apply_cursor(self.cursor, self.staged_pane)
 
     # ---- actions -------------------------------------------------------
 
@@ -357,25 +390,8 @@ class RegieApp(App):
 
     # ---- tree rendering with cursor ------------------------------------
 
-    def _highlight_cursor(self, lines: list[tuple[Text, dict]]) -> list[tuple[Text, dict]]:
-        """Copy lines and mark the cursor and the staged pane."""
-        out: list[tuple[Text, dict]] = []
-        for i, (label, node) in enumerate(lines):
-            is_cursor = i == self.cursor
-            is_staged = bool(
-                self.staged_pane
-                and node.get("tmux_pane") == self.staged_pane
-            )
-            if is_cursor and is_staged:
-                prefix = Text("▸ ", style="bold yellow on blue")
-                out.append((prefix.append_text(label.copy()), node))
-            elif is_cursor:
-                out.append((Text("▸ ", style="bold yellow").append_text(label.copy()), node))
-            elif is_staged:
-                out.append((Text("  ", style="on blue").append_text(label.copy()), node))
-            else:
-                out.append((Text("  ").append_text(label.copy()), node))
-        return out
+    # (highlighting is now done via Textual CSS classes in apply_cursor,
+    #  not by rewriting Rich Text styles)
 
 
 def run_regie() -> None:
