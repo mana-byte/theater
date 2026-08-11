@@ -211,3 +211,17 @@ async def send_keys(pane_id: str, text: str, *, enter: bool = True) -> None:
     await run("send-keys", "-t", pane_id, "-l", "--", text)
     if enter:
         await run("send-keys", "-t", pane_id, "Enter")
+
+
+async def display_message(fmt: str, *, target: str | None = None) -> str:
+    """Query a tmux format string for a target pane/window.
+
+    Used by the régie to discover its own pane id and window id at startup:
+    `display-message -p -t $TMUX_PANE '#{pane_id}'` and
+    `display-message -p -t $TMUX_PANE '#{window_id}'`.
+    """
+    args = ["display-message", "-p"]
+    if target:
+        args += ["-t", target]
+    args.append(fmt)
+    return await run(*args)

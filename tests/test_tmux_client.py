@@ -203,3 +203,41 @@ async def test_send_keys_no_enter_is_single_call(monkeypatch):
     monkeypatch.setattr(client, "run", fake_run)
     await client.send_keys("%7", "text", enter=False)
     assert len(captured) == 1
+
+
+# ---- display_message ---------------------------------------------------
+
+
+async def test_display_message_with_target(monkeypatch):
+    captured: list[list[str]] = []
+
+    async def fake_run(*args: str, check: bool = True) -> str:
+        captured.append(list(args))
+        return "@3"
+
+    monkeypatch.setattr(client, "run", fake_run)
+    result = await client.display_message("#{window_id}", target="%5")
+    assert result == "@3"
+    argv = captured[0]
+    assert argv[0] == "display-message"
+    assert "-p" in argv
+    assert "-t" in argv
+    assert argv[argv.index("-t") + 1] == "%5"
+    assert "#{window_id}" in argv
+
+
+async def test_display_message_without_target(monkeypatch):
+    captured: list[list[str]] = []
+
+    async def fake_run(*args: str, check: bool = True) -> str:
+        captured.append(list(args))
+        return "%99"
+
+    monkeypatch.setattr(client, "run", fake_run)
+    result = await client.display_message("#{pane_id}")
+    assert result == "%99"
+    argv = captured[0]
+    assert argv[0] == "display-message"
+    assert "-p" in argv
+    assert "-t" not in argv
+    assert "#{pane_id}" in argv

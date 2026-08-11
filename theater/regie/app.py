@@ -14,10 +14,11 @@ the daemon tells tmux to join that agent's pane into the stage window; the
 régie then re-asserts its own pane layout so the tree stays visible.
 
 Keybindings:
-    j/k or ↑/↓    navigate the tree
-    Enter         stage the selected agent (join its pane into this window)
-    x             kill the selected agent's pane
-    q             quit (detaches from tmux, does not kill anything)
+    j/k or up/down  navigate the tree
+    Enter           stage the selected agent (join its pane into this window)
+    z               focus the staged pane (type at the agent directly)
+    x               kill the selected agent's pane
+    q               quit (detaches from tmux, does not kill anything)
 
 Polling: the tree refreshes every 1s, the bus tail every 0.4s. Both are
 async daemon calls; the app runs them as background workers.
@@ -38,6 +39,8 @@ from rich.text import Text
 from theater.client import DaemonClient
 from theater.regie.bus_view import format_bus_line
 from theater.regie.tree import render_tree, selected_participant
+from theater.tmux import client as tmux
+from theater.tmux import panes
 
 logger = logging.getLogger("theater.regie")
 
@@ -96,6 +99,7 @@ class RegieApp(App):
         Binding("down", "cursor_down", "down", show=False),
         Binding("up", "cursor_up", "up", show=False),
         Binding("enter", "stage", "stage"),
+        Binding("z", "focus_stage", "focus"),
         Binding("x", "kill", "kill"),
         Binding("q", "quit", "quit"),
     ]
@@ -105,6 +109,12 @@ class RegieApp(App):
     cursor: reactive[int] = reactive(0)
     tree_lines: reactive[list[tuple[Text, dict]]] = reactive([])
     bus_cursor: int = 0
+    #: The régie's own pane id (from $TMUX_PANE), discovered at mount.
+    my_pane: str | None = None
+    #: The window id the régie lives in, discovered at mount.
+    my_window: str | None = None
+    #: The pane id currently on stage (joined into our window), or None.
+    staged_pane: str | None = None
 
     def __init__(self):
         super().__init__()
@@ -120,6 +130,18 @@ class RegieApp(App):
     async def on_mount(self) -> None:
         self._client = DaemonClient()
         await self._client.connect()
+        # Discover our own pane and window id. The régie is itself a tmux
+        # pane — staging means joining another pane into this window, so we
+        # need to know which window we are in.
+        my_pane = tmux.current_pane()
+        if my_pane:
+            self.my_pane = my_pane
+            try:
+                self.my_window = await tmux.display_message(
+                    "#{window_id}", target=my_pane
+                )
+            except Exception as exc:
+                logger.debug("could not discover window id: %s", exc)
         self.set_interval(TREE_INTERVAL, self._refresh_tree)
         self.set_interval(BUS_INTERVAL, self._refresh_bus)
         await self._refresh_tree()
@@ -202,10 +224,8 @@ class RegieApp(App):
     async def action_stage(self) -> None:
         """Stage the selected agent: join its pane into the régie's window.
 
-        Phase 3 milestone: this is where the tmux pane swapping happens.
-        For now, it just reports what it would do — the actual join-pane
-        call requires the régie to know its own window id, which is set up
-        by the `theater regie` CLI command before launching the app.
+        If something is already staged, break it back out to a hidden window
+        first. Then join the new pane in and resize it to fill the stage area.
         """
         node = selected_participant(self.tree_lines, self.cursor)
         if node is None:
@@ -215,7 +235,58 @@ class RegieApp(App):
         if not pane:
             self.notify(f"{node.get('id', '?')[:8]} has no pane", severity="warning")
             return
-        self.notify(f"staging {node.get('harness', '?')} ({pane}) — phase 3 will join-pane")
+        if not self.my_window:
+            self.notify("régie window not discovered — cannot stage", severity="error")
+            return
+
+        # Already staged? Unstage first.
+        if self.staged_pane and self.staged_pane != pane:
+            try:
+                await panes.break_pane(self.staged_pane)
+                self.notify(f"unstaged {self.staged_pane}")
+            except Exception as exc:
+                logger.debug("unstage failed: %s", exc)
+
+        if self.staged_pane == pane:
+            # Toggle: unstaging the current occupant
+            try:
+                await panes.break_pane(pane)
+                self.staged_pane = None
+                self.notify(f"unstaged {node.get('harness', '?')} ({pane})")
+            except Exception as exc:
+                self.notify(f"unstage failed: {exc}", severity="error")
+            return
+
+        # Join the agent's pane into our window.
+        try:
+            await panes.join_pane(pane, target_window=self.my_window)
+            self.staged_pane = pane
+            # Resize the staged pane to fill the area right of the sidebar.
+            # The sidebar is 52 cols; the stage gets the rest.
+            try:
+                width, height = self._stage_dimensions()
+                if width > 10 and height > 3:
+                    await panes.resize_pane(pane, width=width, height=height)
+            except Exception as exc:
+                logger.debug("resize after stage failed: %s", exc)
+            self.notify(f"staged {node.get('harness', '?')} ({pane})")
+        except Exception as exc:
+            self.notify(f"stage failed: {exc}", severity="error")
+
+    def _stage_dimensions(self) -> tuple[int, int]:
+        """Approximate width/height for the staged pane.
+
+        The sidebar takes 52 columns. The stage gets the rest of the terminal
+        width. Height is the full terminal height minus the header/footer.
+        This is approximate — tmux's own layout engine will adjust, and the
+        next resize cycle will correct any drift.
+        """
+        import shutil
+
+        cols, rows = shutil.get_terminal_size((120, 40))
+        width = max(cols - 52, 20)
+        height = max(rows - 4, 10)
+        return width, height
 
     async def action_kill(self) -> None:
         """Kill the selected participant."""
@@ -235,6 +306,23 @@ class RegieApp(App):
         except Exception as exc:
             self.notify(f"kill failed: {exc}", severity="error")
         await self._refresh_tree()
+
+    async def action_focus_stage(self) -> None:
+        """Focus the staged pane so the user can type at the agent.
+
+        This is the 'zoom' action — it selects the staged pane in tmux,
+        which brings it to the foreground of the window. The user can then
+        interact with the agent directly. Pressing q in the régie still
+        detaches everything.
+        """
+        if not self.staged_pane:
+            self.notify("nothing staged — press Enter to stage first", severity="warning")
+            return
+        try:
+            await panes.select_pane(self.staged_pane)
+            self.notify(f"focusing {self.staged_pane} — press Ctrl-B o to return to régie")
+        except Exception as exc:
+            self.notify(f"focus failed: {exc}", severity="error")
 
     # ---- tree rendering with cursor ------------------------------------
 
