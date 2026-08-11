@@ -97,3 +97,11 @@ class BadRequest(TheaterError):
 
 class NotAddressable(TheaterError):
     code = "not_addressable"
+
+
+class HumanPresent(TheaterError):
+    code = "human_present"
+
+
+class Busy(TheaterError):
+    code = "busy"

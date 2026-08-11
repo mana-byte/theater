@@ -105,6 +105,26 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
             session, handles=handles, max_wait=max_wait
         )
 
+    @mcp.tool()
+    async def send(target_id: str, prompt: str) -> dict:
+        """Send a prompt to an already-running agent mid-session.
+
+        The prompt is typed directly into the target's tmux pane via
+        send-keys. The target must be addressable (Spawned or Adopted).
+        The returned handle can be passed to await_sessions.
+
+        target_id: the participant id of the agent to send to. Use
+                   list_participants to find addressable peers.
+        prompt:    the text to type into the target's pane.
+
+        Fails with `human_present` if a human is detected at the target
+        pane — never inject into a session a human is using. Fails with
+        `busy` if the target is already processing a send prompt.
+        """
+        return await tools.send_prompt(
+            session, target_id=target_id, prompt=prompt
+        )
+
     return mcp
 
 

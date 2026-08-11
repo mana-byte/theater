@@ -28,8 +28,9 @@ from theater.daemon.registry import Registry
 from theater.daemon.spawner import SpawnRequest, Spawner
 from theater.daemon.store import Store
 from theater.harness import Harness, known_binaries, normalize
-from theater.models import BadRequest, Status, TheaterError
+from theater.models import BadRequest, Busy, HumanPresent, NotAddressable, Status, TheaterError
 from theater.tmux import client as tmux
+from theater.tmux.presence import human_present
 
 import subprocess
 
@@ -85,6 +86,12 @@ class Daemon:
         #: One task per open connection. Tracked so shutdown can end them; see
         #: aclose().
         self._conns: set[asyncio.Task] = set()
+        #: Monotonic counter for send-job handle uniqueness.
+        self._send_seq = 0
+
+    def _next_send_seq(self) -> int:
+        self._send_seq += 1
+        return self._send_seq
 
     # ---- lifecycle -----------------------------------------------------
 
@@ -576,6 +583,75 @@ async def _bus_tail(daemon: Daemon, params: dict) -> list[dict]:
     return daemon.store.bus_tail(
         limit=int(params.get("limit", 100)), after_id=int(params.get("after_id", 0))
     )
+
+
+@method("send")
+async def _send(daemon: Daemon, params: dict) -> dict:
+    """Send a prompt to an already-running agent via tmux send-keys.
+
+    Creates a job (kind=send) that finishes when the observer detects the
+    next turn-end from the target. The caller can then `await` the handle.
+
+    Safety checks:
+      - The target must be addressable (Spawned or Adopted, not External).
+      - If a human is present at the target pane, returns `human_present`
+        error — never inject into a session a human is using.
+      - If the target has a running send job, returns `busy` error — a
+        slow caller beats a corrupted session. (Queueing is a future
+        enhancement; for now, the caller re-sends.)
+    """
+    target_id = _require(params, "target")
+    prompt = _require(params, "prompt")
+    caller_id = params.get("caller_id") or "cli"
+
+    target = daemon.registry.get(target_id)
+    if not target.addressable:
+        raise NotAddressable(
+            f"participant {target_id!r} is not addressable (tier={target.tier})"
+        )
+    if not target.tmux_pane:
+        raise NotAddressable(
+            f"participant {target_id!r} has no pane to send to"
+        )
+
+    # Check for human presence before injecting.
+    if await human_present(target.tmux_pane):
+        raise HumanPresent(
+            f"a human is present at {target.tmux_pane}; not injecting"
+        )
+
+    # Check for a busy target — a running send job means the agent
+    # is already processing a prompt.
+    running = daemon.store.running_jobs_for_target(target_id)
+    busy = [j for j in running if j.kind == "send"]
+    if busy:
+        raise Busy(
+            f"participant {target_id!r} has a running send job"
+        )
+
+    # Deliver the prompt via send-keys.
+    await tmux.send_keys(target.tmux_pane, prompt)
+
+    # Create a job for this send.
+    handle = f"{target_id}#{daemon._next_send_seq()}"
+    daemon.jobs.create(
+        handle=handle,
+        caller_id=caller_id,
+        target_id=target_id,
+        kind="send",
+        prompt=prompt,
+    )
+
+    daemon.store.bus_append(
+        "agent.send",
+        from_id=caller_id,
+        to_id=target_id,
+        payload={"handle": handle, "prompt": prompt[:200]},
+    )
+
+    result = daemon.jobs.get(handle)
+    assert result is not None
+    return result.to_dict()
 
 
 @method("shutdown")

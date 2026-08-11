@@ -157,3 +157,28 @@ async def await_sessions(
     )
     assert isinstance(jobs, list)
     return jobs
+
+
+async def send_prompt(
+    session: Session, *, target_id: str, prompt: str
+) -> dict:
+    """Send a prompt to an already-running agent via tmux send-keys.
+
+    The prompt is typed directly into the target's pane. The target must
+    be addressable (Spawned or Adopted). If a human is present at the
+    target pane, the call fails with `human_present` — never inject into
+    a session a human is using. If the target is already processing a
+    send prompt, the call fails with `busy`.
+
+    Returns a job handle that can be passed to `await_sessions`.
+    """
+    if not session._resolved:
+        await session.identify()
+    record = await session.client.call(
+        "send",
+        target=target_id,
+        prompt=prompt,
+        caller_id=session.participant_id,
+    )
+    assert isinstance(record, dict)
+    return record

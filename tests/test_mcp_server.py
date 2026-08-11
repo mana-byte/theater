@@ -47,6 +47,7 @@ async def test_tools_are_registered(daemon):
         "spawn_session",
         "register_pane",
         "await_sessions",
+        "send",
     }
 
 

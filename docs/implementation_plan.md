@@ -326,7 +326,7 @@ The core orchestration loop, over spawned children only. No keystroke injection 
 
 ---
 
-## Phase 5b — Live delivery via `send` (1–2 days) — needs spike 0.3
+## Phase 5b — Live delivery via `send` (1–2 days) — **DONE**
 
 Injection into an already-running session. The only part of the design that depends on `send-keys` being reliable.
 
@@ -337,7 +337,20 @@ Injection into an already-running session. The only part of the design that depe
 
 **Exit criteria:** an agent `send`s to a hand-started peer mid-session, the prompt arrives intact, the reply resolves the handle. Typing into the target pane and re-sending produces `human_present` rather than a corrupted input line.
 
-**If 0.3 is red:** ship without `send`. `spawn` + `await` is a complete orchestration story on its own, and External participants were already emit-only — this would extend the same limitation to Adopted ones.
+### Delivered
+
+241 tests green (234 + 7 new). New: `theater/tmux/presence.py`.
+
+| What | Implementation |
+|---|---|
+| `human_present(pane_id)` | Checks `pane_in_mode` (copy mode), `pane_active` + `session_attached` (attached human), and `capture-pane` scrape (non-empty input buffer). Tuned for false negatives over false positives. |
+| `send` daemon method | Checks addressability, human presence, busy state; delivers via `send-keys`; creates a `send` job. The job finishes when the observer detects the next turn-end from the target. |
+| `send` MCP tool | `send(target_id, prompt)` returns a handle. Caller passes it to `await_sessions`. |
+| `busy` rejection | If the target has a running `send` job, the call fails with `busy`. After the job finishes, a new send succeeds. |
+| `HumanPresent`, `Busy` error classes | Structured error codes for the caller to handle. |
+| `JobKind.SEND` | The job system now handles both `spawn` and `send` jobs uniformly. |
+
+**The observer finishes send jobs:** when it detects a `turn_end` event for a participant, it finishes any running `send` jobs for that participant with the assistant text as the result. This is the same mechanism that finishes `spawn` jobs — one code path, both job kinds.
 
 ---
 

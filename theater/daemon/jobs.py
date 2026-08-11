@@ -52,7 +52,7 @@ class JobState(StrEnum):
 
 class JobKind(StrEnum):
     SPAWN = "spawn"
-    # SEND = "send"  # phase 5b
+    SEND = "send"
 
 
 @dataclass(frozen=True, slots=True)
