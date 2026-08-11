@@ -4,17 +4,29 @@ The spec (§10) says: never inject into a session a human is using. This
 module checks whether a human is present at a pane before `send-keys`
 delivers a prompt.
 
-Detection combines:
-  - `pane_active` + `session_attached > 0`: an attached human is looking
-    at this pane.
-  - `pane_in_mode`: copy mode — definitely present.
-  - `capture-pane` scrape of the input line: a non-empty buffer means
-    someone is typing.
+Detection combines two independent signals. Either one is sufficient to
+block injection:
 
-Tuned to accept false negatives and never false positives: when unsure,
-queue rather than error. A false positive (injecting while a human is
-typing) corrupts the input line; a false negative (queuing when nobody
-is there) just adds latency.
+  1. **Copy mode** (`pane_in_mode`): the user is scrolling or selecting
+     text. This is a tmux fact — no heuristic involved. A user in copy
+     mode is definitely present and would lose their selection if we
+     injected.
+
+  2. **Input buffer** (`capture-pane` scrape): the last line of the pane
+     has text beyond a bare prompt — someone has started typing but not
+     yet pressed Enter. This is the primary signal for "a human is
+     actively composing at this pane right now."
+
+What is NOT a signal: `pane_active` + `session_attached`. Being attached
+and looking at a pane does not mean the human is typing — the régie
+stages agents so the user can watch them work, and blocking `send` to
+any visible pane defeats the purpose. The spec says "when unsure, queue
+rather than error"; a human who is merely watching is not using the
+input line, so `send-keys` into the agent's pane is safe.
+
+Tuned to accept false negatives and never false positives: a false
+positive (injecting while a human is typing) corrupts the input line;
+a false negative (queueing when nobody is there) just adds latency.
 """
 
 from __future__ import annotations
@@ -25,45 +37,25 @@ from theater.tmux.client import run
 async def human_present(pane_id: str) -> bool:
     """Is a human likely present at this pane?
 
-    Returns True if any signal indicates a human is actively using the
-    pane. Returns False when unsure — the caller queues rather than
+    Returns True if there is evidence a human is actively using the pane's
+    input. Returns False when unsure — the caller queues rather than
     errors, so a false negative is safe.
-
-    Signals (any one is sufficient):
-      1. `pane_in_mode` is non-empty (copy mode, etc.) — definitely present.
-      2. `pane_active` is 1 AND `session_attached` > 0 — an attached
-         human is looking at this pane.
-      3. The last line of `capture-pane` has a non-empty input buffer
-         (text after the prompt, not yet submitted) — someone is typing.
-
-    Signal 3 is the most reliable but also the most fragile: it depends
-    on the prompt format and the pane's scroll position. Signals 1 and 2
-    are tmux facts, not heuristics.
     """
-    # Check tmux's own pane state — these are facts, not heuristics.
-    fmt = "#{pane_in_mode}\t#{pane_active}\t#{session_attached}"
+    # Signal 1: copy mode or another tmux mode — definitely present.
+    # This is a tmux fact, not a heuristic.
     try:
-        out = await run("display-message", "-p", "-t", pane_id, fmt)
+        in_mode = await run(
+            "display-message", "-p", "-t", pane_id, "#{pane_in_mode}"
+        )
     except Exception:
         # If we can't query the pane, assume no human — queue rather
         # than block forever.
         return False
 
-    parts = out.split("\t")
-    if len(parts) != 3:
-        return False
-
-    in_mode, pane_active, session_attached = parts
-
-    # Signal 1: copy mode or another mode — definitely present.
     if in_mode and in_mode != "0":
         return True
 
-    # Signal 2: the pane is active in an attached session.
-    if pane_active == "1" and int(session_attached or "0") > 0:
-        return True
-
-    # Signal 3: scrape the input line for a non-empty buffer.
+    # Signal 2: scrape the input line for a non-empty buffer.
     # capture-pane -p gives the pane contents as plain text. The last
     # non-empty line is the current input line. If it has content beyond
     # a bare prompt, someone is typing.
@@ -77,11 +69,11 @@ async def human_present(pane_id: str) -> bool:
         return False
 
     last_line = lines[-1].strip()
-    # A bare prompt (e.g. "$", ">", "%") is not a human typing. A line
-    # with content beyond a single prompt character is suspicious. This
-    # is deliberately conservative: we only flag presence when there is
-    # visible input, not just a cursor on a prompt line.
-    if len(last_line) > 3 and not last_line.endswith(("$", ">", "%", "#")):
+    # A bare prompt (e.g. "$", ">", "%", "#", or a short prompt like
+    # "❯") is not a human typing. A line with content beyond a few
+    # characters that does not end with a prompt symbol is suspicious —
+    # someone has typed something and not yet submitted it.
+    if len(last_line) > 3 and not last_line.endswith(("$", ">", "%", "#", "❯")):
         return True
 
     return False
