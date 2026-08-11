@@ -29,6 +29,8 @@ from theater.harness import Harness, known_binaries, normalize
 from theater.models import BadRequest, Status, TheaterError
 from theater.tmux import client as tmux
 
+import subprocess
+
 logger = logging.getLogger("theater.daemon")
 
 #: How often to check whether panes we know about still exist.
@@ -320,7 +322,7 @@ async def _adopt(daemon: Daemon, params: dict) -> dict:
     match = next((p for p in panes if p.pane_id == pane), None)
     if match is None:
         raise BadRequest(f"pane {pane!r} not found in tmux")
-    harness = normalize(override) if override else _detect_harness(match.current_command)
+    harness = normalize(override) if override else _detect_harness(match.current_command, match.pane_pid)
     if cwd is None:
         cwd = match.cwd
     participant = daemon.registry.register(
@@ -331,20 +333,78 @@ async def _adopt(daemon: Daemon, params: dict) -> dict:
     return participant.to_dict()
 
 
-def _detect_harness(command: str) -> str:
-    """Map a pane's current command to a canonical harness name, or 'unknown'.
+def _detect_harness(pane_command: str, pane_pid: int) -> str:
+    """Map a pane to a canonical harness name, or 'unknown'.
 
-    `pane_current_command` is the process name tmux reports — typically the
-    binary basename (e.g. "vibe", "claude") or the python interpreter if the
-    harness was launched via `uv run`. The common case is a bare basename, so
-    we match against the harness's `binary` attribute.
+    `pane_current_command` is the instantaneous foreground process — which,
+    when `theater adopt` is the thing running, is `theater`/`uv`/`python3`,
+    not the harness session that is its ancestor in the process tree.
+
+    So we first check the foreground command (the common case when no adopt
+    is in flight), then walk the process tree from the pane's shell pid
+    looking for any descendant whose name matches a known harness binary.
+    The pane's shell spawned `vibe`, which spawned the bash tool running
+    `theater adopt` — so `vibe` is in the tree even though it is not the
+    foreground leaf.
     """
     from theater.harness import HARNESSES
+
+    name = _match_binary(pane_command, HARNESSES)
+    if name:
+        return name
+    for comm in _descendant_comms(pane_pid):
+        name = _match_binary(comm, HARNESSES)
+        if name:
+            return name
+    return "unknown"
+
+
+def _match_binary(command: str, harnesses) -> str | None:
+    """Return the harness name if a command basename matches a harness binary."""
     basename = command.rsplit("/", 1)[-1]
-    for harness in HARNESSES.values():
+    for harness in harnesses.values():
         if harness.binary == basename or harness.binary == command:
             return harness.name
-    return "unknown"
+    return None
+
+
+def _descendant_comms(root_pid: int) -> list[str]:
+    """Process names of root_pid and all its descendants, breadth-first.
+
+    Uses `ps` rather than /proc or psutil to stay dependency-free. The pane's
+    shell spawned `vibe`, which spawned the bash tool running `theater adopt`
+    — so `vibe` is in the tree even though it is not the foreground leaf.
+    """
+    try:
+        out = subprocess.check_output(
+            ["ps", "-eo", "pid,ppid,comm"],
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    # Build ppid -> [(pid, comm)] map.
+    pid_children: dict[int, list[tuple[int, str]]] = {}
+    for line in out.strip().splitlines()[1:]:  # skip header
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        comm = parts[2]
+        pid_children.setdefault(ppid, []).append((pid, comm))
+    # BFS from root_pid, collecting comm names.
+    result: list[str] = []
+    queue = [root_pid]
+    while queue:
+        pid = queue.pop(0)
+        for child_pid, comm in pid_children.get(pid, []):
+            result.append(comm)
+            queue.append(child_pid)
+    return result
 
 
 @method("participants.unmanaged")
@@ -359,21 +419,21 @@ async def _unmanaged(daemon: Daemon, params: dict) -> list[dict]:
     if not tmux.available():
         return []
     panes = await tmux.list_panes()
-    known = known_binaries()
     registered = {p.tmux_pane for p in daemon.registry.list() if p.tmux_pane}
     out: list[dict] = []
     for p in panes:
         if p.pane_id in registered:
             continue
-        # pane_current_command is the process name, e.g. "vibe" or "claude".
-        # A venv wrapper may show as the python interpreter; the basename
-        # check in _detect_harness handles the common case.
-        basename = p.current_command.rsplit("/", 1)[-1]
-        if basename in known or p.current_command in known:
+        # Check the foreground command first, then walk the process tree.
+        # A pane running `vibe` via `uv run` shows `python3` as the
+        # foreground, but `vibe` is its parent in the process tree.
+        harness = _detect_harness(p.current_command, p.pane_pid)
+        if harness != "unknown":
             out.append(
                 {
                     "pane": p.pane_id,
                     "command": p.current_command,
+                    "harness": harness,
                     "cwd": p.cwd,
                     "session": p.session,
                     "window_name": p.window_name,

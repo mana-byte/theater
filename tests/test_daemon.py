@@ -310,11 +310,11 @@ async def test_unknown_harness_name_passes_through(client):
 # ---- adopt ---------------------------------------------------------------
 
 
-def _make_pane(pane_id="%5", command="vibe", cwd="/tmp/project", session="main"):
+def _make_pane(pane_id="%5", command="vibe", cwd="/tmp/project", session="main", pane_pid=12345):
     from theater.tmux.client import Pane
     return Pane(
         pane_id=pane_id,
-        pane_pid=12345,
+        pane_pid=pane_pid,
         cwd=cwd,
         window_id="@1",
         session=session,
@@ -323,9 +323,15 @@ def _make_pane(pane_id="%5", command="vibe", cwd="/tmp/project", session="main")
     )
 
 
-async def test_adopt_detects_harness_from_pane_command(client, fake_tmux):
+async def test_adopt_detects_harness_from_pane_command(client, fake_tmux, monkeypatch):
     """theater adopt maps pane_current_command to a harness name."""
-    fake_tmux.visible_panes = [_make_pane("%5", command="vibe", cwd="/tmp/proj")]
+    # When adopt runs, pane_current_command is "theater" (the adopt command
+    # itself), not "vibe". The process tree walk finds "vibe" as an ancestor.
+    # Simulate that: foreground is "theater", but descendants include "vibe".
+    import theater.daemon.server as server_mod
+    monkeypatch.setattr(server_mod, "_descendant_comms", lambda pid: ["vibe"])
+
+    fake_tmux.visible_panes = [_make_pane("%5", command="theater", cwd="/tmp/proj")]
     record = await client.call("adopt", pane="%5", cwd="/tmp/proj")
     assert record["tier"] == "adopted"
     assert record["harness"] == "vibe"
@@ -333,28 +339,50 @@ async def test_adopt_detects_harness_from_pane_command(client, fake_tmux):
     assert record["cwd"] == "/tmp/proj"
 
 
-async def test_adopt_detects_claude(client, fake_tmux):
-    fake_tmux.visible_panes = [_make_pane("%6", command="claude", cwd="/tmp/cla")]
+async def test_adopt_detects_claude(client, fake_tmux, monkeypatch):
+    import theater.daemon.server as server_mod
+    monkeypatch.setattr(server_mod, "_descendant_comms", lambda pid: ["claude"])
+
+    fake_tmux.visible_panes = [_make_pane("%6", command="theater", cwd="/tmp/cla")]
     record = await client.call("adopt", pane="%6")
     assert record["harness"] == "claude"
     assert record["cwd"] == "/tmp/cla"
 
 
-async def test_adopt_override_harness(client, fake_tmux):
+async def test_adopt_detects_from_foreground_when_no_descendants(client, fake_tmux, monkeypatch):
+    """If the foreground IS the harness (no adopt in flight), detect it directly."""
+    import theater.daemon.server as server_mod
+    monkeypatch.setattr(server_mod, "_descendant_comms", lambda pid: [])
+
+    fake_tmux.visible_panes = [_make_pane("%9", command="vibe", cwd="/tmp/direct")]
+    record = await client.call("adopt", pane="%9")
+    assert record["harness"] == "vibe"
+
+
+async def test_adopt_override_harness(client, fake_tmux, monkeypatch):
     """--harness overrides detection when the command is not a known binary."""
+    import theater.daemon.server as server_mod
+    monkeypatch.setattr(server_mod, "_descendant_comms", lambda pid: ["python3"])
+
     fake_tmux.visible_panes = [_make_pane("%7", command="python3")]
     record = await client.call("adopt", pane="%7", harness="vibe")
     assert record["harness"] == "vibe"
 
 
-async def test_adopt_unknown_command_yields_unknown_harness(client, fake_tmux):
+async def test_adopt_unknown_command_yields_unknown_harness(client, fake_tmux, monkeypatch):
+    import theater.daemon.server as server_mod
+    monkeypatch.setattr(server_mod, "_descendant_comms", lambda pid: ["zsh"])
+
     fake_tmux.visible_panes = [_make_pane("%8", command="zsh")]
     record = await client.call("adopt", pane="%8")
     assert record["harness"] == "unknown"
     assert record["tier"] == "adopted"
 
 
-async def test_adopt_missing_pane_is_an_error(client, fake_tmux):
+async def test_adopt_missing_pane_is_an_error(client, fake_tmux, monkeypatch):
+    import theater.daemon.server as server_mod
+    monkeypatch.setattr(server_mod, "_descendant_comms", lambda pid: [])
+
     fake_tmux.visible_panes = []
     with pytest.raises(RemoteError) as exc:
         await client.call("adopt", pane="%999")
@@ -364,21 +392,35 @@ async def test_adopt_missing_pane_is_an_error(client, fake_tmux):
 # ---- unmanaged panes -----------------------------------------------------
 
 
-async def test_unmanaged_finds_harness_panes_with_no_participant(client, fake_tmux):
+async def test_unmanaged_finds_harness_panes_with_no_participant(client, fake_tmux, monkeypatch):
+    """The sweep walks the process tree, not just the foreground command."""
+    import theater.daemon.server as server_mod
+
+    # Pane %10's foreground is "python3" but its tree contains "vibe";
+    # pane %12 is just "zsh" with no harness in its tree.
+    def fake_descendants(pid):
+        return {"12345": ["vibe"], "12346": ["claude"], "12347": ["zsh"]}.get(
+            str(pid), []
+        )
+
+    monkeypatch.setattr(server_mod, "_descendant_comms", fake_descendants)
     fake_tmux.visible_panes = [
-        _make_pane("%10", command="vibe", cwd="/tmp/a"),
-        _make_pane("%11", command="claude", cwd="/tmp/b"),
-        _make_pane("%12", command="zsh", cwd="/tmp/c"),
+        _make_pane("%10", command="python3", cwd="/tmp/a", pane_pid=12345),
+        _make_pane("%11", command="python3", cwd="/tmp/b", pane_pid=12346),
+        _make_pane("%12", command="zsh", cwd="/tmp/c", pane_pid=12347),
     ]
     rows = await client.call("participants.unmanaged")
     assert len(rows) == 2
     assert {r["pane"] for r in rows} == {"%10", "%11"}
-    commands = {r["pane"]: r["command"] for r in rows}
-    assert commands["%10"] == "vibe"
-    assert commands["%11"] == "claude"
+    harnesses = {r["pane"]: r["harness"] for r in rows}
+    assert harnesses["%10"] == "vibe"
+    assert harnesses["%11"] == "claude"
 
 
-async def test_unmanaged_excludes_registered_panes(client, fake_tmux):
+async def test_unmanaged_excludes_registered_panes(client, fake_tmux, monkeypatch):
+    import theater.daemon.server as server_mod
+    monkeypatch.setattr(server_mod, "_descendant_comms", lambda pid: ["vibe"])
+
     fake_tmux.visible_panes = [
         _make_pane("%20", command="vibe", cwd="/tmp/a"),
         _make_pane("%21", command="claude", cwd="/tmp/b"),
