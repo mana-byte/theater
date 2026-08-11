@@ -39,6 +39,23 @@ def test_a_participant_renders_with_its_tier_mark():
     assert line.endswith("/tmp/project")
 
 
+def test_unmanaged_panes_append_to_ls_output():
+    """Unmanaged panes show below participants, not instead of them."""
+    out = cli._format_ls([ROW], tree=False, unmanaged=[
+        {"pane": "%9", "command": "vibe", "cwd": "/tmp/other"},
+    ])
+    assert "unmanaged" in out
+    assert "%9" in out
+    assert "/tmp/other" in out
+    # The participant row is still there
+    assert "p-abc123" in out
+
+
+def test_unmanaged_none_does_not_add_section():
+    out = cli._format_ls([ROW], tree=False, unmanaged=None)
+    assert "unmanaged" not in out
+
+
 def test_an_unaddressable_participant_is_marked():
     assert "E*" in cli._row_line({**ROW, "tier": "external", "addressable": False})
 

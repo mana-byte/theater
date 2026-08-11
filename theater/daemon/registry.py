@@ -15,6 +15,7 @@ physical fact: inbound delivery needs a pane to type into, and External has none
 from __future__ import annotations
 
 from theater.daemon.store import Store
+from theater.harness import normalize
 from theater.models import (
     NotFound,
     Participant,
@@ -185,6 +186,7 @@ class Registry:
         primary adoption path, because the MCP SDK's environment allowlist means
         a server process cannot see $TMUX_PANE for itself.
         """
+        harness = normalize(harness)
         if claimed_id:
             existing = self.store.get_participant(claimed_id)
             if existing is not None:

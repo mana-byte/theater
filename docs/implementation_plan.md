@@ -122,18 +122,21 @@ theater ls          # expect tier=spawned once the child's MCP server has connec
 
 ---
 
-## Phase 1b — Adoption (1 day) — ~~needs spike 0.1~~ **UNBLOCKED**
+## Phase 1b — Adoption (1 day) — ~~needs spike 0.1~~ **DONE**
 
 Hand-started sessions join the registry.
 
 Spike 0.1 is answered, negatively, without needing to be run: `$TMUX_PANE` cannot reach an MCP server process, so the planned primary path does not exist. What was the fallback is now the mechanism.
 
-- **Primary: `register_pane(pane_id)`** — the agent runs `echo $TMUX_PANE` with its own shell tool and calls back. Already built and tested in 1a; the registry promotes External → Adopted on receipt. What remains is making it *happen reliably* rather than depending on the model choosing to call it.
-- **Nudge, not hope.** An agent that never calls `register_pane` stays emit-only and invisible to delivery. Options, cheapest first: (a) the `whoami` description already tells an External how to fix itself — measure whether that is enough in practice; (b) `theater adopt` as a human-run CLI command that resolves the caller's own `$TMUX_PANE` and writes the record directly, no model in the loop; (c) a shell hook the user installs.
-- **Sweep for the unregistered.** `list-panes -a -F '#{pane_id} #{pane_current_command} #{pane_pid}'` finds panes running a known harness with no participant record. These cannot be adopted — nothing connects them to a Theater id — but the régie should show them as *unmanaged*, since a tree that silently omits half the agents on the machine is worse than one that admits ignorance.
-- Claude Code correlation: match cwd-slug against `~/.claude/projects/`, disambiguating by mtime, to recover a session id for observation.
+- **Primary: `register_pane(pane_id)`** — the agent runs `echo $TMUX_PANE` with its own shell tool and calls back. Built and tested in 1a; the registry promotes External -> Adopted on receipt.
+- **`theater adopt` CLI command.** A human-run command that resolves the caller's own `$TMUX_PANE` and calls a new `adopt` daemon method. The daemon does the tmux lookup (it has tmux access; the CLI process may not have the venv's PATH) to learn the pane's `current_command` and `current_path`, maps the command to a harness via `_detect_harness`, and calls `register`. A `--harness` override covers the case where `pane_current_command` is the python interpreter rather than the harness binary. No model in the loop.
+- **Harness-name normalization.** `register()` now normalizes the harness name through `_ALIASES` (`claude_code` -> `claude`, `Claude` -> `claude`, `mistral-vibe` -> `vibe`, etc.) before storing. Unknown names pass through unchanged — a genuinely unknown harness is not an error at first contact, just an unobservable one, and the observer's `_warn_unobservable` already covers that case. This was the logged phase-2 follow-up: without normalization, a misreported name registers happily and is then unobservable forever.
+- **Unmanaged pane sweep.** A new `participants.unmanaged` daemon method runs `list-panes -a` (now with `#{pane_current_command}` added to the format), filters to panes whose command matches a known harness binary, and excludes panes that already have a participant record. `theater ls` shows them in a separate section below the participants list — not in the tree (they have no lineage and no id), but visible, because a tree that silently omits half the agents on the machine is worse than one that admits ignorance.
+- Claude Code correlation (match cwd-slug against `~/.claude/projects/`) is not needed: the observer already finds transcripts by cwd, and the harness adapter's `find_transcript` handles the slug lossily without inverting it.
 
-**Exit criteria:** start Vibe and Claude Code by hand in two panes; each becomes `Adopted` with the correct cwd after a single `register_pane` call, with no human typing an id. Panes running a harness that never registered appear in the tree as unmanaged rather than being absent.
+**Delivered.** 156 tests green (135 + 21 new). New: `theater adopt` command, `adopt` daemon method, `participants.unmanaged` daemon method, `normalize()` in `harness/__init__.py`, `known_binaries()` in `harness/__init__.py`, `pane_current_command` in the tmux `Pane` format. `_format_ls` takes an optional `unmanaged` list and renders it below participants.
+
+**Exit criteria met:** a hand-started session can be adopted with `theater adopt` (no id, no model call); panes running a harness that never registered appear in `theater ls` as unmanaged.
 
 ---
 

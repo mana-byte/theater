@@ -33,6 +33,32 @@ HARNESSES: dict[str, Harness] = {
     h.name: h for h in (ClaudeCodeHarness(), VibeHarness())
 }
 
+#: Aliases that a misreporting agent might send at registration. The canonical
+#: name is what the observer needs to match it to a harness adapter; without
+#: normalization, `claude_code` or `Claude` registers happily and is then
+#: unobservable forever, because the observer looks up `HARNESSES[name]` and
+#: misses.
+_ALIASES: dict[str, str] = {
+    "claude_code": "claude",
+    "claude-code": "claude",
+    "Claude": "claude",
+    "ClaudeCode": "claude",
+    "vibe": "vibe",
+    "Vibe": "vibe",
+    "mistral-vibe": "vibe",
+    "mistral_vibe": "vibe",
+}
+
+
+def normalize(name: str) -> str:
+    """Map a harness name as an agent might report it to the canonical key.
+
+    Unknown names are returned unchanged so the caller can decide whether to
+    reject or accept as-is — `register` accepts and warns, because a genuinely
+    unknown harness is not an error at first contact, just an unobservable one.
+    """
+    return _ALIASES.get(name, name)
+
 
 def get(name: str) -> Harness:
     harness = HARNESSES.get(name)
@@ -58,6 +84,16 @@ def plan_launch(
     )
 
 
+def known_binaries() -> set[str]:
+    """Every binary name the registered harnesses look for on PATH.
+
+    Used by the unmanaged-pane sweep: a pane whose current command matches one
+    of these is a harness the daemon can observe if only it knew the session,
+    so it should be surfaced rather than invisible.
+    """
+    return {h.binary for h in HARNESSES.values()}
+
+
 __all__ = [
     "APPROVALS",
     "HARNESSES",
@@ -72,6 +108,8 @@ __all__ = [
     "VibeHarness",
     "clip",
     "get",
+    "known_binaries",
+    "normalize",
     "plan_launch",
     "status_after",
     "theater_binary",

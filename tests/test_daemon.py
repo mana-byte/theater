@@ -25,6 +25,8 @@ class FakeTmux:
         self.windows: list[dict] = []
         self.panes: list[str] = []
         self._next = 0
+        #: Panes visible to list_panes, populated by tests that need the sweep.
+        self.visible_panes: list = []
 
     async def new_window(self, *, session, name, cwd, command, env=None, background=True):
         self._next += 1
@@ -53,6 +55,13 @@ class FakeTmux:
         if pane_id in self.panes:
             self.panes.remove(pane_id)
 
+    async def list_panes(self, session=None):
+        return list(self.visible_panes)
+
+    @staticmethod
+    def available():
+        return True
+
 
 @pytest.fixture
 def fake_tmux(monkeypatch):
@@ -63,7 +72,13 @@ def fake_tmux(monkeypatch):
     monkeypatch.setattr(spawner_mod.tmux, "ensure_session", fake.ensure_session)
     monkeypatch.setattr(spawner_mod.tmux, "sessions", fake.sessions)
     monkeypatch.setattr(spawner_mod.tmux, "kill_pane", fake.kill_pane)
+    monkeypatch.setattr(spawner_mod.tmux, "list_panes", fake.list_panes)
+    monkeypatch.setattr(spawner_mod.tmux, "available", fake.available)
     monkeypatch.setattr(spawner_mod.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+    # The server module imports tmux directly, not through spawner.
+    import theater.daemon.server as server_mod
+    monkeypatch.setattr(server_mod.tmux, "list_panes", fake.list_panes)
+    monkeypatch.setattr(server_mod.tmux, "available", fake.available)
     return fake
 
 
@@ -265,3 +280,110 @@ async def test_bus_records_the_story(client, fake_tmux):
 async def test_pipelined_requests_keep_their_ids(client):
     results = await asyncio.gather(*(client.call("ping") for _ in range(5)))
     assert all(r["pong"] for r in results)
+
+
+# ---- harness name normalization ------------------------------------------
+
+
+async def test_hello_normalizes_claude_code_to_claude(client):
+    """A misreported harness name must not silently become unobservable."""
+    me = await client.call("hello", harness="claude_code", pane="%1", cwd="/tmp")
+    assert me["harness"] == "claude"
+
+
+async def test_hello_normalizes_capitalized_claude(client):
+    me = await client.call("hello", harness="Claude", pane="%2", cwd="/tmp")
+    assert me["harness"] == "claude"
+
+
+async def test_hello_normalizes_mistral_vibe(client):
+    me = await client.call("hello", harness="mistral-vibe", pane="%3", cwd="/tmp")
+    assert me["harness"] == "vibe"
+
+
+async def test_unknown_harness_name_passes_through(client):
+    """A genuinely unknown harness is not rejected — just unobservable."""
+    me = await client.call("hello", harness="cursor", pane="%4", cwd="/tmp")
+    assert me["harness"] == "cursor"
+
+
+# ---- adopt ---------------------------------------------------------------
+
+
+def _make_pane(pane_id="%5", command="vibe", cwd="/tmp/project", session="main"):
+    from theater.tmux.client import Pane
+    return Pane(
+        pane_id=pane_id,
+        pane_pid=12345,
+        cwd=cwd,
+        window_id="@1",
+        session=session,
+        window_name="vibe",
+        current_command=command,
+    )
+
+
+async def test_adopt_detects_harness_from_pane_command(client, fake_tmux):
+    """theater adopt maps pane_current_command to a harness name."""
+    fake_tmux.visible_panes = [_make_pane("%5", command="vibe", cwd="/tmp/proj")]
+    record = await client.call("adopt", pane="%5", cwd="/tmp/proj")
+    assert record["tier"] == "adopted"
+    assert record["harness"] == "vibe"
+    assert record["tmux_pane"] == "%5"
+    assert record["cwd"] == "/tmp/proj"
+
+
+async def test_adopt_detects_claude(client, fake_tmux):
+    fake_tmux.visible_panes = [_make_pane("%6", command="claude", cwd="/tmp/cla")]
+    record = await client.call("adopt", pane="%6")
+    assert record["harness"] == "claude"
+    assert record["cwd"] == "/tmp/cla"
+
+
+async def test_adopt_override_harness(client, fake_tmux):
+    """--harness overrides detection when the command is not a known binary."""
+    fake_tmux.visible_panes = [_make_pane("%7", command="python3")]
+    record = await client.call("adopt", pane="%7", harness="vibe")
+    assert record["harness"] == "vibe"
+
+
+async def test_adopt_unknown_command_yields_unknown_harness(client, fake_tmux):
+    fake_tmux.visible_panes = [_make_pane("%8", command="zsh")]
+    record = await client.call("adopt", pane="%8")
+    assert record["harness"] == "unknown"
+    assert record["tier"] == "adopted"
+
+
+async def test_adopt_missing_pane_is_an_error(client, fake_tmux):
+    fake_tmux.visible_panes = []
+    with pytest.raises(RemoteError) as exc:
+        await client.call("adopt", pane="%999")
+    assert exc.value.code == "bad_request"
+
+
+# ---- unmanaged panes -----------------------------------------------------
+
+
+async def test_unmanaged_finds_harness_panes_with_no_participant(client, fake_tmux):
+    fake_tmux.visible_panes = [
+        _make_pane("%10", command="vibe", cwd="/tmp/a"),
+        _make_pane("%11", command="claude", cwd="/tmp/b"),
+        _make_pane("%12", command="zsh", cwd="/tmp/c"),
+    ]
+    rows = await client.call("participants.unmanaged")
+    assert len(rows) == 2
+    assert {r["pane"] for r in rows} == {"%10", "%11"}
+    commands = {r["pane"]: r["command"] for r in rows}
+    assert commands["%10"] == "vibe"
+    assert commands["%11"] == "claude"
+
+
+async def test_unmanaged_excludes_registered_panes(client, fake_tmux):
+    fake_tmux.visible_panes = [
+        _make_pane("%20", command="vibe", cwd="/tmp/a"),
+        _make_pane("%21", command="claude", cwd="/tmp/b"),
+    ]
+    await client.call("hello", harness="vibe", pane="%20", cwd="/tmp/a")
+    rows = await client.call("participants.unmanaged")
+    assert len(rows) == 1
+    assert rows[0]["pane"] == "%21"

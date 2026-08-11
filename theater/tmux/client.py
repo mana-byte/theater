@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from theater.models import TheaterError
 
 # Fields we ask tmux for when enumerating panes, in order.
-_PANE_FORMAT = "#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{window_id}\t#{session_name}\t#{window_name}"
+_PANE_FORMAT = "#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{window_id}\t#{session_name}\t#{window_name}\t#{pane_current_command}"
 
 
 class TmuxError(TheaterError):
@@ -48,11 +48,12 @@ class Pane:
     window_id: str
     session: str
     window_name: str
+    current_command: str
 
     @classmethod
     def parse(cls, line: str) -> Pane:
         parts = line.split("\t")
-        if len(parts) != 6:
+        if len(parts) != 7:
             raise TmuxError(f"unexpected list-panes row: {line!r}")
         return cls(
             pane_id=parts[0],
@@ -61,6 +62,7 @@ class Pane:
             window_id=parts[3],
             session=parts[4],
             window_name=parts[5],
+            current_command=parts[6],
         )
 
 

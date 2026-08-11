@@ -25,7 +25,7 @@ from theater.daemon.observer import Observer
 from theater.daemon.registry import Registry
 from theater.daemon.spawner import SpawnRequest, Spawner
 from theater.daemon.store import Store
-from theater.harness import Harness
+from theater.harness import Harness, known_binaries, normalize
 from theater.models import BadRequest, Status, TheaterError
 from theater.tmux import client as tmux
 
@@ -296,6 +296,90 @@ async def _kill(daemon: Daemon, params: dict) -> dict:
     pid = _require(params, "id")
     await daemon.spawner.kill(pid)
     return {"id": pid, "killed": True}
+
+
+@method("adopt")
+async def _adopt(daemon: Daemon, params: dict) -> dict:
+    """Adopt a pane the user is already running a harness in.
+
+    The CLI reads $TMUX_PANE and sends it here; the daemon does the tmux lookup
+    to learn the pane's current command (the binary name) and its current path
+    (the cwd), maps the binary to a harness, and registers the participant.
+
+    If the pane's command does not match a known harness, the caller may have
+    passed --harness to override; if neither yields a known harness, the
+    participant is registered as `unknown` and will be unobservable — better
+    than refusing, because the pane is real either way.
+    """
+    pane = _require(params, "pane")
+    override = params.get("harness")
+    cwd = params.get("cwd")
+    if not tmux.available():
+        raise BadRequest("tmux is not available; cannot look up pane")
+    panes = await tmux.list_panes()
+    match = next((p for p in panes if p.pane_id == pane), None)
+    if match is None:
+        raise BadRequest(f"pane {pane!r} not found in tmux")
+    harness = normalize(override) if override else _detect_harness(match.current_command)
+    if cwd is None:
+        cwd = match.cwd
+    participant = daemon.registry.register(
+        harness=harness,
+        pane=pane,
+        cwd=cwd,
+    )
+    return participant.to_dict()
+
+
+def _detect_harness(command: str) -> str:
+    """Map a pane's current command to a canonical harness name, or 'unknown'.
+
+    `pane_current_command` is the process name tmux reports — typically the
+    binary basename (e.g. "vibe", "claude") or the python interpreter if the
+    harness was launched via `uv run`. The common case is a bare basename, so
+    we match against the harness's `binary` attribute.
+    """
+    from theater.harness import HARNESSES
+    basename = command.rsplit("/", 1)[-1]
+    for harness in HARNESSES.values():
+        if harness.binary == basename or harness.binary == command:
+            return harness.name
+    return "unknown"
+
+
+@method("participants.unmanaged")
+async def _unmanaged(daemon: Daemon, params: dict) -> list[dict]:
+    """Panes running a known harness binary with no participant record.
+
+    These are hand-started agent sessions Theater does not yet know about.
+    Surfaced in `theater ls` as unmanaged rather than invisible, because a tree
+    that silently omits half the agents on the machine is worse than one that
+    admits ignorance.
+    """
+    if not tmux.available():
+        return []
+    panes = await tmux.list_panes()
+    known = known_binaries()
+    registered = {p.tmux_pane for p in daemon.registry.list() if p.tmux_pane}
+    out: list[dict] = []
+    for p in panes:
+        if p.pane_id in registered:
+            continue
+        # pane_current_command is the process name, e.g. "vibe" or "claude".
+        # A venv wrapper may show as the python interpreter; the basename
+        # check in _detect_harness handles the common case.
+        basename = p.current_command.rsplit("/", 1)[-1]
+        if basename in known or p.current_command in known:
+            out.append(
+                {
+                    "pane": p.pane_id,
+                    "command": p.current_command,
+                    "cwd": p.cwd,
+                    "session": p.session,
+                    "window_name": p.window_name,
+                }
+            )
+    return out
 
 
 @method("spawn")
