@@ -31,9 +31,9 @@ import logging
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Vertical, VerticalScroll
 from textual.reactive import reactive
-from textual.widgets import Footer, Header, RichLog, Static
+from textual.widgets import Footer, Header, RichLog, Static, Label
 from rich.text import Text
 
 from theater.client import DaemonClient
@@ -54,19 +54,46 @@ BUS_INTERVAL = 0.4
 BUS_BATCH = 50
 
 
-class TreePanel(Static):
-    """Renders the participant tree as Rich Text lines."""
+class TreePanel(VerticalScroll):
+    """A scrollable list of participant tree lines.
+
+    Each line is a separate Label widget, so the panel scrolls natively when
+    the list is longer than the viewport. The cursor and staged-pane
+    highlighting are applied as Rich Text styles on each label.
+    """
 
     lines: reactive[list[tuple[Text, dict]]] = reactive([])
 
-    def render(self) -> Text:
-        if not self.lines:
-            return Text("no participants", style="dim italic")
-        out = Text()
-        for label, _ in self.lines:
-            out.append(label)
-            out.append("\n")
-        return out
+    DEFAULT_CSS = """
+    TreePanel {
+        height: 1fr;
+        scrollbar-size: 1 1;
+    }
+    TreePanel > Label {
+        height: 1;
+        padding: 0 0;
+        margin: 0 0;
+    }
+    """
+
+    def watch_lines(self, lines: list[tuple[Text, dict]]) -> None:
+        """Rebuild the widget children when lines change."""
+        self.remove_children()
+        if not lines:
+            self.mount(Label(Text("no participants", style="dim italic")))
+            return
+        widgets = [Label(label) for label, _ in lines]
+        self.mount(*widgets)
+
+    def scroll_to_cursor(self, cursor: int) -> None:
+        """Ensure the cursor line is visible."""
+        if cursor < 0 or cursor >= len(self.children):
+            return
+        try:
+            child = self.children[cursor]
+            self.scroll_to_widget(child)
+        except Exception:
+            pass
 
 
 class RegieApp(App):
@@ -165,12 +192,10 @@ class RegieApp(App):
             logger.debug("tree refresh failed: %s", exc)
             return
         self.tree_lines = render_tree(tree, unmanaged)
-        panel = self.query_one("#tree-panel", TreePanel)
-        panel.lines = self.tree_lines
         # Clamp cursor
         if self.cursor >= len(self.tree_lines):
             self.cursor = max(0, len(self.tree_lines) - 1)
-        panel.refresh()
+        self._render_tree()
 
     async def _refresh_bus(self) -> None:
         if not self._client:
@@ -202,8 +227,8 @@ class RegieApp(App):
 
     def _render_tree(self) -> None:
         panel = self.query_one("#tree-panel", TreePanel)
-        panel.lines = self.tree_lines
-        panel.refresh()
+        panel.lines = self._highlight_cursor(self.tree_lines)
+        panel.scroll_to_cursor(self.cursor)
 
     def watch_cursor(self, cursor: int) -> None:
         """Redraw the tree with the cursor highlighted."""
@@ -331,11 +356,6 @@ class RegieApp(App):
             self.notify(f"focus failed: {exc}", severity="error")
 
     # ---- tree rendering with cursor ------------------------------------
-
-    def watch_tree_lines(self, lines: list[tuple[Text, dict]]) -> None:
-        panel = self.query_one("#tree-panel", TreePanel)
-        panel.lines = self._highlight_cursor(lines)
-        panel.refresh()
 
     def _highlight_cursor(self, lines: list[tuple[Text, dict]]) -> list[tuple[Text, dict]]:
         """Copy lines and mark the cursor and the staged pane."""
