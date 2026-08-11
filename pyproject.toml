@@ -11,6 +11,8 @@ dependencies = [
     # (mcp/server/runner.py:425), and the 2026-07-28 revision this SDK also
     # speaks is only reachable via server/discover, never via the handshake.
     "mcp>=2.0.0",
+    # The régie. Matches Vibe's stack exactly (Python 3.12 + Textual).
+    "textual>=0.40.0",
 ]
 
 [project.scripts]

@@ -230,10 +230,10 @@ native children      isSidechain records             meta.json.child_sessions[]
 
 ---
 
-## Phase 3 — The régie (3–4 days)
+## Phase 3 — The régie (3–4 days) — **PHASE 3 SKELETON DONE**
 
 **Build**
-- `theater/tmux/client.py` — typed wrappers over `tmux` subprocess calls
+- `theater/tmux/client.py` — typed wrappers over `tmux` subprocess calls *(done in phase 1a)*
 - `theater/tmux/panes.py` — `break-pane` / `join-pane` staging, zoom, grid mode
 - `theater/regie/app.py` — Textual app; adopt `$TMUX` session or create one
 - `theater/regie/tree.py` — lineage tree with live status
@@ -244,6 +244,22 @@ Layout: régie left (~40 cols), stage right. Agents park in hidden windows. Sele
 **Watch for:** geometry. The staged pane must be resized to the stage dimensions on every swap and on terminal resize, or the agent renders for the wrong width.
 
 **Exit criteria:** first half of the acceptance test — three agents started by hand appear in the tree, selecting one puts it on the stage fully interactive, `<prefix>d` detaches and reattaches with everything intact.
+
+### Delivered
+
+181 tests green (157 + 24 new). New modules:
+
+| Module | What it does |
+|---|---|
+| `theater/tmux/panes.py` | Staging primitives: `break-pane`, `join-pane`, `resize-pane`, `select-pane`, `split-window`, `new_window_named`, `swap-pane`, `window_for_pane`. argv asserted in `tests/test_tmux_panes.py`. |
+| `theater/regie/tree.py` | Renders `participants.tree` + `participants.unmanaged` as Rich Text lines with tier marks, status colors, and indentation. `selected_participant` maps cursor position back to a node. |
+| `theater/regie/bus_view.py` | Formats bus rows as Rich Text lines with kind colors and summary. |
+| `theater/regie/app.py` | Textual app: sidebar (tree + bus) with polling, keybindings (j/k navigate, Enter stage, x kill, q quit). `run_regie()` entry point. |
+| `theater regie` CLI | Launches the régie. Requires `$TMUX` — the régie is itself a tmux pane. |
+
+**What works now:** the régie launches, connects to the daemon, and renders a live tree + bus feed. Navigation and kill work. Stage is a stub (notifies what it would do) — the actual `join-pane` call requires the régie to know its own window id, which will be wired in the next step.
+
+**What does not work yet:** actual pane staging (join-pane into the régie's window), zoom mode, grid mode. These need the régie to discover its own pane id and window id at launch, which requires a `display-message` call at startup.
 
 ---
 

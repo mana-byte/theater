@@ -103,6 +103,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     adopt.add_argument("--json", action="store_true")
 
+    sub.add_parser("regie", help="Launch the régie TUI (run inside tmux).")
+
     sub.add_parser("stop", help="Shut the daemon down.")
 
     return p
@@ -360,6 +362,25 @@ def cmd_stop(args) -> int:
     return 0
 
 
+def cmd_regie(args) -> int:
+    """Launch the régie TUI.
+
+    Must be run inside tmux: the régie is itself a tmux pane, and the stage
+    is a real pane in the same window. If $TMUX is not set, the user needs
+    to attach to a session first.
+    """
+    if not tmux.inside_tmux():
+        print(
+            "theater: regie must run inside tmux — attach to a session first",
+            file=sys.stderr,
+        )
+        return 1
+    from theater.regie.app import run_regie
+
+    run_regie()
+    return 0
+
+
 _COMMANDS = {
     "daemon": cmd_daemon,
     "mcp": cmd_mcp,
@@ -368,6 +389,7 @@ _COMMANDS = {
     "spawn": cmd_spawn,
     "kill": cmd_kill,
     "adopt": cmd_adopt,
+    "regie": cmd_regie,
     "stop": cmd_stop,
 }
 
