@@ -46,8 +46,16 @@ async def test_join_pane(monkeypatch):
     argv = captured[0]
     assert argv[0] == "join-pane"
     assert "-d" in argv
+    assert "-h" in argv  # horizontal split: side-by-side, not stacked
     assert argv[argv.index("-s") + 1] == "%5"
     assert argv[argv.index("-t") + 1] == "@3"
+
+
+async def test_join_pane_vertical_when_requested(monkeypatch):
+    captured = await _capture_argv(monkeypatch)
+    await panes.join_pane("%5", target_window="@3", horizontal=False)
+    argv = captured[0]
+    assert "-h" not in argv
 
 
 async def test_resize_pane_width_and_height(monkeypatch):

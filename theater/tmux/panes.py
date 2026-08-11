@@ -43,13 +43,21 @@ async def break_pane(pane_id: str, *, target_window: str | None = None) -> None:
     await run(*args)
 
 
-async def join_pane(pane_id: str, *, target_window: str) -> None:
+async def join_pane(pane_id: str, *, target_window: str, horizontal: bool = True) -> None:
     """Move a pane from its window into another window.
 
     This is how an agent gets staged: its pane is joined into the stage window.
     `join-pane -d -s <pane> -t <window>` moves it without stealing focus.
+
+    `-h` splits horizontally (side-by-side), which is what the régie wants:
+    the agent goes to the right of the sidebar. Without `-h`, tmux defaults
+    to a vertical split, stacking the agent below the régie instead.
     """
-    await run("join-pane", "-d", "-s", pane_id, "-t", target_window)
+    args = ["join-pane", "-d"]
+    if horizontal:
+        args.append("-h")
+    args += ["-s", pane_id, "-t", target_window]
+    await run(*args)
 
 
 async def resize_pane(
