@@ -96,9 +96,65 @@ class Daemon:
         self._server = await asyncio.start_unix_server(self._handle, path=str(sock))
         os.chmod(sock, 0o600)
         self._write_pidfile()
+        # Reconcile stored state against tmux reality before serving.
+        # If the daemon was kill -9'd, participants whose panes vanished
+        # in the interim are marked dead, and their running jobs crashed.
+        await self._reconcile()
         self._reaper = asyncio.create_task(self._reap_loop())
         self.observer.start()
         logger.info("listening on %s", sock)
+
+    async def _reconcile(self) -> None:
+        """Rebuild in-memory state and reconcile with tmux after a restart.
+
+        SQLite already holds the participants, jobs, and bus. What is lost
+        on restart is the in-memory asyncio Events for jobs and the observer
+        tasks. This method:
+          1. Marks participants whose panes no longer exist as dead.
+          2. Crashes running jobs whose targets are dead.
+          3. Recreates asyncio Events for jobs that are still running (so
+             a re-await can wake up when the job finishes).
+        """
+        if not tmux.available():
+            logger.info("tmux unavailable; skipping reconciliation")
+            return
+        # Get the set of live panes from tmux.
+        try:
+            out = await tmux.run("list-panes", "-a", "-F", "#{pane_id}", check=False)
+            alive_panes = set(out.split())
+        except Exception as exc:
+            logger.warning("reconcile: could not list panes: %s", exc)
+            return
+
+        # Mark participants whose panes are gone as dead.
+        for p in self.registry.list():
+            if p.tmux_pane and p.tmux_pane not in alive_panes:
+                if p.status is not Status.DEAD:
+                    logger.info("reconcile: %s lost its pane %s", p.id, p.tmux_pane)
+                    self.registry.mark_dead(p.id)
+
+        # Crash running jobs whose targets are dead.
+        for p in self.registry.list(include_dead=True):
+            if p.status is Status.DEAD:
+                running = self.store.running_jobs_for_target(p.id)
+                for job in running:
+                    self.jobs.finish(
+                        job.handle, state=JobState.CRASHED, error_code="crashed"
+                    )
+
+        # Recreate asyncio Events for jobs still running, so re-await works.
+        for p in self.registry.list():
+            if p.status is not Status.DEAD:
+                running = self.store.running_jobs_for_target(p.id)
+                for job in running:
+                    if job.handle not in self.jobs._events:
+                        self.jobs._events[job.handle] = asyncio.Event()
+
+        logger.info(
+            "reconcile complete: %d participants, %d live panes",
+            len(self.registry.list(include_dead=True)),
+            len(alive_panes),
+        )
 
     async def serve(self) -> None:
         await self.start()

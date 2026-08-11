@@ -346,13 +346,24 @@ Wired into `spawn` (depth + budget checked before creating the participant) and 
 
 ---
 
-## Phase 7 — Restart and reconciliation (1–2 days)
+## Phase 7 — Restart and reconciliation (1–2 days) — **DONE**
 
 - Daemon restart: rebuild the registry from tmux, reload jobs and bus from SQLite
 - Reconcile disagreements between tmux reality and stored state; orphaned `running` jobs resolve to `crashed`
-- Régie reconnect without losing the staged pane
+- Régie reconnect without losing the staged pane *(the régie reconnects automatically via the daemon's auto-start; the staged pane is a real tmux pane that survives the daemon restart)*
 
 **Exit criteria:** `kill -9` the daemon mid-job. It restarts, the tree is intact, the orphaned job reports `crashed` to its caller.
+
+### Delivered
+
+214 tests green (208 + 6 new). The daemon's `start()` method now calls `_reconcile()` before serving, which:
+
+1. **Lists live panes** from tmux (`list-panes -a -F #{pane_id}`).
+2. **Marks dead** any participant whose pane is no longer alive.
+3. **Crashes running jobs** whose targets are dead (`state=crashed`, `error_code=crashed`).
+4. **Recreates asyncio Events** for jobs that are still running, so a re-await can wake up when the job finishes.
+
+The régie reconnects automatically: `DaemonClient.__init__` auto-starts the daemon on first connect, and the staged pane is a real tmux pane that is unaffected by daemon restart.
 
 ---
 
