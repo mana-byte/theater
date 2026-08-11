@@ -114,7 +114,7 @@ class RegieApp(App):
     #: The window id the régie lives in, discovered at mount.
     my_window: str | None = None
     #: The pane id currently on stage (joined into our window), or None.
-    staged_pane: str | None = None
+    staged_pane: reactive[str | None] = reactive(None)
 
     def __init__(self):
         super().__init__()
@@ -207,6 +207,10 @@ class RegieApp(App):
 
     def watch_cursor(self, cursor: int) -> None:
         """Redraw the tree with the cursor highlighted."""
+        self._render_tree()
+
+    def watch_staged_pane(self, _pane: str | None) -> None:
+        """Redraw the tree so the staged pane gets its background."""
         self._render_tree()
 
     # ---- actions -------------------------------------------------------
@@ -334,12 +338,21 @@ class RegieApp(App):
         panel.refresh()
 
     def _highlight_cursor(self, lines: list[tuple[Text, dict]]) -> list[tuple[Text, dict]]:
-        """Copy lines and bold the one under the cursor."""
+        """Copy lines and mark the cursor and the staged pane."""
         out: list[tuple[Text, dict]] = []
         for i, (label, node) in enumerate(lines):
-            if i == self.cursor:
-                highlighted = Text("▸ ", style="bold yellow").append(label)
-                out.append((highlighted, node))
+            is_cursor = i == self.cursor
+            is_staged = bool(
+                self.staged_pane
+                and node.get("tmux_pane") == self.staged_pane
+            )
+            if is_cursor and is_staged:
+                prefix = Text("▸ ", style="bold yellow on blue")
+                out.append((prefix.append(label, style="on blue"), node))
+            elif is_cursor:
+                out.append((Text("▸ ", style="bold yellow").append(label), node))
+            elif is_staged:
+                out.append((Text("  ").append(label, style="on blue"), node))
             else:
                 out.append((Text("  ").append(label), node))
         return out
