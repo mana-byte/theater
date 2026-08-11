@@ -86,12 +86,34 @@ class Daemon:
         #: One task per open connection. Tracked so shutdown can end them; see
         #: aclose().
         self._conns: set[asyncio.Task] = set()
-        #: Monotonic counter for send-job handle uniqueness.
+        #: Monotonic counter for send-job handle uniqueness. Initialized
+        #: from the database on start() so a restart does not reuse
+        #: handle numbers that already exist in SQLite.
         self._send_seq = 0
 
     def _next_send_seq(self) -> int:
         self._send_seq += 1
         return self._send_seq
+
+    def _init_send_seq(self) -> None:
+        """Initialize the send sequence from the database.
+
+        After a restart, the counter must not reuse handle numbers that
+        already exist in the jobs table. Scan existing handles and set
+        the counter above the highest one.
+        """
+        try:
+            row = self.store.db.execute(
+                "SELECT handle FROM jobs WHERE handle LIKE '%#%' ORDER BY handle DESC LIMIT 1"
+            ).fetchone()
+            if row is not None:
+                handle = row["handle"]
+                _, _, seq = handle.rpartition("#")
+                if seq.isdigit():
+                    self._send_seq = int(seq)
+                    logger.info("send sequence initialized to %d", self._send_seq)
+        except Exception as exc:
+            logger.debug("could not initialize send sequence: %s", exc)
 
     # ---- lifecycle -----------------------------------------------------
 
@@ -107,6 +129,7 @@ class Daemon:
         # If the daemon was kill -9'd, participants whose panes vanished
         # in the interim are marked dead, and their running jobs crashed.
         await self._reconcile()
+        self._init_send_seq()
         self._reaper = asyncio.create_task(self._reap_loop())
         self.observer.start()
         logger.info("listening on %s", sock)
