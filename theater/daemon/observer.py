@@ -54,20 +54,37 @@ SEARCH_INTERVAL = 2.0
 SYNC_INTERVAL = 1.0
 
 
-def _attach_point(path: Path) -> tuple[int, int, int]:
-    """Byte offset, record count, and mtime at the current end of the file.
+def _attach_point(path: Path) -> tuple[int, int, int, str | None]:
+    """Byte offset, record count, mtime, and last complete line at end of file.
 
     The mtime is taken *after* the read, from the same descriptor, so it always
     covers every byte counted here even if a writer appended mid-scan.
+
+    The last complete line is returned so the caller can derive an initial
+    status from it without replaying history onto the bus. A spawned agent
+    that finishes its turn before the observer attaches would otherwise stay
+    STARTING forever: no new bytes arrive after attach, so _drain never fires.
     """
     size = 0
     lines = 0
+    tail: list[bytes] = []
     with path.open("rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             size += len(chunk)
             lines += chunk.count(b"\n")
+            tail.append(chunk)
         mtime = os.fstat(fh.fileno()).st_mtime_ns
-    return size, lines, mtime
+    last_line: str | None = None
+    if lines > 0:
+        data = b"".join(tail)
+        head, sep, _rest = data.rpartition(b"\n")
+        if sep:
+            # head is everything before the last newline; the last complete
+            # line is the portion after the second-to-last newline (or the
+            # whole head if there is only one line).
+            _prefix, _sep2, last_bytes = head.rpartition(b"\n")
+            last_line = last_bytes.decode("utf-8", errors="replace")
+    return size, lines, mtime, last_line
 
 
 class Observer:
@@ -181,8 +198,8 @@ class Observer:
                     if path is None:
                         await self._sleep(self.search)
                         continue
-                    offset, index, mtime = await asyncio.to_thread(_attach_point, path)
-                    self._on_attach(pid, harness, path, index)
+                    offset, index, mtime, last_line = await asyncio.to_thread(_attach_point, path)
+                    self._on_attach(pid, harness, path, index, last_line)
                 offset, index, mtime = self._drain(
                     pid, harness, path, offset, index, mtime
                 )
@@ -213,7 +230,9 @@ class Observer:
             after=after,
         )
 
-    def _on_attach(self, pid: str, harness: Harness, path: Path, skipped: int) -> None:
+    def _on_attach(
+        self, pid: str, harness: Harness, path: Path, skipped: int, last_line: str | None
+    ) -> None:
         p = self.store.get_participant(pid)
         session_id = harness.session_id(path)
         if p is not None and session_id and p.session_id != session_id:
@@ -225,6 +244,13 @@ class Observer:
             payload={"path": str(path), "skipped_records": skipped},
         )
         logger.info("observing %s at %s (+%d existing records)", pid, path, skipped)
+        # Derive an initial status from the last record we skipped, so a
+        # spawned agent that finished its turn before we attached does not
+        # stay STARTING forever. The bus gets no history replayed — only the
+        # status moves. An empty file (no last_line) leaves status as-is.
+        if last_line is not None:
+            for event in harness.parse(last_line, skipped - 1):
+                self._settle(pid, status_after(event))
 
     def _drain(
         self,

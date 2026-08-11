@@ -144,6 +144,37 @@ async def test_attaching_skips_history_instead_of_replaying_it(
     assert await until(lambda: "agent.user" in kinds(registry.store))
 
 
+async def test_attaching_derives_status_from_the_last_skipped_record(
+    registry, vibe_tree, observing
+):
+    """A spawned agent that finished before we attached must not stay STARTING.
+
+    The bus gets no history replayed, but the status must reflect the last
+    record seen at attach time. This is the bug that left every spawned
+    participant stuck at "starting" in the real run: the agent completed its
+    turn in the 2 seconds it took the observer to find the transcript, no new
+    bytes arrived after attach, and _drain never fired.
+    """
+    append(vibe_tree["transcript"], USER, WORKING, RESULT, DONE)
+    p = registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
+
+    assert await until(lambda: "agent.transcript" in kinds(registry.store))
+    assert await until(lambda: registry.get(p.id).status is Status.IDLE)
+    # The bus carries only the transcript attach event — no history replay.
+    assert kinds(registry.store) == ["agent.transcript"]
+
+
+async def test_attaching_to_a_working_agent_sets_working(
+    registry, vibe_tree, observing
+):
+    """If the last record is a tool call (no turn_end), status is WORKING."""
+    append(vibe_tree["transcript"], USER, WORKING)
+    p = registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
+
+    assert await until(lambda: "agent.transcript" in kinds(registry.store))
+    assert await until(lambda: registry.get(p.id).status is Status.WORKING)
+
+
 async def test_the_harness_session_id_is_recorded_on_the_participant(
     registry, vibe_tree, observing
 ):
