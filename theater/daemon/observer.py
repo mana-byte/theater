@@ -207,18 +207,10 @@ class Observer:
         while not self._stopping.is_set():
             try:
                 if path is None:
-                    new_path = await self._locate(pid, harness)
-                    if new_path is None:
+                    path = await self._locate(pid, harness)
+                    if path is None:
                         await self._sleep(self.search)
                         continue
-                    # If we just re-located and got the same path, don't
-                    # re-attach — the file hasn't changed, and re-attaching
-                    # would re-emit agent.transcript and flood the bus.
-                    if new_path == path:
-                        last_growth = time.monotonic()
-                        await self._sleep(self.search)
-                        continue
-                    path = new_path
                     offset, index, mtime, last_line = await asyncio.to_thread(_attach_point, path)
                     self._on_attach(pid, harness, path, index, last_line)
                     last_growth = None
@@ -233,31 +225,28 @@ class Observer:
                     # will never grow — that's normal. Only re-locate if we
                     # have been stale long enough that Vibe may have rotated
                     # to a new session directory in response to a send-keys.
-                    # But if re-locating finds the same file, we stay put.
                     if last_growth is None:
                         last_growth = time.monotonic()
                     elif time.monotonic() - last_growth > RELOCATE_TIMEOUT:
-                        logger.info(
-                            "transcript for %s stale; re-locating", pid
-                        )
-                        old_path = path
-                        path = None
-                        offset = index = mtime = 0
-                        last_growth = None
-                        # Re-locate; _locate may return the same path
-                        # (idle agent, no rotation) or a new one.
+                        # Re-locate. If _locate returns a different path,
+                        # the agent rotated to a new session directory —
+                        # re-attach. If it returns the same path, the agent
+                        # is idle, not rotated — stay put and reset the
+                        # timer so we don't re-locate every 5 seconds.
                         new_path = await self._locate(pid, harness)
-                        if new_path is not None and new_path != old_path:
+                        if new_path is not None and new_path != path:
+                            logger.info(
+                                "transcript for %s rotated: %s -> %s",
+                                pid, path, new_path,
+                            )
                             path = new_path
                             offset, index, mtime, last_line = await asyncio.to_thread(_attach_point, path)
                             self._on_attach(pid, harness, path, index, last_line)
-                        elif new_path is not None:
-                            # Same path — the agent is idle, not rotated.
-                            # Stay on the same file without re-attaching.
-                            path = new_path
-                            offset, index, mtime, _ = await asyncio.to_thread(_attach_point, path)
+                            last_growth = None
+                        else:
+                            # Same path or not found — reset the timer
+                            # so we don't spin on re-locate every 5s.
                             last_growth = time.monotonic()
-                        continue
                 offset, index, mtime = new_offset, new_index, new_mtime
             except asyncio.CancelledError:
                 raise

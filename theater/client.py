@@ -85,8 +85,15 @@ class DaemonClient:
             req_id = self._next_id
             self._writer.write(protocol.request(req_id, method, params))
             await self._writer.drain()
+            # jobs.await can block for up to max_wait (60s default). The
+            # timeout must be at least that long, or the client times out
+            # before the daemon responds. Use the max_wait param if present,
+            # otherwise the default connect timeout.
+            timeout = CONNECT_TIMEOUT
+            if method == "jobs.await":
+                timeout = float(params.get("max_wait", 60.0)) + CONNECT_TIMEOUT
             line = await asyncio.wait_for(
-                self._reader.readline(), timeout=CONNECT_TIMEOUT
+                self._reader.readline(), timeout=timeout
             )
         if not line:
             raise ConnectionError("daemon closed the connection")
