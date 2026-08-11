@@ -43,6 +43,9 @@ invent a state we cannot see.
 
 from __future__ import annotations
 
+import os
+import shutil
+import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -52,6 +55,27 @@ from theater.models import Status
 
 #: Name the theater MCP server is registered under inside each harness.
 SERVER_NAME = "theater"
+
+
+def theater_binary() -> str:
+    """Resolve the absolute path to the ``theater`` executable.
+
+    A spawned tmux window does not inherit the daemon's PATH — tmux starts
+    the window from the session's default environment, not the daemon's —
+    so the bare name ``"theater"`` would not be found by the harness's MCP
+    client when theater was installed via ``uv run`` / a venv. Resolve to
+    an absolute path: first check PATH (covers ``uv tool install``), then
+    fall back to the bin directory next to ``sys.executable`` (the venv
+    case). Returns the bare name as a last resort so the failure is loud
+    and diagnosable rather than silent.
+    """
+    found = shutil.which("theater")
+    if found:
+        return found
+    candidate = Path(sys.executable).parent / "theater"
+    if candidate.exists():
+        return str(candidate)
+    return "theater"
 
 #: Approval modes accepted by `spawn`. There is no default anywhere: the caller
 #: must choose, because the choice is the whole safety story for a child that

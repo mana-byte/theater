@@ -23,6 +23,7 @@ from theater.harness.base import (
     NativeChild,
     clip,
     status_after,
+    theater_binary,
 )
 from theater.harness.claude_code import ClaudeCodeHarness
 from theater.harness.vibe import VibeHarness
@@ -73,4 +74,5 @@ __all__ = [
     "get",
     "plan_launch",
     "status_after",
+    "theater_binary",
 ]

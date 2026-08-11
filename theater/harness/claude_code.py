@@ -51,6 +51,7 @@ from theater.harness.base import (
     LaunchPlan,
     NativeChild,
     clip,
+    theater_binary,
 )
 from theater.models import BadRequest
 
@@ -99,7 +100,7 @@ class ClaudeCodeHarness(Harness):
         config = {
             "mcpServers": {
                 SERVER_NAME: {
-                    "command": "theater",
+                    "command": theater_binary(),
                     "args": ["mcp", "--id", participant_id],
                 }
             }

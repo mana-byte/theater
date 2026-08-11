@@ -49,6 +49,7 @@ from theater.harness.base import (
     LaunchPlan,
     NativeChild,
     clip,
+    theater_binary,
 )
 from theater.models import BadRequest
 
@@ -84,7 +85,7 @@ class VibeHarness(Harness):
             {
                 "name": SERVER_NAME,
                 "transport": "stdio",
-                "command": "theater",
+                "command": theater_binary(),
                 "args": ["mcp", "--id", participant_id],
             }
         ]
