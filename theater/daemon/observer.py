@@ -46,6 +46,11 @@ logger = logging.getLogger("theater.observer")
 #: it doing right now" is visible to a human watching.
 POLL_INTERVAL = 0.25
 
+#: How long to wait with no new bytes before re-locating the transcript.
+#: Vibe starts a new session directory on each turn; if the observer
+#: is locked onto the old file, it needs to re-scan to find the new one.
+RELOCATE_TIMEOUT = 5.0
+
 #: How often to look for a transcript we have not found yet. Slower, because
 #: it is a directory scan rather than a stat.
 SEARCH_INTERVAL = 2.0
@@ -196,6 +201,7 @@ class Observer:
         offset = 0
         index = 0
         mtime = 0
+        last_growth: float | None = None
         while not self._stopping.is_set():
             try:
                 if path is None:
@@ -205,9 +211,32 @@ class Observer:
                         continue
                     offset, index, mtime, last_line = await asyncio.to_thread(_attach_point, path)
                     self._on_attach(pid, harness, path, index, last_line)
-                offset, index, mtime = self._drain(
+                    last_growth = None
+                new_offset, new_index, new_mtime = self._drain(
                     pid, harness, path, offset, index, mtime
                 )
+                if new_offset != offset:
+                    # The file grew; reset the stale timer.
+                    last_growth = None
+                else:
+                    # No growth this tick.
+                    if last_growth is None:
+                        import time
+
+                        last_growth = time.monotonic()
+                    elif time.monotonic() - last_growth > RELOCATE_TIMEOUT:
+                        # The transcript hasn't grown in a while. Vibe
+                        # may have rotated to a new session directory
+                        # (it starts a new one on each turn). Drop back
+                        # to searching to find the new transcript.
+                        logger.info(
+                            "transcript for %s stale; re-locating", pid
+                        )
+                        path = None
+                        offset = index = mtime = 0
+                        last_growth = None
+                        continue
+                offset, index, mtime = new_offset, new_index, new_mtime
             except asyncio.CancelledError:
                 raise
             except FileNotFoundError:
