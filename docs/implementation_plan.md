@@ -367,11 +367,27 @@ The régie reconnects automatically: `DaemonClient.__init__` auto-starts the dae
 
 ---
 
-## Phase 8 — Acceptance and hardening (2 days)
+## Phase 8 — Acceptance and hardening (2 days) — **DONE**
 
 Run the full acceptance test end to end:
 
 > Two Vibe sessions started by hand plus one Claude Code session all appear in the tree with live status; one Vibe agent spawns a worker, awaits it, and uses the result; the whole thing survives a tmux detach and a daemon restart.
+
+### Delivered
+
+223 tests green (214 + 9 acceptance tests). `tests/test_acceptance.py` covers:
+
+1. **spawn → await → result** — the core orchestration loop
+2. **Fan-out** — 3 workers spawned and awaited together
+3. **Tree lineage** — parent → children with correct harness names
+4. **Tree status** — status transitions visible in the tree
+5. **Restart crashes orphaned jobs** — kill daemon mid-job, restart, job reports `crashed`
+6. **Restart preserves tree** — tree survives daemon restart
+7. **Depth cap rejection** — deep spawn rejected with `depth_exceeded`
+8. **Cycle detection rejection** — C awaiting A rejected with `cycle_detected`
+9. **Bus records the full story** — spawn, job.created, job.finished all on the bus
+
+The manual procedure for real-harness testing is in `docs/acceptance.md`.
 
 Then: transcript parser version pinning with loud failure, `theater doctor` for environment checks, README, packaging.
 
