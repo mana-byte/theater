@@ -202,13 +202,23 @@ class Observer:
         index = 0
         mtime = 0
         last_growth: float | None = None
+        import time
+
         while not self._stopping.is_set():
             try:
                 if path is None:
-                    path = await self._locate(pid, harness)
-                    if path is None:
+                    new_path = await self._locate(pid, harness)
+                    if new_path is None:
                         await self._sleep(self.search)
                         continue
+                    # If we just re-located and got the same path, don't
+                    # re-attach — the file hasn't changed, and re-attaching
+                    # would re-emit agent.transcript and flood the bus.
+                    if new_path == path:
+                        last_growth = time.monotonic()
+                        await self._sleep(self.search)
+                        continue
+                    path = new_path
                     offset, index, mtime, last_line = await asyncio.to_thread(_attach_point, path)
                     self._on_attach(pid, harness, path, index, last_line)
                     last_growth = None
@@ -219,22 +229,34 @@ class Observer:
                     # The file grew; reset the stale timer.
                     last_growth = None
                 else:
-                    # No growth this tick.
+                    # No growth this tick. An idle agent (waiting for input)
+                    # will never grow — that's normal. Only re-locate if we
+                    # have been stale long enough that Vibe may have rotated
+                    # to a new session directory in response to a send-keys.
+                    # But if re-locating finds the same file, we stay put.
                     if last_growth is None:
-                        import time
-
                         last_growth = time.monotonic()
                     elif time.monotonic() - last_growth > RELOCATE_TIMEOUT:
-                        # The transcript hasn't grown in a while. Vibe
-                        # may have rotated to a new session directory
-                        # (it starts a new one on each turn). Drop back
-                        # to searching to find the new transcript.
                         logger.info(
                             "transcript for %s stale; re-locating", pid
                         )
+                        old_path = path
                         path = None
                         offset = index = mtime = 0
                         last_growth = None
+                        # Re-locate; _locate may return the same path
+                        # (idle agent, no rotation) or a new one.
+                        new_path = await self._locate(pid, harness)
+                        if new_path is not None and new_path != old_path:
+                            path = new_path
+                            offset, index, mtime, last_line = await asyncio.to_thread(_attach_point, path)
+                            self._on_attach(pid, harness, path, index, last_line)
+                        elif new_path is not None:
+                            # Same path — the agent is idle, not rotated.
+                            # Stay on the same file without re-attaching.
+                            path = new_path
+                            offset, index, mtime, _ = await asyncio.to_thread(_attach_point, path)
+                            last_growth = time.monotonic()
                         continue
                 offset, index, mtime = new_offset, new_index, new_mtime
             except asyncio.CancelledError:
@@ -244,6 +266,7 @@ class Observer:
                 # Drop back to searching rather than dying.
                 path = None
                 offset = index = mtime = 0
+                last_growth = None
             except Exception:
                 logger.exception("observing %s failed", pid)
             await self._sleep(self.poll)
