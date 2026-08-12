@@ -347,7 +347,21 @@ is fully interactive and keeps its scrollback.
 
 `theater/formatting.py` holds the rendering both the CLI and the régie need and
 imports neither `rich` nor `textual`, so the plain CLI stays dependency-light
-and the two never drift on how a tier or status is spelled.
+and the two never drift on how a tier or status is spelled. The lineage rails
+(`├── │`) are the one thing the régie draws that the CLI does not: they need
+sibling and ancestor position, which the shared depth-only walk cannot express,
+so `regie/tree.py` keeps its own traversal.
+
+Two tmux courtesies belong to the régie rather than the daemon, because they
+are properties of *being on screen*: it enables the session's `mouse` option
+for as long as it runs, and on exit it unstages, so a staged agent never ends
+up sharing a window with a dead TUI. Both are restored in `action_quit`, not
+`on_unmount` — by unmount the event loop is closing and an awaited tmux call
+can be cancelled halfway.
+
+`regie/palette.py` adds a `Spawn <harness>` entry per registered harness to
+Textual's ctrl+p palette. It goes through the same `spawn` RPC as the CLI, with
+no prompt and no parent, so the régie gains no privileged path to the daemon.
 
 ---
 
@@ -355,7 +369,7 @@ and the two never drift on how a tier or status is spelled.
 
 ```
 theater/
-├── cli.py 395            argparse; daemon mcp ls spawn bus kill adopt regie stop
+├── cli.py 443            argparse; daemon mcp ls spawn bus kill adopt harnesses regie stop
 ├── client.py 130         DaemonClient, autostarts the daemon
 ├── protocol.py 46        NDJSON framing, PROTOCOL_VERSION = 1
 ├── models.py 170         Tier, Status, Participant, Job, error codes
@@ -373,13 +387,13 @@ theater/
 │   ├── rails.py 144      depth / cycle / budget
 │   ├── harness_detect.py 85
 │   └── lineage.py 73     ancestor_ids, depth_of, root_of, subtree_ids
-├── harness/  base.py 273 · claude_code.py 355 · vibe.py 272
+├── harness/  base.py 282 · claude_code.py 355 · vibe.py 272
 ├── mcp/      tools.py 206 · server.py 152
-├── tmux/     client.py 227 · panes.py 167 · presence.py 56
-└── regie/    app.py 384 · tree.py 99 · bus_view.py 37
+├── tmux/     client.py 261 · panes.py 167 · presence.py 56
+└── regie/    app.py 534 · tree.py 131 · palette.py 64 · bus_view.py 37
 ```
 
-Roughly 5,700 lines, 292 tests.
+Roughly 6,000 lines, 339 tests.
 
 The v1.1 refactor split `daemon/server.py` (lifecycle vs. methods vs. harness
 detection), broke the `store ↔ jobs` import cycle by moving `Job` into

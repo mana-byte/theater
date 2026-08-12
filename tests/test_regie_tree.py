@@ -57,15 +57,44 @@ def test_single_participant_renders_with_tier_mark():
     assert "aabbccdd" in str(label)  # short id
 
 
-def test_children_are_indented():
+def test_children_hang_off_a_branch():
+    """Indentation alone could not tell a sibling from a nephew. Rails can."""
     lines = render_tree([{**PARENT, "children": [CHILD]}])
     assert len(lines) == 2
-    parent_label = str(lines[0][0])
-    child_label = str(lines[1][0])
-    # The child line should have more leading whitespace than the parent
-    parent_indent = len(parent_label) - len(parent_label.lstrip())
-    child_indent = len(child_label) - len(child_label.lstrip())
-    assert child_indent > parent_indent
+    assert not str(lines[0][0]).startswith(("├", "└", " "))
+    assert str(lines[1][0]).startswith("└── ")
+
+
+def test_only_the_last_sibling_closes_the_branch():
+    second = {**CHILD, "id": "778899aabbcc"}
+    lines = render_tree([{**PARENT, "children": [CHILD, second]}])
+    assert str(lines[1][0]).startswith("├── ")
+    assert str(lines[2][0]).startswith("└── ")
+
+
+def test_the_rail_continues_past_a_parent_that_has_siblings_below():
+    """A grandchild under a non-last child still shows its aunt's line."""
+    grandchild = {**CHILD, "id": "ddeeff001122"}
+    first = {**CHILD, "children": [grandchild]}
+    second = {**CHILD, "id": "778899aabbcc"}
+    lines = render_tree([{**PARENT, "children": [first, second]}])
+    assert str(lines[1][0]).startswith("├── ")
+    assert str(lines[2][0]).startswith("│   └── ")
+    assert str(lines[3][0]).startswith("└── ")
+
+
+def test_the_rail_stops_under_a_last_child():
+    grandchild = {**CHILD, "id": "ddeeff001122"}
+    lines = render_tree([{**PARENT, "children": [{**CHILD, "children": [grandchild]}]}])
+    assert str(lines[1][0]).startswith("└── ")
+    assert str(lines[2][0]).startswith("    └── ")
+
+
+def test_separate_roots_are_not_drawn_as_siblings():
+    """Two unrelated agents are not children of anything, so no rails."""
+    other = {**PARENT, "id": "998877665544"}
+    lines = render_tree([PARENT, other])
+    assert all(not str(line[0]).startswith(("├", "└")) for line in lines)
 
 
 def test_unmanaged_panes_append_after_separator():

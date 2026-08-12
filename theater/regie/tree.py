@@ -21,7 +21,6 @@ from rich.text import Text
 
 from theater.formatting import (
     clip_harness,
-    flatten_tree,
     reach_mark,
     short_id,
     tier_mark,
@@ -37,13 +36,43 @@ _STATUS_COLOR = {
     "dead": "red",
 }
 
+#: Box-drawing pieces for the lineage rails. Plain indentation could not say
+#: whether the agent two lines down is a sibling or a nephew; the rails can.
+_BRANCH = "├── "
+_LAST_BRANCH = "└── "
+_RAIL = "│   "
+_GAP = "    "
 
-def _node_label(node: dict, indent: int) -> Text:
-    """One line of the tree: mark tier/harness/status/cwd."""
+
+def _walk(nodes: list[dict], prefix: str = "", depth: int = 0) -> list[tuple[str, dict]]:
+    """Depth-first walk that pairs each node with its drawn ancestry.
+
+    Roots get no branch of their own: they are separate agents, not siblings
+    under some invisible parent, and a rail hanging off nothing reads as a
+    missing row. Children get a branch, and the rail continues past them only
+    while their parent still has siblings below.
+    """
+    rows: list[tuple[str, dict]] = []
+    last_index = len(nodes) - 1
+    for i, node in enumerate(nodes):
+        last = i == last_index
+        if depth == 0:
+            branch, child_prefix = "", ""
+        else:
+            branch = _LAST_BRANCH if last else _BRANCH
+            child_prefix = prefix + (_GAP if last else _RAIL)
+        rows.append((prefix + branch, node))
+        rows += _walk(node.get("children") or [], child_prefix, depth + 1)
+    return rows
+
+
+def _node_label(node: dict, prefix: str = "") -> Text:
+    """One line of the tree: rails, then mark tier/harness/status/cwd."""
     status = node.get("status", "?")
 
     label = Text()
-    label.append(f"{'  ' * indent}")
+    if prefix:
+        label.append(prefix, style="dim")
     label.append(f"{tier_mark(node.get('tier'))}{reach_mark(node.get('addressable'))} ", style="bold")
     label.append(f"{harness_icon(node.get('harness'))} ")
     label.append(f"{clip_harness(node.get('harness')):<11} ")
@@ -53,8 +82,9 @@ def _node_label(node: dict, indent: int) -> Text:
     return label
 
 
-def _labelled(node: dict, indent: int) -> tuple[Text, dict]:
-    return _node_label(node, indent), node
+def _labelled(row: tuple[str, dict]) -> tuple[Text, dict]:
+    prefix, node = row
+    return _node_label(node, prefix), node
 
 
 def render_tree(
@@ -71,7 +101,7 @@ def render_tree(
     Returns a flat list so the Textual Tree can map selection back to the
     data without walking the widget's own tree.
     """
-    lines = flatten_tree(tree, _labelled)
+    lines = [_labelled(row) for row in _walk(tree)]
     if unmanaged:
         # Separator line
         lines.append((Text("── unmanaged ──", style="dim italic"), {}))
@@ -86,7 +116,7 @@ def render_tree(
                 "addressable": False,
                 "children": [],
             }
-            lines.append((_node_label(fake_node, 0), fake_node))
+            lines.append((_node_label(fake_node), fake_node))
     return lines
 
 

@@ -18,6 +18,7 @@ Keybindings:
     Enter           stage the selected agent (join its pane into this window)
     z               focus the staged pane (type at the agent directly)
     x               kill the selected agent's pane
+    ctrl+p          command palette, including `Spawn <harness>`
     q               quit (unstages first; detaches, kills nothing)
 
 Polling: the tree refreshes every 1s, the bus tail every 0.4s. Both are
@@ -27,6 +28,7 @@ async daemon calls; the app runs them as background workers.
 from __future__ import annotations
 
 import logging
+import os
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -37,6 +39,7 @@ from rich.text import Text
 
 from theater.client import DaemonClient
 from theater.regie.bus_view import format_bus_line
+from theater.regie.palette import SpawnCommands
 from theater.regie.tree import render_tree, selected_participant
 from theater.tmux import client as tmux
 from theater.tmux import panes
@@ -158,6 +161,10 @@ class RegieApp(App):
         Binding("q", "quit", "quit"),
     ]
 
+    #: ctrl+p opens the palette. Ours adds one `Spawn <harness>` entry per
+    #: registered harness on top of Textual's system commands.
+    COMMANDS = App.COMMANDS | {SpawnCommands}
+
     title = "theater régie"
 
     cursor: reactive[int] = reactive(0)
@@ -171,6 +178,9 @@ class RegieApp(App):
     staged_pane: reactive[str | None] = reactive(None)
     #: The session the régie is running in. tmux options are scoped to it.
     my_session: str | None = None
+    #: The same session by name. The spawner matches against `list-sessions`
+    #: output, which is names, so the `$id` form is no use to it.
+    my_session_name: str | None = None
     #: The session-local value of tmux's `mouse` option before we changed it,
     #: or None if the session had no override of its own.
     _mouse_prev: str | None = None
@@ -208,6 +218,9 @@ class RegieApp(App):
                 )
                 self.my_session = await tmux.display_message(
                     "#{session_id}", target=my_pane
+                )
+                self.my_session_name = await tmux.display_message(
+                    "#{session_name}", target=my_pane
                 )
             except Exception as exc:
                 logger.debug("could not discover window/session id: %s", exc)
@@ -457,6 +470,39 @@ class RegieApp(App):
             self.notify(f"killed {pid[:8]}")
         except Exception as exc:
             self.notify(f"kill failed: {exc}", severity="error")
+        await self._refresh_tree()
+
+    def spawn_harness(self, harness: str) -> None:
+        """Start a bare CLI of this harness, from the command palette.
+
+        Sync on purpose: a palette hit runs its command as a plain callback,
+        and handing it a worker rather than a coroutine keeps the palette from
+        having to care whether the daemon is slow to answer.
+        """
+        self.run_worker(self._spawn_harness(harness), exclusive=False)
+
+    async def _spawn_harness(self, harness: str) -> None:
+        if not self._client:
+            return
+        try:
+            record = await self._client.call(
+                "spawn",
+                harness=harness,
+                # No prompt and no parent: the palette starts a CLI, it does
+                # not delegate work. `manual` adds no approval flags, so what
+                # comes up is the harness's own default behaviour.
+                prompt="",
+                approval="manual",
+                cwd=os.getcwd(),
+                # By name, and only ours: a new window belongs in the session
+                # the user is looking at, not in the fallback `theater` one.
+                tmux_session=self.my_session_name,
+            )
+        except Exception as exc:
+            self.notify(f"spawn failed: {exc}", severity="error")
+            return
+        pane = record.get("tmux_pane") if isinstance(record, dict) else None
+        self.notify(f"spawned {harness} ({pane or 'no pane'})")
         await self._refresh_tree()
 
     async def action_focus_stage(self) -> None:

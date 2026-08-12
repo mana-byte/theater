@@ -142,6 +142,8 @@ Launch the régie TUI — a full-screen view of all sessions and their activity.
 theater regie
 ```
 
+Children hang off their parent on lineage rails, so a sibling is never mistaken for a nephew. `ctrl+p` opens the command palette, which carries a `Spawn <harness>` entry for every harness Theater can drive — that starts a plain CLI in the current session, with no prompt and no parent.
+
 While it runs, the régie turns tmux's `mouse` option on for its own session and puts the previous value back on exit. Quitting also unstages: whatever agent was joined into the régie's window is moved back to a window of its own, still running.
 
 ### `theater kill` / `theater stop`
