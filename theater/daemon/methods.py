@@ -17,7 +17,14 @@ from theater.daemon.harness_detect import detect_harness
 from theater.daemon.rails import check_budget, check_cycle, check_depth
 from theater.daemon.spawner import SpawnRequest
 from theater.harness import HARNESSES, describe, normalize
-from theater.models import BadRequest, Busy, HumanPresent, NotAddressable, Status
+from theater.models import (
+    BadRequest,
+    Busy,
+    HumanPresent,
+    JobState,
+    NotAddressable,
+    Status,
+)
 from theater.tmux import client as tmux
 from theater.tmux.presence import human_present
 
@@ -175,6 +182,17 @@ async def _spawn(daemon, params: dict) -> dict:
         kind="spawn",
         prompt=req.prompt or "",
     )
+    if not req.prompt:
+        # Nothing was asked, so there is nothing to wait for: the job is done
+        # the moment the pane exists. `theater spawn vibe` and the régie
+        # palette both start a bare CLI this way.
+        #
+        # Left running, this job never resolves on its own. It then eats the
+        # first turn end the human produces — which belongs to no caller — and
+        # counts as work in flight, so every `send` to that participant is
+        # refused as busy. Resolving it here keeps both of those honest, and
+        # `await_sessions` on the handle still works: it returns immediately.
+        daemon.jobs.finish(handle, state=JobState.DONE, result="")
     result = participant.to_dict()
     result["handle"] = handle
     return result
@@ -233,15 +251,27 @@ async def _send(daemon, params: dict) -> dict:
             f"a human is present at {target.tmux_pane}; not injecting"
         )
 
-    running = daemon.store.running_jobs_for_target(target_id)
-    busy = [j for j in running if j.kind == "send"]
-    if busy:
+    # Busy is "someone is already waiting on a turn from this participant",
+    # which is any running job that carried a prompt — a spawn prompt occupies
+    # the pane exactly as much as a send does. A promptless job is not evidence
+    # of work; `_spawn` resolves those on the spot, so in practice there are
+    # none, and the filter is here so a stray one cannot wedge a participant.
+    #
+    # Status is deliberately not consulted. It is inferred from a transcript
+    # and has been wrong before; a stuck WORKING would silently make a
+    # participant unreachable, and that failure is worse than a prompt landing
+    # while a human's turn is still running.
+    if [j for j in daemon.store.running_jobs_for_target(target_id) if j.prompt]:
         raise Busy(
             f"participant {target_id!r} has a running send job"
         )
 
-    await tmux.send_keys(target.tmux_pane, prompt)
-
+    # Reserve the job before typing, in that order for two reasons. The check
+    # above and this create must not be separated by an await, or two sends
+    # racing through the daemon both read an empty queue and both type into the
+    # pane. And a fast agent can finish its turn before the RPC returns: with
+    # the job created afterwards, the observer would see the turn end with
+    # nothing running and the caller would await a promise already broken.
     handle = f"{target_id}#{daemon._next_send_seq()}"
     daemon.jobs.create(
         handle=handle,
@@ -250,6 +280,19 @@ async def _send(daemon, params: dict) -> dict:
         kind="send",
         prompt=prompt,
     )
+    try:
+        await tmux.send_keys(target.tmux_pane, prompt)
+    except Exception as exc:
+        # Nothing was delivered, so nothing will ever answer. Close the job
+        # rather than leave a reservation that blocks the next send until the
+        # rescue timer clears it.
+        daemon.jobs.finish(
+            handle,
+            state=JobState.CRASHED,
+            result=str(exc),
+            error_code="send_failed",
+        )
+        raise
 
     daemon.store.bus_append(
         "agent.send",

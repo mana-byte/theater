@@ -96,6 +96,77 @@ async def test_send_after_job_finishes_allows_resend(client, fake_tmux, daemon):
     assert len(fake_tmux.sent) == 2
 
 
+async def test_the_job_exists_before_the_prompt_is_typed(
+    client, fake_tmux, daemon, monkeypatch
+):
+    """The reservation is taken first, so a fast reply has something to land on.
+
+    An agent can finish its turn before the send RPC has even returned. With
+    the job created after send-keys, the observer would see that turn end with
+    no running job and the caller would then await a promise nobody can keep.
+    """
+    from theater.tmux import client as tmux_client
+
+    target = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    seen: list[list] = []
+
+    async def spy(pane, text):
+        seen.append(daemon.store.running_jobs_for_target(target["id"]))
+
+    monkeypatch.setattr(tmux_client, "send_keys", spy)
+    await client.call("send", target=target["id"], prompt="quick one")
+    assert len(seen) == 1 and len(seen[0]) == 1
+    assert seen[0][0].prompt == "quick one"
+
+
+async def test_a_send_that_could_not_be_typed_does_not_wedge_the_target(
+    client, fake_tmux, daemon, monkeypatch
+):
+    """send-keys failed, so nothing will answer: the reservation is released."""
+    from theater.tmux import client as tmux_client
+
+    target = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+
+    async def broken(pane, text):
+        raise RuntimeError("pane went away")
+
+    monkeypatch.setattr(tmux_client, "send_keys", broken)
+    with pytest.raises(RemoteError):
+        await client.call("send", target=target["id"], prompt="doomed")
+    monkeypatch.setattr(tmux_client, "send_keys", fake_tmux.send_keys)
+
+    # No leftover reservation, so the next send is accepted rather than busy.
+    job = await client.call("send", target=target["id"], prompt="second")
+    assert job["state"] == "running"
+
+
+async def test_a_bare_spawn_leaves_nothing_running(client, fake_tmux, daemon):
+    """A spawn with no prompt asked nothing, so its job is already finished.
+
+    Left running it would block every later send as busy, and eat the first
+    turn end the human produces.
+    """
+    child = await client.call(
+        "spawn", harness="vibe", prompt="", approval="manual", cwd="/tmp"
+    )
+    assert daemon.jobs.get(child["handle"]).state == JobState.DONE
+    job = await client.call("send", target=child["id"], prompt="now do something")
+    assert job["state"] == "running"
+
+
+async def test_a_spawn_that_asked_for_something_is_still_pending(
+    client, fake_tmux, daemon
+):
+    """The counterpart: a spawn prompt occupies the pane like any other."""
+    child = await client.call(
+        "spawn", harness="vibe", prompt="do the thing", approval="manual", cwd="/tmp"
+    )
+    assert daemon.jobs.get(child["handle"]).state == JobState.RUNNING
+    with pytest.raises(RemoteError) as exc:
+        await client.call("send", target=child["id"], prompt="and another thing")
+    assert exc.value.code == "busy"
+
+
 async def test_send_bus_event(client, fake_tmux, daemon):
     """send creates an agent.send bus event."""
     target = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
