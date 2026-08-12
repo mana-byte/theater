@@ -1,0 +1,131 @@
+{
+  "event": [
+    {
+      "aggregate_id": "ses_0082e628bffeUSFvjRye4Qi7ul",
+      "data": "{\"sessionID\":\"ses_0082e628bffeUSFvjRye4Qi7ul\",\"info\":{\"id\":\"msg_ff826e011001c17OhKF4koI8Je\",\"sessionID\":\"ses_0082e628bffeUSFvjRye4Qi7ul\",\"role\":\"user\",\"time\":{\"created\":1786574725137},\"agent\":\"build\",\"model\":{\"providerID\":\"openai-foundry\",\"modelID\":\"zai-glm-5-2\"}}}",
+      "id": "evt_ff826e0110016vp47N4PklL6a5",
+      "seq": 142,
+      "type": "message.updated.1"
+    },
+    {
+      "aggregate_id": "ses_0082e628bffeUSFvjRye4Qi7ul",
+      "data": "{\"sessionID\":\"ses_0082e628bffeUSFvjRye4Qi7ul\",\"part\":{\"id\":\"prt_ff826e0110025PglwMwcAkmb9k\",\"sessionID\":\"ses_0082e628bffeUSFvjRye4Qi7ul\",\"messageID\":\"msg_ff826e011001c17OhKF4koI8Je\",\"type\":\"text\",\"text\":\"Reply with exactly this one line and nothing else, no tools, no preamble: CAPTURE-OPENCODE-OK\"},\"time\":1786574725139}",
+      "id": "evt_ff826e013001mrdrrUsEgQrozg",
+      "seq": 143,
+      "type": "message.part.updated.1"
+    },
+    {
+      "aggregate_id": "ses_0082e628bffeUSFvjRye4Qi7ul",
+      "data": "{\"sessionID\":\"ses_0082e628bffeUSFvjRye4Qi7ul\",\"info\":{\"id\":\"ses_0082e628bffeUSFvjRye4Qi7ul\",\"slug\":\"stellar-sailor\",\"projectID\":\"a5eed29606d63597b66223d76969afe7e2fc3072\",\"directory\":\"/Users/manaiki.laut/Desktop/tui_cli_orchestration\",\"path\":\"\",\"summary\":{\"additions\":0,\"deletions\":0,\"files\":0},\"cost\":0,\"tokens\":{\"input\":226013,\"output\":3025,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"title\":\"Dessert debate: tiramisu vs. the rest\",\"agent\":\"build\",\"model\":{\"id\":\"zai-glm-5-2\",\"providerID\":\"openai-foundry\"},\"version\":\"1.18.11\",\"time\":{\"created\":1786569137524,\"updated\":1786574725141}}}",
+      "id": "evt_ff826e015001e3xgNrtvzf5hdu",
+      "seq": 144,
+      "type": "session.updated.1"
+    },
+    {
+      "aggregate_id": "ses_0082e628bffeUSFvjRye4Qi7ul",
+      "data": "{\"sessionID\":\"ses_0082e628bffeUSFvjRye4Qi7ul\",\"info\":{\"id\":\"msg_ff826e019001QwuO9imntMqv9H\",\"sessionID\":\"ses_0082e628bffeUSFvjRye4Qi7ul\",\"role\":\"assistant\",\"time\":{\"created\":1786574725145},\"parentID\":\"msg_ff826e011001c17OhKF4koI8Je\",\"modelID\":\"zai-glm-5-2\",\"providerID\":\"openai-foundry\",\"mode\":\"build\",\"agent\":\"build\",\"path\":{\"cwd\":\"/Users/manaiki.laut/Desktop/tui_cli_orchestration\",\"root\":\"/Users/manaiki.laut/Desktop/tui_cli_orchestration\"},\"cost\":0,\"tokens\":{\"input\":0,\"output\":0,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}}}",
+      "id": "evt_ff826e019001mbdAwRLP5V77cF",
+      "seq": 145,
+      "type": "message.updated.1"
+    },
+    {
+      "aggregate_id": "ses_0082e628bffeUSFvjRye4Qi7ul",
+      "data": "{\"sessionID\":\"ses_0082e628bffeUSFvjRye4Qi7ul\",\"info\":{\"id\":\"ses_0082e628bffeUSFvjRye4Qi7ul\",\"slug\":\"stellar-sailor\",\"projectID\":\"a5eed29606d63597b66223d76969afe7e2fc3072\",\"directory\":\"/Users/manaiki.laut/Desktop/tui_cli_orchestration\",\"path\":\"\",\"summary\":{\"additions\":0,\"deletions\":0,\"files\":0},\"cost\":0,\"tokens\":{\"input\":226013,\"output\":3025,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"title\":\"Dessert debate: tiramisu vs. the rest\",\"agent\":\"build\",\"model\":{\"id\":\"zai-glm-5-2\",\"providerID\":\"openai-foundry\"},\"version\":\"1.18.11\",\"time\":{\"created\":1786569137524,\"updated\":1786574725301}}}",
+      "id": "evt_ff826e0b5001hVNs9rA6dVp8yd",
+      "seq": 146,
+      "type": "session.updated.1"
+    },
+    {
+      "aggregate_id": "ses_0082e628bffeUSFvjRye4Qi7ul",
+      "data": "{\"sessionID\":\"ses_0082e628bffeUSFvjRye4Qi7ul\",\"info\":{\"id\":\"msg_ff826e011001c17OhKF4koI8Je\",\"sessionID\":\"ses_0082e628bffeUSFvjRye4Qi7ul\",\"role\":\"user\",\"time\":{\"created\":1786574725137},\"summary\":{\"diffs\":[]},\"agent\":\"build\",\"model\":{\"providerID\":\"openai-foundry\",\"modelID\":\"zai-glm-5-2\"}}}",
+      "id": "evt_ff826e0b70019C3sxDYPgg1fPV",
+      "seq": 147,
+      "type": "message.updated.1"
+    },
+    {
+      "aggregate_id": "ses_0082e628bffeUSFvjRye4Qi7ul",
+      "data": "{\"sessionID\":\"ses_0082e628bffeUSFvjRye4Qi7ul\",\"part\":{\"id\":\"prt_ff826e5720012tqaeORqz2S2tU\",\"sessionID\":\"ses_0082e628bffeUSFvjRye4Qi7ul\",\"messageID\":\"msg_ff826e019001QwuO9imntMqv9H\",\"type\":\"step-start\",\"snapshot\":\"5925385a92facf9d530b807f3fdca824bea5427b\"},\"time\":1786574726514}",
+      "id": "evt_ff826e572001wsH3rSKeiX6TVs",
+      "seq": 148,
+      "type": "message.part.updated.1"
+    },
+    {
+      "aggregate_id": "ses_0082e628bffeUSFvjRye4Qi7ul",
+      "data": "{\"sessionID\":\"ses_0082e628bffeUSFvjRye4Qi7ul\",\"part\":{\"id\":\"prt_ff826e573001SaljzYqZ2L7py8\",\"sessionID\":\"ses_0082e628bffeUSFvjRye4Qi7ul\",\"messageID\":\"msg_ff826e019001QwuO9imntMqv9H\",\"type\":\"text\",\"text\":\"\",\"time\":{\"start\":1786574726515},\"metadata\":{\"openai\":{\"itemId\":\"resp_d48c997166c445398b0eac676444d55d\"}}},\"time\":1786574726515}",
+      "id": "evt_ff826e573001LNMQFIf4AmelzR",
+      "seq": 149,
+      "type": "message.part.updated.1"
+    },
+    {
+      "aggregate_id": "ses_0082e628bffeUSFvjRye4Qi7ul",
+      "data": "{\"sessionID\":\"ses_0082e628bffeUSFvjRye4Qi7ul\",\"part\":{\"id\":\"prt_ff826e573001SaljzYqZ2L7py8\",\"sessionID\":\"ses_0082e628bffeUSFvjRye4Qi7ul\",\"messageID\":\"msg_ff826e019001QwuO9imntMqv9H\",\"type\":\"text\",\"text\":\"CAPTURE-OPENCODE-OK\",\"time\":{\"start\":1786574726515,\"end\":1786574728550},\"metadata\":{\"openai\":{\"itemId\":\"resp_d48c997166c445398b0eac676444d55d\"}}},\"time\":1786574728550}",
+      "id": "evt_ff826ed66001vol3L92Me5VMFs",
+      "seq": 150,
+      "type": "message.part.updated.1"
+    },
+    {
+      "aggregate_id": "ses_0082e628bffeUSFvjRye4Qi7ul",
+      "data": "{\"sessionID\":\"ses_0082e628bffeUSFvjRye4Qi7ul\",\"part\":{\"id\":\"prt_ff826edbd001Cq1O9r5Zj75ua6\",\"sessionID\":\"ses_0082e628bffeUSFvjRye4Qi7ul\",\"messageID\":\"msg_ff826e019001QwuO9imntMqv9H\",\"type\":\"step-finish\",\"reason\":\"stop\",\"snapshot\":\"5925385a92facf9d530b807f3fdca824bea5427b\",\"cost\":0,\"tokens\":{\"total\":25046,\"input\":25038,\"output\":8,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}}},\"time\":1786574728637}",
+      "id": "evt_ff826edbd001yDB560LbYqSmxJ",
+      "seq": 151,
+      "type": "message.part.updated.1"
+    },
+    {
+      "aggregate_id": "ses_0082e628bffeUSFvjRye4Qi7ul",
+      "data": "{\"sessionID\":\"ses_0082e628bffeUSFvjRye4Qi7ul\",\"info\":{\"id\":\"msg_ff826e019001QwuO9imntMqv9H\",\"sessionID\":\"ses_0082e628bffeUSFvjRye4Qi7ul\",\"role\":\"assistant\",\"time\":{\"created\":1786574725145},\"parentID\":\"msg_ff826e011001c17OhKF4koI8Je\",\"modelID\":\"zai-glm-5-2\",\"providerID\":\"openai-foundry\",\"mode\":\"build\",\"agent\":\"build\",\"path\":{\"cwd\":\"/Users/manaiki.laut/Desktop/tui_cli_orchestration\",\"root\":\"/Users/manaiki.laut/Desktop/tui_cli_orchestration\"},\"cost\":0,\"tokens\":{\"total\":25046,\"input\":25038,\"output\":8,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"finish\":\"stop\"}}",
+      "id": "evt_ff826edbe001Ki31Vmk6TrBg9l",
+      "seq": 152,
+      "type": "message.updated.1"
+    }
+  ],
+  "message": [
+    {
+      "data": "{\"role\":\"user\",\"time\":{\"created\":1786574725137},\"agent\":\"build\",\"model\":{\"providerID\":\"openai-foundry\",\"modelID\":\"zai-glm-5-2\"},\"summary\":{\"diffs\":[]}}",
+      "id": "msg_ff826e011001c17OhKF4koI8Je",
+      "session_id": "ses_0082e628bffeUSFvjRye4Qi7ul",
+      "time_created": 1786574725137,
+      "time_updated": 1786574725303
+    },
+    {
+      "data": "{\"parentID\":\"msg_ff826e011001c17OhKF4koI8Je\",\"role\":\"assistant\",\"mode\":\"build\",\"agent\":\"build\",\"path\":{\"cwd\":\"/Users/manaiki.laut/Desktop/tui_cli_orchestration\",\"root\":\"/Users/manaiki.laut/Desktop/tui_cli_orchestration\"},\"cost\":0,\"tokens\":{\"total\":25046,\"input\":25038,\"output\":8,\"reasoning\":0,\"cache\":{\"write\":0,\"read\":0}},\"modelID\":\"zai-glm-5-2\",\"providerID\":\"openai-foundry\",\"time\":{\"created\":1786574725145},\"finish\":\"stop\"}",
+      "id": "msg_ff826e019001QwuO9imntMqv9H",
+      "session_id": "ses_0082e628bffeUSFvjRye4Qi7ul",
+      "time_created": 1786574725145,
+      "time_updated": 1786574728638
+    }
+  ],
+  "part": [
+    {
+      "data": "{\"type\":\"text\",\"text\":\"Reply with exactly this one line and nothing else, no tools, no preamble: CAPTURE-OPENCODE-OK\"}",
+      "id": "prt_ff826e0110025PglwMwcAkmb9k",
+      "message_id": "msg_ff826e011001c17OhKF4koI8Je",
+      "session_id": "ses_0082e628bffeUSFvjRye4Qi7ul",
+      "time_created": 1786574725139,
+      "time_updated": 1786574725140
+    },
+    {
+      "data": "{\"snapshot\":\"5925385a92facf9d530b807f3fdca824bea5427b\",\"type\":\"step-start\"}",
+      "id": "prt_ff826e5720012tqaeORqz2S2tU",
+      "message_id": "msg_ff826e019001QwuO9imntMqv9H",
+      "session_id": "ses_0082e628bffeUSFvjRye4Qi7ul",
+      "time_created": 1786574726514,
+      "time_updated": 1786574726514
+    },
+    {
+      "data": "{\"type\":\"text\",\"text\":\"CAPTURE-OPENCODE-OK\",\"time\":{\"start\":1786574726515,\"end\":1786574728550},\"metadata\":{\"openai\":{\"itemId\":\"resp_d48c997166c445398b0eac676444d55d\"}}}",
+      "id": "prt_ff826e573001SaljzYqZ2L7py8",
+      "message_id": "msg_ff826e019001QwuO9imntMqv9H",
+      "session_id": "ses_0082e628bffeUSFvjRye4Qi7ul",
+      "time_created": 1786574726515,
+      "time_updated": 1786574728550
+    },
+    {
+      "data": "{\"reason\":\"stop\",\"snapshot\":\"5925385a92facf9d530b807f3fdca824bea5427b\",\"type\":\"step-finish\",\"tokens\":{\"total\":25046,\"input\":25038,\"output\":8,\"reasoning\":0,\"cache\":{\"write\":0,\"read\":0}},\"cost\":0}",
+      "id": "prt_ff826edbd001Cq1O9r5Zj75ua6",
+      "message_id": "msg_ff826e019001QwuO9imntMqv9H",
+      "session_id": "ses_0082e628bffeUSFvjRye4Qi7ul",
+      "time_created": 1786574728637,
+      "time_updated": 1786574728637
+    }
+  ]
+}
