@@ -77,6 +77,7 @@ from theater.harness.base import (
     clipper,
     theater_binary,
 )
+from theater.harness.observation import TranscriptObserver
 from theater.models import BadRequest
 
 #: The composer prompt. A single glyph (U+203A), not the ASCII ">" that Claude
@@ -141,8 +142,9 @@ class CodexHarness(Harness):
     aliases = ("codex-cli", "codex_cli", "openai-codex", "Codex")
 
     def __init__(self, root: Path | None = None):
-        #: Injectable so tests never touch the real ~/.codex.
-        self.root = root or Path.home() / ".codex" / "sessions"
+        #: `root` locates the transcript, which is the observer's
+        #: business alone; nothing about launching depends on it.
+        self.observer = CodexObserver(root=root)
 
     # ---- launching ------------------------------------------------------
 
@@ -179,7 +181,18 @@ class CodexHarness(Harness):
             argv.append(prompt)
         return LaunchPlan(argv=argv)
 
-    # ---- observing ------------------------------------------------------
+
+class CodexObserver(TranscriptObserver):
+    """Read `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`.
+
+    Note the date directories: rollout files are filed under the day the
+    session started, in UTC, which is not the local date for most of the world
+    for part of every day.
+    """
+
+    def __init__(self, root: Path | None = None):
+        #: Injectable so tests never touch the real ~/.codex.
+        self.root = root or Path.home() / ".codex" / "sessions"
 
     def find_transcript(
         self,

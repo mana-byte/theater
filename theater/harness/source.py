@@ -8,9 +8,9 @@ claude append JSONL, opencode writes a shared SQLite database, and a future one
 may only offer an HTTP event stream.
 
 So the first job is the seam. A `Source` produces `Batch`es; the observer owns
-everything that happens to them. A harness that writes a transcript gets
-`TranscriptSource` for free from `Harness.open_source`, which is why the three
-shipped adapters do not mention any of this.
+everything that happens to them. An adapter that writes a transcript gets
+`TranscriptSource` for free by subclassing `TranscriptObserver`, which is why
+three of the four shipped adapters do not mention any of this.
 
 What a source may and may not do
 --------------------------------
@@ -45,7 +45,7 @@ from theater.harness.base import Event
 from theater.models import Status
 
 if TYPE_CHECKING:
-    from theater.harness.base import Harness
+    from theater.harness.observation import TranscriptObserver
 
 logger = logging.getLogger("theater.harness.source")
 
@@ -156,8 +156,8 @@ class Batch:
 class Source(ABC):
     """A live view of one participant's output.
 
-    Constructed per participant by `Harness.open_source` and polled by the
-    observer until the participant dies. Anything expensive to hold open — a
+    Constructed per participant by `HarnessObserver.open_source` and polled by
+    the reducer until the participant dies. Anything expensive to hold open — a
     file handle, a database connection, an HTTP subscription — belongs here,
     which is the whole reason this is an object and not another method on
     `Harness`.
@@ -197,7 +197,7 @@ class Source(ABC):
 
 
 class TranscriptSource(Source):
-    """Tail an append-only transcript file. The default for every harness.
+    """Tail an append-only transcript file. What `TranscriptObserver` returns.
 
     Holds the byte offset, record index and mtime that used to live on the
     observer's cursor. Nothing above it knows the input is a file.
@@ -205,13 +205,13 @@ class TranscriptSource(Source):
 
     def __init__(
         self,
-        harness: Harness,
+        observer: TranscriptObserver,
         *,
         cwd: str | None,
         session_id: str | None = None,
         after: float | None = None,
     ) -> None:
-        self._harness = harness
+        self._observer = observer
         self._cwd = cwd
         #: Updated when an attach reveals the harness's own session id, so a
         #: later re-attach can use the sharper key the first one lacked.
@@ -275,7 +275,7 @@ class TranscriptSource(Source):
                 for index, line in enumerate(fh):
                     line = line.strip()
                     if line:
-                        events.extend(self._harness.parse(line, index, clip_text=False))
+                        events.extend(self._observer.parse(line, index, clip_text=False))
         except OSError:
             # A transcript that vanished mid-read is the same non-event here as
             # it is in the poll path: report what there is, which is nothing.
@@ -292,7 +292,7 @@ class TranscriptSource(Source):
         if not self._cwd:
             return None
         return await asyncio.to_thread(
-            self._harness.find_transcript,
+            self._observer.find_transcript,
             cwd=self._cwd,
             session_id=session_id,
             after=self._after,
@@ -309,12 +309,12 @@ class TranscriptSource(Source):
                 return None
         size, lines, mtime, last_line = await asyncio.to_thread(attach_point, path)
         self.path, self.offset, self.index, self.mtime = path, size, lines, mtime
-        session_id = self._harness.session_id(path)
+        session_id = self._observer.session_id(path)
         if session_id:
             self._session_id = session_id
         last_event: Event | None = None
         if last_line is not None:
-            parsed = self._harness.parse(last_line, lines - 1)
+            parsed = self._observer.parse(last_line, lines - 1)
             last_event = parsed[-1] if parsed else None
         return Attachment(
             location=str(path),
@@ -363,7 +363,7 @@ class TranscriptSource(Source):
         events: list[Event] = []
         for raw in head.split(b"\n"):
             line = raw.decode("utf-8", errors="replace")
-            events.extend(self._harness.parse(line, index))
+            events.extend(self._observer.parse(line, index))
             index += 1
 
         progressed = offset != self.offset

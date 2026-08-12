@@ -1,19 +1,20 @@
 """What every harness must expose, and the normalized types it speaks in.
 
-Two jobs live behind this interface:
+Two jobs live behind a harness adapter, and they are two objects:
 
   launching    how to start the harness so it comes up already knowing its
-               participant id (see the identity note below);
-  observing    how to find the transcript it writes and turn each line into a
-               harness-independent Event.
+               participant id (see the identity note below) — `Harness`, here;
+  observing    how to find what it wrote and turn it into harness-independent
+               Events — `HarnessObserver`, in harness/observation.py, reachable
+               as `harness.observer`.
 
-A harness that writes no transcript answers the second question differently, by
-overriding `open_source`; see harness/source.py. The three shipped adapters do
-not, because they all append JSONL.
+They were one interface until v1.6. See observation.py for why they are not any
+more; the short version is that an adapter whose output is not a transcript had
+to implement four transcript methods in order to return nothing from all four.
 
 The second job is the one that makes Theater cross-harness. Everything above
-this module — the observer, the bus, the TUI — only ever sees `Event`, so
-adding a third harness means adding a file here and nothing else.
+this module — the reducer, the bus, the TUI — only ever sees `Event`, so adding
+a harness means adding a file here and nothing else.
 
 The identity problem, precisely
 -------------------------------
@@ -40,9 +41,8 @@ Status derivation here yields IDLE or WORKING and never AWAITING_INPUT. A
 permission prompt writes nothing to the transcript — it is a UI state, not a
 message — and "the last record is a tool_use with no result yet" is
 indistinguishable from a tool that is merely slow. Detecting a blocked agent
-needs `capture-pane` against the rendered screen, which is phase 5b. Until
-then a paused agent reads as WORKING, which is wrong but honest: we do not
-invent a state we cannot see.
+needs `capture-pane` against the rendered screen, which is why
+`HarnessObserver.is_idle_screen` exists alongside the reading path.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ from typing import TYPE_CHECKING
 from theater.models import Status
 
 if TYPE_CHECKING:
-    from theater.harness.source import Source
+    from theater.harness.observation import HarnessObserver
 
 #: Name the theater MCP server is registered under inside each harness.
 SERVER_NAME = "theater"
@@ -200,24 +200,21 @@ class Harness(ABC):
     #: private-use codepoint, which would render as a blank box for anyone who
     #: has not installed one.
     icon: str = "·"
-    #: Whether the adapter can be observed by reading, rather than by looking
-    #: at the screen. True means `open_source` returns something that reports
-    #: real turns — the default file source driven by `parse`, or a source of
-    #: the adapter's own over some other store. False means there is nothing to
-    #: read and the observer must fall back to the rendered screen, ending a
-    #: turn when the prompt comes back.
-    #:
-    #: The name predates sources and is now wider than it sounds: an adapter
-    #: with no transcript file at all, but a database it can query, still sets
-    #: this True. What the flag really selects is the observer's watch loop, so
-    #: it is not a preference but a statement of what the adapter can do, which
-    #: is why it lives on the adapter.
-    has_transcript: bool = True
     #: Other spellings that should resolve to `name` at registration. An agent
     #: reports its own harness string, and one that does not normalize is
     #: observed as nothing at all — so a plugin needs the same escape valve the
     #: built-ins and config declarations have.
     aliases: tuple[str, ...] = ()
+    #: How to watch this harness. Set in `__init__`, because an observer is
+    #: usually constructed with the paths that locate the harness's output and
+    #: those are exactly what tests inject.
+    #:
+    #: An annotation rather than an abstract property: it is an instance
+    #: attribute, and forcing four lines of property ceremony into every plugin
+    #: to satisfy the ABC buys nothing that the loader's check does not already
+    #: buy. `plugins._check_observer` rejects a plugin that omits it, which is
+    #: the same place `name`, `binary` and `icon` are checked.
+    observer: "HarnessObserver"
 
     # ---- launching ------------------------------------------------------
 
@@ -231,99 +228,6 @@ class Harness(ABC):
         approval: str,
     ) -> LaunchPlan:
         """Describe how to start this harness. Pure: writes nothing itself."""
-
-    # ---- observing ------------------------------------------------------
-
-    def open_source(
-        self,
-        *,
-        cwd: str | None,
-        session_id: str | None = None,
-        after: float | None = None,
-    ) -> "Source":
-        """A live view of one participant's output, for the observer to poll.
-
-        The default tails the transcript this adapter describes, which is why
-        nothing below overrides it: `find_transcript`, `session_id` and `parse`
-        are the whole of what a file-backed harness has to say.
-
-        Override it when the harness does not write an append-only file — a
-        database, an event stream — and the byte-offset model has nothing to
-        grip. The returned object owns the reading and may hold a connection
-        open; the observer keeps the timers, the status policy, job rescue and
-        every write to the registry and the bus. See harness/source.py for the
-        contract, and for why a source over a mutable store must report status
-        itself rather than let silence be interpreted.
-        """
-        from theater.harness.source import TranscriptSource
-
-        return TranscriptSource(
-            self, cwd=cwd, session_id=session_id, after=after
-        )
-
-    @abstractmethod
-    def find_transcript(
-        self,
-        *,
-        cwd: str,
-        session_id: str | None = None,
-        after: float | None = None,
-    ) -> Path | None:
-        """Locate the transcript for a session, or None if it is not there yet.
-
-        Note what is *not* a parameter: the tmux pane. Nothing in either
-        harness's on-disk layout records which pane it was launched from, so a
-        pane cannot narrow the search. The usable keys are the working
-        directory, the harness session id when we happen to know it, and a
-        lower bound on start time.
-
-        `after` is a floor on session start, used for participants we spawned
-        and whose creation time we therefore know exactly. It must be left None
-        for adopted participants, whose transcript predates our first sight of
-        them.
-        """
-
-    @abstractmethod
-    def session_id(self, transcript: Path) -> str | None:
-        """The harness's own id for the session this transcript belongs to.
-
-        Recorded on the participant so that harness-native identifiers — which
-        is what sub-agent bookkeeping is expressed in — can be matched back to
-        a Theater participant later.
-        """
-
-    @abstractmethod
-    def parse(self, line: str, index: int, *, clip_text: bool = True) -> list[Event]:
-        """Turn one transcript line into zero or more events.
-
-        Zero is normal and common: both harnesses write bookkeeping records
-        that mean nothing to an observer. Malformed lines yield zero too rather
-        than raising — a transcript being appended to as we read it is an
-        expected condition, not an error.
-
-        When clip_text is True (the default), event text is clipped to
-        MAX_TEXT for the bus. When False, the full text is returned —
-        used by read_transcript so an agent can read the complete response.
-        """
-
-    @abstractmethod
-    def native_children(self, transcript: Path) -> list[NativeChild]:
-        """Sub-agents this session spawned on its own. Often empty."""
-
-    @abstractmethod
-    def is_idle_screen(self, capture: str) -> bool:
-        """Does the rendered screen show a bare prompt (agent waiting for input)?
-
-        `capture` is the output of `tmux capture-pane -p` — the pane's
-        rendered content as plain text. Each harness recognizes its own
-        prompt format. Used by the observer to detect AWAITING_INPUT:
-        if the transcript says WORKING but the screen shows a bare prompt,
-        the agent is blocked on a permission prompt or waiting for input.
-
-        Tuned to accept false negatives (return False when unsure) and
-        never false positives: a false positive would mark a working agent
-        as idle, hiding activity from the régie.
-        """
 
 
 def status_after(event: Event) -> Status:

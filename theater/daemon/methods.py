@@ -380,10 +380,10 @@ _READABLE = ("assistant", "user", "tool_call", "tool_result")
 async def _read_transcript(daemon, params: dict) -> dict:
     """Read a participant's session back, with the text unclipped.
 
-    Goes through the harness's `Source`, not through `find_transcript`, so a
-    harness whose output is a database answers this as well as one that writes
+    Goes through the observer's `Source`, not through `find_transcript`, so an
+    adapter whose output is a database answers this as well as one that writes
     a file. The source opened here is short-lived and separate from the
-    observer's: reading history must not move the watcher's cursor.
+    watcher's: reading history must not move the watcher's cursor.
     """
     pid = _require(params, "id")
     last_n = int(params.get("last_n", 5))
@@ -397,7 +397,9 @@ async def _read_transcript(daemon, params: dict) -> dict:
     if harness is None:
         raise BadRequest(f"cannot read transcript: harness {p.harness!r} is not known")
 
-    source = harness.open_source(cwd=p.cwd, session_id=p.session_id, after=None)
+    source = harness.observer.open_source(
+        cwd=p.cwd, session_id=p.session_id, after=None
+    )
     try:
         history = await source.history(last_n=last_n)
     finally:

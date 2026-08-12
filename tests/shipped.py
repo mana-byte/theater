@@ -1,4 +1,4 @@
-"""The shipped harness adapters, as classes, for tests that need their own.
+"""The shipped adapters, as classes, for tests that need their own instance.
 
 The adapters live in plugin files loaded by path rather than importable modules
 — that is the point of shipping them through the extension point (see
@@ -27,7 +27,25 @@ def harness_class(stem: str) -> type:
     raise AssertionError(f"no shipped harness plugin named {stem!r}")
 
 
+def observer_class(stem: str) -> type:
+    """The observer class carried by the shipped plugin file `<stem>.py`.
+
+    Taken off a default-constructed harness rather than looked up by name in
+    the plugin module, because the pairing is the thing under test everywhere
+    this is used: whatever `Harness.observer` actually is, is what the daemon
+    will watch with. Constructing the harness costs nothing — every shipped
+    `__init__` computes paths and touches no disk — and the instance is
+    discarded; tests build their own observer with a temporary root.
+    """
+    return type(harness_class(stem)().observer)
+
+
 ClaudeCodeHarness = harness_class("claude")
 CodexHarness = harness_class("codex")
 OpenCodeHarness = harness_class("opencode")
 VibeHarness = harness_class("vibe")
+
+ClaudeCodeObserver = observer_class("claude")
+CodexObserver = observer_class("codex")
+OpenCodeObserver = observer_class("opencode")
+VibeObserver = observer_class("vibe")

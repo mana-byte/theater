@@ -52,6 +52,7 @@ from theater.harness.base import (
     last_screen_line,
     theater_binary,
 )
+from theater.harness.observation import TranscriptObserver
 from theater.models import BadRequest
 
 #: Screen lines that mean "waiting for you". Vibe's prompt is `❯` (U+276F);
@@ -77,8 +78,10 @@ class VibeHarness(Harness):
     aliases = ("Vibe", "mistral-vibe", "mistral_vibe")
 
     def __init__(self, root: Path | None = None):
-        #: Injectable so tests never touch the real ~/.vibe.
-        self.root = root or Path.home() / ".vibe" / "logs" / "session"
+        #: `root` is only the observer's business — nothing about launching vibe
+        #: depends on where it writes — so it is passed straight through rather
+        #: than stored here as well.
+        self.observer = VibeObserver(root=root)
 
     # ---- launching ------------------------------------------------------
 
@@ -114,7 +117,19 @@ class VibeHarness(Harness):
             env={"VIBE_MCP_SERVERS": json.dumps(servers)},
         )
 
-    # ---- observing ------------------------------------------------------
+
+class VibeObserver(TranscriptObserver):
+    """Read `~/.vibe/logs/session/*/messages.jsonl`.
+
+    Vibe is the harness that rotates: a new session directory appears on some
+    turns, so the transcript this observer is reading can stop growing while the
+    agent is very much alive. `TranscriptSource.refresh` handles it by searching
+    on cwd alone; see the note there.
+    """
+
+    def __init__(self, root: Path | None = None):
+        #: Injectable so tests never touch the real ~/.vibe.
+        self.root = root or Path.home() / ".vibe" / "logs" / "session"
 
     def find_transcript(
         self,

@@ -21,23 +21,17 @@ from theater import paths
 from theater.harness import plugins
 from theater.harness.plugins import PluginError
 
-#: A plugin that satisfies the ABC with the least code that can work. Every
-#: test that is not about a specific method starts from this.
+#: A plugin that satisfies both ABCs with the least code that can work. Every
+#: test that is not about a specific method starts from this. Note the shape it
+#: forces: a harness that launches, and a separate observer it carries, which
+#: is the whole point of the v1.6 split.
 BODY = '''
 from pathlib import Path
 
-from theater.harness import Harness, LaunchPlan
+from theater.harness import Harness, LaunchPlan, TranscriptObserver
 
 
-class {cls}(Harness):
-    name = "{name}"
-    binary = "{binary}"
-    icon = "{icon}"
-    aliases = {aliases}
-
-    def plan_launch(self, *, participant_id, prompt, config_path, approval):
-        return LaunchPlan(argv=[self.binary, prompt], env={{"ID": participant_id}})
-
+class {cls}Observer(TranscriptObserver):
     def find_transcript(self, *, cwd, session_id=None, after=None):
         return None
 
@@ -47,11 +41,21 @@ class {cls}(Harness):
     def parse(self, line, index, *, clip_text=True):
         return []
 
-    def native_children(self, transcript):
-        return []
-
     def is_idle_screen(self, capture):
         return capture.endswith("> ")
+
+
+class {cls}(Harness):
+    name = "{name}"
+    binary = "{binary}"
+    icon = "{icon}"
+    aliases = {aliases}
+
+    def __init__(self):
+        self.observer = {cls}Observer()
+
+    def plan_launch(self, *, participant_id, prompt, config_path, approval):
+        return LaunchPlan(argv=[self.binary, prompt], env={{"ID": participant_id}})
 
 
 HARNESS = {cls}()
@@ -138,7 +142,7 @@ def test_the_shipped_adapters_are_plugins_too(local_dir):
 def test_a_plugin_is_a_full_adapter(local_dir):
     plugin(local_dir)
     install(local_dir)
-    assert harness_registry.get("acme").has_transcript is True
+    assert harness_registry.get("acme").observer.has_transcript is True
 
 
 def test_a_plugin_plans_its_own_launch(local_dir):
@@ -258,6 +262,42 @@ def test_exporting_the_class_instead_of_an_instance_is_caught(local_dir):
 def test_a_harness_that_is_not_a_harness_is_caught(local_dir):
     (local_dir / "odd.py").write_text("HARNESS = 'a string'\n")
     assert "does not subclass" in error_in(local_dir)
+
+
+def test_a_harness_with_no_observer_is_caught(local_dir):
+    """The one attribute Python cannot enforce for us.
+
+    `Harness.observer` is an annotation, not an abstract property, so a plugin
+    that forgets it instantiates happily and fails much later inside the
+    daemon's watch loop. The loader is where that has to be caught, and the
+    error has to say what to write.
+    """
+    body = BODY.format(
+        cls="AcmeHarness", name="acme", binary="acme", icon="@", aliases="()"
+    ).replace("        self.observer = AcmeHarnessObserver()", "        pass")
+    (local_dir / "acme.py").write_text(body)
+    error = error_in(local_dir)
+    assert "sets no observer" in error
+    assert "self.observer = MyObserver()" in error
+
+
+def test_an_observer_that_is_not_an_observer_is_caught(local_dir):
+    body = BODY.format(
+        cls="AcmeHarness", name="acme", binary="acme", icon="@", aliases="()"
+    ).replace("        self.observer = AcmeHarnessObserver()", '        self.observer = "nope"')
+    (local_dir / "acme.py").write_text(body)
+    assert "does not subclass" in error_in(local_dir)
+
+
+def test_exporting_the_observer_class_instead_of_an_instance_is_caught(local_dir):
+    body = BODY.format(
+        cls="AcmeHarness", name="acme", binary="acme", icon="@", aliases="()"
+    ).replace(
+        "        self.observer = AcmeHarnessObserver()",
+        "        self.observer = AcmeHarnessObserver",
+    )
+    (local_dir / "acme.py").write_text(body)
+    assert "not an instance" in error_in(local_dir)
 
 
 def test_an_illegal_name_is_caught(local_dir):
@@ -441,9 +481,13 @@ def test_a_plugin_shows_up_in_describe(local_dir):
 
 
 def test_a_plugin_is_observable_from_its_transcript(local_dir):
-    """`has_transcript` decides which watch loop the observer runs."""
+    """`has_transcript` decides which watch loop the daemon runs.
+
+    Read off the observer, not the harness: the daemon is handed only that half
+    and never asks a harness how to watch it.
+    """
     plugin(local_dir)
     install(local_dir)
-    acme = harness_registry.get("acme")
-    assert acme.has_transcript is True
-    assert acme.is_idle_screen("something\n> ") is True
+    observer = harness_registry.get("acme").observer
+    assert observer.has_transcript is True
+    assert observer.is_idle_screen("something\n> ") is True

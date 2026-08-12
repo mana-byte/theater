@@ -25,8 +25,8 @@ from pathlib import Path
 
 import pytest
 
-from shipped import OpenCodeHarness
-from theater.harness import EventKind
+from shipped import OpenCodeHarness, OpenCodeObserver
+from theater.harness import EventKind, TranscriptObserver
 from theater.models import BadRequest, Status
 
 SCHEMA = """
@@ -164,7 +164,7 @@ def rec(tmp_path, workdir):
 
 
 def source_for(rec, workdir, **kwargs):
-    return OpenCodeHarness(db=rec.path).open_source(cwd=str(workdir), **kwargs)
+    return OpenCodeObserver(db=rec.path).open_source(cwd=str(workdir), **kwargs)
 
 
 def a_turn_with_a_tool(rec) -> None:
@@ -231,8 +231,8 @@ def test_an_unknown_approval_is_refused(tmp_path):
 
 
 def test_a_missing_database_is_waiting_not_an_error(tmp_path, workdir):
-    harness = OpenCodeHarness(db=tmp_path / "nope.db")
-    batch = asyncio.run(harness.open_source(cwd=str(workdir)).read())
+    observer = OpenCodeObserver(db=tmp_path / "nope.db")
+    batch = asyncio.run(observer.open_source(cwd=str(workdir)).read())
     assert batch.waiting is True
 
 
@@ -574,26 +574,55 @@ WORKING = "\n".join(["> ", "esc interrupt       ctrl+p commands"])
 
 
 def test_idle_when_the_footer_is_not_offering_to_interrupt():
-    assert OpenCodeHarness().is_idle_screen(IDLE) is True
+    assert OpenCodeObserver().is_idle_screen(IDLE) is True
 
 
 def test_not_idle_while_a_turn_is_running():
-    assert OpenCodeHarness().is_idle_screen(WORKING) is False
+    assert OpenCodeObserver().is_idle_screen(WORKING) is False
 
 
 def test_a_pane_that_has_not_drawn_yet_is_not_idle():
     """A blank capture is no evidence at all, and must never read as a prompt."""
-    assert OpenCodeHarness().is_idle_screen("") is False
-    assert OpenCodeHarness().is_idle_screen("loading\n") is False
+    assert OpenCodeObserver().is_idle_screen("") is False
+    assert OpenCodeObserver().is_idle_screen("loading\n") is False
 
 
-# ---- what this adapter deliberately cannot do ---------------------------
+# ---- how this adapter is observed ---------------------------------------
 
 
-def test_there_is_no_transcript_to_find(tmp_path):
-    """Not a stub: the output is a shared database, so no path names a session."""
-    harness = OpenCodeHarness()
-    assert harness.find_transcript(cwd=str(tmp_path)) is None
-    assert harness.session_id(tmp_path / "anything") is None
-    assert harness.parse("{}", 0) == []
-    assert harness.native_children(tmp_path / "anything") == []
+def test_the_observer_is_not_a_transcript_observer():
+    """The reason observation was split off `Harness` in v1.6.
+
+    Until then this adapter had to implement `find_transcript`, `session_id`,
+    `parse` and `native_children` purely to return nothing, because no path
+    names a session when the output is a shared database. Subclassing
+    `HarnessObserver` directly means those four questions are never asked, and
+    this asserts they stay unasked — reintroducing `TranscriptObserver` here
+    would silently bring the stubs back.
+    """
+    observer = OpenCodeObserver()
+    assert not isinstance(observer, TranscriptObserver)
+    for gone in ("find_transcript", "session_id", "parse"):
+        assert not hasattr(observer, gone)
+
+
+def test_it_is_still_read_rather_than_watched_on_screen():
+    """`has_transcript` means readable, not file-backed.
+
+    A database is read better than a file, so this adapter takes the reading
+    watch loop like the other three; the screen is only a fallback for output
+    that cannot be read at all.
+    """
+    assert OpenCodeObserver().has_transcript is True
+
+
+def test_the_harness_carries_the_observer_the_database_was_given_to():
+    """`db` is passed through to the observer, which is the half that opens it.
+
+    Compared by class name rather than `isinstance`: `shipped.py` loads the
+    plugin file a second time under its own module name, so the class here is
+    not the one the registry holds even though the source is identical.
+    """
+    observer = OpenCodeHarness(db=Path("/tmp/somewhere.db")).observer
+    assert type(observer).__name__ == OpenCodeObserver.__name__
+    assert observer.db == Path("/tmp/somewhere.db")

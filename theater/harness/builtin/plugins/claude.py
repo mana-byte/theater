@@ -54,6 +54,7 @@ from theater.harness.base import (
     last_screen_line,
     theater_binary,
 )
+from theater.harness.observation import TranscriptObserver
 from theater.models import BadRequest
 
 #: Screen lines that mean "waiting for you". Anything after the prompt is
@@ -91,8 +92,9 @@ class ClaudeCodeHarness(Harness):
     aliases = ("claude_code", "claude-code", "Claude", "ClaudeCode")
 
     def __init__(self, root: Path | None = None):
-        #: Injectable so tests never touch the real ~/.claude.
-        self.root = root or Path.home() / ".claude" / "projects"
+        #: `root` locates the transcript, which is the observer's
+        #: business alone; nothing about launching depends on it.
+        self.observer = ClaudeCodeObserver(root=root)
 
     # ---- launching ------------------------------------------------------
 
@@ -133,7 +135,19 @@ class ClaudeCodeHarness(Harness):
             files={config_path: json.dumps(config, indent=2) + "\n"},
         )
 
-    # ---- observing ------------------------------------------------------
+
+class ClaudeCodeObserver(TranscriptObserver):
+    """Read `~/.claude/projects/<cwd-slug>/<session-uuid>.jsonl`.
+
+    The only shipped observer whose parser can emit two turn boundaries for one
+    native message — see the `turn_end` note at the top of this file. That is
+    survivable today because the reducer answers a job per boundary; giving
+    events a native turn id is what makes it harmless.
+    """
+
+    def __init__(self, root: Path | None = None):
+        #: Injectable so tests never touch the real ~/.claude.
+        self.root = root or Path.home() / ".claude" / "projects"
 
     def find_transcript(
         self,

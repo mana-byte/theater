@@ -31,8 +31,8 @@ adapters were ordinary imports, so the plugin loader was exercised only by
 tests. Now every shipped adapter goes through it on every run: the path you are
 about to write on is the path Theater itself depends on.
 
-A harness with no machine-readable transcript is still supported — set
-`has_transcript = False` and the observer falls back to the screen for turn
+A harness with no machine-readable transcript is still supported — its observer
+sets `has_transcript = False` and the daemon falls back to the screen for turn
 boundaries. That is a property of the adapter, not a second kind of adapter.
 
 The four shipped plugins are the best worked examples available. `vibe.py` is
@@ -70,7 +70,12 @@ Plugins are read once, at start-up. After editing one:
 theater restart
 ```
 
-## The identity attributes
+## Two objects: a harness and its observer
+
+A plugin answers two unrelated questions, and since v1.6 they are two classes.
+*How do I start this CLI so that it comes up knowing its participant id* is the
+`Harness`. *How do I tell what it is doing once it is running* is a
+`HarnessObserver`, which the harness constructs and carries:
 
 ```python
 class NovaHarness(Harness):
@@ -78,8 +83,35 @@ class NovaHarness(Harness):
     binary = "nova"                # required
     icon = "◈"                     # one character
     aliases = ("nova-cli",)        # optional
+
+    def __init__(self, root: Path | None = None):
+        self.observer = NovaObserver(root=root)
+
+
+class NovaObserver(TranscriptObserver):
     has_transcript = True          # default
+
+    def __init__(self, root: Path | None = None):
+        self.root = root or Path.home() / ".nova" / "sessions"
+
+
+HARNESS = NovaHarness()
 ```
+
+The split is not bookkeeping. `opencode.py` used to implement `find_transcript`,
+`session_id`, `parse` and `native_children` purely to return nothing, because
+its output is a shared SQLite database and none of those questions has an answer
+for it — a plugin that must write four stubs to say "not applicable" is being
+described by the wrong interface. It also fixes who talks to whom: the daemon's
+reducer needs nothing from a harness except how to watch it, and it now holds
+the observer rather than the harness.
+
+Assigning `self.observer` is not optional. It is checked at load time rather
+than declared abstract, because a property returning a value the constructor
+already has is four lines of ceremony in every plugin; see the failure table
+below for what forgetting it says.
+
+### On the harness
 
 `name` is the spawn key (`theater spawn nova …`) and the registry key. Lowercase
 letters, digits, `-` and `_`, starting with a letter or digit.
@@ -100,18 +132,25 @@ with no alias registered is observed as nothing at all, forever. An alias that
 already belongs to another harness is refused at load time rather than
 silently reassigned.
 
-`has_transcript` selects the observer's loop, and the name is narrower than the
-meaning: it asks whether your adapter can be observed by *reading* anything at
-all. Leave it `True` if `parse` works, and also if you have no file but override
-`open_source` to read some other store. Set it `False` only when there is
-nothing to read — otherwise the observer waits on a source that never produces,
+### On the observer
+
+`has_transcript` selects the daemon's watch loop, and the name is narrower than
+the meaning: it asks whether your adapter can be observed by *reading* anything
+at all. Leave it `True` if `parse` works, and also if you have no file but
+override `open_source` to read some other store. Set it `False` only when there
+is nothing to read — otherwise the daemon waits on a source that never produces,
 the participant never produces an event, and every `theater_send` to it hangs.
 
-## The interface, method by method
+Whatever locates the harness's output — a transcript root, a database path —
+belongs on the observer, injected through its constructor, which is what keeps a
+test away from the developer's real home directory. Nothing per-session belongs
+there: one observer is shared by every session of its harness, and per-session
+state lives on the `Source` it opens.
 
-Six abstract methods. Two are about launching, four about observing. There is a
-seventh, `open_source`, which is not abstract and which only a harness that
-writes no transcript needs — see "When the output is not a file" below.
+## The harness, method by method
+
+One abstract method. Everything else on a harness is the identity data above and
+the observer it carries.
 
 ### `plan_launch(*, participant_id, prompt, config_path, approval) -> LaunchPlan`
 
@@ -161,6 +200,17 @@ else.
 `prompt` may be empty, meaning "start interactive with nothing to do". Do not
 append an empty string to argv; most CLIs treat it as a real, blank argument.
 
+## The observer, method by method
+
+Four methods you will usually write and two that have defaults.
+`find_transcript`, `session_id` and `parse` are abstract on
+`TranscriptObserver`; `is_idle_screen` is abstract on every observer, because
+the daemon needs it for two things reading cannot do — telling "blocked on a
+permission prompt" apart from "thinking", and confirming a pane looks idle
+before rescuing a job whose turn end was never seen. `native_children` defaults
+to none. `open_source` defaults to tailing a file, and only a harness whose
+output is not a file replaces it — see "When the output is not a file" below.
+
 ### `find_transcript(*, cwd, session_id=None, after=None) -> Path | None`
 
 Locate the file this session writes, or `None` if it is not there yet. Called
@@ -178,8 +228,8 @@ whose transcript predates Theater's first sight of them — so do not treat
 on the working directory.
 
 Returning `None` forever with `has_transcript = True` is the one silent failure
-mode in this interface — unless you override `open_source`, in which case this
-method is never called and `None` is the right answer. Otherwise set
+mode in this interface. If there is no file to find, you want one of the other
+two shapes: subclass `HarnessObserver` and write a source, or set
 `has_transcript = False`.
 
 ### `session_id(transcript) -> str | None`
@@ -244,7 +294,8 @@ create them and cannot address them, but showing them in the tree is the
 difference between an accurate picture and a misleading one.
 
 `[]` is a perfectly good answer, and the right one if the harness has no
-sub-agents or does not record them.
+sub-agents or does not record them — which is why it is the default and why you
+can leave the method out entirely.
 
 ### `is_idle_screen(capture) -> bool`
 
@@ -263,13 +314,24 @@ anything after the prompt is a human typing, which is presence, not idleness.
 ## When the output is not a file
 
 Everything above assumes the harness appends to a transcript. Most do. If yours
-writes to a database or offers only an event stream, override one more method —
-`open_source` — and the byte-offset model gets out of your way:
+writes to a database or offers only an event stream, subclass `HarnessObserver`
+directly instead of `TranscriptObserver`, implement `open_source`, and the
+byte-offset model gets out of your way:
 
 ```python
-def open_source(self, *, cwd, session_id=None, after=None) -> Source:
-    return NovaSource(cwd=cwd)
+class NovaObserver(HarnessObserver):
+    def open_source(self, *, cwd, session_id=None, after=None) -> Source:
+        return NovaSource(cwd=cwd)
+
+    def is_idle_screen(self, capture):
+        return last_screen_line(capture) in IDLE_PROMPTS
 ```
+
+That is the whole observer. `find_transcript`, `session_id` and `parse` are not
+on this base class at all — they are how the *default* source is built, and a
+plugin supplying its own source has no reason to mention them. Before v1.6 they
+were abstract on every adapter and this plugin had to define three stubs to say
+so; deleting those stubs is what the split bought.
 
 A `Source` is a live view of one participant's output. Unlike the rest of the
 interface it is an object with a lifetime, so it is the right place for a
@@ -317,11 +379,6 @@ check. That policy is written once and it is where every observation bug in this
 project has been. A source reports facts; it must not touch the registry, the
 bus or the job manager.
 
-`find_transcript`, `session_id` and `parse` are still abstract, so a plugin with
-a custom source has to define them. Return `None`, `None` and `[]`. They are
-what the default source is built from, and nothing else calls them once
-`open_source` is overridden.
-
 One optional method is worth implementing: `history`.
 
 ```python
@@ -357,6 +414,7 @@ from theater.harness import (
     Harness,
     LaunchPlan,
     NativeChild,
+    TranscriptObserver,
     clipper,
     last_screen_line,
     theater_binary,
@@ -379,10 +437,9 @@ class NovaHarness(Harness):
     aliases = ("nova-cli",)
 
     def __init__(self, root: Path | None = None):
-        # Injectable so a test never touches the real ~/.nova.
-        self.root = root or Path.home() / ".nova" / "sessions"
-
-    # ---- launching ----------------------------------------------------
+        # Nothing else to keep: the harness starts the CLI, the observer reads
+        # it, and only the reading needs to know where ~/.nova is.
+        self.observer = NovaObserver(root=root)
 
     def plan_launch(self, *, participant_id, prompt, config_path, approval):
         flags = APPROVAL_FLAGS.get(approval)
@@ -405,7 +462,11 @@ class NovaHarness(Harness):
             files={config_path: json.dumps(config)},
         )
 
-    # ---- observing ----------------------------------------------------
+
+class NovaObserver(TranscriptObserver):
+    def __init__(self, root: Path | None = None):
+        # Injectable so a test never touches the real ~/.nova.
+        self.root = root or Path.home() / ".nova" / "sessions"
 
     def find_transcript(self, *, cwd, session_id=None, after=None):
         if not self.root.is_dir():
@@ -514,13 +575,15 @@ class NovaHarness(Harness):
 HARNESS = NovaHarness()
 ```
 
-If your harness writes no transcript file, you have two options. If it keeps its
-history somewhere else — a database, a socket — implement `open_source` and keep
-`has_transcript = True`; `opencode.py` is the worked example. If it keeps no
-history at all, set `has_transcript = False` and the observing methods collapse
-to four one-liners: the observer stops looking for a file and reads the screen
-instead, and `is_idle_screen` becomes the signal that a turn ended rather than a
-hint about a stuck agent.
+If your harness writes no transcript file, you have two options, and both change
+only the observer — `NovaHarness` above is already finished either way. If it
+keeps its history somewhere else — a database, a socket — subclass
+`HarnessObserver`, implement `open_source`, and keep `has_transcript = True`;
+`opencode.py` is the worked example. If it keeps no history at all, subclass
+`HarnessObserver`, set `has_transcript = False`, and the entire observer is
+`is_idle_screen`: the daemon stops looking for a file and reads the screen
+instead, and that method becomes the signal that a turn ended rather than a hint
+about a stuck agent.
 
 ## Precedence
 
@@ -563,6 +626,9 @@ nothing anywhere saying so — is the defect this design exists to prevent.
 | `HARNESS = NovaHarness` | `…/nova.py: HARNESS is the class NovaHarness, not an instance of it` |
 | `HARNESS = 3` | `…/nova.py: HARNESS is a int, which does not subclass theater.harness.Harness` |
 | a missing abstract method | `…/nova.py: failed to import: TypeError("Can't instantiate abstract class …")` |
+| an `__init__` that never sets `self.observer` | `…/nova.py: harness 'nova' sets no observer. A harness must assign one in __init__ …` |
+| `self.observer = NovaObserver` | `…/nova.py: harness 'nova' sets observer to the class NovaObserver, not an instance of it` |
+| an observer subclassing neither base | `…/nova.py: harness 'nova' has a NovaObserver observer, which does not subclass theater.harness.HarnessObserver` |
 | `name = "My Nova"` | `…/nova.py: harness name 'My Nova' must be lowercase letters, digits, '-' or '_'` |
 | `binary = ""` | `…/nova.py: harness 'nova' sets no binary to look for` |
 | `icon = "<>"` | `…/nova.py: harness 'nova' has icon '<>'; it must be exactly one character` |
@@ -588,23 +654,22 @@ from theater import harness as registry
 
 def test_it_loads(tmp_path):
     (tmp_path / "nova.py").write_text(PLUGIN_SOURCE)
-    added = registry.install(Config(), plugin_dir=tmp_path)
+    added = registry.install(Config(), local_dir=tmp_path)
     assert "nova" in added
     assert registry.HARNESSES["nova"].icon == "◈"
 ```
 
-`install(config, plugin_dir=…)` is the seam: it rebuilds the registry from a
+`install(config, local_dir=…)` is the seam: it rebuilds the registry from a
 directory you choose, so nothing has to relocate `$THEATER_HOME`. It is
 idempotent — calling it again rebuilds from scratch rather than accumulating —
 and `install(Config())` restores the shipped set, which is how a test cleans up
 after itself.
 
-For the harness itself, instantiate it directly:
+Instantiate the two classes directly, and test each for what it owns — the
+launch plan on the harness, everything about reading on the observer:
 
 ```python
-h = NovaHarness(root=tmp_path)             # never the real ~/.nova
-
-plan = h.plan_launch(
+plan = NovaHarness().plan_launch(
     participant_id="abc123def456",
     prompt="hello",
     config_path=tmp_path / "mcp.json",
@@ -613,16 +678,21 @@ plan = h.plan_launch(
 assert "--mcp-config" in plan.argv
 assert "abc123def456" in plan.files[tmp_path / "mcp.json"]
 
-events = h.parse('{"role":"assistant","text":"hi","done":true}', 0)
+obs = NovaObserver(root=tmp_path)          # never the real ~/.nova
+
+events = obs.parse('{"role":"assistant","text":"hi","done":true}', 0)
 assert [e.kind for e in events] == [EventKind.ASSISTANT]
 assert events[0].turn_end
 
-assert h.parse("{not json", 0) == []       # torn line, no exception
-assert h.is_idle_screen("nova> ")
-assert not h.is_idle_screen("nova> what is")
+assert obs.parse("{not json", 0) == []     # torn line, no exception
+assert obs.is_idle_screen("nova> ")
+assert not obs.is_idle_screen("nova> what is")
 ```
 
-Take the constructor-injected root seriously. Every shipped adapter has one
+`NovaHarness(root=tmp_path).observer` reaches the same object through the
+harness, which is the path the daemon takes; either is fine in a test.
+
+Take the constructor-injected root seriously. Every shipped observer has one
 for exactly this reason, and a test that reads the real home directory passes or
 fails depending on what the developer did yesterday.
 

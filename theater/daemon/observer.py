@@ -14,14 +14,20 @@ spawned and adopted participants, and cannot be forgotten by a harness author.
 
 Getting the text, and deciding what it means
 --------------------------------------------
-Those are two jobs, and only the second one lives here. A `Source` — see
-harness/source.py — produces batches of events for one participant, and every
-harness that appends JSONL gets the default file-tailing one without saying so.
-This module owns what happens next: the quiet timers, the status policy, job
-completion and rescue, and every write to the registry and the bus. A harness
-whose output is not a file overrides `open_source` and inherits all of that
-unchanged, which is the point — the policy below is where every observation bug
-in this project has been, and it is not going to be reimplemented per adapter.
+Those are two jobs, and only the second one lives here. The first belongs to
+the adapter: a `HarnessObserver` (harness/observation.py) opens a `Source`
+(harness/source.py) that produces batches of events for one participant, and
+every harness that appends JSONL gets the default file-tailing one without
+saying so. This module owns what happens next: the quiet timers, the status
+policy, job completion and rescue, and every write to the registry and the bus.
+An adapter whose output is not a file writes its own `Source` and inherits all
+of that unchanged, which is the point — the policy below is where every
+observation bug in this project has been, and it is not going to be
+reimplemented per adapter.
+
+Note what this module is handed: a `HarnessObserver`, never a `Harness`. It
+needs nothing from an adapter but how to watch it, and holding only that half
+keeps the launch path from drifting into the observe path.
 
 Attach at EOF, always
 ---------------------
@@ -48,7 +54,14 @@ from dataclasses import dataclass
 
 from theater.config import ObserverSection
 from theater.daemon.registry import Registry
-from theater.harness import HARNESSES, EventKind, Harness, clip, status_after
+from theater.harness import (
+    HARNESSES,
+    EventKind,
+    Harness,
+    HarnessObserver,
+    clip,
+    status_after,
+)
 from theater.harness.source import Attachment, Batch, Source
 from theater.models import JobState, Status, Tier
 
@@ -250,13 +263,14 @@ class Observer:
             if harness is None:
                 self._warn_unobservable(pid, p)
                 continue
+            observer = harness.observer
             # A transcript is found by working directory; a screen is found by
             # pane. So cwd is required for one loop and irrelevant to the other.
-            if harness.has_transcript and not p.cwd:
+            if observer.has_transcript and not p.cwd:
                 self._warn_unobservable(pid, p)
                 continue
             self._unobservable.discard(pid)
-            watch = self._watch if harness.has_transcript else self._watch_screen
+            watch = self._watch if observer.has_transcript else self._watch_screen
             self._tasks[pid] = asyncio.create_task(watch(pid, p.harness))
 
     def _warn_unobservable(self, pid: str, p) -> None:
@@ -273,8 +287,10 @@ class Observer:
     # ---- one participant -----------------------------------------------
 
     async def _watch(self, pid: str, harness_name: str) -> None:
-        harness = self.harnesses[harness_name]
-        source = self._open_source(pid, harness)
+        # Resolved by name on every start rather than captured once, so a
+        # restarted watcher picks up a registry that has since been reinstalled.
+        observer = self.harnesses[harness_name].observer
+        source = self._open_source(pid, observer)
         if source is None:
             return
         clock = QuietClock()
@@ -293,7 +309,7 @@ class Observer:
                         clock.stir()
                         self._unblock(pid)
                     else:
-                        await self._on_quiet(pid, harness, source, clock)
+                        await self._on_quiet(pid, observer, source, clock)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -308,7 +324,7 @@ class Observer:
                 # exception that brought us into `finally` still propagates.
                 logger.debug("closing source for %s failed", pid, exc_info=True)
 
-    def _open_source(self, pid: str, harness: Harness) -> Source | None:
+    def _open_source(self, pid: str, observer: HarnessObserver) -> Source | None:
         """Build the source for a participant, from what the registry knows.
 
         Read once, at watcher start. cwd cannot change during a participant's
@@ -320,7 +336,9 @@ class Observer:
         if p is None:
             return None
         after = p.created_at if p.tier is Tier.SPAWNED else None
-        return harness.open_source(cwd=p.cwd, session_id=p.session_id, after=after)
+        return observer.open_source(
+            cwd=p.cwd, session_id=p.session_id, after=after
+        )
 
     def _apply(self, pid: str, batch: Batch, clock: QuietClock) -> bool:
         """Put a batch on the bus and move the participant's status.
@@ -390,23 +408,23 @@ class Observer:
     async def _watch_screen(self, pid: str, harness_name: str) -> None:
         """Derive status from the rendered screen, for a parser-less harness.
 
-        A harness declared in `[harness.*]` has no transcript, so `parse`
-        returns nothing and no `turn_end` event can ever be produced. Without
-        one, `theater_send` would accept a prompt and leave the caller's
-        `await_sessions` waiting forever. So here the idle-prompt heuristic is
-        promoted from a display hint to a completion signal.
+        An observer with `has_transcript = False` has nothing to read, so no
+        `turn_end` event can ever be produced. Without one, `theater_send`
+        would accept a prompt and leave the caller's `await_sessions` waiting
+        forever. So here the idle-prompt heuristic is promoted from a display
+        hint to a completion signal.
 
         That inverts the risk profile documented on `is_idle_screen`, which was
         tuned to accept false negatives: a false idle now finishes a job early
         and hands the caller a partial answer. Two mitigations, both narrow.
-        The promotion applies only to harnesses that have no parser — never to
-        one whose transcript we can read. And an idle screen must hold for
+        The promotion applies only to observers that can read nothing — never
+        to one whose output we can read. And an idle screen must hold for
         `IDLE_CONFIRMATIONS` consecutive polls before it counts.
 
         An unreadable screen decides nothing. Failing to capture is not
         evidence of either state, so the status is left exactly as it was.
         """
-        harness = self.harnesses[harness_name]
+        observer = self.harnesses[harness_name].observer
         idle_streak = 0
         ended = False
 
@@ -417,7 +435,9 @@ class Observer:
                     return
                 capture = await self._capture(p.tmux_pane) if p.tmux_pane else None
                 if capture is not None:
-                    idle_streak = idle_streak + 1 if harness.is_idle_screen(capture) else 0
+                    idle_streak = (
+                        idle_streak + 1 if observer.is_idle_screen(capture) else 0
+                    )
                     if idle_streak >= IDLE_CONFIRMATIONS:
                         if not ended:
                             ended = True
@@ -471,7 +491,7 @@ class Observer:
             self.registry.set_status(pid, Status.WORKING)
 
     async def _on_quiet(
-        self, pid: str, harness: Harness, source: Source, clock: QuietClock
+        self, pid: str, observer: HarnessObserver, source: Source, clock: QuietClock
     ) -> None:
         """Nothing arrived this tick. Run the three quiet timers.
 
@@ -494,13 +514,13 @@ class Observer:
         # Then ask the screen whether this silence is a prompt waiting on a
         # human rather than an agent thinking.
         if clock.screen_quiet_for(now) > self.awaiting:
-            await self._check_idle_screen(pid, harness)
+            await self._check_idle_screen(pid, observer)
             clock.screen_quiet_since = now  # throttle to one check per window
 
         # Finally, much later, assume a turn end we never read and release
         # anyone still waiting on this participant.
         if clock.rescue_quiet_for(now) > self.rescue:
-            await self._rescue_jobs(pid, harness, clock)
+            await self._rescue_jobs(pid, observer, clock)
             clock.rescue_since = now  # throttle, same as above
 
     def _on_attach(self, pid: str, attached: Attachment) -> None:
@@ -542,7 +562,7 @@ class Observer:
         else:
             self.registry.set_status(pid, desired)
 
-    async def _check_idle_screen(self, pid: str, harness: Harness) -> None:
+    async def _check_idle_screen(self, pid: str, observer: HarnessObserver) -> None:
         """Check the rendered screen for a bare prompt.
 
         If the transcript says WORKING but the screen shows a bare prompt,
@@ -559,12 +579,12 @@ class Observer:
         capture = await self._capture(p.tmux_pane)
         if capture is None:
             return
-        if harness.is_idle_screen(capture):
+        if observer.is_idle_screen(capture):
             self.registry.set_status(pid, Status.AWAITING_INPUT)
             logger.info("participant %s awaiting input (bare prompt on screen)", pid)
 
     async def _rescue_jobs(
-        self, pid: str, harness: Harness, clock: QuietClock
+        self, pid: str, observer: HarnessObserver, clock: QuietClock
     ) -> None:
         """Finish a job whose turn end was never read, so the caller unblocks.
 
@@ -591,7 +611,7 @@ class Observer:
         if p is None or not p.tmux_pane:
             return
         capture = await self._capture(p.tmux_pane)
-        if capture is None or not harness.is_idle_screen(capture):
+        if capture is None or not observer.is_idle_screen(capture):
             return
         logger.warning(
             "no turn end seen for %s after %.0fs of quiet; finishing its jobs",

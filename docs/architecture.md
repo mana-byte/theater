@@ -225,13 +225,16 @@ session in one shared SQLite database, where there is no byte offset to hold
 onto. Job 2 is harness-agnostic policy, and it is where every observation bug in
 this project has been.
 
-So job 1 is a replaceable seam and job 2 is not. `Harness.open_source()`
-returns a `Source` (`theater/harness/source.py`); the default is
-`TranscriptSource`, which is the file tailing that used to live inline in the
-observer. A plugin that overrides it returns `Batch(events, progressed, status,
-attached, waiting)` from `read()` and the observer's policy runs unchanged on
-top. `opencode.py` is the one shipped adapter that does, and its source keys off
-`event.seq` in the database instead of a file position.
+So job 1 is a replaceable seam and job 2 is not. Job 1 belongs to a
+`HarnessObserver` (`theater/harness/observation.py`) which every harness carries
+as `harness.observer`, and which the reducer holds *instead of* the harness — so
+the launch path and the observe path share no object. `observer.open_source()`
+returns a `Source` (`theater/harness/source.py`); the default, inherited from
+`TranscriptObserver`, is `TranscriptSource`, the file tailing that used to live
+inline in the observer. An observer that replaces it returns `Batch(events,
+progressed, status, attached, waiting)` from `read()` and the reducer's policy
+runs unchanged on top. `opencode.py` is the one shipped adapter that does, and
+its source keys off `event.seq` in the database instead of a file position.
 
 Three fields in that contract are load-bearing:
 
@@ -424,17 +427,27 @@ a historical planning record and has been left unedited.
 
 ## 9. Harness abstraction
 
-`theater/harness/base.py` defines an ABC with six methods. To add a harness you
-implement:
+Two objects since v1.6. `theater/harness/base.py` defines `Harness`, which knows
+how to *start* a CLI; `theater/harness/observation.py` defines
+`HarnessObserver`, which knows how to *watch* one. A harness constructs its
+observer and carries it as `harness.observer`.
 
-| Method | Answers |
-|---|---|
-| `plan_launch` | what argv, env, and config files start this thing |
-| `find_transcript` | where does it write its transcript |
-| `session_id` | what does it call this session |
-| `parse` | turn one transcript line into `Event`s |
-| `native_children` | does it spawn its own subagents we should show |
-| `is_idle_screen` | does this rendered screen mean "waiting for a human" |
+| Method | On | Answers |
+|---|---|---|
+| `plan_launch` | harness | what argv, env, and config files start this thing |
+| `find_transcript` | observer | where does it write its transcript |
+| `session_id` | observer | what does it call this session |
+| `parse` | observer | turn one transcript line into `Event`s |
+| `native_children` | observer | does it spawn its own subagents we should show |
+| `is_idle_screen` | observer | does this rendered screen mean "waiting for a human" |
+| `open_source` | observer | where to read from, when it is not a transcript file |
+
+The three transcript methods are abstract on `TranscriptObserver` and absent
+from `HarnessObserver`, which is the point of the split. `OpenCodeHarness` used
+to implement all four observing methods purely to return nothing, because its
+output is a shared SQLite database and none of those questions has an answer for
+it — four stubs to say "not applicable" meant the interface was describing one
+particular way of observing rather than observation itself.
 
 Every adapter is a plugin file, loaded by `harness/plugins.py` under one
 contract. The four that ship — `claude`, `codex`, `opencode`, `vibe` — live in

@@ -90,11 +90,11 @@ from theater.harness.base import (
     EventKind,
     Harness,
     LaunchPlan,
-    NativeChild,
     clip,
     theater_binary,
     whole,
 )
+from theater.harness.observation import HarnessObserver
 from theater.harness.source import Attachment, Batch, History, Source
 from theater.models import BadRequest, Status
 
@@ -177,8 +177,9 @@ class OpenCodeHarness(Harness):
     aliases = ("open-code", "open_code", "OpenCode", "opencode-ai")
 
     def __init__(self, db: Path | None = None):
-        #: Injectable so tests never touch the real database.
-        self.db = db or data_dir() / DB_NAME
+        #: `db` is where the output lives, which is the observer's business
+        #: alone; nothing about launching opencode depends on it.
+        self.observer = OpenCodeObserver(db=db)
 
     # ---- launching ------------------------------------------------------
 
@@ -217,7 +218,31 @@ class OpenCodeHarness(Harness):
             files={config_path: json.dumps(config, indent=2)},
         )
 
-    # ---- observing ------------------------------------------------------
+
+class OpenCodeObserver(HarnessObserver):
+    """Read one session's rows out of the shared opencode database.
+
+    The adapter that motivated splitting observation off `Harness` in v1.6.
+    While the two were one interface this class's four transcript methods —
+    `find_transcript`, `session_id`, `parse`, `native_children` — existed only
+    to return nothing, because none of those questions has an answer when the
+    output is a database rather than a file. Subclassing `HarnessObserver`
+    directly instead of `TranscriptObserver` deletes all four.
+
+    `has_transcript` stays True regardless: it means "can be observed by
+    reading", not "writes a file", and this adapter reads better than the
+    file-backed ones do.
+
+    Known gap, and the reason `native_children` is left at its inherited empty
+    default rather than implemented: opencode does have sub-agents and they are
+    discoverable — `session.parent_id` points at the parent — but the method is
+    keyed by transcript path and there is no path. Surfacing them needs a
+    lineage hook on `Source`.
+    """
+
+    def __init__(self, db: Path | None = None):
+        #: Injectable so tests never touch the real database.
+        self.db = db or data_dir() / DB_NAME
 
     def open_source(
         self,
@@ -229,37 +254,6 @@ class OpenCodeHarness(Harness):
         return OpenCodeSource(
             self.db, cwd=cwd, session_id=session_id, after=after
         )
-
-    def find_transcript(
-        self,
-        *,
-        cwd: str,
-        session_id: str | None = None,
-        after: float | None = None,
-    ) -> Path | None:
-        """There is no per-session file. See `open_source`.
-
-        Not an oversight and not a stub to fill in later: the output lives in a
-        database shared by every session, so no path can name one. Returning
-        None here is what the interface has for "ask somewhere else".
-        """
-        return None
-
-    def session_id(self, transcript: Path) -> str | None:
-        """Answered by the source at attach, since there is no path to read."""
-        return None
-
-    def parse(self, line: str, index: int, *, clip_text: bool = True) -> list[Event]:
-        """Nothing to parse: there are no lines. See `OpenCodeSource`."""
-        return []
-
-    def native_children(self, transcript: Path) -> list[NativeChild]:
-        """Known gap. Opencode does have sub-agents, and they are discoverable
-        — `session.parent_id` points at the parent — but this method is keyed
-        by transcript path and there is not one, so the interface cannot ask
-        the question. Surfacing them needs a lineage hook on `Source`.
-        """
-        return []
 
     def is_idle_screen(self, capture: str) -> bool:
         """Decided by the absence of `esc interrupt` from the footer.

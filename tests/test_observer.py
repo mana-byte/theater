@@ -360,8 +360,12 @@ def test_new_bytes_restart_the_rescue_clock_too():
 # ---- rescuing a job whose turn end was never read ---------------------
 
 
-class ScreenHarness:
-    """Just enough harness for `_rescue_jobs`, which reads one method."""
+class ScreenObserver:
+    """Just enough observer for `_rescue_jobs`, which reads one method.
+
+    An observer and not a harness: rescue is observation, so the reducer is
+    handed only that half and never sees the object that launches anything.
+    """
 
     has_transcript = True
 
@@ -390,13 +394,13 @@ def poised(registry, *, pane="%1", idle=True, capture="$ "):
     observer._capture = capture_pane
     cursor = QuietClock()
     cursor.last_text = "the last thing it said"
-    return observer, ScreenHarness(idle), cursor, p, jobs
+    return observer, ScreenObserver(idle), cursor, p, jobs
 
 
 @pytest.mark.asyncio
 async def test_a_quiet_participant_over_an_idle_screen_releases_its_caller(registry):
-    observer, harness, cursor, p, jobs = poised(registry)
-    await observer._rescue_jobs(p.id, harness, cursor)
+    observer, screen, cursor, p, jobs = poised(registry)
+    await observer._rescue_jobs(p.id, screen, cursor)
     job = jobs.get("h1")
     # DONE, not a failure: the caller has a usable answer, and failing the job
     # would leave it blocked on exactly the thing being rescued. The error code
@@ -409,29 +413,29 @@ async def test_a_quiet_participant_over_an_idle_screen_releases_its_caller(regis
 @pytest.mark.asyncio
 async def test_a_busy_screen_is_not_rescued(registry):
     """Quiet plus a working screen is a slow tool call, not a missed boundary."""
-    observer, harness, cursor, p, jobs = poised(registry, idle=False)
-    await observer._rescue_jobs(p.id, harness, cursor)
+    observer, screen, cursor, p, jobs = poised(registry, idle=False)
+    await observer._rescue_jobs(p.id, screen, cursor)
     assert str(jobs.get("h1").state) == "running"
 
 
 @pytest.mark.asyncio
 async def test_an_unreadable_screen_decides_nothing(registry):
-    observer, harness, cursor, p, jobs = poised(registry, capture=None)
-    await observer._rescue_jobs(p.id, harness, cursor)
+    observer, screen, cursor, p, jobs = poised(registry, capture=None)
+    await observer._rescue_jobs(p.id, screen, cursor)
     assert str(jobs.get("h1").state) == "running"
 
 
 @pytest.mark.asyncio
 async def test_a_participant_with_no_pane_cannot_be_rescued(registry):
     """No pane, no screen, no second opinion — so silence alone decides nothing."""
-    observer, harness, cursor, p, jobs = poised(registry, pane=None)
-    await observer._rescue_jobs(p.id, harness, cursor)
+    observer, screen, cursor, p, jobs = poised(registry, pane=None)
+    await observer._rescue_jobs(p.id, screen, cursor)
     assert str(jobs.get("h1").state) == "running"
 
 
 @pytest.mark.asyncio
 async def test_a_turn_end_that_was_actually_read_carries_no_error_code(registry):
-    observer, _harness, _cursor, p, jobs = poised(registry)
+    observer, _screen, _cursor, p, jobs = poised(registry)
     observer._answer_turn(p.id, "a real reply")
     job = jobs.get("h1")
     assert str(job.state) == "done"
@@ -453,7 +457,7 @@ def spoke(text: str) -> Event:
 
 def test_a_turn_end_mid_batch_still_answers(registry):
     """The reply plus the next prompt arrive together. The reply still lands."""
-    observer, _harness, clock, p, jobs = poised(registry)
+    observer, _screen, clock, p, jobs = poised(registry)
     batch = Batch(events=[said("the answer", turn_end=True), spoke("and now this")])
     observer._apply(p.id, batch, clock)
     job = jobs.get("h1")
@@ -463,7 +467,7 @@ def test_a_turn_end_mid_batch_still_answers(registry):
 
 def test_two_turns_in_one_batch_answer_two_jobs_in_order(registry):
     """Two boundaries, two waiting callers, each gets its own turn's text."""
-    observer, _harness, clock, p, jobs = poised(registry)
+    observer, _screen, clock, p, jobs = poised(registry)
     time.sleep(0.002)  # created_at is a float clock; keep the order unambiguous
     jobs.create(handle="h2", caller_id="caller", target_id=p.id, kind="send")
     batch = Batch(
@@ -480,7 +484,7 @@ def test_two_turns_in_one_batch_answer_two_jobs_in_order(registry):
 
 def test_one_turn_answers_only_the_caller_that_waited_longest(registry):
     """A queued second caller keeps waiting for its own turn, not this one."""
-    observer, _harness, clock, p, jobs = poised(registry)
+    observer, _screen, clock, p, jobs = poised(registry)
     time.sleep(0.002)
     jobs.create(handle="h2", caller_id="other", target_id=p.id, kind="send")
     observer._apply(p.id, Batch(events=[said("for h1", turn_end=True)]), clock)
@@ -490,7 +494,7 @@ def test_one_turn_answers_only_the_caller_that_waited_longest(registry):
 
 def test_a_boundary_with_no_text_answers_with_the_turn(registry):
     """Codex ends a turn on `task_complete`, a record that carries no message."""
-    observer, _harness, clock, p, jobs = poised(registry)
+    observer, _screen, clock, p, jobs = poised(registry)
     batch = Batch(
         events=[
             said("what it actually said", turn_end=False),
@@ -509,9 +513,9 @@ async def test_rescue_still_releases_every_waiting_caller(registry):
     no boundary left to pair a job with. Releasing one at a time would drip the
     queue out over one rescue window each.
     """
-    observer, harness, clock, p, jobs = poised(registry)
+    observer, screen, clock, p, jobs = poised(registry)
     jobs.create(handle="h2", caller_id="other", target_id=p.id, kind="send")
-    await observer._rescue_jobs(p.id, harness, clock)
+    await observer._rescue_jobs(p.id, screen, clock)
     assert str(jobs.get("h1").state) == "done"
     assert str(jobs.get("h2").state) == "done"
 
@@ -533,16 +537,15 @@ class ScriptedSource(Source):
         self.closed = True
 
 
-class SourceHarness:
-    """A harness whose output is not a file, so it overrides `open_source`.
+class ScriptedObserver:
+    """An observer whose output is not a file, so it opens its own source.
 
     This is the whole contract an adapter over a database or an event stream
     has to meet: hand back something that produces batches. Everything the
-    observer does with them is the same code the file-backed harnesses use.
+    reducer does with them is the same code the file-backed adapters use.
     """
 
     has_transcript = True
-    binary = "scripted"
 
     def __init__(self, *batches):
         self.source = ScriptedSource(batches)
@@ -552,6 +555,20 @@ class SourceHarness:
 
     def is_idle_screen(self, capture: str) -> bool:
         return False
+
+
+class SourceHarness:
+    """The launch half, present only to carry the observer.
+
+    The reducer resolves a harness name to `harness.observer`, so a fake that
+    goes into the registry needs both halves — but this one does nothing else,
+    which is exactly the shape of the split.
+    """
+
+    binary = "scripted"
+
+    def __init__(self, *batches):
+        self.observer = ScriptedObserver(*batches)
 
 
 def said(text: str, *, turn_end: bool) -> Event:
@@ -605,7 +622,7 @@ async def test_the_source_is_closed_when_the_watcher_stops(registry):
     registry.register(harness="scripted", pane=None, cwd="/tmp")
     assert await until(lambda: observer._tasks != {})
     await observer.aclose()
-    assert harness.source.closed
+    assert harness.observer.source.closed
 
 
 def test_consumed_input_counts_as_activity_even_with_no_events(registry):

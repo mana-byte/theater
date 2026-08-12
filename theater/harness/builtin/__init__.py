@@ -7,7 +7,7 @@ anything a user drops in `$THEATER_HOME/harnesses`. Shipping them any other way
 would leave the extension point untested by everything except the extensions.
 
 So there is no "built-in tier". The only distinction the system still draws
-between adapters is `Harness.has_transcript`.
+between adapters is `HarnessObserver.has_transcript`.
 """
 
 from __future__ import annotations

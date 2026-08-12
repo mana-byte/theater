@@ -3,8 +3,10 @@
 Every adapter is a plugin file. The ones Theater ships live in
 `builtin/plugins/`, the ones a user writes live in `$THEATER_HOME/harnesses/`,
 and both are read by `plugins.scan` under the same contract. There is no
-built-in tier, and the only distinction the system still draws between adapters
-is `Harness.has_transcript`.
+built-in tier. Each adapter is two objects: a `Harness` that knows how to launch
+the CLI, and the `HarnessObserver` it carries, which knows how to watch it. The
+only distinction the system still draws between adapters is
+`HarnessObserver.has_transcript`.
 
 `install` turns those files into the live registry. Until it runs the registry
 is empty, which is deliberate: a shipped plugin that will not import is fatal,
@@ -41,6 +43,7 @@ from theater.harness.base import (
 from theater import paths
 from theater.config import Config, ConfigError
 from theater.harness import builtin, plugins
+from theater.harness.observation import HarnessObserver, TranscriptObserver
 from theater.harness.plugins import Plugin, PluginError
 from theater.harness.source import (
     Attachment,
@@ -308,12 +311,14 @@ __all__ = [
     "Event",
     "EventKind",
     "Harness",
+    "HarnessObserver",
     "History",
     "LaunchPlan",
     "NativeChild",
     "Plugin",
     "PluginError",
     "Source",
+    "TranscriptObserver",
     "TranscriptSource",
     "clip",
     "clipper",

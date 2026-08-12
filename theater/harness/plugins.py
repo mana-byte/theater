@@ -36,6 +36,7 @@ from pathlib import Path
 
 from theater.config import HARNESS_NAME, ConfigError
 from theater.harness.base import Harness
+from theater.harness.observation import HarnessObserver
 
 logger = logging.getLogger("theater.harness.plugins")
 
@@ -152,7 +153,40 @@ def _load_one(path: Path, source: str) -> Harness:
             "subclass theater.harness.Harness"
         )
     _check_identity(path, harness)
+    _check_observer(path, harness)
     return harness
+
+
+def _check_observer(path: Path, harness: Harness) -> None:
+    """The harness must carry the object that knows how to watch it.
+
+    `Harness.observer` is an annotation rather than an abstract property, so
+    Python will not refuse to instantiate a harness that forgot it — the
+    omission would instead surface as an `AttributeError` inside the daemon's
+    watch loop, minutes later, blamed on the reducer. Declaring it abstract was
+    the alternative and it costs every plugin four lines of property ceremony
+    to return a value the constructor already has; checking it here, beside the
+    other attributes every consumer reads without asking, costs the plugin
+    nothing and fails at load with the file name in hand.
+    """
+    observer = getattr(harness, "observer", None)
+    if observer is None:
+        raise PluginError(
+            f"{path}: harness {harness.name!r} sets no observer. A harness "
+            "must assign one in __init__ — `self.observer = MyObserver()`; "
+            "see docs/harness-plugins.md"
+        )
+    if isinstance(observer, type):
+        raise PluginError(
+            f"{path}: harness {harness.name!r} sets observer to the class "
+            f"{observer.__name__}, not an instance of it"
+        )
+    if not isinstance(observer, HarnessObserver):
+        raise PluginError(
+            f"{path}: harness {harness.name!r} has a "
+            f"{type(observer).__name__} observer, which does not subclass "
+            "theater.harness.HarnessObserver"
+        )
 
 
 def _check_identity(path: Path, harness: Harness) -> None:
