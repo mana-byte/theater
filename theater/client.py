@@ -12,11 +12,14 @@ a cancelled task -- the reply the daemon eventually writes stays in the socket
 buffer, and the *next* call reads it as its own answer. Every later call is
 then off by one, silently, for the life of the process; an MCP server builds
 one client per agent session, so one slow call used to poison every tool call
-that agent made afterwards. Three rules keep that from happening:
+that agent made afterwards. Four rules keep that from happening:
 
 * every reply is checked against the id of the request that is in flight;
 * an abandoned read poisons the connection, because a cancelled ``readline``
   can leave a *partial* line behind that no id check can undo;
+* a reply too long to read poisons it for the same reason, which is why
+  ``protocol.read_message`` reports an overrun as a ``ConnectionError``
+  rather than the bare ``ValueError`` asyncio raises;
 * a poisoned connection reconnects lazily on the next call, and the call that
   failed is not retried -- ``send`` and ``spawn`` type into a live pane, so a
   transparent resend would duplicate a prompt.
@@ -65,7 +68,9 @@ class DaemonClient:
             return
         sock = paths.socket_path()
         try:
-            self._reader, self._writer = await asyncio.open_unix_connection(str(sock))
+            self._reader, self._writer = await asyncio.open_unix_connection(
+                str(sock), limit=protocol.MAX_MESSAGE_BYTES
+            )
             return
         except (FileNotFoundError, ConnectionRefusedError):
             if not self.autostart:
@@ -115,7 +120,9 @@ class DaemonClient:
         last: Exception | None = None
         while asyncio.get_running_loop().time() < deadline:
             try:
-                return await asyncio.open_unix_connection(str(sock))
+                return await asyncio.open_unix_connection(
+                    str(sock), limit=protocol.MAX_MESSAGE_BYTES
+                )
             except (FileNotFoundError, ConnectionRefusedError) as exc:
                 last = exc
                 await asyncio.sleep(delay)
@@ -178,7 +185,9 @@ class DaemonClient:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise TimeoutError(f"no reply to request {req_id} within {timeout}s")
-            line = await asyncio.wait_for(self._reader.readline(), timeout=remaining)
+            line = await asyncio.wait_for(
+                protocol.read_message(self._reader), timeout=remaining
+            )
             if not line:
                 raise ConnectionError("daemon closed the connection")
             try:

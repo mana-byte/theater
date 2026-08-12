@@ -178,7 +178,7 @@ class Daemon:
         try:
             self._clear_stale_socket(sock)
             self._server = await asyncio.start_unix_server(
-                self._handle, path=str(sock)
+                self._handle, path=str(sock), limit=protocol.MAX_MESSAGE_BYTES
             )
             os.chmod(sock, 0o600)
         except BaseException:
@@ -402,7 +402,21 @@ class Daemon:
         if task is not None:
             self._conns.add(task)
         try:
-            while line := await reader.readline():
+            while True:
+                try:
+                    line = await protocol.read_message(reader)
+                except protocol.MessageTooLarge as exc:
+                    # Answer rather than hang up: one absurd prompt should not
+                    # cost an agent the rest of its session. id 0 is the
+                    # daemon's "could not read far enough to echo your id",
+                    # and the client accepts it as the reply in flight.
+                    logger.warning("oversized request: %s", exc)
+                    writer.write(protocol.err(0, "too_large", str(exc)))
+                    await writer.drain()
+                    await protocol.drain_message(reader)
+                    continue
+                if not line:
+                    break
                 response = await self._dispatch(line)
                 writer.write(response)
                 await writer.drain()
