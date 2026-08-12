@@ -137,7 +137,8 @@ The two sets are not the same and should not be: `shutdown`, `adopt`, and
 
 ## 5. State
 
-One SQLite file, `$THEATER_HOME/theater.db`, `SCHEMA_VERSION = 1`.
+One SQLite file, `$THEATER_HOME/theater.db`, owned exclusively by the daemon —
+every other process reaches it over the unix socket.
 
 | Table | Holds |
 |---|---|
@@ -150,6 +151,37 @@ The store is **synchronous on purpose**. Every call is a local SQLite
 statement measured in microseconds; wrapping them in a thread pool to satisfy
 `async` aesthetics would add real complexity to buy nothing. The daemon's event
 loop blocks on these calls and that is fine.
+
+### Schema, and why Alembic (v1.3)
+
+Tables are declared once in `daemon/schema.py` as SQLAlchemy **Core** metadata
+— not the declarative ORM, because `models.py` holds plain dataclasses that
+every layer passes around and mapping them would put `Mapped[...]` columns on
+the domain layer to buy nothing. `Store` already hand-maps rows in `from_row`.
+
+Up to v1.2 the schema was a `CREATE TABLE IF NOT EXISTS` script replayed at
+every start, versioned by `PRAGMA user_version`. It had **no ALTER path**:
+adding a column to `SCHEMA` was a silent no-op against any existing database,
+and the version guard could not fire because the version had not changed. That
+hazard is why the `jobs` table was created empty two phases before anything
+wrote to it. Alembic exists here to close it, and `render_as_batch` is the
+setting that does the work — SQLite cannot express most ALTERs, so Alembic
+copies the table, moves the rows, and swaps the names.
+
+The daemon runs `alembic upgrade head` while constructing a `Store`, on the
+connection it already holds. A developer runs the CLI from the repo root:
+
+```bash
+uv run alembic revision --autogenerate -m "add a column"
+uv run alembic check          # fails if schema.py and versions/ disagree
+```
+
+`tests/test_migrations.py` runs that same comparison in CI, plus a test that
+the comparison is not vacuous. A v1.2 database is **stamped** at the baseline
+revision rather than rebuilt: legacy files have exactly one possible shape,
+stamping is therefore truthful, and it keeps the live pane-to-participant
+mapping across the upgrade instead of making the daemon forget every running
+pane.
 
 The bus is an activity feed, not an archive. Event text is clipped at
 `MAX_TEXT = 2000` chars, because a single tool result is routinely 25 KB and
@@ -380,20 +412,22 @@ theater/
 │   ├── server.py 324     lifecycle only: socket, pidfile, reaper, wiring
 │   ├── methods.py 317    16 RPC handlers
 │   ├── registry.py 233   tier assignment, pane eviction, lineage
-│   ├── store.py 230      SQLite, synchronous on purpose
+│   ├── store.py 276      SQLite over SQLAlchemy Core, synchronous on purpose
 │   ├── jobs.py 181       JobManager, asyncio.Event per handle
 │   ├── worktree.py 158   git worktree per child, branch theater/<child-id>
 │   ├── spawner.py 145    LaunchPlan → tmux window
 │   ├── rails.py 144      depth / cycle / budget
 │   ├── harness_detect.py 85
-│   └── lineage.py 73     ancestor_ids, depth_of, root_of, subtree_ids
+│   ├── schema.py 85      table metadata, the one place columns are declared
+│   ├── lineage.py 73     ancestor_ids, depth_of, root_of, subtree_ids
+│   └── migrations/       alembic env + versions/
 ├── harness/  base.py 282 · claude_code.py 355 · vibe.py 272
 ├── mcp/      tools.py 206 · server.py 152
 ├── tmux/     client.py 261 · panes.py 167 · presence.py 56
 └── regie/    app.py 534 · tree.py 131 · palette.py 64 · bus_view.py 37
 ```
 
-Roughly 6,000 lines, 339 tests.
+Roughly 6,200 lines, 349 tests.
 
 The v1.1 refactor split `daemon/server.py` (lifecycle vs. methods vs. harness
 detection), broke the `store ↔ jobs` import cycle by moving `Job` into

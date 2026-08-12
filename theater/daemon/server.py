@@ -92,19 +92,15 @@ class Daemon:
         """Initialize the send sequence from the database.
 
         After a restart, the counter must not reuse handle numbers that
-        already exist in the jobs table. Scan existing handles and set
-        the counter above the highest one.
+        already exist in the jobs table. `Store.max_send_seq` finds the
+        highest one; see its docstring for why the obvious SQL got this
+        wrong and handed out duplicate handles.
         """
         try:
-            row = self.store.db.execute(
-                "SELECT handle FROM jobs WHERE handle LIKE '%#%' ORDER BY handle DESC LIMIT 1"
-            ).fetchone()
-            if row is not None:
-                handle = row["handle"]
-                _, _, seq = handle.rpartition("#")
-                if seq.isdigit():
-                    self._send_seq = int(seq)
-                    logger.info("send sequence initialized to %d", self._send_seq)
+            highest = self.store.max_send_seq()
+            if highest:
+                self._send_seq = highest
+                logger.info("send sequence initialized to %d", self._send_seq)
         except Exception as exc:
             logger.debug("could not initialize send sequence: %s", exc)
 
