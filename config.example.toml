@@ -103,6 +103,20 @@ awaiting_input_timeout = 10.0
 # this is also half the detection latency.
 screen_interval = 1.0
 
+# How long a transcript may be quiet, over a screen that looks idle, before any
+# job still running against that participant is finished anyway. A backstop for
+# a turn boundary the parser never saw — an aborted turn, a badly timed
+# rotation — which would otherwise leave the agent that sent the prompt waiting
+# on a promise nothing can resolve.
+#
+# Much longer than awaiting_input_timeout, because the two answer different
+# questions. That one paints a status a human can correct at a glance; this one
+# resolves a promise another agent is blocked on, and firing it early hands out
+# a half-written answer. The rescued reply is the last thing the agent said, and
+# carries error_code = "turn_end_unseen" so a caller can tell salvage from a
+# reply the harness declared finished.
+rescue_timeout = 60.0
+
 # How often the observer reconciles its watch tasks against the registry.
 sync_interval = 1.0
 

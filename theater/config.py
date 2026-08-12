@@ -94,6 +94,22 @@ class ObserverSection:
     #: long enough that a slow tool call will not trigger it, short enough that
     #: a human watching the régie sees the change before getting bored.
     awaiting_input_timeout: float = field(default=10.0, metadata={"min": MIN_INTERVAL})
+    #: How long a job may stay running after its target has gone quiet *and* is
+    #: showing a prompt, before the observer gives up waiting for a turn-end it
+    #: is never going to read and finishes the job anyway.
+    #:
+    #: This is the backstop for a turn boundary the parser missed — a harness
+    #: release changing a discriminator, a transcript rotating at exactly the
+    #: wrong moment. Without it the caller's `await_sessions` blocks until its
+    #: own deadline with no explanation, which is the failure mode that is
+    #: hardest to diagnose from the outside.
+    #:
+    #: Much longer than awaiting_input_timeout on purpose. That one only paints
+    #: a status and can afford to be wrong for a second; this one resolves a
+    #: promise made to another agent, and firing early would hand back a
+    #: half-written answer. A rescued job is marked `turn_end_unseen` so the
+    #: caller can tell a real reply from a salvaged one.
+    rescue_timeout: float = field(default=60.0, metadata={"min": MIN_INTERVAL})
     #: How often to look for a transcript not found yet. Slower, because it is
     #: a directory scan rather than a stat.
     search_interval: float = field(default=2.0, metadata={"min": MIN_INTERVAL})

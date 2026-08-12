@@ -17,6 +17,7 @@ import pytest
 from theater.daemon.observer import (
     AWAITING_INPUT_TIMEOUT,
     RELOCATE_TIMEOUT,
+    RESCUE_TIMEOUT,
     Observer,
     TranscriptCursor,
 )
@@ -345,3 +346,117 @@ def test_new_bytes_restart_both_clocks():
     cursor.stir()
     assert cursor.quiet_since is None and cursor.screen_quiet_since is None
     assert cursor.quiet_for(20.0) == 0.0
+
+
+def test_the_rescue_clock_survives_the_screen_check_throttling_itself():
+    """The rescue must not read a clock that another timer keeps pushing.
+
+    `_check_idle_screen` throttles itself by setting screen_quiet_since to now
+    every time it fires. A rescue reading that clock would restart every 10s
+    and never reach its own, much longer, timeout — the same shape of bug as
+    the relocate one above, but silent: the symptom is a caller that waits
+    forever, not a status that never changes.
+    """
+    cursor = TranscriptCursor()
+    cursor.begin_quiet(0.0)
+
+    # Six screen windows go by, each one throttling the screen clock.
+    t = 0.0
+    for _ in range(6):
+        t += AWAITING_INPUT_TIMEOUT + 0.5
+        assert cursor.screen_quiet_for(t) > AWAITING_INPUT_TIMEOUT
+        cursor.screen_quiet_since = t
+
+    # The rescue clock has been counting that whole minute regardless.
+    assert cursor.rescue_quiet_for(t) == t
+    assert cursor.rescue_quiet_for(t) > RESCUE_TIMEOUT
+
+
+def test_new_bytes_restart_the_rescue_clock_too():
+    cursor = TranscriptCursor()
+    cursor.begin_quiet(0.0)
+    cursor.stir()
+    assert cursor.rescue_since is None
+    assert cursor.rescue_quiet_for(90.0) == 0.0
+
+
+# ---- rescuing a job whose turn end was never read ---------------------
+
+
+class ScreenHarness:
+    """Just enough harness for `_rescue_jobs`, which reads one method."""
+
+    has_transcript = True
+
+    def __init__(self, idle: bool):
+        self.idle = idle
+
+    def is_idle_screen(self, capture: str) -> bool:
+        return self.idle
+
+
+def poised(registry, *, pane="%1", idle=True, capture="$ "):
+    """A participant with one running job, and an observer poised to rescue it.
+
+    `capture=None` stands for a pane that could not be read at all.
+    """
+    from theater.daemon.jobs import JobManager
+
+    jobs = JobManager(registry.store)
+    p = registry.register(harness="vibe", pane=pane, cwd="/tmp")
+    jobs.create(handle="h1", caller_id="caller", target_id=p.id, kind="send")
+    observer = Observer(registry, harnesses={}, jobs=jobs)
+
+    async def capture_pane(_pane):
+        return capture
+
+    observer._capture = capture_pane
+    cursor = TranscriptCursor()
+    cursor.last_text = "the last thing it said"
+    return observer, ScreenHarness(idle), cursor, p, jobs
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_participant_over_an_idle_screen_releases_its_caller(registry):
+    observer, harness, cursor, p, jobs = poised(registry)
+    await observer._rescue_jobs(p.id, harness, cursor)
+    job = jobs.get("h1")
+    # DONE, not a failure: the caller has a usable answer, and failing the job
+    # would leave it blocked on exactly the thing being rescued. The error code
+    # is what says this was salvaged rather than declared finished.
+    assert str(job.state) == "done"
+    assert job.result == "the last thing it said"
+    assert job.error_code == "turn_end_unseen"
+
+
+@pytest.mark.asyncio
+async def test_a_busy_screen_is_not_rescued(registry):
+    """Quiet plus a working screen is a slow tool call, not a missed boundary."""
+    observer, harness, cursor, p, jobs = poised(registry, idle=False)
+    await observer._rescue_jobs(p.id, harness, cursor)
+    assert str(jobs.get("h1").state) == "running"
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_screen_decides_nothing(registry):
+    observer, harness, cursor, p, jobs = poised(registry, capture=None)
+    await observer._rescue_jobs(p.id, harness, cursor)
+    assert str(jobs.get("h1").state) == "running"
+
+
+@pytest.mark.asyncio
+async def test_a_participant_with_no_pane_cannot_be_rescued(registry):
+    """No pane, no screen, no second opinion — so silence alone decides nothing."""
+    observer, harness, cursor, p, jobs = poised(registry, pane=None)
+    await observer._rescue_jobs(p.id, harness, cursor)
+    assert str(jobs.get("h1").state) == "running"
+
+
+@pytest.mark.asyncio
+async def test_a_turn_end_that_was_actually_read_carries_no_error_code(registry):
+    observer, _harness, _cursor, p, jobs = poised(registry)
+    observer._finish_jobs_for_turn(p.id, "a real reply")
+    job = jobs.get("h1")
+    assert str(job.state) == "done"
+    assert job.result == "a real reply"
+    assert job.error_code is None

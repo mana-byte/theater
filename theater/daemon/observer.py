@@ -39,7 +39,7 @@ from pathlib import Path
 
 from theater.config import ObserverSection
 from theater.daemon.registry import Registry
-from theater.harness import HARNESSES, Harness, clip, status_after
+from theater.harness import HARNESSES, EventKind, Harness, clip, status_after
 from theater.models import JobState, Status, Tier
 
 logger = logging.getLogger("theater.observer")
@@ -57,6 +57,12 @@ AWAITING_INPUT_TIMEOUT = _DEFAULTS.awaiting_input_timeout
 SEARCH_INTERVAL = _DEFAULTS.search_interval
 SYNC_INTERVAL = _DEFAULTS.sync_interval
 SCREEN_INTERVAL = _DEFAULTS.screen_interval
+RESCUE_TIMEOUT = _DEFAULTS.rescue_timeout
+
+#: Marks a job the observer finished without ever reading a turn-end record.
+#: The caller gets the last thing the agent said, and this code to say that is
+#: what it is: a salvage, not a reply the harness declared complete.
+RESCUE_CODE = "turn_end_unseen"
 
 #: Consecutive idle-looking screens before a turn is called finished. Two, not
 #: one: the screen is a rendering, and a harness that clears the pane between
@@ -121,10 +127,13 @@ def screen_result(capture: str) -> str:
 class TranscriptCursor:
     """Where one participant's watcher has read to, and how long it has waited.
 
-    Two quiet timers, not one. They measure the same silence but are reset by
+    Three quiet timers, not one. They measure the same silence but are reset by
     different events, and collapsing them into a single timer is a bug we have
     already shipped once: the relocate fires at 5s and used to reset the clock,
     so the 10s screen check was never reached and AWAITING_INPUT never appeared.
+    The rescue timer has the same problem in a worse form — the screen check
+    throttles itself by pushing its own clock forward every time it fires, so a
+    rescue reading that clock would never come due at all.
     """
 
     path: Path | None = None
@@ -135,6 +144,11 @@ class TranscriptCursor:
     quiet_since: float | None = None
     #: The same silence, for the screen check. Reset independently.
     screen_quiet_since: float | None = None
+    #: The same silence again, for the job rescue. Reset independently.
+    rescue_since: float | None = None
+    #: The last thing the agent was heard to say. What a rescued job returns,
+    #: since by definition no turn-end event arrived to carry a result.
+    last_text: str = ""
 
     def attach(self, path: Path, offset: int, index: int, mtime: int) -> None:
         self.path = path
@@ -150,9 +164,10 @@ class TranscriptCursor:
         self.stir()
 
     def stir(self) -> None:
-        """Something happened: both timers start counting again from zero."""
+        """Something happened: every timer starts counting again from zero."""
         self.quiet_since = None
         self.screen_quiet_since = None
+        self.rescue_since = None
 
     def advance(self, offset: int, index: int, mtime: int) -> bool:
         """Take a drain's result. True if the file grew."""
@@ -166,12 +181,18 @@ class TranscriptCursor:
             self.quiet_since = now
         if self.screen_quiet_since is None:
             self.screen_quiet_since = now
+        if self.rescue_since is None:
+            self.rescue_since = now
 
     def quiet_for(self, now: float) -> float:
         return now - (self.quiet_since if self.quiet_since is not None else now)
 
     def screen_quiet_for(self, now: float) -> float:
         since = self.screen_quiet_since
+        return now - (since if since is not None else now)
+
+    def rescue_quiet_for(self, now: float) -> float:
+        since = self.rescue_since
         return now - (since if since is not None else now)
 
 
@@ -187,6 +208,7 @@ class Observer:
         relocate: float = RELOCATE_TIMEOUT,
         awaiting: float = AWAITING_INPUT_TIMEOUT,
         screen: float = SCREEN_INTERVAL,
+        rescue: float = RESCUE_TIMEOUT,
         jobs=None,
     ):
         self.registry = registry
@@ -201,6 +223,7 @@ class Observer:
         self.relocate = relocate
         self.awaiting = awaiting
         self.screen = screen
+        self.rescue = rescue
         #: Optional JobManager. When set, turn-end events for a participant
         #: with a running job finish that job with the assistant text as
         #: the result.
@@ -300,10 +323,7 @@ class Observer:
                 if cursor.path is None and not await self._open(pid, harness, cursor):
                     await self._sleep(self.search)
                     continue
-                drained = self._drain(
-                    pid, harness, cursor.path, cursor.offset, cursor.index, cursor.mtime
-                )
-                if cursor.advance(*drained):
+                if cursor.advance(*self._drain(pid, harness, cursor)):
                     cursor.stir()
                     self._unblock(pid)
                 else:
@@ -424,9 +444,9 @@ class Observer:
     async def _on_quiet(
         self, pid: str, harness: Harness, cursor: TranscriptCursor
     ) -> None:
-        """Nothing was written this tick. Run the two quiet timers.
+        """Nothing was written this tick. Run the three quiet timers.
 
-        Both read the same silence, and neither may reset the other: see
+        All read the same silence, and none may reset another: see
         TranscriptCursor for what happens when they share a clock.
         """
         now = time.monotonic()
@@ -442,6 +462,12 @@ class Observer:
         if cursor.screen_quiet_for(now) > self.awaiting:
             await self._check_idle_screen(pid, harness)
             cursor.screen_quiet_since = now  # throttle to one check per window
+
+        # Finally, much later, assume a turn end we never read and release
+        # anyone still waiting on this participant.
+        if cursor.rescue_quiet_for(now) > self.rescue:
+            await self._rescue_jobs(pid, harness, cursor)
+            cursor.rescue_since = now  # throttle, same as above
 
     async def _follow_rotation(
         self, pid: str, harness: Harness, cursor: TranscriptCursor
@@ -518,14 +544,22 @@ class Observer:
                     self._finish_jobs_for_turn(pid, event.text)
 
     def _drain(
-        self,
-        pid: str,
-        harness: Harness,
-        path: Path,
-        offset: int,
-        index: int,
-        mtime: int,
+        self, pid: str, harness: Harness, cursor: TranscriptCursor
     ) -> tuple[int, int, int]:
+        """Read whatever the transcript grew by. Returns the new cursor triple.
+
+        Takes the cursor rather than its four fields because it also writes one
+        back: `last_text`, which the rescue path needs and which only the parse
+        loop here ever sees. The triple is still returned rather than assigned
+        so `advance` stays the single place that decides whether the file grew.
+        """
+        assert cursor.path is not None
+        path, offset, index, mtime = (
+            cursor.path,
+            cursor.offset,
+            cursor.index,
+            cursor.mtime,
+        )
         st = path.stat()
         size = st.st_size
         # Size alone cannot tell "nothing happened" from "rewritten to the same
@@ -568,6 +602,8 @@ class Observer:
                     },
                 )
                 last = event
+                if event.kind is EventKind.ASSISTANT and event.text:
+                    cursor.last_text = event.text
             index += 1
 
         if last is not None:
@@ -610,13 +646,56 @@ class Observer:
             self.registry.set_status(pid, Status.AWAITING_INPUT)
             logger.info("participant %s awaiting input (bare prompt on screen)", pid)
 
-    def _finish_jobs_for_turn(self, pid: str, result_text: str) -> None:
+    async def _rescue_jobs(
+        self, pid: str, harness: Harness, cursor: TranscriptCursor
+    ) -> None:
+        """Finish a job whose turn end was never read, so the caller unblocks.
+
+        A missed turn-end record is not hypothetical: a harness can abort a
+        turn, rotate its transcript at the wrong moment, or write a boundary
+        this parser does not recognise. Whatever the cause, the caller's
+        `await_sessions` waits on a promise nothing will ever resolve, and the
+        symptom the user sees is a conversation that dies on the second reply.
+
+        So: a long silence, over a screen that looks idle, with jobs still
+        running, is taken as a turn that ended unobserved. The caller gets the
+        last thing the agent said and `RESCUE_CODE`, which says plainly that
+        this is salvage rather than a declared reply.
+
+        Deliberately narrow. An unreadable screen decides nothing — the same
+        rule `_watch_screen` follows — and a participant with no pane cannot
+        be rescued at all. Status is left alone: `_check_idle_screen` has
+        already had its say at a much shorter timeout, and this is about the
+        promise, not the participant.
+        """
+        if self.jobs is None or not self.store.running_jobs_for_target(pid):
+            return
+        p = self.store.get_participant(pid)
+        if p is None or not p.tmux_pane:
+            return
+        capture = await self._capture(p.tmux_pane)
+        if capture is None or not harness.is_idle_screen(capture):
+            return
+        logger.warning(
+            "no turn end seen for %s after %.0fs of quiet; finishing its jobs",
+            pid,
+            self.rescue,
+        )
+        self._finish_jobs_for_turn(pid, cursor.last_text, error_code=RESCUE_CODE)
+
+    def _finish_jobs_for_turn(
+        self, pid: str, result_text: str, *, error_code: str | None = None
+    ) -> None:
         """Finish any running jobs for this participant with the result text.
 
         Called when the observer detects a turn_end. The result is the
         assistant's text from the turn-end event — clipped to MAX_TEXT by
         the harness parser already. If the participant has no running jobs
         (e.g. it's a hand-started session nobody spawned), this is a no-op.
+
+        `error_code` is set only by the rescue path. The state stays DONE
+        either way: the caller has a usable answer and blocking on a FAILED
+        job would defeat the point of rescuing it.
         """
         if self.jobs is None:
             return
@@ -626,4 +705,5 @@ class Observer:
                 job.handle,
                 state=JobState.DONE,
                 result=result_text or "",
+                error_code=error_code,
             )

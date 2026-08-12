@@ -98,6 +98,7 @@ class Daemon:
             relocate=observer_cfg.relocate_timeout,
             awaiting=observer_cfg.awaiting_input_timeout,
             screen=observer_cfg.screen_interval,
+            rescue=observer_cfg.rescue_timeout,
             jobs=self.jobs,
         )
         self._server: asyncio.Server | None = None
