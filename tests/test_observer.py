@@ -432,11 +432,88 @@ async def test_a_participant_with_no_pane_cannot_be_rescued(registry):
 @pytest.mark.asyncio
 async def test_a_turn_end_that_was_actually_read_carries_no_error_code(registry):
     observer, _harness, _cursor, p, jobs = poised(registry)
-    observer._finish_jobs_for_turn(p.id, "a real reply")
+    observer._answer_turn(p.id, "a real reply")
     job = jobs.get("h1")
     assert str(job.state) == "done"
     assert job.result == "a real reply"
     assert job.error_code is None
+
+
+# ---- turn boundaries inside a batch ------------------------------------
+#
+# One poll drains everything written since the last one, so a batch is not a
+# turn. These are the cases that used to leave a caller waiting for the 60s
+# rescue, which is what "the conversation always dies on the second reply"
+# actually was.
+
+
+def spoke(text: str) -> Event:
+    return Event(kind=EventKind.USER, text=text, turn_end=False)
+
+
+def test_a_turn_end_mid_batch_still_answers(registry):
+    """The reply plus the next prompt arrive together. The reply still lands."""
+    observer, _harness, clock, p, jobs = poised(registry)
+    batch = Batch(events=[said("the answer", turn_end=True), spoke("and now this")])
+    observer._apply(p.id, batch, clock)
+    job = jobs.get("h1")
+    assert str(job.state) == "done"
+    assert job.result == "the answer"
+
+
+def test_two_turns_in_one_batch_answer_two_jobs_in_order(registry):
+    """Two boundaries, two waiting callers, each gets its own turn's text."""
+    observer, _harness, clock, p, jobs = poised(registry)
+    time.sleep(0.002)  # created_at is a float clock; keep the order unambiguous
+    jobs.create(handle="h2", caller_id="caller", target_id=p.id, kind="send")
+    batch = Batch(
+        events=[
+            said("first", turn_end=True),
+            spoke("next question"),
+            said("second", turn_end=True),
+        ]
+    )
+    observer._apply(p.id, batch, clock)
+    assert jobs.get("h1").result == "first"
+    assert jobs.get("h2").result == "second"
+
+
+def test_one_turn_answers_only_the_caller_that_waited_longest(registry):
+    """A queued second caller keeps waiting for its own turn, not this one."""
+    observer, _harness, clock, p, jobs = poised(registry)
+    time.sleep(0.002)
+    jobs.create(handle="h2", caller_id="other", target_id=p.id, kind="send")
+    observer._apply(p.id, Batch(events=[said("for h1", turn_end=True)]), clock)
+    assert jobs.get("h1").result == "for h1"
+    assert str(jobs.get("h2").state) == "running"
+
+
+def test_a_boundary_with_no_text_answers_with_the_turn(registry):
+    """Codex ends a turn on `task_complete`, a record that carries no message."""
+    observer, _harness, clock, p, jobs = poised(registry)
+    batch = Batch(
+        events=[
+            said("what it actually said", turn_end=False),
+            Event(kind=EventKind.ASSISTANT, text="", turn_end=True),
+        ]
+    )
+    observer._apply(p.id, batch, clock)
+    assert jobs.get("h1").result == "what it actually said"
+
+
+@pytest.mark.asyncio
+async def test_rescue_still_releases_every_waiting_caller(registry):
+    """The backstop stays fan-out: nothing else will ever free the rest.
+
+    Per-turn matching has already failed by the time rescue fires, so there is
+    no boundary left to pair a job with. Releasing one at a time would drip the
+    queue out over one rescue window each.
+    """
+    observer, harness, clock, p, jobs = poised(registry)
+    jobs.create(handle="h2", caller_id="other", target_id=p.id, kind="send")
+    await observer._rescue_jobs(p.id, harness, clock)
+    assert str(jobs.get("h1").state) == "done"
+    assert str(jobs.get("h2").state) == "done"
 
 
 # ---- a harness that brings its own source ------------------------------

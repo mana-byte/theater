@@ -67,8 +67,8 @@ running and `state.output` set at completed.
 
 Assistant text is therefore buffered and emitted as one event when its message
 finishes, rather than streamed. Streaming would put the same reply on the bus
-several times over, each a prefix of the last, and hand `_finish_jobs_for_turn`
-whichever fragment happened to land last. The cost is that a reply appears at
+several times over, each a prefix of the last, and hand `_answer_turn` whichever
+fragment happened to land last. The cost is that a reply appears at
 the end of its step rather than as it is typed; tool activity still streams, so
 a long turn is not silent.
 """

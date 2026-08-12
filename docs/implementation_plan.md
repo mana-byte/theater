@@ -315,7 +315,7 @@ The core orchestration loop, over spawned children only. No keystroke injection 
 |---|---|
 | `theater/daemon/jobs.py` | `Job` dataclass, `JobState` enum (running/done/crashed/killed), `JobKind` enum (spawn). `JobManager` owns job state + asyncio Events for await. `await_jobs` waits on events with timeout; returns current state of each job. |
 | `theater/daemon/store.py` | `create_job`, `get_job`, `finish_job`, `list_jobs_for_caller`, `running_jobs_for_target`. The `jobs` table was already created in phase 1a's schema. |
-| `theater/daemon/observer.py` | Turn-end events now finish running jobs via `_finish_jobs_for_turn`. Works both in `_drain` (live tailing) and `_on_attach` (pre-existing records at attach time). |
+| `theater/daemon/observer.py` | Turn-end events now finish running jobs via `_answer_turn` (named `_finish_jobs_for_turn` when this phase landed). Works both in `_drain` (live tailing) and `_on_attach` (pre-existing records at attach time). |
 | `theater/daemon/server.py` | `spawn` now creates a job and returns `handle` alongside the participant record. `jobs.await` and `jobs.status` daemon methods. Reaper crashes running jobs when a pane vanishes. |
 | `theater/mcp/tools.py` | `await_sessions` tool: blocks the caller's MCP request until jobs finish or timeout. |
 | `theater/mcp/server.py` | `await_sessions` MCP tool registered with full docstring. |

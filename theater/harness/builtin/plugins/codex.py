@@ -48,8 +48,10 @@ One JSON record per line, `{timestamp, type, payload}`, discriminated on
 `last_agent_message` repeats the final `agent_message` verbatim — which is why
 the `final_answer` phase is dropped and the text is taken from the boundary
 record instead. The observer hands the *turn-ending* event's text back to
-whoever is awaiting the job (observer `_finish_jobs_for_turn`), so a boundary
-event with no text would resolve every send with an empty result.
+whoever is awaiting the job (observer `_answer_turn`), so a boundary event with
+no text would resolve the send with an empty result — the observer falls back
+to the turn's last assistant text for exactly this shape, but a boundary that
+carries its own text is better than relying on that.
 
 `turn_aborted` (a human pressing esc) also ends the turn. It has to: 8
 `task_started` records across the sampled transcripts closed as 5

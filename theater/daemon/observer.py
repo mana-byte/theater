@@ -334,11 +334,23 @@ class Observer:
         the whole of the authoritative-status channel: a source that can ask
         the harness directly is believed, and one that cannot stays silent and
         gets the inference below.
+
+        Turn ends are answered *inside* the loop, at every boundary. A poll
+        drains everything written since the last one, so one batch routinely
+        holds a whole turn plus the beginning of the next: `[assistant(end),
+        user]`. Inspecting only the final event missed that boundary entirely
+        and left the caller waiting for the rescue timer — the long-standing
+        "it always breaks on the second reply". Two boundaries in one batch
+        used to collapse into one for the same reason.
         """
         if batch.attached is not None:
             self._on_attach(pid, batch.attached)
 
         last = None
+        # Assistant text seen since the previous boundary, so a turn end that
+        # carries none of its own still answers with what the turn said.
+        # Codex marks the boundary on `task_complete`, an event with no text.
+        reply = ""
         for event in batch.events:
             self.store.bus_append(
                 f"agent.{event.kind}",
@@ -357,15 +369,15 @@ class Observer:
             last = event
             if event.kind is EventKind.ASSISTANT and event.text:
                 clock.last_text = event.text
+                reply = event.text
+            if event.turn_end:
+                self._answer_turn(pid, event.text or reply)
+                reply = ""
 
         if batch.status is not None:
             self._settle(pid, batch.status)
         elif last is not None:
             self._settle(pid, status_after(last))
-        # If this batch ended a turn and the participant has a running job,
-        # finish it with the assistant text as the result.
-        if last is not None and last.turn_end and self.jobs is not None:
-            self._finish_jobs_for_turn(pid, last.text)
 
         return batch.progressed or bool(batch.events) or batch.attached is not None
 
@@ -435,7 +447,7 @@ class Observer:
                 "source": "screen",
             },
         )
-        self._finish_jobs_for_turn(pid, text)
+        self._answer_turn(pid, text)
 
     async def _capture(self, pane: str) -> str | None:
         """The pane's rendered text, or None if it could not be read."""
@@ -510,8 +522,8 @@ class Observer:
         event = attached.last_event
         if event is not None:
             self._settle(pid, status_after(event))
-            if event.turn_end and self.jobs is not None:
-                self._finish_jobs_for_turn(pid, event.text)
+            if event.turn_end:
+                self._answer_turn(pid, event.text)
 
     def _settle(self, pid: str, desired: Status) -> None:
         p = self.store.get_participant(pid)
@@ -580,29 +592,64 @@ class Observer:
             pid,
             self.rescue,
         )
-        self._finish_jobs_for_turn(pid, clock.last_text, error_code=RESCUE_CODE)
+        self._release_jobs(pid, clock.last_text, error_code=RESCUE_CODE)
 
-    def _finish_jobs_for_turn(
+    def _answer_turn(self, pid: str, result_text: str) -> None:
+        """One turn ended: hand its text to the one job that was waiting for it.
+
+        The oldest running job, and only that one. Prompts arrive at a pane in
+        the order they were typed and the agent works through them in that
+        order, so turn N answers prompt N. Resolving every running job at each
+        boundary — which is what this used to do — gave a queued second caller
+        the reply to the first caller's question, and did it instantly, before
+        its prompt had been read.
+
+        A participant with nothing running is the normal case for a session
+        nobody sent to: no-op.
+
+        Note the queue this trusts is not entirely ours. A CLI spawn creates a
+        job nobody awaits, and it legitimately takes the first turn end,
+        because the spawn prompt *is* the first turn. Spawning with an empty
+        prompt leaves that job to soak up the next turn instead — an
+        off-by-one bounded to a single job, and preferable to the alternative
+        of answering the wrong caller.
+        """
+        if self.jobs is None:
+            return
+        job = self.store.oldest_running_job_for_target(pid)
+        if job is not None:
+            self._finish(job.handle, result_text)
+
+    def _release_jobs(
         self, pid: str, result_text: str, *, error_code: str | None = None
     ) -> None:
-        """Finish any running jobs for this participant with the result text.
+        """Finish *every* running job for this participant. Rescue only.
 
-        Called when the observer detects a turn_end. The result is the
-        assistant's text from the turn-end event — clipped to MAX_TEXT by
-        the harness parser already. If the participant has no running jobs
-        (e.g. it's a hand-started session nobody spawned), this is a no-op.
+        The counterpart to `_answer_turn`, and the reason the two are separate
+        methods rather than one with a flag. Rescue fires when no turn end was
+        ever observed, which means the per-turn accounting has already failed;
+        there is no boundary left to match a job to, and nothing else will come
+        along to release the rest. Leaving all but one waiting until each
+        rescue window elapses would drip them out over minutes.
+        """
+        if self.jobs is None:
+            return
+        for job in self.store.running_jobs_for_target(pid):
+            self._finish(job.handle, result_text, error_code=error_code)
+
+    def _finish(
+        self, handle: str, result_text: str, *, error_code: str | None = None
+    ) -> None:
+        """Resolve one job. The result is already clipped by the parser.
 
         `error_code` is set only by the rescue path. The state stays DONE
         either way: the caller has a usable answer and blocking on a FAILED
         job would defeat the point of rescuing it.
         """
-        if self.jobs is None:
-            return
-        running = self.store.running_jobs_for_target(pid)
-        for job in running:
-            self.jobs.finish(
-                job.handle,
-                state=JobState.DONE,
-                result=result_text or "",
-                error_code=error_code,
-            )
+        assert self.jobs is not None
+        self.jobs.finish(
+            handle,
+            state=JobState.DONE,
+            result=result_text or "",
+            error_code=error_code,
+        )

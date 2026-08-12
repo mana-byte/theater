@@ -5,7 +5,7 @@ rejection, send to an unaddressable target, and the full send → await →
 result loop.
 
 tmux is stubbed: `send_keys` and `human_present` are monkeypatched.
-The job lifecycle is real — the observer's _finish_jobs_for_turn would
+The job lifecycle is real — the observer's _answer_turn would
 finish the send job if it were connected to a real transcript, but here
 the tests finish jobs directly via the JobManager.
 """

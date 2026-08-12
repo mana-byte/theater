@@ -223,6 +223,29 @@ class Store:
         ).fetchall()
         return [Job.from_row(r._mapping) for r in rows]
 
+    def oldest_running_job_for_target(self, target_id: str) -> Job | None:
+        """The longest-running job waiting on this participant, if any.
+
+        Its own query rather than `running_jobs_for_target(...)[-1]`: that one
+        orders DESC for display, and a caller in another module relying on the
+        sort direction of a query it does not own is a trap. Prompts reach a
+        pane in the order they were typed, so the oldest running job is the one
+        the next turn answers.
+
+        Jobs created within the same clock tick tie, and the tie breaks
+        arbitrarily. That is acceptable — a caller cannot type two prompts into
+        one pane at the same instant, so a tie means two different callers
+        raced, and neither has a claim on being first.
+        """
+        row = self.conn.execute(
+            select(jobs)
+            .where(jobs.c.target_id == target_id)
+            .where(jobs.c.state == "running")
+            .order_by(jobs.c.created_at.asc())
+            .limit(1)
+        ).fetchone()
+        return Job.from_row(row._mapping) if row else None
+
     def max_send_seq(self) -> int:
         """Highest numeric suffix across every send handle, 0 if there are none.
 
