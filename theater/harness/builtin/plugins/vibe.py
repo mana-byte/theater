@@ -248,6 +248,13 @@ class VibeObserver(TranscriptObserver):
             return out
         # No tool calls: the agent has finished its turn. Content can still be
         # None on a degenerate record, so guarantee the boundary event exists.
+        #
+        # No turn_id: the records carry no id of any kind, not even a message
+        # id, so there is nothing honest to put there. Leaving it None means
+        # the observer treats every Vibe boundary as its own turn — correct
+        # here, because Vibe writes one record per boundary and never repeats
+        # one. Synthesising an id from the index would be a lie the moment a
+        # record is re-read after a relocate.
         if out:
             last = out[-1]
             out[-1] = Event(

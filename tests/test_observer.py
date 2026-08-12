@@ -20,6 +20,7 @@ from theater.daemon.observer import (
     RESCUE_TIMEOUT,
     Observer,
     QuietClock,
+    TurnAccumulator,
 )
 from shipped import VibeHarness
 from theater.harness.base import Event, EventKind
@@ -459,7 +460,7 @@ def test_a_turn_end_mid_batch_still_answers(registry):
     """The reply plus the next prompt arrive together. The reply still lands."""
     observer, _screen, clock, p, jobs = poised(registry)
     batch = Batch(events=[said("the answer", turn_end=True), spoke("and now this")])
-    observer._apply(p.id, batch, clock)
+    observer._apply(p.id, batch, clock, TurnAccumulator())
     job = jobs.get("h1")
     assert str(job.state) == "done"
     assert job.result == "the answer"
@@ -477,7 +478,7 @@ def test_two_turns_in_one_batch_answer_two_jobs_in_order(registry):
             said("second", turn_end=True),
         ]
     )
-    observer._apply(p.id, batch, clock)
+    observer._apply(p.id, batch, clock, TurnAccumulator())
     assert jobs.get("h1").result == "first"
     assert jobs.get("h2").result == "second"
 
@@ -487,7 +488,9 @@ def test_one_turn_answers_only_the_caller_that_waited_longest(registry):
     observer, _screen, clock, p, jobs = poised(registry)
     time.sleep(0.002)
     jobs.create(handle="h2", caller_id="other", target_id=p.id, kind="send")
-    observer._apply(p.id, Batch(events=[said("for h1", turn_end=True)]), clock)
+    observer._apply(
+        p.id, Batch(events=[said("for h1", turn_end=True)]), clock, TurnAccumulator()
+    )
     assert jobs.get("h1").result == "for h1"
     assert str(jobs.get("h2").state) == "running"
 
@@ -501,7 +504,7 @@ def test_a_boundary_with_no_text_answers_with_the_turn(registry):
             Event(kind=EventKind.ASSISTANT, text="", turn_end=True),
         ]
     )
-    observer._apply(p.id, batch, clock)
+    observer._apply(p.id, batch, clock, TurnAccumulator())
     assert jobs.get("h1").result == "what it actually said"
 
 
@@ -633,8 +636,9 @@ def test_consumed_input_counts_as_activity_even_with_no_events(registry):
     """
     observer = Observer(registry, harnesses={})
     clock = QuietClock()
-    assert observer._apply("nobody", Batch(progressed=True), clock) is True
-    assert observer._apply("nobody", Batch(), clock) is False
+    turns = TurnAccumulator()
+    assert observer._apply("nobody", Batch(progressed=True), clock, turns) is True
+    assert observer._apply("nobody", Batch(), clock, turns) is False
 
 
 def test_events_count_as_activity_even_if_the_source_forgets_to_say_so(registry):
@@ -643,5 +647,5 @@ def test_events_count_as_activity_even_if_the_source_forgets_to_say_so(registry)
     p = registry.register(harness="scripted", pane=None, cwd="/tmp")
     clock = QuietClock()
     batch = Batch(events=[said("hello", turn_end=False)])
-    assert observer._apply(p.id, batch, clock) is True
+    assert observer._apply(p.id, batch, clock, TurnAccumulator()) is True
     assert clock.last_text == "hello"

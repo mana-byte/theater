@@ -156,6 +156,20 @@ class Event:
     #: separate is_turn_end(event) would force Event to carry those harness
     #: specifics just to answer the question later.
     turn_end: bool = False
+    #: The harness's own name for the turn this event belongs to, when it
+    #: publishes one. Three of the four shipped adapters do: Codex stamps
+    #: `payload.turn_id` on both ends of a turn, Claude shares `message.id`
+    #: across the records one message is split into, OpenCode keys a turn on
+    #: the assistant message id. Vibe publishes nothing, so it stays None.
+    #:
+    #: Read by the observer to answer a turn once when the harness announces
+    #: the same boundary twice — Claude does, by construction. None means "no
+    #: claim", never "a different turn": two boundaries with no id are always
+    #: two turns. That is the safe direction. A dedup that misses answers the
+    #: waiting job with the right text and drops the second boundary on the
+    #: floor; a dedup that fires wrongly swallows a real reply and leaves the
+    #: caller waiting for the rescue timer.
+    turn_id: str | None = None
     #: Index of the source record in the transcript. Several events can share
     #: one index: a Vibe assistant turn with three tool calls is four events.
     raw_index: int = 0

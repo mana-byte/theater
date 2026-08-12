@@ -453,6 +453,7 @@ class OpenCodeSource(Source):
                     text=whole(text),
                     ts=ts,
                     turn_end=turn_end,
+                    turn_id=info.get("id") or None,
                 )
             )
         return out
@@ -672,6 +673,10 @@ class OpenCodeSource(Source):
                 text=clip(text),
                 ts=ts,
                 turn_end=turn_end,
+                # The assistant message id. Every part of the reply references
+                # it as `message_id`, so it names the turn as well as the
+                # message: opencode ends a turn by finishing a message.
+                turn_id=mid or None,
                 raw_index=seq,
             )
         ]

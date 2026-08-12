@@ -23,7 +23,10 @@ Record shape, as observed over 3.4k records
 One content block per record. An assistant message with thinking, a preamble
 and two tool calls is written as four records sharing `message.id` and
 `message.stop_reason`. That means a turn-ending message can produce two
-turn_end events; harmless, since the derived status is idempotent.
+turn_end events. Harmless for status, which is idempotent, but not for jobs:
+each boundary used to finish one waiting job, so a duplicate answered a second
+caller with the first caller's reply. `message.id` is carried on the events as
+`turn_id` and the observer answers each id once.
 
 `stop_reason` is `tool_use` mid-turn and `end_turn` at the boundary, with a
 handful of Nones. Treating "anything that is neither None nor tool_use" as the
@@ -249,6 +252,14 @@ class ClaudeCodeObserver(TranscriptObserver):
 
         stop = message.get("stop_reason")
         turn_end = stop is not None and stop != "tool_use"
+        # `message.id` is shared by every record one message was split into,
+        # which is exactly the set of records that can repeat a boundary. The
+        # record's own `uuid` is not: it differs per record, so using it would
+        # name each duplicate a separate turn and defeat the dedup. requestId
+        # is the fallback for the handful of records written without a message
+        # id; it is per API call, so it groups the same way for this purpose.
+        tid = message.get("id") or record.get("requestId")
+        tid = tid if isinstance(tid, str) and tid else None
         out: list[Event] = []
         for block in message.get("content") or []:
             if not isinstance(block, dict):
@@ -260,6 +271,7 @@ class ClaudeCodeObserver(TranscriptObserver):
                         kind=EventKind.ASSISTANT,
                         text=_clip(block.get("text")),
                         ts=ts,
+                        turn_id=tid,
                         raw_index=index,
                     )
                 )
@@ -269,6 +281,7 @@ class ClaudeCodeObserver(TranscriptObserver):
                         kind=EventKind.TOOL_CALL,
                         tool_name=block.get("name"),
                         ts=ts,
+                        turn_id=tid,
                         raw_index=index,
                     )
                 )
@@ -286,12 +299,17 @@ class ClaudeCodeObserver(TranscriptObserver):
                     tool_name=last.tool_name,
                     ts=last.ts,
                     turn_end=True,
+                    turn_id=tid,
                     raw_index=last.raw_index,
                 )
             else:
                 out.append(
                     Event(
-                        kind=EventKind.ASSISTANT, ts=ts, turn_end=True, raw_index=index
+                        kind=EventKind.ASSISTANT,
+                        ts=ts,
+                        turn_end=True,
+                        turn_id=tid,
+                        raw_index=index,
                     )
                 )
         return out

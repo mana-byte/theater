@@ -50,7 +50,8 @@ import asyncio
 import contextlib
 import logging
 import time
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
 
 from theater.config import ObserverSection
 from theater.daemon.registry import Registry
@@ -111,6 +112,65 @@ def screen_result(capture: str) -> str:
     if lines:
         lines.pop()  # the prompt itself, which is not part of any answer
     return "\n".join(lines).strip()
+
+
+#: How many answered turn ids one participant remembers. Its only job is to
+#: absorb a harness announcing the same boundary twice, and those duplicates
+#: are adjacent — Claude writes them as consecutive records of one split
+#: message — so a small window is enough. Bounded because a watcher lives as
+#: long as its participant does, and an unbounded set here would be a slow
+#: leak on a session that runs for a day.
+_ANSWERED_TURNS = 32
+
+
+@dataclass
+class TurnAccumulator:
+    """What one participant has said since its last turn boundary.
+
+    Lives for as long as the watcher does, which is the whole point. The text
+    used to be a local rebuilt on every `_apply` call, so a turn whose text
+    arrived in one poll and whose boundary arrived in the next answered the
+    waiting job with an empty string. It also only ever held the *last*
+    assistant fragment, so a Claude reply written as three text blocks came
+    back as its final paragraph alone.
+
+    Kept apart from `QuietClock` deliberately: that class is the observer's
+    sense of time passing and says so in its own docstring. This is
+    conversation state. They have the same lifetime and nothing else in common.
+    """
+
+    #: Assistant text seen since the last boundary, in arrival order.
+    _blocks: list[str] = field(default_factory=list)
+    #: Turn ids already answered, newest last. A deque and a set together: the
+    #: set answers the question, the deque decides what to forget.
+    _answered: deque[str] = field(default_factory=deque)
+    _seen: set[str] = field(default_factory=set)
+
+    def say(self, text: str) -> None:
+        if text:
+            self._blocks.append(text)
+
+    def take(self) -> str:
+        """The turn's text, and forget it. Blank-line joined, as written."""
+        text = "\n\n".join(self._blocks)
+        self._blocks.clear()
+        return text
+
+    def already_answered(self, turn_id: str | None) -> bool:
+        """Has this exact turn already been handed to a job?
+
+        An unidentified boundary is never a duplicate: a harness that publishes
+        no turn id gets one answer per boundary, which is what it had before.
+        """
+        return turn_id is not None and turn_id in self._seen
+
+    def mark_answered(self, turn_id: str | None) -> None:
+        if turn_id is None or turn_id in self._seen:
+            return
+        self._answered.append(turn_id)
+        self._seen.add(turn_id)
+        while len(self._answered) > _ANSWERED_TURNS:
+            self._seen.discard(self._answered.popleft())
 
 
 @dataclass
@@ -294,6 +354,7 @@ class Observer:
         if source is None:
             return
         clock = QuietClock()
+        turns = TurnAccumulator()
 
         try:
             while not self._stopping.is_set():
@@ -305,11 +366,11 @@ class Observer:
                         # that has not attached says nothing about the agent.
                         await self._sleep(self.search)
                         continue
-                    if self._apply(pid, batch, clock):
+                    if self._apply(pid, batch, clock, turns):
                         clock.stir()
                         self._unblock(pid)
                     else:
-                        await self._on_quiet(pid, observer, source, clock)
+                        await self._on_quiet(pid, observer, source, clock, turns)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -340,7 +401,9 @@ class Observer:
             cwd=p.cwd, session_id=p.session_id, after=after
         )
 
-    def _apply(self, pid: str, batch: Batch, clock: QuietClock) -> bool:
+    def _apply(
+        self, pid: str, batch: Batch, clock: QuietClock, turns: TurnAccumulator
+    ) -> bool:
         """Put a batch on the bus and move the participant's status.
 
         Returns whether anything happened, which is what the quiet timers read.
@@ -360,15 +423,16 @@ class Observer:
         and left the caller waiting for the rescue timer — the long-standing
         "it always breaks on the second reply". Two boundaries in one batch
         used to collapse into one for the same reason.
+
+        The turn's text lives in `turns`, which outlives this call. Batches are
+        cut wherever the poll happened to land, so a turn is routinely split
+        across two of them, and text accumulated in one must still be there
+        when the boundary arrives in the next.
         """
         if batch.attached is not None:
             self._on_attach(pid, batch.attached)
 
         last = None
-        # Assistant text seen since the previous boundary, so a turn end that
-        # carries none of its own still answers with what the turn said.
-        # Codex marks the boundary on `task_complete`, an event with no text.
-        reply = ""
         for event in batch.events:
             self.store.bus_append(
                 f"agent.{event.kind}",
@@ -381,16 +445,27 @@ class Observer:
                     # different quantity; do not conflate them.
                     "ts": event.ts,
                     "turn_end": event.turn_end,
+                    "turn": event.turn_id,
                     "index": event.raw_index,
                 },
             )
             last = event
             if event.kind is EventKind.ASSISTANT and event.text:
                 clock.last_text = event.text
-                reply = event.text
+                turns.say(event.text)
             if event.turn_end:
-                self._answer_turn(pid, event.text or reply)
-                reply = ""
+                # Whatever the turn said, whether it came in this batch or an
+                # earlier one. Always taken, even when the boundary is a
+                # duplicate we will not answer: the text belongs to the turn
+                # that just ended and must not spill into the next one.
+                spoken = turns.take()
+                if not turns.already_answered(event.turn_id):
+                    # The boundary's own text still wins where it has any.
+                    # Codex repeats the whole reply on `task_complete` after a
+                    # preamble has already gone by, so joining the two would
+                    # hand the caller the preamble twice.
+                    self._answer_turn(pid, event.text or spoken)
+                    turns.mark_answered(event.turn_id)
                 # Rescue salvages `last_text` when no boundary is ever read.
                 # Past this one, anything said before it has been delivered
                 # and is not a candidate answer to whatever comes next — a
@@ -491,7 +566,12 @@ class Observer:
             self.registry.set_status(pid, Status.WORKING)
 
     async def _on_quiet(
-        self, pid: str, observer: HarnessObserver, source: Source, clock: QuietClock
+        self,
+        pid: str,
+        observer: HarnessObserver,
+        source: Source,
+        clock: QuietClock,
+        turns: TurnAccumulator,
     ) -> None:
         """Nothing arrived this tick. Run the three quiet timers.
 
@@ -507,7 +587,7 @@ class Observer:
         # source this is a directory scan.
         if clock.quiet_for(now) > self.relocate:
             batch = await source.refresh()
-            if self._apply(pid, batch, clock):
+            if self._apply(pid, batch, clock, turns):
                 clock.stir()
                 return
 

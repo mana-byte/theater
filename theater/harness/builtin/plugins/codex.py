@@ -130,6 +130,20 @@ def _flatten(output) -> str:
     return "".join(parts)
 
 
+def _turn_id(payload: dict) -> str | None:
+    """The turn this record belongs to, as Codex names it.
+
+    Stamped identically on `task_started` and on whichever record closes the
+    turn, so the two ends of a turn are joinable without inference. Only read
+    off the boundary records: the mid-turn `agent_message` and `user_message`
+    events carry no turn_id at all, and inventing one for them by remembering
+    the last `task_started` would mean holding state across lines, which
+    parse() deliberately does not do.
+    """
+    tid = payload.get("turn_id")
+    return tid if isinstance(tid, str) and tid else None
+
+
 class CodexHarness(Harness):
     name = "codex"
     binary = "codex"
@@ -309,6 +323,7 @@ class CodexObserver(TranscriptObserver):
                     text=_clip(payload.get("last_agent_message")),
                     ts=ts,
                     turn_end=True,
+                    turn_id=_turn_id(payload),
                     raw_index=index,
                 )
             ]
@@ -319,6 +334,7 @@ class CodexObserver(TranscriptObserver):
                     text=f"turn aborted: {payload.get('reason') or 'unknown'}",
                     ts=ts,
                     turn_end=True,
+                    turn_id=_turn_id(payload),
                     raw_index=index,
                 )
             ]
@@ -353,7 +369,6 @@ class CodexObserver(TranscriptObserver):
         # token_count, task_started, patch_apply_end, thread_settings_applied:
         # progress accounting, not conversation.
         return []
-
     def _mcp_result(self, result) -> str:
         """Unwrap the Rust-style `{"Ok"|"Err": …}` an MCP call comes back as."""
         if not isinstance(result, dict):
