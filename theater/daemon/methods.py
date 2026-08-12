@@ -10,7 +10,8 @@ handlers just wire parameters to calls.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+import functools
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, NoReturn
 
 from theater import protocol
 from theater.daemon.harness_detect import detect_harness
@@ -29,6 +30,7 @@ from theater.models import (
     JobState,
     NotAddressable,
     Status,
+    now,
 )
 from theater.tmux import client as tmux
 from theater.tmux.presence import human_present
@@ -273,6 +275,53 @@ async def _bus_tail(daemon, params: dict) -> list[dict]:
     )
 
 
+@method("stats")
+async def _stats(daemon, params: dict) -> dict:
+    """How turns have been ending, per harness.
+
+    Read straight out of SQLite on each call rather than kept as live counters:
+    the numbers are only interesting over hours, a restart must not reset them,
+    and a counter that exists solely to be printed is a thing to keep in sync
+    for nothing.
+
+    `window` is in hours and cuts on job creation time; omit it for all of
+    history. Cutting on creation rather than completion so a turn that is still
+    running counts in the window it was asked in.
+    """
+    window = params.get("window")
+    since = None if window in (None, "") else now() - float(window) * 3600.0
+    return {
+        "since": since,
+        "harnesses": daemon.store.turn_outcomes(since=since),
+        "refusals": daemon.store.refusal_counts(since=since),
+    }
+
+
+def _refuse_send(
+    daemon, exc: Exception, *, reason: str, caller_id: str, target_id: str
+) -> NoReturn:
+    """Record a send that never became a job, then raise it.
+
+    These refusals happen before anything is reserved, so there is no job row
+    to carry them and — until this — no trace anywhere: a user watching
+    `theater bus` saw a send simply not happen. The caller does get an error
+    back, but the caller is usually an agent, which reports it in its own words
+    or quietly moves on.
+
+    Counted by `Store.refusal_counts`. Kept as one bus kind with a `reason`
+    rather than one kind per refusal, so a reader can subscribe to all of them
+    without knowing the list, and so adding a reason does not need a
+    subscriber change.
+    """
+    daemon.store.bus_append(
+        "send.refused",
+        from_id=caller_id,
+        to_id=target_id,
+        payload={"reason": reason, "detail": str(exc)},
+    )
+    raise exc
+
+
 @method("send")
 async def _send(daemon, params: dict) -> dict:
     """Send a prompt to an already-running agent by pasting into its pane."""
@@ -280,19 +329,28 @@ async def _send(daemon, params: dict) -> dict:
     prompt = _require(params, "prompt")
     caller_id = params.get("caller_id") or "cli"
 
+    refuse = functools.partial(
+        _refuse_send, daemon, caller_id=caller_id, target_id=target_id
+    )
+
     target = daemon.registry.get(target_id)
     if not target.addressable:
-        raise NotAddressable(
-            f"participant {target_id!r} is not addressable (tier={target.tier})"
+        refuse(
+            NotAddressable(
+                f"participant {target_id!r} is not addressable (tier={target.tier})"
+            ),
+            reason="not_addressable",
         )
     if not target.tmux_pane:
-        raise NotAddressable(
-            f"participant {target_id!r} has no pane to send to"
+        refuse(
+            NotAddressable(f"participant {target_id!r} has no pane to send to"),
+            reason="no_pane",
         )
 
     if await human_present(target.tmux_pane):
-        raise HumanPresent(
-            f"a human is present at {target.tmux_pane}; not injecting"
+        refuse(
+            HumanPresent(f"a human is present at {target.tmux_pane}; not injecting"),
+            reason="human_present",
         )
 
     # Busy is "someone is already waiting on a turn from this participant",
@@ -306,8 +364,9 @@ async def _send(daemon, params: dict) -> dict:
     # participant unreachable, and that failure is worse than a prompt landing
     # while a human's turn is still running.
     if [j for j in daemon.store.running_jobs_for_target(target_id) if j.prompt]:
-        raise Busy(
-            f"participant {target_id!r} has a running send job"
+        refuse(
+            Busy(f"participant {target_id!r} has a running send job"),
+            reason="busy",
         )
 
     # Reserve the job before typing, in that order for two reasons. The check

@@ -20,7 +20,17 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import Connection, create_engine, event, insert, inspect, select, update
+from sqlalchemy import (
+    Connection,
+    case,
+    create_engine,
+    event,
+    func,
+    insert,
+    inspect,
+    select,
+    update,
+)
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from theater.daemon.schema import bus, jobs, participants
@@ -266,6 +276,74 @@ class Store:
             if seq.isdigit():
                 best = max(best, int(seq))
         return best
+
+    # ---- metrics --------------------------------------------------------
+
+    def turn_outcomes(self, *, since: float | None = None) -> list[dict]:
+        """How each harness's turns ended, counted per harness.
+
+        A "turn" here is a job that carried a prompt — a spawn prompt occupies
+        a pane exactly as much as a send does, and both are answered by the
+        same observer path, so both are evidence about whether that path works.
+
+        The counts come out of the jobs table rather than from counters kept in
+        the observer, because the table already records the distinction and
+        survives a restart. `error_code` is the whole signal: the observer sets
+        it to `turn_end_unseen` when it gives up waiting for a turn boundary
+        and returns the last thing the agent was heard to say. That is a
+        *silent* degradation — the caller gets a plausible answer and nothing
+        anywhere says it was salvaged — which is exactly why it needs counting.
+
+        Left join: a job whose target has since been forgotten still counts,
+        under "unknown", rather than vanishing and flattering the numbers.
+        """
+        src = jobs.join(
+            participants, jobs.c.target_id == participants.c.id, isouter=True
+        )
+
+        def total(condition) -> object:
+            return func.sum(case((condition, 1), else_=0))
+
+        query = (
+            select(
+                func.coalesce(participants.c.harness, "unknown").label("harness"),
+                func.count().label("turns"),
+                total(
+                    (jobs.c.state == "done") & (jobs.c.error_code.is_(None))
+                ).label("clean"),
+                total(jobs.c.error_code == "turn_end_unseen").label("rescued"),
+                total(jobs.c.state == "crashed").label("failed"),
+                total(jobs.c.state == "running").label("running"),
+            )
+            .select_from(src)
+            .where(jobs.c.prompt.is_not(None))
+            .group_by("harness")
+            .order_by("harness")
+        )
+        if since is not None:
+            query = query.where(jobs.c.created_at >= since)
+        return [dict(r._mapping) for r in self.conn.execute(query).fetchall()]
+
+    def refusal_counts(self, *, since: float | None = None) -> dict[str, int]:
+        """Sends refused before a job existed, counted by reason.
+
+        These leave no job row on purpose — nothing was reserved, so there is
+        nothing to close — which is why they are counted off the bus instead.
+        Aggregating in Python rather than in SQL because the reason lives
+        inside a JSON payload, and a query that reaches into it would bind this
+        to SQLite's JSON support for no gain: refusals are rare.
+        """
+        query = select(bus.c.payload).where(bus.c.kind == "send.refused")
+        if since is not None:
+            query = query.where(bus.c.ts >= since)
+        counts: dict[str, int] = {}
+        for (payload,) in self.conn.execute(query).fetchall():
+            try:
+                reason = json.loads(payload or "{}").get("reason") or "unknown"
+            except ValueError:
+                reason = "unknown"
+            counts[reason] = counts.get(reason, 0) + 1
+        return counts
 
     # ---- bus ----------------------------------------------------------
 

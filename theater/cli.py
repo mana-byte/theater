@@ -161,6 +161,18 @@ def _parser() -> argparse.ArgumentParser:
     )
     conf.add_argument("--json", action="store_true")
 
+    stats = sub.add_parser(
+        "stats", help="How turns have been ending, per harness."
+    )
+    stats.add_argument(
+        "--window",
+        type=float,
+        default=None,
+        metavar="HOURS",
+        help="Only turns started in the last N hours. Default: all of history.",
+    )
+    stats.add_argument("--json", action="store_true")
+
     sub.add_parser("regie", help="Launch the régie TUI (run inside tmux).")
 
     sub.add_parser("stop", help="Shut the daemon down.")
@@ -477,6 +489,51 @@ def cmd_harnesses(args) -> int:
     return 0
 
 
+def cmd_stats(args) -> int:
+    """How turns have been ending, per harness.
+
+    The number that matters is RESCUED: a turn the observer never saw end, so
+    the daemon waited out the rescue timer and handed the caller the last thing
+    the agent was heard to say. The caller cannot tell that apart from a real
+    answer — it reads as a slightly odd reply, or a slow one — so without this
+    command a harness whose transcript format has drifted degrades invisibly.
+
+    A high rate for one harness is a parser problem. A high rate everywhere is
+    a problem with how turn ends are matched to jobs.
+    """
+    data = call_sync("stats", window=args.window)
+    assert isinstance(data, dict)
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return 0
+
+    rows = data.get("harnesses") or []
+    if not rows:
+        print("no turns recorded yet")
+        return 0
+
+    print(
+        f"{'HARNESS':<12} {'TURNS':>6} {'CLEAN':>6} {'RESCUED':>8} "
+        f"{'FAILED':>7} {'RUNNING':>8}  RESCUE RATE"
+    )
+    for r in rows:
+        finished = (r["clean"] or 0) + (r["rescued"] or 0)
+        # Against finished turns, not all turns: one still running is not yet
+        # evidence either way, and counting it as clean would make a burst of
+        # activity look like an improvement.
+        rate = f"{100 * r['rescued'] / finished:.0f}%" if finished else "-"
+        print(
+            f"{clip_harness(r['harness'], 12):<12} {r['turns']:>6} {r['clean']:>6} "
+            f"{r['rescued']:>8} {r['failed']:>7} {r['running']:>8}  {rate:>11}"
+        )
+
+    refusals = data.get("refusals") or {}
+    if refusals:
+        listed = ", ".join(f"{k} {v}" for k, v in sorted(refusals.items()))
+        print(f"\nrefused before delivery: {listed}")
+    return 0
+
+
 def cmd_config(args) -> int:
     """Show the resolved settings, each tagged with where it came from.
 
@@ -651,6 +708,7 @@ _COMMANDS = {
     "kill": cmd_kill,
     "adopt": cmd_adopt,
     "harnesses": cmd_harnesses,
+    "stats": cmd_stats,
     "config": cmd_config,
     "regie": cmd_regie,
     "stop": cmd_stop,

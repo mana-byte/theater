@@ -139,6 +139,34 @@ theater bus --kind agent.tool   # filter by event kind prefix
 theater bus --json              # one JSON object per line
 ```
 
+### `theater stats`
+
+How turns have been ending, per harness:
+
+```sh
+theater stats                   # all of history
+theater stats --window 24       # only turns started in the last 24 hours
+theater stats --json
+```
+
+```
+HARNESS       TURNS  CLEAN  RESCUED  FAILED  RUNNING  RESCUE RATE
+claude           24     22        0       2        0           0%
+opencode         46     43        3       0        0           7%
+```
+
+The column to watch is RESCUED. When the observer never sees a turn end, the
+daemon waits out the rescue timer and hands the caller the last thing the agent
+was heard to say — which reads as a real, slightly odd answer. A harness whose
+transcript format has drifted therefore looks slow rather than broken, and this
+is the only place that shows it. A high rate for one harness is a parser
+problem; a high rate everywhere is a problem with how turn ends are matched to
+jobs.
+
+Sends refused before delivery — a human at the pane, a target already busy, a
+target with no pane — are counted underneath. They leave no job behind, so they
+are recorded as `send.refused` on the bus.
+
 ### `theater regie`
 
 Launch the régie TUI — a full-screen view of all sessions and their activity. Must be run inside tmux:
