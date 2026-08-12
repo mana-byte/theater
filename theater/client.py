@@ -74,11 +74,29 @@ class DaemonClient:
         self._reader, self._writer = await self._await_socket()
 
     async def _start_daemon(self) -> None:
-        """Launch a detached daemon.
+        """Launch a detached daemon, unless one is already coming up.
 
         start_new_session detaches it from our process group so that killing the
         agent that happened to start it does not take the daemon with it.
+
+        The lock check is herd suppression, not correctness — the daemon lock
+        is what actually guarantees singleton, and every loser of that race
+        exits cleanly. But a régié plus six agents all failing to connect at
+        the same instant would each fork a Python interpreter that reads the
+        config, installs plugins, opens the database and then discovers it is
+        not wanted; on a cold start that is enough load to push the winner past
+        the connect timeout, so the herd makes its own failure. Skipping the
+        spawn when the lock is taken turns most of them into waiters instead.
+
+        Racy by construction: the daemon can take the lock between our check
+        and our fork. That costs one wasted process and is caught downstream.
         """
+        # Local import: theater.daemon pulls in the whole server stack, and
+        # this module is imported by every MCP server, which never runs one.
+        from theater.daemon import lock
+
+        if not lock.is_free():
+            return
         paths.ensure_home()
         log = open(paths.log_path(), "ab")
         subprocess.Popen(

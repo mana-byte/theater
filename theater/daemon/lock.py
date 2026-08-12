@@ -27,6 +27,7 @@ import errno
 import fcntl
 import logging
 import os
+import subprocess
 from pathlib import Path
 
 from theater import paths
@@ -76,15 +77,48 @@ def read_pid(path: Path | None = None) -> int | None:
         return None
 
 
+def _live_daemon_pid(path: Path) -> int | None:
+    """The pid recorded in `path`, if a running theater process still owns it.
+
+    Only consulted where flock is unavailable, as a weaker stand-in for the
+    guarantee the kernel would otherwise give. `ps` rather than
+    `os.kill(pid, 0)`: the signal probe cannot tell the daemon from whatever
+    inherited its number after a crash, so a recycled pid would read as a live
+    daemon forever. Matching the command text costs one subprocess and makes
+    reuse survivable.
+
+    Every failure — no pidfile, garbage in it, `ps` missing or slow — answers
+    None. This is already the degraded path; erring toward "nobody is running"
+    keeps a machine that can neither lock nor run `ps` able to start a daemon
+    at all, which matters more here than a guarantee that was already lost.
+    """
+    pid = read_pid(path)
+    if pid is None:
+        return None
+    try:
+        probe = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if probe.returncode != 0:
+        return None
+    return pid if "theater" in probe.stdout else None
+
+
 def is_free(path: Path | None = None) -> bool:
     """True when no live daemon holds the lock.
 
-    Used by `theater restart` to know the old daemon is really gone. Opens
-    without O_CREAT: a missing pidfile means nobody holds anything, and this is
-    a question, so it must not leave a file behind as a side effect.
+    Used by `theater restart` to know the old daemon is really gone, and by
+    `DaemonClient` to decide whether launching another daemon is worth trying.
+    Opens without O_CREAT: a missing pidfile means nobody holds anything, and
+    this is a question, so it must not leave a file behind as a side effect.
 
-    Answers True on a filesystem where flock does not work — the same
-    degradation `DaemonLock.acquire` documents.
+    Where flock does not work, falls back to the recorded pid — same weaker
+    answer `DaemonLock.acquire` settles for, and for the same reason.
     """
     target = path or paths.pidfile_path()
     try:
@@ -94,7 +128,9 @@ def is_free(path: Path | None = None) -> bool:
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
-        return exc.errno not in _HELD
+        if exc.errno in _HELD:
+            return False
+        return _live_daemon_pid(target) is None
     else:
         fcntl.flock(fd, fcntl.LOCK_UN)
         return True
@@ -133,6 +169,15 @@ class DaemonLock:
             # NFS and some FUSE mounts have no working flock. Refusing to run
             # there would be a worse failure than the race this closes, so
             # carry on unlocked and leave a trace of why the guarantee is gone.
+            #
+            # Unlocked is not unchecked: the pid in the file still rules out
+            # the common case of a daemon that is plainly already running. What
+            # is lost is only atomicity — two daemons starting at the same
+            # instant can both find the file empty and both win.
+            live = _live_daemon_pid(self.path)
+            if live is not None:
+                os.close(fd)
+                raise LockHeld(live) from exc
             logger.warning(
                 "cannot lock %s (%s); singleton enforcement is off", self.path, exc
             )

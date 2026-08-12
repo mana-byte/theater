@@ -81,53 +81,69 @@ class Daemon:
         config: Config | None = None,
     ):
         paths.ensure_home()
-        #: Read once, here. There is no reload: see config.py for why, and
-        #: `theater restart` for the remedy. Held on the daemon so request
-        #: handlers can reach the settings without re-reading the file, which
-        #: would let two requests in one process see different values.
-        self.config = config if config is not None else load_config()
-        # Build the harness registry from the shipped and local plugin
-        # directories before anything reads it. Raises ConfigError on anything
-        # that cannot be honoured, which is deliberately fatal: the daemon is
-        # the process that refuses spawns, so it must not come up holding a set
-        # the user did not ask for.
-        installed = harness_registry.install(self.config)
-        logger.info("harnesses: %s", ", ".join(installed) or "none")
-        self.store = store or Store(paths.db_path())
-        self.registry = Registry(self.store)
-        self.spawner = Spawner(self.registry)
-        self.jobs = JobManager(self.store)
-        #: `harnesses={}` disables observation entirely, which is what tests
-        #: that only exercise the socket want: the real harnesses read the
-        #: user's own ~/.claude and ~/.vibe.
-        observer_cfg = self.config.observer
-        self.observer = Observer(
-            self.registry,
-            harnesses,
-            poll=observer_cfg.poll_interval,
-            search=observer_cfg.search_interval,
-            sync=observer_cfg.sync_interval,
-            relocate=observer_cfg.relocate_timeout,
-            awaiting=observer_cfg.awaiting_input_timeout,
-            screen=observer_cfg.screen_interval,
-            rescue=observer_cfg.rescue_timeout,
-            jobs=self.jobs,
-        )
-        self._server: asyncio.Server | None = None
-        self._reaper: asyncio.Task | None = None
-        #: Held from start() to aclose(). Being the daemon is this lock.
+        #: Held from construction to aclose(). Being the daemon is this lock.
+        #:
+        #: Taken here rather than in start() because constructing a Daemon is
+        #: not a read-only act: it opens the shared SQLite file and runs
+        #: Alembic migrations against it. Acquiring only before the bind left
+        #: a window where two daemons both migrated the same database and only
+        #: then discovered which of them was allowed to exist. The lock has to
+        #: come before the first touch of shared state, not before the socket.
         self._lock = DaemonLock()
-        #: (device, inode) of the socket we bound, so shutdown can tell our
-        #: own socket from one a successor has since put at the same path.
-        self._sock_id: tuple[int, int] | None = None
-        self._stopping = asyncio.Event()
-        #: One task per open connection. Tracked so shutdown can end them; see
-        #: aclose().
-        self._conns: set[asyncio.Task] = set()
-        #: Monotonic counter for send-job handle uniqueness. Initialized
-        #: from the database on start() so a restart does not reuse
-        #: handle numbers that already exist in SQLite.
-        self._send_seq = 0
+        self._lock.acquire()
+        try:
+            #: Read once, here. There is no reload: see config.py for why, and
+            #: `theater restart` for the remedy. Held on the daemon so request
+            #: handlers can reach the settings without re-reading the file,
+            #: which would let two requests in one process see different values.
+            self.config = config if config is not None else load_config()
+            # Build the harness registry from the shipped and local plugin
+            # directories before anything reads it. Raises ConfigError on
+            # anything that cannot be honoured, which is deliberately fatal:
+            # the daemon is the process that refuses spawns, so it must not
+            # come up holding a set the user did not ask for.
+            installed = harness_registry.install(self.config)
+            logger.info("harnesses: %s", ", ".join(installed) or "none")
+            self.store = store or Store(paths.db_path())
+            self.registry = Registry(self.store)
+            self.spawner = Spawner(self.registry)
+            self.jobs = JobManager(self.store)
+            #: `harnesses={}` disables observation entirely, which is what
+            #: tests that only exercise the socket want: the real harnesses
+            #: read the user's own ~/.claude and ~/.vibe.
+            observer_cfg = self.config.observer
+            self.observer = Observer(
+                self.registry,
+                harnesses,
+                poll=observer_cfg.poll_interval,
+                search=observer_cfg.search_interval,
+                sync=observer_cfg.sync_interval,
+                relocate=observer_cfg.relocate_timeout,
+                awaiting=observer_cfg.awaiting_input_timeout,
+                screen=observer_cfg.screen_interval,
+                rescue=observer_cfg.rescue_timeout,
+                jobs=self.jobs,
+            )
+            self._server: asyncio.Server | None = None
+            self._reaper: asyncio.Task | None = None
+            #: (device, inode) of the socket we bound, so shutdown can tell
+            #: our own socket from one a successor has since put at the path.
+            self._sock_id: tuple[int, int] | None = None
+            self._stopping = asyncio.Event()
+            #: One task per open connection. Tracked so shutdown can end them;
+            #: see aclose().
+            self._conns: set[asyncio.Task] = set()
+            #: Monotonic counter for send-job handle uniqueness. Initialized
+            #: from the database on start() so a restart does not reuse
+            #: handle numbers that already exist in SQLite.
+            self._send_seq = 0
+        except BaseException:
+            # Construction failing leaves the caller no object to close, so
+            # nothing else would ever drop the fd. Releasing here is what lets
+            # the next attempt in this process get the lock instead of
+            # deadlocking against a Daemon that was never built.
+            self._lock.release()
+            raise
 
     def _next_send_seq(self) -> int:
         self._send_seq += 1
@@ -155,10 +171,10 @@ class Daemon:
         """Bind the socket. Raises here, in the caller's face, if it cannot."""
         sock = paths.socket_path()
         _check_socket_path(sock)
-        # Lock before touching the socket. Everything after this point is
-        # single-threaded across the whole machine, which is what lets
-        # _clear_stale_socket unlink without a race.
-        self._lock.acquire()
+        # The lock is already ours — __init__ took it, before opening the
+        # database. Re-acquiring here would not be a no-op: flock is per open
+        # file description, so a second acquire() opens a second fd and the
+        # daemon would deadlock against itself.
         try:
             self._clear_stale_socket(sock)
             self._server = await asyncio.start_unix_server(

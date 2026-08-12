@@ -18,6 +18,7 @@ the implementation, so they would survive swapping flock for something else.
 
 from __future__ import annotations
 
+import errno
 import os
 
 import pytest
@@ -26,6 +27,7 @@ from theater import paths
 from theater.client import DaemonClient
 from theater.daemon import lock as lock_mod
 from theater.daemon.lock import DaemonLock, LockHeld
+from theater.daemon import server as server_mod
 from theater.daemon.server import Daemon
 
 
@@ -116,6 +118,94 @@ def test_is_free_does_not_create_the_pidfile(theater_home):
     assert not paths.pidfile_path().exists()
 
 
+# ---- filesystems without flock ------------------------------------------
+#
+# NFS and some FUSE mounts return ENOLCK rather than honouring the lock. The
+# daemon runs there anyway — refusing would be a worse failure than the race —
+# but "cannot lock" must not degrade all the way to "cannot notice a daemon
+# that is plainly already running". These cover the weaker fallback.
+
+
+class _Probe:
+    def __init__(self, returncode: int, stdout: str) -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+def _unlockable(monkeypatch):
+    def refuse(fd, op):
+        raise OSError(errno.ENOLCK, "no locks available")
+
+    monkeypatch.setattr(lock_mod.fcntl, "flock", refuse)
+
+
+def test_live_pid_ignores_a_number_that_belongs_to_something_else(
+    theater_home, monkeypatch
+):
+    """Pid reuse is the reason this is not `os.kill(pid, 0)`.
+
+    After a hard kill the number is free for the OS to hand to anything; a
+    shell that inherited it would answer a signal probe and read as a daemon
+    for as long as it lived.
+    """
+    paths.pidfile_path().write_text("4242\n")
+    monkeypatch.setattr(
+        lock_mod.subprocess, "run", lambda *a, **k: _Probe(0, "-zsh\n")
+    )
+    assert lock_mod._live_daemon_pid(paths.pidfile_path()) is None
+
+    monkeypatch.setattr(
+        lock_mod.subprocess,
+        "run",
+        lambda *a, **k: _Probe(0, "python -m theater.cli daemon\n"),
+    )
+    assert lock_mod._live_daemon_pid(paths.pidfile_path()) == 4242
+
+
+def test_live_pid_is_none_when_the_process_is_gone(theater_home, monkeypatch):
+    paths.pidfile_path().write_text("4242\n")
+    monkeypatch.setattr(lock_mod.subprocess, "run", lambda *a, **k: _Probe(1, ""))
+    assert lock_mod._live_daemon_pid(paths.pidfile_path()) is None
+
+
+def test_live_pid_degrades_to_none_when_ps_cannot_run(theater_home, monkeypatch):
+    """Neither locking nor `ps`: answer "free" so the machine can still work."""
+    paths.pidfile_path().write_text("4242\n")
+
+    def explode(*a, **k):
+        raise OSError("no ps here")
+
+    monkeypatch.setattr(lock_mod.subprocess, "run", explode)
+    assert lock_mod._live_daemon_pid(paths.pidfile_path()) is None
+
+
+def test_without_flock_a_live_pid_still_refuses(theater_home, monkeypatch):
+    paths.pidfile_path().write_text("4242\n")
+    _unlockable(monkeypatch)
+    monkeypatch.setattr(lock_mod, "_live_daemon_pid", lambda path: 4242)
+
+    with pytest.raises(LockHeld) as caught:
+        DaemonLock().acquire()
+    assert caught.value.pid == 4242
+    assert not lock_mod.is_free()
+
+
+def test_without_flock_a_dead_pid_lets_the_daemon_run(theater_home, monkeypatch):
+    """Degraded, not broken: unenforced, but running."""
+    paths.pidfile_path().write_text("4242\n")
+    _unlockable(monkeypatch)
+    monkeypatch.setattr(lock_mod, "_live_daemon_pid", lambda path: None)
+
+    lock = DaemonLock()
+    lock.acquire()
+    try:
+        assert lock.held
+        assert not lock.enforced
+        assert lock_mod.is_free()
+    finally:
+        lock.release()
+
+
 # ---- the daemon ---------------------------------------------------------
 
 
@@ -123,12 +213,60 @@ async def test_a_second_daemon_refuses_to_start(theater_home, fake_tmux):
     first = Daemon(harnesses={})
     await first.start()
     try:
-        second = Daemon(harnesses={})
+        # Construction is the refusal point, not start(): see the database test
+        # below for why it had to move. There is no second object to close.
         with pytest.raises(LockHeld):
-            await second.start()
-        await second.aclose()
+            Daemon(harnesses={})
     finally:
         await first.aclose()
+
+
+async def test_a_refused_daemon_never_opens_the_database(
+    theater_home, fake_tmux, monkeypatch
+):
+    """Losing the race must happen before any shared state is touched.
+
+    Constructing a Daemon runs Alembic migrations against the shared SQLite
+    file. While the lock was taken in start(), both daemons migrated and only
+    then found out which of them was allowed to exist — two writers on one
+    database, with the loser's schema work already committed.
+    """
+    opened: list[str] = []
+    real_store = server_mod.Store
+
+    def counting_store(path, *args, **kwargs):
+        opened.append(str(path))
+        return real_store(path, *args, **kwargs)
+
+    monkeypatch.setattr(server_mod, "Store", counting_store)
+
+    first = Daemon(harnesses={})
+    await first.start()
+    try:
+        assert len(opened) == 1
+        with pytest.raises(LockHeld):
+            Daemon(harnesses={})
+        assert len(opened) == 1
+    finally:
+        await first.aclose()
+
+
+async def test_a_failed_construction_releases_the_lock(theater_home, monkeypatch):
+    """A Daemon that raises mid-__init__ leaves the lock free.
+
+    The caller gets no object back, so nothing else can release it. Without
+    the guard the fd would survive until garbage collection and every later
+    attempt in this process would refuse itself.
+    """
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("no database today")
+
+    monkeypatch.setattr(server_mod, "Store", boom)
+
+    with pytest.raises(RuntimeError, match="no database today"):
+        Daemon(harnesses={})
+    assert lock_mod.is_free()
 
 
 async def test_a_refused_daemon_leaves_the_running_one_working(
@@ -144,10 +282,8 @@ async def test_a_refused_daemon_leaves_the_running_one_working(
     first = Daemon(harnesses={})
     await first.start()
     try:
-        second = Daemon(harnesses={})
         with pytest.raises(LockHeld):
-            await second.start()
-        await second.aclose()
+            Daemon(harnesses={})
 
         assert paths.socket_path().exists()
         assert paths.pidfile_path().exists()

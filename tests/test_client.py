@@ -23,6 +23,7 @@ import pytest
 from theater import client as client_mod
 from theater import paths, protocol
 from theater.client import DaemonClient
+from theater.daemon.lock import DaemonLock
 from theater.protocol import RemoteError
 from theater.tmux import client as tmux
 
@@ -286,3 +287,42 @@ def test_await_gets_its_own_budget():
     default = DaemonClient._timeout_for("ping", {})
     waiting = DaemonClient._timeout_for("jobs.await", {"max_wait": 60.0})
     assert waiting > default + 59
+
+
+# ---- autostart herd ----------------------------------------------------
+
+
+async def test_autostart_skips_the_spawn_when_a_daemon_holds_the_lock(
+    theater_home, monkeypatch
+):
+    """Eight clients failing to connect must not fork eight daemons.
+
+    Only one can win the lock, so the other seven would read the config,
+    install plugins, open the database and exit — enough work, on a cold
+    start, to push the winner past the connect timeout that made them all
+    spawn in the first place.
+    """
+    forked: list[list[str]] = []
+    monkeypatch.setattr(
+        client_mod.subprocess, "Popen", lambda cmd, **kw: forked.append(cmd)
+    )
+
+    held = DaemonLock()
+    held.acquire()
+    try:
+        await DaemonClient()._start_daemon()
+        assert forked == []
+    finally:
+        held.release()
+
+
+async def test_autostart_spawns_when_nothing_holds_the_lock(theater_home, monkeypatch):
+    """The suppression must not become a refusal to ever start one."""
+    forked: list[list[str]] = []
+    monkeypatch.setattr(
+        client_mod.subprocess, "Popen", lambda cmd, **kw: forked.append(cmd)
+    )
+
+    await DaemonClient()._start_daemon()
+    assert len(forked) == 1
+    assert forked[0][-2:] == ["theater.cli", "daemon"]
