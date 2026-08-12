@@ -19,7 +19,6 @@ tmux is stubbed, but everything above that boundary is real.
 
 from __future__ import annotations
 
-import asyncio
 
 import pytest
 
@@ -28,44 +27,6 @@ from theater.daemon.jobs import JobState
 from theater.daemon.server import Daemon
 from theater.models import Status
 from theater.protocol import RemoteError
-
-
-@pytest.fixture
-def fake_tmux(monkeypatch):
-    import tests.test_daemon as td
-
-    fake = td.FakeTmux()
-    import theater.daemon.spawner as spawner_mod
-    monkeypatch.setattr(spawner_mod.tmux, "new_window", fake.new_window)
-    monkeypatch.setattr(spawner_mod.tmux, "ensure_session", fake.ensure_session)
-    monkeypatch.setattr(spawner_mod.tmux, "sessions", fake.sessions)
-    monkeypatch.setattr(spawner_mod.tmux, "kill_pane", fake.kill_pane)
-    monkeypatch.setattr(spawner_mod.tmux, "list_panes", fake.list_panes)
-    monkeypatch.setattr(spawner_mod.tmux, "available", fake.available)
-    monkeypatch.setattr(spawner_mod.shutil, "which", lambda b: f"/usr/bin/{b}")
-    import theater.daemon.server as server_mod
-    monkeypatch.setattr(server_mod.tmux, "list_panes", fake.list_panes)
-    monkeypatch.setattr(server_mod.tmux, "available", fake.available)
-    async def fake_run(*args, check=True):
-        return "\n".join(p.pane_id for p in fake.visible_panes)
-    monkeypatch.setattr(server_mod.tmux, "run", fake_run)
-    return fake
-
-
-@pytest.fixture
-async def daemon(theater_home):
-    d = Daemon(harnesses={})
-    await d.start()
-    yield d
-    await d.aclose()
-
-
-@pytest.fixture
-async def client(daemon):
-    c = DaemonClient(autostart=False)
-    await c.connect()
-    yield c
-    await c.aclose()
 
 
 # ========================================================================

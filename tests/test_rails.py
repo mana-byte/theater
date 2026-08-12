@@ -10,8 +10,6 @@ from __future__ import annotations
 import pytest
 
 from theater.daemon.rails import (
-    DEFAULT_BUDGET,
-    DEFAULT_DEPTH_CAP,
     BudgetExceeded,
     CycleDetected,
     DepthExceeded,

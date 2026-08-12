@@ -14,62 +14,8 @@ from __future__ import annotations
 
 import pytest
 
-from theater.client import DaemonClient
 from theater.daemon.jobs import JobState
-from theater.daemon.server import Daemon
 from theater.protocol import RemoteError
-
-
-@pytest.fixture
-def fake_tmux(monkeypatch):
-    import tests.test_daemon as td
-
-    fake = td.FakeTmux()
-    import theater.daemon.spawner as spawner_mod
-    monkeypatch.setattr(spawner_mod.tmux, "new_window", fake.new_window)
-    monkeypatch.setattr(spawner_mod.tmux, "ensure_session", fake.ensure_session)
-    monkeypatch.setattr(spawner_mod.tmux, "sessions", fake.sessions)
-    monkeypatch.setattr(spawner_mod.tmux, "kill_pane", fake.kill_pane)
-    monkeypatch.setattr(spawner_mod.tmux, "list_panes", fake.list_panes)
-    monkeypatch.setattr(spawner_mod.tmux, "available", fake.available)
-    monkeypatch.setattr(spawner_mod.shutil, "which", lambda b: f"/usr/bin/{b}")
-    import theater.daemon.server as server_mod
-    monkeypatch.setattr(server_mod.tmux, "list_panes", fake.list_panes)
-    monkeypatch.setattr(server_mod.tmux, "available", fake.available)
-    async def fake_run(*args, check=True):
-        return "\n".join(p.pane_id for p in fake.visible_panes)
-    monkeypatch.setattr(server_mod.tmux, "run", fake_run)
-    # Patch send_keys to record what was sent
-    sent: list[tuple[str, str]] = []
-
-    async def fake_send_keys(pane_id, text, *, enter=True):
-        sent.append((pane_id, text))
-
-    import theater.tmux.client as tmux_client
-    monkeypatch.setattr(tmux_client, "send_keys", fake_send_keys)
-    # Patch human_present to return False by default
-    import theater.daemon.methods as methods_mod
-    async def fake_human_present(pane_id):
-        return False
-    monkeypatch.setattr(methods_mod, "human_present", fake_human_present)
-    fake.sent = sent
-    return fake
-
-
-@pytest.fixture
-async def daemon(theater_home):
-    d = Daemon(harnesses={})
-    await d.start()
-    yield d
-    await d.aclose()
-
-
-@pytest.fixture
-async def client(daemon):
-    c = DaemonClient(autostart=False)
-    await c.connect()
-    yield c
-    await c.aclose()
 
 
 async def test_send_creates_a_running_job(client, fake_tmux):

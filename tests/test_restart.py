@@ -12,35 +12,9 @@ These tests simulate a restart by:
 
 from __future__ import annotations
 
-import pytest
 
 from theater.client import DaemonClient
 from theater.daemon.server import Daemon
-from theater.models import Status
-
-
-@pytest.fixture
-def fake_tmux(monkeypatch):
-    import tests.test_daemon as td
-
-    fake = td.FakeTmux()
-    import theater.daemon.spawner as spawner_mod
-    monkeypatch.setattr(spawner_mod.tmux, "new_window", fake.new_window)
-    monkeypatch.setattr(spawner_mod.tmux, "ensure_session", fake.ensure_session)
-    monkeypatch.setattr(spawner_mod.tmux, "sessions", fake.sessions)
-    monkeypatch.setattr(spawner_mod.tmux, "kill_pane", fake.kill_pane)
-    monkeypatch.setattr(spawner_mod.tmux, "list_panes", fake.list_panes)
-    monkeypatch.setattr(spawner_mod.tmux, "available", fake.available)
-    monkeypatch.setattr(spawner_mod.shutil, "which", lambda b: f"/usr/bin/{b}")
-    import theater.daemon.server as server_mod
-    monkeypatch.setattr(server_mod.tmux, "list_panes", fake.list_panes)
-    monkeypatch.setattr(server_mod.tmux, "available", fake.available)
-    # Patch the reconcile method's tmux.run call
-    async def fake_run(*args, check=True):
-        # Return the pane ids of visible panes
-        return "\n".join(p.pane_id for p in fake.visible_panes)
-    monkeypatch.setattr(server_mod.tmux, "run", fake_run)
-    return fake
 
 
 async def test_restart_preserves_participants(theater_home, fake_tmux):
@@ -122,7 +96,6 @@ async def test_restart_keeps_live_participants(theater_home, fake_tmux):
 
 async def test_restart_crashes_orphaned_jobs(theater_home, fake_tmux):
     """A running job whose target died during restart is marked crashed."""
-    from theater.daemon.jobs import JobState
 
     d1 = Daemon(harnesses={})
     await d1.start()
