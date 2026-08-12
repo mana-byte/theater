@@ -373,6 +373,12 @@ class Observer:
             if event.turn_end:
                 self._answer_turn(pid, event.text or reply)
                 reply = ""
+                # Rescue salvages `last_text` when no boundary is ever read.
+                # Past this one, anything said before it has been delivered
+                # and is not a candidate answer to whatever comes next — a
+                # rescue returning it would look like a reply rather than the
+                # stale echo it is.
+                clock.last_text = ""
 
         if batch.status is not None:
             self._settle(pid, batch.status)

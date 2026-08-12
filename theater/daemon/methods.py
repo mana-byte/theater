@@ -14,7 +14,12 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from theater import protocol
 from theater.daemon.harness_detect import detect_harness
-from theater.daemon.rails import check_budget, check_cycle, check_depth
+from theater.daemon.rails import (
+    check_budget,
+    check_cycle,
+    check_depth,
+    check_wait_cycle,
+)
 from theater.daemon.spawner import SpawnRequest
 from theater.harness import HARNESSES, describe, normalize
 from theater.models import (
@@ -33,6 +38,13 @@ if TYPE_CHECKING:  # circular at runtime: server imports this module for its han
 
 Handler = Callable[["Daemon", dict[str, Any]], Awaitable[Any]]
 METHODS: dict[str, Handler] = {}
+
+#: Ceiling on a single `jobs.await`, whatever the caller asks for. An await
+#: holds a daemon connection open and stretches the client's socket timeout to
+#: match, so an agent that asks for an hour ties both up for an hour. Five
+#: minutes is longer than any turn observed in practice, and a caller that
+#: still wants more can simply await again — the job keeps running either way.
+MAX_AWAIT = 300.0
 
 
 def method(name: str) -> Callable[[Handler], Handler]:
@@ -200,15 +212,47 @@ async def _spawn(daemon, params: dict) -> dict:
 
 @method("jobs.await")
 async def _jobs_await(daemon, params: dict) -> list[dict]:
-    """Wait for one or more jobs to finish, up to max_wait seconds."""
+    """Wait for one or more jobs to finish, up to max_wait seconds.
+
+    A handle nobody knows is an error, not an empty list. `await_jobs`
+    silently skips what it cannot find, so a typo or a handle from a previous
+    daemon used to come back as `[]` — indistinguishable from "nothing to
+    report", which sent agents into retry loops against a job that never
+    existed.
+
+    The rails run before that complaint. A caller aiming at the wrong end of
+    a loop should be told so, whether or not the thing it named turned out to
+    be awaitable; "you would deadlock" is the more useful of the two answers.
+    """
     handles = params.get("handles") or []
     if not handles:
         raise BadRequest("at least one handle is required")
-    max_wait = float(params.get("max_wait", 60.0))
+    max_wait = min(max(float(params.get("max_wait", 60.0)), 0.0), MAX_AWAIT)
     caller_id = params.get("caller_id")
+
+    known = {h: daemon.jobs.get(h) for h in handles}
+    # Cycles are about participants, and a send handle is `<target>#<n>`
+    # rather than a participant id — so resolve through the jobs. A handle
+    # with no job behind it can still name a participant (a spawn handle is
+    # its own participant id), and that is worth checking even though the
+    # await itself is about to be refused.
+    targets = []
+    for handle, job in known.items():
+        if job is not None:
+            if job.target_id:
+                targets.append(job.target_id)
+        elif daemon.store.get_participant(handle) is not None:
+            targets.append(handle)
     if caller_id:
-        check_cycle(daemon.store, caller_id, handles)
-    jobs = await daemon.jobs.await_jobs(handles, max_wait=max_wait)
+        check_cycle(daemon.store, caller_id, targets)
+        check_wait_cycle(daemon.jobs.wait_graph, caller_id, targets)
+
+    missing = [h for h, job in known.items() if job is None]
+    if missing:
+        raise BadRequest(f"no such job(s): {', '.join(sorted(missing))}")
+
+    with daemon.jobs.waiting(caller_id, targets):
+        jobs = await daemon.jobs.await_jobs(handles, max_wait=max_wait)
     return [j.to_dict() for j in jobs]
 
 

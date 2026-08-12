@@ -14,8 +14,13 @@ Three rails:
 
 2. **Cycle detection** on the await graph. If A awaits B and B awaits A,
    both block forever — async killed this deadlock; `await` revived it.
-   The check walks the await chain from the target upward: if the caller
-   appears in that chain, the await is rejected with `cycle_detected`.
+   Two checks, because there are two ways to see the same loop.
+   `check_wait_cycle` reads the awaits that are actually in flight and
+   rejects one that would close a loop among them: exact, and the only
+   thing that catches two peers with no family relation. `check_cycle`
+   is the older approximation over lineage, which catches a descendant
+   about to block on an ancestor before that ancestor's own await has
+   started. Either rejects with `cycle_detected`.
 
 3. **Per-tree budget**. A tree may hold so many participants and no more,
    counted from its root, so a runaway spawner exhausts its own allowance
@@ -29,6 +34,7 @@ Three rails:
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 
 from theater.config import RailsSection
 from theater.daemon import lineage
@@ -124,6 +130,47 @@ def check_cycle(
                 f"await would close a cycle: {target_id} is an ancestor "
                 f"of {caller_id}"
             )
+
+
+def check_wait_cycle(
+    graph: Mapping[str, set[str]],
+    caller_id: str,
+    target_ids: list[str],
+) -> None:
+    """Reject an await that would close a loop in the live wait graph.
+
+    `graph` maps a participant to the participants it is *currently* blocked
+    on. Adding caller -> target is a deadlock exactly when target can already
+    reach caller by following those edges. Two peers awaiting each other is
+    the case `check_cycle` cannot see: they are siblings, or unrelated
+    entirely, so there is no ancestry to walk.
+
+    Both parties are blocked inside an MCP tool call, so neither can answer
+    the other and neither can notice. They come back when their timeouts
+    expire, minutes later, having learned nothing. Refusing the second await
+    outright is worse than useless only if the loop was imaginary — and it
+    cannot be, because every edge here is a call currently in flight.
+
+    Registration happens before the wait begins and is torn down after it
+    ends, both synchronously, so no await point separates the check from the
+    edge it is checking.
+    """
+    for target_id in target_ids:
+        if target_id == caller_id:
+            raise CycleDetected(f"participant {caller_id} cannot await itself")
+        seen: set[str] = set()
+        frontier = [target_id]
+        while frontier:
+            node = frontier.pop()
+            if node in seen:
+                continue
+            seen.add(node)
+            if node == caller_id:
+                raise CycleDetected(
+                    f"await would deadlock: {target_id} is already waiting "
+                    f"on {caller_id}"
+                )
+            frontier.extend(graph.get(node, ()))
 
 
 def check_budget(

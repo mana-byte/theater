@@ -152,9 +152,94 @@ async def test_jobs_status_unknown_handle(client, fake_tmux):
     assert exc.value.code == "bad_request"
 
 
-async def test_await_unknown_handle_is_ignored(client, fake_tmux):
-    jobs = await client.call("jobs.await", handles=["ghost"], max_wait=0.1)
-    assert jobs == []
+async def test_await_unknown_handle_is_an_error(client, fake_tmux):
+    """It used to return [], which reads as "nothing to report".
+
+    An agent cannot tell that apart from a job that has not finished, so it
+    re-awaits the same dead handle until it gives up.
+    """
+    from theater.protocol import RemoteError
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call("jobs.await", handles=["ghost"], max_wait=0.1)
+    assert exc.value.code == "bad_request"
+    assert "ghost" in str(exc.value)
+
+
+async def test_await_names_every_handle_it_could_not_find(client, fake_tmux):
+    from theater.protocol import RemoteError
+
+    record = await client.call(
+        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
+    )
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "jobs.await", handles=[record["handle"], "ghost"], max_wait=0.1
+        )
+    assert "ghost" in str(exc.value)
+
+
+async def test_await_between_two_peers_blocked_on_each_other_is_refused(
+    client, fake_tmux, daemon
+):
+    """Two siblings, no ancestry between them: only the live graph sees this.
+
+    Both would sit inside an MCP tool call unable to answer the other, and
+    find out minutes later when their timeouts expire.
+    """
+    from theater.protocol import RemoteError
+
+    a = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    b = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    job = await client.call(
+        "send", target=b["id"], prompt="a asks b", caller_id=a["id"]
+    )
+    # B is already blocked on A, as if mid-`await_sessions`.
+    with daemon.jobs.waiting(b["id"], [a["id"]]):
+        with pytest.raises(RemoteError) as exc:
+            await client.call(
+                "jobs.await",
+                handles=[job["handle"]],
+                max_wait=0.1,
+                caller_id=a["id"],
+            )
+    assert exc.value.code == "cycle_detected"
+
+
+async def test_the_wait_graph_empties_when_an_await_returns(
+    client, fake_tmux, daemon
+):
+    """An edge is a call in flight. A timeout ends the call, so it ends too."""
+    a = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    b = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    job = await client.call(
+        "send", target=b["id"], prompt="a asks b", caller_id=a["id"]
+    )
+    await client.call(
+        "jobs.await", handles=[job["handle"]], max_wait=0.05, caller_id=a["id"]
+    )
+    assert daemon.jobs.wait_graph == {}
+
+
+async def test_await_will_not_block_for_longer_than_the_ceiling(
+    client, fake_tmux, daemon, monkeypatch
+):
+    """An agent asking for an hour gets five minutes, not an hour."""
+    import theater.daemon.methods as methods_mod
+
+    seen: list[float] = []
+    real = daemon.jobs.await_jobs
+
+    async def spy(handles, max_wait):
+        seen.append(max_wait)
+        return await real(handles, max_wait=0.01)
+
+    monkeypatch.setattr(daemon.jobs, "await_jobs", spy)
+    record = await client.call(
+        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
+    )
+    await client.call("jobs.await", handles=[record["handle"]], max_wait=3600)
+    assert seen == [methods_mod.MAX_AWAIT]
 
 
 # ---- bus events ---------------------------------------------------------

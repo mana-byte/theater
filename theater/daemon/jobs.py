@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from theater.daemon.store import Store
 from theater.models import Job, JobKind, JobState, now
@@ -62,7 +64,10 @@ class JobManager:
     def __init__(self, store: Store):
         self.store = store
         self._events: dict[str, asyncio.Event] = {}
-        self._results: dict[str, str] = {}
+        #: Awaits currently in flight, keyed by an opaque token so two
+        #: concurrent awaits from the same caller can be torn down
+        #: independently. Read as a graph by `wait_graph`.
+        self._waits: dict[object, tuple[str, frozenset[str]]] = {}
 
     def create(
         self,
@@ -110,9 +115,10 @@ class JobManager:
         if job is None:
             return None
         if job.state != JobState.RUNNING:
-            # Already finished. The event may still need setting if the
-            # daemon was restarted and lost the in-memory event.
-            event = self._events.get(handle)
+            # Already finished. An event can still be here if the daemon was
+            # restarted, lost the original, and `await_jobs` made a fresh one
+            # for a job the database already considers terminal.
+            event = self._events.pop(handle, None)
             if event:
                 event.set()
             return job
@@ -123,9 +129,11 @@ class JobManager:
             error_code=error_code,
             finished_at=now(),
         )
-        if result:
-            self._results[handle] = result
-        event = self._events.get(handle)
+        # Wake anyone waiting, then drop the event: the job is terminal, so
+        # `await_jobs` will short-circuit on its state from here on and never
+        # look for it again. Keeping it would grow the dict for the life of
+        # the daemon, one entry per prompt ever sent.
+        event = self._events.pop(handle, None)
         if event:
             event.set()
         self.store.bus_append(
@@ -143,6 +151,37 @@ class JobManager:
 
     def list_for_caller(self, caller_id: str) -> list[Job]:
         return self.store.list_jobs_for_caller(caller_id)
+
+    @property
+    def wait_graph(self) -> dict[str, set[str]]:
+        """Who is blocked on whom, right now. Rebuilt per call, never cached.
+
+        In-memory on purpose. A wait is a call in flight, not a fact about the
+        world: a daemon that restarts has no callers left waiting on it, so
+        persisting this would resurrect edges that no longer exist.
+        """
+        graph: dict[str, set[str]] = {}
+        for caller, targets in self._waits.values():
+            graph.setdefault(caller, set()).update(targets)
+        return graph
+
+    @contextmanager
+    def waiting(self, caller_id: str | None, target_ids: list[str]) -> Iterator[None]:
+        """Hold caller -> target edges in the wait graph for one await.
+
+        A no-op without both ends. The CLI awaits as `"cli"`, which nothing
+        can send to, so it can never be the target of an edge and never part
+        of a loop.
+        """
+        if not caller_id or not target_ids:
+            yield
+            return
+        token = object()
+        self._waits[token] = (caller_id, frozenset(target_ids))
+        try:
+            yield
+        finally:
+            self._waits.pop(token, None)
 
     async def await_jobs(
         self, handles: list[str], max_wait: float = DEFAULT_MAX_WAIT

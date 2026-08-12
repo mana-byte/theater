@@ -149,11 +149,20 @@ async def await_sessions(
 
     This blocks the current MCP request only; the daemon and every other
     participant continue running.
+
+    An unknown handle is rejected rather than quietly omitted, and `max_wait`
+    is capped daemon-side; a caller that wants longer awaits again.
     """
     if not session._resolved:
         await session.identify()
+    # Identify the caller so the daemon can refuse an await that would
+    # deadlock — waiting on a participant that is, right now, waiting on you.
+    # Without this the rail could only ever see awaits made from the CLI.
     jobs = await session.client.call(
-        "jobs.await", handles=handles, max_wait=max_wait
+        "jobs.await",
+        handles=handles,
+        max_wait=max_wait,
+        caller_id=session.participant_id,
     )
     assert isinstance(jobs, list)
     return jobs

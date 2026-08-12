@@ -387,17 +387,32 @@ failing.
 
 ## 8. Safety rails
 
-Three, in `theater/daemon/rails.py`, all checked before a spawn:
+In `theater/daemon/rails.py`. The depth and budget rails are checked before a
+spawn; the two cycle rails before an await.
 
 | Rail | Default | Behaviour |
 |---|---|---|
 | depth cap | `DEFAULT_DEPTH_CAP = 3` | reject spawns deeper than 3 levels |
-| cycle check | — | reject if the target is an ancestor of the caller |
+| lineage cycle | — | reject if the target is an ancestor of the caller |
+| wait cycle | — | reject if the target is already blocked on the caller |
 | tree budget | `DEFAULT_BUDGET = 20` | reject the next spawn once the tree hits 20 participants |
+| await ceiling | `MAX_AWAIT = 300s` | clamp `max_wait`, whatever the caller asks for |
 
-The cycle check works because **the spawn tree is the await tree**. A child
+The lineage check works because **the spawn tree was the await tree**. A child
 awaiting its own ancestor is a deadlock by construction, and it is cheap to
-refuse.
+refuse. `send` broke that equivalence — any participant can now prompt any
+other — so it is an approximation, not a proof: it catches a descendant about
+to block on an ancestor whose own await has not started yet, and misses two
+peers entirely.
+
+The wait check closes that gap by reading the awaits actually in flight
+(`JobManager.wait_graph`, in memory, an edge per blocked call). Adding
+caller -> target is refused when target can already reach caller. Two peers
+awaiting each other share no ancestry, so this is the only rail that sees
+them.
+
+Both need `caller_id`, which `theater_await_sessions` passes. Until v1.5 it
+did not, and both were unreachable from MCP — the guard existed and never ran.
 
 The budget rail **rejects the next spawn and nothing else**. It does not kill
 anything already running. An earlier `hard_stop_tree` was deleted in v1.1

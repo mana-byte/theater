@@ -16,6 +16,7 @@ from theater.daemon.rails import (
     check_budget,
     check_cycle,
     check_depth,
+    check_wait_cycle,
 )
 from theater.daemon.registry import Registry
 
@@ -117,6 +118,44 @@ def test_await_that_closes_a_cycle_is_rejected(store):
 
 def test_await_empty_targets_is_ok(store):
     check_cycle(store, "abc", [])  # does not raise
+
+
+# ---- cycles in the live wait graph --------------------------------------
+#
+# The lineage check cannot see these: peers share no ancestry, so there is
+# nothing to walk. What makes them a deadlock is that both awaits are calls
+# in flight right now.
+
+
+def test_two_peers_awaiting_each_other_is_refused():
+    """B is blocked on A. A must not now block on B."""
+    with pytest.raises(CycleDetected):
+        check_wait_cycle({"b": {"a"}}, "a", ["b"])
+
+
+def test_awaiting_someone_who_is_waiting_on_a_third_party_is_fine():
+    """B is busy waiting on C. A waiting on B still terminates."""
+    check_wait_cycle({"b": {"c"}}, "a", ["b"])  # does not raise
+
+
+def test_a_longer_loop_is_still_a_loop():
+    """A -> B -> C -> A. The walk has to follow the whole chain."""
+    with pytest.raises(CycleDetected):
+        check_wait_cycle({"b": {"c"}, "c": {"a"}}, "a", ["b"])
+
+
+def test_a_wait_graph_with_a_loop_elsewhere_does_not_hang():
+    """B and C are deadlocked already; asking about A must still return."""
+    check_wait_cycle({"b": {"c"}, "c": {"b"}}, "a", ["d"])  # does not raise
+
+
+def test_awaiting_yourself_is_refused():
+    with pytest.raises(CycleDetected):
+        check_wait_cycle({}, "a", ["a"])
+
+
+def test_an_empty_graph_refuses_nothing():
+    check_wait_cycle({}, "a", ["b", "c"])  # does not raise
 
 
 # ---- budget -------------------------------------------------------------
