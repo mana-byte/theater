@@ -14,7 +14,12 @@ from pathlib import Path
 
 import pytest
 
-from theater.daemon.observer import Observer
+from theater.daemon.observer import (
+    AWAITING_INPUT_TIMEOUT,
+    RELOCATE_TIMEOUT,
+    Observer,
+    TranscriptCursor,
+)
 from theater.harness.vibe import VibeHarness
 from theater.models import Status
 
@@ -273,3 +278,70 @@ async def test_an_observer_with_no_transcript_waits_without_spinning_out(
         assert kinds(registry.store) == []
     finally:
         await observer.aclose()
+
+
+# ---- the cursor -------------------------------------------------------
+
+
+def test_a_fresh_cursor_is_looking_for_a_file():
+    cursor = TranscriptCursor()
+    assert cursor.path is None
+    assert (cursor.offset, cursor.index, cursor.mtime) == (0, 0, 0)
+
+
+def test_advance_reports_growth_only_when_the_offset_moves():
+    cursor = TranscriptCursor()
+    cursor.attach(Path("/t.jsonl"), offset=10, index=2, mtime=1)
+    assert cursor.advance(10, 2, 5) is False  # touched, not grown
+    assert cursor.mtime == 5
+    assert cursor.advance(40, 3, 6) is True
+    assert (cursor.offset, cursor.index) == (40, 3)
+
+
+def test_detaching_forgets_the_file_and_the_clocks():
+    cursor = TranscriptCursor()
+    cursor.attach(Path("/t.jsonl"), offset=10, index=2, mtime=1)
+    cursor.begin_quiet(100.0)
+    cursor.detach()
+    assert cursor.path is None
+    assert cursor.offset == 0
+    assert cursor.quiet_since is None and cursor.screen_quiet_since is None
+
+
+def test_begin_quiet_starts_the_clocks_once_and_leaves_them_running():
+    cursor = TranscriptCursor()
+    cursor.begin_quiet(100.0)
+    cursor.begin_quiet(140.0)  # still the same silence
+    assert cursor.quiet_for(140.0) == 40.0
+    assert cursor.screen_quiet_for(140.0) == 40.0
+
+
+def test_the_screen_clock_survives_a_relocate_resetting_nothing():
+    """The v1 bug: one shared clock meant the screen check never fired.
+
+    The relocate fires at 5s and the screen check at 10s. If the relocate
+    reset the clock the screen check reads, 10s of silence never accumulates
+    and AWAITING_INPUT is unreachable. Only the screen check may reset its
+    own clock.
+    """
+    cursor = TranscriptCursor()
+    cursor.begin_quiet(0.0)
+
+    # Two relocate windows go by. Nothing resets anything.
+    assert cursor.quiet_for(6.0) > RELOCATE_TIMEOUT
+    assert cursor.quiet_for(11.0) > RELOCATE_TIMEOUT
+
+    # The screen check is still reachable, and throttles only itself.
+    assert cursor.screen_quiet_for(11.0) > AWAITING_INPUT_TIMEOUT
+    cursor.screen_quiet_since = 11.0
+    assert cursor.screen_quiet_for(12.0) < AWAITING_INPUT_TIMEOUT
+    assert cursor.quiet_for(12.0) == 12.0  # relocate clock untouched
+
+
+def test_new_bytes_restart_both_clocks():
+    cursor = TranscriptCursor()
+    cursor.begin_quiet(0.0)
+    cursor.screen_quiet_since = 5.0
+    cursor.stir()
+    assert cursor.quiet_since is None and cursor.screen_quiet_since is None
+    assert cursor.quiet_for(20.0) == 0.0

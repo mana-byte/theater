@@ -33,6 +33,8 @@ import asyncio
 import contextlib
 import logging
 import os
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from theater.daemon.registry import Registry
@@ -98,6 +100,64 @@ def _attach_point(path: Path) -> tuple[int, int, int, str | None]:
             _prefix, _sep2, last_bytes = head.rpartition(b"\n")
             last_line = last_bytes.decode("utf-8", errors="replace")
     return size, lines, mtime, last_line
+
+
+@dataclass
+class TranscriptCursor:
+    """Where one participant's watcher has read to, and how long it has waited.
+
+    Two quiet timers, not one. They measure the same silence but are reset by
+    different events, and collapsing them into a single timer is a bug we have
+    already shipped once: the relocate fires at 5s and used to reset the clock,
+    so the 10s screen check was never reached and AWAITING_INPUT never appeared.
+    """
+
+    path: Path | None = None
+    offset: int = 0
+    index: int = 0
+    mtime: int = 0
+    #: When the transcript went quiet, for the relocate timer.
+    quiet_since: float | None = None
+    #: The same silence, for the screen check. Reset independently.
+    screen_quiet_since: float | None = None
+
+    def attach(self, path: Path, offset: int, index: int, mtime: int) -> None:
+        self.path = path
+        self.offset = offset
+        self.index = index
+        self.mtime = mtime
+        self.stir()
+
+    def detach(self) -> None:
+        """Forget the file. The watcher drops back to searching for one."""
+        self.path = None
+        self.offset = self.index = self.mtime = 0
+        self.stir()
+
+    def stir(self) -> None:
+        """Something happened: both timers start counting again from zero."""
+        self.quiet_since = None
+        self.screen_quiet_since = None
+
+    def advance(self, offset: int, index: int, mtime: int) -> bool:
+        """Take a drain's result. True if the file grew."""
+        grew = offset != self.offset
+        self.offset, self.index, self.mtime = offset, index, mtime
+        return grew
+
+    def begin_quiet(self, now: float) -> None:
+        """Start whichever timers are not already running."""
+        if self.quiet_since is None:
+            self.quiet_since = now
+        if self.screen_quiet_since is None:
+            self.screen_quiet_since = now
+
+    def quiet_for(self, now: float) -> float:
+        return now - (self.quiet_since if self.quiet_since is not None else now)
+
+    def screen_quiet_for(self, now: float) -> float:
+        since = self.screen_quiet_since
+        return now - (since if since is not None else now)
 
 
 class Observer:
@@ -205,94 +265,95 @@ class Observer:
 
     async def _watch(self, pid: str, harness_name: str) -> None:
         harness = self.harnesses[harness_name]
-        path: Path | None = None
-        offset = 0
-        index = 0
-        mtime = 0
-        last_growth: float | None = None
-        last_screen_check: float | None = None
-        import time
+        cursor = TranscriptCursor()
 
         while not self._stopping.is_set():
             try:
-                if path is None:
-                    path = await self._locate(pid, harness)
-                    if path is None:
-                        await self._sleep(self.search)
-                        continue
-                    offset, index, mtime, last_line = await asyncio.to_thread(_attach_point, path)
-                    self._on_attach(pid, harness, path, index, last_line)
-                    last_growth = None
-                    last_screen_check = None
-                new_offset, new_index, new_mtime = self._drain(
-                    pid, harness, path, offset, index, mtime
+                if cursor.path is None and not await self._open(pid, harness, cursor):
+                    await self._sleep(self.search)
+                    continue
+                drained = self._drain(
+                    pid, harness, cursor.path, cursor.offset, cursor.index, cursor.mtime
                 )
-                if new_offset != offset:
-                    # The file grew; reset both timers.
-                    last_growth = None
-                    last_screen_check = None
-                    # If the agent was AWAITING_INPUT, new transcript bytes
-                    # mean it's working again — revert to WORKING.
-                    p = self.store.get_participant(pid)
-                    if p and p.status is Status.AWAITING_INPUT:
-                        self.registry.set_status(pid, Status.WORKING)
+                if cursor.advance(*drained):
+                    cursor.stir()
+                    self._unblock(pid)
                 else:
-                    # No growth this tick.
-                    now = time.monotonic()
-                    if last_growth is None:
-                        last_growth = now
-                    if last_screen_check is None:
-                        last_screen_check = now
-
-                    elapsed = now - last_growth
-
-                    # Check 1: re-locate after RELOCATE_TIMEOUT (5s).
-                    # Uses _relocate (cwd scan, no session_id) so Vibe's
-                    # session rotation is found.
-                    if elapsed > RELOCATE_TIMEOUT:
-                        new_path = await self._relocate(pid, harness)
-                        if new_path is not None and new_path != path:
-                            logger.info(
-                                "transcript for %s rotated: %s -> %s",
-                                pid, path, new_path,
-                            )
-                            path = new_path
-                            offset, index, mtime, last_line = await asyncio.to_thread(_attach_point, path)
-                            self._on_attach(pid, harness, path, index, last_line)
-                            last_growth = None
-                            last_screen_check = None
-                        else:
-                            # Same path — the agent is idle, not rotated.
-                            # Don't reset last_growth (that would prevent
-                            # the screen check from ever firing). Instead,
-                            # throttle the re-locate by resetting only
-                            # last_screen_check if the screen check hasn't
-                            # fired yet.
-                            pass
-
-                    # Check 2: after AWAITING_INPUT_TIMEOUT (10s) of no
-                    # growth, check the screen for a bare prompt. This uses
-                    # a SEPARATE timer so the 5s re-locate doesn't prevent
-                    # the 10s screen check from firing.
-                    screen_elapsed = now - last_screen_check
-                    if screen_elapsed > AWAITING_INPUT_TIMEOUT:
-                        await self._check_idle_screen(pid, harness)
-                        # Throttle: don't check again until another
-                        # AWAITING_INPUT_TIMEOUT has passed.
-                        last_screen_check = now
-                offset, index, mtime = new_offset, new_index, new_mtime
+                    await self._on_quiet(pid, harness, cursor)
             except asyncio.CancelledError:
                 raise
             except FileNotFoundError:
                 # Transcript went away: the session was deleted or rotated.
                 # Drop back to searching rather than dying.
-                path = None
-                offset = index = mtime = 0
-                last_growth = None
-                last_screen_check = None
+                cursor.detach()
             except Exception:
                 logger.exception("observing %s failed", pid)
             await self._sleep(self.poll)
+
+    async def _open(
+        self,
+        pid: str,
+        harness: Harness,
+        cursor: TranscriptCursor,
+        path: Path | None = None,
+    ) -> bool:
+        """Point the cursor at the end of a transcript. False if there is none.
+
+        Pass `path` to adopt a known file (a rotation); omit it to go looking.
+        """
+        if path is None:
+            path = await self._locate(pid, harness)
+            if path is None:
+                return False
+        offset, index, mtime, last_line = await asyncio.to_thread(_attach_point, path)
+        cursor.attach(path, offset, index, mtime)
+        self._on_attach(pid, harness, path, index, last_line)
+        return True
+
+    def _unblock(self, pid: str) -> None:
+        """New bytes mean the agent is working, whatever the screen said."""
+        p = self.store.get_participant(pid)
+        if p and p.status is Status.AWAITING_INPUT:
+            self.registry.set_status(pid, Status.WORKING)
+
+    async def _on_quiet(
+        self, pid: str, harness: Harness, cursor: TranscriptCursor
+    ) -> None:
+        """Nothing was written this tick. Run the two quiet timers.
+
+        Both read the same silence, and neither may reset the other: see
+        TranscriptCursor for what happens when they share a clock.
+        """
+        now = time.monotonic()
+        cursor.begin_quiet(now)
+
+        # After 5s, look for a rotation. Vibe opens a new session directory
+        # every turn, so a quiet file may just be the wrong file.
+        if cursor.quiet_for(now) > RELOCATE_TIMEOUT:
+            await self._follow_rotation(pid, harness, cursor)
+
+        # After 10s, ask the screen whether this silence is a prompt waiting
+        # on a human rather than an agent thinking.
+        if cursor.screen_quiet_for(now) > AWAITING_INPUT_TIMEOUT:
+            await self._check_idle_screen(pid, harness)
+            cursor.screen_quiet_since = now  # throttle to one check per window
+
+    async def _follow_rotation(
+        self, pid: str, harness: Harness, cursor: TranscriptCursor
+    ) -> None:
+        """Move to the newest transcript if the harness started a new one.
+
+        The same path back means the agent is idle, not rotated. That case
+        leaves both timers alone on purpose — the relocate must not reset the
+        clock the screen check is reading. It does mean the scan repeats every
+        poll while a participant sits idle; a directory listing is cheap enough
+        that trading it for a slower rotation pickup is not worth it.
+        """
+        path = await self._relocate(pid, harness)
+        if path is None or path == cursor.path:
+            return
+        logger.info("transcript for %s rotated: %s -> %s", pid, cursor.path, path)
+        await self._open(pid, harness, cursor, path=path)
 
     async def _locate(self, pid: str, harness: Harness) -> Path | None:
         """Find the transcript by session_id (fast) or cwd scan (fallback)."""
