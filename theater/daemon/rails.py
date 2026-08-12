@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 
+from theater.daemon import lineage
 from theater.daemon.store import Store
 from theater.models import BadRequest, now
 
@@ -74,40 +75,11 @@ def check_depth(
     parent = store.get_participant(parent_id)
     if parent is None:
         return  # parent vanished; the spawner will fail anyway
-    depth = _depth_of(store, parent_id)
+    depth = lineage.depth_of(store, parent_id)
     if depth + 1 > cap:
         raise DepthExceeded(
             f"spawn would be at depth {depth + 1}, cap is {cap}"
         )
-
-
-def _depth_of(store: Store, pid: str) -> int:
-    """Walk parent links to compute depth. Cycle-safe."""
-    depth = 0
-    seen = {pid}
-    current = store.get_participant(pid)
-    while current is not None and current.parent_id:
-        if current.parent_id in seen:
-            break
-        seen.add(current.parent_id)
-        depth += 1
-        current = store.get_participant(current.parent_id)
-    return depth
-
-
-def _root_of(store: Store, pid: str) -> str:
-    """Walk parent links to find the tree root. Cycle-safe."""
-    seen = {pid}
-    current = store.get_participant(pid)
-    if current is None:
-        return pid
-    while current.parent_id and current.parent_id not in seen:
-        seen.add(current.parent_id)
-        parent = store.get_participant(current.parent_id)
-        if parent is None:
-            break
-        current = parent
-    return current.id
 
 
 def check_cycle(
@@ -139,24 +111,11 @@ def check_cycle(
             )
         # Walk the caller's ancestry. If the target appears as an ancestor
         # of the caller, awaiting it would close a cycle.
-        ancestry = _ancestry(store, caller_id)
-        if target_id in ancestry:
+        if target_id in set(lineage.ancestor_ids(store, caller_id)):
             raise CycleDetected(
                 f"await would close a cycle: {target_id} is an ancestor "
                 f"of {caller_id}"
             )
-
-
-def _ancestry(store: Store, pid: str) -> set[str]:
-    """All ancestors of pid (parent, grandparent, etc.). Cycle-safe."""
-    ancestry: set[str] = set()
-    current = store.get_participant(pid)
-    while current is not None and current.parent_id:
-        if current.parent_id in ancestry:
-            break
-        ancestry.add(current.parent_id)
-        current = store.get_participant(current.parent_id)
-    return ancestry
 
 
 def check_budget(
@@ -173,31 +132,13 @@ def check_budget(
     """
     if parent_id is None:
         return  # root spawn, always allowed
-    root_id = _root_of(store, parent_id)
-    count = _tree_size(store, root_id)
+    root_id = lineage.root_of(store, parent_id)
+    count = len(lineage.subtree_ids(store, root_id))
     if count >= limit:
         raise BudgetExceeded(
             f"tree rooted at {root_id} has {count} participants, "
             f"budget is {limit}"
         )
-
-
-def _tree_size(store: Store, root_id: str) -> int:
-    """Count all descendants of root_id, including itself."""
-    count = 0
-    queue = [root_id]
-    seen: set[str] = set()
-    while queue:
-        pid = queue.pop(0)
-        if pid in seen:
-            continue
-        seen.add(pid)
-        count += 1
-        children = store.children_of(pid)
-        for child in children:
-            if child.id not in seen:
-                queue.append(child.id)
-    return count
 
 
 def hard_stop_tree(store: Store, root_id: str) -> list[str]:
@@ -206,21 +147,10 @@ def hard_stop_tree(store: Store, root_id: str) -> list[str]:
     Returns the list of killed participant ids. Used when a budget is
     exceeded and the subtree must be stopped immediately.
     """
-    killed: list[str] = []
-    queue = [root_id]
-    seen: set[str] = set()
-    while queue:
-        pid = queue.pop(0)
-        if pid in seen:
-            continue
-        seen.add(pid)
-        p = store.get_participant(pid)
-        if p is None:
-            continue
-        killed.append(pid)
-        children = store.children_of(pid)
-        for child in children:
-            if child.id not in seen:
-                queue.append(child.id)
+    killed = [
+        pid
+        for pid in lineage.subtree_ids(store, root_id)
+        if store.get_participant(pid) is not None
+    ]
     logger.warning("hard stop on tree %s: killing %d participants", root_id, len(killed))
     return killed

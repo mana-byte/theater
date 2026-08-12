@@ -14,6 +14,7 @@ physical fact: inbound delivery needs a pane to type into, and External has none
 
 from __future__ import annotations
 
+from theater.daemon import lineage
 from theater.daemon.store import Store
 from theater.harness import normalize
 from theater.models import (
@@ -56,35 +57,19 @@ class Registry:
         return roots
 
     def depth_of(self, pid: str) -> int:
-        """Distance from the root of the lineage. Roots are 0.
-
-        Walks parent links with a visited set: a cycle in the stored lineage
-        would otherwise hang the daemon, and the depth cap is a safety rail, so
-        it must not itself be the unsafe part.
-        """
-        depth = 0
-        seen = {pid}
-        current = self.store.get_participant(pid)
-        while current is not None and current.parent_id:
-            if current.parent_id in seen:
-                break
-            seen.add(current.parent_id)
-            depth += 1
-            current = self.store.get_participant(current.parent_id)
-        return depth
+        """Distance from the root of the lineage. Roots are 0."""
+        return lineage.depth_of(self.store, pid)
 
     def root_of(self, pid: str) -> str:
-        seen = {pid}
-        current = self.store.get_participant(pid)
-        if current is None:
+        """The top of this participant's lineage.
+
+        Unlike the bare walk, this insists the participant exists: a caller
+        asking the registry for a tree root wants a root, and silently getting
+        back the id it passed in reads as success.
+        """
+        if self.store.get_participant(pid) is None:
             raise NotFound(f"no participant {pid!r}")
-        while current.parent_id and current.parent_id not in seen:
-            seen.add(current.parent_id)
-            parent = self.store.get_participant(current.parent_id)
-            if parent is None:
-                break
-            current = parent
-        return current.id
+        return lineage.root_of(self.store, pid)
 
     # ---- writes --------------------------------------------------------
 
