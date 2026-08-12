@@ -43,10 +43,10 @@ invent a state we cannot see.
 
 from __future__ import annotations
 
-import os
 import shutil
 import sys
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -95,6 +95,31 @@ def clip(text: str | None) -> str:
     if len(text) <= MAX_TEXT:
         return text
     return text[:MAX_TEXT] + f"… (+{len(text) - MAX_TEXT} chars)"
+
+
+def whole(text: str | None) -> str:
+    """The text as written. What `read_transcript` asks for."""
+    return text or ""
+
+
+def clipper(clip_text: bool) -> Callable[[str | None], str]:
+    """Pick the text treatment a parse pass should apply.
+
+    Both parsers need this and both used to redefine it inline, once per
+    entry point. The choice is not a detail of either harness: it is whether
+    the caller is filling the bus (clip) or reading a transcript back in full.
+    """
+    return clip if clip_text else whole
+
+
+def last_screen_line(capture: str) -> str:
+    """The bottom-most line with anything on it, stripped.
+
+    Empty string for a blank pane, which no harness should count as a prompt:
+    an empty capture means the pane has not drawn yet, not that it is waiting.
+    """
+    lines = [line for line in capture.splitlines() if line.strip()]
+    return lines[-1].strip() if lines else ""
 
 
 class EventKind(StrEnum):

@@ -48,10 +48,17 @@ from theater.harness.base import (
     Harness,
     LaunchPlan,
     NativeChild,
-    clip,
+    clipper,
+    last_screen_line,
     theater_binary,
 )
 from theater.models import BadRequest
+
+#: Screen lines that mean "waiting for you". Vibe's prompt is `❯` (U+276F);
+#: the variants cover trailing space and the boxed form. Anything after the
+#: prompt is someone typing, which is presence, not idleness — so these must
+#: stay exact matches.
+IDLE_PROMPTS = ("❯", "❯ ", "> ❯")
 
 #: How many session directories to inspect when searching by working directory.
 #: They are scanned newest first and a live session is always near the top, so
@@ -175,8 +182,7 @@ class VibeHarness(Harness):
         if not isinstance(record, dict):
             return []
 
-        def _clip(text):
-            return clip(text) if clip_text else (text or "")
+        _clip = clipper(clip_text)
 
         role = record.get("role")
         if role == "user":
@@ -263,10 +269,4 @@ class VibeHarness(Harness):
         someone is typing — but that's human presence, not idle. If the
         last line is agent output, the agent is still rendering.
         """
-        lines = [line for line in capture.splitlines() if line.strip()]
-        if not lines:
-            return False
-        last = lines[-1].strip()
-        # Vibe's prompt is `❯` (U+276F). When idle, the last line is
-        # just the prompt with nothing after it.
-        return last in ("❯", "❯ ", "> ❯")
+        return last_screen_line(capture) in IDLE_PROMPTS

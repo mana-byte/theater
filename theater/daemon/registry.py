@@ -104,10 +104,9 @@ class Registry:
         )
         return p
 
-    def attach_pane(self, pid: str, pane: str, *, harness_pid: int | None = None) -> Participant:
+    def attach_pane(self, pid: str, pane: str) -> Participant:
         p = self.get(pid)
         p.tmux_pane = pane
-        p.pid = harness_pid
         p.last_activity = now()
         self.store.upsert_participant(p)
         self.store.bus_append("participant.pane", to_id=pid, payload={"pane": pane})

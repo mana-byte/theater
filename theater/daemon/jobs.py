@@ -162,17 +162,16 @@ class JobManager:
                 continue
             event = self._events.get(h)
             if event is None:
-                # Lost the event (daemon restart). Create a new one and
-                # let the caller poll. It will be set if the job is already
-                # finished.
+                # Lost the event (daemon restart). The job is running — the
+                # guard above skipped every other state — so a fresh unset
+                # event is right: finish() will set it, or we time out and
+                # the caller re-awaits.
                 event = asyncio.Event()
                 self._events[h] = event
-                if job.state != JobState.RUNNING:
-                    event.set()
             events.append(event)
 
         if events:
-            done, pending = await asyncio.wait(
+            _done, pending = await asyncio.wait(
                 [asyncio.create_task(e.wait()) for e in events],
                 timeout=max_wait,
             )

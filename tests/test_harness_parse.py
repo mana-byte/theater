@@ -288,3 +288,97 @@ def test_status_is_only_ever_idle_or_working():
     assert {status_after(e) for e in events} <= {Status.IDLE, Status.WORKING}
     assert status_after(events[-1]) is Status.IDLE
     assert status_after(events[0]) is Status.WORKING
+
+
+# ---- clip_text ---------------------------------------------------------
+
+LONG = "x" * (MAX_TEXT * 3)
+
+#: One record per branch that carries text, so the parametrization fails if a
+#: branch forgets to honour clip_text. That has happened: a Claude Code user
+#: text block clipped unconditionally, which `read_transcript` then served as
+#: the "full" text.
+UNCLIPPED_CASES = [
+    (VibeHarness(), {"role": "user", "content": LONG}),
+    (VibeHarness(), {"role": "assistant", "content": LONG}),
+    (VibeHarness(), {"role": "tool", "content": LONG, "name": "bash"}),
+    (
+        ClaudeCodeHarness(),
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": LONG}]}},
+    ),
+    (
+        ClaudeCodeHarness(),
+        {"type": "user", "message": {"content": LONG}},
+    ),
+    (
+        ClaudeCodeHarness(),
+        {
+            "type": "user",
+            "message": {"content": [{"type": "text", "text": LONG}]},
+        },
+    ),
+    (
+        ClaudeCodeHarness(),
+        {
+            "type": "user",
+            "message": {"content": [{"type": "tool_result", "content": LONG}]},
+        },
+    ),
+    (
+        ClaudeCodeHarness(),
+        {"type": "system", "level": "error", "error": LONG},
+    ),
+]
+
+
+@pytest.mark.parametrize("harness,record", UNCLIPPED_CASES)
+def test_clip_text_false_returns_the_whole_text(harness, record):
+    """read_transcript asks for the record as written, on every branch."""
+    events = harness.parse(json.dumps(record), 0, clip_text=False)
+    assert events, "expected the record to parse into at least one event"
+    assert any(e.text == LONG for e in events)
+
+
+@pytest.mark.parametrize("harness,record", UNCLIPPED_CASES)
+def test_the_same_branches_clip_by_default(harness, record):
+    events = harness.parse(json.dumps(record), 0)
+    assert events
+    assert all(len(e.text) <= MAX_TEXT + 40 for e in events)
+
+
+# ---- idle screens ------------------------------------------------------
+
+
+@pytest.mark.parametrize("harness", [ClaudeCodeHarness(), VibeHarness()])
+@pytest.mark.parametrize("capture", ["", "\n", "   \n  \n"])
+def test_a_blank_pane_is_not_a_prompt(harness, capture):
+    """An empty capture means the pane has not drawn, not that it is waiting."""
+    assert harness.is_idle_screen(capture) is False
+
+
+@pytest.mark.parametrize(
+    "harness,capture",
+    [
+        (VibeHarness(), "some output\n❯"),
+        (VibeHarness(), "some output\n❯ "),
+        (VibeHarness(), "some output\n❯\n\n"),
+        (ClaudeCodeHarness(), "some output\n>"),
+        (ClaudeCodeHarness(), "some output\n> "),
+    ],
+)
+def test_a_bare_prompt_on_the_last_line_is_idle(harness, capture):
+    assert harness.is_idle_screen(capture) is True
+
+
+@pytest.mark.parametrize(
+    "harness,capture",
+    [
+        (VibeHarness(), "❯ what model are you"),
+        (VibeHarness(), "❯\nstill rendering output"),
+        (ClaudeCodeHarness(), "> what model are you"),
+        (ClaudeCodeHarness(), "> \nstill rendering output"),
+    ],
+)
+def test_text_after_the_prompt_is_not_idle(harness, capture):
+    """Someone typing is presence, and output still landing is work."""
+    assert harness.is_idle_screen(capture) is False

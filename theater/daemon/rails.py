@@ -17,10 +17,13 @@ Three rails:
    The check walks the await chain from the target upward: if the caller
    appears in that chain, the await is rejected with `cycle_detected`.
 
-3. **Per-tree budget** with hard subtree stop. A budget is allocated to
-   a tree root and decremented per spawn. When it hits zero, the subtree
-   is stopped: no further spawns are allowed, and a `budget_exceeded`
-   error is returned. The only backstop when heuristics fail.
+3. **Per-tree budget**. A tree may hold so many participants and no more,
+   counted from its root, so a runaway spawner exhausts its own allowance
+   rather than the machine. Reaching the limit rejects the next `spawn`
+   with `budget_exceeded`; it does not stop the participants already
+   running. Killing a live subtree on a count alone would destroy work a
+   human may be watching, and the régie already offers a kill key. The
+   backstop is that nothing new starts.
 """
 
 from __future__ import annotations
@@ -29,7 +32,7 @@ import logging
 
 from theater.daemon import lineage
 from theater.daemon.store import Store
-from theater.models import BadRequest, now
+from theater.models import BadRequest
 
 logger = logging.getLogger("theater.rails")
 
@@ -139,18 +142,3 @@ def check_budget(
             f"tree rooted at {root_id} has {count} participants, "
             f"budget is {limit}"
         )
-
-
-def hard_stop_tree(store: Store, root_id: str) -> list[str]:
-    """Mark all participants in a tree as dead, for budget enforcement.
-
-    Returns the list of killed participant ids. Used when a budget is
-    exceeded and the subtree must be stopped immediately.
-    """
-    killed = [
-        pid
-        for pid in lineage.subtree_ids(store, root_id)
-        if store.get_participant(pid) is not None
-    ]
-    logger.warning("hard stop on tree %s: killing %d participants", root_id, len(killed))
-    return killed

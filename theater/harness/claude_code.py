@@ -50,10 +50,15 @@ from theater.harness.base import (
     Harness,
     LaunchPlan,
     NativeChild,
-    clip,
+    clipper,
+    last_screen_line,
     theater_binary,
 )
 from theater.models import BadRequest
+
+#: Screen lines that mean "waiting for you". Anything after the prompt is
+#: someone typing, which is presence, not idleness — so these stay exact.
+IDLE_PROMPTS = (">", "> ")
 
 #: Records to read before giving up on finding a `cwd` in a candidate
 #: transcript. The first record is a `permission-mode` entry that has none;
@@ -207,7 +212,7 @@ class ClaudeCodeHarness(Harness):
             return [
                 Event(
                     kind=EventKind.ERROR,
-                    text=clip(text) if clip_text else (text or ""),
+                    text=clipper(clip_text)(text),
                     ts=ts,
                     raw_index=index,
                     # An API error ends the attempt; the agent is waiting again.
@@ -220,8 +225,7 @@ class ClaudeCodeHarness(Harness):
         self, record: dict, message: dict, ts: float | None, index: int,
         *, clip_text: bool = True,
     ) -> list[Event]:
-        def _clip(text):
-            return clip(text) if clip_text else (text or "")
+        _clip = clipper(clip_text)
 
         stop = message.get("stop_reason")
         turn_end = stop is not None and stop != "tool_use"
@@ -273,8 +277,7 @@ class ClaudeCodeHarness(Harness):
         return out
 
     def _user(self, message: dict, ts: float | None, index: int, *, clip_text: bool = True) -> list[Event]:
-        def _clip(text):
-            return clip(text) if clip_text else (text or "")
+        _clip = clipper(clip_text)
 
         content = message.get("content")
         if isinstance(content, str):
@@ -306,7 +309,7 @@ class ClaudeCodeHarness(Harness):
                 out.append(
                     Event(
                         kind=EventKind.USER,
-                        text=clip(block.get("text")),
+                        text=_clip(block.get("text")),
                         ts=ts,
                         raw_index=index,
                     )
@@ -349,8 +352,4 @@ class ClaudeCodeHarness(Harness):
         output. When a human is typing, the last line has text after
         the prompt.
         """
-        lines = [line for line in capture.splitlines() if line.strip()]
-        if not lines:
-            return False
-        last = lines[-1].strip()
-        return last in (">", "> ")
+        return last_screen_line(capture) in IDLE_PROMPTS

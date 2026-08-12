@@ -23,7 +23,6 @@ import os
 import signal
 import socket as _socket
 from pathlib import Path
-from typing import Any
 
 from theater import paths, protocol
 from theater.daemon.jobs import JobManager, JobState

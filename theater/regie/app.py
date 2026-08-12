@@ -26,14 +26,13 @@ async daemon calls; the app runs them as background workers.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.reactive import reactive
-from textual.widgets import Footer, Header, RichLog, Static, Label
+from textual.widgets import Footer, Header, Label, RichLog
 from rich.text import Text
 
 from theater.client import DaemonClient
@@ -336,21 +335,6 @@ class RegieApp(App):
             self.notify(f"staged {node.get('harness', '?')} ({pane})")
         except Exception as exc:
             self.notify(f"stage failed: {exc}", severity="error")
-
-    def _stage_dimensions(self) -> tuple[int, int]:
-        """Approximate width/height for the staged pane.
-
-        The sidebar takes 52 columns. The stage gets the rest of the terminal
-        width. Height is the full terminal height minus the header/footer.
-        This is approximate — tmux's own layout engine will adjust, and the
-        next resize cycle will correct any drift.
-        """
-        import shutil
-
-        cols, rows = shutil.get_terminal_size((120, 40))
-        width = max(cols - 52, 20)
-        height = max(rows - 4, 10)
-        return width, height
 
     async def action_kill(self) -> None:
         """Kill the selected participant."""
