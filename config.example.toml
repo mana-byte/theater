@@ -6,10 +6,14 @@
 # real one lives at $THEATER_HOME/config.toml, and `theater config path` prints
 # where that is on your machine.
 #
-# Every key below is commented out and shows the value Theater uses when it is
-# absent. Uncomment only what you want to change — a key set to its own default
-# is not a no-op, it pins that value against future changes and makes
-# `theater config` report it as yours rather than ours.
+# Every key below is set to the value Theater uses when it is absent, so this
+# file is a complete, working config that changes nothing. Edit what you want
+# to differ and delete the rest.
+#
+# Writing a key down does have one effect: `theater config` will report it as
+# coming from your file rather than from the code, and if a future version
+# changes a default, your copy keeps the old value. Delete a key to track the
+# code's default instead.
 #
 # Read once, at daemon start. `theater restart` applies an edit.
 # Machine-scoped: there is no project-local config, because there is one daemon
@@ -26,6 +30,9 @@
 # Harness used when `theater spawn` is given no harness name, and sorted first
 # in the régie's ctrl+p palette. Must name a harness that exists — built-in,
 # declared below, or a plugin — checked at daemon start.
+#
+# Left commented because its default is "no favourite", and TOML has no way to
+# write that: the key is either absent or set to a name.
 # favourite = "vibe"
 
 
@@ -36,30 +43,32 @@
 #   catppuccin-latte catppuccin-macchiato catppuccin-mocha dracula flexoki
 #   gruvbox monokai nord rose-pine rose-pine-dawn rose-pine-moon
 #   solarized-dark solarized-light textual-dark textual-light tokyo-night
-# Unset means Textual's own default. A name Textual does not know is reported
-# in the régie's status line, not crashed on: a bad theme is cosmetic.
+# Unset means Textual's own default, which is why this one is left commented:
+# there is no theme name that means "whatever Textual picks". A name Textual
+# does not know is reported in the régie's status line, not crashed on — a bad
+# theme is cosmetic.
 # theme = "nord"
 
 # How often the participant tree is rebuilt, in seconds.
-# tree_interval = 1.0
+tree_interval = 1.0
 
 # How often the bus pane polls for new events, in seconds.
-# bus_interval = 0.4
+bus_interval = 0.4
 
 # How many bus events to pull per poll.
-# bus_batch = 50
+bus_batch = 50
 
 
 [rails]
 
 # Maximum depth of a spawn tree; roots are depth 0. With the default, a root
 # may spawn a child, which may spawn a grandchild, which may not spawn.
-# depth_cap = 3
+depth_cap = 3
 
 # How many participants one tree may hold before further spawns are refused.
 # The two together are what stops a runaway agent filling the machine with
 # panes, so raise them deliberately.
-# budget = 20
+budget = 20
 
 
 [observer]
@@ -70,21 +79,21 @@
 
 # How often to check a known transcript for new bytes. This is what the régie
 # renders, and a second of lag on "what is it doing right now" is visible.
-# poll_interval = 0.25
+poll_interval = 0.25
 
 # How often to look for a transcript that has not appeared yet. Slower because
 # it is a directory scan rather than a stat.
-# search_interval = 2.0
+search_interval = 2.0
 
 # How long a transcript may be quiet before the observer re-locates it. Vibe
 # opens a new session directory on some turns; without this the observer stays
 # locked onto a file that will never grow again.
-# relocate_timeout = 5.0
+relocate_timeout = 5.0
 
 # How long a transcript may be quiet before the screen is checked for a bare
 # prompt — which is how AWAITING_INPUT is detected. Long enough that a slow
 # tool call does not trigger it, short enough that a human watching notices.
-# awaiting_input_timeout = 10.0
+awaiting_input_timeout = 10.0
 
 # How often to read the screen of a harness that has no transcript at all (one
 # declared in [harness.*] below). Much faster than the timeout above, because
@@ -92,15 +101,18 @@
 # only evidence a turn ended, and a caller is blocked on it. A turn is called
 # finished only when two consecutive polls agree, so this is also half the
 # detection latency.
-# screen_interval = 1.0
+screen_interval = 1.0
 
 # How often the observer reconciles its watch tasks against the registry.
-# sync_interval = 1.0
+sync_interval = 1.0
 
 
 # ---------------------------------------------------------------------------
 # Declaring a harness
 # ---------------------------------------------------------------------------
+#
+# Unlike the settings above, everything in this section stays commented: these
+# are examples, not defaults. Theater ships no declared harnesses.
 #
 # [harness.<name>] teaches Theater a CLI it does not ship an adapter for. It
 # covers launching, MCP wiring, presence, the icon and unmanaged-pane

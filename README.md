@@ -189,8 +189,10 @@ every setting with its default and is safe to copy as-is:
 cp config.example.toml ~/.theater/config.toml
 ```
 
-Everything in it is commented out, so copying it changes no behaviour —
-uncomment what you want to change. The short version:
+Every setting in it is written out at the value Theater uses anyway, so copying
+it changes no behaviour — edit what you want to differ and delete the rest.
+Deleting a key is not the same as leaving it: a key you keep is yours, and will
+not follow a default that changes in a later version. The short version:
 
 ```toml
 [theater]
