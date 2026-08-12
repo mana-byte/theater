@@ -51,6 +51,7 @@ import contextlib
 import logging
 import time
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from theater.config import ObserverSection
@@ -114,13 +115,65 @@ def screen_result(capture: str) -> str:
     return "\n".join(lines).strip()
 
 
-#: How many answered turn ids one participant remembers. Its only job is to
+#: How many handled turn ids one participant remembers. Its only job is to
 #: absorb a harness announcing the same boundary twice, and those duplicates
 #: are adjacent — Claude writes them as consecutive records of one split
 #: message — so a small window is enough. Bounded because a watcher lives as
 #: long as its participant does, and an unbounded set here would be a slow
 #: leak on a session that runs for a day.
 _ANSWERED_TURNS = 32
+
+#: How much of a prompt has to reappear before a turn is called an answer to
+#: it. Not the whole prompt: every harness clips what it reports at
+#: `harness.MAX_TEXT`, so a long prompt never comes back whole, and a wrapper
+#: around it would defeat equality anyway. Long enough to be specific — two
+#: prompts sharing 120 characters are the same question by any reading — and
+#: short enough that the clip point is nowhere near it.
+_PROMPT_MATCH = 120
+
+
+def answers_prompt(heard: Sequence[str], prompt: str | None) -> bool:
+    """Did this turn begin with the prompt we injected?
+
+    Every harness Theater drives echoes an injected prompt back as a user
+    record before the reply — verified against captures of one real
+    round-trip per harness in `tests/test_turn_identity.py`, not assumed. So
+    the user text a turn opens with says who the turn belongs to, and a turn
+    that opens with something else belongs to whoever typed it.
+
+    Absence of evidence answers yes. A participant we attached to mid-turn, a
+    harness that keeps no user record, and the screen-derived boundary of a
+    harness with no transcript at all have no user text to offer, and refusing
+    to answer there would hang every caller of those. The gate exists to catch
+    positive evidence that a turn is *someone else's*, and nothing weaker.
+
+    Matching is a normalised prefix rather than equality, in both directions:
+    whitespace survives injection unreliably, the reported text is clipped,
+    and a harness is free to wrap the prompt in scaffolding of its own.
+    """
+    if not prompt or not prompt.strip():
+        # A spawn with no prompt has nothing to claim. Answering keeps the
+        # documented behaviour where such a job soaks up the next turn.
+        return True
+    if not heard:
+        return True
+    needle = " ".join(prompt.split())[:_PROMPT_MATCH]
+    return any(needle in " ".join(text.split()) for text in heard)
+
+
+@dataclass(frozen=True, slots=True)
+class Turn:
+    """One finished turn: what the agent said, and what it was replying to.
+
+    A record rather than a pair, because both halves are sequences of text and
+    a caller that transposes them gets no complaint from the type checker.
+    """
+
+    #: Assistant text, blank-line joined in arrival order.
+    said: str
+    #: User text that arrived during the turn, in arrival order. Normally the
+    #: one prompt that opened it; empty when we attached mid-turn.
+    heard: tuple[str, ...] = ()
 
 
 @dataclass
@@ -141,7 +194,10 @@ class TurnAccumulator:
 
     #: Assistant text seen since the last boundary, in arrival order.
     _blocks: list[str] = field(default_factory=list)
-    #: Turn ids already answered, newest last. A deque and a set together: the
+    #: User text seen since the last boundary, in arrival order. Kept for
+    #: attribution, not for display: it is how a turn says whose it is.
+    _heard: list[str] = field(default_factory=list)
+    #: Turn ids already handled, newest last. A deque and a set together: the
     #: set answers the question, the deque decides what to forget.
     _answered: deque[str] = field(default_factory=deque)
     _seen: set[str] = field(default_factory=set)
@@ -150,21 +206,31 @@ class TurnAccumulator:
         if text:
             self._blocks.append(text)
 
-    def take(self) -> str:
-        """The turn's text, and forget it. Blank-line joined, as written."""
-        text = "\n\n".join(self._blocks)
-        self._blocks.clear()
-        return text
+    def hear(self, text: str) -> None:
+        if text:
+            self._heard.append(text)
 
-    def already_answered(self, turn_id: str | None) -> bool:
-        """Has this exact turn already been handed to a job?
+    def take(self) -> Turn:
+        """The finished turn, and forget it. Text blank-line joined, as written."""
+        turn = Turn("\n\n".join(self._blocks), tuple(self._heard))
+        self._blocks.clear()
+        self._heard.clear()
+        return turn
+
+    def already_handled(self, turn_id: str | None) -> bool:
+        """Has this exact turn already been dealt with?
+
+        Dealt with, not answered: a turn we deliberately declined to answer
+        because it was a human's is handled too. Were it not marked, Claude's
+        duplicate boundary would arrive with the accumulator already emptied,
+        find no user text, read that as no evidence, and answer after all.
 
         An unidentified boundary is never a duplicate: a harness that publishes
         no turn id gets one answer per boundary, which is what it had before.
         """
         return turn_id is not None and turn_id in self._seen
 
-    def mark_answered(self, turn_id: str | None) -> None:
+    def mark_handled(self, turn_id: str | None) -> None:
         if turn_id is None or turn_id in self._seen:
             return
         self._answered.append(turn_id)
@@ -453,19 +519,21 @@ class Observer:
             if event.kind is EventKind.ASSISTANT and event.text:
                 clock.last_text = event.text
                 turns.say(event.text)
+            if event.kind is EventKind.USER and event.text:
+                turns.hear(event.text)
             if event.turn_end:
                 # Whatever the turn said, whether it came in this batch or an
                 # earlier one. Always taken, even when the boundary is a
                 # duplicate we will not answer: the text belongs to the turn
                 # that just ended and must not spill into the next one.
-                spoken = turns.take()
-                if not turns.already_answered(event.turn_id):
+                turn = turns.take()
+                if not turns.already_handled(event.turn_id):
                     # The boundary's own text still wins where it has any.
                     # Codex repeats the whole reply on `task_complete` after a
                     # preamble has already gone by, so joining the two would
                     # hand the caller the preamble twice.
-                    self._answer_turn(pid, event.text or spoken)
-                    turns.mark_answered(event.turn_id)
+                    self._answer_turn(pid, event.text or turn.said, turn.heard)
+                    turns.mark_handled(event.turn_id)
                 # Rescue salvages `last_text` when no boundary is ever read.
                 # Past this one, anything said before it has been delivered
                 # and is not a candidate answer to whatever comes next — a
@@ -700,7 +768,9 @@ class Observer:
         )
         self._release_jobs(pid, clock.last_text, error_code=RESCUE_CODE)
 
-    def _answer_turn(self, pid: str, result_text: str) -> None:
+    def _answer_turn(
+        self, pid: str, result_text: str, heard: Sequence[str] = ()
+    ) -> None:
         """One turn ended: hand its text to the one job that was waiting for it.
 
         The oldest running job, and only that one. Prompts arrive at a pane in
@@ -709,6 +779,18 @@ class Observer:
         boundary — which is what this used to do — gave a queued second caller
         the reply to the first caller's question, and did it instantly, before
         its prompt had been read.
+
+        `heard` is what the turn was replying to, and it is checked against the
+        job's prompt before the job is resolved. Position alone was not enough:
+        a human typing into a pane that has a job waiting produces a perfectly
+        ordinary turn end, and the peer got the operator's conversation as the
+        answer to its question. Both halves of that are bad — a wrong answer,
+        and the operator's private text handed to another agent.
+
+        A turn that does not answer the waiting job leaves it running, which
+        is the honest state: the prompt is still in the pane's queue and the
+        reply is still coming. If it never does, rescue releases the job with
+        `RESCUE_CODE` as before.
 
         A participant with nothing running is the normal case for a session
         nobody sent to: no-op.
@@ -723,8 +805,16 @@ class Observer:
         if self.jobs is None:
             return
         job = self.store.oldest_running_job_for_target(pid)
-        if job is not None:
-            self._finish(job.handle, result_text)
+        if job is None:
+            return
+        if not answers_prompt(heard, job.prompt):
+            logger.info(
+                "turn at %s replies to something else; %s keeps waiting",
+                pid,
+                job.handle,
+            )
+            return
+        self._finish(job.handle, result_text)
 
     def _release_jobs(
         self, pid: str, result_text: str, *, error_code: str | None = None

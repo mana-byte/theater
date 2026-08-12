@@ -399,8 +399,8 @@ def test_the_memory_of_answered_turns_is_bounded():
     """
     turns = TurnAccumulator()
     for n in range(_ANSWERED_TURNS * 3):
-        turns.mark_answered(f"turn-{n}")
+        turns.mark_handled(f"turn-{n}")
 
-    assert turns.already_answered(f"turn-{_ANSWERED_TURNS * 3 - 1}") is True
-    assert turns.already_answered("turn-0") is False
+    assert turns.already_handled(f"turn-{_ANSWERED_TURNS * 3 - 1}") is True
+    assert turns.already_handled("turn-0") is False
     assert len(turns._seen) == _ANSWERED_TURNS
