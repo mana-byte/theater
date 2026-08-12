@@ -104,7 +104,9 @@ produces an event, and every `theater_send` to it hangs.
 
 ## The interface, method by method
 
-Six abstract methods. Two are about launching, four about observing.
+Six abstract methods. Two are about launching, four about observing. There is a
+seventh, `open_source`, which is not abstract and which only a harness that
+writes no transcript needs — see "When the output is not a file" below.
 
 ### `plan_launch(*, participant_id, prompt, config_path, approval) -> LaunchPlan`
 
@@ -250,6 +252,69 @@ false positive marks a working agent idle and hides activity from the régie.
 The helper `last_screen_line(capture)` gives the bottom-most non-empty line,
 stripped. Match it *exactly* against your prompt strings, not as a prefix:
 anything after the prompt is a human typing, which is presence, not idleness.
+
+## When the output is not a file
+
+Everything above assumes the harness appends to a transcript. Most do. If yours
+writes to a database or offers only an event stream, override one more method —
+`open_source` — and the byte-offset model gets out of your way:
+
+```python
+def open_source(self, *, cwd, session_id=None, after=None) -> Source:
+    return NovaSource(cwd=cwd)
+```
+
+A `Source` is a live view of one participant's output. Unlike the rest of the
+interface it is an object with a lifetime, so it is the right place for a
+connection or a subscription you need to hold open:
+
+```python
+class NovaSource(Source):
+    async def read(self) -> Batch:       # required
+    async def refresh(self) -> Batch:    # optional: re-check where to read from
+    async def aclose(self) -> None:      # optional: release what you hold
+```
+
+`read` is polled and returns a `Batch`:
+
+| field | meaning |
+|---|---|
+| `events` | normalized `Event`s, exactly as `parse` would produce |
+| `progressed` | you consumed new input, even if it produced no events |
+| `status` | an authoritative status, when you can actually tell |
+| `attached` | an `Attachment`, the first time you start reading somewhere |
+| `waiting` | there is nothing to read *from* yet |
+
+Three things are worth getting right.
+
+**`progressed` is not "produced events".** Bookkeeping records that parse to
+nothing still mean the agent is alive. If that read as silence, the rescue timer
+would fire mid-turn and hand a caller a half-finished answer. Report it. The
+reverse is free — events are counted as progress whether you set the flag or
+not.
+
+**`status` is for sources that can ask.** Tailing an append-only file gives no
+turn-end signal beyond what the records say, so the observer infers status from
+silence. If your harness will tell you plainly that a session went idle, put it
+here and the guessing is skipped for your participants. Leave it `None` and you
+get the same inference everyone else does.
+
+**Hold mutable records back.** A byte offset into an append-only file is a proof
+that everything behind it is final. A cursor into a table is only a watermark:
+rows behind it may still change. Emit a record when it is terminal, not while it
+is still being written — the bus has no retraction.
+
+What you do *not* implement is everything the observer does with a batch: status
+transitions, job completion, the rescue path, dead detection, the awaiting-input
+check. That policy is written once and it is where every observation bug in this
+project has been. A source reports facts; it must not touch the registry, the
+bus or the job manager.
+
+`find_transcript`, `session_id` and `parse` are still abstract, so a plugin with
+a custom source has to define them. Return `None`, `None` and `[]`. They are
+what the default source is built from, and `read_transcript` still calls them
+directly — an agent asking your participant for its full transcript gets nothing
+until that path grows a source-aware version too.
 
 ## A complete plugin
 

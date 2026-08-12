@@ -194,7 +194,7 @@ untruncated text.
 
 ## 6. Observation
 
-The observer (`theater/daemon/observer.py`, the largest module at 528 lines)
+The observer (`theater/daemon/observer.py`, the largest module at 607 lines)
 tails the transcript files the harnesses already write.
 
 **Why not have agents self-report?** Two reasons, and the second is decisive:
@@ -205,6 +205,48 @@ tails the transcript files the harnesses already write.
    of adoption is that you can point Theater at a session already running.
 
 The observer therefore never asks. It reads.
+
+### Two jobs, one seam
+
+Watching a session is two jobs that look like one:
+
+```
+job 1: get the text        job 2: decide what it means
+────────────────────────   ──────────────────────────────
+find the file              IDLE / WORKING transitions
+open it, tail it           settling before IDLE is believed
+follow a rotation          60s job rescue
+skip to EOF on attach      dead detection, awaiting-input
+```
+
+Job 1 is harness-shaped. Vibe rotates its session directory mid-turn; Claude
+appends to one file; a harness that keeps its sessions in a shared SQLite
+database has no byte offset to hold onto at all. Job 2 is harness-agnostic
+policy, and it is where every observation bug in this project has been.
+
+So job 1 is a replaceable seam and job 2 is not. `Harness.open_source()`
+returns a `Source` (`theater/harness/source.py`); the default is
+`TranscriptSource`, which is the file tailing that used to live inline in the
+observer. A plugin that overrides it returns `Batch(events, progressed, status,
+attached, waiting)` from `poll()` and the observer's policy runs unchanged on
+top.
+
+Three fields in that contract are load-bearing:
+
+- `progressed` is not "produced events". A bookkeeping record advances the file
+  with zero events; if that read as silence the 60s rescue would fire
+  mid-turn.
+- `status` lets a source that knows the agent's real state say so, instead of
+  having it inferred from the last event. That is the channel for a harness
+  with an authoritative status column.
+- `waiting=True` means "nothing to read from yet" — no session file, no row.
+  The observer sleeps and runs no timers, because a quiet timer against a
+  source that has never spoken measures nothing.
+
+**Why not let a plugin bring its own observer?** Because job 2 would then be
+written once per harness, and the settling logic, the rescue and the
+relocation timers are exactly the code that took a dozen bug fixes to get
+right. The seam is deliberately placed below the policy, not around it.
 
 ### Attaching
 
@@ -440,7 +482,7 @@ theater/
 ├── paths.py 35           $THEATER_HOME layout
 ├── formatting.py 109     shared CLI/régie rendering, no rich/textual
 ├── daemon/
-│   ├── observer.py 708   transcript tailing, status, job completion and rescue
+│   ├── observer.py 607   status policy, job completion and rescue
 │   ├── server.py 348     lifecycle only: socket, pidfile, reaper, wiring
 │   ├── methods.py 332    17 RPC handlers
 │   ├── registry.py 233   tier assignment, pane eviction, lineage
@@ -453,19 +495,19 @@ theater/
 │   ├── schema.py 85      table metadata, the one place columns are declared
 │   ├── lineage.py 73     ancestor_ids, depth_of, root_of, subtree_ids
 │   └── migrations/       alembic env + versions/
-├── harness/  __init__.py 318 (registry + install) · base.py 293
-│            plugins.py 183 (the loader)
+├── harness/  __init__.py 323 (registry + install) · base.py 328
+│            source.py 310 (the observer's job-1 seam) · plugins.py 183 (loader)
 │            builtin/plugins/  codex.py 414 · claude.py 367 · vibe.py 284
 ├── mcp/      tools.py 206 · server.py 152
 ├── tmux/     client.py 261 · panes.py 167 · presence.py 56
 └── regie/    app.py 534 · tree.py 131 · palette.py 64 · bus_view.py 37
 ```
 
-Roughly 8,100 lines, 535 tests.
+Roughly 8,400 lines, 537 tests.
 
 The v1.1 refactor split `daemon/server.py` (lifecycle vs. methods vs. harness
 detection), broke the `store ↔ jobs` import cycle by moving `Job` into
-`models.py`, gave the observer's watch loop an explicit `TranscriptCursor`, and
+`models.py`, gave the observer's watch loop an explicit cursor object, and
 consolidated four hand-rolled tree walks into `lineage.py`. It found three real
 bugs in the process, which is the argument for having done it.
 

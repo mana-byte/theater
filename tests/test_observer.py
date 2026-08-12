@@ -19,9 +19,11 @@ from theater.daemon.observer import (
     RELOCATE_TIMEOUT,
     RESCUE_TIMEOUT,
     Observer,
-    TranscriptCursor,
+    QuietClock,
 )
 from shipped import VibeHarness
+from theater.harness.base import Event, EventKind
+from theater.harness.source import Batch, Source
 from theater.models import Status
 
 USER = {"role": "user", "content": "do the thing"}
@@ -281,36 +283,11 @@ async def test_an_observer_with_no_transcript_waits_without_spinning_out(
         await observer.aclose()
 
 
-# ---- the cursor -------------------------------------------------------
-
-
-def test_a_fresh_cursor_is_looking_for_a_file():
-    cursor = TranscriptCursor()
-    assert cursor.path is None
-    assert (cursor.offset, cursor.index, cursor.mtime) == (0, 0, 0)
-
-
-def test_advance_reports_growth_only_when_the_offset_moves():
-    cursor = TranscriptCursor()
-    cursor.attach(Path("/t.jsonl"), offset=10, index=2, mtime=1)
-    assert cursor.advance(10, 2, 5) is False  # touched, not grown
-    assert cursor.mtime == 5
-    assert cursor.advance(40, 3, 6) is True
-    assert (cursor.offset, cursor.index) == (40, 3)
-
-
-def test_detaching_forgets_the_file_and_the_clocks():
-    cursor = TranscriptCursor()
-    cursor.attach(Path("/t.jsonl"), offset=10, index=2, mtime=1)
-    cursor.begin_quiet(100.0)
-    cursor.detach()
-    assert cursor.path is None
-    assert cursor.offset == 0
-    assert cursor.quiet_since is None and cursor.screen_quiet_since is None
+# ---- the quiet clock --------------------------------------------------
 
 
 def test_begin_quiet_starts_the_clocks_once_and_leaves_them_running():
-    cursor = TranscriptCursor()
+    cursor = QuietClock()
     cursor.begin_quiet(100.0)
     cursor.begin_quiet(140.0)  # still the same silence
     assert cursor.quiet_for(140.0) == 40.0
@@ -325,7 +302,7 @@ def test_the_screen_clock_survives_a_relocate_resetting_nothing():
     and AWAITING_INPUT is unreachable. Only the screen check may reset its
     own clock.
     """
-    cursor = TranscriptCursor()
+    cursor = QuietClock()
     cursor.begin_quiet(0.0)
 
     # Two relocate windows go by. Nothing resets anything.
@@ -340,7 +317,7 @@ def test_the_screen_clock_survives_a_relocate_resetting_nothing():
 
 
 def test_new_bytes_restart_both_clocks():
-    cursor = TranscriptCursor()
+    cursor = QuietClock()
     cursor.begin_quiet(0.0)
     cursor.screen_quiet_since = 5.0
     cursor.stir()
@@ -357,7 +334,7 @@ def test_the_rescue_clock_survives_the_screen_check_throttling_itself():
     the relocate one above, but silent: the symptom is a caller that waits
     forever, not a status that never changes.
     """
-    cursor = TranscriptCursor()
+    cursor = QuietClock()
     cursor.begin_quiet(0.0)
 
     # Six screen windows go by, each one throttling the screen clock.
@@ -373,7 +350,7 @@ def test_the_rescue_clock_survives_the_screen_check_throttling_itself():
 
 
 def test_new_bytes_restart_the_rescue_clock_too():
-    cursor = TranscriptCursor()
+    cursor = QuietClock()
     cursor.begin_quiet(0.0)
     cursor.stir()
     assert cursor.rescue_since is None
@@ -411,7 +388,7 @@ def poised(registry, *, pane="%1", idle=True, capture="$ "):
         return capture
 
     observer._capture = capture_pane
-    cursor = TranscriptCursor()
+    cursor = QuietClock()
     cursor.last_text = "the last thing it said"
     return observer, ScreenHarness(idle), cursor, p, jobs
 
@@ -460,3 +437,117 @@ async def test_a_turn_end_that_was_actually_read_carries_no_error_code(registry)
     assert str(job.state) == "done"
     assert job.result == "a real reply"
     assert job.error_code is None
+
+
+# ---- a harness that brings its own source ------------------------------
+
+
+class ScriptedSource(Source):
+    """Hands back canned batches, then goes quiet. Records that it was closed."""
+
+    def __init__(self, batches):
+        self.batches = list(batches)
+        self.closed = False
+
+    async def read(self) -> Batch:
+        return self.batches.pop(0) if self.batches else Batch()
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class SourceHarness:
+    """A harness whose output is not a file, so it overrides `open_source`.
+
+    This is the whole contract an adapter over a database or an event stream
+    has to meet: hand back something that produces batches. Everything the
+    observer does with them is the same code the file-backed harnesses use.
+    """
+
+    has_transcript = True
+    binary = "scripted"
+
+    def __init__(self, *batches):
+        self.source = ScriptedSource(batches)
+
+    def open_source(self, *, cwd, session_id=None, after=None):
+        return self.source
+
+    def is_idle_screen(self, capture: str) -> bool:
+        return False
+
+
+def said(text: str, *, turn_end: bool) -> Event:
+    return Event(kind=EventKind.ASSISTANT, text=text, turn_end=turn_end)
+
+
+async def watching(registry, harness):
+    observer = Observer(
+        registry, {"scripted": harness}, poll=0.01, search=0.01, sync=0.01
+    )
+    observer.start()
+    return observer
+
+
+async def test_events_from_a_plugins_own_source_reach_the_bus(registry):
+    harness = SourceHarness(Batch(events=[said("done", turn_end=True)], progressed=True))
+    observer = await watching(registry, harness)
+    try:
+        p = registry.register(harness="scripted", pane=None, cwd="/tmp")
+        assert await until(lambda: "agent.assistant" in kinds(registry.store))
+        assert await until(lambda: registry.get(p.id).status is Status.IDLE)
+    finally:
+        await observer.aclose()
+
+
+async def test_a_source_that_reports_status_is_believed_over_the_events(registry):
+    """The channel a mutable-store source needs.
+
+    The event says the turn is still going, which would infer WORKING. The
+    source says otherwise, because it can ask the harness directly rather
+    than inferring from silence. The source wins.
+    """
+    harness = SourceHarness(
+        Batch(
+            events=[said("still going", turn_end=False)],
+            progressed=True,
+            status=Status.IDLE,
+        )
+    )
+    observer = await watching(registry, harness)
+    try:
+        p = registry.register(harness="scripted", pane=None, cwd="/tmp")
+        assert await until(lambda: registry.get(p.id).status is Status.IDLE)
+    finally:
+        await observer.aclose()
+
+
+async def test_the_source_is_closed_when_the_watcher_stops(registry):
+    harness = SourceHarness()
+    observer = await watching(registry, harness)
+    registry.register(harness="scripted", pane=None, cwd="/tmp")
+    assert await until(lambda: observer._tasks != {})
+    await observer.aclose()
+    assert harness.source.closed
+
+
+def test_consumed_input_counts_as_activity_even_with_no_events(registry):
+    """Bookkeeping records move the file without parsing to anything.
+
+    If that read as silence, the rescue timer would fire during real work and
+    hand a caller a half-finished answer.
+    """
+    observer = Observer(registry, harnesses={})
+    clock = QuietClock()
+    assert observer._apply("nobody", Batch(progressed=True), clock) is True
+    assert observer._apply("nobody", Batch(), clock) is False
+
+
+def test_events_count_as_activity_even_if_the_source_forgets_to_say_so(registry):
+    """A forgiving contract: nothing breaks if a plugin omits `progressed`."""
+    observer = Observer(registry, harnesses={})
+    p = registry.register(harness="scripted", pane=None, cwd="/tmp")
+    clock = QuietClock()
+    batch = Batch(events=[said("hello", turn_end=False)])
+    assert observer._apply(p.id, batch, clock) is True
+    assert clock.last_text == "hello"

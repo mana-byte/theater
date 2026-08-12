@@ -42,6 +42,7 @@ from theater import paths
 from theater.config import Config, ConfigError
 from theater.harness import builtin, plugins
 from theater.harness.plugins import Plugin, PluginError
+from theater.harness.source import Attachment, Batch, Source, TranscriptSource
 from theater.models import BadRequest
 
 logger = logging.getLogger("theater.harness")
@@ -296,6 +297,8 @@ __all__ = [
     "MAX_TEXT",
     "SERVER_NAME",
     "UNKNOWN_ICON",
+    "Attachment",
+    "Batch",
     "Event",
     "EventKind",
     "Harness",
@@ -303,6 +306,8 @@ __all__ = [
     "NativeChild",
     "Plugin",
     "PluginError",
+    "Source",
+    "TranscriptSource",
     "clip",
     "clipper",
     "describe",

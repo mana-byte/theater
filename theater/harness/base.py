@@ -7,6 +7,10 @@ Two jobs live behind this interface:
   observing    how to find the transcript it writes and turn each line into a
                harness-independent Event.
 
+A harness that writes no transcript answers the second question differently, by
+overriding `open_source`; see harness/source.py. The three shipped adapters do
+not, because they all append JSONL.
+
 The second job is the one that makes Theater cross-harness. Everything above
 this module — the observer, the bus, the TUI — only ever sees `Event`, so
 adding a third harness means adding a file here and nothing else.
@@ -50,8 +54,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from theater.models import Status
+
+if TYPE_CHECKING:
+    from theater.harness.source import Source
 
 #: Name the theater MCP server is registered under inside each harness.
 SERVER_NAME = "theater"
@@ -218,6 +226,33 @@ class Harness(ABC):
         """Describe how to start this harness. Pure: writes nothing itself."""
 
     # ---- observing ------------------------------------------------------
+
+    def open_source(
+        self,
+        *,
+        cwd: str | None,
+        session_id: str | None = None,
+        after: float | None = None,
+    ) -> "Source":
+        """A live view of one participant's output, for the observer to poll.
+
+        The default tails the transcript this adapter describes, which is why
+        nothing below overrides it: `find_transcript`, `session_id` and `parse`
+        are the whole of what a file-backed harness has to say.
+
+        Override it when the harness does not write an append-only file — a
+        database, an event stream — and the byte-offset model has nothing to
+        grip. The returned object owns the reading and may hold a connection
+        open; the observer keeps the timers, the status policy, job rescue and
+        every write to the registry and the bus. See harness/source.py for the
+        contract, and for why a source over a mutable store must report status
+        itself rather than let silence be interpreted.
+        """
+        from theater.harness.source import TranscriptSource
+
+        return TranscriptSource(
+            self, cwd=cwd, session_id=session_id, after=after
+        )
 
     @abstractmethod
     def find_transcript(
