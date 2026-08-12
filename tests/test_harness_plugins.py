@@ -60,11 +60,11 @@ HARNESS = {cls}()
 
 def plugin(
     dirpath: Path,
-    filename: str = "codex.py",
+    filename: str = "acme.py",
     *,
-    cls: str = "CodexHarness",
-    name: str = "codex",
-    binary: str = "codex",
+    cls: str = "AcmeHarness",
+    name: str = "acme",
+    binary: str = "acme",
     icon: str = "@",
     aliases: tuple[str, ...] = (),
 ) -> Path:
@@ -120,36 +120,37 @@ def error_in(directory: Path) -> str:
 
 def test_a_plugin_joins_the_registry(local_dir):
     plugin(local_dir)
-    assert install(local_dir) == ["claude", "codex", "vibe"]
-    assert harness_registry.get("codex").binary == "codex"
-    assert harness_registry.harness_icon("codex") == "@"
+    assert install(local_dir) == ["acme", "claude", "codex", "vibe"]
+    assert harness_registry.get("acme").binary == "acme"
+    assert harness_registry.harness_icon("acme") == "@"
 
 
 def test_the_shipped_adapters_are_plugins_too(local_dir):
-    """No built-in tier: claude and vibe come through the same loader."""
-    assert install(local_dir) == ["claude", "vibe"]
+    """No built-in tier: every adapter comes through the same loader."""
+    assert install(local_dir) == ["claude", "codex", "vibe"]
     rows = {r["name"]: r for r in harness_registry.describe()}
     assert rows["vibe"]["source"] == "shipped"
     assert rows["claude"]["source"] == "shipped"
+    assert rows["codex"]["source"] == "shipped"
 
 
 def test_a_plugin_is_a_full_adapter(local_dir):
     plugin(local_dir)
     install(local_dir)
-    assert harness_registry.get("codex").has_transcript is True
+    assert harness_registry.get("acme").has_transcript is True
 
 
 def test_a_plugin_plans_its_own_launch(local_dir):
     plugin(local_dir)
     install(local_dir)
     plan = harness_registry.plan_launch(
-        "codex",
+        "acme",
         participant_id="abc123",
         prompt="hello",
         config_path=Path("/tmp/x.json"),
         approval="manual",
     )
-    assert plan.argv == ["codex", "hello"]
+    assert plan.argv == ["acme", "hello"]
     assert plan.env == {"ID": "abc123"}
 
 
@@ -158,21 +159,21 @@ def test_a_missing_directory_is_not_an_error(tmp_path):
 
 
 def test_an_empty_directory_leaves_the_shipped_set(local_dir):
-    assert install(local_dir) == ["claude", "vibe"]
+    assert install(local_dir) == ["claude", "codex", "vibe"]
 
 
 def test_underscored_files_are_skipped(local_dir):
     """So a plugin can keep a helper module beside it."""
     (local_dir / "_shared.py").write_text("raise RuntimeError('imported')")
     plugin(local_dir)
-    assert "codex" in install(local_dir)
+    assert "acme" in install(local_dir)
 
 
 def test_non_python_files_are_ignored(local_dir):
     (local_dir / "notes.txt").write_text("not a plugin")
-    (local_dir / "codex.py.bak").write_text("also not")
+    (local_dir / "acme.py.bak").write_text("also not")
     plugin(local_dir)
-    assert "codex" in install(local_dir)
+    assert "acme" in install(local_dir)
 
 
 def test_plugins_load_in_filename_order(local_dir):
@@ -207,14 +208,14 @@ def test_the_two_sources_do_not_share_module_names(local_dir, shipped_dir):
 def test_installing_twice_is_the_same_as_once(local_dir):
     plugin(local_dir)
     install(local_dir)
-    assert install(local_dir) == ["claude", "codex", "vibe"]
+    assert install(local_dir) == ["acme", "claude", "codex", "vibe"]
 
 
 def test_installing_an_empty_directory_drops_the_plugin(local_dir, tmp_path):
     plugin(local_dir)
     install(local_dir)
     install(tmp_path / "gone")
-    assert "codex" not in harness_registry.HARNESSES
+    assert "acme" not in harness_registry.HARNESSES
 
 
 # ---- refusals -----------------------------------------------------------
@@ -247,10 +248,10 @@ def test_a_plugin_with_no_harness_says_what_to_write(local_dir):
 def test_exporting_the_class_instead_of_an_instance_is_caught(local_dir):
     """The likeliest mistake, and the error tells you the fix verbatim."""
     body = BODY.format(
-        cls="CodexHarness", name="codex", binary="codex", icon="@", aliases="()"
-    ).replace("HARNESS = CodexHarness()", "HARNESS = CodexHarness")
-    (local_dir / "codex.py").write_text(body)
-    assert "CodexHarness()" in error_in(local_dir)
+        cls="AcmeHarness", name="acme", binary="acme", icon="@", aliases="()"
+    ).replace("HARNESS = AcmeHarness()", "HARNESS = AcmeHarness")
+    (local_dir / "acme.py").write_text(body)
+    assert "AcmeHarness()" in error_in(local_dir)
 
 
 def test_a_harness_that_is_not_a_harness_is_caught(local_dir):
@@ -259,7 +260,7 @@ def test_a_harness_that_is_not_a_harness_is_caught(local_dir):
 
 
 def test_an_illegal_name_is_caught(local_dir):
-    plugin(local_dir, name="My Codex")
+    plugin(local_dir, name="My Acme")
     assert "lowercase letters" in error_in(local_dir)
 
 
@@ -289,7 +290,7 @@ def test_a_broken_local_plugin_does_not_stop_start_up(local_dir):
     """The user wrote it and can see it; one bad file is not worth the daemon."""
     (local_dir / "broken.py").write_text("raise ValueError('boom')")
     plugin(local_dir)
-    assert install(local_dir) == ["claude", "codex", "vibe"]
+    assert install(local_dir) == ["acme", "claude", "codex", "vibe"]
 
 
 def test_a_broken_local_plugin_is_listed_as_broken(local_dir):
@@ -303,23 +304,23 @@ def test_a_broken_local_plugin_is_listed_as_broken(local_dir):
 
 def test_a_broken_shipped_plugin_is_fatal(local_dir, shipped_dir):
     """An adapter we ship that will not load is our bug, not a warning."""
-    (shipped_dir / "codex.py").write_text("raise ValueError('boom')")
-    with pytest.raises(PluginError, match="codex.py"):
+    (shipped_dir / "acme.py").write_text("raise ValueError('boom')")
+    with pytest.raises(PluginError, match="acme.py"):
         install(local_dir, shipped_dir=shipped_dir)
 
 
 def test_a_broken_shipped_plugin_names_the_escape_hatch(local_dir, shipped_dir):
-    (shipped_dir / "codex.py").write_text("raise ValueError('boom')")
+    (shipped_dir / "acme.py").write_text("raise ValueError('boom')")
     with pytest.raises(PluginError) as exc:
         install(local_dir, shipped_dir=shipped_dir)
-    assert 'disabled = ["codex"]' in str(exc.value)
+    assert 'disabled = ["acme"]' in str(exc.value)
 
 
 def test_disabling_a_plugin_stops_it_being_imported(local_dir, shipped_dir):
     """The escape hatch has to work when importing is exactly what breaks."""
-    (shipped_dir / "codex.py").write_text("raise ValueError('boom')")
+    (shipped_dir / "acme.py").write_text("raise ValueError('boom')")
     plugin(shipped_dir, "vibe.py", cls="TheirVibe", name="vibe", binary="vibe")
-    assert install(local_dir, disabling("codex"), shipped_dir=shipped_dir) == ["vibe"]
+    assert install(local_dir, disabling("acme"), shipped_dir=shipped_dir) == ["vibe"]
 
 
 # ---- precedence ---------------------------------------------------------
@@ -342,9 +343,9 @@ def test_an_override_reports_itself_as_local(local_dir):
 
 
 def test_a_plugin_alias_normalizes(local_dir):
-    plugin(local_dir, aliases=("codex-cli",))
+    plugin(local_dir, aliases=("acme-cli",))
     install(local_dir)
-    assert harness_registry.normalize("codex-cli") == "codex"
+    assert harness_registry.normalize("acme-cli") == "acme"
 
 
 def test_a_plugin_alias_cannot_shadow_another_harness(local_dir):
@@ -363,7 +364,7 @@ def test_a_plugin_alias_cannot_be_another_harness_name(local_dir):
 
 
 def test_a_disabled_harness_is_absent(local_dir):
-    assert install(local_dir, disabling("vibe")) == ["claude"]
+    assert install(local_dir, disabling("vibe")) == ["claude", "codex"]
     assert "vibe" not in harness_registry.HARNESSES
 
 
@@ -378,7 +379,7 @@ def test_a_disabled_harness_is_not_offered_by_the_palette(local_dir):
 
     install(local_dir, disabling("vibe"))
     offered = [name for _, name, _ in entries(harness_registry.describe())]
-    assert offered == ["claude"]
+    assert offered == ["claude", "codex"]
 
 
 def test_a_disabled_harness_still_draws_in_the_tree(local_dir):
@@ -389,7 +390,11 @@ def test_a_disabled_harness_still_draws_in_the_tree(local_dir):
 
 def test_disabling_something_that_is_not_there_is_not_an_error(local_dir):
     """Names come and go across releases; a stale entry is not worth a crash."""
-    assert install(local_dir, disabling("nosuchharness")) == ["claude", "vibe"]
+    assert install(local_dir, disabling("nosuchharness")) == [
+        "claude",
+        "codex",
+        "vibe",
+    ]
 
 
 # ---- the rest of the system sees them -----------------------------------
@@ -401,7 +406,7 @@ def test_the_cli_loads_plugins_from_theater_home(capsys):
     plugin(paths.harnesses_dir())
     assert cli.main(["harnesses"]) == 0
     out = capsys.readouterr().out
-    assert "codex" in out
+    assert "acme" in out
 
 
 def test_a_broken_plugin_is_reported_by_the_cli(capsys):
@@ -418,25 +423,25 @@ def test_ensure_home_creates_the_directory():
 
 
 def test_a_plugin_binary_joins_the_unmanaged_sweep(local_dir):
-    plugin(local_dir, binary="codex-bin")
+    plugin(local_dir, binary="acme-bin")
     install(local_dir)
-    assert "codex-bin" in harness_registry.known_binaries()
+    assert "acme-bin" in harness_registry.known_binaries()
 
 
 def test_a_plugin_shows_up_in_describe(local_dir):
     plugin(local_dir)
     install(local_dir)
     rows = {r["name"]: r for r in harness_registry.describe()}
-    assert rows["codex"]["icon"] == "@"
-    assert rows["codex"]["binary"] == "codex"
-    assert rows["codex"]["source"] == "local"
-    assert rows["codex"]["error"] is None
+    assert rows["acme"]["icon"] == "@"
+    assert rows["acme"]["binary"] == "acme"
+    assert rows["acme"]["source"] == "local"
+    assert rows["acme"]["error"] is None
 
 
 def test_a_plugin_is_observable_from_its_transcript(local_dir):
     """`has_transcript` decides which watch loop the observer runs."""
     plugin(local_dir)
     install(local_dir)
-    codex = harness_registry.get("codex")
-    assert codex.has_transcript is True
-    assert codex.is_idle_screen("something\n> ") is True
+    acme = harness_registry.get("acme")
+    assert acme.has_transcript is True
+    assert acme.is_idle_screen("something\n> ") is True

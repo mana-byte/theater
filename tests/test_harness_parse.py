@@ -19,7 +19,7 @@ import pytest
 
 from theater.harness import EventKind, status_after
 from theater.harness.base import MAX_TEXT
-from shipped import ClaudeCodeHarness, VibeHarness
+from shipped import ClaudeCodeHarness, CodexHarness, VibeHarness
 from theater.models import Status
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -262,10 +262,174 @@ def test_vibe_native_children_come_from_meta_json(tmp_path):
     assert children[0].relative_path.startswith("agents/explore_")
 
 
+# ---- codex -------------------------------------------------------------
+
+
+def test_codex_turn_parses_to_the_expected_event_sequence():
+    events = events_for(CodexHarness(), FIXTURES / "codex.jsonl")
+
+    assert [e.kind for e in events] == [
+        EventKind.USER,
+        EventKind.ASSISTANT,
+        EventKind.TOOL_CALL,
+        EventKind.TOOL_RESULT,
+        EventKind.TOOL_RESULT,
+        EventKind.ASSISTANT,
+    ]
+    # session_meta, turn_context, reasoning and token_count produce nothing.
+    assert events[2].tool_name == "exec"
+    assert events[-1].turn_end is True
+    assert [e.turn_end for e in events[:-1]] == [False] * 5
+
+
+def test_codex_raw_index_tracks_the_source_record():
+    events = events_for(CodexHarness(), FIXTURES / "codex.jsonl")
+    assert [e.raw_index for e in events] == [2, 3, 4, 5, 7, 10]
+
+
+def test_codex_records_carry_their_own_timestamp():
+    events = events_for(CodexHarness(), FIXTURES / "codex.jsonl")
+    assert all(e.ts is not None for e in events)
+    # ISO-8601 with a Z suffix, parsed as UTC rather than local time.
+    assert events[0].ts == pytest.approx(1786534852.2, abs=0.01)
+
+
+def test_codex_takes_the_reply_from_the_turn_boundary_not_the_final_message():
+    """`task_complete` repeats the final agent_message, so only one may speak.
+
+    It has to be the boundary record: the observer hands the turn-ending
+    event's text back to whoever awaited the job.
+    """
+    events = events_for(CodexHarness(), FIXTURES / "codex.jsonl")
+    final = [e for e in events if e.text == "<final answer 208 chars>"]
+    assert len(final) == 1
+    assert final[0].turn_end is True
+
+
+def test_codex_commentary_is_kept_but_does_not_end_the_turn():
+    events = events_for(CodexHarness(), FIXTURES / "codex.jsonl")
+    assert events[1].text == "<commentary 112 chars>"
+    assert status_after(events[1]) is Status.WORKING
+
+
+def test_codex_tool_output_blocks_are_flattened():
+    events = events_for(CodexHarness(), FIXTURES / "codex.jsonl")
+    assert events[3].text == "Script completed\n<tool output 64 chars>"
+    # The record carries only a call_id, and parse holds no state across lines.
+    assert events[3].tool_name is None
+
+
+def test_codex_mcp_calls_are_the_only_sight_of_theaters_own_tools():
+    """They never appear as response_items, so this branch is load-bearing."""
+    events = events_for(CodexHarness(), FIXTURES / "codex.jsonl")
+    assert events[4].tool_name == "theater.list_participants"
+    assert events[4].text == "<mcp result 41 chars>"
+
+
+def test_codex_an_aborted_turn_ends_the_turn():
+    """Otherwise a caller awaits a reply that a human has already cancelled."""
+    record = {
+        "timestamp": "2026-08-12T11:37:50.379Z",
+        "type": "event_msg",
+        "payload": {"type": "turn_aborted", "reason": "interrupted"},
+    }
+    events = CodexHarness().parse(json.dumps(record), 0)
+    assert len(events) == 1
+    assert events[0].kind is EventKind.ERROR
+    assert events[0].text == "turn aborted: interrupted"
+    assert status_after(events[0]) is Status.IDLE
+
+
+def test_codex_function_calls_parse_like_custom_tool_calls():
+    """Two spellings of the same thing; both appear in one transcript."""
+    call = {
+        "type": "response_item",
+        "payload": {"type": "function_call", "name": "wait", "call_id": "c1"},
+    }
+    output = {
+        "type": "response_item",
+        "payload": {
+            "type": "function_call_output",
+            "call_id": "c1",
+            "output": [{"type": "input_text", "text": "done"}],
+        },
+    }
+    harness = CodexHarness()
+    assert harness.parse(json.dumps(call), 0)[0].tool_name == "wait"
+    assert harness.parse(json.dumps(output), 1)[0].text == "done"
+
+
+def test_codex_finds_a_transcript_by_cwd_and_by_session_id(tmp_path):
+    root = tmp_path / "sessions"
+    day = root / "2026" / "08" / "12"
+    day.mkdir(parents=True)
+    project = tmp_path / "work"
+    project.mkdir()
+
+    def meta(path: Path, cwd: str) -> None:
+        path.write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-08-12T11:40:50.100Z",
+                    "type": "session_meta",
+                    "payload": {"session_id": "ignored", "cwd": cwd},
+                }
+            )
+            + "\n"
+        )
+
+    sid = "019ff5c6-717c-7a70-9ec4-66dd1f4d173e"
+    target = day / f"rollout-2026-08-12T13-40-50-{sid}.jsonl"
+    meta(target, str(project))
+    meta(day / "rollout-2026-08-12T09-00-00-0000-other.jsonl", "/elsewhere")
+
+    harness = CodexHarness(root=root)
+    assert harness.find_transcript(cwd=str(project)) == target
+    assert harness.find_transcript(cwd="/nowhere") is None
+    # A known session id is an exact glob: no scan, no date guessing.
+    assert harness.find_transcript(cwd="/nowhere", session_id=sid) == target
+
+
+def test_codex_session_id_is_the_uuid_tail_of_the_filename(tmp_path):
+    """The uuid keeps its own hyphens, so the timestamp is what anchors it."""
+    sid = "019ff5c6-717c-7a70-9ec4-66dd1f4d173e"
+    path = tmp_path / f"rollout-2026-08-12T13-40-50-{sid}.jsonl"
+    assert CodexHarness().session_id(path) == sid
+    assert CodexHarness().session_id(tmp_path / "not-a-rollout.jsonl") is None
+
+
+def test_codex_after_excludes_transcripts_that_predate_the_participant(tmp_path):
+    root = tmp_path / "sessions"
+    day = root / "2026" / "08" / "12"
+    day.mkdir(parents=True)
+    project = tmp_path / "work"
+    project.mkdir()
+    path = day / "rollout-2026-08-12T13-40-50-abc.jsonl"
+    path.write_text(
+        json.dumps(
+            {"type": "session_meta", "payload": {"cwd": str(project)}}
+        )
+        + "\n"
+    )
+
+    harness = CodexHarness(root=root)
+    assert harness.find_transcript(cwd=str(project), after=0) == path
+    # A floor in the future can never be satisfied by an existing file. The
+    # filename's timestamp is local and is never what gets compared.
+    assert harness.find_transcript(cwd=str(project), after=4e9) is None
+
+
+def test_codex_has_no_native_children(tmp_path):
+    """Codex has no sub-agent mechanism, so this is a statement, not a stub."""
+    assert CodexHarness().native_children(tmp_path / "anything.jsonl") == []
+
+
 # ---- shared ------------------------------------------------------------
 
 
-@pytest.mark.parametrize("harness", [ClaudeCodeHarness(), VibeHarness()])
+@pytest.mark.parametrize(
+    "harness", [ClaudeCodeHarness(), CodexHarness(), VibeHarness()]
+)
 @pytest.mark.parametrize("line", ["", "   ", "not json", "[]", "null", '{"role": 3}'])
 def test_unparseable_lines_yield_nothing_rather_than_raising(harness, line):
     """A transcript being appended to as we read it is normal, not an error."""
@@ -327,6 +491,49 @@ UNCLIPPED_CASES = [
         ClaudeCodeHarness(),
         {"type": "system", "level": "error", "error": LONG},
     ),
+    (
+        CodexHarness(),
+        {"type": "event_msg", "payload": {"type": "user_message", "message": LONG}},
+    ),
+    (
+        CodexHarness(),
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "agent_message",
+                "message": LONG,
+                "phase": "commentary",
+            },
+        },
+    ),
+    (
+        CodexHarness(),
+        {
+            "type": "event_msg",
+            "payload": {"type": "task_complete", "last_agent_message": LONG},
+        },
+    ),
+    (
+        CodexHarness(),
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "mcp_tool_call_end",
+                "invocation": {"server": "theater", "tool": "send"},
+                "result": {"Ok": {"content": [{"type": "text", "text": LONG}]}},
+            },
+        },
+    ),
+    (
+        CodexHarness(),
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "output": [{"type": "input_text", "text": LONG}],
+            },
+        },
+    ),
 ]
 
 
@@ -348,7 +555,9 @@ def test_the_same_branches_clip_by_default(harness, record):
 # ---- idle screens ------------------------------------------------------
 
 
-@pytest.mark.parametrize("harness", [ClaudeCodeHarness(), VibeHarness()])
+@pytest.mark.parametrize(
+    "harness", [ClaudeCodeHarness(), CodexHarness(), VibeHarness()]
+)
 @pytest.mark.parametrize("capture", ["", "\n", "   \n  \n"])
 def test_a_blank_pane_is_not_a_prompt(harness, capture):
     """An empty capture means the pane has not drawn, not that it is waiting."""
@@ -381,3 +590,39 @@ def test_a_bare_prompt_on_the_last_line_is_idle(harness, capture):
 def test_text_after_the_prompt_is_not_idle(harness, capture):
     """Someone typing is presence, and output still landing is work."""
     assert harness.is_idle_screen(capture) is False
+
+
+#: Codex keeps a status footer under the composer, so its prompt is never the
+#: bottom line and the shared "last line is the prompt" tests do not apply.
+CODEX_IDLE = "\n".join(
+    [
+        "> Ran ls",
+        "",
+        "\u203aExplain this codebase",
+        "gpt-5.6-sol medium \u00b7 ~/work",
+    ]
+)
+
+CODEX_WORKING = "\n".join(
+    [
+        "> Ran ls",
+        "",
+        "\u2022 Working (12s \u2022 esc to interrupt)",
+    ]
+)
+
+
+def test_codex_is_idle_when_the_composer_is_above_the_footer():
+    assert CodexHarness().is_idle_screen(CODEX_IDLE) is True
+
+
+def test_codex_is_not_idle_while_a_turn_is_running():
+    """The composer is still on screen mid-turn; the status line is the tell."""
+    assert CodexHarness().is_idle_screen(CODEX_WORKING) is False
+    assert CodexHarness().is_idle_screen(CODEX_IDLE + "\n" + CODEX_WORKING) is False
+
+
+def test_codex_output_scrolled_past_the_composer_is_not_idle():
+    """Beyond the tail window the pane is showing something else entirely."""
+    trailing = "\n".join(["more output"] * 8)
+    assert CodexHarness().is_idle_screen(CODEX_IDLE + "\n" + trailing) is False
