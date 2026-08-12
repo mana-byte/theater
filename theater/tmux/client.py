@@ -13,10 +13,14 @@ makes it a session target and lets tmux choose the index. This cost a real
 spawn failure; the argv is now asserted in tests/test_tmux_client.py, because
 argv can be checked without a tmux server and the behaviour cannot.
 
-PARTLY VERIFIED. `ensure_session`, `new_window` and pane-id capture have been
-run against a real server. `kill_pane` and the session-scoped `list_panes`
-have not. `deliver_text`'s buffer round-trip was checked against a real
-server; its paste into a live TUI is covered end to end by hand.
+Verified against a real server by `tests/test_tmux_rig.py`, which runs a
+private tmux (via `TMUX_TMPDIR`) with a program that logs every byte it
+receives: `new_window` including its `-e` environment, session-scoped
+`list_panes`, `kill_pane`, `display_message`, and the paste semantics
+`deliver_text` depends on -- bracket markers around the text, Enter outside
+them, one paste for a multi-line prompt, and no crosstalk between two panes
+pasted at once. Reverting `deliver_text` to `send-keys -l` fails six of those
+tests, which is the regression that suite exists to catch.
 """
 
 from __future__ import annotations
