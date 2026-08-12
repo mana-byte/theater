@@ -32,6 +32,13 @@ from theater.models import TheaterError
 _PANE_FORMAT = "#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{window_id}\t#{session_name}\t#{window_name}\t#{pane_current_command}"
 
 
+#: Ceiling on a single tmux invocation. tmux commands are local and fast; this
+#: only fires when the server is wedged. Named because the daemon socket client
+#: derives its own read timeout from it -- a client that gives up before tmux
+#: does would desync the connection.
+RUN_TIMEOUT = 10.0
+
+
 class TmuxError(TheaterError):
     code = "tmux_error"
 
@@ -87,7 +94,7 @@ def _require() -> None:
 def run_sync(*args: str, check: bool = True) -> str:
     _require()
     proc = subprocess.run(
-        ["tmux", *args], capture_output=True, text=True, timeout=10
+        ["tmux", *args], capture_output=True, text=True, timeout=RUN_TIMEOUT
     )
     if check and proc.returncode != 0:
         raise TmuxError(f"tmux {' '.join(args)} failed: {proc.stderr.strip()}")
@@ -103,7 +110,7 @@ async def run(*args: str, check: bool = True) -> str:
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=10)
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=RUN_TIMEOUT)
     except TimeoutError:
         proc.kill()
         raise TmuxError(f"tmux {' '.join(args)} timed out") from None
