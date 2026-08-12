@@ -237,19 +237,35 @@ was removed: it cannot distinguish agent output from unsubmitted human input,
 and the last line of an agent pane is almost always non-empty text. It blocked
 legitimate sends constantly. Copy mode is narrow, but it is never wrong.
 
-### Two independent quiet timers
+### Three independent quiet timers
 
 ```
 RELOCATE_TIMEOUT      = 5.0    # Vibe rotates its session dir per turn
 AWAITING_INPUT_TIMEOUT = 10.0  # quiet long enough to be a prompt, not a pause
+RESCUE_TIMEOUT         = 60.0  # quiet long enough that a turn end was missed
 POLL_INTERVAL          = 0.25
 SEARCH_INTERVAL        = 2.0
 SYNC_INTERVAL          = 1.0
 ```
 
-These were one timer in v1. Sharing them made `AWAITING_INPUT` unreachable:
-relocation fired first, every time. They measure different things and must stay
-separate — this is a scar, not a preference.
+The first two were one timer in v1. Sharing them made `AWAITING_INPUT`
+unreachable: relocation fired first, every time. They measure different things
+and must stay separate — this is a scar, not a preference.
+
+The third is the same scar seen coming. A rescue reading the screen check's
+clock would never fire at all, because that check throttles itself by pushing
+its own clock forward every time it runs. Its job: after a minute of silence
+over a screen that looks idle, finish any job still running against the
+participant, with the last thing it said as the result and `error_code =
+"turn_end_unseen"`. That covers a turn boundary the parser never saw — an
+aborted turn, a badly timed rotation — which otherwise leaves the agent that
+sent the prompt waiting on a promise nothing can resolve.
+
+It stays `DONE` rather than failing, because the caller has a usable answer and
+failing the job would block it on the very thing being rescued. Narrow on
+purpose: no pane means no rescue, and an unreadable capture decides nothing.
+Sixty seconds because firing early hands out a half-written answer, which is
+worse than a slow one.
 
 ---
 
@@ -353,10 +369,26 @@ implement:
 | `native_children` | does it spawn its own subagents we should show |
 | `is_idle_screen` | does this rendered screen mean "waiting for a human" |
 
-Two implementations ship: `claude_code.py` and `vibe.py`. They are genuinely
-different — Claude Code writes one JSONL per project directory; Vibe rotates
-its session directory per turn, which is the entire reason `RELOCATE_TIMEOUT`
-exists.
+Every adapter is a plugin file, loaded by `harness/plugins.py` under one
+contract. The three that ship — `claude`, `codex`, `vibe` — live in
+`builtin/plugins/` and are read by the same scanner as anything in
+`$THEATER_HOME/harnesses/`. There is no built-in tier. The only asymmetry is
+what happens when one will not import: a shipped plugin failing is fatal (the
+install is broken and hiding it makes the bug report unreadable), a local one
+is skipped with a warning and listed by `theater harnesses`.
+
+That is a v1.4 decision, and the reason is that a plugin was previously the
+second of two mechanisms — the other being a TOML block that could describe a
+harness without a parser. A config schema can only express the shallow half of
+an adapter, so the deep half was untested-by-construction: nothing that shipped
+used the extension point. Now the shipped adapters exercise it on every run.
+
+The three are genuinely different, which is the interface's real test. Claude
+Code writes one JSONL per project directory. Vibe rotates its session directory
+per turn, which is the entire reason `RELOCATE_TIMEOUT` exists. Codex writes
+date-sharded rollout files and marks a turn end with an explicit
+`task_complete` — or `turn_aborted`, which counts too, since an abandoned turn
+still has to release a waiting caller.
 
 `parse` takes `clip_text: bool` rather than always clipping, because the same
 parser serves two consumers with opposite needs: the bus wants a one-line
@@ -408,9 +440,9 @@ theater/
 ├── paths.py 35           $THEATER_HOME layout
 ├── formatting.py 109     shared CLI/régie rendering, no rich/textual
 ├── daemon/
-│   ├── observer.py 528   transcript tailing, status, job completion
-│   ├── server.py 324     lifecycle only: socket, pidfile, reaper, wiring
-│   ├── methods.py 317    16 RPC handlers
+│   ├── observer.py 708   transcript tailing, status, job completion and rescue
+│   ├── server.py 348     lifecycle only: socket, pidfile, reaper, wiring
+│   ├── methods.py 332    17 RPC handlers
 │   ├── registry.py 233   tier assignment, pane eviction, lineage
 │   ├── store.py 276      SQLite over SQLAlchemy Core, synchronous on purpose
 │   ├── jobs.py 181       JobManager, asyncio.Event per handle
@@ -421,13 +453,15 @@ theater/
 │   ├── schema.py 85      table metadata, the one place columns are declared
 │   ├── lineage.py 73     ancestor_ids, depth_of, root_of, subtree_ids
 │   └── migrations/       alembic env + versions/
-├── harness/  base.py 282 · claude_code.py 355 · vibe.py 272
+├── harness/  __init__.py 318 (registry + install) · base.py 293
+│            plugins.py 183 (the loader)
+│            builtin/plugins/  codex.py 414 · claude.py 367 · vibe.py 284
 ├── mcp/      tools.py 206 · server.py 152
 ├── tmux/     client.py 261 · panes.py 167 · presence.py 56
 └── regie/    app.py 534 · tree.py 131 · palette.py 64 · bus_view.py 37
 ```
 
-Roughly 6,200 lines, 349 tests.
+Roughly 8,100 lines, 535 tests.
 
 The v1.1 refactor split `daemon/server.py` (lifecycle vs. methods vs. harness
 detection), broke the `store ↔ jobs` import cycle by moving `Job` into
@@ -452,5 +486,10 @@ bugs in the process, which is the argument for having done it.
 - **Human presence is narrow.** Copy mode only. An agent-aware prompt matcher
   would be better but requires knowing each harness's prompt format, which is
   not stable across versions.
+- **Codex's first run in a directory is a trust dialog.** It waits on a
+  keypress no transcript records, so a spawn there reads as WORKING until a
+  human answers it. Run `codex` by hand once per directory. Detecting the
+  dialog would mean matching its rendered text, which is the fragile thing
+  `is_idle_screen` is already deliberately conservative about.
 
 `docs/v2_ideas.md` covers where this goes next.

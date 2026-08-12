@@ -2,7 +2,7 @@
 
 A tmux-native orchestration layer for coding-agent CLIs.
 
-Theater lets agents running in different harnesses — Claude Code, Vibe — discover each other, delegate work to each other, and wait for the results, all without any of them needing to know what the others are. It is three things at once: a daemon that tracks every session on the machine, an MCP server each agent plugs into, and a TUI that gathers all sessions into one view.
+Theater lets agents running in different harnesses — Claude Code, Codex, Vibe — discover each other, delegate work to each other, and wait for the results, all without any of them needing to know what the others are. It is three things at once: a daemon that tracks every session on the machine, an MCP server each agent plugs into, and a TUI that gathers all sessions into one view.
 
 ---
 
@@ -42,7 +42,7 @@ Theater lets agents running in different harnesses — Claude Code, Vibe — dis
 
 - Python 3.12+
 - tmux (hard dependency — inbound delivery requires a pane)
-- At least one of `claude`, `vibe` on `PATH` — or any other CLI you teach it
+- At least one of `claude`, `codex`, `vibe` on `PATH` — or any other CLI you teach it
   about, see [Configuration](#configuration)
 
 ---
@@ -215,6 +215,10 @@ screen_interval        = 1.0
 sync_interval          = 1.0
 relocate_timeout       = 5.0
 awaiting_input_timeout = 10.0
+rescue_timeout         = 60.0
+
+[harness]
+disabled = []             # plugin names to leave out of the registry
 ```
 
 Deliberately not configurable: the default approval mode. There is none anywhere
@@ -223,30 +227,22 @@ watching, and a key setting it to `yolo` once and forever defeats that.
 
 ### Teaching Theater a new CLI
 
-Two ways, and the cheap one is usually enough.
+One way: write a plugin. A Python file that implements the adapter, dropped in
+`$THEATER_HOME/harnesses/`.
 
-**Declare it in TOML.** Enough for spawning, MCP wiring, presence, the icon and
-turn detection from the rendered screen:
+The three adapters Theater ships — `claude`, `codex`, `vibe` — are the same kind
+of file, living in `theater/harness/builtin/plugins/`. There is no privileged
+built-in tier and no second, weaker mechanism to declare one in TOML: a config
+schema could only ever express the shallow half of an adapter, and the deep half
+is where turn boundaries, bus messages, `read_transcript` and native sub-agents
+come from. One mechanism means the shipped adapters exercise the extension point
+every time Theater runs, instead of being the reason it is untested.
 
-```toml
-[harness.codex]
-binary       = "codex"
-icon         = "◇"
-aliases      = ["codex-cli"]
-idle_prompts = ["›"]
-mcp_argv     = ["-c", "mcp_servers.theater.command={theater}",
-                "-c", 'mcp_servers.theater.args=["mcp","--id","{id}"]']
-approvals    = { manual = [], edits = ["--full-auto"], yolo = ["--dangerously-bypass-approvals-and-sandbox"] }
-```
+`theater harnesses` lists what loaded, where each came from, and why any were
+rejected. Writing one: **[docs/harness-plugins.md](docs/harness-plugins.md)**.
 
-`binary`, `idle_prompts` and all three `approvals` modes are required. A
-declared harness has no transcript parser, so its turns end when its prompt
-comes back on screen, confirmed across two polls.
-
-**Write a plugin.** A Python file in `$THEATER_HOME/harnesses/` implementing the
-full adapter, including transcript parsing — which gets you real turn
-boundaries, messages on the bus, `read_transcript` and native sub-agents. See
-**[docs/harness-plugins.md](docs/harness-plugins.md)**.
+`[harness] disabled` is the only switch over the registry — a denylist, so a
+harness added in a later release appears without anyone editing config.
 
 ---
 
@@ -277,7 +273,7 @@ Lists every participant Theater knows about — id, harness, status, cwd, addres
 Starts a new agent in a child tmux window. Returns the child's id and a handle for `await_sessions`.
 
 ```
-harness:     "claude" | "vibe"
+harness:     "claude" | "codex" | "vibe"
 prompt:      task delivered on the child's command line
 approval:    "manual" | "edits" | "yolo"
 cwd:         working directory (defaults to caller's cwd)
@@ -338,7 +334,7 @@ theater/
   paths.py        XDG-style home directory layout
   daemon/         the registry server
   mcp/            the stdio MCP server and tool implementations
-  harness/        per-harness launch and transcript-parsing logic
+  harness/        the plugin loader, and the adapters that ship in builtin/plugins/
   regie/          Textual TUI
   tmux/           tmux client wrapper
 docs/
@@ -360,5 +356,5 @@ tests/                    pytest suite (asyncio_mode = auto)
 The full rationale for every architectural decision is in `docs/init_idea_grilled.md`. The short version:
 
 - **MCP cannot push.** No server can initiate an agent turn. MCP handles outbound (agent → Theater), tmux handles inbound (Theater → agent pane).
-- **Observation reads transcripts, not screens.** Status is derived from the JSONL transcript the harness writes; `capture-pane` only detects a human typing. The exception is a harness declared in `config.toml`, which by definition has no parser — there, and only there, the screen decides when a turn ends.
+- **Observation reads transcripts, not screens.** Status is derived from the JSONL transcript the harness writes; `capture-pane` only detects a human typing. Two narrow exceptions: a plugin that declares `has_transcript = False` has no parser, so its turns end when its prompt returns on screen; and after a minute of silence over an idle screen, a job still waiting is finished anyway, so a turn boundary the parser never saw cannot strand the agent that sent the prompt.
 - **Approval is per-spawn.** The orchestrator chooses the child's approval policy at spawn time. There is no global default — this is intentional.

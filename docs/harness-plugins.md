@@ -6,36 +6,37 @@ without touching the source tree. Drop a file in `$THEATER_HOME/harnesses/`
 registry: spawnable, observable, listed by `theater harnesses`, offered by the
 régie palette.
 
-## Plugin or declaration?
+## One mechanism, not two
 
-There are two ways to add a harness, and the cheap one is usually enough.
+Every adapter Theater can drive is a plugin, including the three it ships:
+`claude`, `codex` and `vibe` live in `theater/harness/builtin/plugins/` and are
+loaded by the same scanner that reads yours. There is no built-in tier and no
+lighter-weight way to declare a harness in TOML.
 
-A **declaration** is a `[harness.<name>]` table in `config.toml`. It describes
-how to *launch* the harness and what its idle prompt looks like on screen. That
-covers spawning, MCP injection, presence, the icon, unmanaged-pane detection,
-and — through the screen heuristic — the end of a turn. No Python.
+There used to be. A `[harness.<name>]` table could describe how to launch a CLI
+and what its idle prompt looked like, and that was enough for spawning, MCP
+wiring, presence and an icon — everything except reading a transcript. It was
+removed in v1.4 for two reasons.
 
-A **plugin** is the full `Harness` interface, including `parse`. Write one when
-you need something a declaration cannot express:
+The first is that the two halves are not comparable. A declared harness ended a
+turn when its prompt reappeared on screen: a guess, confirmed across two polls,
+but still a rendering. A plugin ends a turn when the transcript says so. Only a
+plugin can put messages on the bus, answer `read_transcript`, or show native
+sub-agents. Offering the cheap path first steered people toward the weaker half
+of the system for harnesses that deserved the real one.
 
-| You need | Declaration | Plugin |
-|---|---|---|
-| spawn with the right flags and MCP wiring | yes | yes |
-| icon, aliases, `theater harnesses` | yes | yes |
-| turn end derived from the rendered screen | yes | yes |
-| turn end derived from the transcript | no | yes |
-| messages and tool calls on the bus | no | yes |
-| `read_transcript` for this harness | no | yes |
-| native sub-agents in the tree | no | yes |
-| launch logic with a condition in it | no | yes |
+The second is that nothing that shipped used the extension point. The built-in
+adapters were ordinary imports, so the plugin loader was exercised only by
+tests. Now every shipped adapter goes through it on every run: the path you are
+about to write on is the path Theater itself depends on.
 
-The line is `parse`. A declared harness finishes a job when its prompt comes
-back on screen, which is a guess — a good one, confirmed across two polls, but a
-guess. A plugin finishes a job when the transcript says the turn ended, which is
-a record. If the harness you are adding writes a machine-readable transcript,
-the plugin is worth the hour.
+A harness with no machine-readable transcript is still supported — set
+`has_transcript = False` and the observer falls back to the screen for turn
+boundaries. That is a property of the adapter, not a second kind of adapter.
 
-Start with a declaration. Reach for a plugin when the guess is not good enough.
+The three shipped plugins are the best worked examples available. `vibe.py` is
+the shortest, `codex.py` shows a harness whose MCP wiring goes on the command
+line, and `claude.py` shows one that needs a config file written first.
 
 ## Where plugins live, and how they load
 
@@ -57,8 +58,8 @@ the whole daemon process, and the resulting failure would name neither your file
 nor the plugin system. Under a prefixed name it collides with nothing — and your
 plugin can `import json` and get the real one.
 
-The directory is created empty by `theater daemon` on first run. Its existing is
-how the extension point announces itself.
+The directory is created empty by `theater daemon` on first run. Its existence
+is how the extension point announces itself.
 
 Plugins are read once, at start-up. After editing one:
 
@@ -187,7 +188,7 @@ Turn one line of the transcript into zero or more normalized events. This is the
 method that makes Theater cross-harness: nothing above the adapter ever sees
 your format.
 
-Returning `[]` is normal and common — both built-in harnesses skip bookkeeping
+Returning `[]` is normal and common — the shipped harnesses skip bookkeeping
 records that mean nothing to an observer. A malformed line must also return `[]`
 rather than raise: the file is being appended to while you read it, and a torn
 last line is an expected condition, not an error.
@@ -424,29 +425,30 @@ class NovaHarness(Harness):
 HARNESS = NovaHarness()
 ```
 
-If your harness has no transcript at all and you only want the launch half, the
-observing methods collapse to four one-liners — but at that point write a
-`[harness.nova]` declaration instead, which is the same thing without a file to
-maintain.
+If your harness has no transcript at all, set `has_transcript = False` and the
+observing methods collapse to four one-liners: the observer stops looking for a
+file and reads the screen instead, and `is_idle_screen` becomes the signal that
+a turn ended rather than a hint about a stuck agent.
 
 ## Precedence
 
 The registry is rebuilt at every start-up in this order:
 
 ```
-built-in adapters  →  plugins  →  config declarations
+shipped plugins  →  local plugins
 ```
 
-Later wins, with one asymmetry:
+Later wins: name your plugin `vibe` and it takes over from the shipped Vibe
+adapter. That is deliberate. Both are the same kind of file with the same
+powers, so overriding one is the supported way to fix or extend it locally
+without editing an installed package.
 
-- **A plugin may replace a built-in.** Name your plugin `vibe` and it takes over
-  from the shipped Vibe adapter. That is deliberate: a plugin is a full adapter
-  and can do everything the built-in did, so overriding one is a legitimate way
-  to fix or extend it locally.
-- **A declaration may replace neither.** `[harness.vibe]` is an error, and so is
-  a declaration whose name matches a plugin. A declaration cannot read a
-  transcript, so replacing something that can would silently downgrade turn
-  detection from a record to a guess.
+The asymmetry is in what a failure means. A shipped plugin that will not import
+stops start-up — the install is broken, and the only way past it is `[harness]
+disabled`, which is why that key matches the filename before the file is
+imported. A local plugin that will not import is skipped with a warning and
+shown as rejected by `theater harnesses`, because a file in your own directory
+is yours to break and should not take the daemon down with it.
 
 Two plugins defining the same name is an error naming both files. An alias
 collision is an error naming the claimant and the current owner. Nothing here
@@ -455,10 +457,11 @@ not something anyone can debug from the symptom.
 
 ## When it goes wrong
 
-Every failure stops start-up with the file path in the message. A plugin the
-user believes they installed but which is quietly absent is exactly the defect
-this design exists to prevent, so there is no soft-fail mode and no
-`--ignore-broken-plugins`.
+Every failure below is reported with the file path in the message. For a
+shipped plugin it stops start-up; for one of yours it is a warning, the harness
+is absent from the registry, and `theater harnesses` lists it under rejected. A
+plugin the user believes they installed but which is quietly absent — with
+nothing anywhere saying so — is the defect this design exists to prevent.
 
 | What you wrote | What you get |
 |---|---|
@@ -501,7 +504,7 @@ def test_it_loads(tmp_path):
 `install(config, plugin_dir=…)` is the seam: it rebuilds the registry from a
 directory you choose, so nothing has to relocate `$THEATER_HOME`. It is
 idempotent — calling it again rebuilds from scratch rather than accumulating —
-and `install(Config())` restores the built-ins, which is how a test cleans up
+and `install(Config())` restores the shipped set, which is how a test cleans up
 after itself.
 
 For the harness itself, instantiate it directly:
@@ -527,7 +530,7 @@ assert h.is_idle_screen("nova> ")
 assert not h.is_idle_screen("nova> what is")
 ```
 
-Take the constructor-injected root seriously. Both built-in adapters have one
+Take the constructor-injected root seriously. Every shipped adapter has one
 for exactly this reason, and a test that reads the real home directory passes or
 fails depending on what the developer did yesterday.
 
