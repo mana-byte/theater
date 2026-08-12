@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -538,11 +539,19 @@ def _shutdown_running_daemon() -> bool:
     Autostart off, which is not a detail: the previous version used the
     autostarting client, so `theater stop` with nothing running would launch a
     daemon purely to tell it to shut down.
+
+    Connecting is what answers "is there a daemon"; the call is not. A daemon
+    that shuts down promptly may cancel this very connection before its reply
+    is drained, and reporting that as "no daemon running" told the user the
+    opposite of what had just happened. So the connect is allowed to raise and
+    the call is not.
     """
 
     async def go():
         async with DaemonClient(autostart=False) as client:
-            return await client.call("shutdown")
+            await client.connect()
+            with contextlib.suppress(ConnectionError, OSError):
+                await client.call("shutdown")
 
     try:
         asyncio.run(go())

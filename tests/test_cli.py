@@ -385,6 +385,13 @@ class StoppableDaemon:
     async def __aexit__(self, *exc):
         return False
 
+    async def connect(self):
+        """Reaching the daemon succeeds. Whether it replies is another matter.
+
+        `_shutdown_running_daemon` distinguishes the two: connecting answers
+        "is there a daemon", and the reply is allowed to go missing.
+        """
+
     async def call(self, method, **params):
         if method == "shutdown":
             type(self).stopped = True

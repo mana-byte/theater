@@ -52,6 +52,17 @@ REAP_INTERVAL = 1.0
 #: check first and explain.
 MAX_SOCKET_PATH = 100
 
+#: How long aclose() waits for the listener to finish closing. Reaching this
+#: means a connection handler outlived its cancellation, which is a bug — but
+#: not one worth hanging the process over, since everything a successor needs
+#: is released immediately after.
+CLOSE_TIMEOUT = 2.0
+
+#: How long run() gives the whole shutdown before it gives up and releases the
+#: socket and lock regardless. A daemon that cannot finish closing must still
+#: not be allowed to block every future daemon on the machine.
+SHUTDOWN_TIMEOUT = 10.0
+
 
 def _check_socket_path(sock) -> None:
     if len(str(sock).encode()) > MAX_SOCKET_PATH:
@@ -213,16 +224,38 @@ class Daemon:
         )
 
     async def serve(self) -> None:
+        """Run until stop() is called. Teardown is aclose()'s job, not ours.
+
+        Deliberately not `async with self._server`. Server.__aexit__ calls
+        wait_closed(), which since 3.12 waits for every connection handler to
+        finish — and our handlers only finish when their client disconnects.
+        MCP servers and the régie hold a connection open for their whole life,
+        so serving under that context manager meant the listener closed and
+        then the daemon hung forever, still holding the lock, while clients
+        autostarted replacements that could not take it.
+        """
         await self.start()
         assert self._server is not None
-        async with self._server:
-            await self._stopping.wait()
+        await self._stopping.wait()
 
     def stop(self) -> None:
         self._stopping.set()
 
     async def aclose(self) -> None:
+        """Shut down in the one order that terminates.
+
+        The listener closes first, before connections are cancelled: closing
+        it only stops accepting, so this shuts the door on a new connection
+        arriving between the cancel loop and wait_closed() — which would
+        otherwise make wait_closed() block on a handler nobody cancelled.
+
+        wait_closed() is bounded even so. It is the only step here that waits
+        on work we do not fully control, and no diagnosis it could offer is
+        worth leaving the socket and lock held.
+        """
         self.stop()
+        if self._server:
+            self._server.close()
         await self.observer.aclose()
         if self._reaper:
             self._reaper.cancel()
@@ -234,8 +267,13 @@ class Daemon:
             await asyncio.gather(*self._conns, return_exceptions=True)
             self._conns.clear()
         if self._server:
-            self._server.close()
-            await self._server.wait_closed()
+            try:
+                await asyncio.wait_for(self._server.wait_closed(), CLOSE_TIMEOUT)
+            except TimeoutError:
+                logger.warning(
+                    "listener did not close within %.1fs; releasing anyway",
+                    CLOSE_TIMEOUT,
+                )
         self.store.close()
         self._release_files()
 
@@ -292,12 +330,34 @@ class Daemon:
         config, which survives neither `tmux kill-server` nor a config reload.
         """
         while not self._stopping.is_set():
+            if self._socket_lost():
+                logger.warning("our socket is gone; nothing can reach us, stopping")
+                self.stop()
+                return
             try:
                 await self._reap_once()
             except Exception:
                 logger.exception("reaper iteration failed")
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._stopping.wait(), timeout=REAP_INTERVAL)
+
+    def _socket_lost(self) -> bool:
+        """True once the path we bound no longer leads to our socket.
+
+        Deleting the socket file does not close the listening socket: the
+        daemon keeps running on an inode nobody can open, still holding the
+        lock, so every client autostarts a replacement that the lock then
+        refuses. Nothing recovers that — `theater restart` cannot even connect
+        to ask it to stop — so the only way out was to find the pid and kill
+        it. Noticing costs one stat per second, and exiting hands the lock to
+        the replacement that is already trying to start.
+
+        Identity, not existence: a successor that bound a new socket at the
+        same path is also a reason to go, and for the same reason.
+        """
+        if self._sock_id is None:
+            return False
+        return file_id(paths.socket_path()) != self._sock_id
 
     async def _reap_once(self) -> None:
         tracked = [p for p in self.registry.list() if p.tmux_pane]
@@ -375,4 +435,16 @@ async def run() -> None:
     try:
         await daemon.serve()
     finally:
-        await daemon.aclose()
+        # Bounded, and the socket and lock go regardless. A shutdown that
+        # cannot finish is a bug to fix, but a daemon that dies still holding
+        # the lock is worse than one that exits untidily: nothing on the
+        # machine can become the daemon until someone finds the pid and
+        # SIGKILLs it.
+        try:
+            await asyncio.wait_for(daemon.aclose(), SHUTDOWN_TIMEOUT)
+        except TimeoutError:
+            logger.error(
+                "shutdown did not finish within %.0fs; releasing socket and lock",
+                SHUTDOWN_TIMEOUT,
+            )
+            daemon._release_files()
