@@ -29,4 +29,5 @@ def harness_class(stem: str) -> type:
 
 ClaudeCodeHarness = harness_class("claude")
 CodexHarness = harness_class("codex")
+OpenCodeHarness = harness_class("opencode")
 VibeHarness = harness_class("vibe")

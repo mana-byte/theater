@@ -42,7 +42,13 @@ from theater import paths
 from theater.config import Config, ConfigError
 from theater.harness import builtin, plugins
 from theater.harness.plugins import Plugin, PluginError
-from theater.harness.source import Attachment, Batch, Source, TranscriptSource
+from theater.harness.source import (
+    Attachment,
+    Batch,
+    History,
+    Source,
+    TranscriptSource,
+)
 from theater.models import BadRequest
 
 logger = logging.getLogger("theater.harness")
@@ -302,6 +308,7 @@ __all__ = [
     "Event",
     "EventKind",
     "Harness",
+    "History",
     "LaunchPlan",
     "NativeChild",
     "Plugin",

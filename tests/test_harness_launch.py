@@ -97,7 +97,7 @@ def test_codex_approval_modes_set_both_axes(tmp_path, approval, expected):
 
 def test_the_id_never_travels_by_bare_environment(tmp_path):
     """THEATER_ID alone is not a channel: the MCP SDK would strip it."""
-    for harness in ("claude", "codex", "vibe"):
+    for harness in ("claude", "codex", "opencode", "vibe"):
         plan = plan_launch(
             harness,
             participant_id="abc123",

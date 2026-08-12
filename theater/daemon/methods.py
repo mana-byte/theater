@@ -283,11 +283,21 @@ async def _shutdown(daemon, params: dict) -> dict:
     return {"stopping": True}
 
 
+#: Kinds `read_transcript` reports. ERROR is dropped: the caller is an agent
+#: reading what was said, and a harness-level error record is not part of the
+#: conversation.
+_READABLE = ("assistant", "user", "tool_call", "tool_result")
+
+
 @method("read_transcript")
 async def _read_transcript(daemon, params: dict) -> dict:
-    """Read the transcript of a participant, returning normalized events."""
-    import asyncio
+    """Read a participant's session back, with the text unclipped.
 
+    Goes through the harness's `Source`, not through `find_transcript`, so a
+    harness whose output is a database answers this as well as one that writes
+    a file. The source opened here is short-lived and separate from the
+    observer's: reading history must not move the watcher's cursor.
+    """
     pid = _require(params, "id")
     last_n = int(params.get("last_n", 5))
 
@@ -300,33 +310,21 @@ async def _read_transcript(daemon, params: dict) -> dict:
     if harness is None:
         raise BadRequest(f"cannot read transcript: harness {p.harness!r} is not known")
 
-    path = await asyncio.to_thread(
-        harness.find_transcript,
-        cwd=p.cwd,
-        session_id=p.session_id,
-        after=None,
-    )
-    if path is None or not path.exists():
-        return {"id": pid, "events": [], "path": None}
-
-    events: list[dict] = []
+    source = harness.open_source(cwd=p.cwd, session_id=p.session_id, after=None)
     try:
-        with path.open(encoding="utf-8", errors="replace") as fh:
-            for index, line in enumerate(fh):
-                line = line.strip()
-                if not line:
-                    continue
-                for event in harness.parse(line, index, clip_text=False):
-                    if event.kind.value in ("assistant", "user", "tool_call", "tool_result"):
-                        events.append({
-                            "index": event.raw_index,
-                            "role": str(event.kind),
-                            "text": event.text or "",
-                            "tool_name": event.tool_name,
-                            "turn_end": event.turn_end,
-                        })
-    except OSError:
-        return {"id": pid, "events": [], "path": str(path)}
+        history = await source.history(last_n=last_n)
+    finally:
+        await source.aclose()
 
-    events = events[-last_n:] if last_n > 0 else events
-    return {"id": pid, "events": events, "path": str(path)}
+    events = [
+        {
+            "index": event.raw_index,
+            "role": str(event.kind),
+            "text": event.text or "",
+            "tool_name": event.tool_name,
+            "turn_end": event.turn_end,
+        }
+        for event in history.events
+        if event.kind.value in _READABLE
+    ]
+    return {"id": pid, "events": events, "path": history.location}

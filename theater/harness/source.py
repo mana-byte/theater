@@ -108,6 +108,24 @@ class Attachment:
 
 
 @dataclass(frozen=True, slots=True)
+class History:
+    """A session's past, read back in full. What `read_transcript` asks for.
+
+    Separate from `read()` because it answers a different question. Polling
+    asks "what is new"; this asks "what was said", and the answer must be
+    unclipped — the entire reason the tool exists is that the bus clips to
+    `MAX_TEXT` and an agent sometimes needs the whole reply.
+
+    It is a method on the source rather than a free function over a transcript
+    path because "where the text lives" is precisely what the source owns. A
+    harness with no file cannot answer the path question at all.
+    """
+
+    location: str | None = None
+    events: Sequence[Event] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class Batch:
     """One poll's worth of facts from a source.
 
@@ -159,6 +177,19 @@ class Source(ABC):
         check.
         """
         return Batch()
+
+    async def history(self, *, last_n: int) -> History:
+        """The session so far, with text unclipped. Newest `last_n` events.
+
+        Independent of the poll cursor: reading history must not disturb where
+        the watcher has got to, because the caller is usually a *different*
+        consumer — `read_transcript` opens its own short-lived source rather
+        than borrowing the observer's.
+
+        `last_n <= 0` means everything. The default returns nothing, which is
+        the honest answer for a source that can only see forward.
+        """
+        return History()
 
     async def aclose(self) -> None:
         """Release anything held open. Called once, when the watcher stops."""
@@ -220,6 +251,36 @@ class TranscriptSource(Source):
         logger.info("transcript rotated: %s -> %s", self.path, path)
         attached = await self._attach(path)
         return Batch(attached=attached) if attached else Batch()
+
+    async def history(self, *, last_n: int) -> History:
+        """Re-read the whole transcript with the text left unclipped.
+
+        Located from scratch rather than reusing `self.path`, so this works on
+        a source that has never polled — which is the normal case, since the
+        caller opens one just for this.
+        """
+        path = self.path or await self._locate(session_id=self._session_id)
+        if path is None:
+            return History()
+        events = await asyncio.to_thread(self._read_all, path)
+        return History(
+            location=str(path),
+            events=events[-last_n:] if last_n > 0 else events,
+        )
+
+    def _read_all(self, path: Path) -> list[Event]:
+        events: list[Event] = []
+        try:
+            with path.open(encoding="utf-8", errors="replace") as fh:
+                for index, line in enumerate(fh):
+                    line = line.strip()
+                    if line:
+                        events.extend(self._harness.parse(line, index, clip_text=False))
+        except OSError:
+            # A transcript that vanished mid-read is the same non-event here as
+            # it is in the poll path: report what there is, which is nothing.
+            return []
+        return events
 
     # ---- internals ------------------------------------------------------
 

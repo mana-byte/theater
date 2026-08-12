@@ -200,11 +200,18 @@ class Harness(ABC):
     #: private-use codepoint, which would render as a blank box for anyone who
     #: has not installed one.
     icon: str = "·"
-    #: Whether `parse` can produce events from a file on disk. False for a
-    #: harness declared in config, which has no declared transcript layout and
-    #: must be observed from its rendered screen instead. The observer reads
-    #: this to choose a watch loop; it is not a preference but a statement of
-    #: what the adapter can do, so it lives on the adapter.
+    #: Whether the adapter can be observed by reading, rather than by looking
+    #: at the screen. True means `open_source` returns something that reports
+    #: real turns — the default file source driven by `parse`, or a source of
+    #: the adapter's own over some other store. False means there is nothing to
+    #: read and the observer must fall back to the rendered screen, ending a
+    #: turn when the prompt comes back.
+    #:
+    #: The name predates sources and is now wider than it sounds: an adapter
+    #: with no transcript file at all, but a database it can query, still sets
+    #: this True. What the flag really selects is the observer's watch loop, so
+    #: it is not a preference but a statement of what the adapter can do, which
+    #: is why it lives on the adapter.
     has_transcript: bool = True
     #: Other spellings that should resolve to `name` at registration. An agent
     #: reports its own harness string, and one that does not normalize is

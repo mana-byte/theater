@@ -186,9 +186,9 @@ pane.
 The bus is an activity feed, not an archive. Event text is clipped at
 `MAX_TEXT = 2000` chars, because a single tool result is routinely 25 KB and
 keeping it whole would put megabytes of file contents into SQLite for something
-the TUI renders as one line. The transcript on disk stays the full record —
-which is exactly what `read_transcript` reaches for when a caller needs the
-untruncated text.
+the TUI renders as one line. What the harness itself wrote stays the full record
+— which is exactly what `read_transcript` reaches for, through the same `Source`
+the observer uses, when a caller needs the untruncated text.
 
 ---
 
@@ -220,16 +220,18 @@ skip to EOF on attach      dead detection, awaiting-input
 ```
 
 Job 1 is harness-shaped. Vibe rotates its session directory mid-turn; Claude
-appends to one file; a harness that keeps its sessions in a shared SQLite
-database has no byte offset to hold onto at all. Job 2 is harness-agnostic
-policy, and it is where every observation bug in this project has been.
+appends to one file; opencode writes no transcript at all and keeps every
+session in one shared SQLite database, where there is no byte offset to hold
+onto. Job 2 is harness-agnostic policy, and it is where every observation bug in
+this project has been.
 
 So job 1 is a replaceable seam and job 2 is not. `Harness.open_source()`
 returns a `Source` (`theater/harness/source.py`); the default is
 `TranscriptSource`, which is the file tailing that used to live inline in the
 observer. A plugin that overrides it returns `Batch(events, progressed, status,
-attached, waiting)` from `poll()` and the observer's policy runs unchanged on
-top.
+attached, waiting)` from `read()` and the observer's policy runs unchanged on
+top. `opencode.py` is the one shipped adapter that does, and its source keys off
+`event.seq` in the database instead of a file position.
 
 Three fields in that contract are load-bearing:
 
@@ -242,6 +244,14 @@ Three fields in that contract are load-bearing:
 - `waiting=True` means "nothing to read from yet" — no session file, no row.
   The observer sleeps and runs no timers, because a quiet timer against a
   source that has never spoken measures nothing.
+
+A source has one more job, and it is not the observer's: `history(last_n)`
+returns the session from the beginning, unclipped, and is what `read_transcript`
+calls. `read()` is a tail and cannot answer that question — by the time an agent
+asks for the full text of a reply, the batch carrying it is long gone. The
+default implementation re-reads the file with clipping off; a database source
+writes its own query. A custom source that skips it does not error, it just
+returns nothing, which is the one feature a source can silently lose.
 
 **Why not let a plugin bring its own observer?** Because job 2 would then be
 written once per harness, and the settling logic, the rescue and the
@@ -412,7 +422,7 @@ implement:
 | `is_idle_screen` | does this rendered screen mean "waiting for a human" |
 
 Every adapter is a plugin file, loaded by `harness/plugins.py` under one
-contract. The three that ship — `claude`, `codex`, `vibe` — live in
+contract. The four that ship — `claude`, `codex`, `opencode`, `vibe` — live in
 `builtin/plugins/` and are read by the same scanner as anything in
 `$THEATER_HOME/harnesses/`. There is no built-in tier. The only asymmetry is
 what happens when one will not import: a shipped plugin failing is fatal (the
@@ -495,15 +505,16 @@ theater/
 │   ├── schema.py 85      table metadata, the one place columns are declared
 │   ├── lineage.py 73     ancestor_ids, depth_of, root_of, subtree_ids
 │   └── migrations/       alembic env + versions/
-├── harness/  __init__.py 323 (registry + install) · base.py 328
-│            source.py 310 (the observer's job-1 seam) · plugins.py 183 (loader)
-│            builtin/plugins/  codex.py 414 · claude.py 367 · vibe.py 284
+├── harness/  __init__.py 330 (registry + install) · base.py 335
+│            source.py 371 (the observer's job-1 seam) · plugins.py 183 (loader)
+│            builtin/plugins/  opencode.py 706 (a database, not a file)
+│                              codex.py 414 · claude.py 367 · vibe.py 284
 ├── mcp/      tools.py 206 · server.py 152
 ├── tmux/     client.py 261 · panes.py 167 · presence.py 56
 └── regie/    app.py 534 · tree.py 131 · palette.py 64 · bus_view.py 37
 ```
 
-Roughly 8,400 lines, 537 tests.
+Roughly 9,200 lines, 572 tests.
 
 The v1.1 refactor split `daemon/server.py` (lifecycle vs. methods vs. harness
 detection), broke the `store ↔ jobs` import cycle by moving `Job` into

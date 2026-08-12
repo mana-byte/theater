@@ -8,9 +8,10 @@ régie palette.
 
 ## One mechanism, not two
 
-Every adapter Theater can drive is a plugin, including the three it ships:
-`claude`, `codex` and `vibe` live in `theater/harness/builtin/plugins/` and are
-loaded by the same scanner that reads yours. There is no built-in tier and no
+Every adapter Theater can drive is a plugin, including the four it ships:
+`claude`, `codex`, `opencode` and `vibe` live in
+`theater/harness/builtin/plugins/` and are loaded by the same scanner that reads
+yours. There is no built-in tier and no
 lighter-weight way to declare a harness in TOML.
 
 There used to be. A `[harness.<name>]` table could describe how to launch a CLI
@@ -34,9 +35,11 @@ A harness with no machine-readable transcript is still supported — set
 `has_transcript = False` and the observer falls back to the screen for turn
 boundaries. That is a property of the adapter, not a second kind of adapter.
 
-The three shipped plugins are the best worked examples available. `vibe.py` is
+The four shipped plugins are the best worked examples available. `vibe.py` is
 the shortest, `codex.py` shows a harness whose MCP wiring goes on the command
-line, and `claude.py` shows one that needs a config file written first.
+line, `claude.py` shows one that needs a config file written first, and
+`opencode.py` shows one that writes no transcript file at all and reads its own
+SQLite event log instead.
 
 ## Where plugins live, and how they load
 
@@ -97,10 +100,12 @@ with no alias registered is observed as nothing at all, forever. An alias that
 already belongs to another harness is refused at load time rather than
 silently reassigned.
 
-`has_transcript` selects the observer's loop. Leave it `True` if `parse` works.
-Set it `False` if your `find_transcript` will always return `None` — otherwise
-the observer searches for a file that never appears, the participant never
-produces an event, and every `theater_send` to it hangs.
+`has_transcript` selects the observer's loop, and the name is narrower than the
+meaning: it asks whether your adapter can be observed by *reading* anything at
+all. Leave it `True` if `parse` works, and also if you have no file but override
+`open_source` to read some other store. Set it `False` only when there is
+nothing to read — otherwise the observer waits on a source that never produces,
+the participant never produces an event, and every `theater_send` to it hangs.
 
 ## The interface, method by method
 
@@ -173,7 +178,9 @@ whose transcript predates Theater's first sight of them — so do not treat
 on the working directory.
 
 Returning `None` forever with `has_transcript = True` is the one silent failure
-mode in this interface. Set `has_transcript = False` instead.
+mode in this interface — unless you override `open_source`, in which case this
+method is never called and `None` is the right answer. Otherwise set
+`has_transcript = False`.
 
 ### `session_id(transcript) -> str | None`
 
@@ -312,9 +319,26 @@ bus or the job manager.
 
 `find_transcript`, `session_id` and `parse` are still abstract, so a plugin with
 a custom source has to define them. Return `None`, `None` and `[]`. They are
-what the default source is built from, and `read_transcript` still calls them
-directly — an agent asking your participant for its full transcript gets nothing
-until that path grows a source-aware version too.
+what the default source is built from, and nothing else calls them once
+`open_source` is overridden.
+
+One optional method is worth implementing: `history`.
+
+```python
+async def history(self, *, last_n: int) -> History:
+```
+
+`read` is a tail — it answers "what happened since I last looked". `history`
+answers "what has this session said, from the beginning", and it is what backs
+the `read_transcript` tool, which exists because the bus clips long replies and
+an agent sometimes needs the whole thing. The default implementation re-reads
+the file with clipping off; a source over a database has to write its own. Skip
+it and callers get an empty transcript with no error — the one place a custom
+source silently loses a feature.
+
+Two rules. Return the *newest* `last_n` events, `0` meaning all. And do not clip
+text: clipping is the caller's job, and this is the path a caller takes
+precisely because the clipped copy was not enough.
 
 ## A complete plugin
 
@@ -490,10 +514,13 @@ class NovaHarness(Harness):
 HARNESS = NovaHarness()
 ```
 
-If your harness has no transcript at all, set `has_transcript = False` and the
-observing methods collapse to four one-liners: the observer stops looking for a
-file and reads the screen instead, and `is_idle_screen` becomes the signal that
-a turn ended rather than a hint about a stuck agent.
+If your harness writes no transcript file, you have two options. If it keeps its
+history somewhere else — a database, a socket — implement `open_source` and keep
+`has_transcript = True`; `opencode.py` is the worked example. If it keeps no
+history at all, set `has_transcript = False` and the observing methods collapse
+to four one-liners: the observer stops looking for a file and reads the screen
+instead, and `is_idle_screen` becomes the signal that a turn ended rather than a
+hint about a stuck agent.
 
 ## Precedence
 

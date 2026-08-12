@@ -120,18 +120,19 @@ def error_in(directory: Path) -> str:
 
 def test_a_plugin_joins_the_registry(local_dir):
     plugin(local_dir)
-    assert install(local_dir) == ["acme", "claude", "codex", "vibe"]
+    assert install(local_dir) == ["acme", "claude", "codex", "opencode", "vibe"]
     assert harness_registry.get("acme").binary == "acme"
     assert harness_registry.harness_icon("acme") == "@"
 
 
 def test_the_shipped_adapters_are_plugins_too(local_dir):
     """No built-in tier: every adapter comes through the same loader."""
-    assert install(local_dir) == ["claude", "codex", "vibe"]
+    assert install(local_dir) == ["claude", "codex", "opencode", "vibe"]
     rows = {r["name"]: r for r in harness_registry.describe()}
     assert rows["vibe"]["source"] == "shipped"
     assert rows["claude"]["source"] == "shipped"
     assert rows["codex"]["source"] == "shipped"
+    assert rows["opencode"]["source"] == "shipped"
 
 
 def test_a_plugin_is_a_full_adapter(local_dir):
@@ -159,7 +160,7 @@ def test_a_missing_directory_is_not_an_error(tmp_path):
 
 
 def test_an_empty_directory_leaves_the_shipped_set(local_dir):
-    assert install(local_dir) == ["claude", "codex", "vibe"]
+    assert install(local_dir) == ["claude", "codex", "opencode", "vibe"]
 
 
 def test_underscored_files_are_skipped(local_dir):
@@ -208,7 +209,7 @@ def test_the_two_sources_do_not_share_module_names(local_dir, shipped_dir):
 def test_installing_twice_is_the_same_as_once(local_dir):
     plugin(local_dir)
     install(local_dir)
-    assert install(local_dir) == ["acme", "claude", "codex", "vibe"]
+    assert install(local_dir) == ["acme", "claude", "codex", "opencode", "vibe"]
 
 
 def test_installing_an_empty_directory_drops_the_plugin(local_dir, tmp_path):
@@ -290,7 +291,7 @@ def test_a_broken_local_plugin_does_not_stop_start_up(local_dir):
     """The user wrote it and can see it; one bad file is not worth the daemon."""
     (local_dir / "broken.py").write_text("raise ValueError('boom')")
     plugin(local_dir)
-    assert install(local_dir) == ["acme", "claude", "codex", "vibe"]
+    assert install(local_dir) == ["acme", "claude", "codex", "opencode", "vibe"]
 
 
 def test_a_broken_local_plugin_is_listed_as_broken(local_dir):
@@ -364,7 +365,7 @@ def test_a_plugin_alias_cannot_be_another_harness_name(local_dir):
 
 
 def test_a_disabled_harness_is_absent(local_dir):
-    assert install(local_dir, disabling("vibe")) == ["claude", "codex"]
+    assert install(local_dir, disabling("vibe")) == ["claude", "codex", "opencode"]
     assert "vibe" not in harness_registry.HARNESSES
 
 
@@ -379,7 +380,7 @@ def test_a_disabled_harness_is_not_offered_by_the_palette(local_dir):
 
     install(local_dir, disabling("vibe"))
     offered = [name for _, name, _ in entries(harness_registry.describe())]
-    assert offered == ["claude", "codex"]
+    assert offered == ["claude", "codex", "opencode"]
 
 
 def test_a_disabled_harness_still_draws_in_the_tree(local_dir):
@@ -393,6 +394,7 @@ def test_disabling_something_that_is_not_there_is_not_an_error(local_dir):
     assert install(local_dir, disabling("nosuchharness")) == [
         "claude",
         "codex",
+        "opencode",
         "vibe",
     ]
 

@@ -42,8 +42,8 @@ Theater lets agents running in different harnesses — Claude Code, Codex, Vibe 
 
 - Python 3.12+
 - tmux (hard dependency — inbound delivery requires a pane)
-- At least one of `claude`, `codex`, `vibe` on `PATH` — or any other CLI you teach it
-  about, see [Configuration](#configuration)
+- At least one of `claude`, `codex`, `opencode`, `vibe` on `PATH` — or any other CLI
+  you teach it about, see [Configuration](#configuration)
 
 ---
 
@@ -103,6 +103,10 @@ theater spawn claude "add tests for the new API" --approval yolo --worktree --fo
 - `manual` — every tool call requires human approval
 - `edits` — file edits are auto-approved, everything else prompts
 - `yolo` — all tool calls auto-approved (use with care)
+
+An adapter maps these onto whatever its CLI actually offers, and may have to
+round down: `opencode` has one flag, `--auto`, so `edits` there behaves as
+`manual` rather than silently granting more than was asked for.
 
 `--worktree` creates an isolated git worktree for the child so parallel agents don't conflict on the index.
 
@@ -230,8 +234,8 @@ watching, and a key setting it to `yolo` once and forever defeats that.
 One way: write a plugin. A Python file that implements the adapter, dropped in
 `$THEATER_HOME/harnesses/`.
 
-The three adapters Theater ships — `claude`, `codex`, `vibe` — are the same kind
-of file, living in `theater/harness/builtin/plugins/`. There is no privileged
+The four adapters Theater ships — `claude`, `codex`, `opencode`, `vibe` — are the
+same kind of file, living in `theater/harness/builtin/plugins/`. There is no privileged
 built-in tier and no second, weaker mechanism to declare one in TOML: a config
 schema could only ever express the shallow half of an adapter, and the deep half
 is where turn boundaries, bus messages, `read_transcript` and native sub-agents
@@ -273,7 +277,7 @@ Lists every participant Theater knows about — id, harness, status, cwd, addres
 Starts a new agent in a child tmux window. Returns the child's id and a handle for `await_sessions`.
 
 ```
-harness:     "claude" | "codex" | "vibe"
+harness:     "claude" | "codex" | "opencode" | "vibe"
 prompt:      task delivered on the child's command line
 approval:    "manual" | "edits" | "yolo"
 cwd:         working directory (defaults to caller's cwd)
@@ -356,5 +360,5 @@ tests/                    pytest suite (asyncio_mode = auto)
 The full rationale for every architectural decision is in `docs/init_idea_grilled.md`. The short version:
 
 - **MCP cannot push.** No server can initiate an agent turn. MCP handles outbound (agent → Theater), tmux handles inbound (Theater → agent pane).
-- **Observation reads transcripts, not screens.** Status is derived from the JSONL transcript the harness writes; `capture-pane` only detects a human typing. Two narrow exceptions: a plugin that declares `has_transcript = False` has no parser, so its turns end when its prompt returns on screen; and after a minute of silence over an idle screen, a job still waiting is finished anyway, so a turn boundary the parser never saw cannot strand the agent that sent the prompt.
+- **Observation reads what the agent wrote, not the screen.** Status is derived from the transcript the harness leaves behind — a JSONL file for three of the four shipped adapters, a SQLite event log for `opencode`, which brings its own reader; `capture-pane` only detects a human typing. Two narrow exceptions: a plugin that declares `has_transcript = False` has nothing to read, so its turns end when its prompt returns on screen; and after a minute of silence over an idle screen, a job still waiting is finished anyway, so a turn boundary the parser never saw cannot strand the agent that sent the prompt.
 - **Approval is per-spawn.** The orchestrator chooses the child's approval policy at spawn time. There is no global default — this is intentional.
