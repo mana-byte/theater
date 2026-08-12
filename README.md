@@ -182,6 +182,16 @@ apply a change.
 Machine-scoped only: there is no project-local config, because there is one
 daemon per machine holding one registry.
 
+[`config.example.toml`](config.example.toml) in the repository root documents
+every setting with its default and is safe to copy as-is:
+
+```sh
+cp config.example.toml ~/.theater/config.toml
+```
+
+Everything in it is commented out, so copying it changes no behaviour —
+uncomment what you want to change. The short version:
+
 ```toml
 [theater]
 favourite = "vibe"        # harness used when `theater spawn` omits one
@@ -317,6 +327,7 @@ for r in results:
 ## Project layout
 
 ```
+config.example.toml   every setting with its default, safe to copy
 theater/
   cli.py          theater binary entry point
   models.py       Participant, Status, Tier domain types

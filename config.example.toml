@@ -1,0 +1,165 @@
+# Theater configuration — every setting, with its default.
+#
+#   cp config.example.toml ~/.theater/config.toml
+#
+# This file is an example. Theater does not read it from the repository: the
+# real one lives at $THEATER_HOME/config.toml, and `theater config path` prints
+# where that is on your machine.
+#
+# Every key below is commented out and shows the value Theater uses when it is
+# absent. Uncomment only what you want to change — a key set to its own default
+# is not a no-op, it pins that value against future changes and makes
+# `theater config` report it as yours rather than ours.
+#
+# Read once, at daemon start. `theater restart` applies an edit.
+# Machine-scoped: there is no project-local config, because there is one daemon
+# per machine holding one registry.
+# An unknown key is a hard error naming the file, the key and the closest legal
+# spelling. A typo that is silently ignored is the defect this file exists to
+# avoid.
+#
+# Full reference: README.md (Configuration), docs/harness-plugins.md.
+
+
+[theater]
+
+# Harness used when `theater spawn` is given no harness name, and sorted first
+# in the régie's ctrl+p palette. Must name a harness that exists — built-in,
+# declared below, or a plugin — checked at daemon start.
+# favourite = "vibe"
+
+
+[regie]
+
+# Textual theme for the régie TUI. One of:
+#   ansi-dark ansi-light atom-one-dark atom-one-light catppuccin-frappe
+#   catppuccin-latte catppuccin-macchiato catppuccin-mocha dracula flexoki
+#   gruvbox monokai nord rose-pine rose-pine-dawn rose-pine-moon
+#   solarized-dark solarized-light textual-dark textual-light tokyo-night
+# Unset means Textual's own default. A name Textual does not know is reported
+# in the régie's status line, not crashed on: a bad theme is cosmetic.
+# theme = "nord"
+
+# How often the participant tree is rebuilt, in seconds.
+# tree_interval = 1.0
+
+# How often the bus pane polls for new events, in seconds.
+# bus_interval = 0.4
+
+# How many bus events to pull per poll.
+# bus_batch = 50
+
+
+[rails]
+
+# Maximum depth of a spawn tree; roots are depth 0. With the default, a root
+# may spawn a child, which may spawn a grandchild, which may not spawn.
+# depth_cap = 3
+
+# How many participants one tree may hold before further spawns are refused.
+# The two together are what stops a runaway agent filling the machine with
+# panes, so raise them deliberately.
+# budget = 20
+
+
+[observer]
+
+# All values are seconds. The floor for any of them is 0.01 — below that the
+# daemon spends more time waking up than working, so a typo'd 0.0001 is
+# rejected rather than left to spin a core.
+
+# How often to check a known transcript for new bytes. This is what the régie
+# renders, and a second of lag on "what is it doing right now" is visible.
+# poll_interval = 0.25
+
+# How often to look for a transcript that has not appeared yet. Slower because
+# it is a directory scan rather than a stat.
+# search_interval = 2.0
+
+# How long a transcript may be quiet before the observer re-locates it. Vibe
+# opens a new session directory on some turns; without this the observer stays
+# locked onto a file that will never grow again.
+# relocate_timeout = 5.0
+
+# How long a transcript may be quiet before the screen is checked for a bare
+# prompt — which is how AWAITING_INPUT is detected. Long enough that a slow
+# tool call does not trigger it, short enough that a human watching notices.
+# awaiting_input_timeout = 10.0
+
+# How often to read the screen of a harness that has no transcript at all (one
+# declared in [harness.*] below). Much faster than the timeout above, because
+# for those harnesses the screen is not a hint about a stuck agent — it is the
+# only evidence a turn ended, and a caller is blocked on it. A turn is called
+# finished only when two consecutive polls agree, so this is also half the
+# detection latency.
+# screen_interval = 1.0
+
+# How often the observer reconciles its watch tasks against the registry.
+# sync_interval = 1.0
+
+
+# ---------------------------------------------------------------------------
+# Declaring a harness
+# ---------------------------------------------------------------------------
+#
+# [harness.<name>] teaches Theater a CLI it does not ship an adapter for. It
+# covers launching, MCP wiring, presence, the icon and unmanaged-pane
+# detection. It does not cover reading a transcript — a declared harness has no
+# parser, so its turns end when its prompt reappears on screen, confirmed
+# across two polls. If you need real turn boundaries, messages on the bus,
+# read_transcript or native sub-agents, write a plugin instead:
+# docs/harness-plugins.md.
+#
+# Required: binary, idle_prompts, and all three approvals modes (the empty list
+# included). Each missing value would mislead rather than degrade — nothing to
+# run, a yolo spawn with no flags that looks deliberate, or a turn that never
+# ends and hangs every caller.
+#
+# A declaration may not take the name of a built-in (claude, vibe) or of a
+# plugin. Overriding an adapter that can read a transcript with one that cannot
+# is a silent downgrade, so it is refused.
+#
+# Placeholders, substituted literally wherever they appear:
+#   {id}           participant id — this is what makes the MCP server ours
+#   {prompt}       the initial prompt
+#   {binary}       this harness's executable
+#   {theater}      absolute path to the theater binary
+#   {config_path}  where mcp_file will be written
+#
+# argv order is fixed, not templated:
+#   binary  approval flags  mcp_argv  mcp_file_argv  argv
+#
+# The examples below are real CLI surfaces but are NOT verified end to end:
+# neither binary has been spawned through Theater. Treat them as examples of
+# the schema, not as tested recipes.
+
+# [harness.codex]
+# binary       = "codex"
+# icon         = "◇"
+# aliases      = ["codex-cli", "openai-codex"]
+# idle_prompts = ["›", "▌"]
+# mcp_argv     = ["-c", "mcp_servers.theater.command={theater}",
+#                 "-c", 'mcp_servers.theater.args=["mcp","--id","{id}"]']
+# approvals    = { manual = [], edits = ["--full-auto"], yolo = ["--dangerously-bypass-approvals-and-sandbox"] }
+
+# A harness configured by a file instead of flags. mcp_file is written to
+# {config_path} before the pane is created; mcp_file_argv points the harness at
+# it. This is the shape Claude Code's built-in adapter uses.
+#
+# [harness.someagent]
+# binary        = "someagent"
+# icon          = "◆"
+# idle_prompts  = ["> "]
+# mcp_file      = '{"mcpServers":{"theater":{"command":"{theater}","args":["mcp","--id","{id}"]}}}'
+# mcp_file_argv = ["--mcp-config={config_path}"]
+# approvals     = { manual = [], edits = ["--accept-edits"], yolo = ["--yes"] }
+# argv          = ["{prompt}"]
+
+# A harness that reads its MCP config from the environment, the way Vibe does.
+#
+# [harness.otheragent]
+# binary       = "otheragent"
+# icon         = "▣"
+# idle_prompts = ["❯"]
+# mcp_env      = { OTHER_MCP_SERVERS = '[{"name":"theater","transport":"stdio","command":"{theater}","args":["mcp","--id","{id}"]}]' }
+# approvals    = { manual = [], edits = ["--auto-edit"], yolo = ["--yolo"] }
