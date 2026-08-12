@@ -84,6 +84,23 @@ def plan_launch(
     )
 
 
+#: Shown for a participant whose harness has no adapter — an unmanaged pane,
+#: or an agent that registered under a name we do not recognise.
+UNKNOWN_ICON = "?"
+
+
+def harness_icon(name: str | None) -> str:
+    """The one-character mark for a harness name, as reported by a participant.
+
+    Normalizes first, so an agent that registered as `claude-code` still gets
+    the Claude glyph. Unknown names are not an error here: an external
+    participant may be running something Theater has never heard of, and a
+    listing should say so rather than refuse to draw the row.
+    """
+    harness = HARNESSES.get(normalize(name or ""))
+    return harness.icon if harness else UNKNOWN_ICON
+
+
 def known_binaries() -> set[str]:
     """Every binary name the registered harnesses look for on PATH.
 
@@ -99,6 +116,7 @@ __all__ = [
     "HARNESSES",
     "MAX_TEXT",
     "SERVER_NAME",
+    "UNKNOWN_ICON",
     "ClaudeCodeHarness",
     "Event",
     "EventKind",
@@ -108,6 +126,7 @@ __all__ = [
     "VibeHarness",
     "clip",
     "get",
+    "harness_icon",
     "known_binaries",
     "normalize",
     "plan_launch",

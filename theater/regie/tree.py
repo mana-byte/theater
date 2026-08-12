@@ -27,6 +27,7 @@ from theater.formatting import (
     tier_mark,
     tilde,
 )
+from theater.harness import harness_icon
 
 _STATUS_COLOR = {
     "starting": "yellow",
@@ -44,6 +45,7 @@ def _node_label(node: dict, indent: int) -> Text:
     label = Text()
     label.append(f"{'  ' * indent}")
     label.append(f"{tier_mark(node.get('tier'))}{reach_mark(node.get('addressable'))} ", style="bold")
+    label.append(f"{harness_icon(node.get('harness'))} ")
     label.append(f"{clip_harness(node.get('harness')):<11} ")
     label.append(f"{status:<14} ", style=_STATUS_COLOR.get(status, "white"))
     label.append(f"{short_id(node.get('id'))} ")

@@ -114,6 +114,15 @@ theater adopt
 theater adopt --harness claude  # override harness detection
 ```
 
+### `theater harnesses`
+
+List the coding CLIs Theater knows how to drive, and whether each one is on PATH here. Reads a local registry, so it works before the daemon is running:
+
+```sh
+theater harnesses
+theater harnesses --json
+```
+
 ### `theater bus`
 
 Watch the normalized event feed from all agents:
@@ -132,6 +141,8 @@ Launch the régie TUI — a full-screen view of all sessions and their activity.
 ```sh
 theater regie
 ```
+
+While it runs, the régie turns tmux's `mouse` option on for its own session and puts the previous value back on exit. Quitting also unstages: whatever agent was joined into the régie's window is moved back to a window of its own, still running.
 
 ### `theater kill` / `theater stop`
 

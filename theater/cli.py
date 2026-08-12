@@ -31,7 +31,7 @@ from theater.formatting import (
     tier_mark,
     tilde,
 )
-from theater.harness import APPROVALS, HARNESSES
+from theater.harness import APPROVALS, HARNESSES, harness_icon
 from theater.protocol import RemoteError
 from theater.tmux import client as tmux
 
@@ -122,6 +122,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     adopt.add_argument("--json", action="store_true")
 
+    harnesses = sub.add_parser(
+        "harnesses", help="List the coding CLIs Theater knows how to drive."
+    )
+    harnesses.add_argument("--json", action="store_true")
+
     sub.add_parser("regie", help="Launch the régie TUI (run inside tmux).")
 
     sub.add_parser("stop", help="Shut the daemon down.")
@@ -164,6 +169,7 @@ def _row_line(p: dict, indent: int = 0) -> str:
     pad = "  " * indent
     return (
         f"{p['id']:<14}{tier_mark(p['tier'])}{reach_mark(p['addressable'])} "
+        f"{harness_icon(p.get('harness'))} "
         f"{clip_harness(p.get('harness')):<11} "
         f"{p['status']:<15} {p.get('tmux_pane') or '-':<6} {pad}{tilde(p.get('cwd'))}"
     )
@@ -173,7 +179,7 @@ def _format_ls(rows: list[dict], *, tree: bool, unmanaged: list[dict] | None = N
     if not rows and not unmanaged:
         return "no participants"
     body = flatten_tree(rows, _row_line) if tree else [_row_line(r) for r in rows]
-    header = f"{'ID':<14}{'T':<2} {'HARNESS':<11} {'STATUS':<15} {'PANE':<6} DIRECTORY"
+    header = f"{'ID':<14}{'T':<2}   {'HARNESS':<11} {'STATUS':<15} {'PANE':<6} DIRECTORY"
     lines = [header, *body]
     if unmanaged:
         lines.append("")
@@ -181,8 +187,12 @@ def _format_ls(rows: list[dict], *, tree: bool, unmanaged: list[dict] | None = N
         for u in unmanaged:
             cmd = clip_harness(u.get("command"))
             pane = u.get("pane") or "-"
+            icon = harness_icon(u.get("harness") or u.get("command"))
             lines.append(
-                f"  {'-':<14}{'?'}  {cmd:<11} {'-':<15} {pane:<6} {tilde(u.get('cwd'))}"
+                # The 2-space indent eats into the id column so the tier and
+                # harness columns still line up with the participants above.
+                f"  {'-':<12}{'?':<2} {icon} {cmd:<11} "
+                f"{'-':<15} {pane:<6} {tilde(u.get('cwd'))}"
             )
     lines.extend(["", TIER_LEGEND])
     return "\n".join(lines)
@@ -336,6 +346,43 @@ def cmd_adopt(args) -> int:
     return 0
 
 
+def cmd_harnesses(args) -> int:
+    """List the registered harness adapters.
+
+    Answers a question that otherwise needs reading the source: what can I
+    pass to `theater spawn`, and is it actually installed here? The registry
+    is local data, so this deliberately does not start or contact the daemon —
+    it works before anything else does.
+    """
+    rows = []
+    for name in sorted(HARNESSES):
+        harness = HARNESSES[name]
+        path = shutil.which(harness.binary)
+        rows.append(
+            {
+                "name": name,
+                "icon": harness.icon,
+                "binary": harness.binary,
+                "installed": path is not None,
+                "path": path,
+            }
+        )
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    print(f"{'':<2} {'NAME':<10} {'BINARY':<10} {'INSTALLED':<10} PATH")
+    for r in rows:
+        mark = "yes" if r["installed"] else "no"
+        print(
+            f"{r['icon']:<2} {r['name']:<10} {r['binary']:<10} {mark:<10} "
+            f"{tilde(r['path']) if r['path'] else '-'}"
+        )
+    missing = [r["name"] for r in rows if not r["installed"]]
+    if missing:
+        print(f"\nnot on PATH: {', '.join(missing)} — spawn will refuse these")
+    return 0
+
+
 def cmd_stop(args) -> int:
     call_sync("shutdown")
     print("daemon stopping")
@@ -369,6 +416,7 @@ _COMMANDS = {
     "spawn": cmd_spawn,
     "kill": cmd_kill,
     "adopt": cmd_adopt,
+    "harnesses": cmd_harnesses,
     "regie": cmd_regie,
     "stop": cmd_stop,
 }

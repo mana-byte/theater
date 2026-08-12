@@ -183,6 +183,15 @@ class Harness(ABC):
     name: str
     #: Executable to look for on PATH.
     binary: str
+    #: One character shown before the harness name in listings.
+    #:
+    #: A single glyph, not an image: terminal image protocols do not survive
+    #: tmux, so a "logo" here can only ever be a character. Kept to width 1 so
+    #: no listing has to reflow when a harness is added, and chosen from
+    #: symbols a default font is likely to have rather than a Nerd Font
+    #: private-use codepoint, which would render as a blank box for anyone who
+    #: has not installed one.
+    icon: str = "·"
 
     # ---- launching ------------------------------------------------------
 

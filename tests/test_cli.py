@@ -222,3 +222,65 @@ async def test_follow_from_an_empty_bus_starts_at_zero(fake_follow):
     args = parse("bus", "-f", "--interval", "0")
     await _run_follow(args)
     assert client.cursors == [0, 0, 1]
+
+
+# ---- harnesses ----------------------------------------------------------
+
+
+def test_harnesses_is_a_command():
+    assert parse("harnesses").command == "harnesses"
+
+
+def test_harnesses_lists_every_registered_adapter(monkeypatch, capsys):
+    monkeypatch.setattr(cli.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+    assert cli.cmd_harnesses(parse("harnesses")) == 0
+    out = capsys.readouterr().out
+    for name in cli.HARNESSES:
+        assert name in out
+    assert "not on PATH" not in out
+
+
+def test_harnesses_says_which_ones_are_missing(monkeypatch, capsys):
+    """Naming an uninstalled harness is the whole point: spawn will refuse it."""
+    monkeypatch.setattr(cli.shutil, "which", lambda binary: None)
+    cli.cmd_harnesses(parse("harnesses"))
+    out = capsys.readouterr().out
+    assert "not on PATH" in out
+    for name in cli.HARNESSES:
+        assert name in out
+
+
+def test_harnesses_json_reports_install_state(monkeypatch, capsys):
+    monkeypatch.setattr(cli.shutil, "which", lambda binary: None)
+    cli.cmd_harnesses(parse("harnesses", "--json"))
+    rows = json.loads(capsys.readouterr().out)
+    assert {r["name"] for r in rows} == set(cli.HARNESSES)
+    assert all(r["installed"] is False and r["path"] is None for r in rows)
+    assert all(r["icon"] for r in rows)
+
+
+def test_harnesses_never_contacts_the_daemon(monkeypatch, capsys):
+    """It is local data, so it has to work before anything else is running."""
+    def explode(*a, **k):
+        raise AssertionError("cmd_harnesses talked to the daemon")
+
+    monkeypatch.setattr(cli, "call_sync", explode)
+    monkeypatch.setattr(cli, "DaemonClient", explode)
+    assert cli.cmd_harnesses(parse("harnesses")) == 0
+
+
+def test_the_harness_column_lines_up_across_header_rows_and_unmanaged():
+    """The icon added a column; every row type has to shift by the same amount."""
+    out = cli._format_ls(
+        [ROW],
+        tree=False,
+        unmanaged=[{"pane": "%9", "command": "vibe", "cwd": "/tmp/other"}],
+    )
+    lines = out.splitlines()
+    col = lines[0].index("HARNESS")
+    assert lines[1].index("vibe") == col
+    assert next(ln for ln in lines if "%9" in ln).index("vibe") == col
+
+
+def test_a_participant_row_carries_its_harness_icon():
+    assert cli.harness_icon("vibe") in cli._row_line(ROW)

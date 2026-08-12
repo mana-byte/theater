@@ -83,6 +83,9 @@ def _epoch(value) -> float | None:
 class ClaudeCodeHarness(Harness):
     name = "claude"
     binary = "claude"
+    #: Claude Code prints this same spoked asterisk as its own spinner glyph,
+    #: so it reads as the product's mark rather than an arbitrary bullet.
+    icon = "✻"
 
     def __init__(self, root: Path | None = None):
         #: Injectable so tests never touch the real ~/.claude.

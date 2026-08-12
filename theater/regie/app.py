@@ -18,7 +18,7 @@ Keybindings:
     Enter           stage the selected agent (join its pane into this window)
     z               focus the staged pane (type at the agent directly)
     x               kill the selected agent's pane
-    q               quit (detaches from tmux, does not kill anything)
+    q               quit (unstages first; detaches, kills nothing)
 
 Polling: the tree refreshes every 1s, the bus tail every 0.4s. Both are
 async daemon calls; the app runs them as background workers.
@@ -32,7 +32,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.reactive import reactive
-from textual.widgets import Footer, Header, Label, RichLog
+from textual.widgets import Footer, Label, RichLog
 from rich.text import Text
 
 from theater.client import DaemonClient
@@ -169,13 +169,25 @@ class RegieApp(App):
     my_window: str | None = None
     #: The pane id currently on stage (joined into our window), or None.
     staged_pane: reactive[str | None] = reactive(None)
+    #: The session the régie is running in. tmux options are scoped to it.
+    my_session: str | None = None
+    #: The session-local value of tmux's `mouse` option before we changed it,
+    #: or None if the session had no override of its own.
+    _mouse_prev: str | None = None
+    #: Whether we actually changed the option, so a failed enable does not
+    #: cause a restore that clobbers a setting we never touched.
+    _mouse_set: bool = False
+    #: Teardown runs from two places and must not run twice.
+    _torn_down: bool = False
 
     def __init__(self):
         super().__init__()
         self._client: DaemonClient | None = None
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=False)
+        # No Header: it spent a whole row restating the app's own class name to
+        # someone who just typed the command that started it. The footer already
+        # carries the keybindings, which is the only thing worth the space.
         with Vertical(id="sidebar"):
             yield TreePanel(id="tree-panel")
             yield RichLog(id="bus-panel", max_lines=200, wrap=False, markup=True)
@@ -194,16 +206,90 @@ class RegieApp(App):
                 self.my_window = await tmux.display_message(
                     "#{window_id}", target=my_pane
                 )
+                self.my_session = await tmux.display_message(
+                    "#{session_id}", target=my_pane
+                )
             except Exception as exc:
-                logger.debug("could not discover window id: %s", exc)
+                logger.debug("could not discover window/session id: %s", exc)
+        await self._enable_mouse()
         self.set_interval(TREE_INTERVAL, self._refresh_tree)
         self.set_interval(BUS_INTERVAL, self._refresh_bus)
         await self._refresh_tree()
         await self._refresh_bus()
 
     async def on_unmount(self) -> None:
+        # Best effort only. Exits that go through `q` or ctrl-c have already
+        # torn down in action_quit, where awaiting still works; this catches
+        # the paths that never reach it.
+        await self._teardown()
         if self._client:
             await self._client.aclose()
+
+    # ---- tmux lifecycle -------------------------------------------------
+
+    async def _enable_mouse(self) -> None:
+        """Turn tmux mouse reporting on for the régie's session.
+
+        Scoped to the session rather than `-g`: a global set would change every
+        session on the server and outlive this process, which is not a choice a
+        TUI gets to make on the user's behalf. The previous session-local value
+        is remembered so exiting puts it back.
+        """
+        if not self.my_session:
+            return
+        try:
+            self._mouse_prev = await tmux.show_option("mouse", target=self.my_session)
+            await tmux.set_option("mouse", "on", target=self.my_session)
+            self._mouse_set = True
+        except Exception as exc:
+            logger.debug("could not enable mouse: %s", exc)
+
+    async def _restore_mouse(self) -> None:
+        if not self._mouse_set or not self.my_session:
+            return
+        self._mouse_set = False
+        try:
+            if self._mouse_prev is None:
+                # The session had no override before us, so remove ours rather
+                # than pinning it to whatever the global value happened to be.
+                await tmux.unset_option("mouse", target=self.my_session)
+            else:
+                await tmux.set_option(
+                    "mouse", self._mouse_prev, target=self.my_session
+                )
+        except Exception as exc:
+            logger.debug("could not restore mouse: %s", exc)
+
+    async def _teardown(self) -> None:
+        """Leave tmux as we found it: nothing staged, options restored.
+
+        Unstaging matters more than it looks. The staged agent's pane lives in
+        the régie's window only for as long as the régie is there to frame it;
+        quitting without breaking it out would leave the agent alive but sharing
+        a window with a dead TUI. `break_pane` moves it back to a window of its
+        own without touching the process.
+        """
+        if self._torn_down:
+            return
+        self._torn_down = True
+        pane = self.staged_pane
+        if pane:
+            try:
+                await panes.break_pane(pane)
+            except Exception as exc:
+                logger.debug("unstage on exit failed: %s", exc)
+        await self._restore_mouse()
+
+    async def action_quit(self) -> None:
+        """Quit, but put the stage back first.
+
+        This has to happen here and not only in `on_unmount`: by unmount time
+        Textual is already shutting the loop down, and an awaited tmux call can
+        be cancelled halfway through — which would strand the staged agent in a
+        window whose other occupant has exited.
+        """
+        await self._teardown()
+        self.exit()
 
     # ---- polling -------------------------------------------------------
 
@@ -252,8 +338,22 @@ class RegieApp(App):
 
     # ---- rendering -----------------------------------------------------
 
+    def _panel(self) -> TreePanel | None:
+        """The tree panel, or None when there is no mounted widget to draw on.
+
+        Reactive watchers fire on assignment, which can happen before mount and
+        during teardown as well as in the middle of a normal frame. A missing
+        widget in those windows is expected, not an error.
+        """
+        try:
+            return self.query_one("#tree-panel", TreePanel)
+        except Exception:
+            return None
+
     def _render_tree(self) -> None:
-        panel = self.query_one("#tree-panel", TreePanel)
+        panel = self._panel()
+        if panel is None:
+            return
         panel._lines_data = self.tree_lines
         panel.lines = self.tree_lines
         panel.apply_cursor(self.cursor, self.staged_pane)
@@ -261,13 +361,17 @@ class RegieApp(App):
 
     def watch_cursor(self, cursor: int) -> None:
         """Redraw the tree with the cursor highlighted."""
-        panel = self.query_one("#tree-panel", TreePanel)
+        panel = self._panel()
+        if panel is None:
+            return
         panel.apply_cursor(cursor, self.staged_pane)
         panel.scroll_to_cursor(cursor)
 
     def watch_staged_pane(self, _pane: str | None) -> None:
         """Redraw the tree so the staged pane gets its background."""
-        panel = self.query_one("#tree-panel", TreePanel)
+        panel = self._panel()
+        if panel is None:
+            return
         panel.apply_cursor(self.cursor, self.staged_pane)
 
     # ---- actions -------------------------------------------------------

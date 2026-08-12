@@ -225,3 +225,37 @@ async def display_message(fmt: str, *, target: str | None = None) -> str:
         args += ["-t", target]
     args.append(fmt)
     return await run(*args)
+
+
+# ---- options -----------------------------------------------------------
+#
+# Scoped to a session on purpose. `set-option -g` would rewrite the user's
+# tmux behaviour for every session on the server and outlive the process that
+# did it, which is not a side effect a TUI gets to have. Session scope plus
+# `unset_option` on the way out keeps the blast radius to the session the
+# régie is actually running in.
+
+
+async def show_option(name: str, *, target: str) -> str | None:
+    """The session-local value of an option, or None if it is not set there.
+
+    Deliberately not `-g`: the question is "did this session override the
+    option", because that is what has to be put back afterwards. An unset
+    option prints nothing, which is distinguishable from the value "off".
+    """
+    out = await run("show-options", "-t", target, name, check=False)
+    if not out.strip():
+        return None
+    # Output is "<name> <value>"; anything else means tmux told us something
+    # we did not ask about, so treat it as unset rather than guess.
+    parts = out.split(None, 1)
+    return parts[1].strip() if len(parts) == 2 else None
+
+
+async def set_option(name: str, value: str, *, target: str) -> None:
+    await run("set-option", "-t", target, name, value)
+
+
+async def unset_option(name: str, *, target: str) -> None:
+    """Drop a session-local override so the global value applies again."""
+    await run("set-option", "-u", "-t", target, name, check=False)

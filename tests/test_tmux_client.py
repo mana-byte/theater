@@ -241,3 +241,64 @@ async def test_display_message_without_target(monkeypatch):
     assert "-p" in argv
     assert "-t" not in argv
     assert "#{pane_id}" in argv
+
+
+# ---- options -----------------------------------------------------------
+
+
+def _capture(monkeypatch, output: str = ""):
+    captured: list[list[str]] = []
+
+    async def fake_run(*args: str, check: bool = True) -> str:
+        captured.append(list(args))
+        return output
+
+    monkeypatch.setattr(client, "run", fake_run)
+    return captured
+
+
+async def test_show_option_is_session_scoped_not_global(monkeypatch):
+    """`-g` would report the server-wide value, which is not what gets restored."""
+    captured = _capture(monkeypatch, "mouse on")
+    await client.show_option("mouse", target="$2")
+    argv = captured[0]
+    assert argv[0] == "show-options"
+    assert "-g" not in argv
+    assert argv[argv.index("-t") + 1] == "$2"
+    assert argv[-1] == "mouse"
+
+
+async def test_show_option_returns_the_value_without_its_name(monkeypatch):
+    _capture(monkeypatch, "mouse on\n")
+    assert await client.show_option("mouse", target="$2") == "on"
+
+
+async def test_show_option_returns_none_when_the_session_has_no_override(monkeypatch):
+    """An unset option prints nothing, which is not the same as `off`."""
+    _capture(monkeypatch, "")
+    assert await client.show_option("mouse", target="$2") is None
+
+
+async def test_show_option_returns_none_for_output_it_cannot_parse(monkeypatch):
+    _capture(monkeypatch, "mouse")
+    assert await client.show_option("mouse", target="$2") is None
+
+
+async def test_set_option_targets_the_session(monkeypatch):
+    captured = _capture(monkeypatch)
+    await client.set_option("mouse", "on", target="$2")
+    argv = captured[0]
+    assert argv[0] == "set-option"
+    assert "-g" not in argv
+    assert argv[argv.index("-t") + 1] == "$2"
+    assert argv[-2:] == ["mouse", "on"]
+
+
+async def test_unset_option_uses_u_so_the_global_value_applies_again(monkeypatch):
+    captured = _capture(monkeypatch)
+    await client.unset_option("mouse", target="$2")
+    argv = captured[0]
+    assert argv[0] == "set-option"
+    assert "-u" in argv
+    assert "-g" not in argv
+    assert argv[-1] == "mouse"

@@ -69,6 +69,9 @@ _SCAN_LIMIT = 200
 class VibeHarness(Harness):
     name = "vibe"
     binary = "vibe"
+    #: Stacked bars, echoing the Mistral mark. A lozenge or an "M" would both
+    #: collide with the asterisk-family glyphs a third harness is likely to want.
+    icon = "▤"
 
     def __init__(self, root: Path | None = None):
         #: Injectable so tests never touch the real ~/.vibe.
