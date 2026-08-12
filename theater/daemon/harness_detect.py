@@ -37,6 +37,25 @@ def detect_harness(pane_command: str, pane_pid: int) -> str:
     return "unknown"
 
 
+#: Interactive shells a pane falls back to when the program running in it
+#: exits. Not exhaustive and does not need to be: a name missing from this set
+#: only costs a refusal we could have made, never a wrong delivery.
+SHELLS = frozenset(
+    {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "xonsh", "elvish"}
+)
+
+
+def is_shell(command: str) -> bool:
+    """Whether a pane's foreground command is an interactive shell.
+
+    Used as the second half of the "the CLI died" test. On its own it proves
+    nothing — an agent running its bash tool also puts a shell in the
+    foreground — so it is only ever read together with the absence of any
+    harness in the process tree.
+    """
+    return command.rsplit("/", 1)[-1] in SHELLS
+
+
 def match_binary(command: str, harnesses) -> str | None:
     """Return the harness name if a command basename matches a harness binary."""
     basename = command.rsplit("/", 1)[-1]

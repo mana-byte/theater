@@ -11,10 +11,11 @@ handlers just wire parameters to calls.
 from __future__ import annotations
 
 import functools
+import logging
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, NoReturn
 
 from theater import protocol
-from theater.daemon.harness_detect import detect_harness
+from theater.daemon.harness_detect import detect_harness, is_shell
 from theater.daemon.rails import (
     check_budget,
     check_cycle,
@@ -29,6 +30,7 @@ from theater.models import (
     HumanPresent,
     JobState,
     NotAddressable,
+    StaleTarget,
     Status,
     now,
 )
@@ -37,6 +39,8 @@ from theater.tmux.presence import human_present
 
 if TYPE_CHECKING:  # circular at runtime: server imports this module for its handlers
     from theater.daemon.server import Daemon
+
+logger = logging.getLogger(__name__)
 
 Handler = Callable[["Daemon", dict[str, Any]], Awaitable[Any]]
 METHODS: dict[str, Handler] = {}
@@ -137,6 +141,13 @@ async def _adopt(daemon, params: dict) -> dict:
         harness=harness,
         pane=pane,
         cwd=cwd,
+    )
+    # Record the launch epoch from the row we already looked up. For an
+    # adopted pane this is the shell tmux forked, not the harness — the
+    # harness is its descendant — so it stays constant when the CLI exits.
+    # That is why the delivery gate cannot rely on the pid alone.
+    participant = daemon.registry.attach_pane(
+        participant.id, pane, pane_pid=match.pane_pid
     )
     return participant.to_dict()
 
@@ -322,6 +333,96 @@ def _refuse_send(
     raise exc
 
 
+async def _check_pane_identity(daemon, target, refuse) -> None:
+    """Refuse to type into a pane that is no longer this participant's.
+
+    The failure this exists for is the only irreversible one Theater has. A
+    CLI exits, its pane falls back to a shell, and the next paste plus Enter
+    runs the prompt as a shell command — which is how an agent came to be
+    answered by `(eval):1: not enough directory stack entries`. Every other
+    delivery bug produces a wrong answer that can be retried.
+
+    Three checks, in descending order of how much the evidence is worth:
+
+      1. **The pane exists.** A fact from tmux. Absent, the participant is
+         gone: mark it dead, which is what the reconcile sweep would conclude
+         at its next pass anyway.
+      2. **The pid still matches the launch epoch.** Also a fact from tmux.
+         tmux never recycles pane ids, but `respawn-pane` keeps the id and
+         replaces the process behind it, so equality of pane id is not
+         equality of occupant. Skipped when no epoch was recorded.
+      3. **A harness is still in the process tree.** Weaker: it walks `ps`,
+         which can fail, and a failure is indistinguishable from an exit. So
+         "no harness found" alone is not enough to refuse — the pane's
+         foreground must *also* be a shell, which is a fact from tmux and is
+         precisely the dead-CLI shape. An agent running its bash tool trips
+         the shell half and not the tree half, so it passes.
+
+    Marking dead is reserved for 1 and 2, where tmux is the witness. Case 3
+    refuses without destroying the record: `ps` was the only witness, and if
+    it lied, a demotion to dead would need a human to undo. The registry
+    already marks the old occupant dead when a new one claims the same pane.
+
+    Fails open when tmux itself errors. A gate that turns an unrelated tmux
+    hiccup into an unreachable participant reproduces the harm it exists to
+    prevent, and it costs nothing to skip: the delivery immediately after
+    goes through the same tmux and fails cleanly on its own.
+    """
+    if not tmux.available():
+        return
+    try:
+        pane = await tmux.pane_info(target.tmux_pane)
+    except Exception as exc:  # pragma: no cover - tmux failing mid-send
+        logger.warning("pane identity check failed for %s: %s", target.id, exc)
+        return
+
+    if pane is None:
+        daemon.registry.mark_dead(target.id)
+        refuse(
+            StaleTarget(
+                f"pane {target.tmux_pane} of {target.id!r} no longer exists"
+            ),
+            reason="pane_gone",
+        )
+
+    if target.pid is not None and pane.pane_pid != target.pid:
+        daemon.registry.mark_dead(target.id)
+        refuse(
+            StaleTarget(
+                f"pane {target.tmux_pane} was respawned "
+                f"(pid {target.pid} -> {pane.pane_pid}); {target.id!r} is gone"
+            ),
+            reason="pane_replaced",
+        )
+
+    if target.harness == "unknown":
+        # Nothing to compare against. Adopted participants whose harness could
+        # not be identified are addressable today and work; refusing them on
+        # the strength of a second failed identification would be a
+        # regression, not a fix.
+        return
+
+    found = detect_harness(pane.current_command, pane.pane_pid)
+    if found == target.harness:
+        return
+    if found != "unknown":
+        refuse(
+            StaleTarget(
+                f"pane {target.tmux_pane} is running {found!r}, "
+                f"not {target.harness!r}; {target.id!r} has lost its seat"
+            ),
+            reason="harness_changed",
+        )
+    if is_shell(pane.current_command):
+        refuse(
+            StaleTarget(
+                f"{target.harness} has exited in pane {target.tmux_pane}; "
+                f"a shell ({pane.current_command}) is at the prompt"
+            ),
+            reason="harness_gone",
+        )
+
+
 @method("send")
 async def _send(daemon, params: dict) -> dict:
     """Send a prompt to an already-running agent by pasting into its pane."""
@@ -346,6 +447,10 @@ async def _send(daemon, params: dict) -> dict:
             NotAddressable(f"participant {target_id!r} has no pane to send to"),
             reason="no_pane",
         )
+
+    # Before asking whether a human is at the pane, establish that the pane
+    # is still the participant's at all.
+    await _check_pane_identity(daemon, target, refuse)
 
     if await human_present(target.tmux_pane):
         refuse(

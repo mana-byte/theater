@@ -144,6 +144,20 @@ async def pane_exists(pane_id: str) -> bool:
     return pane_id in out.split()
 
 
+async def pane_info(pane_id: str) -> Pane | None:
+    """The full row for one pane, or None if it no longer exists.
+
+    `pane_exists` answers the same question more cheaply but only as a
+    boolean, and every caller that cares whether a pane is alive also cares
+    what is now running in it. One `list-panes` serves both, so asking twice
+    would only widen the window between the two answers.
+    """
+    for pane in await list_panes():
+        if pane.pane_id == pane_id:
+            return pane
+    return None
+
+
 async def sessions() -> list[str]:
     out = await run("list-sessions", "-F", "#{session_name}", check=False)
     return [line for line in out.splitlines() if line]

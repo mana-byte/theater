@@ -121,7 +121,19 @@ class Spawner:
             self.registry.mark_dead(participant.id)
             raise
 
-        return self.registry.attach_pane(participant.id, pane)
+        # The launch epoch, read straight back out of tmux rather than
+        # inferred. Best-effort on purpose: the window exists and the harness
+        # is already starting, so failing the spawn over a bookkeeping lookup
+        # would throw away a working agent. A missing epoch costs one delivery
+        # check, and `pane_info` returning None means the pane died inside
+        # these few milliseconds — which the pane-alive check catches anyway.
+        try:
+            info = await tmux.pane_info(pane)
+        except Exception:
+            info = None
+        return self.registry.attach_pane(
+            participant.id, pane, pane_pid=info.pane_pid if info else None
+        )
 
     async def _resolve_session(self, requested: str | None, cwd: str) -> str:
         """Adopt the caller's session when there is one; never nest a server."""

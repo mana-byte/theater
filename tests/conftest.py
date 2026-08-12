@@ -11,6 +11,7 @@ from theater.client import DaemonClient
 from theater.daemon.registry import Registry
 from theater.daemon.server import Daemon
 from theater.daemon.store import Store
+from theater.tmux.client import Pane
 
 
 @pytest.fixture(autouse=True)
@@ -97,8 +98,11 @@ class FakeTmux:
         self.windows: list[dict] = []
         self.panes: list[str] = []
         self._next = 0
-        #: Panes visible to list_panes, populated by tests that need the sweep.
-        self.visible_panes: list = []
+        #: Panes visible to list_panes. A window created here appears in it,
+        #: because a pane that was just made does exist — the delivery gate
+        #: reads this list and a fake that forgot its own windows would fail
+        #: every send. Tests that need a specific pane still append their own.
+        self.visible_panes: list[Pane] = []
         #: (pane_id, text) pairs delivered through deliver_text.
         self.sent: list[tuple[str, str]] = []
 
@@ -117,6 +121,21 @@ class FakeTmux:
             }
         )
         self.panes.append(pane)
+        self.visible_panes.append(
+            Pane(
+                pane_id=pane,
+                # Distinct from the pane id so a test cannot pass by
+                # confusing the two.
+                pane_pid=10_000 + self._next,
+                cwd=cwd,
+                window_id=f"@{self._next}",
+                session=session,
+                window_name=name,
+                # tmux reports the program it forked; for a spawned harness
+                # that is the harness binary itself.
+                current_command=command[0] if command else "sh",
+            )
+        )
         return pane
 
     async def ensure_session(self, name, *, cwd=None):
@@ -128,6 +147,27 @@ class FakeTmux:
     async def kill_pane(self, pane_id):
         if pane_id in self.panes:
             self.panes.remove(pane_id)
+        self.visible_panes = [p for p in self.visible_panes if p.pane_id != pane_id]
+
+    def add_pane(self, pane_id, *, command="vibe", pid=None, cwd="/tmp"):
+        """Declare that a pane exists, and what is running in it."""
+        pane = Pane(
+            pane_id=pane_id,
+            pane_pid=pid if pid is not None else 20_000 + len(self.visible_panes),
+            cwd=cwd,
+            window_id="@0",
+            session="main",
+            window_name="w",
+            current_command=command,
+        )
+        self.visible_panes = [
+            p for p in self.visible_panes if p.pane_id != pane_id
+        ] + [pane]
+        return pane
+
+    def remove_pane(self, pane_id):
+        """The pane closed — the CLI exited and took its window with it."""
+        self.visible_panes = [p for p in self.visible_panes if p.pane_id != pane_id]
 
     async def list_panes(self, session=None):
         return list(self.visible_panes)
@@ -151,6 +191,13 @@ class FakeTmux:
 @pytest.fixture
 def fake_tmux(monkeypatch):
     fake = FakeTmux()
+    # The panes most tests take for granted. A test that says
+    # `hello(pane="%1")` is describing an agent that is already running
+    # somewhere, and since the delivery gate checks that the pane is real,
+    # the fake tmux has to agree that it is. Tests about the gate itself
+    # reshape this with add_pane / remove_pane.
+    for pane_id in ("%1", "%2", "%3"):
+        fake.add_pane(pane_id)
 
     import theater.daemon.methods as methods_mod
     import theater.daemon.spawner as spawner_mod

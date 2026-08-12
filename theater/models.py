@@ -168,3 +168,16 @@ class HumanPresent(TheaterError):
 
 class Busy(TheaterError):
     code = "busy"
+
+
+class StaleTarget(TheaterError):
+    """The pane on record is no longer the participant we think it is.
+
+    Distinct from `NotAddressable`, which is a permanent property of a tier.
+    This one says the address was right once and has since gone stale: the
+    pane closed, was respawned under a new process, or the harness exited and
+    left a shell sitting at the prompt. The distinction matters to a caller,
+    because retrying is pointless in a way that a `Busy` retry is not.
+    """
+
+    code = "stale_target"

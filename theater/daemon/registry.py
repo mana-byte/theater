@@ -104,12 +104,28 @@ class Registry:
         )
         return p
 
-    def attach_pane(self, pid: str, pane: str) -> Participant:
+    def attach_pane(
+        self, pid: str, pane: str, *, pane_pid: int | None = None
+    ) -> Participant:
+        """Record where a participant lives, and which process was there.
+
+        `pane_pid` is the launch epoch: tmux's `#{pane_pid}`, the process the
+        pane was forked with. Delivery compares it against the pane's current
+        pid to notice a seat that changed hands without changing its id — a
+        respawn keeps the pane id and replaces everything behind it. Optional
+        because a caller that could not read it (the pane vanished between
+        creation and lookup) should still record the pane; a missing epoch
+        turns that one check off rather than blocking delivery on it.
+        """
         p = self.get(pid)
+        moved = p.tmux_pane != pane
         p.tmux_pane = pane
+        if pane_pid is not None:
+            p.pid = pane_pid
         p.last_activity = now()
         self.store.upsert_participant(p)
-        self.store.bus_append("participant.pane", to_id=pid, payload={"pane": pane})
+        if moved:
+            self.store.bus_append("participant.pane", to_id=pid, payload={"pane": pane})
         return p
 
     def _evict_pane_holder(self, pane: str, *, keep: str) -> None:
