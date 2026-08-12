@@ -86,6 +86,9 @@ class ClaudeCodeHarness(Harness):
     #: Claude Code prints this same spoked asterisk as its own spinner glyph,
     #: so it reads as the product's mark rather than an arbitrary bullet.
     icon = "✻"
+    #: What an agent might call itself at registration. A spelling that does not
+    #: normalize is observed as nothing at all, so these are not cosmetic.
+    aliases = ("claude_code", "claude-code", "Claude", "ClaudeCode")
 
     def __init__(self, root: Path | None = None):
         #: Injectable so tests never touch the real ~/.claude.
@@ -356,3 +359,9 @@ class ClaudeCodeHarness(Harness):
         the prompt.
         """
         return last_screen_line(capture) in IDLE_PROMPTS
+
+
+#: What the loader looks for. An instance, not the class: see
+#: docs/harness-plugins.md. Shipped adapters meet the same contract as anything
+#: dropped in $THEATER_HOME/harnesses, which is the point of shipping them here.
+HARNESS = ClaudeCodeHarness()

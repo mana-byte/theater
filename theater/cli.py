@@ -453,16 +453,22 @@ def cmd_harnesses(args) -> int:
     if args.json:
         print(json.dumps(rows, indent=2))
         return 0
-    print(f"{'':<2} {'NAME':<10} {'BINARY':<10} {'INSTALLED':<10} PATH")
+    print(f"{'':<2} {'NAME':<10} {'SOURCE':<8} {'BINARY':<10} {'INSTALLED':<10} PATH")
     for r in rows:
-        mark = "yes" if r["installed"] else "no"
+        # A plugin that would not load has no binary to look for, so
+        # "installed: no" would blame PATH for a syntax error. Say broken.
+        mark = "broken" if r.get("error") else ("yes" if r["installed"] else "no")
         print(
-            f"{r['icon']:<2} {r['name']:<10} {r['binary']:<10} {mark:<10} "
+            f"{r['icon']:<2} {r['name']:<10} {r.get('source', '-'):<8} "
+            f"{r['binary'] or '-':<10} {mark:<10} "
             f"{tilde(r['path']) if r['path'] else '-'}"
         )
-    missing = [r["name"] for r in rows if not r["installed"]]
+    missing = [r["name"] for r in rows if not r["installed"] and not r.get("error")]
     if missing:
         print(f"\nnot on PATH: {', '.join(missing)} — spawn will refuse these")
+    for r in rows:
+        if r.get("error"):
+            print(f"\n{r['name']}: {r['error']}")
     if fallback:
         # Worth saying which list this is: a daemon already up may be holding
         # a different one, and only it can refuse a spawn.
@@ -631,9 +637,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     paths.ensure_home()
     try:
-        # Teach this process the declared and plugin harnesses before the
-        # command runs, so `spawn`, `ls` and `harnesses` all see the same set
-        # the daemon will.
+        # Build the harness registry before the command runs, so `spawn`, `ls`
+        # and `harnesses` all see the same set the daemon will.
         # `config` is exempt: it is the command built to explain a broken config
         # file, so it is the one that must still work without a usable one.
         if args.command != "config":

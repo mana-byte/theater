@@ -72,6 +72,9 @@ class VibeHarness(Harness):
     #: Stacked bars, echoing the Mistral mark. A lozenge or an "M" would both
     #: collide with the asterisk-family glyphs a third harness is likely to want.
     icon = "▤"
+    #: What an agent might call itself at registration. A spelling that does not
+    #: normalize is observed as nothing at all, so these are not cosmetic.
+    aliases = ("Vibe", "mistral-vibe", "mistral_vibe")
 
     def __init__(self, root: Path | None = None):
         #: Injectable so tests never touch the real ~/.vibe.
@@ -273,3 +276,9 @@ class VibeHarness(Harness):
         last line is agent output, the agent is still rendering.
         """
         return last_screen_line(capture) in IDLE_PROMPTS
+
+
+#: What the loader looks for. An instance, not the class: see
+#: docs/harness-plugins.md. Shipped adapters meet the same contract as anything
+#: dropped in $THEATER_HOME/harnesses, which is the point of shipping them here.
+HARNESS = VibeHarness()

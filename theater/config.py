@@ -97,64 +97,34 @@ class ObserverSection:
     #: How often to look for a transcript not found yet. Slower, because it is
     #: a directory scan rather than a stat.
     search_interval: float = field(default=2.0, metadata={"min": MIN_INTERVAL})
-    #: How often to read the screen of a harness that has no transcript at all
-    #: (one declared in `[harness.*]`). Separate from awaiting_input_timeout
-    #: and much faster, because for those harnesses the screen is not a hint
-    #: about a stuck agent — it is the only evidence that a turn ended, and a
-    #: caller is blocked on it. A turn is only called finished when two
-    #: consecutive polls agree, so this is also half the detection latency.
+    #: How often to read the screen of a harness with no transcript at all —
+    #: one whose adapter reports `has_transcript = False`. Separate from
+    #: awaiting_input_timeout and much faster, because for those harnesses the
+    #: screen is not a hint about a stuck agent — it is the only evidence that a
+    #: turn ended, and a caller is blocked on it. A turn is only called finished
+    #: when two consecutive polls agree, so this is also half the latency.
     screen_interval: float = field(default=1.0, metadata={"min": MIN_INTERVAL})
     #: How often to reconcile the watch tasks against the registry.
     sync_interval: float = field(default=1.0, metadata={"min": MIN_INTERVAL})
 
 
 @dataclass(frozen=True, slots=True)
-class HarnessSpec:
-    """A harness declared in config rather than written in Python.
-
-    Covers launching, presence and listing — everything except reading a
-    transcript, which is not data and needs a plugin (`docs/harness-plugins.md`).
-    A harness declared here is observed from its rendered screen instead; see
-    `harness/declared.py` for what that costs.
-
-    Three fields are required with no default, and each for the same reason: a
-    missing value would not degrade, it would mislead. Without `binary` there is
-    nothing to run; without `approvals` a `yolo` spawn would launch with no
-    flags and look safe; without `idle_prompts` no turn ever ends, so every
-    caller that sends to this harness waits forever.
-    """
-
-    #: Executable to look for on PATH and to run as argv[0].
-    binary: str = field(default="", metadata={"required": True})
-    #: One character shown before the name in listings. See `Harness.icon` for
-    #: why this cannot be an image.
-    icon: str = "·"
-    #: Other names that should resolve to this one at registration time.
-    aliases: list[str] = field(default_factory=list)
-    #: Argument template after the binary and the injected flags. `{prompt}`
-    #: is the initial prompt; an element that renders empty is dropped.
-    argv: list[str] = field(default_factory=lambda: ["{prompt}"])
-    #: Extra environment for the pane, templated.
-    env: dict[str, str] = field(default_factory=dict)
-    #: Per-approval-mode flags, one list per mode in APPROVALS. All three keys
-    #: are required — see the class docstring.
-    approvals: dict[str, list[str]] = field(
-        default_factory=dict, metadata={"required": True}
-    )
-    #: Screen lines that mean "waiting for you", matched exactly against the
-    #: last non-empty line of `capture-pane`.
-    idle_prompts: list[str] = field(default_factory=list, metadata={"required": True})
-    #: MCP registration, three independent levers because the harnesses that
-    #: exist use three different ones: an env var (vibe), a config file passed
-    #: by flag (claude), or dotted overrides on the command line (codex).
-    #: Whichever are set are all applied.
-    mcp_env: dict[str, str] = field(default_factory=dict)
-    mcp_argv: list[str] = field(default_factory=list)
-    #: Contents to write at `{config_path}` before the window is created.
-    mcp_file: str | None = None
-    #: Flags pointing the harness at that file. Required with `mcp_file`, and
-    #: meaningless without it.
-    mcp_file_argv: list[str] = field(default_factory=list)
+class HarnessSection:
+    #: Harness plugins to leave out of the registry, by name. A denylist rather
+    #: than an allowlist so that an adapter added in a later release appears
+    #: without anyone editing this file — the opposite choice would make every
+    #: new harness invisible to every existing install.
+    #:
+    #: A disabled harness is absent, not refused: it cannot be spawned, is not
+    #: offered by the palette, and is not looked for in unmanaged panes. An
+    #: agent that registers under the name still appears in the tree, drawn with
+    #: the unknown icon. Hiding a session that exists would be worse than
+    #: admitting Theater cannot read it.
+    #:
+    #: Matched against the plugin's file stem before it is imported, so a plugin
+    #: that fails on import — the case where this is most needed — can still be
+    #: switched off.
+    disabled: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,13 +149,9 @@ _SECTIONS: dict[str, type] = {
     "theater": TheaterSection,
     "rails": RailsSection,
     "observer": ObserverSection,
+    "harness": HarnessSection,
     "regie": RegieSection,
 }
-
-
-#: Table of tables rather than a fixed section: the keys are harness names the
-#: user invents, so it cannot live in `_SECTIONS` with the others.
-_HARNESS_SECTION = "harness"
 
 #: Harness names are used as a spawn argument, a wire value and part of a tmux
 #: window name. Restricting them here means none of those three has to quote.
@@ -202,10 +168,8 @@ class Config:
     theater: TheaterSection = field(default_factory=TheaterSection)
     rails: RailsSection = field(default_factory=RailsSection)
     observer: ObserverSection = field(default_factory=ObserverSection)
+    harness: HarnessSection = field(default_factory=HarnessSection)
     regie: RegieSection = field(default_factory=RegieSection)
-    #: Harnesses declared in `[harness.<name>]`, by name. Empty is the normal
-    #: case: the built-in adapters are not represented here.
-    harnesses: dict[str, HarnessSpec] = field(default_factory=dict)
     #: Dotted key -> "default" | "config.toml". The whole point of
     #: `theater config`: a value alone cannot tell the user whether their edit
     #: took effect, and "it took effect" is the question they are asking.
@@ -257,24 +221,6 @@ def _check_str_list(value: Any) -> list[str] | None:
     return list(value)
 
 
-def _check_str_map(value: Any) -> dict[str, str] | None:
-    if not isinstance(value, dict) or not all(isinstance(v, str) for v in value.values()):
-        return None
-    return dict(value)
-
-
-def _check_str_list_map(value: Any) -> dict[str, list[str]] | None:
-    if not isinstance(value, dict):
-        return None
-    out: dict[str, list[str]] = {}
-    for key, raw in value.items():
-        parsed = _check_str_list(raw)
-        if parsed is None:
-            return None
-        out[key] = parsed
-    return out
-
-
 #: Annotations are strings under `from __future__ import annotations`, so
 #: dispatch on the written form. Explicit beats get_type_hints() here: the set
 #: of legal field types is small and closed on purpose.
@@ -284,8 +230,6 @@ _CHECKERS = {
     "str": (_check_str, "a string"),
     "str | None": (_check_str, "a string"),
     "list[str]": (_check_str_list, "a list of strings"),
-    "dict[str, str]": (_check_str_map, "a table of strings"),
-    "dict[str, list[str]]": (_check_str_list_map, "a table of string lists"),
 }
 
 
@@ -297,11 +241,6 @@ def _build_section(path: Path, name: str, cls: type, raw: Any) -> Any:
     for key in raw:
         if key not in known:
             _fail(path, f"unknown key '{name}.{key}' ({_suggest(key, known)})")
-    for f in fields(cls):
-        # A dataclass default exists for every field so the type stays simple,
-        # but some of those defaults are not usable values — see HarnessSpec.
-        if f.metadata.get("required") and f.name not in raw:
-            _fail(path, f"[{name}] is missing required key '{f.name}'")
 
     values: dict[str, Any] = {}
     sources: dict[str, str] = {}
@@ -329,55 +268,25 @@ def _defaults_for(name: str, cls: type) -> dict[str, str]:
     return {f"{name}.{f.name}": "default" for f in fields(cls)}
 
 
-def _build_harnesses(
-    path: Path, raw: Any
-) -> tuple[dict[str, HarnessSpec], dict[str, str]]:
-    """Parse `[harness.<name>]` tables into specs.
+def _check_no_declarations(path: Path, raw: Any) -> None:
+    """Refuse a `[harness.<name>]` table left over from before v1.4.
 
-    Only syntax is checked here. Whether the approval keys are the modes
-    Theater actually has is a harness question, answered where the registry is
-    built — config has no business importing the harness package, and doing so
-    would close an import cycle.
+    Without this the generic unknown-key check fires and says
+    `unknown key 'harness.codex'`, which reads as a typo and sends the user
+    looking for the right spelling of a key that no longer exists. The whole
+    mechanism was replaced by plugins, and that is what the message has to say.
     """
     if not isinstance(raw, dict):
-        _fail(path, f"[{_HARNESS_SECTION}] must be a table of tables")
-
-    specs: dict[str, HarnessSpec] = {}
-    sources: dict[str, str] = {}
-    for name, body in raw.items():
-        if not HARNESS_NAME.match(name):
-            _fail(
-                path,
-                f"harness name {name!r} must be lowercase letters, digits, "
-                "'-' or '_', starting with a letter or digit",
-            )
-        dotted = f"{_HARNESS_SECTION}.{name}"
-        spec, spec_sources = _build_section(path, dotted, HarnessSpec, body)
-        if spec.mcp_file is not None and not spec.mcp_file_argv:
-            _fail(
-                path,
-                f"'{dotted}.mcp_file' is set but 'mcp_file_argv' is not — the "
-                "file would be written and never passed to the harness",
-            )
-        if spec.mcp_file_argv and spec.mcp_file is None:
-            _fail(
-                path,
-                f"'{dotted}.mcp_file_argv' is set but 'mcp_file' is not — "
-                "there would be no file at that path",
-            )
-        if not spec.idle_prompts:
-            _fail(
-                path,
-                f"'{dotted}.idle_prompts' must list at least one prompt: with "
-                "no transcript to read, it is the only way a turn can end",
-            )
-        specs[name] = spec
-        sources.update(spec_sources)
-        # Every field of a declared harness is reportable, so the ones left at
-        # their default are still listed rather than silently absent.
-        for f in fields(HarnessSpec):
-            sources.setdefault(f"{dotted}.{f.name}", "default")
-    return specs, sources
+        return
+    declared = [name for name, body in raw.items() if isinstance(body, dict)]
+    if declared:
+        _fail(
+            path,
+            f"[harness.{declared[0]}] declares a harness in config, which v1.4 "
+            "removed: a declaration could launch a harness but never read its "
+            "transcript, so turns ended on a guess. Write a plugin instead — "
+            "see docs/harness-plugins.md",
+        )
 
 
 def load(path: Path | None = None) -> Config:
@@ -403,10 +312,11 @@ def load(path: Path | None = None) -> Config:
     except OSError as exc:
         raise ConfigError(f"{target}: cannot read: {exc}") from exc
 
-    legal = [*_SECTIONS, _HARNESS_SECTION]
+    legal = list(_SECTIONS)
     for key in raw:
         if key not in legal:
             _fail(target, f"unknown section [{key}] ({_suggest(key, legal)})")
+    _check_no_declarations(target, raw.get("harness"))
 
     built: dict[str, Any] = {}
     for name, cls in _SECTIONS.items():
@@ -417,14 +327,7 @@ def load(path: Path | None = None) -> Config:
         built[name] = section
         sources.update(section_sources)
 
-    harnesses: dict[str, HarnessSpec] = {}
-    if _HARNESS_SECTION in raw:
-        harnesses, harness_sources = _build_harnesses(target, raw[_HARNESS_SECTION])
-        sources.update(harness_sources)
-
-    return Config(
-        **built, harnesses=harnesses, sources=sources, path=target, exists=True
-    )
+    return Config(**built, sources=sources, path=target, exists=True)
 
 
 def describe(config: Config) -> list[tuple[str, str, str]]:
@@ -439,15 +342,6 @@ def describe(config: Config) -> list[tuple[str, str, str]]:
         for f in fields(cls):
             dotted = f"{name}.{f.name}"
             value = getattr(section, f.name)
-            shown = "(unset)" if value is None else str(value)
-            rows.append((dotted, shown, config.source(dotted)))
-    # Declared harnesses last, and only the ones that exist: unlike the fixed
-    # sections there is no default set to show when nobody declared any.
-    for name in sorted(config.harnesses):
-        spec = config.harnesses[name]
-        for f in fields(HarnessSpec):
-            dotted = f"{_HARNESS_SECTION}.{name}.{f.name}"
-            value = getattr(spec, f.name)
             shown = "(unset)" if value is None else str(value)
             rows.append((dotted, shown, config.source(dotted)))
     return rows

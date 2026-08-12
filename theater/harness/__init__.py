@@ -1,15 +1,25 @@
 """Harness registry.
 
-One module per harness, one instance each. The instances are stateless apart
-from the transcript root they read, which is constructor-injected so tests can
-point them at a temporary directory instead of the user's real ~/.claude.
+Every adapter is a plugin file. The ones Theater ships live in
+`builtin/plugins/`, the ones a user writes live in `$THEATER_HOME/harnesses/`,
+and both are read by `plugins.scan` under the same contract. There is no
+built-in tier, and the only distinction the system still draws between adapters
+is `Harness.has_transcript`.
 
-Adding a harness is: write the module, add it here. Nothing above this package
-needs to change, because nothing above it sees anything but `Event`.
+`install` turns those files into the live registry. Until it runs the registry
+is empty, which is deliberate: a shipped plugin that will not import is fatal,
+and the only way past it is `[harness] disabled`, which cannot be read at import
+time. Every process that touches the registry installs first — the daemon at
+start-up, the CLI before dispatch (`config` excepted, since it is the command
+for explaining a broken config file).
+
+Nothing above this package needs to change to add a harness, because nothing
+above it sees anything but `Event`.
 """
 
 from __future__ import annotations
 
+import logging
 import shutil
 from pathlib import Path
 
@@ -30,115 +40,123 @@ from theater.harness.base import (
 )
 from theater import paths
 from theater.config import Config, ConfigError
-from theater.harness import plugins
-from theater.harness.claude_code import ClaudeCodeHarness
-from theater.harness.declared import DeclaredHarness
-from theater.harness.plugins import PluginError
-from theater.harness.vibe import VibeHarness
+from theater.harness import builtin, plugins
+from theater.harness.plugins import Plugin, PluginError
 from theater.models import BadRequest
 
-#: The adapters written in Python. Snapshotted separately from HARNESSES so
-#: that installing config-declared harnesses is idempotent and reversible: the
-#: registry is rebuilt from this each time rather than accumulated.
-_BUILTIN_HARNESSES: dict[str, Harness] = {
-    h.name: h for h in (ClaudeCodeHarness(), VibeHarness())
-}
-
-#: Aliases that a misreporting agent might send at registration. The canonical
-#: name is what the observer needs to match it to a harness adapter; without
-#: normalization, `claude_code` or `Claude` registers happily and is then
-#: unobservable forever, because the observer looks up `HARNESSES[name]` and
-#: misses.
-_BUILTIN_ALIASES: dict[str, str] = {
-    "claude_code": "claude",
-    "claude-code": "claude",
-    "Claude": "claude",
-    "ClaudeCode": "claude",
-    "vibe": "vibe",
-    "Vibe": "vibe",
-    "mistral-vibe": "vibe",
-    "mistral_vibe": "vibe",
-}
+logger = logging.getLogger("theater.harness")
 
 #: The live registry. Mutated in place by `install`, never rebound: other
 #: modules hold a reference to this exact dict (`from theater.harness import
 #: HARNESSES`), and rebinding would leave every one of them reading a stale
 #: registry with no symptom but a missing harness.
-HARNESSES: dict[str, Harness] = dict(_BUILTIN_HARNESSES)
-_ALIASES: dict[str, str] = dict(_BUILTIN_ALIASES)
+HARNESSES: dict[str, Harness] = {}
+
+#: Aliases a misreporting agent might send at registration, mapped to the
+#: canonical name. Without this, an agent that says `claude_code` registers
+#: happily and is then unobservable forever, because the observer looks up
+#: `HARNESSES[name]` and misses. Every alias is declared by the plugin that
+#: owns it — see `Harness.aliases`.
+_ALIASES: dict[str, str] = {}
+
+#: name -> the plugin file it came from. Kept for the collision messages and
+#: for the SOURCE column of `theater harnesses`: "why is this harness behaving
+#: strangely" is usually answered by naming the file it was loaded from.
+_PLUGINS: dict[str, Plugin] = {}
+
+#: Local plugins that would not load. Not an exception — see `install` — but
+#: not silent either: they are listed by `theater harnesses` as broken, since a
+#: plugin the user believes they installed and cannot find is the failure this
+#: release exists to remove.
+_BROKEN: list[Plugin] = []
 
 
-def install(config: Config, *, plugin_dir: Path | None = None) -> list[str]:
-    """Rebuild the registry: built-ins, then plugins, then config declarations.
+def install(
+    config: Config,
+    *,
+    local_dir: Path | None = None,
+    shipped_dir: Path | None = None,
+) -> list[str]:
+    """Rebuild the registry from the shipped and local plugin directories.
 
-    Called once per process that needs the full set — the daemon at start-up,
-    the CLI before dispatch. Rebuilt rather than extended, so calling it twice
-    is the same as calling it once and `install(Config())` restores the
-    built-ins, which is what test isolation needs.
+    Called once per process that needs it. Rebuilt rather than extended, so
+    calling it twice is the same as calling it once — which is what test
+    isolation needs, and what makes `theater restart` a complete answer to a
+    config change.
 
-    The order is the precedence. A plugin may replace a built-in, because a
-    plugin is a full adapter and can do everything the built-in did; a
-    declaration may replace neither, because it cannot read a transcript and
-    the loss would be silent.
+    Local beats shipped. Someone who has written their own `vibe.py` has said
+    which one they want, and refusing the collision would leave them no way to
+    repair a shipped adapter without waiting for a release. Both paths are
+    logged, because a silently shadowed adapter is a long afternoon.
 
-    Returns the names that were added or replaced, for logging. Raises
-    `ConfigError` for anything that cannot be honoured: a harness the user
-    believes they installed but which is silently absent is the failure mode
-    this whole release is built to avoid.
+    The two sources fail differently. A broken *shipped* plugin raises: it is a
+    bug in Theater, and coming up without an adapter the user has every reason
+    to expect would hide it. A broken *local* plugin is skipped with a warning
+    and listed as broken by `theater harnesses`: the user wrote it, they can see
+    it, and one bad file of their own should not stop the daemon from starting.
+
+    Returns the registered names, sorted.
     """
+    # Matched against the file stem before the import and the harness name
+    # after it: a plugin too broken to say what it is called still has to be
+    # switchable off, and that is exactly when the user needs it to be.
+    disabled = set(config.harness.disabled)
+
     HARNESSES.clear()
-    HARNESSES.update(_BUILTIN_HARNESSES)
     _ALIASES.clear()
-    _ALIASES.update(_BUILTIN_ALIASES)
+    _PLUGINS.clear()
+    _BROKEN.clear()
 
-    added: list[str] = []
-    from_plugin: dict[str, Path] = {}
-    directory = plugin_dir if plugin_dir is not None else paths.harnesses_dir()
-    for path, harness in plugins.load(directory):
-        if harness.name in from_plugin:
-            raise ConfigError(
-                f"two plugins both define the harness {harness.name!r}: "
-                f"{from_plugin[harness.name]} and {path}"
-            )
-        from_plugin[harness.name] = path
-        HARNESSES[harness.name] = harness
-        added.append(harness.name)
-        for alias in harness.aliases:
-            _claim_alias(alias, harness.name, str(path))
+    shipped = plugins.scan(
+        shipped_dir if shipped_dir is not None else builtin.plugin_dir(),
+        source=plugins.SHIPPED,
+        skip=disabled,
+    )
+    local = plugins.scan(
+        local_dir if local_dir is not None else paths.harnesses_dir(),
+        source=plugins.LOCAL,
+        skip=disabled,
+    )
 
-    for name, spec in config.harnesses.items():
-        if name in _BUILTIN_HARNESSES:
+    for found in [*shipped, *local]:
+        if found.name in disabled:
+            continue
+        if found.harness is None:
+            _reject(found, config)
+            continue
+        previous = _PLUGINS.get(found.name)
+        if previous is not None and previous.source == found.source:
             raise ConfigError(
-                f"[harness.{name}] would replace the built-in {name!r} adapter, "
-                "which can read its transcript — a declared harness cannot. "
-                "Pick another name, or write a plugin to override it."
+                f"two {found.source} plugins both define the harness "
+                f"{found.name!r}: {previous.path} and {found.path}"
             )
-        if name in from_plugin:
-            raise ConfigError(
-                f"[harness.{name}] and the plugin {from_plugin[name]} both "
-                f"define {name!r}. Two definitions of one harness, and nothing "
-                "here can know which you meant — delete one."
+        if previous is not None:
+            logger.info(
+                "%s plugin %s overrides the %s %s",
+                found.source,
+                found.path,
+                previous.source,
+                previous.path,
             )
-        missing = sorted(set(APPROVALS) - set(spec.approvals))
-        if missing:
-            raise ConfigError(
-                f"'harness.{name}.approvals' is missing {', '.join(missing)} — "
-                "every mode needs its flags spelled out, including the empty "
-                "list, so that no mode launches with flags nobody chose"
-            )
-        unknown = sorted(set(spec.approvals) - set(APPROVALS))
-        if unknown:
-            raise ConfigError(
-                f"'harness.{name}.approvals' has unknown mode(s) "
-                f"{', '.join(unknown)}; known: {', '.join(APPROVALS)}"
-            )
-        HARNESSES[name] = DeclaredHarness(name, spec)
-        added.append(name)
+        HARNESSES[found.name] = found.harness
+        _PLUGINS[found.name] = found
+        for alias in found.harness.aliases:
+            _claim_alias(alias, found.name, str(found.path))
 
-    for name, spec in config.harnesses.items():
-        for alias in [name, *spec.aliases]:
-            _claim_alias(alias, name, f"'harness.{name}'")
-    return added
+    return sorted(HARNESSES)
+
+
+def _reject(found: Plugin, config: Config) -> None:
+    """A plugin that would not load: fatal if we shipped it, logged if not."""
+    if found.source == plugins.SHIPPED:
+        where = config.path or paths.config_path()
+        raise PluginError(
+            f"{found.error}\n  This is an adapter Theater ships, so this is a "
+            f"bug. To start without it, put\n    [harness]\n    disabled = "
+            f'["{found.name}"]\n  in {where}'
+        )
+    logger.warning("skipping harness plugin %s: %s", found.path, found.error)
+    _BROKEN.append(found)
 
 
 def _claim_alias(alias: str, owner: str, claimant: str) -> None:
@@ -226,6 +244,11 @@ def describe() -> list[dict]:
     `installed` is resolved here, so it describes the PATH of whichever process
     called. That is the honest answer for all three: the daemon spawns the
     binary, and the CLI and régie run on the same machine.
+
+    Broken local plugins come last, with `error` set and no usable binary.
+    Listing them is the point — the user's question is "where did my harness
+    go", and the answer is a parse error in a file they wrote. Every consumer
+    that spawns must therefore skip rows carrying an `error`.
     """
     rows = []
     for name in sorted(HARNESSES):
@@ -238,6 +261,20 @@ def describe() -> list[dict]:
                 "binary": harness.binary,
                 "installed": path is not None,
                 "path": path,
+                "source": _PLUGINS[name].source,
+                "error": None,
+            }
+        )
+    for found in sorted(_BROKEN, key=lambda p: p.name):
+        rows.append(
+            {
+                "name": found.name,
+                "icon": UNKNOWN_ICON,
+                "binary": "",
+                "installed": False,
+                "path": str(found.path),
+                "source": found.source,
+                "error": found.error,
             }
         )
     return rows
@@ -259,15 +296,13 @@ __all__ = [
     "MAX_TEXT",
     "SERVER_NAME",
     "UNKNOWN_ICON",
-    "ClaudeCodeHarness",
-    "DeclaredHarness",
     "Event",
     "EventKind",
     "Harness",
     "LaunchPlan",
     "NativeChild",
+    "Plugin",
     "PluginError",
-    "VibeHarness",
     "clip",
     "clipper",
     "describe",

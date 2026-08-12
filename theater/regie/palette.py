@@ -45,6 +45,11 @@ def entries(
     """
     rows: list[tuple[str, str, str]] = []
     for row in _order(describe() if harnesses is None else harnesses, favourite):
+        if row.get("error"):
+            # A plugin that would not load. `theater harnesses` says so with
+            # the parse error; an entry here could only offer a spawn that
+            # cannot happen.
+            continue
         if not row.get("installed", True):
             # Listed anyway. Hiding the entry looks like Theater cannot drive
             # this harness at all, when the truth is narrower and fixable:

@@ -74,14 +74,13 @@ class Daemon:
         #: handlers can reach the settings without re-reading the file, which
         #: would let two requests in one process see different values.
         self.config = config if config is not None else load_config()
-        # Teach this process the harnesses the user added — config declarations
-        # and plugin files — before anything reads the registry. Raises
-        # ConfigError on anything that cannot be honoured, which is deliberately
-        # fatal: the daemon is the process that refuses spawns, so it must not
-        # come up holding a set the user did not ask for.
-        extra = harness_registry.install(self.config)
-        if extra:
-            logger.info("harnesses from config and plugins: %s", ", ".join(extra))
+        # Build the harness registry from the shipped and local plugin
+        # directories before anything reads it. Raises ConfigError on anything
+        # that cannot be honoured, which is deliberately fatal: the daemon is
+        # the process that refuses spawns, so it must not come up holding a set
+        # the user did not ask for.
+        installed = harness_registry.install(self.config)
+        logger.info("harnesses: %s", ", ".join(installed) or "none")
         self.store = store or Store(paths.db_path())
         self.registry = Registry(self.store)
         self.spawner = Spawner(self.registry)

@@ -28,8 +28,8 @@
 [theater]
 
 # Harness used when `theater spawn` is given no harness name, and sorted first
-# in the régie's ctrl+p palette. Must name a harness that exists — built-in,
-# declared below, or a plugin — checked at daemon start.
+# in the régie's ctrl+p palette. Must name a harness the registry actually
+# holds — shipped or local, and not disabled below — checked at daemon start.
 #
 # Left commented because its default is "no favourite", and TOML has no way to
 # write that: the key is either absent or set to a name.
@@ -95,86 +95,40 @@ relocate_timeout = 5.0
 # tool call does not trigger it, short enough that a human watching notices.
 awaiting_input_timeout = 10.0
 
-# How often to read the screen of a harness that has no transcript at all (one
-# declared in [harness.*] below). Much faster than the timeout above, because
-# for those harnesses the screen is not a hint about a stuck agent — it is the
-# only evidence a turn ended, and a caller is blocked on it. A turn is called
-# finished only when two consecutive polls agree, so this is also half the
-# detection latency.
+# How often to read the screen of a harness that has no transcript at all — a
+# plugin whose adapter sets `has_transcript = False`. Much faster than the
+# timeout above, because for those harnesses the screen is not a hint about a
+# stuck agent — it is the only evidence a turn ended, and a caller is blocked
+# on it. A turn is called finished only when two consecutive polls agree, so
+# this is also half the detection latency.
 screen_interval = 1.0
 
 # How often the observer reconciles its watch tasks against the registry.
 sync_interval = 1.0
 
 
-# ---------------------------------------------------------------------------
-# Declaring a harness
-# ---------------------------------------------------------------------------
-#
-# Theater ships working adapters for claude and vibe; `theater harnesses` lists
-# what is available on this machine. Nothing here is needed to use those two.
-#
-# So, unlike the settings above, everything in this section stays commented:
-# these are examples of how to add a *third* CLI, not defaults being restated.
-#
-# [harness.<name>] teaches Theater a CLI it does not ship an adapter for. It
-# covers launching, MCP wiring, presence, the icon and unmanaged-pane
-# detection. It does not cover reading a transcript — a declared harness has no
-# parser, so its turns end when its prompt reappears on screen, confirmed
-# across two polls. If you need real turn boundaries, messages on the bus,
-# read_transcript or native sub-agents, write a plugin instead:
-# docs/harness-plugins.md.
-#
-# Required: binary, idle_prompts, and all three approvals modes (the empty list
-# included). Each missing value would mislead rather than degrade — nothing to
-# run, a yolo spawn with no flags that looks deliberate, or a turn that never
-# ends and hangs every caller.
-#
-# A declaration may not take the name of a built-in (claude, vibe) or of a
-# plugin. Overriding an adapter that can read a transcript with one that cannot
-# is a silent downgrade, so it is refused.
-#
-# Placeholders, substituted literally wherever they appear:
-#   {id}           participant id — this is what makes the MCP server ours
-#   {prompt}       the initial prompt
-#   {binary}       this harness's executable
-#   {theater}      absolute path to the theater binary
-#   {config_path}  where mcp_file will be written
-#
-# argv order is fixed, not templated:
-#   binary  approval flags  mcp_argv  mcp_file_argv  argv
-#
-# The examples below are real CLI surfaces but are NOT verified end to end:
-# neither binary has been spawned through Theater. Treat them as examples of
-# the schema, not as tested recipes.
+[harness]
 
-# [harness.codex]
-# binary       = "codex"
-# icon         = "◇"
-# aliases      = ["codex-cli", "openai-codex"]
-# idle_prompts = ["›", "▌"]
-# mcp_argv     = ["-c", "mcp_servers.theater.command={theater}",
-#                 "-c", 'mcp_servers.theater.args=["mcp","--id","{id}"]']
-# approvals    = { manual = [], edits = ["--full-auto"], yolo = ["--dangerously-bypass-approvals-and-sandbox"] }
-
-# A harness configured by a file instead of flags. mcp_file is written to
-# {config_path} before the pane is created; mcp_file_argv points the harness at
-# it. This is the shape Claude Code's built-in adapter uses.
+# Harness plugins to leave out of the registry, by name. Everything Theater can
+# drive is a plugin: the adapters it ships live beside the ones you write, and
+# this is the only key that decides which of them load.
 #
-# [harness.someagent]
-# binary        = "someagent"
-# icon          = "◆"
-# idle_prompts  = ["> "]
-# mcp_file      = '{"mcpServers":{"theater":{"command":"{theater}","args":["mcp","--id","{id}"]}}}'
-# mcp_file_argv = ["--mcp-config={config_path}"]
-# approvals     = { manual = [], edits = ["--accept-edits"], yolo = ["--yes"] }
-# argv          = ["{prompt}"]
-
-# A harness that reads its MCP config from the environment, the way Vibe does.
+# A denylist rather than an allowlist, so a harness added in a later release
+# shows up without anyone editing this file. The opposite choice would make
+# every new adapter invisible on every existing install, which is a bug report
+# rather than a setting.
 #
-# [harness.otheragent]
-# binary       = "otheragent"
-# icon         = "▣"
-# idle_prompts = ["❯"]
-# mcp_env      = { OTHER_MCP_SERVERS = '[{"name":"theater","transport":"stdio","command":"{theater}","args":["mcp","--id","{id}"]}]' }
-# approvals    = { manual = [], edits = ["--auto-edit"], yolo = ["--yolo"] }
+# Disabling is absence, not refusal. A disabled harness cannot be spawned, is
+# not offered in the palette, and is not looked for when adopting an unmanaged
+# pane. An agent that registers under the name anyway still appears in the
+# tree, drawn with the unknown icon — hiding a session that exists would be
+# worse than admitting Theater cannot read it.
+#
+# The name is matched against the plugin's filename before the file is
+# imported, and against the harness name afterwards. Matching the filename
+# first is what lets you switch off a plugin that fails on import — the case
+# where you need this most, and the one an allowlist of names could not reach.
+#
+# `theater harnesses` lists what loaded, where each one came from, and why any
+# were rejected. Writing your own: docs/harness-plugins.md.
+disabled = []

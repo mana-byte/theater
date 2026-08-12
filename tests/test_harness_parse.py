@@ -19,8 +19,7 @@ import pytest
 
 from theater.harness import EventKind, status_after
 from theater.harness.base import MAX_TEXT
-from theater.harness.claude_code import ClaudeCodeHarness
-from theater.harness.vibe import VibeHarness
+from shipped import ClaudeCodeHarness, VibeHarness
 from theater.models import Status
 
 FIXTURES = Path(__file__).parent / "fixtures"

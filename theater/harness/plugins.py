@@ -1,10 +1,11 @@
-"""Harness adapters written in Python and dropped into `$THEATER_HOME/harnesses`.
+"""Harness adapters loaded from Python files, by path.
 
-A config declaration (`[harness.*]`) can describe how to *launch* a harness, but
-not how to read what it writes: it has no transcript parser, so the observer
-falls back to reading the rendered screen and a job finishes on a guess rather
-than on a record. A plugin is the escape hatch for anyone who needs the real
-thing — the full `Harness` ABC, including `parse`.
+Two directories feed the registry, read by this one loader: the plugins Theater
+ships (`theater/harness/builtin/plugins/`) and the ones a user writes
+(`$THEATER_HOME/harnesses/`). There is no built-in tier. Shipping the default
+adapters through the extension point is what keeps the extension point honest —
+otherwise it is exercised only by the people who have already committed to it,
+and the first time it is short of something is the first time anyone finds out.
 
 Loading is by path, not by package. The alternative — putting the directory on
 `sys.path` and importing by name — makes every file in it shadow a top-level
@@ -12,11 +13,11 @@ module for the whole process, so a user's `json.py` would break Theater in a way
 that names neither the file nor the plugin system. Each file is loaded under a
 prefixed synthetic module name instead, which collides with nothing.
 
-Failure is loud, for the same reason a bad config key is: a plugin the user
-believes they installed but which is silently absent is the exact defect this
-release exists to remove. A plugin that raises on import, defines no `HARNESS`,
-or defines one that is not a `Harness` stops start-up with the file path in the
-message.
+Failure is reported, not raised. `scan` never throws: a file that will not load
+comes back as a `Plugin` with `error` set and `harness` None. The two sources
+have different failure policies — a broken shipped plugin is fatal, a broken
+local one is skipped with a warning — and choosing between them is the
+registry's job, not the loader's.
 
 Trust: a plugin is arbitrary Python executed by the daemon, at the privileges of
 the user who started it. That is the same trust level as `~/.bashrc`, and the
@@ -29,6 +30,8 @@ from __future__ import annotations
 import importlib.util
 import logging
 import sys
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
 from theater.config import HARNESS_NAME, ConfigError
@@ -37,8 +40,16 @@ from theater.harness.base import Harness
 logger = logging.getLogger("theater.harness.plugins")
 
 #: Synthetic module names are prefixed so a plugin can never take the import
-#: slot of a real module — see the loading note in the module docstring.
+#: slot of a real module — see the loading note in the module docstring. The
+#: source is part of the name too, so a local `vibe.py` overriding the shipped
+#: one does not evict the module the shipped instance came from.
 MODULE_PREFIX = "theater_harness_plugin_"
+
+#: Where a plugin came from. Reported by `theater harnesses`, because "why is
+#: this harness behaving unexpectedly" is usually answered by "not the file you
+#: think".
+SHIPPED = "shipped"
+LOCAL = "local"
 
 
 class PluginError(ConfigError):
@@ -50,32 +61,64 @@ class PluginError(ConfigError):
     """
 
 
-def load(directory: Path) -> list[tuple[Path, Harness]]:
-    """Every plugin in `directory`, in filename order, paired with its file.
+@dataclass(frozen=True, slots=True)
+class Plugin:
+    """One plugin file, loaded or not.
 
     The path travels with the harness because the registry needs it for the
     collision messages: "two definitions of `codex`" is only actionable if it
-    says which two files.
+    says which two files. `source` travels with it for the same reason —
+    "which two" is usually one shipped and one local.
+
+    `name` is the harness's own name once it loads, and the file stem before
+    that. A file that raises on import cannot be asked what it is called, and
+    the whole point of `[harness] disabled` is to be able to switch off the one
+    that is breaking start-up.
+    """
+
+    path: Path
+    source: str
+    name: str
+    harness: Harness | None = None
+    error: str | None = None
+
+
+def scan(
+    directory: Path, *, source: str, skip: Iterable[str] = ()
+) -> list[Plugin]:
+    """Every plugin in `directory`, in filename order. Never raises.
 
     A missing directory is not an error: the common case is a user who has
     never written one. Files starting with `_` or `.` are skipped, which is
     what makes a shared helper module possible next to the plugins that use it.
+
+    `skip` holds file stems to not even import — disabling a plugin has to work
+    when the reason for disabling it is that importing it is what breaks.
     """
+    skipped = set(skip)
     if not directory.is_dir():
         return []
 
-    found: list[tuple[Path, Harness]] = []
+    found: list[Plugin] = []
     for path in sorted(directory.glob("*.py")):
-        if path.name.startswith(("_", ".")):
+        if path.name.startswith(("_", ".")) or path.stem in skipped:
             continue
-        harness = _load_one(path)
-        logger.info("loaded harness plugin %r from %s", harness.name, path)
-        found.append((path, harness))
+        try:
+            harness = _load_one(path, source)
+        except PluginError as exc:
+            found.append(
+                Plugin(path=path, source=source, name=path.stem, error=str(exc))
+            )
+            continue
+        logger.info("loaded %s harness plugin %r from %s", source, harness.name, path)
+        found.append(
+            Plugin(path=path, source=source, name=harness.name, harness=harness)
+        )
     return found
 
 
-def _load_one(path: Path) -> Harness:
-    module_name = MODULE_PREFIX + path.stem
+def _load_one(path: Path, source: str) -> Harness:
+    module_name = f"{MODULE_PREFIX}{source}_{path.stem}"
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
         raise PluginError(f"{path}: not loadable as a Python module")

@@ -20,7 +20,7 @@ from theater.daemon.observer import (
     Observer,
     TranscriptCursor,
 )
-from theater.harness.vibe import VibeHarness
+from shipped import VibeHarness
 from theater.models import Status
 
 USER = {"role": "user", "content": "do the thing"}

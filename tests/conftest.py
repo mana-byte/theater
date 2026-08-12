@@ -27,24 +27,49 @@ def theater_home(monkeypatch):
     shutil.rmtree(root, ignore_errors=True)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def shipped_harnesses():
+    """Register the shipped adapters once, as every real entry point does.
+
+    The registry is empty until `install` runs — see `theater/harness`. In
+    production that is the daemon or `main()`; here it has to be someone, or
+    every test that expects `claude` and `vibe` to exist would have to say so.
+    Session-scoped so it lands before `clean_registry` takes its snapshot.
+
+    `local_dir` points nowhere on purpose: a plugin in the developer's own
+    ~/.theater must not change what the suite tests.
+    """
+    from theater import harness
+    from theater.config import Config
+
+    harness.install(Config(), local_dir=Path("/nonexistent/theater-harnesses"))
+
+
 @pytest.fixture(autouse=True)
-def clean_registry():
+def clean_registry(shipped_harnesses):
     """Undo any `harness.install` a test performed.
 
     The registry is a module-level dict mutated in place — it has to be, since
-    other modules hold a reference to that exact object. That makes a declared
-    harness leak into every later test in the process, so snapshot and restore
-    rather than trusting each test to clean up after itself.
+    other modules hold a reference to that exact object. That makes a plugin
+    installed by one test leak into every later test in the process, so
+    snapshot and restore rather than trusting each test to clean up after
+    itself.
     """
     from theater import harness
 
     harnesses = dict(harness.HARNESSES)
     aliases = dict(harness._ALIASES)
+    registered = dict(harness._PLUGINS)
+    broken = list(harness._BROKEN)
     yield
     harness.HARNESSES.clear()
     harness.HARNESSES.update(harnesses)
     harness._ALIASES.clear()
     harness._ALIASES.update(aliases)
+    harness._PLUGINS.clear()
+    harness._PLUGINS.update(registered)
+    harness._BROKEN.clear()
+    harness._BROKEN.extend(broken)
 
 
 @pytest.fixture
