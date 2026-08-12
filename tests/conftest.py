@@ -99,7 +99,7 @@ class FakeTmux:
         self._next = 0
         #: Panes visible to list_panes, populated by tests that need the sweep.
         self.visible_panes: list = []
-        #: (pane_id, text) pairs delivered through send_keys.
+        #: (pane_id, text) pairs delivered through deliver_text.
         self.sent: list[tuple[str, str]] = []
 
     async def new_window(self, *, session, name, cwd, command, env=None, background=True):
@@ -136,7 +136,7 @@ class FakeTmux:
         """Answer `list-panes -a -F #{pane_id}`, the only raw call the daemon makes."""
         return "\n".join(p.pane_id for p in self.visible_panes)
 
-    async def send_keys(self, pane_id, text, *, enter=True):
+    async def deliver_text(self, pane_id, text, *, enter=True):
         self.sent.append((pane_id, text))
 
     async def human_present(self, pane_id):
@@ -166,7 +166,7 @@ def fake_tmux(monkeypatch):
         "list_panes",
         "available",
         "run",
-        "send_keys",
+        "deliver_text",
     ):
         monkeypatch.setattr(tmux_client, name, getattr(fake, name))
     monkeypatch.setattr(spawner_mod.shutil, "which", lambda binary: f"/usr/bin/{binary}")

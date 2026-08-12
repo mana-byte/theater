@@ -275,7 +275,7 @@ async def _bus_tail(daemon, params: dict) -> list[dict]:
 
 @method("send")
 async def _send(daemon, params: dict) -> dict:
-    """Send a prompt to an already-running agent via tmux send-keys."""
+    """Send a prompt to an already-running agent by pasting into its pane."""
     target_id = _require(params, "target")
     prompt = _require(params, "prompt")
     caller_id = params.get("caller_id") or "cli"
@@ -325,7 +325,7 @@ async def _send(daemon, params: dict) -> dict:
         prompt=prompt,
     )
     try:
-        await tmux.send_keys(target.tmux_pane, prompt)
+        await tmux.deliver_text(target.tmux_pane, prompt)
     except Exception as exc:
         # Nothing was delivered, so nothing will ever answer. Close the job
         # rather than leave a reservation that blocks the next send until the

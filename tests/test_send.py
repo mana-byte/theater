@@ -4,7 +4,7 @@ Covers: send to an addressable target, human_present rejection, busy
 rejection, send to an unaddressable target, and the full send → await →
 result loop.
 
-tmux is stubbed: `send_keys` and `human_present` are monkeypatched.
+tmux is stubbed: `deliver_text` and `human_present` are monkeypatched.
 The job lifecycle is real — the observer's _answer_turn would
 finish the send job if it were connected to a real transcript, but here
 the tests finish jobs directly via the JobManager.
@@ -113,7 +113,7 @@ async def test_the_job_exists_before_the_prompt_is_typed(
     async def spy(pane, text):
         seen.append(daemon.store.running_jobs_for_target(target["id"]))
 
-    monkeypatch.setattr(tmux_client, "send_keys", spy)
+    monkeypatch.setattr(tmux_client, "deliver_text", spy)
     await client.call("send", target=target["id"], prompt="quick one")
     assert len(seen) == 1 and len(seen[0]) == 1
     assert seen[0][0].prompt == "quick one"
@@ -130,10 +130,10 @@ async def test_a_send_that_could_not_be_typed_does_not_wedge_the_target(
     async def broken(pane, text):
         raise RuntimeError("pane went away")
 
-    monkeypatch.setattr(tmux_client, "send_keys", broken)
+    monkeypatch.setattr(tmux_client, "deliver_text", broken)
     with pytest.raises(RemoteError):
         await client.call("send", target=target["id"], prompt="doomed")
-    monkeypatch.setattr(tmux_client, "send_keys", fake_tmux.send_keys)
+    monkeypatch.setattr(tmux_client, "deliver_text", fake_tmux.deliver_text)
 
     # No leftover reservation, so the next send is accepted rather than busy.
     job = await client.call("send", target=target["id"], prompt="second")

@@ -156,7 +156,7 @@ async def test_list_panes_uses_pane_format(monkeypatch):
     assert argv[i + 1] == client._PANE_FORMAT
 
 
-# ---- kill_pane / send_keys: targets are pane ids, not sessions ---------
+# ---- kill_pane / deliver_text: targets are pane ids, not sessions ------
 
 
 async def test_kill_pane_targets_pane_id_directly(monkeypatch):
@@ -174,7 +174,7 @@ async def test_kill_pane_targets_pane_id_directly(monkeypatch):
     assert argv[argv.index("-t") + 1] == "%42"
 
 
-async def test_send_keys_uses_l_and_double_dash(monkeypatch):
+async def _deliver_argv(monkeypatch, text: str, **kw) -> list[list[str]]:
     captured: list[list[str]] = []
 
     async def fake_run(*args: str, check: bool = True) -> str:
@@ -182,27 +182,67 @@ async def test_send_keys_uses_l_and_double_dash(monkeypatch):
         return ""
 
     monkeypatch.setattr(client, "run", fake_run)
-    await client.send_keys("%7", "echo hi", enter=True)
-    assert len(captured) == 2
-    first, second = captured
-    assert first[0] == "send-keys"
-    assert "-t" in first and first[first.index("-t") + 1] == "%7"
-    assert "-l" in first
-    i = first.index("--")
-    assert first[i + 1:] == ["echo hi"]
-    assert second == ["send-keys", "-t", "%7", "Enter"]
+    await client.deliver_text("%7", text, **kw)
+    return captured
 
 
-async def test_send_keys_no_enter_is_single_call(monkeypatch):
+async def test_deliver_text_pastes_rather_than_typing(monkeypatch):
+    """A prompt must not arrive as keystrokes.
+
+    `send-keys -l` fired the receiver's keybindings -- OpenCode read the `!`
+    in "Hey!" as its shell-mode trigger and ran the rest of the sentence
+    through zsh. A paste is inert.
+    """
+    captured = await _deliver_argv(monkeypatch, "Hey! I'm here")
+
+    assert not any(
+        argv[0] == "send-keys" and "-l" in argv for argv in captured
+    ), "the prompt must never be typed as keys"
+
+    set_buffer = next(a for a in captured if a[0] == "set-buffer")
+    i = set_buffer.index("--")
+    assert set_buffer[i + 1:] == ["Hey! I'm here"], "text passes through unaltered"
+
+    paste = next(a for a in captured if a[0] == "paste-buffer")
+    assert paste[paste.index("-t") + 1] == "%7"
+    # -p is what makes tmux add bracketed-paste markers, and only for an
+    # application that asked for them. Without it the receiver sees keystrokes
+    # again and the bug returns.
+    assert "-p" in paste
+
+
+async def test_deliver_text_buffer_is_per_pane(monkeypatch):
+    """Two sends in flight must not paste each other's text."""
+    captured = await _deliver_argv(monkeypatch, "hello")
+    names = {a[a.index("-b") + 1] for a in captured if "-b" in a}
+    assert names == {"theater-7"}
+
+
+async def test_deliver_text_cleans_up_after_a_failed_paste(monkeypatch):
+    """A dead pane must not leave its buffer on the stack."""
     captured: list[list[str]] = []
 
     async def fake_run(*args: str, check: bool = True) -> str:
         captured.append(list(args))
+        if args[0] == "paste-buffer":
+            raise client.TmuxError("no such pane")
         return ""
 
     monkeypatch.setattr(client, "run", fake_run)
-    await client.send_keys("%7", "text", enter=False)
-    assert len(captured) == 1
+    with pytest.raises(client.TmuxError):
+        await client.deliver_text("%7", "hello")
+    assert captured[-1][0] == "delete-buffer"
+
+
+async def test_deliver_text_sends_enter_as_a_key(monkeypatch):
+    """Enter is a key, not text: inside a paste it would be a literal newline."""
+    captured = await _deliver_argv(monkeypatch, "hello", enter=True)
+    assert captured[-1] == ["send-keys", "-t", "%7", "Enter"]
+
+
+async def test_deliver_text_without_enter_does_not_submit(monkeypatch):
+    captured = await _deliver_argv(monkeypatch, "hello", enter=False)
+    assert not any(a[0] == "send-keys" for a in captured)
 
 
 # ---- display_message ---------------------------------------------------

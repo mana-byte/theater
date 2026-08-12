@@ -14,8 +14,9 @@ spawn failure; the argv is now asserted in tests/test_tmux_client.py, because
 argv can be checked without a tmux server and the behaviour cannot.
 
 PARTLY VERIFIED. `ensure_session`, `new_window` and pane-id capture have been
-run against a real server. `send_keys`, `kill_pane` and the session-scoped
-`list_panes` have not.
+run against a real server. `kill_pane` and the session-scoped `list_panes`
+have not. `deliver_text`'s buffer round-trip was checked against a real
+server; its paste into a live TUI is covered end to end by hand.
 """
 
 from __future__ import annotations
@@ -209,13 +210,48 @@ async def kill_pane(pane_id: str) -> None:
     await run("kill-pane", "-t", pane_id, check=False)
 
 
-async def send_keys(pane_id: str, text: str, *, enter: bool = True) -> None:
-    """Phase 5b uses this for real. Present here only so the wrapper set is whole.
+async def deliver_text(pane_id: str, text: str, *, enter: bool = True) -> None:
+    """Insert text into whatever is running in a pane, as a paste.
 
-    `-l` sends the text literally, so prompt content is never interpreted as a
-    key name. The Enter is a separate call for the same reason.
+    Not `send-keys`, which is what this used to be and which is wrong for a
+    TUI. `send-keys -l` is literal only in the sense that tmux does not read
+    the text as *key names*; the characters still arrive one by one, exactly
+    as if a human had typed them, and every keybinding on the far side fires.
+    That is not a theoretical problem. OpenCode binds `!` to shell mode, so
+    sending
+
+        Hey! Quick fun debate ... over ~10 short dialogue lines
+
+    swallowed the `!`, flipped the composer into shell mode, and the following
+    Enter ran the rest of the sentence through zsh -- which answered
+    "not enough directory stack entries", because `~10` is a directory stack
+    reference. An earlier prompt died on `I'm` with "unmatched '". The agent
+    was never prompted at all, so its caller waited for a reply that no one
+    was writing. Claude Code binds `!` and a leading `/` the same way; so do
+    Codex and Vibe. Escaping cannot fix this: the characters are legitimate
+    prose, and the receiving application is right to bind them.
+
+    A paste is the mechanism a terminal already has for "this is text, not
+    keystrokes". `paste-buffer -p` wraps the buffer in bracketed-paste markers
+    *if the application asked for them* (DECSET 2004) and sends it plain
+    otherwise, so tmux makes that decision from the receiver's own declared
+    capability rather than from a guess in a table here. All four supported
+    CLIs request it; `#{bracket_paste_flag}` reports 1 for each.
+
+    The buffer is named per pane so two concurrent sends cannot paste each
+    other's text, and deleted on the way out even if the paste fails, so a
+    dead pane cannot leave the buffer stack growing.
+
+    Enter stays a separate `send-keys`: it is a key, and inside a bracketed
+    paste it would be inserted as a literal newline instead of submitting.
     """
-    await run("send-keys", "-t", pane_id, "-l", "--", text)
+    buffer = f"theater-{pane_id.lstrip('%')}"
+    await run("set-buffer", "-b", buffer, "--", text)
+    try:
+        await run("paste-buffer", "-b", buffer, "-t", pane_id, "-p", "-d")
+    finally:
+        # -d already deletes it on success; this is for the failure path.
+        await run("delete-buffer", "-b", buffer, check=False)
     if enter:
         await run("send-keys", "-t", pane_id, "Enter")
 
