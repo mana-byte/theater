@@ -19,7 +19,15 @@ from __future__ import annotations
 
 from rich.text import Text
 
-_TIER_MARK = {"spawned": "S", "adopted": "A", "external": "E"}
+from theater.formatting import (
+    clip_harness,
+    flatten_tree,
+    reach_mark,
+    short_id,
+    tier_mark,
+    tilde,
+)
+
 _STATUS_COLOR = {
     "starting": "yellow",
     "idle": "green",
@@ -29,52 +37,22 @@ _STATUS_COLOR = {
 }
 
 
-def _short_id(pid: str) -> str:
-    """First 8 chars is enough to tell participants apart in a tree."""
-    return pid[:8]
-
-
-def _tilde(path: str | None) -> str:
-    if not path:
-        return "-"
-    home = ""
-    try:
-        import os
-
-        home = os.path.expanduser("~")
-    except Exception:
-        pass
-    if home and path.startswith(home):
-        return "~" + path[len(home):]
-    return path
-
-
 def _node_label(node: dict, indent: int) -> Text:
     """One line of the tree: mark tier/harness/status/cwd."""
-    mark = _TIER_MARK.get(node.get("tier", ""), "?")
-    reach = " " if node.get("addressable") else "*"
-    harness = (node.get("harness") or "-")[:11]
     status = node.get("status", "?")
-    cwd = _tilde(node.get("cwd"))
-    pid = _short_id(node.get("id", "????????"))
 
     label = Text()
     label.append(f"{'  ' * indent}")
-    label.append(f"{mark}{reach} ", style="bold")
-    label.append(f"{harness:<11} ")
+    label.append(f"{tier_mark(node.get('tier'))}{reach_mark(node.get('addressable'))} ", style="bold")
+    label.append(f"{clip_harness(node.get('harness')):<11} ")
     label.append(f"{status:<14} ", style=_STATUS_COLOR.get(status, "white"))
-    label.append(f"{pid} ")
-    label.append(cwd, style="dim")
+    label.append(f"{short_id(node.get('id'))} ")
+    label.append(tilde(node.get("cwd")), style="dim")
     return label
 
 
-def _tree_lines(nodes: list[dict], indent: int = 0) -> list[tuple[Text, dict]]:
-    """Flatten the tree into (label, node) pairs for easy rendering."""
-    out: list[tuple[Text, dict]] = []
-    for node in nodes:
-        out.append((_node_label(node, indent), node))
-        out += _tree_lines(node.get("children", []), indent + 1)
-    return out
+def _labelled(node: dict, indent: int) -> tuple[Text, dict]:
+    return _node_label(node, indent), node
 
 
 def render_tree(
@@ -91,7 +69,7 @@ def render_tree(
     Returns a flat list so the Textual Tree can map selection back to the
     data without walking the widget's own tree.
     """
-    lines = _tree_lines(tree)
+    lines = flatten_tree(tree, _labelled)
     if unmanaged:
         # Separator line
         lines.append((Text("── unmanaged ──", style="dim italic"), {}))

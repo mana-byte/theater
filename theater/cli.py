@@ -20,11 +20,20 @@ import time
 
 from theater import paths
 from theater.client import DaemonClient, call_sync
+from theater.formatting import (
+    TIER_LEGEND,
+    clip_harness,
+    event_stamp,
+    event_summary,
+    event_who,
+    flatten_tree,
+    reach_mark,
+    tier_mark,
+    tilde,
+)
 from theater.harness import APPROVALS, HARNESSES
 from theater.protocol import RemoteError
 from theater.tmux import client as tmux
-
-_TIER_MARK = {"spawned": "S", "adopted": "A", "external": "E"}
 
 #: Home, then erase. Cheaper than curses and good enough for a redraw loop.
 _CLEAR = "\033[H\033[2J"
@@ -151,47 +160,31 @@ def _width() -> int:
     return shutil.get_terminal_size((100, 24)).columns
 
 
-def _tilde(path: str) -> str:
-    home = os.path.expanduser("~")
-    return "~" + path[len(home) :] if path.startswith(home) else path
-
-
 def _row_line(p: dict, indent: int = 0) -> str:
-    mark = _TIER_MARK.get(p["tier"], "?")
-    reach = " " if p["addressable"] else "*"
     pad = "  " * indent
-    # Clipped, not just padded: a participant is free to report any harness
-    # name it likes, and one long one must not shear every column after it.
-    harness = (p.get("harness") or "-")[:11]
     return (
-        f"{p['id']:<14}{mark}{reach} {harness:<11} "
-        f"{p['status']:<15} {p.get('tmux_pane') or '-':<6} {pad}{_tilde(p.get('cwd') or '-')}"
+        f"{p['id']:<14}{tier_mark(p['tier'])}{reach_mark(p['addressable'])} "
+        f"{clip_harness(p.get('harness')):<11} "
+        f"{p['status']:<15} {p.get('tmux_pane') or '-':<6} {pad}{tilde(p.get('cwd'))}"
     )
-
-
-def _tree_lines(nodes: list[dict], indent: int = 0) -> list[str]:
-    out: list[str] = []
-    for node in nodes:
-        out.append(_row_line(node, indent))
-        out += _tree_lines(node.get("children", []), indent + 1)
-    return out
 
 
 def _format_ls(rows: list[dict], *, tree: bool, unmanaged: list[dict] | None = None) -> str:
     if not rows and not unmanaged:
         return "no participants"
-    body = _tree_lines(rows) if tree else [_row_line(r) for r in rows]
+    body = flatten_tree(rows, _row_line) if tree else [_row_line(r) for r in rows]
     header = f"{'ID':<14}{'T':<2} {'HARNESS':<11} {'STATUS':<15} {'PANE':<6} DIRECTORY"
-    legend = "T: S spawned  A adopted  E external   * not addressable"
     lines = [header, *body]
     if unmanaged:
         lines.append("")
         lines.append("unmanaged (harness panes not yet adopted):")
         for u in unmanaged:
-            cmd = (u.get("command") or "-")[:11]
+            cmd = clip_harness(u.get("command"))
             pane = u.get("pane") or "-"
-            lines.append(f"  {'-':<14}{'?'}  {cmd:<11} {'-':<15} {pane:<6} {_tilde(u.get('cwd') or '-')}")
-    lines.extend(["", legend])
+            lines.append(
+                f"  {'-':<14}{'?'}  {cmd:<11} {'-':<15} {pane:<6} {tilde(u.get('cwd'))}"
+            )
+    lines.extend(["", TIER_LEGEND])
     return "\n".join(lines)
 
 
@@ -250,36 +243,11 @@ def cmd_spawn(args) -> int:
     return 0
 
 
-def _summary(payload: dict | None) -> str:
-    """One line describing an event, whatever kind it is.
-
-    The bus carries both agent activity and registry bookkeeping, so this
-    prefers the fields the observer writes and falls back to raw JSON rather
-    than dropping information it does not recognise.
-    """
-    if not payload:
-        return ""
-    bits = []
-    if payload.get("tool"):
-        bits.append(f"[{payload['tool']}]")
-    if payload.get("text"):
-        bits.append(" ".join(str(payload["text"]).split()))
-    if not bits:
-        known = {"ts", "turn_end", "index"}
-        rest = {k: v for k, v in payload.items() if k not in known and v is not None}
-        if rest:
-            bits.append(json.dumps(rest, separators=(",", ":")))
-    if payload.get("turn_end"):
-        bits.append("(turn end)")
-    return " ".join(bits)
-
-
 def _bus_line(row: dict, width: int) -> str:
-    stamp = time.strftime("%H:%M:%S", time.localtime(row.get("ts") or 0))
-    who = row.get("from_id") or "-"
-    if row.get("to_id"):
-        who = f"{who} -> {row['to_id']}"
-    line = f"{stamp}  {row.get('kind', '?'):<18} {who:<32} {_summary(row.get('payload'))}"
+    line = (
+        f"{event_stamp(row.get('ts'))}  {row.get('kind', '?'):<18} "
+        f"{event_who(row):<32} {event_summary(row.get('payload'))}"
+    )
     return line[: width - 1] if width > 20 and len(line) >= width else line
 
 
@@ -363,7 +331,7 @@ def cmd_adopt(args) -> int:
         print(json.dumps(record, indent=2))
     else:
         assert isinstance(record, dict)
-        mark = _TIER_MARK.get(record["tier"], "?")
+        mark = tier_mark(record["tier"])
         print(f"{record['id']}  {mark} {record['harness']}  pane {record['tmux_pane']}")
     return 0
 

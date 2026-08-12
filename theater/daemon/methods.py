@@ -10,7 +10,7 @@ handlers just wire parameters to calls.
 
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from theater import protocol
 from theater.daemon.harness_detect import detect_harness
@@ -20,6 +20,9 @@ from theater.harness import HARNESSES, normalize
 from theater.models import BadRequest, Busy, HumanPresent, NotAddressable, Status
 from theater.tmux import client as tmux
 from theater.tmux.presence import human_present
+
+if TYPE_CHECKING:  # circular at runtime: server imports this module for its handlers
+    from theater.daemon.server import Daemon
 
 Handler = Callable[["Daemon", dict[str, Any]], Awaitable[Any]]
 METHODS: dict[str, Handler] = {}

@@ -12,6 +12,7 @@ import json
 import pytest
 
 from theater import cli
+from theater.formatting import event_summary, flatten_tree
 
 ROW = {
     "id": "p-abc123",
@@ -74,7 +75,7 @@ def test_the_home_directory_is_abbreviated(monkeypatch):
 
 def test_children_are_indented_under_their_parent():
     tree = [{**ROW, "children": [{**ROW, "id": "p-child0", "children": []}]}]
-    lines = cli._tree_lines(tree)
+    lines = flatten_tree(tree, cli._row_line)
     assert len(lines) == 2
     assert lines[1].rstrip().endswith("  /tmp/project")
     assert lines[1].index("/tmp/project") > lines[0].index("/tmp/project")
@@ -135,7 +136,7 @@ def test_an_unrecognised_payload_is_shown_rather_than_dropped():
 
 def test_bookkeeping_fields_alone_do_not_produce_noise():
     """ts/index/turn_end are chrome; with nothing else there is nothing to say."""
-    assert cli._summary({"ts": None, "index": 4, "turn_end": False}) == ""
+    assert event_summary({"ts": None, "index": 4, "turn_end": False}) == ""
 
 
 def test_a_long_line_is_clipped_to_the_terminal():
