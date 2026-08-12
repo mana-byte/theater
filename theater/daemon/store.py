@@ -12,7 +12,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from theater.models import Participant, Status, now
+from theater.models import Job, Participant, Status, now
 
 SCHEMA_VERSION = 1
 
@@ -172,13 +172,12 @@ class Store:
             ),
         )
 
-    def get_job(self, handle: str):
+    def get_job(self, handle: str) -> Job | None:
         row = self.db.execute(
             "SELECT * FROM jobs WHERE handle = ?", (handle,)
         ).fetchone()
         if row is None:
             return None
-        from theater.daemon.jobs import Job
         return Job.from_row(row)
 
     def finish_job(
@@ -191,16 +190,14 @@ class Store:
             (state, result, error_code, finished_at, handle),
         )
 
-    def list_jobs_for_caller(self, caller_id: str) -> list:
-        from theater.daemon.jobs import Job
+    def list_jobs_for_caller(self, caller_id: str) -> list[Job]:
         rows = self.db.execute(
             "SELECT * FROM jobs WHERE caller_id = ? ORDER BY created_at DESC",
             (caller_id,),
         ).fetchall()
         return [Job.from_row(r) for r in rows]
 
-    def running_jobs_for_target(self, target_id: str) -> list:
-        from theater.daemon.jobs import Job
+    def running_jobs_for_target(self, target_id: str) -> list[Job]:
         rows = self.db.execute(
             "SELECT * FROM jobs WHERE target_id = ? AND state = ? "
             "ORDER BY created_at DESC",

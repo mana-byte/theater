@@ -34,68 +34,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
-from enum import StrEnum
 
 from theater.daemon.store import Store
-from theater.models import now
+from theater.models import Job, JobKind, JobState, now
 
 logger = logging.getLogger("theater.jobs")
 
-
-class JobState(StrEnum):
-    RUNNING = "running"
-    DONE = "done"
-    CRASHED = "crashed"
-    KILLED = "killed"
-
-
-class JobKind(StrEnum):
-    SPAWN = "spawn"
-    SEND = "send"
-
-
-@dataclass(frozen=True, slots=True)
-class Job:
-    handle: str
-    caller_id: str
-    target_id: str | None
-    kind: str
-    prompt: str | None
-    state: str
-    result: str | None
-    error_code: str | None
-    created_at: float
-    finished_at: float | None
-
-    def to_dict(self) -> dict:
-        return {
-            "handle": self.handle,
-            "caller_id": self.caller_id,
-            "target_id": self.target_id,
-            "kind": str(self.kind),
-            "prompt": self.prompt,
-            "state": str(self.state),
-            "result": self.result,
-            "error_code": self.error_code,
-            "created_at": self.created_at,
-            "finished_at": self.finished_at,
-        }
-
-    @classmethod
-    def from_row(cls, row) -> Job:
-        return cls(
-            handle=row["handle"],
-            caller_id=row["caller_id"],
-            target_id=row["target_id"],
-            kind=row["kind"],
-            prompt=row["prompt"],
-            state=row["state"],
-            result=row["result"],
-            error_code=row["error_code"],
-            created_at=row["created_at"],
-            finished_at=row["finished_at"],
-        )
+#: Re-exported for callers that think of these as job vocabulary rather than
+#: domain models. They live in theater.models so the store can build a Job
+#: without importing this module.
+__all__ = ["Job", "JobKind", "JobManager", "JobState"]
 
 
 #: How long to wait for a job to finish if the caller does not specify.

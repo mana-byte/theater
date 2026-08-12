@@ -37,7 +37,7 @@ from pathlib import Path
 
 from theater.daemon.registry import Registry
 from theater.harness import HARNESSES, Harness, status_after
-from theater.models import Status, Tier
+from theater.models import JobState, Status, Tier
 
 logger = logging.getLogger("theater.observer")
 
@@ -459,7 +459,6 @@ class Observer:
         """
         if self.jobs is None:
             return
-        from theater.daemon.jobs import JobState
         running = self.store.running_jobs_for_target(pid)
         for job in running:
             self.jobs.finish(
