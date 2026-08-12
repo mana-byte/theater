@@ -48,9 +48,10 @@ def fake_tmux(monkeypatch):
     import theater.tmux.client as tmux_client
     monkeypatch.setattr(tmux_client, "send_keys", fake_send_keys)
     # Patch human_present to return False by default
+    import theater.daemon.methods as methods_mod
     async def fake_human_present(pane_id):
         return False
-    monkeypatch.setattr(server_mod, "human_present", fake_human_present)
+    monkeypatch.setattr(methods_mod, "human_present", fake_human_present)
     fake.sent = sent
     return fake
 
@@ -95,12 +96,12 @@ async def test_send_to_unaddressable_rejected(client, fake_tmux):
 async def test_send_with_human_present_rejected(client, fake_tmux, monkeypatch):
     """send to a pane where a human is present returns human_present."""
     target = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
-    import theater.daemon.server as server_mod
+    import theater.daemon.methods as methods_mod
 
     async def human_here(pane_id):
         return True
 
-    monkeypatch.setattr(server_mod, "human_present", human_here)
+    monkeypatch.setattr(methods_mod, "human_present", human_here)
     with pytest.raises(RemoteError) as exc:
         await client.call("send", target=target["id"], prompt="hi")
     assert exc.value.code == "human_present"

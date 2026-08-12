@@ -75,10 +75,6 @@ def fake_tmux(monkeypatch):
     monkeypatch.setattr(spawner_mod.tmux, "list_panes", fake.list_panes)
     monkeypatch.setattr(spawner_mod.tmux, "available", fake.available)
     monkeypatch.setattr(spawner_mod.shutil, "which", lambda binary: f"/usr/bin/{binary}")
-    # The server module imports tmux directly, not through spawner.
-    import theater.daemon.server as server_mod
-    monkeypatch.setattr(server_mod.tmux, "list_panes", fake.list_panes)
-    monkeypatch.setattr(server_mod.tmux, "available", fake.available)
     return fake
 
 
@@ -238,10 +234,10 @@ async def test_the_reaper_notices_a_vanished_pane(daemon, client, fake_tmux, mon
         "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
     )
 
-    import theater.daemon.server as server_mod
+    from theater.tmux import client as tmux_client
 
-    monkeypatch.setattr(server_mod.tmux, "available", lambda: True)
-    monkeypatch.setattr(server_mod.tmux, "run", _fake_list_panes(""))
+    monkeypatch.setattr(tmux_client, "available", lambda: True)
+    monkeypatch.setattr(tmux_client, "run", _fake_list_panes(""))
     await daemon._reap_once()
 
     dead = await client.call("participants.get", id=record["id"])
@@ -253,10 +249,10 @@ async def test_the_reaper_leaves_live_panes_alone(daemon, client, fake_tmux, mon
         "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
     )
 
-    import theater.daemon.server as server_mod
+    from theater.tmux import client as tmux_client
 
-    monkeypatch.setattr(server_mod.tmux, "available", lambda: True)
-    monkeypatch.setattr(server_mod.tmux, "run", _fake_list_panes(record["tmux_pane"]))
+    monkeypatch.setattr(tmux_client, "available", lambda: True)
+    monkeypatch.setattr(tmux_client, "run", _fake_list_panes(record["tmux_pane"]))
     await daemon._reap_once()
 
     alive = await client.call("participants.get", id=record["id"])
@@ -328,8 +324,8 @@ async def test_adopt_detects_harness_from_pane_command(client, fake_tmux, monkey
     # When adopt runs, pane_current_command is "theater" (the adopt command
     # itself), not "vibe". The process tree walk finds "vibe" as an ancestor.
     # Simulate that: foreground is "theater", but descendants include "vibe".
-    import theater.daemon.server as server_mod
-    monkeypatch.setattr(server_mod, "_descendant_comms", lambda pid: ["vibe"])
+    import theater.daemon.harness_detect as harness_detect_mod
+    monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid: ["vibe"])
 
     fake_tmux.visible_panes = [_make_pane("%5", command="theater", cwd="/tmp/proj")]
     record = await client.call("adopt", pane="%5", cwd="/tmp/proj")
@@ -340,8 +336,8 @@ async def test_adopt_detects_harness_from_pane_command(client, fake_tmux, monkey
 
 
 async def test_adopt_detects_claude(client, fake_tmux, monkeypatch):
-    import theater.daemon.server as server_mod
-    monkeypatch.setattr(server_mod, "_descendant_comms", lambda pid: ["claude"])
+    import theater.daemon.harness_detect as harness_detect_mod
+    monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid: ["claude"])
 
     fake_tmux.visible_panes = [_make_pane("%6", command="theater", cwd="/tmp/cla")]
     record = await client.call("adopt", pane="%6")
@@ -351,8 +347,8 @@ async def test_adopt_detects_claude(client, fake_tmux, monkeypatch):
 
 async def test_adopt_detects_from_foreground_when_no_descendants(client, fake_tmux, monkeypatch):
     """If the foreground IS the harness (no adopt in flight), detect it directly."""
-    import theater.daemon.server as server_mod
-    monkeypatch.setattr(server_mod, "_descendant_comms", lambda pid: [])
+    import theater.daemon.harness_detect as harness_detect_mod
+    monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid: [])
 
     fake_tmux.visible_panes = [_make_pane("%9", command="vibe", cwd="/tmp/direct")]
     record = await client.call("adopt", pane="%9")
@@ -361,8 +357,8 @@ async def test_adopt_detects_from_foreground_when_no_descendants(client, fake_tm
 
 async def test_adopt_override_harness(client, fake_tmux, monkeypatch):
     """--harness overrides detection when the command is not a known binary."""
-    import theater.daemon.server as server_mod
-    monkeypatch.setattr(server_mod, "_descendant_comms", lambda pid: ["python3"])
+    import theater.daemon.harness_detect as harness_detect_mod
+    monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid: ["python3"])
 
     fake_tmux.visible_panes = [_make_pane("%7", command="python3")]
     record = await client.call("adopt", pane="%7", harness="vibe")
@@ -370,8 +366,8 @@ async def test_adopt_override_harness(client, fake_tmux, monkeypatch):
 
 
 async def test_adopt_unknown_command_yields_unknown_harness(client, fake_tmux, monkeypatch):
-    import theater.daemon.server as server_mod
-    monkeypatch.setattr(server_mod, "_descendant_comms", lambda pid: ["zsh"])
+    import theater.daemon.harness_detect as harness_detect_mod
+    monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid: ["zsh"])
 
     fake_tmux.visible_panes = [_make_pane("%8", command="zsh")]
     record = await client.call("adopt", pane="%8")
@@ -380,8 +376,8 @@ async def test_adopt_unknown_command_yields_unknown_harness(client, fake_tmux, m
 
 
 async def test_adopt_missing_pane_is_an_error(client, fake_tmux, monkeypatch):
-    import theater.daemon.server as server_mod
-    monkeypatch.setattr(server_mod, "_descendant_comms", lambda pid: [])
+    import theater.daemon.harness_detect as harness_detect_mod
+    monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid: [])
 
     fake_tmux.visible_panes = []
     with pytest.raises(RemoteError) as exc:
@@ -394,7 +390,7 @@ async def test_adopt_missing_pane_is_an_error(client, fake_tmux, monkeypatch):
 
 async def test_unmanaged_finds_harness_panes_with_no_participant(client, fake_tmux, monkeypatch):
     """The sweep walks the process tree, not just the foreground command."""
-    import theater.daemon.server as server_mod
+    import theater.daemon.harness_detect as harness_detect_mod
 
     # Pane %10's foreground is "python3" but its tree contains "vibe";
     # pane %12 is just "zsh" with no harness in its tree.
@@ -403,7 +399,7 @@ async def test_unmanaged_finds_harness_panes_with_no_participant(client, fake_tm
             str(pid), []
         )
 
-    monkeypatch.setattr(server_mod, "_descendant_comms", fake_descendants)
+    monkeypatch.setattr(harness_detect_mod, "descendant_comms", fake_descendants)
     fake_tmux.visible_panes = [
         _make_pane("%10", command="python3", cwd="/tmp/a", pane_pid=12345),
         _make_pane("%11", command="python3", cwd="/tmp/b", pane_pid=12346),
@@ -418,8 +414,8 @@ async def test_unmanaged_finds_harness_panes_with_no_participant(client, fake_tm
 
 
 async def test_unmanaged_excludes_registered_panes(client, fake_tmux, monkeypatch):
-    import theater.daemon.server as server_mod
-    monkeypatch.setattr(server_mod, "_descendant_comms", lambda pid: ["vibe"])
+    import theater.daemon.harness_detect as harness_detect_mod
+    monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid: ["vibe"])
 
     fake_tmux.visible_panes = [
         _make_pane("%20", command="vibe", cwd="/tmp/a"),
