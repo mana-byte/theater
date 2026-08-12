@@ -111,8 +111,11 @@ sync_interval = 1.0
 # Declaring a harness
 # ---------------------------------------------------------------------------
 #
-# Unlike the settings above, everything in this section stays commented: these
-# are examples, not defaults. Theater ships no declared harnesses.
+# Theater ships working adapters for claude and vibe; `theater harnesses` lists
+# what is available on this machine. Nothing here is needed to use those two.
+#
+# So, unlike the settings above, everything in this section stays commented:
+# these are examples of how to add a *third* CLI, not defaults being restated.
 #
 # [harness.<name>] teaches Theater a CLI it does not ship an adapter for. It
 # covers launching, MCP wiring, presence, the icon and unmanaged-pane
