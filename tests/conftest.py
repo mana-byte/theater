@@ -27,6 +27,26 @@ def theater_home(monkeypatch):
     shutil.rmtree(root, ignore_errors=True)
 
 
+@pytest.fixture(autouse=True)
+def clean_registry():
+    """Undo any `harness.install` a test performed.
+
+    The registry is a module-level dict mutated in place — it has to be, since
+    other modules hold a reference to that exact object. That makes a declared
+    harness leak into every later test in the process, so snapshot and restore
+    rather than trusting each test to clean up after itself.
+    """
+    from theater import harness
+
+    harnesses = dict(harness.HARNESSES)
+    aliases = dict(harness._ALIASES)
+    yield
+    harness.HARNESSES.clear()
+    harness.HARNESSES.update(harnesses)
+    harness._ALIASES.clear()
+    harness._ALIASES.update(aliases)
+
+
 @pytest.fixture
 def store(theater_home) -> Store:
     s = Store(paths.db_path())

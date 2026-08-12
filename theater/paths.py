@@ -28,8 +28,24 @@ def mcp_config_dir() -> Path:
     return home() / "mcp"
 
 
+def config_path() -> Path:
+    """User settings. Read by Theater, never written by it — see config.py."""
+    return home() / "config.toml"
+
+
+def harnesses_dir() -> Path:
+    """Python harness plugins, imported at start-up.
+
+    See docs/harness-plugins.md. Created empty by `ensure_home` rather than on
+    first use: the directory existing is how a user finds out the extension
+    point exists at all.
+    """
+    return home() / "harnesses"
+
+
 def ensure_home() -> Path:
     root = home()
     root.mkdir(parents=True, exist_ok=True)
     mcp_config_dir().mkdir(parents=True, exist_ok=True)
+    harnesses_dir().mkdir(parents=True, exist_ok=True)
     return root

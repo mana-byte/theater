@@ -13,15 +13,21 @@ from __future__ import annotations
 
 import pytest
 
+from theater import harness as harness_registry
+from theater.config import Config, TheaterSection
 from theater.harness import HARNESSES
-from theater.regie import palette
 from theater.regie.app import RegieApp
 from theater.regie.palette import SpawnCommands, entries
 
 
 class FakeApp:
-    def __init__(self) -> None:
+    def __init__(self, settings=None) -> None:
         self.spawned: list[str] = []
+        # Only set when a test cares. The unset case is the one the provider
+        # has to survive: Textual builds providers against whatever app is
+        # running, which in a screen test is not a RegieApp.
+        if settings is not None:
+            self.settings = settings
 
     def spawn_harness(self, harness: str) -> None:
         self.spawned.append(harness)
@@ -34,7 +40,13 @@ class FakeScreen:
 
 @pytest.fixture
 def installed(monkeypatch):
-    monkeypatch.setattr(palette.shutil, "which", lambda binary: f"/usr/bin/{binary}")
+    """Pretend every harness binary is on PATH.
+
+    Patched in `theater.harness`, which is where install state is now decided:
+    the palette no longer looks at PATH itself, it renders whatever rows the
+    daemon handed it.
+    """
+    monkeypatch.setattr(harness_registry.shutil, "which", lambda binary: f"/usr/bin/{binary}")
 
 
 @pytest.fixture
@@ -59,7 +71,7 @@ def test_an_entry_shows_the_harness_icon(installed):
 
 def test_a_missing_binary_is_listed_and_labelled(monkeypatch):
     """Dropping the entry would read as 'Theater cannot drive this harness'."""
-    monkeypatch.setattr(palette.shutil, "which", lambda binary: None)
+    monkeypatch.setattr(harness_registry.shutil, "which", lambda binary: None)
     rows = entries()
     assert {name for _, name, _ in rows} == set(HARNESSES)
     assert all("not on PATH" in help_text for _, _, help_text in rows)
@@ -67,6 +79,65 @@ def test_a_missing_binary_is_listed_and_labelled(monkeypatch):
 
 def test_an_installed_binary_says_what_the_entry_will_do(installed):
     assert all("no prompt" in help_text for _, _, help_text in entries())
+
+
+# ---- favourite ordering -------------------------------------------------
+
+
+def test_without_a_favourite_the_order_is_alphabetical(installed):
+    assert [name for _, name, _ in entries()] == sorted(HARNESSES)
+
+
+def test_the_favourite_is_offered_first(installed):
+    last = sorted(HARNESSES)[-1]
+    assert [name for _, name, _ in entries(favourite=last)][0] == last
+
+
+def test_promoting_a_favourite_drops_nobody(installed):
+    """A favourite ranks the list; it does not filter it."""
+    last = sorted(HARNESSES)[-1]
+    assert {name for _, name, _ in entries(favourite=last)} == set(HARNESSES)
+
+
+def test_the_rest_stay_alphabetical_behind_the_favourite(installed):
+    last = sorted(HARNESSES)[-1]
+    names = [name for _, name, _ in entries(favourite=last)]
+    assert names[1:] == sorted(set(HARNESSES) - {last})
+
+
+def test_a_favourite_that_is_not_a_harness_is_ignored(installed):
+    """Config can name anything; the palette is not where that is policed."""
+    assert [name for _, name, _ in entries(favourite="nope")] == sorted(HARNESSES)
+
+
+# ---- the rows come from the caller --------------------------------------
+
+
+def test_supplied_rows_are_used_instead_of_the_registry():
+    """A harness the daemon declared from config is not importable here."""
+    rows = [
+        {"name": "codex", "icon": "◇", "binary": "codex", "installed": True},
+        {"name": "opencode", "icon": "◈", "binary": "opencode", "installed": False},
+    ]
+    assert [name for _, name, _ in entries(rows)] == ["codex", "opencode"]
+
+
+def test_supplied_rows_keep_their_order_behind_the_favourite():
+    """The daemon sorted them; re-sorting here would fight it."""
+    rows = [
+        {"name": "codex", "icon": "◇", "binary": "codex", "installed": True},
+        {"name": "opencode", "icon": "◈", "binary": "opencode", "installed": True},
+        {"name": "vibe", "icon": "▲", "binary": "vibe", "installed": True},
+    ]
+    names = [name for _, name, _ in entries(rows, favourite="vibe")]
+    assert names == ["vibe", "codex", "opencode"]
+
+
+def test_a_supplied_row_reports_its_own_install_state(monkeypatch):
+    """PATH is the daemon's to resolve — it is the process that spawns."""
+    monkeypatch.setattr(harness_registry.shutil, "which", lambda binary: "/usr/bin/x")
+    rows = [{"name": "codex", "icon": "◇", "binary": "codex", "installed": False}]
+    assert "not on PATH" in entries(rows)[0][2]
 
 
 # ---- provider -----------------------------------------------------------
@@ -104,6 +175,41 @@ async def test_hits_are_scored_so_the_palette_can_rank_them(provider):
     prov, _ = provider
     hits = [hit async for hit in prov.search("spawn")]
     assert hits and all(hit.score > 0 for hit in hits)
+
+
+async def test_the_daemons_list_is_what_gets_offered(installed):
+    """Not the local registry: the daemon is the process that will refuse."""
+    rows = [{"name": "codex", "icon": "◇", "binary": "codex", "installed": True}]
+    app = FakeApp()
+    app.harnesses = rows
+    prov = SpawnCommands(FakeScreen(app))
+    hits = [hit async for hit in prov.discover()]
+    assert len(hits) == 1
+    hits[0].command()
+    assert app.spawned == ["codex"]
+
+
+async def test_a_failed_harness_call_falls_back_to_the_registry(provider):
+    """`harnesses` is None when the call failed; an empty palette would lie."""
+    prov, app = provider
+    app.harnesses = None
+    assert len([hit async for hit in prov.discover()]) == len(HARNESSES)
+
+
+async def test_an_app_without_settings_still_gets_a_palette(provider):
+    """The provider reads config off the app defensively, and must not assume."""
+    prov, app = provider
+    assert not hasattr(app, "settings")
+    assert len([hit async for hit in prov.discover()]) == len(HARNESSES)
+
+
+async def test_the_configured_favourite_is_discovered_first(installed):
+    last = sorted(HARNESSES)[-1]
+    settings = Config(theater=TheaterSection(favourite=last))
+    prov = SpawnCommands(FakeScreen(FakeApp(settings)))
+    first = [hit async for hit in prov.discover()][0]
+    first.command()
+    assert prov.app.spawned == [last]
 
 
 # ---- app wiring ---------------------------------------------------------
@@ -188,3 +294,48 @@ async def test_a_refused_spawn_does_not_take_the_app_down(monkeypatch):
     app._client = Refusing()
     await app._spawn_harness("claude")
     assert reported and "not on PATH" in reported[0]
+
+
+# ---- the app asks the daemon for the list -------------------------------
+
+
+async def test_the_app_loads_the_harness_list_at_mount():
+    app = RegieApp()
+    client = FakeClient()
+    app._client = client
+    await app._load_harnesses()
+    assert any(method == "harnesses" for method, _ in client.calls)
+
+
+async def test_the_loaded_list_is_what_the_palette_offers():
+    rows = [{"name": "codex", "icon": "◇", "binary": "codex", "installed": True}]
+
+    class Answering:
+        async def call(self, method, **params):
+            return rows
+
+    app = RegieApp()
+    app._client = Answering()
+    await app._load_harnesses()
+    prov = SpawnCommands(FakeScreen(app))
+    assert [name for _, name, _ in prov._entries()] == ["codex"]
+
+
+async def test_a_failed_load_leaves_the_registry_fallback_in_place():
+    """An empty palette would say 'nothing can be spawned', which is false."""
+    class Refusing:
+        async def call(self, method, **params):
+            raise RuntimeError("daemon went away")
+
+    app = RegieApp()
+    app._client = Refusing()
+    await app._load_harnesses()
+    assert app.harnesses is None
+
+
+async def test_loading_without_a_client_is_not_an_error():
+    """on_mount runs before the connection on a daemonless start."""
+    app = RegieApp()
+    app._client = None
+    await app._load_harnesses()
+    assert app.harnesses is None

@@ -38,6 +38,7 @@ from textual.widgets import Footer, Label, RichLog
 from rich.text import Text
 
 from theater.client import DaemonClient
+from theater.config import Config, RegieSection
 from theater.regie.bus_view import format_bus_line
 from theater.regie.palette import SpawnCommands
 from theater.regie.tree import render_tree, selected_participant
@@ -46,14 +47,13 @@ from theater.tmux import panes
 
 logger = logging.getLogger("theater.regie")
 
-#: How often to refresh the participant tree (seconds).
-TREE_INTERVAL = 1.0
+#: Fallbacks. `config.RegieSection` owns the literals; `RegieApp` reads the
+#: loaded config at start-up and overrides these per instance.
+_DEFAULTS = RegieSection()
 
-#: How often to poll the bus for new events (seconds).
-BUS_INTERVAL = 0.4
-
-#: How many bus events to pull per poll.
-BUS_BATCH = 50
+TREE_INTERVAL = _DEFAULTS.tree_interval
+BUS_INTERVAL = _DEFAULTS.bus_interval
+BUS_BATCH = _DEFAULTS.bus_batch
 
 
 class TreePanel(VerticalScroll):
@@ -190,9 +190,17 @@ class RegieApp(App):
     #: Teardown runs from two places and must not run twice.
     _torn_down: bool = False
 
-    def __init__(self):
+    def __init__(self, settings: Config | None = None):
         super().__init__()
         self._client: DaemonClient | None = None
+        #: The whole config, not just [regie]: the palette needs
+        #: theater.favourite too. Injectable so tests can drive the app
+        #: without writing a config file.
+        self.settings = settings or Config()
+        #: What the daemon says it can spawn, filled at mount. None until then,
+        #: and after a failed call — the palette reads that as "ask the local
+        #: registry instead", which is right more often than an empty list.
+        self.harnesses: list[dict] | None = None
 
     def compose(self) -> ComposeResult:
         # No Header: it spent a whole row restating the app's own class name to
@@ -225,10 +233,55 @@ class RegieApp(App):
             except Exception as exc:
                 logger.debug("could not discover window/session id: %s", exc)
         await self._enable_mouse()
-        self.set_interval(TREE_INTERVAL, self._refresh_tree)
-        self.set_interval(BUS_INTERVAL, self._refresh_bus)
+        self._apply_theme()
+        await self._load_harnesses()
+        self.set_interval(self.settings.regie.tree_interval, self._refresh_tree)
+        self.set_interval(self.settings.regie.bus_interval, self._refresh_bus)
         await self._refresh_tree()
         await self._refresh_bus()
+
+    async def _load_harnesses(self) -> None:
+        """Ask the daemon what it can spawn, for the palette to offer.
+
+        Once at mount, not per keystroke: the palette opens on ctrl+p and must
+        be instant, and the answer only changes when the daemon restarts — it
+        reads its config at start and never reloads. Failure leaves
+        `self.harnesses` at None, which the palette reads as "use the local
+        registry" rather than showing an empty list.
+        """
+        if self._client is None:
+            return
+        try:
+            rows = await self._client.call("harnesses")
+            assert isinstance(rows, list)
+        except Exception as exc:
+            logger.debug("harness list unavailable: %s", exc)
+            return
+        self.harnesses = rows
+
+    def _apply_theme(self) -> None:
+        """Switch to the configured theme, or say why not.
+
+        Unknown names are the one config error not raised at load time: the
+        legal values live inside Textual, and importing the TUI stack into the
+        daemon to validate a string is a poor trade. So the check happens here,
+        where the real alternatives can be listed — and it is a notification
+        rather than a crash, because a bad theme name is a cosmetic mistake and
+        killing the régie over it would hide every agent on the machine.
+        """
+        name = self.settings.regie.theme
+        if not name:
+            return
+        available = sorted(self.available_themes)
+        if name not in available:
+            self.notify(
+                f"unknown theme {name!r} — available: {', '.join(available)}",
+                title="config",
+                severity="warning",
+                timeout=10,
+            )
+            return
+        self.theme = name
 
     async def on_unmount(self) -> None:
         # Best effort only. Exits that go through `q` or ctrl-c have already
@@ -328,7 +381,7 @@ class RegieApp(App):
             return
         try:
             rows = await self._client.call(
-                "bus.tail", limit=BUS_BATCH, after_id=self.bus_cursor
+                "bus.tail", limit=self.settings.regie.bus_batch, after_id=self.bus_cursor
             )
             assert isinstance(rows, list)
         except Exception as exc:
@@ -345,8 +398,13 @@ class RegieApp(App):
         # Sort ascending for display
         rows_sorted = sorted(rows, key=lambda r: r["id"])
         log = self.query_one("#bus-panel", RichLog)
+        # Resolved per batch, not cached: the built-in palette can switch the
+        # theme mid-session, and lines written after that should follow it.
+        # Already-written lines keep their old colour, which is the price of a
+        # RichLog and cheaper than re-rendering the panel on every tick.
+        variables = self.theme_variables
         for row in rows_sorted:
-            log.write(format_bus_line(row))
+            log.write(format_bus_line(row, variables=variables))
         self.bus_cursor = rows[-1]["id"]
 
     # ---- rendering -----------------------------------------------------
@@ -528,7 +586,7 @@ class RegieApp(App):
     #  not by rewriting Rich Text styles)
 
 
-def run_regie() -> None:
+def run_regie(settings: Config | None = None) -> None:
     """Entry point for `theater regie`."""
-    app = RegieApp()
+    app = RegieApp(settings)
     app.run()

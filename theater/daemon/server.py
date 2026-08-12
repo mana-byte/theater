@@ -25,11 +25,14 @@ import socket as _socket
 from pathlib import Path
 
 from theater import paths, protocol
+from theater.config import Config
+from theater.config import load as load_config
 from theater.daemon.jobs import JobManager, JobState
 from theater.daemon.observer import Observer
 from theater.daemon.registry import Registry
 from theater.daemon.spawner import Spawner
 from theater.daemon.store import Store
+from theater import harness as harness_registry
 from theater.harness import Harness
 from theater.models import Status, TheaterError
 from theater.tmux import client as tmux
@@ -63,8 +66,22 @@ class Daemon:
         *,
         store: Store | None = None,
         harnesses: dict[str, Harness] | None = None,
+        config: Config | None = None,
     ):
         paths.ensure_home()
+        #: Read once, here. There is no reload: see config.py for why, and
+        #: `theater restart` for the remedy. Held on the daemon so request
+        #: handlers can reach the settings without re-reading the file, which
+        #: would let two requests in one process see different values.
+        self.config = config if config is not None else load_config()
+        # Teach this process the harnesses the user added — config declarations
+        # and plugin files — before anything reads the registry. Raises
+        # ConfigError on anything that cannot be honoured, which is deliberately
+        # fatal: the daemon is the process that refuses spawns, so it must not
+        # come up holding a set the user did not ask for.
+        extra = harness_registry.install(self.config)
+        if extra:
+            logger.info("harnesses from config and plugins: %s", ", ".join(extra))
         self.store = store or Store(paths.db_path())
         self.registry = Registry(self.store)
         self.spawner = Spawner(self.registry)
@@ -72,7 +89,18 @@ class Daemon:
         #: `harnesses={}` disables observation entirely, which is what tests
         #: that only exercise the socket want: the real harnesses read the
         #: user's own ~/.claude and ~/.vibe.
-        self.observer = Observer(self.registry, harnesses, jobs=self.jobs)
+        observer_cfg = self.config.observer
+        self.observer = Observer(
+            self.registry,
+            harnesses,
+            poll=observer_cfg.poll_interval,
+            search=observer_cfg.search_interval,
+            sync=observer_cfg.sync_interval,
+            relocate=observer_cfg.relocate_timeout,
+            awaiting=observer_cfg.awaiting_input_timeout,
+            screen=observer_cfg.screen_interval,
+            jobs=self.jobs,
+        )
         self._server: asyncio.Server | None = None
         self._reaper: asyncio.Task | None = None
         self._stopping = asyncio.Event()

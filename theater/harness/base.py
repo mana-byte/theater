@@ -192,6 +192,17 @@ class Harness(ABC):
     #: private-use codepoint, which would render as a blank box for anyone who
     #: has not installed one.
     icon: str = "·"
+    #: Whether `parse` can produce events from a file on disk. False for a
+    #: harness declared in config, which has no declared transcript layout and
+    #: must be observed from its rendered screen instead. The observer reads
+    #: this to choose a watch loop; it is not a preference but a statement of
+    #: what the adapter can do, so it lives on the adapter.
+    has_transcript: bool = True
+    #: Other spellings that should resolve to `name` at registration. An agent
+    #: reports its own harness string, and one that does not normalize is
+    #: observed as nothing at all — so a plugin needs the same escape valve the
+    #: built-ins and config declarations have.
+    aliases: tuple[str, ...] = ()
 
     # ---- launching ------------------------------------------------------
 

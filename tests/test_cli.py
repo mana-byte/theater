@@ -11,8 +11,9 @@ import json
 
 import pytest
 
-from theater import cli
+from theater import cli, paths
 from theater.formatting import event_summary, flatten_tree
+from theater.protocol import RemoteError
 
 ROW = {
     "id": "p-abc123",
@@ -259,14 +260,52 @@ def test_harnesses_json_reports_install_state(monkeypatch, capsys):
     assert all(r["icon"] for r in rows)
 
 
-def test_harnesses_never_contacts_the_daemon(monkeypatch, capsys):
-    """It is local data, so it has to work before anything else is running."""
+def test_harnesses_never_starts_a_daemon(monkeypatch, capsys):
+    """It answers 'what can I spawn', so it must work before anything is up.
+
+    It does ask a *running* daemon — that one is authoritative, since it holds
+    the config as of its own start. But autostart is off, so the question is
+    never the thing that launches one.
+    """
     def explode(*a, **k):
-        raise AssertionError("cmd_harnesses talked to the daemon")
+        raise AssertionError("cmd_harnesses started a daemon")
 
     monkeypatch.setattr(cli, "call_sync", explode)
-    monkeypatch.setattr(cli, "DaemonClient", explode)
+    monkeypatch.setattr(cli.DaemonClient, "_start_daemon", explode)
     assert cli.cmd_harnesses(parse("harnesses")) == 0
+    assert "no daemon running" in capsys.readouterr().out
+
+
+def test_harnesses_prefers_the_running_daemons_answer(monkeypatch, capsys):
+    """The daemon may know harnesses this process cannot import."""
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def call(self, method, **params):
+            assert method == "harnesses"
+            return [
+                {
+                    "name": "codex",
+                    "icon": "◇",
+                    "binary": "codex",
+                    "installed": True,
+                    "path": "/usr/bin/codex",
+                }
+            ]
+
+    monkeypatch.setattr(cli, "DaemonClient", FakeClient)
+    assert cli.cmd_harnesses(parse("harnesses")) == 0
+    out = capsys.readouterr().out
+    assert "codex" in out
+    assert "no daemon running" not in out
+    assert "vibe" not in out
 
 
 def test_the_harness_column_lines_up_across_header_rows_and_unmanaged():
@@ -284,3 +323,138 @@ def test_the_harness_column_lines_up_across_header_rows_and_unmanaged():
 
 def test_a_participant_row_carries_its_harness_icon():
     assert cli.harness_icon("vibe") in cli._row_line(ROW)
+
+
+def test_harnesses_falls_back_when_the_daemon_predates_the_method(monkeypatch, capsys):
+    """Version skew: a daemon that old necessarily has the built-in registry."""
+    class OldDaemon:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def call(self, method, **params):
+            raise RemoteError("unknown_method", f"no method {method!r}")
+
+    monkeypatch.setattr(cli, "DaemonClient", OldDaemon)
+    assert cli.cmd_harnesses(parse("harnesses")) == 0
+    out = capsys.readouterr().out
+    assert "predates this command" in out
+    for name in cli.HARNESSES:
+        assert name in out
+
+
+def test_a_real_daemon_error_is_not_papered_over(monkeypatch):
+    """Any other failure must surface, not become a plausible-looking list."""
+    class Broken:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def call(self, method, **params):
+            raise RemoteError("internal", "the registry blew up")
+
+    monkeypatch.setattr(cli, "DaemonClient", Broken)
+    with pytest.raises(RemoteError):
+        cli.cmd_harnesses(parse("harnesses"))
+
+
+# ---- stop and restart ---------------------------------------------------
+
+
+class StoppableDaemon:
+    """A daemon that answers shutdown, then takes its socket away."""
+
+    stopped = False
+
+    def __init__(self, *a, **k):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def call(self, method, **params):
+        if method == "shutdown":
+            type(self).stopped = True
+            paths.socket_path().unlink(missing_ok=True)
+            return {"stopping": True}
+        return {"pong": True}
+
+
+class NoDaemon:
+    def __init__(self, *a, **k):
+        pass
+
+    async def __aenter__(self):
+        raise FileNotFoundError(paths.socket_path())
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def test_restart_is_a_command():
+    assert parse("restart").command == "restart"
+
+
+def test_stop_does_not_start_a_daemon_just_to_stop_it(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "DaemonClient", NoDaemon)
+    assert cli.cmd_stop(parse("stop")) == 0
+    assert "no daemon running" in capsys.readouterr().out
+
+
+def test_stop_shuts_down_a_running_daemon(monkeypatch, capsys):
+    StoppableDaemon.stopped = False
+    monkeypatch.setattr(cli, "DaemonClient", StoppableDaemon)
+    assert cli.cmd_stop(parse("stop")) == 0
+    assert StoppableDaemon.stopped
+    assert "stopping" in capsys.readouterr().out
+
+
+def test_restart_stops_the_old_daemon_before_starting_one(monkeypatch, capsys):
+    StoppableDaemon.stopped = False
+    order: list[str] = []
+    monkeypatch.setattr(cli, "DaemonClient", StoppableDaemon)
+    monkeypatch.setattr(cli, "call_sync", lambda method, **p: order.append(method))
+    assert cli.cmd_restart(parse("restart")) == 0
+    assert StoppableDaemon.stopped
+    assert order == ["ping"], "the new daemon has to be proved up, not assumed"
+    assert "restarted" in capsys.readouterr().out
+
+
+def test_restart_with_no_daemon_just_starts_one(monkeypatch, capsys):
+    started: list[str] = []
+    monkeypatch.setattr(cli, "DaemonClient", NoDaemon)
+    monkeypatch.setattr(cli, "call_sync", lambda method, **p: started.append(method))
+    assert cli.cmd_restart(parse("restart")) == 0
+    assert started == ["ping"]
+
+
+def test_restart_refuses_to_start_a_second_daemon(monkeypatch, capsys):
+    """A socket still held means the old daemon is alive; two would race."""
+    paths.socket_path().touch()
+
+    class Deaf(StoppableDaemon):
+        async def call(self, method, **params):
+            return {"stopping": True}  # says yes, never lets go
+
+    monkeypatch.setattr(cli, "DaemonClient", Deaf)
+    monkeypatch.setattr(cli, "STOP_TIMEOUT", 0.1)
+    monkeypatch.setattr(cli, "call_sync", _explode_on_call)
+    assert cli.cmd_restart(parse("restart")) == 1
+    assert "still holding" in capsys.readouterr().err
+
+
+def _explode_on_call(*a, **k):
+    raise AssertionError("started a daemon while the old one was still up")

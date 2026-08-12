@@ -16,7 +16,7 @@ from theater import protocol
 from theater.daemon.harness_detect import detect_harness
 from theater.daemon.rails import check_budget, check_cycle, check_depth
 from theater.daemon.spawner import SpawnRequest
-from theater.harness import HARNESSES, normalize
+from theater.harness import HARNESSES, describe, normalize
 from theater.models import BadRequest, Busy, HumanPresent, NotAddressable, Status
 from theater.tmux import client as tmux
 from theater.tmux.presence import human_present
@@ -161,8 +161,9 @@ async def _spawn(daemon, params: dict) -> dict:
         base_branch=params.get("base_branch"),
     )
     # Safety rails: reject before creating anything.
-    check_depth(daemon.store, req.parent_id)
-    check_budget(daemon.store, req.parent_id)
+    rails = daemon.config.rails
+    check_depth(daemon.store, req.parent_id, cap=rails.depth_cap)
+    check_budget(daemon.store, req.parent_id, limit=rails.budget)
 
     participant = await daemon.spawner.spawn(req)
     # Create a job for this spawn so the caller can await the result.
@@ -260,6 +261,20 @@ async def _send(daemon, params: dict) -> dict:
     result = daemon.jobs.get(handle)
     assert result is not None
     return result.to_dict()
+
+
+@method("harnesses")
+async def _harnesses(daemon, params: dict) -> list[dict]:
+    """What this daemon can actually spawn.
+
+    The registry is importable by anyone, so this looks redundant — but the
+    daemon reads its config once at start and never reloads, so a config edit
+    leaves the CLI and the régie holding a *newer* harness set than the process
+    that has to honour it. Offering a spawn the daemon then refuses is the
+    failure this method exists to prevent, and it becomes real the moment the
+    set stops being a hardcoded literal.
+    """
+    return describe()
 
 
 @method("shutdown")

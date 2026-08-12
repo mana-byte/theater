@@ -18,7 +18,7 @@ import shutil
 import sys
 import time
 
-from theater import paths
+from theater import config, paths
 from theater.client import DaemonClient, call_sync
 from theater.formatting import (
     TIER_LEGEND,
@@ -31,9 +31,19 @@ from theater.formatting import (
     tier_mark,
     tilde,
 )
-from theater.harness import APPROVALS, HARNESSES, harness_icon
+from theater import harness as harness_registry
+from theater.harness import APPROVALS, HARNESSES, describe, harness_icon
 from theater.protocol import RemoteError
 from theater.tmux import client as tmux
+
+class BadUsage(Exception):
+    """The command line is wrong in a way argparse cannot express.
+
+    Raised for the cases that depend on state argparse never sees — chiefly
+    config. Caught in `main` and printed like any other usage error, so these
+    do not read as crashes.
+    """
+
 
 #: Home, then erase. Cheaper than curses and good enough for a redraw loop.
 _CLEAR = "\033[H\033[2J"
@@ -70,8 +80,21 @@ def _parser() -> argparse.ArgumentParser:
     ls.add_argument("--interval", type=float, default=1.0, help="Seconds per redraw.")
 
     spawn = sub.add_parser("spawn", help="Start an agent in a new tmux window.")
-    spawn.add_argument("harness", choices=sorted(HARNESSES))
+    # Optional, and deliberately without `choices`: the legal set now includes
+    # harnesses declared in config, which is not read until after the parser is
+    # built. `_spawn_harness` validates instead, against the registry as it
+    # actually is. A wrong name still fails loudly rather than being mistaken
+    # for the prompt — which is why the prompt also has a flag form, since with
+    # two optional positionals `theater spawn "do the thing"` would otherwise
+    # bind the prompt to the harness slot and guess at what the user meant.
+    spawn.add_argument("harness", nargs="?", default=None)
     spawn.add_argument("prompt", nargs="?", default="")
+    spawn.add_argument(
+        "--prompt",
+        dest="prompt_flag",
+        default=None,
+        help="The prompt, when no harness is named and the favourite is used.",
+    )
     spawn.add_argument(
         "--approval",
         choices=APPROVALS,
@@ -127,9 +150,24 @@ def _parser() -> argparse.ArgumentParser:
     )
     harnesses.add_argument("--json", action="store_true")
 
+    conf = sub.add_parser("config", help="Show resolved settings and where they came from.")
+    conf.add_argument(
+        "topic",
+        nargs="?",
+        choices=["path"],
+        default=None,
+        help="'path' prints the config file location and nothing else.",
+    )
+    conf.add_argument("--json", action="store_true")
+
     sub.add_parser("regie", help="Launch the régie TUI (run inside tmux).")
 
     sub.add_parser("stop", help="Shut the daemon down.")
+
+    sub.add_parser(
+        "restart",
+        help="Restart the daemon, applying config changes. Agents keep running.",
+    )
 
     return p
 
@@ -232,11 +270,43 @@ def cmd_ls(args) -> int:
     return 0
 
 
+def _spawn_harness(args) -> str:
+    """The harness to spawn: the one named, else the configured favourite.
+
+    An unset favourite is not a silent fallback to some arbitrary harness —
+    picking one for the user is exactly the guess this release is trying not
+    to make — so it is an error that says how to fix itself.
+    """
+    known = ", ".join(sorted(HARNESSES))
+    if args.harness:
+        if args.harness not in HARNESSES:
+            # Checked here rather than by argparse `choices`, because declared
+            # harnesses are not in the registry when the parser is built.
+            raise BadUsage(
+                f"unknown harness {args.harness!r} (known: {known}). If you "
+                "meant this as the prompt, pass it with --prompt."
+            )
+        return args.harness
+    favourite = config.load().theater.favourite
+    if not favourite:
+        raise BadUsage(
+            "no harness given and no favourite set — name one "
+            f"({known}), or set theater.favourite in {paths.config_path()}"
+        )
+    if favourite not in HARNESSES:
+        raise BadUsage(
+            f"theater.favourite is {favourite!r}, which is not a known harness "
+            f"({known})"
+        )
+    return favourite
+
+
 def cmd_spawn(args) -> int:
+    harness = _spawn_harness(args)
     record = call_sync(
         "spawn",
-        harness=args.harness,
-        prompt=args.prompt,
+        harness=harness,
+        prompt=args.prompt_flag if args.prompt_flag is not None else args.prompt,
         approval=args.approval,
         cwd=args.cwd or os.getcwd(),
         parent_id=args.parent_id,
@@ -346,27 +416,40 @@ def cmd_adopt(args) -> int:
     return 0
 
 
-def cmd_harnesses(args) -> int:
-    """List the registered harness adapters.
+def _harness_rows() -> tuple[list[dict], str | None]:
+    """The harness list, and why it is not the daemon's answer if it is not.
 
-    Answers a question that otherwise needs reading the source: what can I
-    pass to `theater spawn`, and is it actually installed here? The registry
-    is local data, so this deliberately does not start or contact the daemon —
-    it works before anything else does.
+    The daemon is authoritative — it is the process that will refuse a spawn,
+    and it holds the config as of its own start. But it is asked with autostart
+    off: `theater harnesses` answers "what can I pass to spawn", which must
+    work before anything else does and must not be the thing that launches a
+    daemon. With none running, the local registry is the same answer anyway,
+    because the daemon would read the same config when it starts.
     """
-    rows = []
-    for name in sorted(HARNESSES):
-        harness = HARNESSES[name]
-        path = shutil.which(harness.binary)
-        rows.append(
-            {
-                "name": name,
-                "icon": harness.icon,
-                "binary": harness.binary,
-                "installed": path is not None,
-                "path": path,
-            }
-        )
+
+    async def go():
+        async with DaemonClient(autostart=False) as client:
+            return await client.call("harnesses")
+
+    try:
+        rows = asyncio.run(go())
+    except (FileNotFoundError, ConnectionRefusedError, ConnectionError, OSError):
+        return describe(), "no daemon running"
+    except RemoteError as exc:
+        # A daemon older than this CLI has no such method, and one that
+        # predates it necessarily has the built-in registry — so the local
+        # answer is right. Anything else is a real fault and must not be
+        # papered over with a plausible-looking list.
+        if exc.code != "unknown_method":
+            raise
+        return describe(), "the running daemon predates this command"
+    assert isinstance(rows, list)
+    return rows, None
+
+
+def cmd_harnesses(args) -> int:
+    """List the harness adapters, as the daemon sees them."""
+    rows, fallback = _harness_rows()
     if args.json:
         print(json.dumps(rows, indent=2))
         return 0
@@ -380,12 +463,131 @@ def cmd_harnesses(args) -> int:
     missing = [r["name"] for r in rows if not r["installed"]]
     if missing:
         print(f"\nnot on PATH: {', '.join(missing)} — spawn will refuse these")
+    if fallback:
+        # Worth saying which list this is: a daemon already up may be holding
+        # a different one, and only it can refuse a spawn.
+        print(f"\n{fallback} — read from this process's registry")
     return 0
 
 
+def cmd_config(args) -> int:
+    """Show the resolved settings, each tagged with where it came from.
+
+    Prints the *resolved* view rather than the file, because the question this
+    answers is "did my edit take effect", which the file cannot answer. Like
+    `harnesses`, it reads local data and never contacts the daemon — a config
+    error is exactly the thing that stops the daemon from starting, so this has
+    to work when nothing else does.
+
+    A malformed file is reported here as the daemon would reject it, so the
+    same message is available before the first confusing start-up failure.
+    """
+    if args.topic == "path":
+        print(paths.config_path())
+        return 0
+
+    try:
+        loaded = config.load()
+    except config.ConfigError as exc:
+        print(f"theater: {exc}", file=sys.stderr)
+        return 1
+
+    rows = config.describe(loaded)
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "path": str(loaded.path),
+                    "exists": loaded.exists,
+                    "settings": [
+                        {"key": key, "value": value, "source": source}
+                        for key, value, source in rows
+                    ],
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    where = tilde(str(loaded.path))
+    print(f"{where}{'' if loaded.exists else '  (no file yet — all defaults)'}\n")
+    width = max(len(key) for key, _, _ in rows)
+    for key, value, source in rows:
+        mark = "" if source == "default" else "  <- config.toml"
+        print(f"{key:<{width}}  {value}{mark}")
+    if loaded.exists:
+        print("\nchanges apply on `theater restart`")
+    return 0
+
+
+#: How long to wait for a stopping daemon to release its socket. It unlinks on
+#: the way out, so this is bounded by draining connections, not by any work.
+STOP_TIMEOUT = 5.0
+
+
+def _shutdown_running_daemon() -> bool:
+    """Ask a running daemon to stop. False when there was none to ask.
+
+    Autostart off, which is not a detail: the previous version used the
+    autostarting client, so `theater stop` with nothing running would launch a
+    daemon purely to tell it to shut down.
+    """
+
+    async def go():
+        async with DaemonClient(autostart=False) as client:
+            return await client.call("shutdown")
+
+    try:
+        asyncio.run(go())
+    except (FileNotFoundError, ConnectionRefusedError, ConnectionError, OSError):
+        return False
+    return True
+
+
+def _await_daemon_gone(timeout: float | None = None) -> bool:
+    """Wait for the socket to disappear, which `aclose` does last.
+
+    Polling the path rather than the pid: the socket is what the next client
+    connects to, so its absence is exactly the condition that makes starting a
+    replacement safe. Reconnecting too early would reach the dying daemon.
+
+    The default is read at call time, not bound as a default argument, so the
+    wait is patchable — otherwise a test for the timeout path has to take the
+    full timeout.
+    """
+    deadline = time.monotonic() + (STOP_TIMEOUT if timeout is None else timeout)
+    while paths.socket_path().exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return not paths.socket_path().exists()
+
+
 def cmd_stop(args) -> int:
-    call_sync("shutdown")
+    if not _shutdown_running_daemon():
+        print("no daemon running")
+        return 0
     print("daemon stopping")
+    return 0
+
+
+def cmd_restart(args) -> int:
+    """Stop the daemon and start a fresh one.
+
+    This is how a config edit takes effect — config is read once at start and
+    never reloaded. Nothing else is disturbed: agents live in tmux panes this
+    process does not touch, and the registry is on disk, so the new daemon
+    comes back to the same participants.
+    """
+    if _shutdown_running_daemon() and not _await_daemon_gone():
+        print(
+            f"theater: daemon still holding {paths.socket_path()} after "
+            f"{STOP_TIMEOUT:g}s — not starting a second one",
+            file=sys.stderr,
+        )
+        return 1
+    # Autostart does the starting, and waits for the socket with a real error
+    # if it never appears. The ping is what makes "started" a fact.
+    call_sync("ping")
+    print("daemon restarted")
     return 0
 
 
@@ -402,9 +604,10 @@ def cmd_regie(args) -> int:
             file=sys.stderr,
         )
         return 1
+    settings = config.load()
     from theater.regie.app import run_regie
 
-    run_regie()
+    run_regie(settings)
     return 0
 
 
@@ -417,8 +620,10 @@ _COMMANDS = {
     "kill": cmd_kill,
     "adopt": cmd_adopt,
     "harnesses": cmd_harnesses,
+    "config": cmd_config,
     "regie": cmd_regie,
     "stop": cmd_stop,
+    "restart": cmd_restart,
 }
 
 
@@ -426,7 +631,17 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     paths.ensure_home()
     try:
+        # Teach this process the declared and plugin harnesses before the
+        # command runs, so `spawn`, `ls` and `harnesses` all see the same set
+        # the daemon will.
+        # `config` is exempt: it is the command built to explain a broken config
+        # file, so it is the one that must still work without a usable one.
+        if args.command != "config":
+            harness_registry.install(config.load())
         return _COMMANDS[args.command](args)
+    except (BadUsage, config.ConfigError) as exc:
+        print(f"theater: {exc}", file=sys.stderr)
+        return 1
     except RemoteError as exc:
         print(f"theater: {exc.code}: {exc.message}", file=sys.stderr)
         return 1

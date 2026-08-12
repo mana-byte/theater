@@ -37,36 +37,33 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from theater.config import ObserverSection
 from theater.daemon.registry import Registry
-from theater.harness import HARNESSES, Harness, status_after
+from theater.harness import HARNESSES, Harness, clip, status_after
 from theater.models import JobState, Status, Tier
 
 logger = logging.getLogger("theater.observer")
 
-#: How often to check a known transcript for new bytes. Faster than the reaper
-#: because this drives what the régie renders, and a second of lag on "what is
-#: it doing right now" is visible to a human watching.
-POLL_INTERVAL = 0.25
+#: Fallback timings, used when no config is passed in. Each is documented on
+#: `config.ObserverSection`, which owns the literal so the value a user can set
+#: and the value the code defaults to cannot drift apart. A live daemon passes
+#: the loaded config through `Daemon.__init__`; these matter for direct
+#: construction, which is mostly tests.
+_DEFAULTS = ObserverSection()
 
-#: How long to wait with no new bytes before re-locating the transcript.
-#: Vibe starts a new session directory on each turn; if the observer
-#: is locked onto the old file, it needs to re-scan to find the new one.
-RELOCATE_TIMEOUT = 5.0
+POLL_INTERVAL = _DEFAULTS.poll_interval
+RELOCATE_TIMEOUT = _DEFAULTS.relocate_timeout
+AWAITING_INPUT_TIMEOUT = _DEFAULTS.awaiting_input_timeout
+SEARCH_INTERVAL = _DEFAULTS.search_interval
+SYNC_INTERVAL = _DEFAULTS.sync_interval
+SCREEN_INTERVAL = _DEFAULTS.screen_interval
 
-#: How long to wait with no transcript growth before checking the screen
-#: for a bare prompt. If the transcript says WORKING but the screen shows
-#: a prompt, the agent is AWAITING_INPUT (blocked on a permission prompt
-#: or waiting for human input). Tuned to avoid false positives: 10s is
-#: long enough that a slow tool call won't trigger it, short enough that
-#: a human watching the régie sees the status change before getting bored.
-AWAITING_INPUT_TIMEOUT = 10.0
-
-#: How often to look for a transcript we have not found yet. Slower, because
-#: it is a directory scan rather than a stat.
-SEARCH_INTERVAL = 2.0
-
-#: How often to reconcile the watch tasks against the registry.
-SYNC_INTERVAL = 1.0
+#: Consecutive idle-looking screens before a turn is called finished. Two, not
+#: one: the screen is a rendering, and a harness that clears the pane between
+#: phases shows a bare prompt for one frame in the middle of working. Finishing
+#: a job there hands the caller a partial answer, which is worse than being a
+#: poll late — see `_watch_screen`.
+IDLE_CONFIRMATIONS = 2
 
 
 def _attach_point(path: Path) -> tuple[int, int, int, str | None]:
@@ -100,6 +97,24 @@ def _attach_point(path: Path) -> tuple[int, int, int, str | None]:
             _prefix, _sep2, last_bytes = head.rpartition(b"\n")
             last_line = last_bytes.decode("utf-8", errors="replace")
     return size, lines, mtime, last_line
+
+
+def screen_result(capture: str) -> str:
+    """What a screen-derived turn end can offer a waiting caller as a result.
+
+    The visible pane with its trailing prompt line removed. This is not the
+    agent's answer: it is one screenful of rendering, banner and all, cut off
+    at the top by the pane height and stripped of everything that scrolled
+    past. It is the best available for a harness with no transcript, and the
+    thinness of it is the price of declaring a harness instead of writing a
+    plugin that can read one.
+    """
+    lines = [line.rstrip() for line in capture.splitlines()]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if lines:
+        lines.pop()  # the prompt itself, which is not part of any answer
+    return "\n".join(lines).strip()
 
 
 @dataclass
@@ -169,6 +184,9 @@ class Observer:
         poll: float = POLL_INTERVAL,
         search: float = SEARCH_INTERVAL,
         sync: float = SYNC_INTERVAL,
+        relocate: float = RELOCATE_TIMEOUT,
+        awaiting: float = AWAITING_INPUT_TIMEOUT,
+        screen: float = SCREEN_INTERVAL,
         jobs=None,
     ):
         self.registry = registry
@@ -180,6 +198,9 @@ class Observer:
         self.poll = poll
         self.search = search
         self.sync = sync
+        self.relocate = relocate
+        self.awaiting = awaiting
+        self.screen = screen
         #: Optional JobManager. When set, turn-end events for a participant
         #: with a running job finish that job with the assistant text as
         #: the result.
@@ -244,21 +265,28 @@ class Observer:
         for pid, p in live.items():
             if pid in self._tasks or pid in self._retired:
                 continue
-            if p.harness not in self.harnesses or not p.cwd:
+            harness = self.harnesses.get(p.harness)
+            if harness is None:
+                self._warn_unobservable(pid, p)
+                continue
+            # A transcript is found by working directory; a screen is found by
+            # pane. So cwd is required for one loop and irrelevant to the other.
+            if harness.has_transcript and not p.cwd:
                 self._warn_unobservable(pid, p)
                 continue
             self._unobservable.discard(pid)
-            self._tasks[pid] = asyncio.create_task(self._watch(pid, p.harness))
+            watch = self._watch if harness.has_transcript else self._watch_screen
+            self._tasks[pid] = asyncio.create_task(watch(pid, p.harness))
 
     def _warn_unobservable(self, pid: str, p) -> None:
         if pid in self._unobservable:
             return
         self._unobservable.add(pid)
-        if not p.cwd:
-            reason = "it reported no working directory"
-        else:
+        if p.harness not in self.harnesses:
             known = ", ".join(sorted(self.harnesses)) or "none"
             reason = f"harness {p.harness!r} is not one we can read (known: {known})"
+        else:
+            reason = "it reported no working directory"
         logger.warning("cannot observe %s: %s", pid, reason)
 
     # ---- one participant -----------------------------------------------
@@ -289,6 +317,83 @@ class Observer:
             except Exception:
                 logger.exception("observing %s failed", pid)
             await self._sleep(self.poll)
+
+    async def _watch_screen(self, pid: str, harness_name: str) -> None:
+        """Derive status from the rendered screen, for a parser-less harness.
+
+        A harness declared in `[harness.*]` has no transcript, so `parse`
+        returns nothing and no `turn_end` event can ever be produced. Without
+        one, `theater_send` would accept a prompt and leave the caller's
+        `await_sessions` waiting forever. So here the idle-prompt heuristic is
+        promoted from a display hint to a completion signal.
+
+        That inverts the risk profile documented on `is_idle_screen`, which was
+        tuned to accept false negatives: a false idle now finishes a job early
+        and hands the caller a partial answer. Two mitigations, both narrow.
+        The promotion applies only to harnesses that have no parser — never to
+        one whose transcript we can read. And an idle screen must hold for
+        `IDLE_CONFIRMATIONS` consecutive polls before it counts.
+
+        An unreadable screen decides nothing. Failing to capture is not
+        evidence of either state, so the status is left exactly as it was.
+        """
+        harness = self.harnesses[harness_name]
+        idle_streak = 0
+        ended = False
+
+        while not self._stopping.is_set():
+            try:
+                p = self.store.get_participant(pid)
+                if p is None or p.status is Status.DEAD:
+                    return
+                capture = await self._capture(p.tmux_pane) if p.tmux_pane else None
+                if capture is not None:
+                    idle_streak = idle_streak + 1 if harness.is_idle_screen(capture) else 0
+                    if idle_streak >= IDLE_CONFIRMATIONS:
+                        if not ended:
+                            ended = True
+                            self._end_turn_from_screen(pid, capture)
+                        self._settle(pid, Status.IDLE)
+                    elif idle_streak == 0:
+                        ended = False
+                        self._settle(pid, Status.WORKING)
+                    # A streak of one is undecided: say nothing.
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("observing screen of %s failed", pid)
+            await self._sleep(self.screen)
+
+    def _end_turn_from_screen(self, pid: str, capture: str) -> None:
+        """Record a turn boundary that was seen rather than read.
+
+        The bus event is marked `source: "screen"` and carries index -1: it did
+        not come from any transcript record, and nothing downstream should be
+        able to mistake a rendering for a parsed message.
+        """
+        text = clip(screen_result(capture))
+        self.store.bus_append(
+            "agent.assistant",
+            from_id=pid,
+            payload={
+                "text": text,
+                "tool": None,
+                "ts": None,
+                "turn_end": True,
+                "index": -1,
+                "source": "screen",
+            },
+        )
+        self._finish_jobs_for_turn(pid, text)
+
+    async def _capture(self, pane: str) -> str | None:
+        """The pane's rendered text, or None if it could not be read."""
+        from theater.tmux import client as tmux
+
+        try:
+            return await tmux.run("capture-pane", "-p", "-t", pane, check=False)
+        except Exception:
+            return None
 
     async def _open(
         self,
@@ -327,14 +432,14 @@ class Observer:
         now = time.monotonic()
         cursor.begin_quiet(now)
 
-        # After 5s, look for a rotation. Vibe opens a new session directory
-        # every turn, so a quiet file may just be the wrong file.
-        if cursor.quiet_for(now) > RELOCATE_TIMEOUT:
+        # Look for a rotation. Vibe opens a new session directory every turn,
+        # so a quiet file may just be the wrong file.
+        if cursor.quiet_for(now) > self.relocate:
             await self._follow_rotation(pid, harness, cursor)
 
-        # After 10s, ask the screen whether this silence is a prompt waiting
-        # on a human rather than an agent thinking.
-        if cursor.screen_quiet_for(now) > AWAITING_INPUT_TIMEOUT:
+        # Then ask the screen whether this silence is a prompt waiting on a
+        # human rather than an agent thinking.
+        if cursor.screen_quiet_for(now) > self.awaiting:
             await self._check_idle_screen(pid, harness)
             cursor.screen_quiet_since = now  # throttle to one check per window
 
@@ -493,18 +598,13 @@ class Observer:
         genuinely working — leave as WORKING. If capture-pane fails, leave
         as WORKING (accept false negatives).
         """
-        from theater.tmux import client as tmux
-
         p = self.store.get_participant(pid)
         if p is None or p.status is not Status.WORKING:
             return  # only check if transcript says WORKING
         if not p.tmux_pane:
             return
-        try:
-            capture = await tmux.run(
-                "capture-pane", "-p", "-t", p.tmux_pane, check=False
-            )
-        except Exception:
+        capture = await self._capture(p.tmux_pane)
+        if capture is None:
             return
         if harness.is_idle_screen(capture):
             self.registry.set_status(pid, Status.AWAITING_INPUT)

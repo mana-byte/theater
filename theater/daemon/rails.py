@@ -30,24 +30,29 @@ from __future__ import annotations
 
 import logging
 
+from theater.config import RailsSection
 from theater.daemon import lineage
 from theater.daemon.store import Store
 from theater.models import BadRequest
 
 logger = logging.getLogger("theater.rails")
 
-#: Default maximum depth of a spawn tree. Roots are depth 0; their
-#: children are depth 1; etc. A cap of 3 means a root can spawn children
-#: that spawn children that spawn children, but those grandchildren
-#: cannot spawn further.
-DEFAULT_DEPTH_CAP = 3
+#: Fallbacks for direct calls. `config.RailsSection` owns both literals so the
+#: settable value and the default cannot drift; a live daemon passes the
+#: configured numbers in from `methods.spawn`.
+#:
+#: Depth: roots are depth 0, their children depth 1. A cap of 3 means a root
+#: can spawn children that spawn children that spawn children, but those
+#: grandchildren cannot spawn further.
+#:
+#: Budget: a count of participants in a tree, not a dollar amount — the spec
+#: mentions $0.10 as an example, but token/cost tracking is not available yet.
+#: A count cap is the honest version: it stops runaway spawning without
+#: pretending to know the cost.
+_DEFAULTS = RailsSection()
 
-#: Default budget: number of participants in a tree before it is stopped.
-#: This is a count, not a dollar amount — the spec mentions $0.10 as an
-#: example, but token/cost tracking is not available yet. A count cap is
-#: the honest version: it stops runaway spawning without pretending to
-#: know the cost.
-DEFAULT_BUDGET = 20
+DEFAULT_DEPTH_CAP = _DEFAULTS.depth_cap
+DEFAULT_BUDGET = _DEFAULTS.budget
 
 
 class DepthExceeded(BadRequest):

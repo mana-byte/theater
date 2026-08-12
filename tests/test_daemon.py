@@ -12,7 +12,9 @@ import asyncio
 
 import pytest
 
+from theater import harness as harness_registry
 from theater import paths
+from theater.harness import HARNESSES
 from theater.protocol import RemoteError
 
 
@@ -345,3 +347,30 @@ async def test_unmanaged_excludes_registered_panes(client, fake_tmux, monkeypatc
     rows = await client.call("participants.unmanaged")
     assert len(rows) == 1
     assert rows[0]["pane"] == "%21"
+
+
+# ---- the harness list --------------------------------------------------
+
+
+async def test_harnesses_lists_what_the_daemon_can_spawn(client):
+    rows = await client.call("harnesses")
+    names = {r["name"] for r in rows}
+    assert names == set(HARNESSES)
+    assert all(r["icon"] and r["binary"] for r in rows)
+
+
+async def test_harnesses_reports_install_state(client, monkeypatch):
+    """The daemon's PATH is the one that matters: it runs the binary."""
+    monkeypatch.setattr(harness_registry.shutil, "which", lambda binary: None)
+    rows = await client.call("harnesses")
+    assert all(r["installed"] is False and r["path"] is None for r in rows)
+
+
+async def test_harnesses_is_sorted_so_callers_need_not_re_sort(client):
+    rows = await client.call("harnesses")
+    assert [r["name"] for r in rows] == sorted(r["name"] for r in rows)
+
+
+async def test_harnesses_needs_no_parameters(client):
+    """The régie calls it at mount with nothing to say."""
+    assert await client.call("harnesses") == await client.call("harnesses", id="x")

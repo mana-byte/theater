@@ -42,7 +42,8 @@ Theater lets agents running in different harnesses — Claude Code, Vibe — dis
 
 - Python 3.12+
 - tmux (hard dependency — inbound delivery requires a pane)
-- At least one of `claude`, `vibe` on `PATH`
+- At least one of `claude`, `vibe` on `PATH` — or any other CLI you teach it
+  about, see [Configuration](#configuration)
 
 ---
 
@@ -146,12 +147,94 @@ Children hang off their parent on lineage rails, so a sibling is never mistaken 
 
 While it runs, the régie turns tmux's `mouse` option on for its own session and puts the previous value back on exit. Quitting also unstages: whatever agent was joined into the régie's window is moved back to a window of its own, still running.
 
-### `theater kill` / `theater stop`
+### `theater kill` / `theater stop` / `theater restart`
 
 ```sh
 theater kill <participant-id>   # kill a specific agent's pane
 theater stop                    # shut the daemon down
+theater restart                 # stop, then start again — how config is applied
 ```
+
+### `theater config`
+
+Show the resolved settings and where each value came from:
+
+```sh
+theater config                  # every key, tagged default / config.toml / plugin
+theater config path             # the file to edit, whether or not it exists
+theater config --json
+```
+
+This prints what the daemon holds, not what the file says. The failure it exists
+to diagnose is "I set the key and nothing happened".
+
+---
+
+## Configuration
+
+`$THEATER_HOME/config.toml` (default `~/.theater/config.toml`). Optional —
+Theater runs with no config file at all. Read at start-up and never written by
+Theater, so your comments and ordering survive. An unknown key is a loud error
+naming the file, the key and the closest legal spelling; a typo that is silently
+ignored is the defect this file is meant to remove. Run `theater restart` to
+apply a change.
+
+Machine-scoped only: there is no project-local config, because there is one
+daemon per machine holding one registry.
+
+```toml
+[theater]
+favourite = "vibe"        # harness used when `theater spawn` omits one
+
+[regie]
+theme = "nord"            # any Textual theme name
+tree_interval = 1.0
+bus_interval  = 0.4
+bus_batch     = 50
+
+[rails]
+depth_cap = 3             # how deep a spawn chain may go
+budget    = 20            # how many descendants one root may have
+
+[observer]
+poll_interval          = 0.25
+search_interval        = 2.0
+screen_interval        = 1.0
+sync_interval          = 1.0
+relocate_timeout       = 5.0
+awaiting_input_timeout = 10.0
+```
+
+Deliberately not configurable: the default approval mode. There is none anywhere
+in Theater, because the choice is the whole safety story for a child nobody is
+watching, and a key setting it to `yolo` once and forever defeats that.
+
+### Teaching Theater a new CLI
+
+Two ways, and the cheap one is usually enough.
+
+**Declare it in TOML.** Enough for spawning, MCP wiring, presence, the icon and
+turn detection from the rendered screen:
+
+```toml
+[harness.codex]
+binary       = "codex"
+icon         = "◇"
+aliases      = ["codex-cli"]
+idle_prompts = ["›"]
+mcp_argv     = ["-c", "mcp_servers.theater.command={theater}",
+                "-c", 'mcp_servers.theater.args=["mcp","--id","{id}"]']
+approvals    = { manual = [], edits = ["--full-auto"], yolo = ["--dangerously-bypass-approvals-and-sandbox"] }
+```
+
+`binary`, `idle_prompts` and all three `approvals` modes are required. A
+declared harness has no transcript parser, so its turns end when its prompt
+comes back on screen, confirmed across two polls.
+
+**Write a plugin.** A Python file in `$THEATER_HOME/harnesses/` implementing the
+full adapter, including transcript parsing — which gets you real turn
+boundaries, messages on the bus, `read_transcript` and native sub-agents. See
+**[docs/harness-plugins.md](docs/harness-plugins.md)**.
 
 ---
 
@@ -249,6 +332,9 @@ docs/
   init_idea.md            original design sketch
   init_idea_grilled.md    spec — why each decision went the way it did
   implementation_plan.md  phased build plan
+  architecture.md         how the pieces fit together
+  harness-plugins.md      writing a harness adapter in Python
+  v1.4_configuration.md   the configuration release, decision by decision
   spike_results.md        findings from early prototyping
   v2_ideas.md             future feature ideas
 tests/                    pytest suite (asyncio_mode = auto)
@@ -261,5 +347,5 @@ tests/                    pytest suite (asyncio_mode = auto)
 The full rationale for every architectural decision is in `docs/init_idea_grilled.md`. The short version:
 
 - **MCP cannot push.** No server can initiate an agent turn. MCP handles outbound (agent → Theater), tmux handles inbound (Theater → agent pane).
-- **Observation reads transcripts, not screens.** `capture-pane` is used only to detect a human typing; status is derived from the JSONL transcript the harness writes.
+- **Observation reads transcripts, not screens.** Status is derived from the JSONL transcript the harness writes; `capture-pane` only detects a human typing. The exception is a harness declared in `config.toml`, which by definition has no parser — there, and only there, the screen decides when a turn ends.
 - **Approval is per-spawn.** The orchestrator chooses the child's approval policy at spawn time. There is no global default — this is intentional.
