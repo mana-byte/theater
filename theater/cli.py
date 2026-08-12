@@ -526,8 +526,9 @@ def cmd_config(args) -> int:
     return 0
 
 
-#: How long to wait for a stopping daemon to release its socket. It unlinks on
-#: the way out, so this is bounded by draining connections, not by any work.
+#: How long to wait for a stopping daemon to let go. Bounded by the observer
+#: stopping and connections draining, not by any work in flight — but those are
+#: not instant, which is why the wait exists at all.
 STOP_TIMEOUT = 5.0
 
 
@@ -550,21 +551,31 @@ def _shutdown_running_daemon() -> bool:
     return True
 
 
-def _await_daemon_gone(timeout: float | None = None) -> bool:
-    """Wait for the socket to disappear, which `aclose` does last.
+def _daemon_released() -> bool:
+    """True once the old daemon holds neither the socket nor the lock.
 
-    Polling the path rather than the pid: the socket is what the next client
-    connects to, so its absence is exactly the condition that makes starting a
-    replacement safe. Reconnecting too early would reach the dying daemon.
+    Both, because they answer different questions. The socket is what the next
+    client connects to, so a leftover one means a replacement could reach the
+    dying daemon. The lock is what the next daemon needs to take, and it is the
+    only reliable signal: a daemon killed with -9 leaves its socket file behind
+    forever but loses its lock the moment it dies.
+    """
+    from theater.daemon import lock
+
+    return not paths.socket_path().exists() and lock.is_free()
+
+
+def _await_daemon_gone(timeout: float | None = None) -> bool:
+    """Wait for the stopping daemon to release what a replacement needs.
 
     The default is read at call time, not bound as a default argument, so the
     wait is patchable — otherwise a test for the timeout path has to take the
     full timeout.
     """
     deadline = time.monotonic() + (STOP_TIMEOUT if timeout is None else timeout)
-    while paths.socket_path().exists() and time.monotonic() < deadline:
+    while not _daemon_released() and time.monotonic() < deadline:
         time.sleep(0.05)
-    return not paths.socket_path().exists()
+    return _daemon_released()
 
 
 def cmd_stop(args) -> int:
@@ -584,9 +595,14 @@ def cmd_restart(args) -> int:
     comes back to the same participants.
     """
     if _shutdown_running_daemon() and not _await_daemon_gone():
+        held = (
+            paths.socket_path()
+            if paths.socket_path().exists()
+            else paths.pidfile_path()
+        )
         print(
-            f"theater: daemon still holding {paths.socket_path()} after "
-            f"{STOP_TIMEOUT:g}s — not starting a second one",
+            f"theater: daemon still holding {held} after {STOP_TIMEOUT:g}s "
+            "— not starting a second one",
             file=sys.stderr,
         )
         return 1

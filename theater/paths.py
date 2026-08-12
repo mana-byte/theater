@@ -23,6 +23,15 @@ def log_path() -> Path:
     return home() / "daemon.log"
 
 
+def pidfile_path() -> Path:
+    """The daemon's lockfile. Held with flock; see theater/daemon/lock.py.
+
+    The pid inside is for a human reading the file. Whether a daemon is running
+    is answered by whether the lock is held, never by this number.
+    """
+    return home() / "daemon.pid"
+
+
 def mcp_config_dir() -> Path:
     """Per-participant MCP server configs, written at spawn time."""
     return home() / "mcp"

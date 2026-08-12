@@ -1,8 +1,9 @@
 """The daemon: one per machine, owner of the registry.
 
-Singleton by construction. The socket path is fixed under THEATER_HOME and a
-lockfile holds the pid, so a second `theater daemon` exits rather than racing
-the first for the same SQLite file.
+Singleton by construction. An flock'd pidfile under THEATER_HOME decides who
+the daemon is, so a second `theater daemon` exits rather than racing the first
+for the same SQLite file. See theater/daemon/lock.py for why the lock, and not
+the presence of the socket, is the thing consulted.
 
 Concurrency model: one asyncio task per connection, all sharing a single Store
 on the loop thread. Store calls are synchronous because they are local and
@@ -22,12 +23,12 @@ import logging
 import os
 import signal
 import socket as _socket
-from pathlib import Path
 
 from theater import paths, protocol
 from theater.config import Config
 from theater.config import load as load_config
 from theater.daemon.jobs import JobManager, JobState
+from theater.daemon.lock import DaemonLock, file_id
 from theater.daemon.observer import Observer
 from theater.daemon.registry import Registry
 from theater.daemon.spawner import Spawner
@@ -103,6 +104,11 @@ class Daemon:
         )
         self._server: asyncio.Server | None = None
         self._reaper: asyncio.Task | None = None
+        #: Held from start() to aclose(). Being the daemon is this lock.
+        self._lock = DaemonLock()
+        #: (device, inode) of the socket we bound, so shutdown can tell our
+        #: own socket from one a successor has since put at the same path.
+        self._sock_id: tuple[int, int] | None = None
         self._stopping = asyncio.Event()
         #: One task per open connection. Tracked so shutdown can end them; see
         #: aclose().
@@ -138,10 +144,20 @@ class Daemon:
         """Bind the socket. Raises here, in the caller's face, if it cannot."""
         sock = paths.socket_path()
         _check_socket_path(sock)
-        self._clear_stale_socket(sock)
-        self._server = await asyncio.start_unix_server(self._handle, path=str(sock))
-        os.chmod(sock, 0o600)
-        self._write_pidfile()
+        # Lock before touching the socket. Everything after this point is
+        # single-threaded across the whole machine, which is what lets
+        # _clear_stale_socket unlink without a race.
+        self._lock.acquire()
+        try:
+            self._clear_stale_socket(sock)
+            self._server = await asyncio.start_unix_server(
+                self._handle, path=str(sock)
+            )
+            os.chmod(sock, 0o600)
+        except BaseException:
+            self._lock.release()
+            raise
+        self._sock_id = file_id(sock)
         await self._reconcile()
         self._init_send_seq()
         self._reaper = asyncio.create_task(self._reap_loop())
@@ -221,23 +237,37 @@ class Daemon:
             self._server.close()
             await self._server.wait_closed()
         self.store.close()
-        with contextlib.suppress(FileNotFoundError):
-            paths.socket_path().unlink()
-        with contextlib.suppress(FileNotFoundError):
-            self._pidfile().unlink()
+        self._release_files()
 
-    def _pidfile(self) -> Path:
-        return paths.home() / "daemon.pid"
+    def _release_files(self) -> None:
+        """Delete the socket and pidfile — but only if they are still ours.
 
-    def _write_pidfile(self) -> None:
-        self._pidfile().write_text(str(os.getpid()))
+        A daemon can take seconds to shut down: the observer stops, connections
+        drain. A replacement can be listening before that finishes. Unlinking
+        by path would then delete the live daemon's socket, and the next client
+        would find nothing and start a third. So both deletions are guarded on
+        identity, and the socket goes first: once the lock is free, the path it
+        protects is already clear.
+
+        Start() may never have run, in which case there is nothing to release
+        and both guards fall through.
+        """
+        sock = paths.socket_path()
+        if self._sock_id is not None and file_id(sock) == self._sock_id:
+            with contextlib.suppress(OSError):
+                sock.unlink()
+        self._sock_id = None
+        self._lock.release()
 
     @staticmethod
     def _clear_stale_socket(sock) -> None:
         """Remove a socket left behind by a daemon that did not shut down.
 
-        Probing it first: a live daemon accepts the connection, in which case we
-        must not delete its socket out from under it.
+        Called while holding the lock, so nothing can bind between the probe
+        and the unlink. A socket that still answers therefore means a daemon
+        from before the lock existed: refuse rather than steal its socket, and
+        let the user stop it. Without that check an upgrade would take the
+        socket away from the running old daemon.
         """
         if not sock.exists():
             return
