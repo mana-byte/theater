@@ -428,6 +428,17 @@ base_branch: branch to base the worktree on
 model:       model the child runs on; omit for the CLI's own default
 ```
 
+### `list_models`
+The models `spawn_session` will accept for each spawnable harness. Answered by the daemon, which is what enforces the list — `theater models` reads the file on disk, and the two differ until a `theater restart`.
+
+```
+harness:    harness name
+models:     allowlist from [models] in the config; empty means no model may be named
+supported:  whether the adapter can select a model at all
+```
+
+An empty `models` is the default and is not a dead end: spawn without `model` and the child comes up on its own CLI's default. `supported: false` cannot be fixed by config.
+
 ### `send`
 Delivers a prompt to an already-running addressable agent mid-session. Returns a handle for `await_sessions`. Fails with `human_present` if a human is at the target pane, or `busy` if the target is already handling a send.
 

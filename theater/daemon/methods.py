@@ -25,7 +25,7 @@ from theater.daemon.rails import (
     check_wait_cycle,
 )
 from theater.daemon.spawner import SpawnRequest
-from theater.harness import HARNESSES, describe, normalize
+from theater.harness import HARNESSES, describe, normalize, supports_model
 from theater.models import (
     BadRequest,
     Busy,
@@ -537,6 +537,45 @@ async def _harnesses(daemon, params: dict) -> list[dict]:
     set stops being a hardcoded literal.
     """
     return describe()
+
+
+@method("models")
+async def _models(daemon, params: dict) -> list[dict]:
+    """The model allowlist this daemon will actually enforce, per harness.
+
+    Exists for the same reason as `harnesses`, one level down: the allowlist is
+    read out of `daemon.config` at start-up and never reloaded, so after an edit
+    the file on disk and the process that refuses the spawn disagree. `theater
+    models` reports the file, which is right for a human about to edit it; a
+    caller asking "what will be accepted" has to be told what this daemon holds.
+
+    Every registered harness gets a row, including one with no entry: absent is
+    the common case and the informative one, since that harness refuses every
+    named model. Rows carrying an `error`, or a binary that is not installed,
+    are reported too — `describe` already decided they are worth naming, and a
+    consumer that only wants spawnable ones filters on the same two fields it
+    filters `harnesses` on.
+
+    `supported` and `models` are two different gates, and an empty list alone
+    cannot say which one would stop a spawn: `supported` is the adapter's
+    capability (`check_model`), `models` is the user's policy
+    (`check_model_allowed`). Supported with an empty list is one config edit
+    away from working; unsupported cannot take a model however the config reads.
+    """
+    rows = []
+    for row in describe():
+        name = row["name"]
+        harness = HARNESSES.get(name)
+        rows.append(
+            {
+                "harness": name,
+                "models": daemon.config.models_for(name),
+                "supported": harness is not None and supports_model(harness),
+                "installed": row["installed"],
+                "error": row["error"],
+            }
+        )
+    return rows
 
 
 @method("shutdown")

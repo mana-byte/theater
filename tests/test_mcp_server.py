@@ -45,6 +45,7 @@ async def test_tools_are_registered(daemon):
         "whoami",
         "list_participants",
         "list_harnesses",
+        "list_models",
         "spawn_session",
         "register_pane",
         "await_sessions",

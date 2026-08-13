@@ -104,6 +104,32 @@ async def harnesses(session: Session) -> list[dict]:
     ]
 
 
+async def models(session: Session) -> list[dict]:
+    """What `spawn_session` will accept as `model`, per harness.
+
+    Asked of the daemon for the reason `harnesses` is: the allowlist is enforced
+    from the config the daemon read at start-up, so after an edit the file and
+    the running process disagree, and the one that refuses the spawn is the one
+    worth reporting. `theater models` answers the same question from the file,
+    which is the right answer for the human editing it and the wrong one here.
+
+    Filtered like `harnesses`, and to the same end: every row left is a harness
+    a `spawn_session` call could name, so nothing here invites a call that
+    cannot work.
+    """
+    rows = await session.client.call("models")
+    assert isinstance(rows, list)
+    return [
+        {
+            "harness": r["harness"],
+            "models": r["models"],
+            "supported": r["supported"],
+        }
+        for r in rows
+        if r["installed"] and not r["error"]
+    ]
+
+
 async def spawn_session(
     session: Session,
     *,
@@ -124,10 +150,12 @@ async def spawn_session(
     its own isolated index and HEAD. The branch name `theater/<child-id>` is
     reported in the result so the parent can merge it explicitly.
 
-    `model` is passed to the harness unchanged. Theater does not check it
-    against any list of known models and cannot confirm the CLI honoured it:
-    the only failures visible here are a harness with no way to select a model
-    at all, which is refused before anything is created.
+    `model` is passed to the harness unchanged, but not unchecked: it must be
+    one the config lists for that harness, and the harness must be able to
+    select a model at all. Both are refused before anything is created; `models`
+    reports them. Membership is the whole of the check — Theater cannot confirm
+    the name is real or that the CLI honoured it, so a typo the user vouched for
+    surfaces as a child on the wrong model, not as an error here.
     """
     if not session._resolved:
         await session.identify()

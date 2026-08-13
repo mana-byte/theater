@@ -48,9 +48,12 @@ approval: "manual" | "edits" | "yolo" — required, no default. This is
 cwd:      where the child works. Defaults to your own directory.
 model:    which model the child runs, spelled the way its own CLI spells it
           (opencode wants provider/model). Optional; omit it and the harness
-          uses its default. Theater passes the string through without
-          checking it and cannot confirm the CLI honoured it, so a typo
-          surfaces as a child on the wrong model, not as an error here.
+          uses its default, which always works. Naming one only works if the
+          config allows it for that harness — call list_models for the set,
+          which is usually empty until a human writes it. Theater checks
+          membership and nothing else: it cannot confirm the CLI honoured the
+          name, so a typo someone allowed surfaces as a child on the wrong
+          model, not as an error here.
 worktree: if True, create a git worktree for the child with its own
           isolated index and HEAD. The branch name theater/<child-id>
           is in the result so you can merge it explicitly. The child's
@@ -110,6 +113,23 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         fixed list, and it differs between machines.
         """
         return await tools.harnesses(session)
+
+    @mcp.tool()
+    async def list_models() -> list[dict]:
+        """The models spawn_session will accept for each harness, on this machine.
+
+        An allowlist a human writes in Theater's config, not everything the CLI
+        could run, and it starts empty: a harness with `models: []` refuses
+        every model you name. That is not a dead end — spawn without `model`
+        and the child comes up on whatever its own CLI is set to, which always
+        works. Suggest the config edit rather than retrying with another name.
+
+        `supported: false` means the adapter cannot select a model at all, so
+        no config edit helps.
+
+        Answered by the daemon, which is the process that enforces the list.
+        """
+        return await tools.models(session)
 
     @mcp.tool(description=_spawn_description())
     async def spawn_session(
