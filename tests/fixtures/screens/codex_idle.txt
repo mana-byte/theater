@@ -1,0 +1,96 @@
+╭───────────────────────────────────────────────────────────────╮
+│ ✨ Update available! 0.146.0 -> 0.147.0                       │
+│ See https://github.com/openai/codex for installation options. │
+│                                                               │
+│ See full release notes:                                       │
+│ https://github.com/openai/codex/releases/latest               │
+╰───────────────────────────────────────────────────────────────╯
+
+╭───────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.146.0)                        │
+│                                                   │
+│ model:     gpt-5.5 high   /model to change        │
+│ directory: /private/var/folders/j5/…/probe/codex2 │
+╰───────────────────────────────────────────────────╯
+
+  Tip: New Build faster with the Desktop app. Run 'codex app' or visit https://chatgpt.com/codex?app-landing-page=true
+
+⚠ MCP client for `sentry` failed to start: MCP startup failed: Environment variable MISTRAL_API_KEY for MCP server 'sentry' is not set
+
+⚠ MCP client for `buildkite` failed to start: MCP startup failed: Environment variable MISTRAL_API_KEY for MCP server 'buildkite' is not set
+
+⚠ MCP client for `mistralai` failed to start: MCP startup failed: Environment variable MISTRAL_API_KEY for MCP server 'mistralai' is not set
+
+⚠ MCP client for `github` failed to start: MCP startup failed: Environment variable MISTRAL_API_KEY for MCP server 'github' is not set
+
+⚠ MCP client for `notion` failed to start: MCP startup failed: Environment variable MISTRAL_API_KEY for MCP server 'notion' is not set
+
+⚠ MCP client for `linear` failed to start: MCP startup failed: Environment variable MISTRAL_API_KEY for MCP server 'linear' is not set
+
+⚠ MCP startup incomplete (failed: buildkite, github, linear, mistralai, notion, sentry)
+
+
+› Write tests for @filename
+
+  gpt-5.5 high · /private/var/folders/j5/0kvr98n96kd8zdl0zck_ly840000gn/T/vibe-scratchpad-72558813-d_911zan/probe/codex2
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
