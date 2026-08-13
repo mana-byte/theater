@@ -55,6 +55,34 @@ pip install -e .
 
 This installs the `theater` binary.
 
+### Nix
+
+The flake builds from the same `uv.lock` the repo already uses, so a Nix install
+and a `uv run` install resolve to identical dependencies.
+
+```sh
+nix run . -- ls              # run it once from a clone, install nothing
+nix profile install .        # or put it on PATH for good
+```
+
+There is no remote yet; once there is one, the same commands take a
+`github:owner/theater` flake reference in place of the `.`.
+
+The packaged binary is wrapped with `tmux` and `git` appended to `PATH` — as a
+*fallback*, not an override. A tmux client refuses to talk to a server running a
+different protocol version, so if you already have tmux (and you do, since
+Theater lives in your session) yours is still the one that gets used. The
+bundled copy only matters on a machine with none.
+
+For development:
+
+```sh
+nix develop     # venv with the dev group, plus uv, tmux and git
+```
+
+This shell has the real tmux the `tmux`-marked tests need; without it they skip
+themselves and delivery goes untested.
+
 ---
 
 ## CLI reference
