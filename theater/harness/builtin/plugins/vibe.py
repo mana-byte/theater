@@ -85,6 +85,14 @@ _SCREEN_IDLE_PROMPTS = (*IDLE_PROMPTS, ">")
 #: marker or every approval dialog is misclassified as `working`.
 APPROVAL_MARKER = "Esc reject"
 
+#: Drawn in the spinner line while a turn is in flight. Unlike the other
+#: harnesses this does *not* imply the absence of a dialog — vibe keeps the
+#: spinner on screen underneath its permission box — so `screen_reading` must
+#: test `APPROVAL_MARKER` first. Present in both
+#: `tests/fixtures/screens/vibe_working.txt` and `vibe_approval.txt`, which is
+#: what makes that ordering testable rather than merely asserted.
+WORKING_MARKER = "Esc/Ctrl+C to interrupt"
+
 #: How far up from the bottom to look for the prompt. A real capture has a
 #: separator and a cwd/token footer below the prompt, so the prompt is not
 #: the last non-blank line and `is_idle_screen` — which checks only the last
@@ -385,22 +393,32 @@ class VibeObserver(TranscriptObserver):
         return last_screen_line(capture) in IDLE_PROMPTS
 
     def screen_reading(self, capture: str) -> ScreenReading:
-        """Classify the rendered screen as `approval`, `prompt`, or `unknown`.
+        """Classify the screen as `approval`, `working`, `prompt` or `unknown`.
 
-        Approval before prompt: vibe's working spinner and its permission box
-        are on screen at the same time, so testing the prompt (which looks at
-        the last line) or a working marker first would classify every approval
-        dialog as something else. The `APPROVAL_MARKER` is dialog chrome, so it
-        cannot appear in the agent's own output.
+        Order is load-bearing here, twice over, because vibe keeps drawing the
+        composer and the spinner underneath its permission box:
 
-        Prompt is detected by scanning the tail for a bare prompt line rather
-        than checking only the last line: a real capture has a separator and a
-        cwd/token footer below the prompt, so the prompt is never the last
-        non-blank line and `is_idle_screen` does not fire on a real screen.
+        Approval before working, because `WORKING_MARKER` is on screen in the
+        same capture as the permission box — check working first and every
+        dialog reads as `working`, so AWAITING_INPUT is never reachable.
+
+        Working before prompt, because the composer's empty prompt line stays
+        on screen during a turn. Reading a working screen as a prompt does not
+        merely mislabel it: the reducer maps `prompt` to IDLE, and
+        `_rescue_jobs` then finishes the agent's jobs mid-turn, resolving the
+        caller's `await` on a turn that never ended.
+
+        The prompt is found by scanning the tail rather than checking only the
+        last line: a real capture has a separator and a cwd/token footer below
+        it, so `is_idle_screen` does not fire on a real screen.
         """
         if APPROVAL_MARKER in capture:
             return ScreenReading(
                 kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH
+            )
+        if WORKING_MARKER in capture:
+            return ScreenReading(
+                kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH
             )
         lines = [line.strip() for line in capture.splitlines() if line.strip()]
         if any(line in _SCREEN_IDLE_PROMPTS for line in lines[-_SCREEN_TAIL_LINES:]):

@@ -760,3 +760,53 @@ def test_opencode_idle_fixture_classifies_as_prompt():
     capture = _screen("opencode_idle.txt")
     reading = OpenCodeObserver().screen_reading(capture)
     assert reading.kind is ScreenKind.PROMPT
+
+
+# ---- a working screen must never read as a prompt --------------------------
+#
+# The reducer maps PROMPT to IDLE and `_rescue_jobs` finishes a participant's
+# jobs on a PROMPT screen, so classifying a working screen as a prompt does
+# not merely mislabel it in the display: it resolves the caller's `await` on a
+# turn that never ended. Claude and vibe both keep a prompt-like line on
+# screen for the whole turn — claude the composer's `❯`, vibe the empty
+# composer — so for those two the idle fixture alone cannot prove the matcher
+# discriminates. These pin the other side of it.
+
+
+def test_claude_working_fixture_classifies_as_working_not_prompt():
+    """The permission-mode indicator is on screen during a turn as well.
+
+    `manual mode on` is drawn in the footer whether claude is idle or working,
+    so a matcher keyed on it reads a working screen as a prompt. The
+    discriminating segment is `esc to interrupt` / `? for shortcuts`.
+    """
+    capture = _screen("claude_working.txt")
+    assert "manual mode on" in capture  # the non-discriminating indicator
+    reading = ClaudeCodeObserver().screen_reading(capture)
+    assert reading.kind is ScreenKind.WORKING
+    assert reading.confidence is ScreenConfidence.HIGH
+
+
+def test_vibe_working_fixture_classifies_as_working_not_prompt():
+    """The composer's empty prompt line stays on screen during a turn.
+
+    A tail scan for a bare prompt therefore matches while vibe is working, so
+    the working marker has to be tested first.
+    """
+    capture = _screen("vibe_working.txt")
+    reading = VibeObserver().screen_reading(capture)
+    assert reading.kind is ScreenKind.WORKING
+    assert reading.confidence is ScreenConfidence.HIGH
+
+
+def test_claude_bash_approval_fixture_classifies_as_approval():
+    """A second dialog shape, to show the marker is chrome and not one phrase.
+
+    The write-permission dialog and the bash-permission dialog ask different
+    questions and offer different options; both are framed by the same
+    `Esc to cancel` footer.
+    """
+    capture = _screen("claude_approval_bash.txt")
+    reading = ClaudeCodeObserver().screen_reading(capture)
+    assert reading.kind is ScreenKind.APPROVAL
+    assert reading.confidence is ScreenConfidence.HIGH

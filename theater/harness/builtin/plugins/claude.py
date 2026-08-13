@@ -75,12 +75,22 @@ IDLE_PROMPTS = (">", "> ")
 #: false-positive. Present in `tests/fixtures/screens/claude_approval.txt`.
 APPROVAL_MARKER = "Esc to cancel"
 
-#: The idle footer the CLI draws below the prompt. Used by `screen_reading`
-#: because a real capture has this footer below the prompt, so the prompt is
-#: not the last non-blank line and `is_idle_screen` — which checks only the
-#: last line — does not fire. Present in
-#: `tests/fixtures/screens/claude_idle.txt`.
-IDLE_FOOTER = "manual mode on"
+#: The middle segment of the status footer while a turn is in flight. The
+#: footer keeps its shape and swaps this segment for `IDLE_FOOTER` when the
+#: turn ends, so the two are mutually exclusive. Present in
+#: `tests/fixtures/screens/claude_working.txt`.
+WORKING_MARKER = "esc to interrupt"
+
+#: The middle segment of the status footer while waiting for input. Used by
+#: `screen_reading` because a real capture has this footer below the prompt,
+#: so the prompt is not the last non-blank line and `is_idle_screen` — which
+#: checks only the last line — does not fire.
+#:
+#: Deliberately not the permission-mode indicator (`manual mode on`) that sits
+#: to its left: that is drawn while idle *and* while working, so it cannot
+#: tell them apart, and its text changes with the approval mode the agent was
+#: spawned under. Present in `tests/fixtures/screens/claude_idle.txt`.
+IDLE_FOOTER = "? for shortcuts"
 
 #: How far up from the bottom to look for the prompt and footer. A real
 #: capture has several lines of padding below the footer, so a window of one
@@ -424,25 +434,35 @@ class ClaudeCodeObserver(TranscriptObserver):
         return last_screen_line(capture) in IDLE_PROMPTS
 
     def screen_reading(self, capture: str) -> ScreenReading:
-        """Classify the rendered screen as `approval`, `prompt`, or `unknown`.
+        """Classify the screen as `approval`, `working`, `prompt` or `unknown`.
 
         Approval first: the dialog's footer chrome (`Esc to cancel`) is a
         frame element the CLI draws, not text the agent produced, so it cannot
-        appear in echoed output. The working spinner and the approval dialog
-        are mutually exclusive in claude, but checking approval first is the
-        rule that keeps this method honest if that ever changes.
+        appear in echoed output. The dialog replaces the status footer, so all
+        three markers are mutually exclusive on a real capture — the order is
+        what keeps that from mattering if a future release overlaps them.
 
-        Prompt is detected from the idle footer (`manual mode on`) rather than
-        a bare last line: a real capture has the footer below the prompt, so
-        the prompt is never the last non-blank line and `is_idle_screen` does
-        not fire on a real screen.
+        Working before prompt because the reducer maps `prompt` to IDLE: a
+        working screen misread as a prompt does not merely mislabel it, it
+        also lets `_rescue_jobs` finish the agent's jobs mid-turn, which
+        resolves the caller's `await` on a turn that never ended.
+
+        Both are read from the status footer rather than the last line: a real
+        capture draws the footer below the prompt, so the prompt is never the
+        last non-blank line and `is_idle_screen` does not fire on a real
+        screen.
         """
         if APPROVAL_MARKER in capture:
             return ScreenReading(
                 kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH
             )
         lines = [line for line in capture.splitlines() if line.strip()]
-        if any(IDLE_FOOTER in line for line in lines[-_SCREEN_TAIL_LINES:]):
+        tail = lines[-_SCREEN_TAIL_LINES:]
+        if any(WORKING_MARKER in line for line in tail):
+            return ScreenReading(
+                kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH
+            )
+        if any(IDLE_FOOTER in line for line in tail):
             return ScreenReading(
                 kind=ScreenKind.PROMPT, confidence=ScreenConfidence.HIGH
             )
