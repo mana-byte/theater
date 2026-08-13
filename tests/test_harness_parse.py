@@ -20,10 +20,21 @@ import json
 from pathlib import Path
 
 import pytest
-from shipped import ClaudeCodeObserver, CodexObserver, VibeObserver
+from shipped import (
+    ClaudeCodeObserver,
+    CodexObserver,
+    OpenCodeObserver,
+    VibeObserver,
+)
 
 from theater.harness import EventKind, status_after
 from theater.harness.base import MAX_TEXT
+from theater.harness.observation import (
+    HarnessObserver,
+    ScreenConfidence,
+    ScreenKind,
+    ScreenReading,
+)
 from theater.models import Status
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -630,3 +641,64 @@ def test_codex_output_scrolled_past_the_composer_is_not_idle():
     """Beyond the tail window the pane is showing something else entirely."""
     trailing = "\n".join(["more output"] * 8)
     assert CodexObserver().is_idle_screen(CODEX_IDLE + "\n" + trailing) is False
+
+
+# ---- the screen_reading default shim ----------------------------------
+
+
+class _BooleanOnlyObserver(HarnessObserver):
+    """A stub observer that implements only ``is_idle_screen``.
+
+    This is the shape a third-party plugin in ``$THEATER_HOME/harnesses`` has
+    today: it answers the boolean and nothing else. The default
+    ``screen_reading`` shim must keep it working without any code change.
+    """
+
+    def __init__(self, idle: bool):
+        self._idle = idle
+
+    def is_idle_screen(self, capture: str) -> bool:
+        return self._idle
+
+
+def test_a_boolean_idle_observer_yields_prompt_with_low_confidence():
+    """The default shim maps True to kind=prompt, confidence=low."""
+    observer = _BooleanOnlyObserver(idle=True)
+    reading = observer.screen_reading("anything")
+    assert reading == ScreenReading(
+        kind=ScreenKind.PROMPT, confidence=ScreenConfidence.LOW
+    )
+
+
+def test_a_boolean_not_idle_observer_yields_unknown_with_low_confidence():
+    """The default shim maps False to kind=unknown, confidence=low.
+
+    ``unknown`` rather than ``working`` so that a future send gate — which must
+    never falsely conclude "blocked" — treats a low-confidence non-idle screen
+    as "do not know" rather than "safe to send". The consumer resolves
+    ``unknown``, not the type.
+    """
+    observer = _BooleanOnlyObserver(idle=False)
+    reading = observer.screen_reading("anything")
+    assert reading == ScreenReading(
+        kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW
+    )
+
+
+_SHIPPED_OBSERVERS = [
+    ClaudeCodeObserver(),
+    CodexObserver(),
+    OpenCodeObserver(),
+    VibeObserver(),
+]
+
+
+@pytest.mark.parametrize("observer", _SHIPPED_OBSERVERS)
+def test_no_shipped_plugin_overrides_screen_reading_yet(observer):
+    """Every shipped adapter inherits the default shim.
+
+    A later phase overriding ``screen_reading`` in one of these plugins is a
+    visible, deliberate change: this test will fail the moment that happens,
+    so the override cannot slip in silently.
+    """
+    assert "screen_reading" not in type(observer).__dict__

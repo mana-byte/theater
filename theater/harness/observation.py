@@ -44,6 +44,8 @@ from `open_source`; `opencode.py` is the worked example.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -51,6 +53,68 @@ from theater.harness.base import Event, NativeChild
 
 if TYPE_CHECKING:
     from theater.harness.source import Source
+
+
+class ScreenKind(StrEnum):
+    """What the rendered screen is showing, at the level a consumer needs.
+
+    The split that ``is_idle_screen`` could not make: a boolean answers "is
+    this pane waiting for input" but cannot say *what kind* of input.
+    ``approval`` and ``trust`` are the ones that carry an unrecoverable cost —
+    at an approval prompt, Enter is a button press, so injecting a prompt into
+    that pane can auto-approve a tool call the human never saw.
+    """
+
+    WORKING = "working"
+    PROMPT = "prompt"
+    APPROVAL = "approval"
+    TRUST = "trust"
+    UNKNOWN = "unknown"
+
+
+class ScreenConfidence(StrEnum):
+    """How sure the observer is about its classification.
+
+    ``low`` is the honest default for any reading derived from a heuristic
+    over a text scrape: a capture is a snapshot, not a state machine, and the
+    only harnesses that can answer with certainty are ones that expose their
+    own UI state out-of-band. The default shim always reports ``low``
+    because the boolean it derives from was itself tuned to accept false
+    negatives.
+    """
+
+    LOW = "low"
+    HIGH = "high"
+
+
+@dataclass(frozen=True, slots=True)
+class ScreenReading:
+    """A structured classification of the rendered screen.
+
+    The replacement for the boolean ``is_idle_screen``, introduced because the
+    two consumers of a screen reading need **opposite** safety properties and a
+    single boolean cannot serve both:
+
+    * The **rescue path** (``observer.py:_rescue_jobs``) must never falsely
+      conclude "prompt": a false idle finishes a caller's job with a partial
+      answer, which is unrecoverable.
+    * The **send gate** (future, per v1.7 Phase C/F) must never falsely
+      conclude "approval"/blocked: a false block makes a healthy pane
+      permanently unreachable, which is also unrecoverable.
+
+    ``unknown`` is therefore resolved differently per consumer, and this type
+    does not pick one global default. A gate that protects against injection
+    must treat ``unknown`` as *not* ``prompt``; the régie's display hint may
+    treat ``unknown`` as ``prompt`` because the cost of being wrong there is a
+    cosmetic mislabel. The consumer decides — encoding a single resolution
+    here would re-create the boolean's ambiguity in a richer type.
+
+    See ``docs/v1.6_observation.md`` (lines 81-95) and
+    ``docs/v1.7_hardening.md`` (lines 223-228, 496-505) for the design history.
+    """
+
+    kind: ScreenKind
+    confidence: ScreenConfidence = ScreenConfidence.LOW
 
 
 class HarnessObserver(ABC):
@@ -115,7 +179,50 @@ class HarnessObserver(ABC):
         the reducer uses this for two things reading cannot do: distinguishing
         "blocked on a permission prompt" from "thinking", and confirming a pane
         looks idle before it rescues a job whose turn end was never seen.
+
+        Of those two promises, the rescue guard is the one this method actually
+        delivers: every shipped adapter treats a bare last line as idle. The
+        distinction between a permission prompt and ordinary thinking is the
+        one the docstring has always claimed but that ``ScreenReading`` — not a
+        boolean — is the type that can actually make. Two of the four shipped
+        adapters (``claude``, ``vibe``) match a bare last line positively;
+        the other two (``codex``, ``opencode``) test for the absence of a
+        working marker. Neither shape can tell an approval modal from a prompt,
+        and that gap is the reason ``screen_reading`` exists.
         """
+
+    def screen_reading(self, capture: str) -> ScreenReading:
+        """A structured classification of the rendered screen.
+
+        The replacement for ``is_idle_screen``, introduced because a single
+        boolean cannot separate "waiting at its input prompt" from "showing an
+        approval modal" — and at an approval prompt, Enter is a button press,
+        so injecting a prompt into that pane can auto-approve a tool call the
+        human never saw. That is the one false positive with an unrecoverable
+        cost, and it is why ``ScreenReading`` carries a ``kind`` rather than a
+        boolean.
+
+        **Not abstract.** This default implementation is a compatibility shim
+        that derives a reading from the existing boolean: ``is_idle_screen``
+        True maps to ``kind=prompt, confidence=low``, and False maps to
+        ``kind=unknown, confidence=low``. Third-party plugins living in
+        ``$THEATER_HOME/harnesses`` that only implement the boolean keep
+        working unchanged — a later phase will override this method
+        per-harness to return ``approval``/``trust``/``working`` with
+        ``high`` confidence where the CLI exposes the information.
+
+        Both readings from the shim carry ``confidence=low`` because the
+        boolean it derives from was itself tuned to accept false negatives,
+        and a heuristic over a text scrape cannot claim more than that.
+        ``unknown`` rather than ``working`` is chosen for the not-idle case
+        so that a send gate — which must never falsely conclude "blocked" —
+        treats a low-confidence non-idle screen as "do not know" rather than
+        "safe to send". See the ``ScreenReading`` docstring for why the
+        consumer, not this type, resolves ``unknown``.
+        """
+        if self.is_idle_screen(capture):
+            return ScreenReading(kind=ScreenKind.PROMPT, confidence=ScreenConfidence.LOW)
+        return ScreenReading(kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW)
 
     def native_children(self, transcript: Path) -> list[NativeChild]:
         """Sub-agents this session spawned by itself, outside Theater.
