@@ -255,6 +255,29 @@ class Harness(ABC):
         keeps working for every launch that does not name a model.
         """
 
+    def discover_models(self) -> list[str]:
+        """Model names this CLI reports it can run, for `theater models`.
+
+        Optional, and concrete rather than abstract so that not implementing it
+        costs a plugin nothing. Two of the four shipped adapters cannot answer:
+        `claude` and `codex` offer no listing of any kind, and guessing on their
+        behalf would produce a catalogue that goes stale silently.
+
+        This is an authoring aid, never a gate. What a spawn may use is the
+        `[models]` allowlist in Theater's own config, which the user writes; the
+        job here is only to save them typing it. Whatever is returned is
+        therefore a suggestion — it may be out of date, may list models the
+        user is not authenticated for, and is not consulted at spawn time.
+
+        Raise `NotImplementedError` when the CLI has no way to be asked. Return
+        an empty list only for the genuinely different case of having asked and
+        been told none, which is what an unauthenticated provider looks like:
+        the caller reports those two states differently.
+        """
+        raise NotImplementedError(
+            f"{self.name} cannot list its models: no command or config to read"
+        )
+
 
 def status_after(event: Event) -> Status:
     """The status implied by having just seen this event.

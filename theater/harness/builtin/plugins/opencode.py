@@ -80,6 +80,7 @@ import json
 import logging
 import os
 import sqlite3
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
@@ -105,6 +106,12 @@ logger = logging.getLogger("theater.harness.opencode")
 #: next to this one, and pointing at the wrong one would find no sessions at
 #: all rather than fail loudly.
 DB_NAME = "opencode-stable.db"
+
+#: Seconds `opencode models` gets before `theater models --discover` gives up.
+#: It reaches the network to resolve providers, so it is not instant, but it is
+#: also run by a human waiting at a terminal — long enough for a slow link,
+#: short enough to fail rather than hang.
+MODELS_TIMEOUT = 20
 
 #: In the footer for exactly as long as a turn is running — present from the
 #: instant after Enter. See `is_idle_screen` for why this is the whole test.
@@ -234,6 +241,35 @@ class OpenCodeHarness(Harness):
             env={"OPENCODE_CONFIG": str(config_path)},
             files={config_path: json.dumps(config, indent=2)},
         )
+
+    def discover_models(self) -> list[str]:
+        """`opencode models`, which prints one `provider/model` per line.
+
+        The only shipped harness with a real listing command, and it prints
+        exactly the spelling `--model` wants, so the output needs no
+        translation. It reflects the providers this user has authenticated,
+        which is why it is worth asking rather than hardcoding — and equally
+        why the answer belongs in the user's config file and not in a cache
+        Theater manages.
+        """
+        try:
+            out = subprocess.check_output(
+                [self.binary, "models"],
+                text=True,
+                timeout=MODELS_TIMEOUT,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError as exc:
+            raise NotImplementedError(f"{self.binary} is not on PATH") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise NotImplementedError(
+                f"`{self.binary} models` did not answer within {MODELS_TIMEOUT}s"
+            ) from exc
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise NotImplementedError(f"`{self.binary} models` failed: {exc}") from exc
+        # An empty result is not an error: it is what no authenticated provider
+        # looks like, and the caller says so in those words.
+        return [line.strip() for line in out.splitlines() if line.strip()]
 
 
 class OpenCodeObserver(HarnessObserver):

@@ -21,6 +21,7 @@ from theater.daemon.rails import (
     check_budget,
     check_cycle,
     check_depth,
+    check_model_allowed,
     check_wait_cycle,
 )
 from theater.daemon.spawner import SpawnRequest
@@ -198,6 +199,12 @@ async def _spawn(daemon, params: dict) -> dict:
     rails = daemon.config.rails
     check_depth(daemon.store, req.parent_id, cap=rails.depth_cap)
     check_budget(daemon.store, req.parent_id, limit=rails.budget)
+    # Policy, not capability: `Spawner` asks the adapter whether it can take a
+    # model at all, which it can answer alone. Whether the user permits *this*
+    # model is a question only the config can answer, and the spawner has none.
+    check_model_allowed(
+        req.harness, req.model, daemon.config.models_for(req.harness)
+    )
 
     participant = await daemon.spawner.spawn(req)
     # Create a job for this spawn so the caller can await the result.

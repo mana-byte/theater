@@ -149,8 +149,8 @@ state lives on the `Source` it opens.
 
 ## The harness, method by method
 
-One abstract method. Everything else on a harness is the identity data above and
-the observer it carries.
+One abstract method and one optional concrete one. Everything else on a harness
+is the identity data above and the observer it carries.
 
 ### `plan_launch(*, participant_id, prompt, config_path, approval, model=None) -> LaunchPlan`
 
@@ -226,6 +226,60 @@ env["NOVA_MODEL"] = model or ""
 Environments are inherited and flags are not. Skip the empty case and an agent
 you started on one model hands that model to every grandchild it spawns without
 one.
+
+### `discover_models() -> list[str]`
+
+Optional. Model names your CLI reports it can run, for `theater models
+--discover <harness>`, which prints them as a `[models]` block for the user to
+paste into Theater's config and cut down.
+
+Concrete on the base class, so omitting it costs you nothing: the inherited
+version raises `NotImplementedError`, and the CLI reports that as "cannot be
+asked" rather than as a broken plugin. Two of the four shipped adapters do
+exactly that — neither `claude` nor `codex` offers a listing of any kind, and a
+hand-written catalogue on their behalf would go stale in silence.
+
+**This is an authoring aid and never a gate.** It is not consulted when a spawn
+happens. What a spawn may name is the `[models]` allowlist in Theater's config,
+which a human wrote; your job here is only to save them the typing. So it is
+fine for the answer to be incomplete, out of date, or to include models the user
+is not authenticated for.
+
+Two failure shapes, and the distinction is the contract:
+
+- **`NotImplementedError`** — there is no way to ask. No command, no config file
+  to read, or the binary is not installed. Retrying will not help, and the CLI
+  says so and points at writing the list by hand.
+- **`[]`** — you asked and were told none. Usually a provider that is not logged
+  in yet, which the CLI reports as such, because that one *is* worth retrying
+  after logging in.
+
+Never return a guess to paper over either. Turn anything that goes wrong while
+asking into `NotImplementedError` with a message that says what was tried:
+
+```python
+def discover_models(self) -> list[str]:
+    try:
+        out = subprocess.check_output(
+            [self.binary, "models"], text=True, timeout=20,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError as exc:
+        raise NotImplementedError(f"{self.binary} is not on PATH") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise NotImplementedError(f"`{self.binary} models` timed out") from exc
+    return [line.strip() for line in out.splitlines() if line.strip()]
+```
+
+A subprocess is not the only source. `vibe` has no listing command, so its
+adapter reads the `[[models]]` tables out of `~/.vibe/config.toml` instead —
+whatever answers the question without starting a session. Give any subprocess a
+timeout: a human is waiting at a terminal, and hanging is worse than failing.
+
+Return the names in the CLI's own spelling, in whatever order is most useful to
+read, deduplicated. They go straight into a config file and then straight back
+to your `plan_launch` as `model`, so a friendly alias here becomes a name that
+is allowlisted and then rejected by the CLI.
 
 ## The observer, method by method
 

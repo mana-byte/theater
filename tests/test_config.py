@@ -297,6 +297,141 @@ async def test_configured_depth_cap_actually_rejects_a_spawn(fake_tmux):
         await daemon.aclose()
 
 
+# ---- the model allowlist ------------------------------------------------
+
+
+def test_models_are_read_per_harness():
+    write('[models]\nvibe = ["small", "big"]\n')
+    assert cfg.load().models_for("vibe") == ["small", "big"]
+
+
+def test_a_harness_with_no_entry_allows_no_model():
+    write('[models]\nvibe = ["small"]\n')
+    assert cfg.load().models_for("claude") == []
+
+
+def test_no_models_section_at_all_is_not_an_error():
+    """The default install. Every harness is simply unlisted."""
+    write("[rails]\ndepth_cap = 2\n")
+    assert cfg.load().models_for("vibe") == []
+
+
+def test_models_must_be_a_table():
+    write("models = 3\n")
+    with pytest.raises(cfg.ConfigError) as exc:
+        cfg.load()
+    assert "must be a table" in str(exc.value)
+
+
+def test_a_harness_entry_must_be_a_list_of_strings():
+    write("[models]\nvibe = 3\n")
+    with pytest.raises(cfg.ConfigError) as exc:
+        cfg.load()
+    assert "must be a list of strings" in str(exc.value)
+
+
+def test_a_list_of_non_strings_is_refused():
+    write("[models]\nvibe = [1, 2]\n")
+    with pytest.raises(cfg.ConfigError):
+        cfg.load()
+
+
+def test_a_model_listed_twice_is_refused():
+    """A copy-paste artefact, not a second model."""
+    write('[models]\nvibe = ["big", "big"]\n')
+    with pytest.raises(cfg.ConfigError) as exc:
+        cfg.load()
+    assert "more than once" in str(exc.value)
+
+
+def test_an_illegal_harness_name_is_refused():
+    write('[models]\n"Not A Harness" = ["big"]\n')
+    with pytest.raises(cfg.ConfigError) as exc:
+        cfg.load()
+    assert "legal harness name" in str(exc.value)
+
+
+def test_a_harness_that_is_not_installed_is_not_a_parse_error():
+    """This module knows nothing of the registry; the daemon checks that."""
+    write('[models]\nnotinstalled = ["big"]\n')
+    assert cfg.load().models_for("notinstalled") == ["big"]
+
+
+def test_a_typo_of_the_section_name_suggests_it():
+    write('[modles]\nvibe = ["big"]\n')
+    with pytest.raises(cfg.ConfigError) as exc:
+        cfg.load()
+    assert "models" in str(exc.value)
+
+
+def test_an_empty_list_is_legal_and_means_nothing_is_allowed():
+    """Distinct from absent only in intent, and both refuse every --model."""
+    write("[models]\nvibe = []\n")
+    assert cfg.load().models_for("vibe") == []
+
+
+def test_describe_reports_a_configured_allowlist():
+    write('[models]\nvibe = ["big"]\n')
+    rows = cfg.describe(cfg.load())
+    assert any(key == "models.vibe" for key, _, _ in rows)
+
+
+def test_describe_says_nothing_about_unlisted_harnesses():
+    """`[models]` has no fields to enumerate, so there is no default row."""
+    rows = cfg.describe(cfg.load())
+    assert not [key for key, _, _ in rows if key.startswith("models.")]
+
+
+async def test_a_model_outside_the_allowlist_actually_stops_a_spawn(fake_tmux):
+    """The end-to-end claim, as for the depth cap: the file changes behaviour."""
+    write('[models]\nvibe = ["small"]\n')
+    daemon = Daemon(harnesses={})
+    await daemon.start()
+    client = DaemonClient(autostart=False)
+    await client.connect()
+    try:
+        with pytest.raises(RemoteError) as exc:
+            await client.call(
+                "spawn",
+                harness="vibe",
+                prompt="hi",
+                approval="manual",
+                cwd="/tmp",
+                model="enormous",
+            )
+        assert exc.value.code == "model_not_allowed"
+        # And the listed one goes through, so the rail is a filter and not a
+        # blanket refusal of every --model.
+        record = await client.call(
+            "spawn",
+            harness="vibe",
+            prompt="hi",
+            approval="manual",
+            cwd="/tmp",
+            model="small",
+        )
+        assert record["tier"] == "spawned"
+    finally:
+        await client.aclose()
+        await daemon.aclose()
+
+
+async def test_an_unlisted_harness_still_spawns_without_a_model(fake_tmux):
+    """The default install must keep working: no allowlist, no --model, no fuss."""
+    daemon = Daemon(harnesses={})
+    await daemon.start()
+    client = DaemonClient(autostart=False)
+    await client.connect()
+    try:
+        record = await client.call(
+            "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
+        )
+        assert record["tier"] == "spawned"
+    finally:
+        await client.aclose()
+        await daemon.aclose()
+
+
 # ---- the CLI ------------------------------------------------------------
 
 

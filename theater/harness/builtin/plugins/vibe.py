@@ -38,6 +38,8 @@ quantity and is labelled as such.
 from __future__ import annotations
 
 import json
+import os
+import tomllib
 from pathlib import Path
 
 from theater.harness.base import (
@@ -125,6 +127,52 @@ class VibeHarness(Harness):
         # "use the configured default", which is what an unset variable means.
         env["VIBE_ACTIVE_MODEL"] = model or ""
         return LaunchPlan(argv=argv, env=env)
+
+    def discover_models(self) -> list[str]:
+        """Read `[[models]]` out of vibe's own config.
+
+        Vibe has no `models` subcommand, but its model set is not a remote
+        catalogue — it is a list the user already wrote in `config.toml`, which
+        makes it exactly the thing worth copying into Theater's `[models]`.
+
+        Both spellings are returned. `VIBE_ACTIVE_MODEL` accepts either the
+        `name` (`claude-opus-5`) or the shorter `alias` (`opus-5`), and which
+        one someone wants to see in Theater's config is a matter of taste.
+
+        Reading another tool's config file is a coupling Theater does not
+        otherwise take, and it is only tolerable because of where it sits:
+        discovery, run by hand, printed for review, never on the spawn path. A
+        vibe release that renames these keys degrades this to "found nothing"
+        rather than breaking a spawn.
+        """
+        path = self._config_path()
+        try:
+            raw = tomllib.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError as exc:
+            raise NotImplementedError(f"{path} does not exist") from exc
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            raise NotImplementedError(f"{path} cannot be read: {exc}") from exc
+
+        entries = raw.get("models")
+        if not isinstance(entries, list):
+            raise NotImplementedError(f"{path} has no [[models]] entries")
+
+        found: list[str] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            for key in ("name", "alias"):
+                value = entry.get(key)
+                if isinstance(value, str) and value and value not in found:
+                    found.append(value)
+        return found
+
+    @staticmethod
+    def _config_path() -> Path:
+        """Where vibe keeps its config. `$VIBE_HOME` wins, as it does for vibe."""
+        home = os.environ.get("VIBE_HOME")
+        base = Path(home) if home else Path.home() / ".vibe"
+        return base / "config.toml"
 
 
 class VibeObserver(TranscriptObserver):

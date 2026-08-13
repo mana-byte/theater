@@ -13,9 +13,11 @@ from theater.daemon.rails import (
     BudgetExceeded,
     CycleDetected,
     DepthExceeded,
+    ModelNotAllowed,
     check_budget,
     check_cycle,
     check_depth,
+    check_model_allowed,
     check_wait_cycle,
 )
 from theater.daemon.registry import Registry
@@ -192,3 +194,50 @@ def test_budget_counts_entire_subtree(store):
     # 3 participants. Budget 3 means the tree is full.
     with pytest.raises(BudgetExceeded):
         check_budget(store, child.id, limit=3)
+
+
+# ---- the model allowlist ------------------------------------------------
+
+
+def test_naming_no_model_is_always_allowed():
+    """The case every install starts in, and the one that must never break."""
+    check_model_allowed("vibe", None, [])  # does not raise
+
+
+def test_a_listed_model_is_allowed():
+    check_model_allowed("vibe", "big", ["small", "big"])  # does not raise
+
+
+def test_a_model_that_is_not_listed_is_refused():
+    with pytest.raises(ModelNotAllowed) as exc:
+        check_model_allowed("vibe", "enormous", ["small", "big"])
+    message = str(exc.value)
+    assert "enormous" in message
+    # The allowed set, so the fix does not need a second command.
+    assert "big, small" in message
+
+
+def test_an_empty_allowlist_refuses_an_explicit_model():
+    """Not silently coerced to the default: that starts the wrong model."""
+    with pytest.raises(ModelNotAllowed) as exc:
+        check_model_allowed("vibe", "big", [])
+    assert "theater models --discover vibe" in str(exc.value)
+
+
+def test_the_empty_case_names_the_harness_it_refused_for():
+    with pytest.raises(ModelNotAllowed) as exc:
+        check_model_allowed("claude", "big", [])
+    assert "claude" in str(exc.value)
+
+
+def test_matching_is_exact():
+    """No prefixes, no case folding: the CLI's spelling is the only spelling."""
+    with pytest.raises(ModelNotAllowed):
+        check_model_allowed("vibe", "BIG", ["big"])
+    with pytest.raises(ModelNotAllowed):
+        check_model_allowed("vibe", "big", ["bigger"])
+
+
+def test_the_refusal_carries_a_stable_code():
+    """Callers match on the code; the prose is free to change."""
+    assert ModelNotAllowed.code == "model_not_allowed"

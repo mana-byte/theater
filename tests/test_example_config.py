@@ -107,6 +107,20 @@ def test_every_documented_default_is_the_real_default(load):
             assert getattr(getattr(full, section), f.name) == default_of(f), dotted
 
 
+def test_the_model_allowlist_ships_empty(load):
+    """`[models]` is documented but grants nothing.
+
+    The one section with no default to write out: every name in it is a model
+    an agent that can spawn may then spend, so a copied example that came with
+    entries would hand out that permission to everyone who ran `cp`. The header
+    is live because an empty table means exactly what absence means, and having
+    it there is what makes the prose above it findable.
+    """
+    full = load(EXAMPLE.read_text())
+    assert full.models == {}
+    assert full.models_for("claude") == []
+
+
 def test_it_does_not_still_document_harness_declarations():
     """The v1.4 removal has to reach the example, not just the loader.
 

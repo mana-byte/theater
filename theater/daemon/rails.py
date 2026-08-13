@@ -1,11 +1,11 @@
-"""Safety rails: depth cap, cycle detection, per-tree budget.
+"""Safety rails: depth cap, cycle detection, per-tree budget, model allowlist.
 
 These are the guardrails that make multi-agent orchestration safe enough
 to leave running unattended. Without them, a runaway agent could spawn a
 deep subtree that exhausts the machine, or close an await cycle that
 deadlocks the daemon.
 
-Three rails:
+Four rails:
 
 1. **Depth cap** (default 3). Enforced at `spawn`: the depth of the new
    child in the lineage tree must not exceed the cap. Wide fan-out is
@@ -29,6 +29,13 @@ Three rails:
    running. Killing a live subtree on a count alone would destroy work a
    human may be watching, and the régie already offers a kill key. The
    backstop is that nothing new starts.
+
+4. **Model allowlist**. A spawn may only name a model the user listed for
+   that harness under `[models]`. The other three rails bound how much a
+   tree may spawn; this one bounds what it may spend per turn, which is the
+   axis a count cannot see — one child on a frontier model can cost more
+   than twenty on a small one. Unset by default, and an unset list refuses
+   only an explicit `--model`, never a plain spawn.
 """
 
 from __future__ import annotations
@@ -71,6 +78,41 @@ class CycleDetected(BadRequest):
 
 class BudgetExceeded(BadRequest):
     code = "budget_exceeded"
+
+
+class ModelNotAllowed(BadRequest):
+    code = "model_not_allowed"
+
+
+def check_model_allowed(harness: str, model: str | None, allowed: list[str]) -> None:
+    """Reject a spawn naming a model the config does not list for this harness.
+
+    `allowed` is `[models].<harness>` from the user's config. Empty — which is
+    the default, and true of every install until someone writes the section —
+    means no model may be *named*, not that no model runs: omitting `--model`
+    is unaffected and the child comes up on whatever its own CLI is configured
+    for. So the empty case only ever refuses a request that was made
+    explicitly, and never silently swaps the model out from under one.
+
+    Theater checks membership and nothing else. It does not know whether a
+    listed name is real, only whether the user vouched for it; the CLI still
+    has the last word in the pane. An allowlist here is about intent — which
+    models this machine is willing to spend on unattended — not correctness.
+    """
+    if model is None:
+        return
+    if not allowed:
+        raise ModelNotAllowed(
+            f"no models are configured for harness {harness!r}, so --model "
+            f"cannot be used with it: add them under [models] in the config "
+            f"file (`theater models --discover {harness}` prints a block to "
+            f"paste), or omit --model to use that CLI's own default"
+        )
+    if model not in allowed:
+        raise ModelNotAllowed(
+            f"model {model!r} is not configured for harness {harness!r}: "
+            f"allowed are {', '.join(sorted(allowed))}"
+        )
 
 
 def check_depth(

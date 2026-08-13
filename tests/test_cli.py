@@ -661,6 +661,137 @@ def test_a_favourite_that_is_not_a_harness_is_an_error(monkeypatch):
     assert "not a known harness" in str(exc.value)
 
 
+# ---- models --------------------------------------------------------------
+
+
+def write_config(text: str) -> None:
+    paths.config_path().write_text(text, encoding="utf-8")
+
+
+def discover(monkeypatch, harness: str, result, *extra):
+    """Run `models --discover <harness>` with that adapter answering `result`.
+
+    An exception as `result` is raised instead of returned, which is how the
+    "cannot be asked" path is reached.
+
+    Called directly rather than through `main`, because `main` rebuilds the
+    registry first and `plugins.scan` re-imports the plugin files — so neither
+    the instance nor the class present at patch time is the one the command
+    would end up calling. The real adapters have to be kept out of this: `vibe`
+    reads ~/.vibe/config.toml, so unpatched these tests would assert against
+    whatever models the developer running the suite happens to have.
+    """
+
+    def answer():
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(cli.HARNESSES[harness], "discover_models", answer)
+    return cli.cmd_models(parse("models", "--discover", harness, *extra))
+
+
+def test_models_lists_every_harness_not_only_the_configured_ones(capsys):
+    """The unlisted ones are the point: those are what `--model` refuses."""
+    write_config('[models]\nvibe = ["big"]\n')
+    assert cli.main(["models"]) == 0
+    out = capsys.readouterr().out
+    assert "vibe" in out
+    assert "big" in out
+    assert "claude" in out
+    assert "--model refused" in out
+
+
+def test_models_says_how_to_get_started(capsys):
+    """An empty allowlist refuses every --model, so the on-ramp must be visible."""
+    assert cli.main(["models"]) == 0
+    assert "--discover" in capsys.readouterr().out
+
+
+def test_models_json_is_the_configured_mapping(capsys):
+    write_config('[models]\nvibe = ["big", "small"]\n')
+    assert cli.main(["models", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"vibe": ["big", "small"]}
+
+
+def test_discover_prints_a_block_naming_the_harness(monkeypatch, capsys):
+    assert discover(monkeypatch, "vibe", ["big", "small"]) == 0
+    out = capsys.readouterr().out
+    assert "[models]" in out
+    assert "vibe = [" in out
+    assert '"big",' in out
+
+
+def pasted(capsys) -> str:
+    """What a human would copy: the block, without the explanatory comments."""
+    return "\n".join(
+        line
+        for line in capsys.readouterr().out.splitlines()
+        if not line.startswith("#")
+    )
+
+
+def test_a_discovered_block_parses_back_as_the_allowlist(monkeypatch, capsys):
+    """The claim the command makes: paste this and it works, unedited."""
+    assert discover(monkeypatch, "vibe", ["big", "small"]) == 0
+    write_config(pasted(capsys))
+    assert cli.main(["models", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"vibe": ["big", "small"]}
+
+
+def test_a_quoted_model_name_survives_the_round_trip(monkeypatch, capsys):
+    """Names are quoted by a real encoder, not by string concatenation."""
+    assert discover(monkeypatch, "vibe", ['weird"name']) == 0
+    write_config(pasted(capsys))
+    assert cli.main(["models", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"vibe": ['weird"name']}
+
+
+def test_discover_json_is_the_found_list(monkeypatch, capsys):
+    assert discover(monkeypatch, "vibe", ["big"], "--json") == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "harness": "vibe",
+        "models": ["big"],
+    }
+
+
+def test_discover_on_a_cli_that_cannot_be_asked_fails_helpfully(
+    monkeypatch, capsys
+):
+    problem = NotImplementedError("claude has no list")
+    assert discover(monkeypatch, "claude", problem) == 1
+    err = capsys.readouterr().err
+    assert "claude has no list" in err
+    # The manual route still works, and is the whole of the fix.
+    assert "by hand" in err
+
+
+def test_discover_that_finds_nothing_is_not_the_same_failure(monkeypatch, capsys):
+    """Asked and answered: none. Usually an unauthenticated provider."""
+    assert discover(monkeypatch, "vibe", []) == 1
+    err = capsys.readouterr().err
+    assert "no models" in err
+    assert "by hand" not in err
+
+
+def test_discover_never_prints_a_block_it_could_not_fill(monkeypatch, capsys):
+    """An empty [models] block would read as an answer."""
+    discover(monkeypatch, "vibe", [])
+    assert capsys.readouterr().out == ""
+
+
+def test_discover_rejects_an_unknown_harness(capsys):
+    assert cli.main(["models", "--discover", "nope"]) == 1
+    assert "unknown harness" in capsys.readouterr().err
+
+
+def test_discover_accepts_an_alias_for_the_harness_name(monkeypatch, capsys):
+    """Same spelling rules as `spawn`; the name came from the same head."""
+    monkeypatch.setattr(cli.HARNESSES["claude"], "discover_models", lambda: ["big"])
+    assert cli.cmd_models(parse("models", "--discover", "claude-code")) == 0
+    assert "claude = [" in capsys.readouterr().out
+
+
 # ---- long-running commands ----------------------------------------------
 
 

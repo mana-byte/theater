@@ -56,6 +56,29 @@ _CLEAR = "\033[H\033[2J"
 _FOLLOW_BATCH = 200
 
 
+def _add_models_parser(sub) -> None:
+    """Register `theater models`.
+
+    Its own function because `_parser` sits at the statement cap the linter
+    enforces, and one flat registry of every flag was always going to reach it.
+    New subcommands get a builder like this one rather than another few lines
+    there.
+    """
+    models = sub.add_parser(
+        "models", help="Show, or discover, the models a spawn may name."
+    )
+    models.add_argument(
+        "--discover",
+        metavar="HARNESS",
+        default=None,
+        help=(
+            "Ask that CLI what models it can run and print a [models] block "
+            "to paste. Not every CLI can be asked."
+        ),
+    )
+    models.add_argument("--json", action="store_true")
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="theater",
@@ -173,6 +196,8 @@ def _parser() -> argparse.ArgumentParser:
         help="'path' prints the config file location and nothing else.",
     )
     conf.add_argument("--json", action="store_true")
+
+    _add_models_parser(sub)
 
     stats = sub.add_parser(
         "stats", help="How turns have been ending, per harness."
@@ -599,6 +624,93 @@ def cmd_config(args) -> int:
     return 0
 
 
+def _models_block(harness: str, models: list[str]) -> str:
+    """Render a `[models]` entry the user can paste without editing.
+
+    Model names are quoted with `json.dumps`, which is exact here: a TOML basic
+    string and a JSON string agree on every escape that can appear in a model
+    name, and both are double-quoted. Writing the quotes by hand would be wrong
+    the first time a name contains a backslash.
+    """
+    lines = [f"[{config.MODELS_SECTION}]", f"{harness} = ["]
+    lines += [f"  {json.dumps(name)}," for name in models]
+    lines.append("]")
+    return "\n".join(lines)
+
+
+def cmd_models(args) -> int:
+    """Show, or discover, the models a spawn may name for each harness.
+
+    Two jobs, because they are two halves of one task. Bare, it answers "what
+    will `--model` accept", which is a config question. With `--discover`, it
+    asks the CLI itself what it can run and prints that as a config block —
+    the on-ramp, since the allowlist starts empty and an empty list refuses
+    every `--model`.
+
+    Discovery is an authoring aid and never a gate: nothing here is consulted
+    at spawn time, and the block is a suggestion the human edits down to the
+    models they actually want spent on. Like `config`, this reads local data
+    and never contacts the daemon — the allowlist is enforced from the file,
+    so the file is the honest thing to report.
+    """
+    loaded = config.load()
+
+    if args.discover:
+        name = harness_registry.normalize(args.discover)
+        adapter = HARNESSES.get(name)
+        if adapter is None:
+            known = ", ".join(sorted(HARNESSES))
+            raise BadUsage(f"unknown harness {args.discover!r}; known: {known}")
+        try:
+            found = adapter.discover_models()
+        except NotImplementedError as exc:
+            # Not a failure of this run: the CLI has no way to be asked, and no
+            # amount of retrying changes that. Say so, and point at the manual
+            # route, which still works.
+            print(f"theater: {exc}", file=sys.stderr)
+            print(
+                f"theater: list them by hand under [{config.MODELS_SECTION}] "
+                f"in {tilde(str(loaded.path))}",
+                file=sys.stderr,
+            )
+            return 1
+        if not found:
+            # Asked and answered: none. Distinct from the case above, and
+            # usually a provider that is not logged in yet.
+            print(
+                f"theater: {name} reported no models — it may not be "
+                f"authenticated yet",
+                file=sys.stderr,
+            )
+            return 1
+        if args.json:
+            print(json.dumps({"harness": name, "models": found}, indent=2))
+            return 0
+        print(f"# {len(found)} found — paste into {tilde(str(loaded.path))},")
+        print("# keeping only the models you want spawns to be able to name")
+        print(_models_block(name, found))
+        return 0
+
+    if args.json:
+        print(json.dumps(loaded.models, indent=2))
+        return 0
+
+    # Every known harness, not just the configured ones: the absent entries are
+    # the point, since those are the harnesses `--model` currently refuses.
+    names = sorted(set(HARNESSES) | set(loaded.models))
+    if not names:
+        print("no harnesses registered")
+        return 0
+    width = max(len(name) for name in names)
+    print(f"{tilde(str(loaded.path))}\n")
+    for name in names:
+        allowed = loaded.models_for(name)
+        listed = ", ".join(allowed) if allowed else "-  (--model refused)"
+        print(f"{name:<{width}}  {listed}")
+    print("\n`theater models --discover <harness>` prints a block to paste")
+    return 0
+
+
 #: How long to wait for a stopping daemon to let go. Bounded by the observer
 #: stopping and connections draining, not by any work in flight — but those are
 #: not instant, which is why the wait exists at all.
@@ -725,6 +837,7 @@ _COMMANDS = {
     "harnesses": cmd_harnesses,
     "stats": cmd_stats,
     "config": cmd_config,
+    "models": cmd_models,
     "regie": cmd_regie,
     "stop": cmd_stop,
     "restart": cmd_restart,

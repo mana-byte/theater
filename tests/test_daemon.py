@@ -109,8 +109,24 @@ async def test_spawn_rejects_an_unknown_harness(client, fake_tmux):
     assert exc.value.code == "bad_request"
 
 
-async def test_spawn_carries_a_model_all_the_way_to_the_pane(client, fake_tmux):
+def allow_models(daemon, **by_harness) -> None:
+    """Put models on the daemon's allowlist, as a config file would.
+
+    `Config` is frozen, but the mapping it holds is not, and `models_for` reads
+    exactly this dict. Naming the models is not optional in these tests: the
+    spawn rail refuses any `--model` a harness has no entry for, so a spawn
+    that means to test the wiring has to be permitted first.
+    """
+    daemon.config.models.update(by_harness)
+
+
+async def test_spawn_carries_a_model_all_the_way_to_the_pane(
+    daemon, client, fake_tmux
+):
     """The whole wire, end to end: MCP/CLI param -> SpawnRequest -> plan -> tmux."""
+    allow_models(
+        daemon, vibe=["mysuperdupermodelname"], claude=["opus-4.1"]
+    )
     await client.call(
         "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp",
         model="mysuperdupermodelname",
@@ -133,13 +149,18 @@ async def test_spawn_without_a_model_pins_the_vibe_env_empty(client, fake_tmux):
 
 
 async def test_spawn_refuses_an_impossible_model_before_creating_anything(
-    client, fake_tmux, monkeypatch
+    daemon, client, fake_tmux, monkeypatch
 ):
     """The refusal has to land before step 1, not at the launch plan.
 
     `plan_launch` runs after the participant and its worktree exist, so a
     harness that cannot take a model would leave both behind — a STARTING
     ghost the régie draws forever — for something knowable up front.
+
+    The model is allowlisted deliberately, so the policy rail passes and the
+    *capability* check is what refuses. The two are separate questions — may
+    the user spend this, and can this adapter accept it at all — and only one
+    of them is under test here.
     """
     from theater.harness import Harness, LaunchPlan
 
@@ -151,6 +172,7 @@ async def test_spawn_refuses_an_impossible_model_before_creating_anything(
             return LaunchPlan(argv=["legacy"])
 
     monkeypatch.setitem(HARNESSES, "legacy", LegacyHarness())
+    allow_models(daemon, legacy=["whatever"])
     before = len(await client.call("participants.list"))
 
     with pytest.raises(RemoteError) as exc:

@@ -146,3 +146,36 @@ sync_interval = 1.0
 # `theater harnesses` lists what loaded, where each one came from, and why any
 # were rejected. Writing your own: docs/harness-plugins.md.
 disabled = []
+
+
+[models]
+
+# What `theater spawn --model` may name, per harness. One key per harness, each
+# a list of model names; a harness with no key here, or an empty list, refuses
+# every `--model` and its children run on whatever their own CLI config chose.
+#
+# So the whole section is commented out, and unlike every other setting in this
+# file there is no default to write down. Absent is not a value Theater picked
+# on your behalf — it is the behaviour every spawn had before this option
+# existed, which is the right thing to keep doing until someone says otherwise.
+# Naming a model here is a deliberate grant: an agent that can spawn can now
+# spend it, at its price, without asking a human first.
+#
+# An allowlist rather than a denylist, the opposite of `[harness] disabled`
+# above, because the two lists fail in opposite directions. A harness that
+# appears in a later release should work without editing this file; a model
+# that appears in a later release should not become spendable without editing
+# it. Absence is the safe answer here and the unhelpful one there.
+#
+# Names are passed to the CLI untouched — Theater checks membership and nothing
+# else. Model namespaces change faster than this project releases, so a listed
+# name the CLI does not recognise still fails, in the child's pane, where the
+# vendor that owns the namespace can explain it properly. That also means the
+# spelling has to be the CLI's own, not a friendly alias.
+#
+# `theater models` shows what is allowed now. `theater models --discover
+# <harness>` asks a CLI what it can run and prints a block to paste here, which
+# you then cut down; not every CLI can be asked, and none of it is consulted at
+# spawn time.
+# claude   = ["opus-4.1", "sonnet-4"]
+# opencode = ["anthropic/claude-sonnet-4"]

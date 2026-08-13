@@ -28,6 +28,12 @@ spelling.
 The known-key set is derived from the dataclasses below rather than written out
 a second time, so a new setting cannot be added without its validation.
 
+`[models]` is the one exception, and has to be: its keys are harness names, so
+the legal set is whatever is registered rather than anything this module can
+enumerate. Its shape is validated by `_build_models`, and the names it lists are
+checked against the registry by the daemon at start-up — the same split
+`theater.favourite` uses.
+
 What is deliberately not settable
 ---------------------------------
 The default approval mode. See `harness/base.py:80`: there is no default
@@ -43,7 +49,7 @@ import re
 import tomllib
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 from theater import paths
 
@@ -176,6 +182,12 @@ _SECTIONS: dict[str, type] = {
 #: about what a harness may be called.
 HARNESS_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
+#: The one section whose keys are not a fixed field set: `[models]` is keyed by
+#: harness name, and which names are legal depends on the registry, which this
+#: module cannot see. Kept out of `_SECTIONS` for that reason and parsed by
+#: `_build_models` instead.
+MODELS_SECTION = "models"
+
 
 @dataclass(frozen=True, slots=True)
 class Config:
@@ -186,6 +198,11 @@ class Config:
     observer: ObserverSection = field(default_factory=ObserverSection)
     harness: HarnessSection = field(default_factory=HarnessSection)
     regie: RegieSection = field(default_factory=RegieSection)
+    #: Harness name -> the models `spawn --model` may name for it. An allowlist,
+    #: and the absent case is the common one: a harness with no entry (or an
+    #: empty list) permits no model *selection* at all, so its children come up
+    #: on whatever that CLI's own config says. See `rails.check_model_allowed`.
+    models: dict[str, list[str]] = field(default_factory=dict)
     #: Dotted key -> "default" | "config.toml". The whole point of
     #: `theater config`: a value alone cannot tell the user whether their edit
     #: took effect, and "it took effect" is the question they are asking.
@@ -197,8 +214,12 @@ class Config:
     def source(self, dotted: str) -> str:
         return self.sources.get(dotted, "default")
 
+    def models_for(self, harness: str) -> list[str]:
+        """The allowlist for one harness. Empty means no model may be named."""
+        return self.models.get(harness, [])
 
-def _fail(path: Path, message: str) -> None:
+
+def _fail(path: Path, message: str) -> NoReturn:
     raise ConfigError(f"{path}: {message}")
 
 
@@ -286,6 +307,44 @@ def _defaults_for(name: str, cls: type) -> dict[str, str]:
     return {f"{name}.{f.name}": "default" for f in fields(cls)}
 
 
+def _build_models(path: Path, raw: Any) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """Parse `[models]`, which is keyed by harness name rather than by field.
+
+    It cannot go through `_build_section`: the legal keys are whatever
+    harnesses are registered, and this module deliberately knows nothing about
+    the registry. So the shape is checked here — name spelling, list of
+    strings — and whether the harness exists is left to the daemon, which
+    checks it at start-up once the registry is built. That is the same split
+    `theater.favourite` already uses, and the reason a `[models]` entry for a
+    harness you have not installed yet is not an error at parse time.
+    """
+    if not isinstance(raw, dict):
+        _fail(path, f"[{MODELS_SECTION}] must be a table, got {type(raw).__name__}")
+
+    out: dict[str, list[str]] = {}
+    sources: dict[str, str] = {}
+    for name, value in raw.items():
+        dotted = f"{MODELS_SECTION}.{name}"
+        if not HARNESS_NAME.match(name):
+            _fail(
+                path,
+                f"'{dotted}' is not a legal harness name: expected lowercase "
+                "letters, digits, '-' or '_', starting with a letter or digit",
+            )
+        names = _check_str_list(value)
+        if names is None:
+            got = type(value).__name__
+            _fail(path, f"'{dotted}' must be a list of strings, got {got}")
+        # A model named twice is a copy-paste artefact, not a second model, and
+        # it would show up twice in every list Theater prints.
+        if len(set(names)) != len(names):
+            dupe = next(n for n in names if names.count(n) > 1)
+            _fail(path, f"'{dotted}' lists {dupe!r} more than once")
+        out[name] = names
+        sources[dotted] = "config.toml"
+    return out, sources
+
+
 def _check_no_declarations(path: Path, raw: Any) -> None:
     """Refuse a `[harness.<name>]` table left over from before v1.4.
 
@@ -330,7 +389,7 @@ def load(path: Path | None = None) -> Config:
     except OSError as exc:
         raise ConfigError(f"{target}: cannot read: {exc}") from exc
 
-    legal = list(_SECTIONS)
+    legal = [*_SECTIONS, MODELS_SECTION]
     for key in raw:
         if key not in legal:
             _fail(target, f"unknown section [{key}] ({_suggest(key, legal)})")
@@ -345,7 +404,12 @@ def load(path: Path | None = None) -> Config:
         built[name] = section
         sources.update(section_sources)
 
-    return Config(**built, sources=sources, path=target, exists=True)
+    models: dict[str, list[str]] = {}
+    if MODELS_SECTION in raw:
+        models, model_sources = _build_models(target, raw[MODELS_SECTION])
+        sources.update(model_sources)
+
+    return Config(**built, models=models, sources=sources, path=target, exists=True)
 
 
 def describe(config: Config) -> list[tuple[str, str, str]]:
@@ -362,4 +426,11 @@ def describe(config: Config) -> list[tuple[str, str, str]]:
             value = getattr(section, f.name)
             shown = "(unset)" if value is None else str(value)
             rows.append((dotted, shown, config.source(dotted)))
+    # `[models]` has no fields to enumerate, so only what the user wrote can be
+    # listed. A harness absent from the file has no row rather than an empty
+    # one: there is no default to show, and inventing a row per registered
+    # harness would make this depend on the registry.
+    for harness in sorted(config.models):
+        dotted = f"{MODELS_SECTION}.{harness}"
+        rows.append((dotted, str(config.models[harness]), config.source(dotted)))
     return rows

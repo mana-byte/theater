@@ -146,10 +146,15 @@ theater spawn claude "audit the crypto helpers" --approval manual --model opus-4
 theater spawn opencode "port the CSV reader" --approval edits --model anthropic/claude-sonnet-4
 ```
 
-The name is passed through untouched — Theater keeps no allowlist, because model
-namespaces change faster than this project releases. A name the CLI does not
-recognise fails in the child's pane, where the vendor that owns the namespace can
-say so properly. Omit the flag and the CLI's own default applies.
+A model has to be listed for that harness under `[models]` in the config file
+first — see `theater models` below. Nothing is listed by default, so `--model`
+refuses everything until you write the section; omit the flag and the CLI's own
+default applies, which is what every spawn did before this option existed.
+
+Within the allowlist the name is passed through untouched. Theater checks
+membership and nothing else, because model namespaces change faster than this
+project releases: a listed name the CLI does not recognise still fails in the
+child's pane, where the vendor that owns the namespace can say so properly.
 
 Every built-in harness supports it, by whichever lever its CLI offers: `claude`,
 `codex`, and `opencode` take a flag, `vibe` takes `VIBE_ACTIVE_MODEL` in the
@@ -173,6 +178,59 @@ List the coding CLIs Theater knows how to drive, and whether each one is on PATH
 theater harnesses
 theater harnesses --json
 ```
+
+### `theater models`
+
+Show which models a `theater spawn --model` may name, per harness. Reads the
+config file, so like `theater config` it works before the daemon is running —
+and the file is the honest thing to report, since the file is what enforces it:
+
+```sh
+theater models
+theater models --json
+theater models --discover opencode
+```
+
+Bare, it lists every registered harness, including the ones with nothing
+listed, because those are exactly the harnesses `--model` currently refuses:
+
+```
+~/.theater/config.toml
+
+claude    opus-4.1, sonnet-4
+codex     -  (--model refused)
+opencode  -  (--model refused)
+vibe      -  (--model refused)
+```
+
+`--discover <harness>` asks that CLI what it can run and prints a `[models]`
+block to paste — the on-ramp, since the list starts empty and an empty list
+refuses every `--model`. Paste it, then delete down to the models you actually
+want spawns to be able to spend:
+
+```
+# 31 found — paste into ~/.theater/config.toml,
+# keeping only the models you want spawns to be able to name
+[models]
+opencode = [
+  "anthropic/claude-sonnet-4",
+  ...
+]
+```
+
+Not every CLI can be asked, and the two ways of finding nothing are reported
+differently, because they call for different next steps:
+
+- **models found** — the block above, on stdout, exit 0
+- **asked, none reported** — usually a provider that is not logged in yet; log
+  in and ask again. Exit 1
+- **cannot be asked** — the CLI has no command or config file to read, so no
+  amount of retrying will help. Exit 1, pointing at the manual route. `claude`
+  and `codex` are both in this bucket today
+
+Discovery is an authoring aid and never a gate. Nothing here is consulted when
+a spawn happens: the allowlist is whatever the config file says, whether you
+wrote it by hand or pasted it from here.
 
 ### `theater bus`
 
@@ -297,7 +355,17 @@ rescue_timeout         = 60.0
 
 [harness]
 disabled = []             # plugin names to leave out of the registry
+
+[models]                  # what `theater spawn --model` may name, per harness
+claude = ["opus-4.1", "sonnet-4"]
 ```
+
+`[models]` is the one section with no default to write out, so
+`config.example.toml` ships it commented: an absent or empty list means no
+model may be named for that harness and children run on whatever their own CLI
+config picked, which is what every spawn did before the option existed. Listing
+a model is therefore a deliberate grant, not a default being restated. Write it
+by hand or start from `theater models --discover <harness>`.
 
 Deliberately not configurable: the default approval mode. There is none anywhere
 in Theater, because the choice is the whole safety story for a child nobody is
