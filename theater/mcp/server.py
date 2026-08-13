@@ -220,20 +220,21 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
     async def put_child_back_in_the_wound(target_id: str) -> dict:
         """Kill a child agent that you spawned.
 
-        Only a direct child of yours can be killed: the target's
-        parent_id must be your own participant id. This is enforced
-        in the tool body because the daemon's participant.kill has no
-        permission check — wiring it straight through would let any
-        agent terminate its parent, its siblings, or itself.
+        Only a direct child of yours can be killed: the daemon enforces
+        that the target's parent_id equals your own participant id. This
+        check covers every caller that identifies itself — including
+        `theater kill` from an agent's shell tool — because it lives in
+        the daemon, not in this tool body.
 
         target_id: the participant id of the child to kill.
 
         Refuses with `no_self_kill` if the target is you. Refuses with
-        `not_your_child` if the target does not exist, is not your
-        child (a sibling, a parent, a stranger, or a grandchild).
-        A target that is already dead is a no-op that returns
-        {"killed": false, "reason": "already_dead"} rather than an
-        error — killing a dead thing is not a failure.
+        `not_your_child` if the target exists but is not your child
+        (a sibling, a parent, a stranger, or a grandchild). A target
+        that does not exist arrives as `not_found`. A target that is
+        already dead is a no-op that returns {"killed": false,
+        "reason": "already_dead"} rather than an error — killing a
+        dead thing is not a failure.
 
         **Side effect: destroying a worktree child erases uncommitted
         work.** If the child was spawned with worktree=True, killing

@@ -31,7 +31,9 @@ from theater.models import (
     Busy,
     HumanPresent,
     JobState,
+    NoSelfKill,
     NotAddressable,
+    NotYourChild,
     StaleTarget,
     Status,
     now,
@@ -131,6 +133,23 @@ async def _status(daemon, params: dict) -> dict:
 @method("participant.kill")
 async def _kill(daemon, params: dict) -> dict:
     pid = _require(params, "id")
+    caller_id = params.get("caller_id") or "cli"
+
+    target = daemon.registry.get(pid)
+
+    if caller_id != "cli":
+        if target.id == caller_id:
+            raise NoSelfKill(
+                f"refusing to kill {pid!r}: that is you, not your child"
+            )
+        if target.parent_id != caller_id:
+            raise NotYourChild(
+                f"refusing to kill {pid!r}: its parent is "
+                f"{target.parent_id!r}, not you ({caller_id!r})"
+            )
+        if target.status is Status.DEAD:
+            return {"id": pid, "killed": False, "reason": "already_dead"}
+
     await daemon.spawner.kill(pid)
     return {"id": pid, "killed": True}
 

@@ -227,6 +227,70 @@ async def test_kill_marks_dead_and_hides(client, fake_tmux):
     assert dead["addressable"] is False
 
 
+async def test_kill_from_a_caller_who_is_the_parent_succeeds(client, fake_tmux):
+    parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
+    child = await client.call(
+        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp",
+        parent_id=parent["id"],
+    )
+    result = await client.call(
+        "participant.kill", id=child["id"], caller_id=parent["id"]
+    )
+    assert result == {"id": child["id"], "killed": True}
+    dead = await client.call("participants.get", id=child["id"])
+    assert dead["status"] == "dead"
+
+
+async def test_kill_refuses_a_target_that_is_not_the_callers_child(client, fake_tmux):
+    parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
+    stranger = await client.call(
+        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp",
+    )
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "participant.kill", id=stranger["id"], caller_id=parent["id"]
+        )
+    assert exc.value.code == "not_your_child"
+    alive = await client.call("participants.get", id=stranger["id"])
+    assert alive["status"] != "dead"
+
+
+async def test_kill_refuses_self_kill(client, fake_tmux):
+    parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "participant.kill", id=parent["id"], caller_id=parent["id"]
+        )
+    assert exc.value.code == "no_self_kill"
+    alive = await client.call("participants.get", id=parent["id"])
+    assert alive["status"] != "dead"
+
+
+async def test_kill_on_an_already_dead_child_is_a_no_op(client, fake_tmux):
+    parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
+    child = await client.call(
+        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp",
+        parent_id=parent["id"],
+    )
+    await client.call("participant.kill", id=child["id"], caller_id=parent["id"])
+    result = await client.call(
+        "participant.kill", id=child["id"], caller_id=parent["id"]
+    )
+    assert result == {"id": child["id"], "killed": False, "reason": "already_dead"}
+
+
+async def test_kill_without_caller_id_is_unrestricted(client, fake_tmux):
+    """The CLI and the régie send no caller_id; a human may kill anything."""
+    parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
+    stranger = await client.call(
+        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp",
+    )
+    result = await client.call("participant.kill", id=stranger["id"])
+    assert result == {"id": stranger["id"], "killed": True}
+    result = await client.call("participant.kill", id=parent["id"])
+    assert result == {"id": parent["id"], "killed": True}
+
+
 async def test_the_reaper_notices_a_vanished_pane(daemon, client, fake_tmux, monkeypatch):
     record = await client.call(
         "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
