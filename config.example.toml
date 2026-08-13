@@ -93,7 +93,7 @@ relocate_timeout = 5.0
 # How long a transcript may be quiet before the screen is checked for a bare
 # prompt — which is how AWAITING_INPUT is detected. Long enough that a slow
 # tool call does not trigger it, short enough that a human watching notices.
-awaiting_input_timeout = 10.0
+awaiting_input_timeout = 1.5
 
 # How often to read the screen of a harness that has no transcript at all — a
 # plugin whose adapter sets `has_transcript = False`. Much faster than the

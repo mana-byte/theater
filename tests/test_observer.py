@@ -24,6 +24,12 @@ from theater.daemon.observer import (
     TurnAccumulator,
 )
 from theater.harness.base import Event, EventKind
+from theater.harness.observation import (
+    HarnessObserver,
+    ScreenConfidence,
+    ScreenKind,
+    ScreenReading,
+)
 from theater.harness.source import Batch, Source
 from theater.models import Status
 
@@ -298,10 +304,10 @@ def test_begin_quiet_starts_the_clocks_once_and_leaves_them_running():
 def test_the_screen_clock_survives_a_relocate_resetting_nothing():
     """The v1 bug: one shared clock meant the screen check never fired.
 
-    The relocate fires at 5s and the screen check at 10s. If the relocate
-    reset the clock the screen check reads, 10s of silence never accumulates
-    and AWAITING_INPUT is unreachable. Only the screen check may reset its
-    own clock.
+    The relocate fires at 5s and the screen check shortly after. If the
+    relocate reset the clock the screen check reads, the screen quiet
+    never accumulates and AWAITING_INPUT is unreachable. Only the screen
+    check may reset its own clock.
     """
     cursor = QuietClock()
     cursor.begin_quiet(0.0)
@@ -330,22 +336,23 @@ def test_the_rescue_clock_survives_the_screen_check_throttling_itself():
     """The rescue must not read a clock that another timer keeps pushing.
 
     `_check_idle_screen` throttles itself by setting screen_quiet_since to now
-    every time it fires. A rescue reading that clock would restart every 10s
-    and never reach its own, much longer, timeout — the same shape of bug as
-    the relocate one above, but silent: the symptom is a caller that waits
-    forever, not a status that never changes.
+    every time it fires. A rescue reading that clock would restart every
+    `awaiting_input_timeout` and never reach its own, much longer, timeout —
+    the same shape of bug as the relocate one above, but silent: the symptom
+    is a caller that waits forever, not a status that never changes.
     """
     cursor = QuietClock()
     cursor.begin_quiet(0.0)
 
-    # Six screen windows go by, each one throttling the screen clock.
+    # Enough screen windows to exceed the rescue timeout, each one
+    # throttling the screen clock.
     t = 0.0
-    for _ in range(6):
+    while t <= RESCUE_TIMEOUT:
         t += AWAITING_INPUT_TIMEOUT + 0.5
         assert cursor.screen_quiet_for(t) > AWAITING_INPUT_TIMEOUT
         cursor.screen_quiet_since = t
 
-    # The rescue clock has been counting that whole minute regardless.
+    # The rescue clock has been counting that whole time regardless.
     assert cursor.rescue_quiet_for(t) == t
     assert cursor.rescue_quiet_for(t) > RESCUE_TIMEOUT
 
@@ -361,11 +368,13 @@ def test_new_bytes_restart_the_rescue_clock_too():
 # ---- rescuing a job whose turn end was never read ---------------------
 
 
-class ScreenObserver:
-    """Just enough observer for `_rescue_jobs`, which reads one method.
+class ScreenObserver(HarnessObserver):
+    """Just enough observer for `_rescue_jobs`, which reads `screen_reading`.
 
-    An observer and not a harness: rescue is observation, so the reducer is
-    handed only that half and never sees the object that launches anything.
+    Inherits the default `screen_reading` shim, which derives a reading from
+    `is_idle_screen`. An observer and not a harness: rescue is observation,
+    so the reducer is handed only that half and never sees the object that
+    launches anything.
     """
 
     has_transcript = True
@@ -521,6 +530,116 @@ async def test_rescue_still_releases_every_waiting_caller(registry):
     await observer._rescue_jobs(p.id, screen, clock)
     assert str(jobs.get("h1").state) == "done"
     assert str(jobs.get("h2").state) == "done"
+
+
+# ---- the screen-to-status mapping in `_check_idle_screen` -------------
+#
+# The transcript can only settle IDLE or WORKING. An approval modal shows
+# up as silence in the transcript, so the participant settles IDLE and the
+# old gate — which only checked when status was WORKING — was closed before
+# it was ever reached. The rewrite runs for any non-DEAD status.
+
+
+class ReadingObserver:
+    """An observer whose `screen_reading` returns a canned `ScreenReading`.
+
+    Implements `is_idle_screen` only to satisfy the ABC; the reducer never
+    calls it when `screen_reading` is overridden.
+    """
+
+    has_transcript = True
+
+    def __init__(self, reading: ScreenReading):
+        self._reading = reading
+
+    def is_idle_screen(self, capture: str) -> bool:
+        return self._reading.kind is ScreenKind.PROMPT
+
+    def screen_reading(self, capture: str) -> ScreenReading:
+        return self._reading
+
+
+def screen_checked(registry, *, reading: ScreenReading, status=Status.IDLE):
+    """A participant and an observer whose screen returns the given reading.
+
+    `_capture` is monkey-patched so no subprocess is spawned.
+    """
+    observer = Observer(registry, harnesses={})
+    p = registry.register(harness="vibe", pane="%1", cwd="/tmp")
+    registry.set_status(p.id, status)
+
+    async def capture_pane(_pane):
+        return "$ "
+
+    observer._capture = capture_pane
+    return observer, ReadingObserver(reading), p
+
+
+@pytest.mark.asyncio
+async def test_an_idle_participant_at_an_approval_screen_becomes_awaiting_input(
+    registry,
+):
+    """The regression: the old gate only checked when status was WORKING.
+
+    A finished turn settles IDLE, so the participant was never screen-checked
+    and AWAITING_INPUT was unreachable in the common case.
+    """
+    observer, screen, p = screen_checked(
+        registry,
+        reading=ScreenReading(ScreenKind.APPROVAL, ScreenConfidence.LOW),
+    )
+    await observer._check_idle_screen(p.id, screen)
+    assert registry.get(p.id).status is Status.AWAITING_INPUT
+
+
+@pytest.mark.asyncio
+async def test_a_working_participant_at_a_prompt_becomes_idle(registry):
+    """The turn ended without an observed boundary.
+
+    Settling IDLE is correct, and it is not safe to leave it to the rescue
+    timer: `_rescue_jobs` does not touch participant status, so the
+    participant would read WORKING forever.
+    """
+    observer, screen, p = screen_checked(
+        registry,
+        reading=ScreenReading(ScreenKind.PROMPT, ScreenConfidence.LOW),
+        status=Status.WORKING,
+    )
+    await observer._check_idle_screen(p.id, screen)
+    assert registry.get(p.id).status is Status.IDLE
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_screen_reading_leaves_the_status_untouched(registry):
+    """UNKNOWN says nothing the reducer can act on."""
+    observer, screen, p = screen_checked(
+        registry,
+        reading=ScreenReading(ScreenKind.UNKNOWN, ScreenConfidence.LOW),
+        status=Status.WORKING,
+    )
+    await observer._check_idle_screen(p.id, screen)
+    assert registry.get(p.id).status is Status.WORKING
+
+    # And from IDLE, it stays IDLE.
+    observer2, screen2, p2 = screen_checked(
+        registry,
+        reading=ScreenReading(ScreenKind.UNKNOWN, ScreenConfidence.LOW),
+        status=Status.IDLE,
+    )
+    await observer2._check_idle_screen(p2.id, screen2)
+    assert registry.get(p2.id).status is Status.IDLE
+
+
+@pytest.mark.asyncio
+async def test_a_dead_participant_is_never_screen_checked(registry):
+    """DEAD is terminal; a capture-pane on a dead pane is wasted work."""
+    observer, screen, p = screen_checked(
+        registry,
+        reading=ScreenReading(ScreenKind.APPROVAL, ScreenConfidence.HIGH),
+        status=Status.DEAD,
+    )
+    await observer._check_idle_screen(p.id, screen)
+    assert registry.get(p.id).status is Status.DEAD
 
 
 # ---- a harness that brings its own source ------------------------------
