@@ -26,7 +26,9 @@ from theater.daemon.rails import (
 )
 from theater.daemon.spawner import SpawnRequest
 from theater.harness import HARNESSES, describe, normalize, supports_model
+from theater.harness.observation import ScreenConfidence, ScreenKind
 from theater.models import (
+    AwaitingDecision,
     BadRequest,
     Busy,
     HumanPresent,
@@ -466,6 +468,75 @@ async def _check_pane_identity(
         )
 
 
+async def _check_approval_modal(
+    daemon, target, refuse: Callable[..., NoReturn]
+) -> None:
+    """Refuse to type into a pane showing an approval or trust modal.
+
+    At an approval prompt, Enter is a button press, so an injected prompt can
+    auto-approve a tool call the human never saw — the one false positive with
+    an unrecoverable cost (`docs/v1.6_observation.md` lines 88-91). This gate
+    captures a fresh screen reading and refuses only when the kind is
+    `APPROVAL` or `TRUST` at `HIGH` confidence. Everything else — `UNKNOWN`,
+    `WORKING`, `PROMPT`, and low-confidence `APPROVAL` — lets the send
+    through.
+
+    Why a fresh capture, not the stored `Status`: v1.7 planned this exact gate
+    ("C3, the modal veto") and dropped it for two reasons
+    (`docs/v1.7_hardening.md` lines 223-228). (a) `is_idle_screen` is a boolean
+    and cannot separate "waiting at its input prompt" from "showing an approval
+    modal", so a veto would block ordinary idle panes. (b) It explicitly rejects
+    gating on `AWAITING_INPUT`, a display hint tuned to accept false negatives,
+    because using it as a control signal would make a stuck `WORKING` pane
+    unreachable. Both are answered now: (a) by `ScreenReading`, which carries
+    a `kind` plus a `confidence`; (b) by reading a fresh capture, not the
+    stored status. A stuck pane reads `working` or `unknown`, never
+    `approval`, so it stays reachable. Reading the status instead would also be
+    stale by up to a poll interval.
+
+    The `high` requirement is the safety margin. A false refusal makes a
+    healthy pane permanently unreachable, so only a marker verified against a
+    real captured screen may block a caller. The default `screen_reading` shim
+    never returns `approval` at all — it maps to `prompt`/`unknown`, both at
+    `low` — so a third-party plugin that only implements the old boolean can
+    never accidentally brick a pane.
+
+    Fails open, like `_check_pane_identity`: if the capture or the harness
+    lookup raises, log it and let the send through. A gate that turns a
+    transient tmux error into an unreachable pane is worse than the risk it
+    removes (`docs/v1.7_hardening.md` lines 234-238).
+    """
+    harness = HARNESSES.get(normalize(target.harness))
+    if harness is None:
+        return
+
+    try:
+        capture = await tmux.run(
+            "capture-pane", "-p", "-t", target.tmux_pane, check=False
+        )
+    except Exception as exc:  # pragma: no cover - tmux failing mid-send
+        logger.warning("approval-modal capture failed for %s: %s", target.id, exc)
+        return
+
+    try:
+        reading = harness.observer.screen_reading(capture)
+    except Exception as exc:  # pragma: no cover - third-party observer
+        logger.warning("screen_reading failed for %s: %s", target.id, exc)
+        return
+
+    if (
+        reading.kind in (ScreenKind.APPROVAL, ScreenKind.TRUST)
+        and reading.confidence == ScreenConfidence.HIGH
+    ):
+        refuse(
+            AwaitingDecision(
+                f"pane {target.tmux_pane} of {target.id!r} is showing an "
+                f"approval modal ({reading.kind}); not injecting"
+            ),
+            reason="awaiting_decision",
+        )
+
+
 @method("send")
 async def _send(daemon, params: dict) -> dict:
     """Send a prompt to an already-running agent by pasting into its pane."""
@@ -500,6 +571,11 @@ async def _send(daemon, params: dict) -> dict:
             HumanPresent(f"a human is present at {target.tmux_pane}; not injecting"),
             reason="human_present",
         )
+
+    # A human is not at the pane; check whether the pane itself is waiting on
+    # a human decision. This costs a capture-pane, so it runs after the
+    # cheaper presence check.
+    await _check_approval_modal(daemon, target, refuse)
 
     # Busy is "someone is already waiting on a turn from this participant",
     # which is any running job that carried a prompt — a spawn prompt occupies
