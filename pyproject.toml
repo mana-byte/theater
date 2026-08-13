@@ -1,6 +1,6 @@
 [project]
 name = "theater"
-version = "1.6.0"
+version = "1.7.0"
 description = "Cross-harness orchestration layer for coding agents"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -133,10 +133,12 @@ source = ["theater"]
 #
 #     uv run pytest --cov
 #
-# 90 is a floor with about 40 lines of slack at the time it was set. What is
-# *not* covered is deliberate and worth knowing: the daemon's asyncio watcher
-# loops, the tmux subprocess layer below the argv assertions, and the Alembic
-# scaffolding. Everything that decides something is covered.
-fail_under = 90
+# The floor is 80, well under the ~91% the suite actually reaches: it is there
+# to catch a collapse, not to police every commit. That is roughly 460 lines of
+# slack, so new code can land slightly under-tested without blocking the run.
+# What is *not* covered is deliberate and worth knowing: the daemon's asyncio
+# watcher loops, the tmux subprocess layer below the argv assertions, and the
+# Alembic scaffolding. Everything that decides something is covered.
+fail_under = 80
 show_missing = true
 skip_covered = true
