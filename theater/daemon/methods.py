@@ -31,7 +31,9 @@ from theater.models import (
     Busy,
     HumanPresent,
     JobState,
+    NoSelfKill,
     NotAddressable,
+    NotYourChild,
     StaleTarget,
     Status,
     now,
@@ -53,6 +55,19 @@ METHODS: dict[str, Handler] = {}
 #: minutes is longer than any turn observed in practice, and a caller that
 #: still wants more can simply await again — the job keeps running either way.
 MAX_AWAIT = 300.0
+
+#: How long a running send job keeps its exclusive claim on a pane. `send`
+#: types the prompt into the pane and creates a job, but nothing verifies the
+#: prompt reached the agent — a human at the pane can clear the composer (Esc),
+#: and the prompt never enters the transcript. The job stays RUNNING, the
+#: observer never sees a matching turn end, and the rescue timer cannot fire
+#: on a participant that is actively working (every transcript event resets
+#: the quiet clock). Past this TTL the job stops blocking the pane; it is not
+#: finished, and the observer may still answer it, it has only lost its
+#: reservation. Five minutes is long enough that a genuinely queued prompt
+#: has had every chance to be read, and short enough that a lost one does not
+#: wedge the participant for the rest of the session.
+SEND_CLAIM_TTL = 300.0
 
 
 def method(name: str) -> Callable[[Handler], Handler]:
@@ -118,6 +133,23 @@ async def _status(daemon, params: dict) -> dict:
 @method("participant.kill")
 async def _kill(daemon, params: dict) -> dict:
     pid = _require(params, "id")
+    caller_id = params.get("caller_id") or "cli"
+
+    target = daemon.registry.get(pid)
+
+    if caller_id != "cli":
+        if target.id == caller_id:
+            raise NoSelfKill(
+                f"refusing to kill {pid!r}: that is you, not your child"
+            )
+        if target.parent_id != caller_id:
+            raise NotYourChild(
+                f"refusing to kill {pid!r}: its parent is "
+                f"{target.parent_id!r}, not you ({caller_id!r})"
+            )
+        if target.status is Status.DEAD:
+            return {"id": pid, "killed": False, "reason": "already_dead"}
+
     await daemon.spawner.kill(pid)
     return {"id": pid, "killed": True}
 
@@ -249,7 +281,7 @@ async def _jobs_await(daemon, params: dict) -> list[dict]:
     handles = params.get("handles") or []
     if not handles:
         raise BadRequest("at least one handle is required")
-    max_wait = min(max(float(params.get("max_wait", 60.0)), 0.0), MAX_AWAIT)
+    max_wait = min(max(float(params.get("max_wait", 150.0)), 0.0), MAX_AWAIT)
     caller_id = params.get("caller_id")
 
     known = {h: daemon.jobs.get(h) for h in handles}
@@ -479,7 +511,22 @@ async def _send(daemon, params: dict) -> dict:
     # and has been wrong before; a stuck WORKING would silently make a
     # participant unreachable, and that failure is worse than a prompt landing
     # while a human's turn is still running.
-    if [j for j in daemon.store.running_jobs_for_target(target_id) if j.prompt]:
+    #
+    # The same argument applies to a stuck job. A running job is an
+    # unverifiable claim that a prompt sits in the pane's queue — `send`
+    # typed it, but nothing confirms the agent received it, and a human at the
+    # pane can clear the composer before it is read. A job that has held its
+    # reservation past `SEND_CLAIM_TTL` is dropped from this check: it is not
+    # finished, and the observer may still answer it if a matching turn end
+    # arrives, but it no longer blocks the pane. This is the exception the
+    # paragraph above already makes for a stuck status, extended to the case
+    # it missed.
+    stale = now() - SEND_CLAIM_TTL
+    if [
+        j
+        for j in daemon.store.running_jobs_for_target(target_id)
+        if j.prompt and j.created_at > stale
+    ]:
         refuse(
             Busy(f"participant {target_id!r} has a running send job"),
             reason="busy",

@@ -195,7 +195,7 @@ async def register_pane(session: Session, *, pane: str) -> dict:
 
 
 async def await_sessions(
-    session: Session, *, handles: list[str], max_wait: float = 60.0
+    session: Session, *, handles: list[str], max_wait: float = 150.0
 ) -> list[dict]:
     """Wait for spawned child sessions to finish, up to max_wait seconds.
 
@@ -248,6 +248,37 @@ async def send_prompt(
     )
     assert isinstance(record, dict)
     return record
+
+
+async def put_child_back_in_the_wound(
+    session: Session, *, target_id: str
+) -> dict:
+    """Kill a child agent that the caller spawned.
+
+    The permission check lives in the daemon, not here: ``participant.kill``
+    refuses unless the target's ``parent_id`` equals ``caller_id``. This
+    body is a thin pass-through that adds ``caller_id``, exactly as
+    ``send_prompt`` does — so the gate covers every caller that identifies
+    itself, including ``theater kill`` from an agent's shell tool, which a
+    body-only check would have missed.
+
+    **Side effect: destroying a worktree child erases uncommitted work.**
+    If the child was spawned with ``worktree=True``, killing it removes
+    the git worktree and deletes its branch. Commits already made on the
+    branch are lost with the branch; uncommitted changes in the worktree
+    are lost irreversibly. This is the daemon's behaviour, not a choice
+    this tool makes, but it is the one fact the caller must know before
+    calling — there is no confirmation prompt, and no undo.
+    """
+    if not session._resolved:
+        await session.identify()
+    result = await session.client.call(
+        "participant.kill",
+        id=target_id,
+        caller_id=session.participant_id,
+    )
+    assert isinstance(result, dict)
+    return result
 
 
 async def read_transcript(

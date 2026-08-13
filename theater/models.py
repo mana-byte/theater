@@ -181,3 +181,27 @@ class StaleTarget(TheaterError):
     """
 
     code = "stale_target"
+
+
+class NotYourChild(TheaterError):
+    """A kill was attempted on a participant the caller did not spawn.
+
+    Covers a sibling, a parent, a stranger, or a grandchild — anything whose
+    ``parent_id`` is not the caller's id. Distinct from a plain ``NotFound``,
+    which says the id does not exist at all: this one says it does, and it is
+    not yours to kill. The caller learns nothing it did not already know from
+    ``list_participants``, because the check runs after the record is fetched.
+    """
+
+    code = "not_your_child"
+
+
+class NoSelfKill(TheaterError):
+    """A kill was attempted on the caller's own participant id.
+
+    Separate from ``NotYourChild`` because the failure is different: the id
+    exists and the lineage is known, but self-termination through this path
+    is refused. An agent that needs to stop should exit its own process.
+    """
+
+    code = "no_self_kill"

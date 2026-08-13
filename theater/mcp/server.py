@@ -157,13 +157,13 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
 
     @mcp.tool()
     async def await_sessions(
-        handles: list[str], max_wait: float = 60.0
+        handles: list[str], max_wait: float = 150.0
     ) -> list[dict]:
         """Wait for spawned child sessions to finish.
 
         handles:   the handle values returned by spawn_session (same as the
                    participant id).
-        max_wait:  maximum seconds to block. Default 60. If the timeout
+        max_wait:  maximum seconds to block. Default 150. If the timeout
                    expires, jobs still running are returned with state="running"
                    and you should re-await.
 
@@ -214,6 +214,38 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         """
         return await tools.read_transcript(
             session, target_id=target_id, last_n=last_n
+        )
+
+    @mcp.tool()
+    async def put_child_back_in_the_wound(target_id: str) -> dict:
+        """Kill a child agent that you spawned.
+
+        Only a direct child of yours can be killed: the daemon enforces
+        that the target's parent_id equals your own participant id. This
+        check covers every caller that identifies itself — including
+        `theater kill` from an agent's shell tool — because it lives in
+        the daemon, not in this tool body.
+
+        target_id: the participant id of the child to kill.
+
+        Refuses with `no_self_kill` if the target is you. Refuses with
+        `not_your_child` if the target exists but is not your child
+        (a sibling, a parent, a stranger, or a grandchild). A target
+        that does not exist arrives as `not_found`. A target that is
+        already dead is a no-op that returns {"killed": false,
+        "reason": "already_dead"} rather than an error — killing a
+        dead thing is not a failure.
+
+        **Side effect: destroying a worktree child erases uncommitted
+        work.** If the child was spawned with worktree=True, killing
+        it removes the git worktree and deletes its branch. Commits
+        already made on the branch are lost with the branch; uncommitted
+        changes in the worktree are lost irreversibly. There is no
+        confirmation prompt and no undo. This is the single most
+        important fact to know before calling.
+        """
+        return await tools.put_child_back_in_the_wound(
+            session, target_id=target_id
         )
 
     return mcp
