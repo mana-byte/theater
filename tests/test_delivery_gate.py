@@ -348,3 +348,42 @@ async def test_a_real_move_is_still_announced(registry, store):
 
     assert [e["payload"]["pane"] for e in moves] == ["%5"]
     assert registry.get(p.id).pid == 555
+
+
+# ---- copy mode: the one presence signal that is a tmux fact ---------------
+
+
+async def _in_mode(monkeypatch, answer):
+    """`human_present` over a tmux that reports `answer` for pane_in_mode."""
+    from theater.tmux import presence
+
+    async def fake_run(*args, **kw):
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(presence, "run", fake_run)
+    return await presence.human_present("%1")
+
+
+async def test_copy_mode_counts_as_a_human_at_the_pane(monkeypatch):
+    """Injecting here would wipe the selection the user is in the middle of."""
+    assert await _in_mode(monkeypatch, "1") is True
+
+
+async def test_a_pane_in_no_mode_is_free_to_receive(monkeypatch):
+    assert await _in_mode(monkeypatch, "0") is False
+
+
+async def test_an_empty_answer_is_not_read_as_presence(monkeypatch):
+    """tmux prints nothing for a pane it cannot format; that is not a human."""
+    assert await _in_mode(monkeypatch, "") is False
+
+
+async def test_a_tmux_that_cannot_be_asked_does_not_block_forever(monkeypatch):
+    """Refusing on error would strand every send behind a transient tmux failure.
+
+    The safe direction here is the opposite of the pane-liveness gate: this
+    check only decides whether to queue, and the liveness gate still runs.
+    """
+    assert await _in_mode(monkeypatch, RuntimeError("no server")) is False

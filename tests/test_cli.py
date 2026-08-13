@@ -465,3 +465,343 @@ def test_restart_refuses_to_start_a_second_daemon(monkeypatch, capsys):
 
 def _explode_on_call(*a, **k):
     raise AssertionError("started a daemon while the old one was still up")
+
+
+# ---- command bodies ------------------------------------------------------
+#
+# Everything above tests rendering against dicts. These test the commands
+# themselves: what they ask the daemon for, what they print, and what they
+# return. `call_sync` is the seam — it is the only thing between a command and
+# a socket, and the socket itself is covered in test_daemon.py.
+
+
+@pytest.fixture
+def answers(monkeypatch):
+    """Replace call_sync with a canned-answer recorder."""
+    state = {"replies": {}, "calls": []}
+
+    def call_sync(method, **params):
+        state["calls"].append((method, params))
+        reply = state["replies"].get(method, [])
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(cli, "call_sync", call_sync)
+    return state
+
+
+def test_ls_prints_participants_and_unmanaged_panes(answers, capsys):
+    answers["replies"] = {"participants.list": [ROW], "participants.unmanaged": []}
+    assert cli.cmd_ls(parse("ls")) == 0
+    assert "p-abc123" in capsys.readouterr().out
+
+
+def test_ls_json_carries_both_lists(answers, capsys):
+    answers["replies"] = {
+        "participants.list": [ROW],
+        "participants.unmanaged": [{"pane": "%9"}],
+    }
+    assert cli.cmd_ls(parse("ls", "--json")) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["participants"] == [ROW]
+    assert payload["unmanaged"] == [{"pane": "%9"}]
+
+
+def test_ls_tree_does_not_ask_for_unmanaged_panes(answers):
+    """The tree is lineage; a pane with no participant has no place in it."""
+    answers["replies"] = {"participants.tree": [ROW]}
+    assert cli.cmd_ls(parse("ls", "--tree")) == 0
+    assert [m for m, _ in answers["calls"]] == ["participants.tree"]
+
+
+def test_ls_all_asks_for_the_dead_too(answers):
+    answers["replies"] = {"participants.list": [], "participants.unmanaged": []}
+    cli.cmd_ls(parse("ls", "--all"))
+    assert answers["calls"][0] == ("participants.list", {"include_dead": True})
+
+
+def test_kill_names_what_it_killed(answers, capsys):
+    assert cli.cmd_kill(parse("kill", "p-abc123")) == 0
+    assert answers["calls"] == [("participant.kill", {"id": "p-abc123"})]
+    assert "killed p-abc123" in capsys.readouterr().out
+
+
+def test_bus_with_no_events_says_so(answers, capsys):
+    answers["replies"] = {"bus.tail": []}
+    assert cli.cmd_bus(parse("bus")) == 0
+    assert "no events" in capsys.readouterr().out
+
+
+def test_bus_filters_by_kind_prefix(answers, capsys):
+    answers["replies"] = {
+        "bus.tail": [
+            {"id": 1, "ts": 0, "kind": "agent.assistant", "from_id": "a", "to_id": None,
+             "payload": {"text": "hi"}},
+            {"id": 2, "ts": 0, "kind": "job.created", "from_id": "a", "to_id": "b",
+             "payload": {}},
+        ]
+    }
+    assert cli.cmd_bus(parse("bus", "--kind", "agent")) == 0
+    out = capsys.readouterr().out
+    assert "agent.assistant" in out
+    assert "job.created" not in out
+
+
+def test_adopt_without_a_pane_explains_itself(monkeypatch, capsys):
+    monkeypatch.setattr(cli.tmux, "current_pane", lambda: None)
+    assert cli.cmd_adopt(parse("adopt")) == 1
+    assert "$TMUX_PANE" in capsys.readouterr().err
+
+
+def test_adopt_reports_the_record_it_got_back(answers, monkeypatch, capsys):
+    monkeypatch.setattr(cli.tmux, "current_pane", lambda: "%7")
+    answers["replies"] = {
+        "adopt": {"id": "p-xyz", "tier": "adopted", "harness": "vibe", "tmux_pane": "%7"}
+    }
+    assert cli.cmd_adopt(parse("adopt")) == 0
+    out = capsys.readouterr().out
+    assert "p-xyz" in out
+    assert "%7" in out
+    assert answers["calls"][0][1]["pane"] == "%7"
+
+
+def test_adopt_json_prints_the_record_verbatim(answers, monkeypatch, capsys):
+    monkeypatch.setattr(cli.tmux, "current_pane", lambda: "%7")
+    record = {"id": "p-xyz", "tier": "adopted", "harness": "vibe", "tmux_pane": "%7"}
+    answers["replies"] = {"adopt": record}
+    assert cli.cmd_adopt(parse("adopt", "--json")) == 0
+    assert json.loads(capsys.readouterr().out) == record
+
+
+def test_stats_with_nothing_recorded_says_so(answers, capsys):
+    answers["replies"] = {"stats": {"harnesses": [], "refusals": []}}
+    assert cli.cmd_stats(parse("stats")) == 0
+    assert "no turns recorded" in capsys.readouterr().out
+
+
+def test_stats_json_is_the_daemon_answer(answers, capsys):
+    data = {"since": 0, "harnesses": [], "refusals": []}
+    answers["replies"] = {"stats": data}
+    assert cli.cmd_stats(parse("stats", "--json")) == 0
+    assert json.loads(capsys.readouterr().out) == data
+
+
+# ---- spawn ---------------------------------------------------------------
+
+
+def test_spawn_passes_the_prompt_and_the_cwd(answers, monkeypatch, capsys):
+    monkeypatch.setattr(cli.tmux, "current_session_sync", lambda: "main")
+    answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
+    assert cli.cmd_spawn(parse("spawn", "vibe", "say hello", "--approval", "manual")) == 0
+    method, params = answers["calls"][0]
+    assert method == "spawn"
+    assert params["harness"] == "vibe"
+    assert params["prompt"] == "say hello"
+    assert params["tmux_session"] == "main"
+    assert "p-new" in capsys.readouterr().out
+
+
+def test_spawn_json_prints_the_record_verbatim(answers, monkeypatch, capsys):
+    monkeypatch.setattr(cli.tmux, "current_session_sync", lambda: "main")
+    answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
+    assert cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual", "--json")) == 0
+    assert json.loads(capsys.readouterr().out)["id"] == "p-new"
+
+
+def test_spawn_rejects_an_unknown_harness_by_name(monkeypatch):
+    """Not argparse `choices`: declared harnesses arrive after the parser."""
+    with pytest.raises(cli.BadUsage) as exc:
+        cli._spawn_harness(parse("spawn", "nosuch", "hi", "--approval", "manual"))
+    assert "unknown harness" in str(exc.value)
+    assert "--prompt" in str(exc.value), "the likely mistake is naming a prompt"
+
+
+def test_spawn_with_no_harness_and_no_favourite_says_how_to_fix_it():
+    with pytest.raises(cli.BadUsage) as exc:
+        cli._spawn_harness(parse("spawn", "--prompt", "hi", "--approval", "manual"))
+    assert "favourite" in str(exc.value)
+
+
+def test_spawn_falls_back_to_the_configured_favourite(monkeypatch):
+    from theater.config import Config, TheaterSection
+
+    monkeypatch.setattr(
+        cli.config, "load", lambda: Config(theater=TheaterSection(favourite="vibe"))
+    )
+    assert cli._spawn_harness(parse("spawn", "--prompt", "hi", "--approval", "manual")) == "vibe"
+
+
+def test_a_favourite_that_is_not_a_harness_is_an_error(monkeypatch):
+    from theater.config import Config, TheaterSection
+
+    monkeypatch.setattr(
+        cli.config, "load", lambda: Config(theater=TheaterSection(favourite="ghost"))
+    )
+    with pytest.raises(cli.BadUsage) as exc:
+        cli._spawn_harness(parse("spawn", "--prompt", "hi", "--approval", "manual"))
+    assert "not a known harness" in str(exc.value)
+
+
+# ---- long-running commands ----------------------------------------------
+
+
+class _Stop(Exception):
+    """Ends a follow loop the way ctrl-c would, without the signal."""
+
+
+class _FollowClient:
+    """A daemon that answers a fixed script, then ends the loop.
+
+    `_watch_ls` and `_follow_bus` never return on their own, so the script
+    running out is how the test gets control back.
+    """
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.calls: list[tuple[str, dict]] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def call(self, method, **params):
+        self.calls.append((method, params))
+        if not self.script:
+            raise _Stop
+        return self.script.pop(0)
+
+
+def test_ls_watch_redraws_a_whole_frame_each_time(monkeypatch, capsys):
+    """A partial redraw would leave the previous frame's rows on screen."""
+    client = _FollowClient([[ROW], [], [ROW], []])
+    monkeypatch.setattr(cli, "DaemonClient", lambda: client)
+    with pytest.raises(_Stop):
+        cli.cmd_ls(parse("ls", "--watch", "--interval", "0"))
+    out = capsys.readouterr().out
+    assert out.count(cli._CLEAR) == 2, "one screen clear per frame"
+    assert out.count("p-abc123") == 2
+
+
+def test_ls_watch_in_tree_mode_never_asks_for_unmanaged_panes(monkeypatch):
+    """Unmanaged panes have no place in a lineage tree — no parent, no children."""
+    client = _FollowClient([[ROW]])
+    monkeypatch.setattr(cli, "DaemonClient", lambda: client)
+    with pytest.raises(_Stop):
+        cli.cmd_ls(parse("ls", "--watch", "--tree", "--interval", "0"))
+    assert [m for m, _ in client.calls] == ["participants.tree", "participants.tree"]
+
+
+def test_follow_says_when_the_feed_fell_behind(monkeypatch, capsys):
+    """A burst larger than one batch drops the middle; silence would look complete."""
+    client = _FollowClient([
+        [{"id": 1, "ts": 0, "kind": "agent.user", "actor_id": "p-a", "payload": {}}],
+        [{"id": 5, "ts": 0, "kind": "agent.user", "actor_id": "p-a", "payload": {}}],
+    ])
+    monkeypatch.setattr(cli, "DaemonClient", lambda: client)
+    with pytest.raises(_Stop):
+        cli.cmd_bus(parse("bus", "-f", "--interval", "0"))
+    assert "3 events dropped" in capsys.readouterr().out
+
+
+def test_follow_holds_its_cursor_across_an_empty_poll(monkeypatch, capsys):
+    """Advancing on nothing would skip whatever the daemon writes next."""
+    client = _FollowClient([
+        [{"id": 7, "ts": 0, "kind": "agent.user", "actor_id": "p-a", "payload": {}}],
+        [],
+    ])
+    monkeypatch.setattr(cli, "DaemonClient", lambda: client)
+    with pytest.raises(_Stop):
+        cli.cmd_bus(parse("bus", "-f", "--interval", "0"))
+    assert [p.get("after_id") for _, p in client.calls] == [None, 7, 7]
+
+
+def test_follow_starts_from_zero_when_the_bus_is_empty(monkeypatch):
+    client = _FollowClient([[]])
+    monkeypatch.setattr(cli, "DaemonClient", lambda: client)
+    with pytest.raises(_Stop):
+        cli.cmd_bus(parse("bus", "-f", "--interval", "0"))
+    assert client.calls[1][1]["after_id"] == 0
+
+
+def test_regie_refuses_to_run_outside_tmux(monkeypatch, capsys):
+    monkeypatch.setattr(cli.tmux, "inside_tmux", lambda: False)
+    assert cli.cmd_regie(parse("regie")) == 1
+    assert "inside tmux" in capsys.readouterr().err
+
+
+def test_regie_hands_the_config_to_the_app(monkeypatch):
+    import theater.regie.app as app_mod
+
+    monkeypatch.setattr(cli.tmux, "inside_tmux", lambda: True)
+    seen: list = []
+    monkeypatch.setattr(app_mod, "run_regie", seen.append)
+    assert cli.cmd_regie(parse("regie")) == 0
+    assert seen and seen[0].regie is not None
+
+
+def test_daemon_reports_a_refusal_to_start(monkeypatch, capsys):
+    import theater.daemon.server as server_mod
+
+    async def refuse():
+        raise RuntimeError("another daemon holds the lock")
+
+    monkeypatch.setattr(server_mod, "run", refuse)
+    assert cli.cmd_daemon(parse("daemon")) == 1
+    assert "another daemon" in capsys.readouterr().err
+
+
+def test_daemon_exits_quietly_on_ctrl_c(monkeypatch):
+    import theater.daemon.server as server_mod
+
+    async def interrupted():
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(server_mod, "run", interrupted)
+    assert cli.cmd_daemon(parse("daemon")) == 0
+
+
+def test_mcp_serves_the_id_it_was_given(monkeypatch):
+    import theater.mcp.server as server_mod
+
+    seen: list = []
+    monkeypatch.setattr(server_mod, "main", lambda pid, harness: seen.append((pid, harness)))
+    assert cli.cmd_mcp(parse("mcp", "--id", "p-abc", "--harness", "vibe")) == 0
+    assert seen == [("p-abc", "vibe")]
+
+
+# ---- main ----------------------------------------------------------------
+
+
+def test_main_dispatches_to_the_named_command(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "call_sync", lambda m, **p: [])
+    assert cli.main(["ls"]) == 0
+
+
+def test_main_turns_a_remote_error_into_one_line(monkeypatch, capsys):
+    def fail(method, **params):
+        raise RemoteError("busy", "target is mid-turn")
+
+    monkeypatch.setattr(cli, "call_sync", fail)
+    assert cli.main(["kill", "p-abc"]) == 1
+    assert "busy: target is mid-turn" in capsys.readouterr().err
+
+
+def test_main_turns_an_unreachable_daemon_into_one_line(monkeypatch, capsys):
+    def fail(method, **params):
+        raise ConnectionError("no daemon at /tmp/theater.sock")
+
+    monkeypatch.setattr(cli, "call_sync", fail)
+    assert cli.main(["kill", "p-abc"]) == 1
+    assert "no daemon" in capsys.readouterr().err
+
+
+def test_ctrl_c_out_of_a_follow_is_not_a_crash(monkeypatch):
+    """`bus -f` and `ls --watch` are ended this way; 130 is what a shell expects."""
+    def interrupt(method, **params):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "call_sync", interrupt)
+    assert cli.main(["kill", "p-abc"]) == 130

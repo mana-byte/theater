@@ -6,3 +6,7 @@ build/
 *.egg-info/
 .pytest_cache/
 .theater/
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/

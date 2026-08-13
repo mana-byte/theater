@@ -38,6 +38,7 @@ dev = [
     "mypy>=2.3.0",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    "pytest-cov>=7.1.0",
     "ruff>=0.16.2",
 ]
 
@@ -119,3 +120,23 @@ testpaths = ["tests"]
 markers = [
     "tmux: drives a real tmux server; skipped when tmux is not installed",
 ]
+
+[tool.coverage.run]
+source = ["theater"]
+# Line coverage only. Branch coverage is a separate, stricter decision: it would
+# drop the number ~5 points overnight and most of the new misses would be
+# defensive `if not x: return` arms that no test should have to stage.
+
+[tool.coverage.report]
+# The gate. Not wired into `addopts`, because that would make `pytest
+# tests/test_cli.py` fail for measuring one file — run it deliberately:
+#
+#     uv run pytest --cov
+#
+# 90 is a floor with about 40 lines of slack at the time it was set. What is
+# *not* covered is deliberate and worth knowing: the daemon's asyncio watcher
+# loops, the tmux subprocess layer below the argv assertions, and the Alembic
+# scaffolding. Everything that decides something is covered.
+fail_under = 90
+show_missing = true
+skip_covered = true
