@@ -250,6 +250,93 @@ async def send_prompt(
     return record
 
 
+class KillRefused(Exception):
+    """A kill the caller asked for that the tool body refused to forward.
+
+    Carries a machine-readable `code` and a sentence a model can act on,
+    the same shape `send`'s refusals take (`human_present`, `busy`).
+    """
+
+    def __init__(self, code: str, message: str):
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.message = message
+
+
+#: Direct children only. A parent knows the ids of the participants it spawned;
+#: reaching further down the tree is the business of whoever is between. A
+#: grandchild's `parent_id` is not the caller's id, so it fails the check — and
+#: that is correct, because killing a grandchild silently destroys a subtree
+#: the caller may not even know is alive. The child that owns it can kill it.
+
+
+async def put_child_back_in_the_wound(
+    session: Session, *, target_id: str
+) -> dict:
+    """Kill a child agent that the caller spawned.
+
+    Only a direct child of the caller can be killed: the target's
+    ``parent_id`` must equal the caller's own participant id. This is
+    enforced in the tool body because the daemon's ``participant.kill``
+    has no permission check — wiring it straight through would let any
+    agent terminate its parent, its siblings, or itself.
+
+    Refuses with ``no_self_kill`` if the target is the caller, and with
+    ``not_your_child`` if the target's ``parent_id`` is not the caller
+    (this covers a sibling, a parent, a stranger, or a grandchild). A
+    target that is already dead is a no-op that says so, rather than an
+    error — killing a dead thing is not a failure.
+
+    **Side effect: destroying a worktree child erases uncommitted work.**
+    If the child was spawned with ``worktree=True``, killing it removes
+    the git worktree and deletes its branch. Commits already made on the
+    branch are lost with the branch; uncommitted changes in the worktree
+    are lost irreversibly. This is the daemon's behaviour, not a choice
+    this tool makes, but it is the one fact the caller must know before
+    calling — there is no confirmation prompt, and no undo.
+    """
+    if not session._resolved:
+        await session.identify()
+
+    me = session.participant_id
+
+    if target_id == me:
+        raise KillRefused(
+            "no_self_kill",
+            f"refusing to kill {target_id!r}: that is you, not your child",
+        )
+
+    try:
+        target = await session.client.call("participants.get", id=target_id)
+    except Exception as exc:
+        #: The daemon raises ``NotFound`` for an unknown id, which arrives
+        #: here as a ``RemoteError`` with code ``not_found``. Re-key it to
+        #: ``not_your_child`` so the refusal surface is uniform: a stranger
+        #: is not your child, whether it never existed or merely is not
+        #: yours.
+        raise KillRefused(
+            "not_your_child",
+            f"refusing to kill {target_id!r}: no such participant, "
+            f"or it is not your child",
+        ) from exc
+
+    assert isinstance(target, dict)
+
+    if target.get("status") == "dead":
+        return {"id": target_id, "killed": False, "reason": "already_dead"}
+
+    if target.get("parent_id") != me:
+        raise KillRefused(
+            "not_your_child",
+            f"refusing to kill {target_id!r}: its parent is "
+            f"{target.get('parent_id')!r}, not you ({me!r})",
+        )
+
+    result = await session.client.call("participant.kill", id=target_id)
+    assert isinstance(result, dict)
+    return result
+
+
 async def read_transcript(
     session: Session, *, target_id: str, last_n: int = 5
 ) -> dict:
