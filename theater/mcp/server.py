@@ -157,13 +157,13 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
 
     @mcp.tool()
     async def await_sessions(
-        handles: list[str], max_wait: float = 60.0
+        handles: list[str], max_wait: float = 150.0
     ) -> list[dict]:
         """Wait for spawned child sessions to finish.
 
         handles:   the handle values returned by spawn_session (same as the
                    participant id).
-        max_wait:  maximum seconds to block. Default 60. If the timeout
+        max_wait:  maximum seconds to block. Default 150. If the timeout
                    expires, jobs still running are returned with state="running"
                    and you should re-await.
 

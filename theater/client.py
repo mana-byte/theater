@@ -149,7 +149,7 @@ class DaemonClient:
         budget plus slack; everything else shares CALL_TIMEOUT.
         """
         if method == "jobs.await":
-            return float(params.get("max_wait", 60.0)) + CALL_TIMEOUT
+            return float(params.get("max_wait", 150.0)) + CALL_TIMEOUT
         return CALL_TIMEOUT
 
     async def call(self, method: str, **params) -> object:

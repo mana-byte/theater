@@ -281,7 +281,7 @@ async def _jobs_await(daemon, params: dict) -> list[dict]:
     handles = params.get("handles") or []
     if not handles:
         raise BadRequest("at least one handle is required")
-    max_wait = min(max(float(params.get("max_wait", 60.0)), 0.0), MAX_AWAIT)
+    max_wait = min(max(float(params.get("max_wait", 150.0)), 0.0), MAX_AWAIT)
     caller_id = params.get("caller_id")
 
     known = {h: daemon.jobs.get(h) for h in handles}

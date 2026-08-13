@@ -195,7 +195,7 @@ async def register_pane(session: Session, *, pane: str) -> dict:
 
 
 async def await_sessions(
-    session: Session, *, handles: list[str], max_wait: float = 60.0
+    session: Session, *, handles: list[str], max_wait: float = 150.0
 ) -> list[dict]:
     """Wait for spawned child sessions to finish, up to max_wait seconds.
 

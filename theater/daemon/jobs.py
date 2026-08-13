@@ -49,7 +49,7 @@ __all__ = ["Job", "JobKind", "JobManager", "JobState"]
 
 
 #: How long to wait for a job to finish if the caller does not specify.
-DEFAULT_MAX_WAIT = 60.0
+DEFAULT_MAX_WAIT = 150.0
 
 
 class JobManager:
