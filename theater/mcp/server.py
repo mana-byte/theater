@@ -220,6 +220,15 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
     async def put_child_back_in_the_wound(target_id: str) -> dict:
         """Kill a child agent that you spawned.
 
+        **Ask the user before every call, and wait for an explicit yes.**
+        The kill is destructive and cannot be undone, so the decision
+        belongs to the user, not to you. Put the question at the end of
+        your answer and stop there — for example: "May I clean up the
+        child sessions I spawned?" Name the children you mean, because an
+        approval covers only those: ask again for a different child, and
+        ask again on a later turn. An approval to spawn is not an approval
+        to kill, and neither is a general instruction to tidy up.
+
         Only a direct child of yours can be killed: the daemon enforces
         that the target's parent_id equals your own participant id. This
         check covers every caller that identifies itself — including
@@ -241,8 +250,9 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         it removes the git worktree and deletes its branch. Commits
         already made on the branch are lost with the branch; uncommitted
         changes in the worktree are lost irreversibly. There is no
-        confirmation prompt and no undo. This is the single most
-        important fact to know before calling.
+        confirmation prompt and no undo anywhere below this tool — the
+        user's yes is the only thing standing between a call and lost
+        work, which is why it has to be asked for every time.
         """
         return await tools.put_child_back_in_the_wound(
             session, target_id=target_id
