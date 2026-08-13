@@ -171,6 +171,32 @@ class HumanPresent(TheaterError):
     code = "human_present"
 
 
+class AwaitingDecision(TheaterError):
+    """The pane is showing an approval or trust modal, and typing would answer it.
+
+    A `send` is delivered by pasting into the target's tmux pane. At an
+    approval prompt, Enter is a button press, not text, so an injected prompt
+    can auto-approve a tool call the human never saw (`docs/v1.6_observation.md`
+    lines 88-91). This gate refuses a send when a fresh `capture-pane` reads
+    `approval` or `trust` at `high` confidence.
+
+    Temporary, unlike `NotAddressable` (permanent) and `StaleTarget` (the
+    address is dead): the modal is a transient screen the human will dismiss,
+    and the caller should retry. A stuck pane reads `working` or `unknown`,
+    never `approval`, so it stays reachable — which is why the gate reads a
+    fresh capture rather than the stored `Status`. `AWAITING_INPUT` is a
+    display hint tuned to accept false negatives; using it as a control signal
+    would make a stuck `WORKING` pane unreachable (`docs/v1.7_hardening.md`
+    lines 188-191, 223-228).
+
+    This gate also removes the only mechanism by which an agent could answer
+    a child's approval dialog. That is intended: the alternative is a parent
+    auto-approving a tool call the human never saw.
+    """
+
+    code = "awaiting_decision"
+
+
 class Busy(TheaterError):
     code = "busy"
 

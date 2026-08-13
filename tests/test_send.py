@@ -15,6 +15,12 @@ from __future__ import annotations
 import pytest
 
 from theater.daemon.jobs import JobState
+from theater.harness import HARNESSES, normalize
+from theater.harness.observation import (
+    ScreenConfidence,
+    ScreenKind,
+    ScreenReading,
+)
 from theater.protocol import RemoteError
 
 
@@ -208,3 +214,93 @@ async def test_send_bus_event(client, fake_tmux, daemon):
     send_event = next(e for e in events if e["kind"] == "agent.send")
     assert send_event["to_id"] == target["id"]
     assert "hi there" in send_event["payload"]["prompt"]
+
+
+# ---- approval modal gate -------------------------------------------------
+
+
+def _patch_screen_reading(monkeypatch, reading: ScreenReading) -> None:
+    """Replace the vibe observer's `screen_reading` with one that always returns `reading`.
+
+    The gate captures a pane and hands the text to the target's harness
+    observer. Tests cannot produce a real approval modal, so the observer is
+    replaced with a stub that returns a fixed reading regardless of capture.
+    """
+    harness = HARNESSES.get(normalize("vibe"))
+    assert harness is not None, "vibe must be registered for these tests"
+    monkeypatch.setattr(
+        harness.observer, "screen_reading", lambda capture: reading
+    )
+
+
+async def test_send_to_a_pane_showing_an_approval_modal_at_high_confidence_is_refused(
+    client, fake_tmux, daemon, monkeypatch
+):
+    """An approval modal at high confidence blocks the send."""
+    _patch_screen_reading(
+        monkeypatch,
+        ScreenReading(kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH),
+    )
+    target = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    with pytest.raises(RemoteError) as exc:
+        await client.call("send", target=target["id"], prompt="go ahead")
+    assert exc.value.code == "awaiting_decision"
+    assert len(fake_tmux.sent) == 0
+
+
+async def test_send_to_a_pane_showing_an_approval_modal_at_low_confidence_is_allowed(
+    client, fake_tmux, daemon, monkeypatch
+):
+    """Low confidence is the floor: the gate lets it through rather than risk a false refusal."""
+    _patch_screen_reading(
+        monkeypatch,
+        ScreenReading(kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.LOW),
+    )
+    target = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    job = await client.call("send", target=target["id"], prompt="go ahead")
+    assert job["state"] == "running"
+    assert len(fake_tmux.sent) == 1
+
+
+async def test_send_to_a_pane_whose_screen_reads_unknown_is_allowed(
+    client, fake_tmux, daemon, monkeypatch
+):
+    """Unknown is not approval, so the send proceeds."""
+    _patch_screen_reading(
+        monkeypatch,
+        ScreenReading(kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW),
+    )
+    target = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    job = await client.call("send", target=target["id"], prompt="go ahead")
+    assert job["state"] == "running"
+    assert len(fake_tmux.sent) == 1
+
+
+async def test_send_is_allowed_when_the_capture_raises(
+    client, fake_tmux, daemon, monkeypatch
+):
+    """A tmux error during capture does not turn into an unreachable pane."""
+    import theater.daemon.methods as methods_mod
+
+    async def broken_run(*args, check=True):
+        raise RuntimeError("tmux exploded")
+
+    monkeypatch.setattr(methods_mod.tmux, "run", broken_run)
+    target = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    job = await client.call("send", target=target["id"], prompt="go ahead")
+    assert job["state"] == "running"
+    assert len(fake_tmux.sent) == 1
+
+
+async def test_the_approval_modal_refusal_is_counted_by_stats(
+    client, fake_tmux, daemon, monkeypatch
+):
+    """The refusal flows through `_refuse_send` so `theater stats` sees it."""
+    _patch_screen_reading(
+        monkeypatch,
+        ScreenReading(kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH),
+    )
+    target = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    with pytest.raises(RemoteError):
+        await client.call("send", target=target["id"], prompt="go ahead")
+    assert daemon.store.refusal_counts() == {"awaiting_decision": 1}
