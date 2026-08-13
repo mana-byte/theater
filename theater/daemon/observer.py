@@ -154,9 +154,11 @@ UNMATCHED_LIMIT = 2
 UNMATCHED_CAP = 256
 
 #: Set on a job released because its prompt was never seen in the transcript
-#: after `UNMATCHED_LIMIT` turn ends answered someone else. Distinct from
-#: `RESCUE_CODE` (a turn end that was never observed at all) so a caller can
-#: tell the two apart.
+#: after `UNMATCHED_LIMIT` turn ends answered someone else. The job is
+#: finished as CRASHED, not DONE: no prompt landed and no answer exists, which
+#: is the same class of failure as a `send` whose `deliver_text` raised.
+#: Distinct from `RESCUE_CODE` (a turn end that was never observed at all,
+#: which salvages text and stays DONE) so a caller can tell the two apart.
 UNDELIVERED_CODE = "prompt_never_seen"
 
 
@@ -825,12 +827,14 @@ class Observer:
         answer it. Two consecutive misses mean the pane processed two other
         turns while ours supposedly waited, which no real queue does: the
         prompt was never delivered (a human at the pane can clear the composer
-        before it is read), and the job is released with `UNDELIVERED_CODE`
-        rather than left running indefinitely. The rescue timer cannot save
-        this case, because it requires an idle screen and the participant is
-        actively working. The accepted cost: a human taking two turns back to
-        back while our prompt legitimately waits behind them will fail the job
-        early, which is cheaper than an unbounded wedge.
+        before it is read), and the job is released as CRASHED with
+        `UNDELIVERED_CODE` rather than left running indefinitely. CRASHED, not
+        DONE, because no prompt landed and no answer exists — the same state
+        `send` itself uses when `deliver_text` fails. The rescue timer cannot
+        save this case, because it requires an idle screen and the participant
+        is actively working. The accepted cost: a human taking two turns back
+        to back while our prompt legitimately waits behind them will fail the
+        job early, which is cheaper than an unbounded wedge.
 
         A participant with nothing running is the normal case for a session
         nobody sent to: no-op.
@@ -866,7 +870,9 @@ class Observer:
                 missed,
                 pid,
             )
-            self._finish(job.handle, "", error_code=UNDELIVERED_CODE)
+            self._finish(
+                job.handle, "", error_code=UNDELIVERED_CODE, state=JobState.CRASHED
+            )
             return
         self._unmatched.pop(job.handle, None)
         self._finish(job.handle, result_text)
@@ -889,19 +895,37 @@ class Observer:
             self._finish(job.handle, result_text, error_code=error_code)
 
     def _finish(
-        self, handle: str, result_text: str, *, error_code: str | None = None
+        self,
+        handle: str,
+        result_text: str,
+        *,
+        error_code: str | None = None,
+        state: JobState = JobState.DONE,
     ) -> None:
         """Resolve one job. The result is already clipped by the parser.
 
-        `error_code` is set only by the rescue and undelivered paths. The
-        state stays DONE either way: the caller has a usable answer and
-        blocking on a FAILED job would defeat the point of rescuing it.
+        `error_code` is set only by the rescue and undelivered paths. The two
+        differ in state because they differ in what the caller actually has.
+
+        Rescue salvages the last text the agent said before the quiet window:
+        not a declared reply, but a real answer the caller can read. Reporting
+        DONE there is deliberate — the caller has a usable result, and blocking
+        on a CRASHED job would defeat the point of rescuing it.
+
+        Undelivered has no answer at all. The prompt never reached the queue,
+        nothing was said in reply to it, and the empty string passed in here is
+        a placeholder rather than a result. Reporting DONE would make that read
+        as "the peer replied with nothing", which is a different failure than
+        the one that happened. CRASHED says what is true: no prompt landed, no
+        answer exists. That is the same state `send` itself uses when
+        `deliver_text` fails before the prompt is typed — the same class of
+        failure, one tick later.
         """
         assert self.jobs is not None
         self._unmatched.pop(handle, None)
         self.jobs.finish(
             handle,
-            state=JobState.DONE,
+            state=state,
             result=result_text or "",
             error_code=error_code,
         )

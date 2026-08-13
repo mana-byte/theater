@@ -185,13 +185,16 @@ def test_one_unmatched_turn_end_leaves_the_job_running(registry):
     assert observer._unmatched.get("h1") == 1
 
 
-def test_two_consecutive_unmatched_turn_ends_finish_the_job(registry):
+def test_two_consecutive_unmatched_turn_ends_crash_the_job(registry):
     """Two misses mean the prompt never reached the queue.
 
     The pane processed two other turns while ours supposedly waited — no
-    real queue does that. The job is released with `UNDELIVERED_CODE` so the
-    caller knows the prompt was never seen, not merely that the turn ended
-    unobserved.
+    real queue does that. The job is released as CRASHED with
+    `UNDELIVERED_CODE`, not DONE: no prompt landed and no answer exists,
+    which is the same class of failure as a `send` whose `deliver_text`
+    raised. DONE would make the caller read an empty string as "the peer
+    replied with nothing", a different and quieter failure than the one
+    that happened.
     """
     observer, p, jobs = poised(registry)
     clock, turns = QuietClock(), TurnAccumulator()
@@ -212,7 +215,7 @@ def test_two_consecutive_unmatched_turn_ends_finish_the_job(registry):
     )
 
     job = jobs.get("h1")
-    assert str(job.state) == "done"
+    assert str(job.state) == "crashed"
     assert job.error_code == UNDELIVERED_CODE
     # The counter was cleaned up.
     assert "h1" not in observer._unmatched
