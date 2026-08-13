@@ -152,7 +152,7 @@ state lives on the `Source` it opens.
 One abstract method. Everything else on a harness is the identity data above and
 the observer it carries.
 
-### `plan_launch(*, participant_id, prompt, config_path, approval) -> LaunchPlan`
+### `plan_launch(*, participant_id, prompt, config_path, approval, model=None) -> LaunchPlan`
 
 Describe how to start the harness. Pure — it must not write anything itself;
 return the files you need written and the spawner writes them before the window
@@ -199,6 +199,33 @@ else.
 
 `prompt` may be empty, meaning "start interactive with nothing to do". Do not
 append an empty string to argv; most CLIs treat it as a real, blank argument.
+
+`model` is optional and defaults to `None`, meaning "the CLI picks". Accept it if
+your CLI can be pointed at a specific model, and pass the string through
+untouched — do not validate it against a list of names you know. Model namespaces
+change faster than a plugin gets updated, and a name your CLI rejects fails
+visibly in the pane, which is the right place for it.
+
+Declaring the parameter is what opts you in. Theater inspects your signature and
+only passes `model` when you have somewhere to put it, so a plugin written before
+this option existed keeps working unchanged for every launch that does not ask
+for a model. Ask such a plugin for one and the spawn is refused by name, before
+anything is created — Theater will not quietly drop the caller's choice and start
+the wrong model instead.
+
+Use whichever lever the CLI actually offers; it does not have to be a flag. The
+built-ins split both ways — `claude`, `codex`, and `opencode` take a flag, while
+`vibe` has none and reads `VIBE_ACTIVE_MODEL` from the environment. If yours is
+an environment variable, set it *unconditionally*, empty when no model was asked
+for:
+
+```python
+env["NOVA_MODEL"] = model or ""
+```
+
+Environments are inherited and flags are not. Skip the empty case and an agent
+you started on one model hands that model to every grandchild it spawns without
+one.
 
 ## The observer, method by method
 
@@ -441,7 +468,7 @@ class NovaHarness(Harness):
         # it, and only the reading needs to know where ~/.nova is.
         self.observer = NovaObserver(root=root)
 
-    def plan_launch(self, *, participant_id, prompt, config_path, approval):
+    def plan_launch(self, *, participant_id, prompt, config_path, approval, model=None):
         flags = APPROVAL_FLAGS.get(approval)
         if flags is None:
             raise BadRequest(f"unknown approval mode {approval!r}")
@@ -455,6 +482,9 @@ class NovaHarness(Harness):
             }
         }
         argv = [self.binary, *flags, "--mcp-config", str(config_path)]
+        if model:
+            # Passed through as given. Nova owns its namespace, not us.
+            argv += ["--model", model]
         if prompt:
             argv.append(prompt)
         return LaunchPlan(

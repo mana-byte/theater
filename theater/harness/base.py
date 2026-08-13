@@ -240,8 +240,20 @@ class Harness(ABC):
         prompt: str,
         config_path: Path,
         approval: str,
+        model: str | None = None,
     ) -> LaunchPlan:
-        """Describe how to start this harness. Pure: writes nothing itself."""
+        """Describe how to start this harness. Pure: writes nothing itself.
+
+        `model` is opaque and optional. Theater never validates it: vendor
+        model namespaces change faster than any allowlist here could, so the
+        string is passed through to whatever lever the CLI offers — a flag for
+        most, an environment variable for one — and the harness decides. A
+        plugin that cannot select a model simply omits the parameter, and
+        `harness.plan_launch` rejects the request before reaching it rather
+        than dropping the caller's choice on the floor. That omission is the
+        compatibility story: an adapter written before this parameter existed
+        keeps working for every launch that does not name a model.
+        """
 
 
 def status_after(event: Event) -> Status:

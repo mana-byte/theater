@@ -20,8 +20,8 @@ from dataclasses import dataclass
 from theater import paths
 from theater.daemon import worktree as worktree_mod
 from theater.daemon.registry import Registry
+from theater.harness import check_model, plan_launch
 from theater.harness import get as get_harness
-from theater.harness import plan_launch
 from theater.models import BadRequest, Participant
 from theater.tmux import client as tmux
 
@@ -43,6 +43,10 @@ class SpawnRequest:
     worktree: bool = False
     #: Base branch for the worktree. Defaults to current HEAD.
     base_branch: str | None = None
+    #: Model for the child, in whatever spelling its harness expects. Opaque
+    #: here and never validated: see `harness.plan_launch`. None means the
+    #: harness picks, which is what every spawn did before this existed.
+    model: str | None = None
 
 
 class Spawner:
@@ -53,6 +57,10 @@ class Spawner:
         harness = get_harness(req.harness)
         if shutil.which(harness.binary) is None:
             raise BadRequest(f"{harness.binary!r} is not on PATH")
+        # Before step 1, with the PATH check, because both are refusals and a
+        # refusal after step 1 leaves a participant — and possibly a worktree —
+        # behind for something we could have known up front.
+        check_model(req.harness, req.model)
 
         participant = self.registry.create_spawned(
             harness=req.harness, cwd=req.cwd, parent_id=req.parent_id
@@ -98,6 +106,7 @@ class Spawner:
             prompt=req.prompt,
             config_path=config_path,
             approval=req.approval,
+            model=req.model,
         )
 
         paths.ensure_home()

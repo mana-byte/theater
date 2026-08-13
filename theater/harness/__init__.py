@@ -21,6 +21,7 @@ above it sees anything but `Event`.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import shutil
 from pathlib import Path
@@ -209,6 +210,28 @@ def get(name: str) -> Harness:
     return harness
 
 
+def supports_model(harness: Harness) -> bool:
+    """Whether this adapter accepts a `model` in `plan_launch`.
+
+    Read off the signature rather than declared as a class attribute, because
+    the signature is the thing that is actually true: an adapter that says it
+    supports models and does not take the parameter would fail at the call,
+    which is the failure this check exists to prevent.
+    """
+    return "model" in inspect.signature(harness.plan_launch).parameters
+
+
+def check_model(harness: str, model: str | None) -> None:
+    """Raise if this harness cannot honour a model request.
+
+    Pure and cheap, so a caller can gate on it *before* creating anything. The
+    spawner does exactly that: `plan_launch` runs after the participant and its
+    worktree exist, and a refusal there would leave both behind.
+    """
+    if model is not None and not supports_model(get(harness)):
+        raise BadRequest(f"harness {harness!r} does not support model selection")
+
+
 def plan_launch(
     harness: str,
     *,
@@ -216,12 +239,27 @@ def plan_launch(
     prompt: str,
     config_path: Path,
     approval: str,
+    model: str | None = None,
 ) -> LaunchPlan:
-    return get(harness).plan_launch(
+    """The one funnel every spawn goes through, and so the one compat seam.
+
+    `model` is only forwarded when the caller named one. That is what keeps a
+    third-party adapter written against the older signature working: it is
+    never called with a keyword it does not accept, and the only launches it
+    cannot serve are the ones that ask for something it has no way to deliver.
+    Those are refused here, with a message that names the harness, rather than
+    surfacing as a `TypeError` from inside the plugin or — far worse — as a
+    child that silently came up on the wrong model.
+    """
+    found = get(harness)
+    check_model(harness, model)
+    extra = {"model": model} if model is not None else {}
+    return found.plan_launch(
         participant_id=participant_id,
         prompt=prompt,
         config_path=config_path,
         approval=approval,
+        **extra,
     )
 
 
@@ -320,6 +358,7 @@ __all__ = [
     "Source",
     "TranscriptObserver",
     "TranscriptSource",
+    "check_model",
     "clip",
     "clipper",
     "describe",
@@ -331,5 +370,6 @@ __all__ = [
     "normalize",
     "plan_launch",
     "status_after",
+    "supports_model",
     "theater_binary",
 ]

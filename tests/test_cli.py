@@ -602,6 +602,24 @@ def test_spawn_passes_the_prompt_and_the_cwd(answers, monkeypatch, capsys):
     assert "p-new" in capsys.readouterr().out
 
 
+def test_spawn_sends_the_model_it_was_given(answers, monkeypatch):
+    monkeypatch.setattr(cli.tmux, "current_session_sync", lambda: "main")
+    answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
+    cli.cmd_spawn(
+        parse("spawn", "vibe", "hi", "--approval", "manual", "--model", "big-one")
+    )
+    assert answers["calls"][0][1]["model"] == "big-one"
+
+
+def test_spawn_sends_no_model_when_none_was_named(answers, monkeypatch):
+    """None, not absent: the daemon reads it with .get either way, but a
+    spawn that did not choose must be distinguishable from one that did."""
+    monkeypatch.setattr(cli.tmux, "current_session_sync", lambda: "main")
+    answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
+    cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual"))
+    assert answers["calls"][0][1]["model"] is None
+
+
 def test_spawn_json_prints_the_record_verbatim(answers, monkeypatch, capsys):
     monkeypatch.setattr(cli.tmux, "current_session_sync", lambda: "main")
     answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}

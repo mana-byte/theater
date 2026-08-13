@@ -108,6 +108,7 @@ class ClaudeCodeHarness(Harness):
         prompt: str,
         config_path: Path,
         approval: str,
+        model: str | None = None,
     ) -> LaunchPlan:
         if approval not in APPROVALS:
             raise BadRequest(
@@ -127,6 +128,11 @@ class ClaudeCodeHarness(Harness):
         # "MCP config file not found: <cwd>/<prompt>" and the pane dies before
         # the observer ever attaches. The `=` form binds the value tightly.
         argv = ["claude", f"--mcp-config={config_path}"]
+        if model:
+            # `=` form for the same reason as --mcp-config above: a
+            # space-separated value sits next to the prompt positional, and
+            # binding tightly is the habit that keeps this argv unambiguous.
+            argv.append(f"--model={model}")
         if approval == "yolo":
             argv.append("--dangerously-skip-permissions")
         elif approval == "edits":

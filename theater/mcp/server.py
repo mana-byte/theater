@@ -45,6 +45,11 @@ approval: "manual" | "edits" | "yolo" — required, no default. This is
           the only thing standing between an unattended child and your
           filesystem, so choose it deliberately.
 cwd:      where the child works. Defaults to your own directory.
+model:    which model the child runs, spelled the way its own CLI spells it
+          (opencode wants provider/model). Optional; omit it and the harness
+          uses its default. Theater passes the string through without
+          checking it and cannot confirm the CLI honoured it, so a typo
+          surfaces as a child on the wrong model, not as an error here.
 worktree: if True, create a git worktree for the child with its own
           isolated index and HEAD. The branch name theater/<child-id>
           is in the result so you can merge it explicitly. The child's
@@ -109,12 +114,13 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
     async def spawn_session(
         harness: str, prompt: str, approval: str, cwd: str | None = None,
         worktree: bool = False, base_branch: str | None = None,
+        model: str | None = None,
     ) -> dict:
         # Description comes from SPAWN_DOC, since the harness names in it are
         # only known once the registry is built. See `_spawn_description`.
         return await tools.spawn_session(
             session, harness=harness, prompt=prompt, approval=approval, cwd=cwd,
-            worktree=worktree, base_branch=base_branch,
+            worktree=worktree, base_branch=base_branch, model=model,
         )
 
     @mcp.tool()

@@ -109,6 +109,60 @@ async def test_spawn_rejects_an_unknown_harness(client, fake_tmux):
     assert exc.value.code == "bad_request"
 
 
+async def test_spawn_carries_a_model_all_the_way_to_the_pane(client, fake_tmux):
+    """The whole wire, end to end: MCP/CLI param -> SpawnRequest -> plan -> tmux."""
+    await client.call(
+        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp",
+        model="mysuperdupermodelname",
+    )
+    assert fake_tmux.windows[0]["env"]["VIBE_ACTIVE_MODEL"] == "mysuperdupermodelname"
+
+    await client.call(
+        "spawn", harness="claude", prompt="hi", approval="manual", cwd="/tmp",
+        model="opus-4.1",
+    )
+    assert "--model=opus-4.1" in fake_tmux.windows[1]["command"]
+
+
+async def test_spawn_without_a_model_pins_the_vibe_env_empty(client, fake_tmux):
+    """An unset variable would be inherited from the daemon's own environment."""
+    await client.call(
+        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
+    )
+    assert fake_tmux.windows[0]["env"]["VIBE_ACTIVE_MODEL"] == ""
+
+
+async def test_spawn_refuses_an_impossible_model_before_creating_anything(
+    client, fake_tmux, monkeypatch
+):
+    """The refusal has to land before step 1, not at the launch plan.
+
+    `plan_launch` runs after the participant and its worktree exist, so a
+    harness that cannot take a model would leave both behind — a STARTING
+    ghost the régie draws forever — for something knowable up front.
+    """
+    from theater.harness import Harness, LaunchPlan
+
+    class LegacyHarness(Harness):
+        name = "legacy"
+        binary = "legacy"
+
+        def plan_launch(self, *, participant_id, prompt, config_path, approval):
+            return LaunchPlan(argv=["legacy"])
+
+    monkeypatch.setitem(HARNESSES, "legacy", LegacyHarness())
+    before = len(await client.call("participants.list"))
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "spawn", harness="legacy", prompt="hi", approval="manual", cwd="/tmp",
+            model="whatever",
+        )
+    assert exc.value.code == "bad_request"
+    assert len(await client.call("participants.list")) == before
+    assert fake_tmux.windows == []
+
+
 async def test_spawned_child_hellos_with_its_given_id(client, fake_tmux):
     child = await client.call(
         "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"

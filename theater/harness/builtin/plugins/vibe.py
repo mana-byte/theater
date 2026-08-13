@@ -92,6 +92,7 @@ class VibeHarness(Harness):
         prompt: str,
         config_path: Path,
         approval: str,
+        model: str | None = None,
     ) -> LaunchPlan:
         if approval not in APPROVALS:
             raise BadRequest(
@@ -112,10 +113,18 @@ class VibeHarness(Harness):
             argv += ["--agent", "accept-edits"]
         if prompt:
             argv.append(prompt)
-        return LaunchPlan(
-            argv=argv,
-            env={"VIBE_MCP_SERVERS": json.dumps(servers)},
-        )
+        env = {"VIBE_MCP_SERVERS": json.dumps(servers)}
+        # The only shipped harness with no `--model` flag: the same VIBE_*
+        # override mechanism that carries the MCP server carries the model.
+        #
+        # It is set unconditionally, empty when no model was asked for, because
+        # an environment variable is inherited and a flag is not. A vibe agent
+        # spawned with a model would otherwise pass it down to every descendant
+        # that did not name one, and the child would come up on a model nobody
+        # chose — a bug that is invisible until the bill arrives. Empty means
+        # "use the configured default", which is what an unset variable means.
+        env["VIBE_ACTIVE_MODEL"] = model or ""
+        return LaunchPlan(argv=argv, env=env)
 
 
 class VibeObserver(TranscriptObserver):

@@ -138,6 +138,24 @@ round down: `opencode` has one flag, `--auto`, so `edits` there behaves as
 
 `--worktree` creates an isolated git worktree for the child so parallel agents don't conflict on the index.
 
+`--model` picks the model the child runs on, overriding whatever that CLI would
+have chosen for itself:
+
+```sh
+theater spawn claude "audit the crypto helpers" --approval manual --model opus-4.1
+theater spawn opencode "port the CSV reader" --approval edits --model anthropic/claude-sonnet-4
+```
+
+The name is passed through untouched — Theater keeps no allowlist, because model
+namespaces change faster than this project releases. A name the CLI does not
+recognise fails in the child's pane, where the vendor that owns the namespace can
+say so properly. Omit the flag and the CLI's own default applies.
+
+Every built-in harness supports it, by whichever lever its CLI offers: `claude`,
+`codex`, and `opencode` take a flag, `vibe` takes `VIBE_ACTIVE_MODEL` in the
+child's environment. A third-party harness plugin written before this option
+existed will refuse `--model` by name rather than start the wrong model.
+
 ### `theater adopt`
 
 Register the current pane as a Theater participant (for agents you started by hand rather than via `spawn`):
@@ -339,6 +357,7 @@ approval:    "manual" | "edits" | "yolo"
 cwd:         working directory (defaults to caller's cwd)
 worktree:    create an isolated git worktree (bool)
 base_branch: branch to base the worktree on
+model:       model the child runs on; omit for the CLI's own default
 ```
 
 ### `send`

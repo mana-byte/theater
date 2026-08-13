@@ -192,6 +192,7 @@ async def _spawn(daemon, params: dict) -> dict:
         background=params.get("background", True),
         worktree=bool(params.get("worktree", False)),
         base_branch=params.get("base_branch"),
+        model=params.get("model"),
     )
     # Safety rails: reject before creating anything.
     rails = daemon.config.rails

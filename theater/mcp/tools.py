@@ -113,6 +113,7 @@ async def spawn_session(
     cwd: str | None = None,
     worktree: bool = False,
     base_branch: str | None = None,
+    model: str | None = None,
 ) -> dict:
     """Create a child agent in a new tmux window and return its record.
 
@@ -122,6 +123,11 @@ async def spawn_session(
     If `worktree` is True, a git worktree is created for the child so it has
     its own isolated index and HEAD. The branch name `theater/<child-id>` is
     reported in the result so the parent can merge it explicitly.
+
+    `model` is passed to the harness unchanged. Theater does not check it
+    against any list of known models and cannot confirm the CLI honoured it:
+    the only failures visible here are a harness with no way to select a model
+    at all, which is refused before anything is created.
     """
     if not session._resolved:
         await session.identify()
@@ -135,6 +141,7 @@ async def spawn_session(
         tmux_session=os.environ.get("THEATER_TMUX_SESSION"),
         worktree=worktree,
         base_branch=base_branch,
+        model=model,
     )
     assert isinstance(record, dict)
     return _summarise(record)

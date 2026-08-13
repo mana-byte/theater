@@ -200,6 +200,7 @@ class OpenCodeHarness(Harness):
         prompt: str,
         config_path: Path,
         approval: str,
+        model: str | None = None,
     ) -> LaunchPlan:
         if approval not in APPROVALS:
             raise BadRequest(
@@ -216,6 +217,12 @@ class OpenCodeHarness(Harness):
             },
         }
         argv = ["opencode"]
+        if model:
+            # opencode wants `provider/model`, not a bare model name. Passed
+            # through as given: which providers a user has configured is not
+            # something this adapter can know, so validating the shape here
+            # would only reject spellings that work.
+            argv += ["--model", model]
         if approval == "yolo":
             argv.append("--auto")
         if prompt:

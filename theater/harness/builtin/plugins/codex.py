@@ -169,6 +169,7 @@ class CodexHarness(Harness):
         prompt: str,
         config_path: Path,
         approval: str,
+        model: str | None = None,
     ) -> LaunchPlan:
         if approval not in APPROVALS:
             raise BadRequest(
@@ -183,6 +184,8 @@ class CodexHarness(Harness):
             "-c",
             f"mcp_servers.{SERVER_NAME}.args={args}",
         ]
+        if model:
+            argv += ["--model", model]
         if approval == "yolo":
             argv.append("--dangerously-bypass-approvals-and-sandbox")
         elif approval == "edits":

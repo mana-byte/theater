@@ -107,6 +107,14 @@ def _parser() -> argparse.ArgumentParser:
     spawn.add_argument("--cwd", default=None)
     spawn.add_argument("--parent", dest="parent_id", default=None)
     spawn.add_argument(
+        "--model",
+        default=None,
+        help=(
+            "Model for the new agent, spelled as its harness expects. "
+            "Not validated: an unknown name fails in the pane, not here."
+        ),
+    )
+    spawn.add_argument(
         "--worktree",
         action="store_true",
         help="Create a git worktree for the child with isolated index and HEAD.",
@@ -333,6 +341,7 @@ def cmd_spawn(args) -> int:
         background=not args.foreground,
         worktree=args.worktree,
         base_branch=args.base_branch,
+        model=args.model,
     )
     if args.json:
         print(json.dumps(record, indent=2))
