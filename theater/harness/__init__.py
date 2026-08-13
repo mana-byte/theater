@@ -44,7 +44,13 @@ from theater.harness.base import (
     status_after,
     theater_binary,
 )
-from theater.harness.observation import HarnessObserver, TranscriptObserver
+from theater.harness.observation import (
+    HarnessObserver,
+    ScreenConfidence,
+    ScreenKind,
+    ScreenReading,
+    TranscriptObserver,
+)
 from theater.harness.plugins import Plugin, PluginError
 from theater.harness.source import (
     Attachment,
@@ -355,6 +361,9 @@ __all__ = [
     "NativeChild",
     "Plugin",
     "PluginError",
+    "ScreenConfidence",
+    "ScreenKind",
+    "ScreenReading",
     "Source",
     "TranscriptObserver",
     "TranscriptSource",
