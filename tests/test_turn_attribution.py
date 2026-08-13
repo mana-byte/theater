@@ -34,6 +34,7 @@ from theater.daemon.jobs import JobManager
 from theater.daemon.observer import (
     _PROMPT_MATCH,
     UNDELIVERED_CODE,
+    UNMATCHED_CAP,
     Observer,
     QuietClock,
     TurnAccumulator,
@@ -248,6 +249,54 @@ def test_a_match_after_one_miss_clears_the_counter(registry):
     )
     assert jobs.get("h1").result == "the answer"
     assert "h1" not in observer._unmatched
+
+
+def test_the_unmatched_dict_evicts_the_oldest_entry_past_the_cap(registry):
+    """A job that ends outside the observer orphans its entry; that leaks.
+
+    `kill` and the `send_failed` path in methods.py both bypass `_finish`,
+    which is where the entry would normally be popped. Left unbounded, one
+    orphan per killed job accumulates over a watcher that lives as long as
+    its participant — the same class of slow leak `_ANSWERED_TURNS` was
+    sized for. The cap evicts the oldest entry when the dict is full, and
+    a plain dict preserves insertion order, so the first key in is the
+    first one dropped.
+
+    Pre-populating the dict with synthetic entries reaches the cap without
+    registering 256 participants — the faithful path, but heavy and slow for
+    what is fundamentally a one-line guard. The precedent is
+    `test_the_memory_of_answered_turns_is_bounded` in test_turn_identity,
+    which asserts directly on `turns._seen`; this does the same on
+    `observer._unmatched`.
+    """
+    observer, p, jobs = poised(registry)
+    clock, turns = QuietClock(), TurnAccumulator()
+
+    # Fill the dict to capacity with synthetic handles — jobs that were
+    # killed outside the observer and left their miss counters behind.
+    for n in range(UNMATCHED_CAP):
+        observer._unmatched[f"orphan-{n}"] = 1
+    assert len(observer._unmatched) == UNMATCHED_CAP
+
+    # One real miss: a non-matching turn end for the waiting job h1.
+    observer._apply(
+        p.id,
+        Batch(events=[heard("what branch am i on?"), said("main", "m1")]),
+        clock,
+        turns,
+    )
+
+    # The cap held: h1's entry was added, and the oldest synthetic was
+    # evicted to make room.
+    assert len(observer._unmatched) == UNMATCHED_CAP
+    assert "orphan-0" not in observer._unmatched
+    assert "orphan-1" in observer._unmatched
+
+    # The real job's miss counter started from 1, not resumed from whatever
+    # the evicted entry held — dropping the key means the next miss begins
+    # fresh, which is the correct consequence of eviction.
+    assert observer._unmatched.get("h1") == 1
+    assert str(jobs.get("h1").state) == "running"
 
 
 def test_the_user_record_may_arrive_in_an_earlier_batch(registry):
