@@ -18,8 +18,52 @@ import os
 from mcp.server import MCPServer
 
 from theater.client import DaemonClient
+from theater.harness import describe
 from theater.mcp import tools
 from theater.mcp.tools import Session
+
+#: `spawn_session`'s description, with the harness list left open.
+#:
+#: A literal here was the bug: it read `"vibe" or "claude"` while the registry
+#: had grown codex and opencode, so the two newer adapters were spawnable by
+#: every path except the one an agent uses. An agent cannot spawn what its tool
+#: schema does not name, and nothing in the daemon was ever going to say
+#: otherwise — the schema is the whole of what it knows.
+#:
+#: Filled from the local registry, which is a hint and not the authority: this
+#: process built its registry from the config as it is now, the daemon built
+#: its own when it started, and a config edit between the two leaves them
+#: disagreeing. `list_harnesses` asks the daemon, and is what the text points
+#: at for anything load-bearing.
+SPAWN_DOC = """Start a new agent in its own tmux window as your child.
+
+harness:  which CLI to run. This machine has: {harnesses}. Call
+          list_harnesses for the daemon's own answer, which is the one that
+          decides whether a spawn succeeds.
+prompt:   the task, delivered on the child's command line at startup
+approval: "manual" | "edits" | "yolo" — required, no default. This is
+          the only thing standing between an unattended child and your
+          filesystem, so choose it deliberately.
+cwd:      where the child works. Defaults to your own directory.
+worktree: if True, create a git worktree for the child with its own
+          isolated index and HEAD. The branch name theater/<child-id>
+          is in the result so you can merge it explicitly. The child's
+          repo must be a git repo for this to work.
+base_branch: the branch to base the worktree on. Defaults to current HEAD.
+"""
+
+
+def _spawn_description() -> str:
+    """SPAWN_DOC with the harness names of this process's registry filled in.
+
+    Every registered adapter is named, including one whose binary is missing:
+    `installed` here would be resolved against *this* process's PATH, and the
+    daemon spawns with its own. Naming a harness the daemon can in fact spawn
+    matters more than hiding one it cannot — the second case fails at the call
+    with a message that says so, the first fails silently by never being tried.
+    """
+    names = [row["name"] for row in describe() if not row["error"]]
+    return SPAWN_DOC.format(harnesses=", ".join(names) or "no harnesses registered")
 
 
 def build(participant_id: str | None = None, harness: str = "unknown") -> MCPServer:
@@ -51,24 +95,23 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         return await tools.list_participants(session, include_dead=include_dead)
 
     @mcp.tool()
+    async def list_harnesses() -> list[dict]:
+        """The CLIs you can pass to spawn_session as `harness`, on this machine.
+
+        Answered by the daemon, so it accounts for adapters a user has added
+        and for binaries that are not installed. Call it before spawning
+        something you have not spawned before: the set is configuration, not a
+        fixed list, and it differs between machines.
+        """
+        return await tools.harnesses(session)
+
+    @mcp.tool(description=_spawn_description())
     async def spawn_session(
         harness: str, prompt: str, approval: str, cwd: str | None = None,
         worktree: bool = False, base_branch: str | None = None,
     ) -> dict:
-        """Start a new agent in its own tmux window as your child.
-
-        harness:  "vibe" or "claude"
-        prompt:   the task, delivered on the child's command line at startup
-        approval: "manual" | "edits" | "yolo" — required, no default. This is
-                  the only thing standing between an unattended child and your
-                  filesystem, so choose it deliberately.
-        cwd:      where the child works. Defaults to your own directory.
-        worktree: if True, create a git worktree for the child with its own
-                  isolated index and HEAD. The branch name theater/<child-id>
-                  is in the result so you can merge it explicitly. The child's
-                  repo must be a git repo for this to work.
-        base_branch: the branch to base the worktree on. Defaults to current HEAD.
-        """
+        # Description comes from SPAWN_DOC, since the harness names in it are
+        # only known once the registry is built. See `_spawn_description`.
         return await tools.spawn_session(
             session, harness=harness, prompt=prompt, approval=approval, cwd=cwd,
             worktree=worktree, base_branch=base_branch,

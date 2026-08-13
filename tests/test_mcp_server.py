@@ -44,6 +44,7 @@ async def test_tools_are_registered(daemon):
     assert {t.name for t in tools} == {
         "whoami",
         "list_participants",
+        "list_harnesses",
         "spawn_session",
         "register_pane",
         "await_sessions",
