@@ -95,7 +95,12 @@ from theater.harness.base import (
     theater_binary,
     whole,
 )
-from theater.harness.observation import HarnessObserver
+from theater.harness.observation import (
+    HarnessObserver,
+    ScreenConfidence,
+    ScreenKind,
+    ScreenReading,
+)
 from theater.harness.source import Attachment, Batch, History, Source
 from theater.models import BadRequest, Status
 
@@ -321,6 +326,28 @@ class OpenCodeObserver(HarnessObserver):
         if WORKING_MARKER in capture:
             return False
         return FOOTER_MARKER in capture
+
+    def screen_reading(self, capture: str) -> ScreenReading:
+        """Classify the rendered screen as `working`, `prompt`, or `unknown`.
+
+        Opencode's idle screen and working screen are already distinguishable
+        by the presence or absence of `WORKING_MARKER`, so `prompt` and
+        `working` both carry `high` confidence. The approval arm is
+        unimplemented because this host's config auto-approves opencode, so the
+        dialog could not be captured — an unverified approval marker is the
+        exact failure this phase is meant to avoid.
+        """
+        if WORKING_MARKER in capture:
+            return ScreenReading(
+                kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH
+            )
+        if self.is_idle_screen(capture):
+            return ScreenReading(
+                kind=ScreenKind.PROMPT, confidence=ScreenConfidence.HIGH
+            )
+        return ScreenReading(
+            kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW
+        )
 
 
 class OpenCodeSource(Source):
