@@ -85,6 +85,22 @@ async def test_spawn_creates_an_identified_participant(client, fake_tmux):
     assert record["id"] in window["env"]["VIBE_MCP_SERVERS"]
 
 
+async def test_a_freshly_spawned_participant_is_idle_before_hello(client, fake_tmux):
+    """A spawned participant is IDLE from the moment it is created.
+
+    Before the STARTING status was removed, a participant that never said
+    hello could be pinned at STARTING forever. Starting at IDLE deletes that
+    failure class entirely.
+    """
+    record = await client.call(
+        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
+    )
+    assert record["status"] == "idle"
+
+    fetched = await client.call("participants.get", id=record["id"])
+    assert fetched["status"] == "idle"
+
+
 async def test_spawn_writes_a_config_for_claude(client, fake_tmux):
     record = await client.call(
         "spawn", harness="claude", prompt="hi", approval="yolo", cwd="/tmp"
@@ -154,8 +170,8 @@ async def test_spawn_refuses_an_impossible_model_before_creating_anything(
     """The refusal has to land before step 1, not at the launch plan.
 
     `plan_launch` runs after the participant and its worktree exist, so a
-    harness that cannot take a model would leave both behind — a STARTING
-    ghost the régie draws forever — for something knowable up front.
+    harness that cannot take a model would leave both behind — a ghost
+    the régie draws forever — for something knowable up front.
 
     The model is allowlisted deliberately, so the policy rail passes and the
     *capability* check is what refuses. The two are separate questions — may

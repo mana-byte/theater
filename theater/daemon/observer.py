@@ -723,9 +723,10 @@ class Observer:
             attached.skipped,
         )
         # Derive an initial status from the last record skipped, so a spawned
-        # agent that finished its turn before we attached does not stay
-        # STARTING forever. The bus gets no history replayed — only the status
-        # moves. A source with nothing behind it leaves the status as it was.
+        # agent that finished its turn before we attached does not stay IDLE
+        # when its last action was working. The bus gets no history replayed —
+        # only the status moves. A source with nothing behind it leaves the
+        # status as it was.
         event = attached.last_event
         if event is not None:
             self._settle(pid, status_after(event))

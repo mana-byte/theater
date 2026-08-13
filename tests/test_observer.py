@@ -156,11 +156,11 @@ async def test_attaching_skips_history_instead_of_replaying_it(
 async def test_attaching_derives_status_from_the_last_skipped_record(
     registry, vibe_tree, observing
 ):
-    """A spawned agent that finished before we attached must not stay STARTING.
+    """A spawned agent that finished before we attached must not stay idle.
 
     The bus gets no history replayed, but the status must reflect the last
     record seen at attach time. This is the bug that left every spawned
-    participant stuck at "starting" in the real run: the agent completed its
+    participant stuck at "idle" in the real run: the agent completed its
     turn in the 2 seconds it took the observer to find the transcript, no new
     bytes arrived after attach, and _drain never fired.
     """

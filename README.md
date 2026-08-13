@@ -34,7 +34,7 @@ Theater lets agents running in different harnesses — Claude Code, Codex, Vibe 
 | Adopted | Pre-existing pane, self-registered via `theater adopt` | Yes |
 | External | No pane (e.g. a remote agent) | No — emit only |
 
-**Status lifecycle:** `starting` → `idle` ↔ `working` ↔ `awaiting_input` → `dead`
+**Status lifecycle:** `idle` ↔ `working` ↔ `awaiting_input` → `dead`
 
 ---
 

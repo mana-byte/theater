@@ -144,10 +144,10 @@ async def test_acceptance_tree_status(client, fake_tmux, daemon):
         approval="manual", cwd="/tmp", parent_id=parent["id"]
     )
 
-    # Child starts as "starting"
+    # Child starts as "idle"
     tree = await client.call("participants.tree")
     child_node = tree[0]["children"][0]
-    assert child_node["status"] == "starting"
+    assert child_node["status"] == "idle"
 
     # Observer finishes the job → status should still be visible
     daemon.jobs.finish(child["handle"], state=JobState.DONE, result="done")
