@@ -69,16 +69,7 @@ async def test_send_to_busy_target_rejected(client, fake_tmux, daemon):
     assert fake_tmux.sent[0] == ("%1", "first")
 
 
-async def test_send_to_busy_target_rejected_within_ttl(client, fake_tmux, daemon):
-    """A running send job younger than SEND_CLAIM_TTL blocks the pane."""
-    target = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
-    await client.call("send", target=target["id"], prompt="first")
-    with pytest.raises(RemoteError) as exc:
-        await client.call("send", target=target["id"], prompt="second")
-    assert exc.value.code == "busy"
-
-
-async def test_send_allowed_after_job_exceeds_ttl(client, fake_tmux, daemon):
+async def test_send_allowed_after_job_exceeds_ttl(client, fake_tmux, daemon, monkeypatch):
     """A running send job older than SEND_CLAIM_TTL no longer blocks the pane.
 
     The prompt may never have reached the agent (a human cleared the
@@ -86,19 +77,19 @@ async def test_send_allowed_after_job_exceeds_ttl(client, fake_tmux, daemon):
     Past the TTL the job loses its reservation — it is not finished, the
     observer may still answer it, but a new send is accepted.
     """
-    from sqlalchemy import text
-
+    import theater.daemon.methods as methods_mod
     from theater.daemon.methods import SEND_CLAIM_TTL
 
     target = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
     await client.call("send", target=target["id"], prompt="first")
 
-    # Fast-forward the job's created_at past the TTL so it looks stale.
-    job = daemon.store.oldest_running_job_for_target(target["id"])
-    assert job is not None
-    daemon.store.conn.execute(
-        text("UPDATE jobs SET created_at = :ts WHERE handle = :h"),
-        {"ts": job.created_at - SEND_CLAIM_TTL - 1, "h": job.handle},
+    # Drive the clock: the send handler computes `stale = now() - SEND_CLAIM_TTL`
+    # and rejects jobs whose created_at is newer than that. By advancing `now`
+    # past the TTL, the job's real created_at falls on the stale side and the
+    # busy gate drops it.
+    real_now = methods_mod.now()
+    monkeypatch.setattr(
+        methods_mod, "now", lambda: real_now + SEND_CLAIM_TTL + 1
     )
 
     # The stale job no longer blocks; a new send is accepted.

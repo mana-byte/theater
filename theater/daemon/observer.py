@@ -143,6 +143,16 @@ _PROMPT_MATCH = 120
 #: the error code says which happened.
 UNMATCHED_LIMIT = 2
 
+#: How many entries the per-job miss counter (`Observer._unmatched`) holds
+#: before the oldest is evicted. The dict is cleared on a match and in
+#: `_finish`, but a job can end outside the observer — a `kill`, or the
+#: `send_failed` path in methods.py — which leaves its entry behind if a miss
+#: was already recorded. Unbounded, that is a slow leak on a watcher that
+#: lives as long as its participant does, exactly the class of bug
+#: `_ANSWERED_TURNS` above was sized for. A plain dict preserves insertion
+#: order, so popping the first key is enough to drop the oldest.
+UNMATCHED_CAP = 256
+
 #: Set on a job released because its prompt was never seen in the transcript
 #: after `UNMATCHED_LIMIT` turn ends answered someone else. Distinct from
 #: `RESCUE_CODE` (a turn end that was never observed at all) so a caller can
@@ -840,6 +850,8 @@ class Observer:
         if not answers_prompt(heard, job.prompt):
             missed = self._unmatched.get(job.handle, 0) + 1
             self._unmatched[job.handle] = missed
+            while len(self._unmatched) > UNMATCHED_CAP:
+                self._unmatched.pop(next(iter(self._unmatched)))
             if missed < UNMATCHED_LIMIT:
                 logger.info(
                     "turn at %s replies to something else; %s keeps waiting",
