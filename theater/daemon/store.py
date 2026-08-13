@@ -21,6 +21,7 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import (
+    ColumnElement,
     Connection,
     case,
     create_engine,
@@ -301,7 +302,7 @@ class Store:
             participants, jobs.c.target_id == participants.c.id, isouter=True
         )
 
-        def total(condition) -> object:
+        def total(condition) -> ColumnElement[int]:
             return func.sum(case((condition, 1), else_=0))
 
         query = (
@@ -360,7 +361,9 @@ class Store:
                 payload=json.dumps(payload) if payload else None,
             )
         )
-        return result.inserted_primary_key[0]
+        pk = result.inserted_primary_key
+        assert pk is not None  # a single-row INSERT always yields one
+        return pk[0]
 
     def bus_tail(self, limit: int = 100, *, after_id: int = 0) -> list[dict]:
         rows = self.conn.execute(

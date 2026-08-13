@@ -259,10 +259,11 @@ async def _watch_ls(args, method: str, params: dict) -> int:
         while True:
             rows = await client.call(method, **params)
             assert isinstance(rows, list)
-            unmanaged = []
+            unmanaged: list = []
             if not args.tree:
-                unmanaged = await client.call("participants.unmanaged")
-                assert isinstance(unmanaged, list)
+                found = await client.call("participants.unmanaged")
+                assert isinstance(found, list)
+                unmanaged = found
             stamp = time.strftime("%H:%M:%S")
             frame = _format_ls(rows, tree=args.tree, unmanaged=unmanaged or None)
             sys.stdout.write(f"{_CLEAR}{stamp}  (ctrl-c to stop)\n\n{frame}\n")

@@ -14,6 +14,8 @@ physical fact: inbound delivery needs a pane to type into, and External has none
 
 from __future__ import annotations
 
+import builtins
+
 from theater.daemon import lineage
 from theater.daemon.store import Store
 from theater.harness import normalize
@@ -39,10 +41,12 @@ class Registry:
             raise NotFound(f"no participant {pid!r}")
         return p
 
-    def list(self, *, include_dead: bool = False) -> list[Participant]:
+    # `builtins.` because this class defines a method named `list`, which
+    # shadows the builtin for every annotation written after it.
+    def list(self, *, include_dead: bool = False) -> builtins.list[Participant]:
         return self.store.list_participants(include_dead=include_dead)
 
-    def tree(self) -> list[dict]:
+    def tree(self) -> builtins.list[dict]:
         """Participants as a forest, each node carrying its children inline."""
         people = self.list()
         nodes = {p.id: {**p.to_dict(), "children": []} for p in people}

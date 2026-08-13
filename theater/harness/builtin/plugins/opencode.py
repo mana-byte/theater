@@ -152,6 +152,16 @@ def _loads(raw) -> dict:
     return found if isinstance(found, dict) else {}
 
 
+def _table(value) -> dict:
+    """A nested object inside an already-parsed row. Empty for anything else.
+
+    Written as a function rather than inline so the value is tested once:
+    `x.get(k) if isinstance(x.get(k), dict) else {}` reads the key twice and
+    leaves the result typed as the union it was before the test.
+    """
+    return value if isinstance(value, dict) else {}
+
+
 def _tool_output(state: dict) -> str:
     """What a finished tool call produced, or what went wrong."""
     output = state.get("output")
@@ -418,7 +428,7 @@ class OpenCodeSource(Source):
 
     def _replay(self, info: dict, parts: list[dict]) -> list[Event]:
         """One stored message, as events. Text unclipped: this is history."""
-        time = info.get("time") if isinstance(info.get("time"), dict) else {}
+        time = _table(info.get("time"))
         ts = _seconds(time.get("completed")) or _seconds(time.get("created"))
         text = "".join(
             p.get("text") or "" for p in parts if p.get("type") == "text"
@@ -430,7 +440,7 @@ class OpenCodeSource(Source):
         for part in parts:
             if part.get("type") != "tool":
                 continue
-            state = part.get("state") if isinstance(part.get("state"), dict) else {}
+            state = _table(part.get("state"))
             name = part.get("tool")
             out.append(Event(kind=EventKind.TOOL_CALL, tool_name=name, ts=ts))
             if state.get("status") in ("completed", "error"):
@@ -540,7 +550,7 @@ class OpenCodeSource(Source):
         info = _loads(row[0])
         if info.get("role") != "assistant":
             return Status.WORKING
-        time = info.get("time") if isinstance(info.get("time"), dict) else {}
+        time = _table(info.get("time"))
         finish = info.get("finish")
         if finish and finish != STEP_FINISH and time.get("completed"):
             return Status.IDLE
@@ -614,7 +624,7 @@ class OpenCodeSource(Source):
         return []
 
     def _on_tool(self, part: dict, ts: float | None, seq: int) -> list[Event]:
-        state = part.get("state") if isinstance(part.get("state"), dict) else {}
+        state = _table(part.get("state"))
         status = state.get("status")
         if not status or status == "pending":
             # Pending carries no arguments yet and may never run at all.
@@ -655,7 +665,7 @@ class OpenCodeSource(Source):
         if not finish or mid in self._finished:
             return []
         self._finished.add(mid)
-        time = info.get("time") if isinstance(info.get("time"), dict) else {}
+        time = _table(info.get("time"))
         ts = (
             _seconds(time.get("completed"))
             or self._stamp.pop(mid, None)

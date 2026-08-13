@@ -16,7 +16,6 @@ import json
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import TypeVar
 
 #: How each tier is marked in the T column.
 TIER_MARK = {"spawned": "S", "adopted": "A", "external": "E"}
@@ -90,20 +89,17 @@ def event_who(row: dict) -> str:
     return f"{who} -> {row['to_id']}" if row.get("to_id") else who
 
 
-_Line = TypeVar("_Line")
-
-
 def flatten_tree[Line](
     nodes: list[dict],
-    render: Callable[[dict, int], _Line],
+    render: Callable[[dict, int], Line],
     indent: int = 0,
-) -> list[_Line]:
+) -> list[Line]:
     """Depth-first walk of `participants.tree`, one rendered line per node.
 
     The caller supplies the rendering, so the CLI gets plain strings and the
     régie gets Rich Text out of the same traversal.
     """
-    out: list[_Line] = []
+    out: list[Line] = []
     for node in nodes:
         out.append(render(node, indent))
         out += flatten_tree(node.get("children", []), render, indent + 1)

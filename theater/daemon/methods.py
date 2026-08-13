@@ -334,7 +334,9 @@ def _refuse_send(
     raise exc
 
 
-async def _check_pane_identity(daemon, target, refuse) -> None:
+async def _check_pane_identity(
+    daemon, target, refuse: Callable[..., NoReturn]
+) -> None:
     """Refuse to type into a pane that is no longer this participant's.
 
     The failure this exists for is the only irreversible one Theater has. A

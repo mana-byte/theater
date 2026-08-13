@@ -43,7 +43,7 @@ import re
 import tomllib
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from theater import paths
 
@@ -264,7 +264,9 @@ def _build_section(path: Path, name: str, cls: type, raw: Any) -> Any:
         if f.name not in raw:
             continue
         dotted = f"{name}.{f.name}"
-        checker, expected = _CHECKERS[f.type]
+        # `f.type` is the written annotation, always a string here: see
+        # _CHECKERS. Typeshed allows a type object too, which we never see.
+        checker, expected = _CHECKERS[cast(str, f.type)]
         parsed = checker(raw[f.name])
         if parsed is None:
             got = type(raw[f.name]).__name__

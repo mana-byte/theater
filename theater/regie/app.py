@@ -33,7 +33,7 @@ from typing import ClassVar
 
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.containers import Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.widgets import Footer, Label, RichLog
@@ -67,6 +67,12 @@ class TreePanel(VerticalScroll):
     """
 
     lines: reactive[list[tuple[Text, dict]]] = reactive([])
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        #: Set by the app so apply_cursor can map a line index back to its
+        #: node. Per-instance: the app rebinds it on every redraw.
+        self._lines_data: list[tuple[Text, dict]] = []
 
     DEFAULT_CSS = """
     TreePanel {
@@ -113,10 +119,6 @@ class TreePanel(VerticalScroll):
             if i == cursor:
                 child.add_class("tree-cursor")
 
-    #: Set by the app so apply_cursor can map line index to node. Instances
-    #: rebind it; the class-level value is the empty fallback.
-    _lines_data: ClassVar[list[tuple[Text, dict]]] = []
-
     def scroll_to_cursor(self, cursor: int) -> None:
         """Ensure the cursor line is visible."""
         if cursor < 0 or cursor >= len(self.children):
@@ -152,7 +154,7 @@ class RegieApp(App):
     }
     """
 
-    BINDINGS: ClassVar[list[Binding]] = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("j", "cursor_down", "down", show=False),
         Binding("k", "cursor_up", "up", show=False),
         Binding("down", "cursor_down", "down", show=False),
