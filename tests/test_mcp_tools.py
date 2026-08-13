@@ -174,3 +174,18 @@ async def test_read_transcript_asks_for_the_number_of_events_requested():
     s = resolved(read_transcript={"id": "p-you", "events": []})
     await tools.read_transcript(s, target_id="p-you", last_n=12)
     assert s.client.params("read_transcript") == {"id": "p-you", "last_n": 12}
+
+
+async def test_put_child_back_in_the_wound_names_the_caller_so_the_daemon_can_authorize():
+    """The daemon checks parentage against caller_id, so it must reach the daemon."""
+    s = resolved(**{"participant.kill": {"id": "p-child", "killed": True}})
+    await tools.put_child_back_in_the_wound(s, target_id="p-child")
+    p = s.client.params("participant.kill")
+    assert p["id"] == "p-child"
+    assert p["caller_id"] == "p-me"
+
+
+async def test_put_child_back_in_the_wound_identifies_first_or_the_daemon_cannot_authorize():
+    s = session(**{"participant.kill": {"id": "p-child", "killed": True}})
+    await tools.put_child_back_in_the_wound(s, target_id="p-child")
+    assert s.client.methods == ["hello", "participant.kill"]
