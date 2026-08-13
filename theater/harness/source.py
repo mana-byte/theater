@@ -58,8 +58,8 @@ def attach_point(path: Path) -> tuple[int, int, int, str | None]:
 
     The last complete line is returned so the caller can derive an initial
     status from it without replaying history onto the bus. A spawned agent
-    that finishes its turn before the observer attaches would otherwise stay
-    STARTING forever: no new bytes arrive after attach, so nothing else fires.
+    that finishes its turn before the observer attaches would otherwise keep
+    the wrong status: no new bytes arrive after attach, so nothing else fires.
     """
     size = 0
     lines = 0
@@ -94,7 +94,7 @@ class Attachment:
 
     `last_event` is the final event of the last record skipped at attach, and
     it is the reason a spawned agent that finished before we found it does not
-    sit at STARTING forever. It is deliberately not put on the bus: attaching
+    keep the wrong status. It is deliberately not put on the bus: attaching
     skips history rather than replaying it. Note that only the *last* event of
     that record is carried — every shipped parser puts a turn boundary on the
     final event of a record, so nothing is lost, but a parser that did

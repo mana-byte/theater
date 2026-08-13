@@ -66,3 +66,27 @@ def test_reopening_does_not_wipe_state(store, theater_home):
     again = Store(paths.db_path())
     assert again.get_participant(p.id) is not None
     again.close()
+
+
+def test_a_persisted_starting_status_loads_as_idle(store):
+    """A database from an older daemon may contain the 'starting' value.
+
+    The STARTING status was removed, so a row with the old value must load
+    as IDLE rather than raising ValueError. This is the migration shim in
+    Participant.from_row.
+    """
+    from theater.daemon.store import participants
+
+    p = Participant(harness="vibe", tier=Tier.SPAWNED)
+    store.upsert_participant(p)
+
+    # Write the old value directly, bypassing the enum, as an upgrade would.
+    store.conn.execute(
+        participants.update()
+        .where(participants.c.id == p.id)
+        .values(status="starting")
+    )
+
+    got = store.get_participant(p.id)
+    assert got is not None
+    assert got.status is Status.IDLE

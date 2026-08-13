@@ -29,7 +29,6 @@ from theater.formatting import (
 from theater.harness import harness_icon
 
 _STATUS_COLOR = {
-    "starting": "yellow",
     "idle": "green",
     "working": "cyan",
     "awaiting_input": "magenta",

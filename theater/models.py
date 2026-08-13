@@ -17,7 +17,6 @@ class Tier(StrEnum):
 
 
 class Status(StrEnum):
-    STARTING = "starting"
     IDLE = "idle"
     WORKING = "working"
     AWAITING_INPUT = "awaiting_input"
@@ -43,7 +42,7 @@ class Participant:
     session_id: str | None = None
     parent_id: str | None = None
     pid: int | None = None
-    status: Status = Status.STARTING
+    status: Status = Status.IDLE
     last_activity: float = field(default_factory=now)
     created_at: float = field(default_factory=now)
 
@@ -65,6 +64,12 @@ class Participant:
 
     @classmethod
     def from_row(cls, row) -> Participant:
+        # Migration shim: older daemons persisted 'starting' before STARTING was
+        # removed. A row from such a database loads as IDLE, since a participant
+        # that never left 'starting' was functionally idle. This can be deleted
+        # in a later version once no database can contain the old value.
+        raw_status = row["status"]
+        status = Status.IDLE if raw_status == "starting" else Status(raw_status)
         return cls(
             id=row["id"],
             harness=row["harness"],
@@ -75,7 +80,7 @@ class Participant:
             session_id=row["session_id"],
             parent_id=row["parent_id"],
             pid=row["pid"],
-            status=Status(row["status"]),
+            status=status,
             last_activity=row["last_activity"],
             created_at=row["created_at"],
         )

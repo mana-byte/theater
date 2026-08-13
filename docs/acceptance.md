@@ -40,7 +40,7 @@ Each session starts. After a few seconds:
 - Run `theater adopt` from inside each Vibe session to register it.
 - The régie tree should show both sessions as `A` (adopted) with
   harness `vibe`.
-- Status should transition from `starting` to `working` to `idle` as
+- Status should transition from `idle` to `working` to `idle` as
   the agents respond to their initial prompts.
 
 ## Step 3: Start a Claude Code session by hand
@@ -143,7 +143,7 @@ The test passes if:
 The test fails if:
 
 - Any session does not appear in the tree.
-- Status does not transition (stuck at `starting`).
+- Status does not transition (stuck at `idle`).
 - The `await_sessions` call hangs or returns no result.
 - The tree is empty after a daemon restart.
 - The régie crashes or becomes unresponsive.

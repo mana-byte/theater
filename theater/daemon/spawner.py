@@ -9,7 +9,7 @@ Sequence, and why it is this order:
   5. record the pane              nothing was inferred at any point
 
 If step 4 fails the participant is marked dead immediately rather than left as a
-STARTING ghost that the régie would draw forever.
+ghost that the régie would draw forever.
 """
 
 from __future__ import annotations

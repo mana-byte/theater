@@ -97,7 +97,7 @@ class Registry:
             tier=Tier.SPAWNED,
             cwd=cwd,
             parent_id=parent_id,
-            status=Status.STARTING,
+            status=Status.IDLE,
         )
         self.store.upsert_participant(p)
         self.store.bus_append(
@@ -194,9 +194,6 @@ class Registry:
         if claimed_id:
             existing = self.store.get_participant(claimed_id)
             if existing is not None:
-                existing.status = (
-                    Status.IDLE if existing.status is Status.STARTING else existing.status
-                )
                 existing.session_id = session_id or existing.session_id
                 existing.cwd = cwd or existing.cwd
                 if pane:

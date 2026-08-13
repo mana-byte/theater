@@ -339,7 +339,7 @@ mint id  →  worktree (opt)  →  write MCP config  →  tmux new-window  →  
 The order is not arbitrary. The id must exist before the config is written
 because the config contains `theater mcp --id <id>`; the pane id is only known
 after `new-window` returns it. Nothing is ever inferred. If `new-window` fails
-the participant is marked dead immediately rather than left as a `STARTING`
+the participant is marked dead immediately rather than left as a
 ghost the régie would draw forever.
 
 **`send`** — prompt is typed into an existing pane with `send-keys`, after
