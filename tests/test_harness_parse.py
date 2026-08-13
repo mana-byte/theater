@@ -694,11 +694,69 @@ _SHIPPED_OBSERVERS = [
 
 
 @pytest.mark.parametrize("observer", _SHIPPED_OBSERVERS)
-def test_no_shipped_plugin_overrides_screen_reading_yet(observer):
-    """Every shipped adapter inherits the default shim.
+def test_every_shipped_plugin_now_overrides_screen_reading(observer):
+    """Every shipped adapter overrides `screen_reading` with a real classifier.
 
-    A later phase overriding ``screen_reading`` in one of these plugins is a
-    visible, deliberate change: this test will fail the moment that happens,
-    so the override cannot slip in silently.
+    Phase 2a left the default shim in place and asserted no plugin overrode
+    it, so the override could not slip in silently. Phase 2b makes that
+    assertion deliberately false: each plugin now returns a `high`-confidence
+    reading built on a real captured screen.
     """
-    assert "screen_reading" not in type(observer).__dict__
+    assert "screen_reading" in type(observer).__dict__
+
+
+# ---- screen_reading on real captured screens -------------------------------
+
+
+SCREENS = FIXTURES / "screens"
+
+
+def _screen(name: str) -> str:
+    return (SCREENS / name).read_text()
+
+
+def test_claude_approval_fixture_classifies_as_approval_with_high_confidence():
+    capture = _screen("claude_approval.txt")
+    reading = ClaudeCodeObserver().screen_reading(capture)
+    assert reading.kind is ScreenKind.APPROVAL
+    assert reading.confidence is ScreenConfidence.HIGH
+
+
+def test_claude_idle_fixture_classifies_as_prompt():
+    capture = _screen("claude_idle.txt")
+    reading = ClaudeCodeObserver().screen_reading(capture)
+    assert reading.kind is ScreenKind.PROMPT
+
+
+def test_vibe_approval_fixture_classifies_as_approval_not_working():
+    """The working marker is present in the same capture as the permission box.
+
+    This is the regression test for the rule that approval must be tested
+    before the working marker: vibe renders both simultaneously, so a matcher
+    that checks `working` first would classify every approval dialog as
+    `working` and the bug survives.
+    """
+    capture = _screen("vibe_approval.txt")
+    assert "esc" in capture.lower()  # the working spinner is on screen
+    reading = VibeObserver().screen_reading(capture)
+    assert reading.kind is ScreenKind.APPROVAL
+    assert reading.kind is not ScreenKind.WORKING
+    assert reading.confidence is ScreenConfidence.HIGH
+
+
+def test_vibe_idle_fixture_classifies_as_prompt():
+    capture = _screen("vibe_idle.txt")
+    reading = VibeObserver().screen_reading(capture)
+    assert reading.kind is ScreenKind.PROMPT
+
+
+def test_codex_idle_fixture_classifies_as_prompt():
+    capture = _screen("codex_idle.txt")
+    reading = CodexObserver().screen_reading(capture)
+    assert reading.kind is ScreenKind.PROMPT
+
+
+def test_opencode_idle_fixture_classifies_as_prompt():
+    capture = _screen("opencode_idle.txt")
+    reading = OpenCodeObserver().screen_reading(capture)
+    assert reading.kind is ScreenKind.PROMPT

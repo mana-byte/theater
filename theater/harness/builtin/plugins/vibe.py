@@ -54,7 +54,12 @@ from theater.harness.base import (
     last_screen_line,
     theater_binary,
 )
-from theater.harness.observation import TranscriptObserver
+from theater.harness.observation import (
+    ScreenConfidence,
+    ScreenKind,
+    ScreenReading,
+    TranscriptObserver,
+)
 from theater.models import BadRequest
 
 #: Screen lines that mean "waiting for you". Vibe's prompt is `❯` (U+276F);
@@ -62,6 +67,29 @@ from theater.models import BadRequest
 #: prompt is someone typing, which is presence, not idleness — so these must
 #: stay exact matches.
 IDLE_PROMPTS = ("❯", "❯ ", "> ❯")
+
+#: Prompt forms recognised in a tail scan by `screen_reading`. A superset of
+#: `IDLE_PROMPTS` because a real capture can render the prompt as bare `>`
+#: (ASCII), which the exact `IDLE_PROMPTS` tuple used by `is_idle_screen` does
+#: not include. Seen in `tests/fixtures/screens/vibe_idle.txt`.
+_SCREEN_IDLE_PROMPTS = (*IDLE_PROMPTS, ">")
+
+#: Drawn by the CLI at the bottom of every permission box, regardless of which
+#: tool or question the box is about. Chosen over the question text
+#: (`Permission for the`) because `Esc reject` is frame furniture — the CLI's
+#: own navigation hint — and cannot appear in the agent's echoed output.
+#: Present in `tests/fixtures/screens/vibe_approval.txt`.
+#:
+#: Vibe renders its working spinner (`Esc/Ctrl+C to interrupt`) *and* the
+#: permission box simultaneously, so approval must be tested before the working
+#: marker or every approval dialog is misclassified as `working`.
+APPROVAL_MARKER = "Esc reject"
+
+#: How far up from the bottom to look for the prompt. A real capture has a
+#: separator and a cwd/token footer below the prompt, so the prompt is not
+#: the last non-blank line and `is_idle_screen` — which checks only the last
+#: line — does not fire on a real screen.
+_SCREEN_TAIL_LINES = 6
 
 #: How many session directories to inspect when searching by working directory.
 #: They are scanned newest first and a live session is always near the top, so
@@ -355,6 +383,33 @@ class VibeObserver(TranscriptObserver):
         last line is agent output, the agent is still rendering.
         """
         return last_screen_line(capture) in IDLE_PROMPTS
+
+    def screen_reading(self, capture: str) -> ScreenReading:
+        """Classify the rendered screen as `approval`, `prompt`, or `unknown`.
+
+        Approval before prompt: vibe's working spinner and its permission box
+        are on screen at the same time, so testing the prompt (which looks at
+        the last line) or a working marker first would classify every approval
+        dialog as something else. The `APPROVAL_MARKER` is dialog chrome, so it
+        cannot appear in the agent's own output.
+
+        Prompt is detected by scanning the tail for a bare prompt line rather
+        than checking only the last line: a real capture has a separator and a
+        cwd/token footer below the prompt, so the prompt is never the last
+        non-blank line and `is_idle_screen` does not fire on a real screen.
+        """
+        if APPROVAL_MARKER in capture:
+            return ScreenReading(
+                kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH
+            )
+        lines = [line.strip() for line in capture.splitlines() if line.strip()]
+        if any(line in _SCREEN_IDLE_PROMPTS for line in lines[-_SCREEN_TAIL_LINES:]):
+            return ScreenReading(
+                kind=ScreenKind.PROMPT, confidence=ScreenConfidence.HIGH
+            )
+        return ScreenReading(
+            kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW
+        )
 
 
 #: What the loader looks for. An instance, not the class: see

@@ -57,12 +57,35 @@ from theater.harness.base import (
     last_screen_line,
     theater_binary,
 )
-from theater.harness.observation import TranscriptObserver
+from theater.harness.observation import (
+    ScreenConfidence,
+    ScreenKind,
+    ScreenReading,
+    TranscriptObserver,
+)
 from theater.models import BadRequest
 
 #: Screen lines that mean "waiting for you". Anything after the prompt is
 #: someone typing, which is presence, not idleness — so these stay exact.
 IDLE_PROMPTS = (">", "> ")
+
+#: Drawn by the CLI as the footer of every approval dialog, regardless of what
+#: the question asks. Chosen over the question text (`Do you want to`) because
+#: that phrasing can appear in an agent's own echoed output and would
+#: false-positive. Present in `tests/fixtures/screens/claude_approval.txt`.
+APPROVAL_MARKER = "Esc to cancel"
+
+#: The idle footer the CLI draws below the prompt. Used by `screen_reading`
+#: because a real capture has this footer below the prompt, so the prompt is
+#: not the last non-blank line and `is_idle_screen` — which checks only the
+#: last line — does not fire. Present in
+#: `tests/fixtures/screens/claude_idle.txt`.
+IDLE_FOOTER = "manual mode on"
+
+#: How far up from the bottom to look for the prompt and footer. A real
+#: capture has several lines of padding below the footer, so a window of one
+#: would miss it.
+_SCREEN_TAIL_LINES = 6
 
 #: Records to read before giving up on finding a `cwd` in a candidate
 #: transcript. The first record is a `permission-mode` entry that has none;
@@ -399,6 +422,33 @@ class ClaudeCodeObserver(TranscriptObserver):
         the prompt.
         """
         return last_screen_line(capture) in IDLE_PROMPTS
+
+    def screen_reading(self, capture: str) -> ScreenReading:
+        """Classify the rendered screen as `approval`, `prompt`, or `unknown`.
+
+        Approval first: the dialog's footer chrome (`Esc to cancel`) is a
+        frame element the CLI draws, not text the agent produced, so it cannot
+        appear in echoed output. The working spinner and the approval dialog
+        are mutually exclusive in claude, but checking approval first is the
+        rule that keeps this method honest if that ever changes.
+
+        Prompt is detected from the idle footer (`manual mode on`) rather than
+        a bare last line: a real capture has the footer below the prompt, so
+        the prompt is never the last non-blank line and `is_idle_screen` does
+        not fire on a real screen.
+        """
+        if APPROVAL_MARKER in capture:
+            return ScreenReading(
+                kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH
+            )
+        lines = [line for line in capture.splitlines() if line.strip()]
+        if any(IDLE_FOOTER in line for line in lines[-_SCREEN_TAIL_LINES:]):
+            return ScreenReading(
+                kind=ScreenKind.PROMPT, confidence=ScreenConfidence.HIGH
+            )
+        return ScreenReading(
+            kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW
+        )
 
 
 #: What the loader looks for. An instance, not the class: see

@@ -77,7 +77,12 @@ from theater.harness.base import (
     clipper,
     theater_binary,
 )
-from theater.harness.observation import TranscriptObserver
+from theater.harness.observation import (
+    ScreenConfidence,
+    ScreenKind,
+    ScreenReading,
+    TranscriptObserver,
+)
 from theater.models import BadRequest
 
 #: The composer prompt. A single glyph (U+203A), not the ASCII ">" that Claude
@@ -439,6 +444,28 @@ class CodexObserver(TranscriptObserver):
             return False
         lines = [line.strip() for line in capture.splitlines() if line.strip()]
         return any(line.startswith(PROMPT) for line in lines[-_SCREEN_TAIL_LINES:])
+
+    def screen_reading(self, capture: str) -> ScreenReading:
+        """Classify the rendered screen as `working`, `prompt`, or `unknown`.
+
+        Codex's idle screen and working screen are already distinguishable by
+        the presence or absence of `WORKING_MARKER`, so `prompt` and `working`
+        both carry `high` confidence. The approval arm is unimplemented because
+        this host's config auto-approves codex, so the dialog could not be
+        captured — an unverified approval marker is the exact failure this phase
+        is meant to avoid.
+        """
+        if WORKING_MARKER in capture:
+            return ScreenReading(
+                kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH
+            )
+        if self.is_idle_screen(capture):
+            return ScreenReading(
+                kind=ScreenKind.PROMPT, confidence=ScreenConfidence.HIGH
+            )
+        return ScreenReading(
+            kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW
+        )
 
 
 #: What the loader looks for. An instance, not the class: see
