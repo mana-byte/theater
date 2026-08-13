@@ -63,7 +63,7 @@ async def test_spawn_session_forces_a_choice_of_approval(daemon):
     schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
     required = schema["spawn_session"]["required"]
     assert "approval" in required
-    assert "prompt" in required
+    assert "prompt" not in required
     assert "cwd" not in required
 
 

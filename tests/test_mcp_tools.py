@@ -128,6 +128,13 @@ async def test_spawn_names_the_caller_as_the_parent():
     assert s.client.params("spawn")["parent_id"] == "p-me"
 
 
+async def test_spawn_accepts_no_prompt():
+    """No prompt means the daemon starts a plain CLI and resolves the job."""
+    s = resolved()
+    await tools.spawn_session(s, harness="vibe", approval="manual")
+    assert s.client.params("spawn")["prompt"] is None
+
+
 async def test_spawn_defaults_the_cwd_to_this_process():
     s = resolved()
     await tools.spawn_session(s, harness="vibe", prompt="hi", approval="manual")

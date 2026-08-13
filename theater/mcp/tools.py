@@ -108,7 +108,7 @@ async def spawn_session(
     session: Session,
     *,
     harness: str,
-    prompt: str,
+    prompt: str | None = None,
     approval: str,
     cwd: str | None = None,
     worktree: bool = False,

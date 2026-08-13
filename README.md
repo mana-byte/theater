@@ -420,7 +420,7 @@ Starts a new agent in a child tmux window. Returns the child's id and a handle f
 
 ```
 harness:     "claude" | "codex" | "opencode" | "vibe"
-prompt:      task delivered on the child's command line
+prompt:      task delivered on the child's command line; optional for a plain CLI
 approval:    "manual" | "edits" | "yolo"
 cwd:         working directory (defaults to caller's cwd)
 worktree:    create an isolated git worktree (bool)

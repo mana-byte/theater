@@ -40,7 +40,8 @@ SPAWN_DOC = """Start a new agent in its own tmux window as your child.
 harness:  which CLI to run. This machine has: {harnesses}. Call
           list_harnesses for the daemon's own answer, which is the one that
           decides whether a spawn succeeds.
-prompt:   the task, delivered on the child's command line at startup
+prompt:   the task, delivered on the child's command line at startup.
+          Optional; omit it or pass null to start a plain CLI with no task.
 approval: "manual" | "edits" | "yolo" — required, no default. This is
           the only thing standing between an unattended child and your
           filesystem, so choose it deliberately.
@@ -112,7 +113,8 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
 
     @mcp.tool(description=_spawn_description())
     async def spawn_session(
-        harness: str, prompt: str, approval: str, cwd: str | None = None,
+        harness: str, approval: str, prompt: str | None = None,
+        cwd: str | None = None,
         worktree: bool = False, base_branch: str | None = None,
         model: str | None = None,
     ) -> dict:
