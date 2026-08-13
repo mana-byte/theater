@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import functools
 import logging
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, NoReturn
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from theater import protocol
 from theater.daemon.harness_detect import detect_harness, is_shell

@@ -95,7 +95,7 @@ def test_an_unknown_participant_is_its_own_root(store):
 
 
 def test_the_root_is_the_last_participant_that_exists(store):
-    root, child = chain(store, 2)
+    _root, child = chain(store, 2)
     child.parent_id = "ghost"
     store.upsert_participant(child)
     assert root_of(store, child.id) == child.id
@@ -115,7 +115,7 @@ def test_a_subtree_includes_grandchildren(store):
 
 
 def test_a_subtree_is_taken_from_where_you_ask_not_the_root(store):
-    root, child, grandchild = chain(store, 3)
+    _root, child, grandchild = chain(store, 3)
     assert set(subtree_ids(store, child.id)) == {child.id, grandchild.id}
 
 

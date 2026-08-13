@@ -314,7 +314,9 @@ class ClaudeCodeObserver(TranscriptObserver):
                 )
         return out
 
-    def _user(self, message: dict, ts: float | None, index: int, *, clip_text: bool = True) -> list[Event]:
+    def _user(
+        self, message: dict, ts: float | None, index: int, *, clip_text: bool = True
+    ) -> list[Event]:
         _clip = clipper(clip_text)
 
         content = message.get("content")
@@ -360,8 +362,8 @@ class ClaudeCodeObserver(TranscriptObserver):
         out: list[NativeChild] = []
         try:
             with transcript.open(encoding="utf-8", errors="replace") as fh:
-                for line in fh:
-                    line = line.strip()
+                for raw in fh:
+                    line = raw.strip()
                     if not line:
                         continue
                     try:

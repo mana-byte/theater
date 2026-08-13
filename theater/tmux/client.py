@@ -34,7 +34,10 @@ from dataclasses import dataclass
 from theater.models import TheaterError
 
 # Fields we ask tmux for when enumerating panes, in order.
-_PANE_FORMAT = "#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{window_id}\t#{session_name}\t#{window_name}\t#{pane_current_command}"
+_PANE_FORMAT = (
+    "#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{window_id}\t"
+    "#{session_name}\t#{window_name}\t#{pane_current_command}"
+)
 
 
 #: Ceiling on a single tmux invocation. tmux commands are local and fast; this
@@ -99,7 +102,7 @@ def _require() -> None:
 def run_sync(*args: str, check: bool = True) -> str:
     _require()
     proc = subprocess.run(
-        ["tmux", *args], capture_output=True, text=True, timeout=RUN_TIMEOUT
+        ["tmux", *args], capture_output=True, text=True, timeout=RUN_TIMEOUT, check=False
     )
     if check and proc.returncode != 0:
         raise TmuxError(f"tmux {' '.join(args)} failed: {proc.stderr.strip()}")

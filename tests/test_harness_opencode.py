@@ -24,8 +24,8 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-
 from shipped import OpenCodeHarness, OpenCodeObserver
+
 from theater.harness import EventKind, TranscriptObserver
 from theater.models import BadRequest, Status
 

@@ -25,6 +25,9 @@ import logging
 import shutil
 from pathlib import Path
 
+from theater import paths
+from theater.config import Config, ConfigError
+from theater.harness import builtin, plugins
 from theater.harness.base import (
     APPROVALS,
     MAX_TEXT,
@@ -40,9 +43,6 @@ from theater.harness.base import (
     status_after,
     theater_binary,
 )
-from theater import paths
-from theater.config import Config, ConfigError
-from theater.harness import builtin, plugins
 from theater.harness.observation import HarnessObserver, TranscriptObserver
 from theater.harness.plugins import Plugin, PluginError
 from theater.harness.source import (

@@ -50,7 +50,4 @@ async def human_present(pane_id: str) -> bool:
         # than block forever.
         return False
 
-    if in_mode and in_mode != "0":
-        return True
-
-    return False
+    return bool(in_mode and in_mode != "0")

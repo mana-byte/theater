@@ -26,10 +26,9 @@ import pytest
 from theater import paths
 from theater.client import DaemonClient
 from theater.daemon import lock as lock_mod
-from theater.daemon.lock import DaemonLock, LockHeld
 from theater.daemon import server as server_mod
+from theater.daemon.lock import DaemonLock, LockHeld
 from theater.daemon.server import Daemon
-
 
 # ---- the lock itself ---------------------------------------------------
 

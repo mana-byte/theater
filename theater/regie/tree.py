@@ -73,7 +73,8 @@ def _node_label(node: dict, prefix: str = "") -> Text:
     label = Text()
     if prefix:
         label.append(prefix, style="dim")
-    label.append(f"{tier_mark(node.get('tier'))}{reach_mark(node.get('addressable'))} ", style="bold")
+    marks = f"{tier_mark(node.get('tier'))}{reach_mark(node.get('addressable'))} "
+    label.append(marks, style="bold")
     label.append(f"{harness_icon(node.get('harness'))} ")
     label.append(f"{clip_harness(node.get('harness')):<11} ")
     label.append(f"{status:<14} ", style=_STATUS_COLOR.get(status, "white"))

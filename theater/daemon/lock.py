@@ -62,7 +62,7 @@ def file_id(path: Path) -> tuple[int, int] | None:
     created is how it stops.
     """
     try:
-        st = os.stat(path)
+        st = path.stat()
     except OSError:
         return None
     return (st.st_dev, st.st_ino)
@@ -98,6 +98,7 @@ def _live_daemon_pid(path: Path) -> int | None:
     try:
         probe = subprocess.run(
             ["ps", "-p", str(pid), "-o", "command="],
+            check=False,
             capture_output=True,
             text=True,
             timeout=2,

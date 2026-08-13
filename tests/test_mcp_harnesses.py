@@ -17,10 +17,9 @@ import json
 
 import pytest
 
+from tests.test_harness_plugins import install, plugin
 from theater.daemon.server import Daemon
 from theater.mcp.server import build
-
-from tests.test_harness_plugins import install, plugin
 
 #: The adapters Theater ships. Every one must reach an agent.
 SHIPPED = {"claude", "codex", "opencode", "vibe"}
@@ -111,7 +110,7 @@ async def test_spawn_points_at_the_authoritative_list(daemon):
 
 async def test_list_harnesses_returns_the_shipped_set(daemon, all_installed):
     rows = _payload(await build("p1", "vibe").call_tool("list_harnesses", {}))
-    assert SHIPPED <= {r["name"] for r in rows}
+    assert {r["name"] for r in rows} >= SHIPPED
     assert all(r["icon"] and r["binary"] for r in rows)
 
 
@@ -146,7 +145,7 @@ async def test_list_harnesses_omits_a_broken_plugin(daemon, local_dir, all_insta
         for r in _payload(await build("p1", "vibe").call_tool("list_harnesses", {}))
     }
     assert "broken" not in names
-    assert SHIPPED <= names
+    assert names >= SHIPPED
 
 
 async def test_spawning_a_listed_harness_is_accepted(daemon, fake_tmux, all_installed):

@@ -66,7 +66,7 @@ def test_create_worktree(repo):
     # The branch exists
     result = subprocess.run(
         ["git", "rev-parse", "--verify", "theater/child1"],
-        cwd=repo, capture_output=True, text=True,
+        cwd=repo, capture_output=True, text=True, check=False,
     )
     assert result.returncode == 0
 
@@ -122,7 +122,7 @@ def test_remove_worktree(repo):
     # The branch is gone
     result = subprocess.run(
         ["git", "rev-parse", "--verify", "theater/child4"],
-        cwd=repo, capture_output=True, text=True,
+        cwd=repo, capture_output=True, text=True, check=False,
     )
     assert result.returncode != 0
 

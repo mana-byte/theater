@@ -69,7 +69,13 @@ def test_from_to_routing_shown():
         "kind": "agent.user",
         "from_id": "abc123",
         "to_id": "def456",
-        "payload": {"text": "do the thing", "tool": None, "ts": None, "turn_end": False, "index": 0},
+        "payload": {
+            "text": "do the thing",
+            "tool": None,
+            "ts": None,
+            "turn_end": False,
+            "index": 0,
+        },
     }
     text = format_bus_line(row)
     assert "abc123 -> def456" in str(text)

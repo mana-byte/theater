@@ -56,8 +56,8 @@ def test_bus_is_ordered_and_seekable(store):
 
 
 def test_reopening_does_not_wipe_state(store, theater_home):
-    from theater.daemon.store import Store
     from theater import paths
+    from theater.daemon.store import Store
 
     p = Participant(harness="vibe")
     store.upsert_participant(p)

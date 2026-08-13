@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 import pytest
+from shipped import VibeHarness
 
 from theater.daemon.observer import (
     AWAITING_INPUT_TIMEOUT,
@@ -22,7 +23,6 @@ from theater.daemon.observer import (
     QuietClock,
     TurnAccumulator,
 )
-from shipped import VibeHarness
 from theater.harness.base import Event, EventKind
 from theater.harness.source import Batch, Source
 from theater.models import Status
@@ -144,9 +144,9 @@ async def test_attaching_skips_history_instead_of_replaying_it(
     await asyncio.sleep(0.1)
     assert kinds(registry.store) == ["agent.transcript"]
 
-    attach = [
+    attach = next(
         r for r in registry.store.bus_tail(limit=500) if r["kind"] == "agent.transcript"
-    ][0]
+    )
     assert attach["payload"]["skipped_records"] == 4
 
     append(vibe_tree["transcript"], USER)

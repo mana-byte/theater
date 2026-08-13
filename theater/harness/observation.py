@@ -80,7 +80,7 @@ class HarnessObserver(ABC):
         cwd: str | None,
         session_id: str | None = None,
         after: float | None = None,
-    ) -> "Source":
+    ) -> Source:
         """A live view of one participant's output, for the reducer to poll.
 
         Called once per participant, at watcher start. The returned object owns
@@ -146,7 +146,7 @@ class TranscriptObserver(HarnessObserver):
         cwd: str | None,
         session_id: str | None = None,
         after: float | None = None,
-    ) -> "Source":
+    ) -> Source:
         from theater.harness.source import TranscriptSource
 
         return TranscriptSource(self, cwd=cwd, session_id=session_id, after=after)

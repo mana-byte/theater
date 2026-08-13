@@ -12,7 +12,6 @@ import pytest
 
 from theater.tmux import client
 
-
 # ---- new_window --------------------------------------------------------
 
 
@@ -24,12 +23,12 @@ async def _new_window_argv(monkeypatch, **kw):
         return "%99"
 
     monkeypatch.setattr(client, "run", fake_run)
-    defaults = dict(
-        session="0",
-        name="vibe-abc",
-        cwd="/tmp",
-        command=["vibe", "say hello"],
-    )
+    defaults = {
+        "session": "0",
+        "name": "vibe-abc",
+        "cwd": "/tmp",
+        "command": ["vibe", "say hello"],
+    }
     defaults.update(kw)
     pane_id = await client.new_window(**defaults)
     assert pane_id == "%99"
@@ -54,7 +53,7 @@ async def test_new_window_named_session_keeps_colon(monkeypatch):
     assert argv[argv.index("-t") + 1] == "dev:"
 
 
-async def test_new_window_background_inserts_d_before_P(monkeypatch):
+async def test_new_window_background_inserts_d_before_capital_p(monkeypatch):
     argv = await _new_window_argv(monkeypatch, background=True)
     assert argv[0:2] == ["new-window", "-d"]
     assert "-P" in argv

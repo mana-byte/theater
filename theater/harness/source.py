@@ -193,7 +193,7 @@ class Source(ABC):
 
     async def aclose(self) -> None:
         """Release anything held open. Called once, when the watcher stops."""
-        return None
+        return
 
 
 class TranscriptSource(Source):
@@ -272,8 +272,8 @@ class TranscriptSource(Source):
         events: list[Event] = []
         try:
             with path.open(encoding="utf-8", errors="replace") as fh:
-                for index, line in enumerate(fh):
-                    line = line.strip()
+                for index, raw in enumerate(fh):
+                    line = raw.strip()
                     if line:
                         events.extend(self._observer.parse(line, index, clip_text=False))
         except OSError:

@@ -18,8 +18,10 @@ import os
 import shutil
 import sys
 import time
+from pathlib import Path
 
 from theater import config, paths
+from theater import harness as harness_registry
 from theater.client import DaemonClient, call_sync
 from theater.formatting import (
     TIER_LEGEND,
@@ -32,10 +34,10 @@ from theater.formatting import (
     tier_mark,
     tilde,
 )
-from theater import harness as harness_registry
 from theater.harness import APPROVALS, HARNESSES, describe, harness_icon
 from theater.protocol import RemoteError
 from theater.tmux import client as tmux
+
 
 class BadUsage(Exception):
     """The command line is wrong in a way argparse cannot express.
@@ -142,7 +144,10 @@ def _parser() -> argparse.ArgumentParser:
     adopt.add_argument(
         "--harness",
         default=None,
-        help="Override harness detection. By default the pane's current command is matched against known harness binaries.",
+        help=(
+            "Override harness detection. By default the pane's current command "
+            "is matched against known harness binaries."
+        ),
     )
     adopt.add_argument("--json", action="store_true")
 
@@ -321,7 +326,7 @@ def cmd_spawn(args) -> int:
         harness=harness,
         prompt=args.prompt_flag if args.prompt_flag is not None else args.prompt,
         approval=args.approval,
-        cwd=args.cwd or os.getcwd(),
+        cwd=args.cwd or str(Path.cwd()),
         parent_id=args.parent_id,
         tmux_session=tmux.current_session_sync(),
         background=not args.foreground,
@@ -419,7 +424,7 @@ def cmd_adopt(args) -> int:
             file=sys.stderr,
         )
         return 1
-    record = call_sync("adopt", pane=pane, harness=args.harness, cwd=os.getcwd())
+    record = call_sync("adopt", pane=pane, harness=args.harness, cwd=str(Path.cwd()))
     if args.json:
         print(json.dumps(record, indent=2))
     else:

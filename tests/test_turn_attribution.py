@@ -28,14 +28,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
 from shipped import ClaudeCodeObserver, CodexObserver, VibeObserver
+
 from theater.daemon.jobs import JobManager
 from theater.daemon.observer import (
+    _PROMPT_MATCH,
     Observer,
     QuietClock,
     TurnAccumulator,
-    _PROMPT_MATCH,
     answers_prompt,
 )
 from theater.harness.base import Event, EventKind, clip

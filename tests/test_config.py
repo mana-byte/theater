@@ -11,9 +11,8 @@ import json
 
 import pytest
 
-from theater import cli
+from theater import cli, paths
 from theater import config as cfg
-from theater import paths
 from theater.client import DaemonClient
 from theater.daemon.server import Daemon
 from theater.protocol import RemoteError
@@ -101,7 +100,7 @@ def test_theme_and_favourite_are_plain_strings():
 
 def test_describe_reports_source_per_key():
     write("[rails]\nbudget = 7\n")
-    rows = dict((key, (value, source)) for key, value, source in cfg.describe(cfg.load()))
+    rows = {key: (value, source) for key, value, source in cfg.describe(cfg.load())}
     assert rows["rails.budget"] == ("7", "config.toml")
     assert rows["rails.depth_cap"] == ("3", "default")
     assert rows["regie.theme"] == ("(unset)", "default")

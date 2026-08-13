@@ -28,6 +28,7 @@ that agent made afterwards. Four rules keep that from happening:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import subprocess
@@ -71,10 +72,11 @@ class DaemonClient:
             self._reader, self._writer = await asyncio.open_unix_connection(
                 str(sock), limit=protocol.MAX_MESSAGE_BYTES
             )
-            return
         except (FileNotFoundError, ConnectionRefusedError):
             if not self.autostart:
                 raise
+        else:
+            return
         await self._start_daemon()
         self._reader, self._writer = await self._await_socket()
 
@@ -103,15 +105,23 @@ class DaemonClient:
         if not lock.is_free():
             return
         paths.ensure_home()
-        log = open(paths.log_path(), "ab")
-        subprocess.Popen(
-            [sys.executable, "-m", "theater.cli", "daemon"],
-            stdout=log,
-            stderr=log,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-            env=os.environ.copy(),
-        )
+        # Blocking on purpose. Forking is blocking whichever way it is
+        # written, and this runs once, on the path where no daemon exists
+        # yet, so there is nothing else on the loop to starve.
+        log = paths.log_path().open("ab")
+        try:
+            subprocess.Popen(  # noqa: ASYNC220
+                [sys.executable, "-m", "theater.cli", "daemon"],
+                stdout=log,
+                stderr=log,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+                env=os.environ.copy(),
+            )
+        finally:
+            # Popen has dup'd it into the child; ours would otherwise stay
+            # open for the life of this process.
+            log.close()
 
     async def _await_socket(self):
         sock = paths.socket_path()
@@ -200,7 +210,7 @@ class DaemonClient:
             got = msg.get("id")
             # The daemon answers with id 0 when it could not parse the request
             # far enough to echo one back; that is still our reply.
-            if got == req_id or got == 0:
+            if got in (req_id, 0):
                 return msg
             if isinstance(got, int) and got < req_id:
                 continue
@@ -218,10 +228,8 @@ class DaemonClient:
         writer = self._writer
         self._discard()
         if writer is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await writer.wait_closed()
-            except Exception:
-                pass
 
     async def aclose(self) -> None:
         await self._drop()

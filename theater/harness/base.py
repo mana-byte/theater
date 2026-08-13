@@ -228,7 +228,7 @@ class Harness(ABC):
     #: to satisfy the ABC buys nothing that the loader's check does not already
     #: buy. `plugins._check_observer` rejects a plugin that omits it, which is
     #: the same place `name`, `binary` and `icon` are checked.
-    observer: "HarnessObserver"
+    observer: HarnessObserver
 
     # ---- launching ------------------------------------------------------
 

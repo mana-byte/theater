@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from theater.client import DaemonClient
 
@@ -37,7 +38,7 @@ class Session:
             id=self.participant_id,
             harness=self.harness,
             pane=os.environ.get("TMUX_PANE"),
-            cwd=os.getcwd(),
+            cwd=str(Path.cwd()),
         )
         assert isinstance(record, dict)
         self.participant_id = record["id"]
@@ -129,7 +130,7 @@ async def spawn_session(
         harness=harness,
         prompt=prompt,
         approval=approval,
-        cwd=cwd or os.getcwd(),
+        cwd=cwd or str(Path.cwd()),
         parent_id=session.participant_id,
         tmux_session=os.environ.get("THEATER_TMUX_SESSION"),
         worktree=worktree,
@@ -150,7 +151,7 @@ async def register_pane(session: Session, *, pane: str) -> dict:
         id=session.participant_id,
         harness=session.harness,
         pane=pane,
-        cwd=os.getcwd(),
+        cwd=str(Path.cwd()),
     )
     assert isinstance(record, dict)
     session.participant_id = record["id"]

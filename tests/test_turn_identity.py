@@ -28,14 +28,14 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-
 from shipped import ClaudeCodeObserver, CodexObserver, OpenCodeObserver, VibeObserver
+
 from theater.daemon.jobs import JobManager
 from theater.daemon.observer import (
+    _ANSWERED_TURNS,
     Observer,
     QuietClock,
     TurnAccumulator,
-    _ANSWERED_TURNS,
 )
 from theater.harness.base import Event, EventKind
 from theater.harness.source import Batch
@@ -159,8 +159,8 @@ def replay_opencode_capture(db: Path, directory: str) -> list[Event]:
             # suite uses. Dropped rather than reconciled: the adapter orders
             # the log by `seq` and never looks at the row id.
             drop = {"id"} if table == "event" else set()
-            for row in rows[table]:
-                row = {k: v for k, v in row.items() if k not in drop}
+            for raw in rows[table]:
+                row = {k: v for k, v in raw.items() if k not in drop}
                 columns = ", ".join(row)
                 marks = ", ".join("?" * len(row))
                 conn.execute(

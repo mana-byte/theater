@@ -60,7 +60,7 @@ def match_binary(command: str, harnesses) -> str | None:
     """Return the harness name if a command basename matches a harness binary."""
     basename = command.rsplit("/", 1)[-1]
     for harness in harnesses.values():
-        if harness.binary == basename or harness.binary == command:
+        if harness.binary in (basename, command):
             return harness.name
     return None
 

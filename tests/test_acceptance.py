@@ -19,7 +19,6 @@ tmux is stubbed, but everything above that boundary is real.
 
 from __future__ import annotations
 
-
 import pytest
 
 from theater.client import DaemonClient
@@ -27,7 +26,6 @@ from theater.daemon.jobs import JobState
 from theater.daemon.server import Daemon
 from theater.models import Status
 from theater.protocol import RemoteError
-
 
 # ========================================================================
 # 1. spawn → await → result

@@ -20,10 +20,10 @@ import json
 from pathlib import Path
 
 import pytest
+from shipped import ClaudeCodeObserver, CodexObserver, VibeObserver
 
 from theater.harness import EventKind, status_after
 from theater.harness.base import MAX_TEXT
-from shipped import ClaudeCodeObserver, CodexObserver, VibeObserver
 from theater.models import Status
 
 FIXTURES = Path(__file__).parent / "fixtures"

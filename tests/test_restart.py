@@ -12,7 +12,6 @@ These tests simulate a restart by:
 
 from __future__ import annotations
 
-
 from theater.client import DaemonClient
 from theater.daemon.server import Daemon
 
@@ -148,7 +147,7 @@ async def test_restart_preserves_lineage(theater_home, fake_tmux):
     await d1.start()
     async with DaemonClient(autostart=False) as c:
         parent = await c.call("hello", harness="vibe", pane="%1", cwd="/tmp")
-        child = await c.call(
+        await c.call(
             "spawn", harness="vibe", prompt="hi", approval="manual",
             cwd="/tmp", parent_id=parent["id"]
         )

@@ -37,7 +37,71 @@ packages = ["theater"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    "ruff>=0.16.2",
 ]
+
+[tool.ruff]
+# 88 would flag 50 lines; 100 flags 5. The wide ones are prose — docstrings and
+# error messages that explain a decision — and folding them costs more than the
+# column saves.
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "F", "E9",      # the gate that already existed
+    "E", "W",       # pycodestyle
+    "I",            # import order
+    "N",            # naming
+    "UP",           # syntax that 3.12 made obsolete
+    "B",            # bugbear
+    "SIM", "C4", "RET",
+    "ASYNC",        # blocking calls inside async functions
+    "PTH",          # os.path -> pathlib
+    "RUF",
+    "PL",           # pylint subset
+    "TRY",
+]
+ignore = [
+    # The house style is French-flavoured: "régie", "théâtre", em-dashes. These
+    # three rules exist to catch homoglyph attacks in identifiers, which is not
+    # what a docstring saying "régie" is.
+    "RUF001", "RUF002", "RUF003",
+
+    # An exception's class name is the CamelCase of its wire code: `Busy` is
+    # `busy`, `HumanPresent` is `human_present` (models.py:147). Adding an
+    # `Error` suffix either desyncs the two or changes the code an agent sees.
+    "N818",
+
+    # Long messages are raised inline on purpose. Every error a caller sees is
+    # meant to say what to do about it, and a one-line exception class per
+    # message would bury that.
+    "TRY003",
+
+    # Imports inside functions are deliberate: harness plugins are loaded
+    # lazily, and the CLI keeps Textual out of the import path of every
+    # subcommand that is not the régie.
+    "PLC0415",
+
+    # 52 hits, nearly all `assert x == 3` in tests, where the literal *is* the
+    # assertion.
+    "PLR2004",
+
+    # Complexity ceilings. The reducer takes ten arguments because it reduces
+    # ten facts; a parser returns eight times because it classifies eight
+    # record shapes. Refactoring those to satisfy a counter would make them
+    # worse, and v1.1 already did the modularity pass.
+    "PLR0911", "PLR0913", "PLR0917",
+
+    # Our own APIs take `timeout` parameters by design. The rule wants the
+    # caller to wrap in `asyncio.timeout` instead, which would move the
+    # deadline away from the protocol that defines it.
+    "ASYNC109",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# A test that waits for a daemon to converge polls; that is the test, not an
+# accident. Same for touching the filesystem inside an async test body.
+"tests/*" = ["ASYNC110", "ASYNC240"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

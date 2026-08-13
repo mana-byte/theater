@@ -13,9 +13,10 @@ TUI's dependencies are not importable. Colour and styling stay in
 from __future__ import annotations
 
 import json
-import os
 import time
-from typing import Callable, TypeVar
+from collections.abc import Callable
+from pathlib import Path
+from typing import TypeVar
 
 #: How each tier is marked in the T column.
 TIER_MARK = {"spawned": "S", "adopted": "A", "external": "E"}
@@ -37,7 +38,7 @@ def tilde(path: str | None) -> str:
     """Abbreviate the user's home directory, so cwds fit on one line."""
     if not path:
         return "-"
-    home = os.path.expanduser("~")
+    home = str(Path.home())
     return "~" + path[len(home) :] if path.startswith(home) else path
 
 
@@ -92,7 +93,7 @@ def event_who(row: dict) -> str:
 _Line = TypeVar("_Line")
 
 
-def flatten_tree(
+def flatten_tree[Line](
     nodes: list[dict],
     render: Callable[[dict, int], _Line],
     indent: int = 0,

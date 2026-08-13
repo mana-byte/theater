@@ -90,7 +90,7 @@ def test_without_a_favourite_the_order_is_alphabetical(installed):
 
 def test_the_favourite_is_offered_first(installed):
     last = sorted(HARNESSES)[-1]
-    assert [name for _, name, _ in entries(favourite=last)][0] == last
+    assert next(name for _, name, _ in entries(favourite=last)) == last
 
 
 def test_promoting_a_favourite_drops_nobody(installed):
@@ -207,7 +207,7 @@ async def test_the_configured_favourite_is_discovered_first(installed):
     last = sorted(HARNESSES)[-1]
     settings = Config(theater=TheaterSection(favourite=last))
     prov = SpawnCommands(FakeScreen(FakeApp(settings)))
-    first = [hit async for hit in prov.discover()][0]
+    first = await anext(prov.discover())
     first.command()
     assert prov.app.spawned == [last]
 
@@ -217,7 +217,7 @@ async def test_the_configured_favourite_is_discovered_first(installed):
 
 def test_the_provider_is_registered_without_dropping_the_built_ins():
     assert SpawnCommands in RegieApp.COMMANDS
-    assert RegieApp.COMMANDS > {SpawnCommands}
+    assert {SpawnCommands} < RegieApp.COMMANDS
 
 
 # ---- what the app actually asks the daemon for --------------------------

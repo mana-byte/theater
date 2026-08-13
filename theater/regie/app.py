@@ -28,14 +28,15 @@ async daemon calls; the app runs them as background workers.
 from __future__ import annotations
 
 import logging
-import os
+from pathlib import Path
+from typing import ClassVar
 
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.widgets import Footer, Label, RichLog
-from rich.text import Text
 
 from theater.client import DaemonClient
 from theater.config import Config, RegieSection
@@ -112,8 +113,9 @@ class TreePanel(VerticalScroll):
             if i == cursor:
                 child.add_class("tree-cursor")
 
-    #: Set by the app so apply_cursor can map line index to node.
-    _lines_data: list[tuple[Text, dict]] = []
+    #: Set by the app so apply_cursor can map line index to node. Instances
+    #: rebind it; the class-level value is the empty fallback.
+    _lines_data: ClassVar[list[tuple[Text, dict]]] = []
 
     def scroll_to_cursor(self, cursor: int) -> None:
         """Ensure the cursor line is visible."""
@@ -150,7 +152,7 @@ class RegieApp(App):
     }
     """
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding("j", "cursor_down", "down", show=False),
         Binding("k", "cursor_up", "up", show=False),
         Binding("down", "cursor_down", "down", show=False),
@@ -551,7 +553,7 @@ class RegieApp(App):
                 # comes up is the harness's own default behaviour.
                 prompt="",
                 approval="manual",
-                cwd=os.getcwd(),
+                cwd=str(Path.cwd()),
                 # By name, and only ours: a new window belongs in the session
                 # the user is looking at, not in the fallback `theater` one.
                 tmux_session=self.my_session_name,

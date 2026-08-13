@@ -53,13 +53,15 @@ def is_git_repo(path: str) -> bool:
         result = subprocess.run(
             ["git", "rev-parse", "--git-dir"],
             cwd=path,
+            check=False,
             capture_output=True,
             text=True,
             timeout=5,
         )
-        return result.returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
+    else:
+        return result.returncode == 0
 
 
 def repo_root(path: str) -> str | None:
@@ -68,15 +70,15 @@ def repo_root(path: str) -> str | None:
         result = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
             cwd=path,
+            check=False,
             capture_output=True,
             text=True,
             timeout=5,
         )
-        if result.returncode == 0:
-            return result.stdout.strip()
-        return None
     except (OSError, subprocess.SubprocessError):
         return None
+    else:
+        return result.stdout.strip() if result.returncode == 0 else None
 
 
 def create_worktree(
@@ -98,6 +100,7 @@ def create_worktree(
     check = subprocess.run(
         ["git", "rev-parse", "--verify", branch],
         cwd=repo_root,
+        check=False,
         capture_output=True,
         text=True,
         timeout=5,
@@ -113,6 +116,7 @@ def create_worktree(
     result = subprocess.run(
         args,
         cwd=repo_root,
+        check=False,
         capture_output=True,
         text=True,
         timeout=30,
@@ -141,6 +145,7 @@ def remove_worktree(*, repo_root: str, child_id: str) -> None:
     subprocess.run(
         ["git", "worktree", "remove", "--force", wt_path],
         cwd=repo_root,
+        check=False,
         capture_output=True,
         text=True,
         timeout=10,
@@ -150,6 +155,7 @@ def remove_worktree(*, repo_root: str, child_id: str) -> None:
     subprocess.run(
         ["git", "branch", "-D", branch],
         cwd=repo_root,
+        check=False,
         capture_output=True,
         text=True,
         timeout=5,

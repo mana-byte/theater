@@ -8,10 +8,7 @@ reaper or by calling the job manager, rather than by tailing transcripts.
 
 from __future__ import annotations
 
-
 import pytest
-
-
 
 # ---- spawn creates a job ------------------------------------------------
 
@@ -195,14 +192,13 @@ async def test_await_between_two_peers_blocked_on_each_other_is_refused(
         "send", target=b["id"], prompt="a asks b", caller_id=a["id"]
     )
     # B is already blocked on A, as if mid-`await_sessions`.
-    with daemon.jobs.waiting(b["id"], [a["id"]]):
-        with pytest.raises(RemoteError) as exc:
-            await client.call(
-                "jobs.await",
-                handles=[job["handle"]],
-                max_wait=0.1,
-                caller_id=a["id"],
-            )
+    with daemon.jobs.waiting(b["id"], [a["id"]]), pytest.raises(RemoteError) as exc:
+        await client.call(
+            "jobs.await",
+            handles=[job["handle"]],
+            max_wait=0.1,
+            caller_id=a["id"],
+        )
     assert exc.value.code == "cycle_detected"
 
 

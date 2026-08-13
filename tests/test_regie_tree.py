@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from theater.regie.tree import render_tree, selected_participant
 
-
 PARENT = {
     "id": "aabbccddeeff",
     "tier": "spawned",

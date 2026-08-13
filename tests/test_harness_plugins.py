@@ -14,10 +14,9 @@ from pathlib import Path
 
 import pytest
 
-from theater import cli
+from theater import cli, paths
 from theater import config as cfg
 from theater import harness as harness_registry
-from theater import paths
 from theater.harness import plugins
 from theater.harness.plugins import PluginError
 
@@ -346,7 +345,7 @@ def test_a_broken_local_plugin_is_listed_as_broken(local_dir):
 def test_a_broken_shipped_plugin_is_fatal(local_dir, shipped_dir):
     """An adapter we ship that will not load is our bug, not a warning."""
     (shipped_dir / "acme.py").write_text("raise ValueError('boom')")
-    with pytest.raises(PluginError, match="acme.py"):
+    with pytest.raises(PluginError, match=r"acme\.py"):
         install(local_dir, shipped_dir=shipped_dir)
 
 

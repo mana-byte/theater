@@ -20,27 +20,26 @@ import asyncio
 import contextlib
 import json
 import logging
-import os
 import signal
 import socket as _socket
 
+from theater import harness as harness_registry
 from theater import paths, protocol
 from theater.config import Config
 from theater.config import load as load_config
+
+# Importing methods registers all @method handlers as a side effect.
+from theater.daemon import methods  # noqa: F401
 from theater.daemon.jobs import JobManager, JobState
 from theater.daemon.lock import DaemonLock, file_id
+from theater.daemon.methods import METHODS
 from theater.daemon.observer import Observer
 from theater.daemon.registry import Registry
 from theater.daemon.spawner import Spawner
 from theater.daemon.store import Store
-from theater import harness as harness_registry
 from theater.harness import Harness
 from theater.models import Status, TheaterError
 from theater.tmux import client as tmux
-
-# Importing methods registers all @method handlers as a side effect.
-from theater.daemon import methods  # noqa: F401
-from theater.daemon.methods import METHODS
 
 logger = logging.getLogger("theater.daemon")
 
@@ -180,7 +179,7 @@ class Daemon:
             self._server = await asyncio.start_unix_server(
                 self._handle, path=str(sock), limit=protocol.MAX_MESSAGE_BYTES
             )
-            os.chmod(sock, 0o600)
+            sock.chmod(0o600)
         except BaseException:
             self._lock.release()
             raise
@@ -213,10 +212,9 @@ class Daemon:
             return
 
         for p in self.registry.list():
-            if p.tmux_pane and p.tmux_pane not in alive_panes:
-                if p.status is not Status.DEAD:
-                    logger.info("reconcile: %s lost its pane %s", p.id, p.tmux_pane)
-                    self.registry.mark_dead(p.id)
+            if p.tmux_pane and p.tmux_pane not in alive_panes and p.status is not Status.DEAD:
+                logger.info("reconcile: %s lost its pane %s", p.id, p.tmux_pane)
+                self.registry.mark_dead(p.id)
 
         for p in self.registry.list(include_dead=True):
             if p.status is Status.DEAD:
@@ -473,7 +471,7 @@ async def run() -> None:
         try:
             await asyncio.wait_for(daemon.aclose(), SHUTDOWN_TIMEOUT)
         except TimeoutError:
-            logger.error(
+            logger.error(  # noqa: TRY400
                 "shutdown did not finish within %.0fs; releasing socket and lock",
                 SHUTDOWN_TIMEOUT,
             )

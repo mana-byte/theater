@@ -20,7 +20,6 @@ from theater.daemon.rails import (
 )
 from theater.daemon.registry import Registry
 
-
 # ---- depth cap ----------------------------------------------------------
 
 
@@ -168,7 +167,7 @@ def test_root_spawn_is_not_budget_limited(store):
 def test_budget_within_limit_is_allowed(store):
     reg = Registry(store)
     root = reg.create_spawned(harness="vibe", cwd="/tmp")
-    for i in range(5):
+    for _i in range(5):
         reg.create_spawned(harness="vibe", cwd="/tmp", parent_id=root.id)
     # 6 participants (root + 5 children), budget default is 20
     check_budget(store, root.id)  # does not raise
@@ -177,7 +176,7 @@ def test_budget_within_limit_is_allowed(store):
 def test_budget_exceeded_rejected(store):
     reg = Registry(store)
     root = reg.create_spawned(harness="vibe", cwd="/tmp")
-    for i in range(3):
+    for _i in range(3):
         reg.create_spawned(harness="vibe", cwd="/tmp", parent_id=root.id)
     # 4 participants, budget 3 → exceeded
     with pytest.raises(BudgetExceeded):
@@ -189,7 +188,7 @@ def test_budget_counts_entire_subtree(store):
     reg = Registry(store)
     root = reg.create_spawned(harness="vibe", cwd="/tmp")
     child = reg.create_spawned(harness="vibe", cwd="/tmp", parent_id=root.id)
-    grandchild = reg.create_spawned(harness="vibe", cwd="/tmp", parent_id=child.id)
+    reg.create_spawned(harness="vibe", cwd="/tmp", parent_id=child.id)
     # 3 participants. Budget 3 means the tree is full.
     with pytest.raises(BudgetExceeded):
         check_budget(store, child.id, limit=3)

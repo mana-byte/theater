@@ -93,7 +93,6 @@ async def drain_message(reader: asyncio.StreamReader) -> None:
     while True:
         try:
             await reader.readuntil(b"\n")
-            return
         except asyncio.IncompleteReadError:
             return
         except asyncio.LimitOverrunError as exc:
@@ -101,6 +100,9 @@ async def drain_message(reader: asyncio.StreamReader) -> None:
                 await reader.readexactly(max(exc.consumed, 1))
             except asyncio.IncompleteReadError:
                 return
+        else:
+            # The newline arrived: the stream is back on a message boundary.
+            return
 
 
 def encode(payload: dict[str, Any]) -> bytes:

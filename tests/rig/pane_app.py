@@ -34,6 +34,7 @@ import os
 import sys
 import termios
 import tty
+from pathlib import Path
 
 #: Ctrl-C. In raw mode ISIG is off, so this arrives as a byte rather than a
 #: signal, which makes it usable as a quit marker a test can type on purpose.
@@ -62,7 +63,9 @@ def main() -> int:
     sys.stdout.write(READY + "\r\n")
     sys.stdout.flush()
 
-    log = open(args.log, "ab", buffering=0)
+    # Held open across the read loop and closed in the `finally` below, so a
+    # `with` block would have to wrap the whole function body.
+    log = Path(args.log).open("ab", buffering=0)  # noqa: SIM115
     needle = args.modal_on.encode() if args.modal_on else None
     try:
         while True:
