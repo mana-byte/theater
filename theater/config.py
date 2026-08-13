@@ -99,7 +99,7 @@ class ObserverSection:
     #: prompt, the agent is AWAITING_INPUT. Tuned to avoid false positives:
     #: long enough that a slow tool call will not trigger it, short enough that
     #: a human watching the régie sees the change before getting bored.
-    awaiting_input_timeout: float = field(default=10.0, metadata={"min": MIN_INTERVAL})
+    awaiting_input_timeout: float = field(default=1.5, metadata={"min": MIN_INTERVAL})
     #: How long a job may stay running after its target has gone quiet *and* is
     #: showing a prompt, before the observer gives up waiting for a turn-end it
     #: is never going to read and finishes the job anyway.

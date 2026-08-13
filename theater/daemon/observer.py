@@ -37,11 +37,17 @@ So attaching skips to the current end of file and counts the records it
 skipped, so record indices stay true. For a freshly spawned agent the file is
 empty and the rule costs nothing — one behaviour, no special case.
 
-What this cannot see
---------------------
-Only IDLE and WORKING are derivable here; see harness/base.py for why
-AWAITING_INPUT needs the rendered screen instead. A participant blocked on a
-permission prompt will read as WORKING until phase 5b.
+What the screen adds
+---------------------
+IDLE and WORKING are derivable from the transcript alone; AWAITING_INPUT is
+not, because a permission modal and a thinking agent produce the same silence.
+`_check_idle_screen` reads the rendered screen via the harness's
+`screen_reading` and maps it to a status: APPROVAL/TRUST settles
+AWAITING_INPUT, WORKING settles WORKING, PROMPT settles IDLE, and UNKNOWN
+leaves the status untouched. The reducer acts on this reading regardless of
+confidence — being wrong here costs a mislabel in the display, which is
+cheaper than the unrecoverable cost a send gate would pay for the same
+mistake, so the two consumers use different confidence thresholds.
 """
 
 from __future__ import annotations
@@ -61,6 +67,7 @@ from theater.harness import (
     EventKind,
     Harness,
     HarnessObserver,
+    ScreenKind,
     clip,
     status_after,
 )
@@ -745,25 +752,42 @@ class Observer:
             self.registry.set_status(pid, desired)
 
     async def _check_idle_screen(self, pid: str, observer: HarnessObserver) -> None:
-        """Check the rendered screen for a bare prompt.
+        """Map the rendered screen to a status, for any non-DEAD participant.
 
-        If the transcript says WORKING but the screen shows a bare prompt,
-        the agent is blocked on a permission prompt or waiting for input —
-        set AWAITING_INPUT. If the screen shows agent output, the agent is
-        genuinely working — leave as WORKING. If capture-pane fails, leave
-        as WORKING (accept false negatives).
+        The transcript can only settle IDLE or WORKING — see `status_after`.
+        A turn boundary that ends in an approval dialog is never read from the
+        transcript alone: the agent finishes its turn, the screen shows a modal,
+        and the transcript goes quiet, so the participant settles IDLE and the
+        gate that would catch the modal is closed before it is ever checked.
+        Running for every non-DEAD status closes that gap.
+
+        The mapping is applied regardless of confidence. Being wrong here costs
+        a mislabel in the display; the send gate, which is built on the same
+        `screen_reading`, requires `high` confidence because being wrong there
+        makes a pane permanently unreachable. The asymmetry is deliberate and
+        exists because the two consumers pay different costs for the same error.
         """
         p = self.store.get_participant(pid)
-        if p is None or p.status is not Status.WORKING:
-            return  # only check if transcript says WORKING
+        if p is None or p.status is Status.DEAD:
+            return
         if not p.tmux_pane:
             return
         capture = await self._capture(p.tmux_pane)
         if capture is None:
             return
-        if observer.is_idle_screen(capture):
-            self.registry.set_status(pid, Status.AWAITING_INPUT)
-            logger.info("participant %s awaiting input (bare prompt on screen)", pid)
+        reading = observer.screen_reading(capture)
+        # PROMPT -> IDLE is not safe to defer to the rescue timer: `_rescue_jobs`
+        # deliberately does not touch participant status, so a participant whose
+        # turn ended without an observed boundary would read WORKING forever.
+        if reading.kind in (ScreenKind.APPROVAL, ScreenKind.TRUST):
+            self._settle(pid, Status.AWAITING_INPUT)
+            logger.info("participant %s awaiting input (%s on screen)", pid, reading.kind)
+        elif reading.kind is ScreenKind.WORKING:
+            self._settle(pid, Status.WORKING)
+        elif reading.kind is ScreenKind.PROMPT:
+            self._settle(pid, Status.IDLE)
+        # UNKNOWN: leave the status untouched. The screen said nothing the
+        # reducer can act on, and the previous status is the best guess.
 
     async def _rescue_jobs(
         self, pid: str, observer: HarnessObserver, clock: QuietClock
@@ -776,16 +800,19 @@ class Observer:
         `await_sessions` waits on a promise nothing will ever resolve, and the
         symptom the user sees is a conversation that dies on the second reply.
 
-        So: a long silence, over a screen that looks idle, with jobs still
-        running, is taken as a turn that ended unobserved. The caller gets the
-        last thing the agent said and `RESCUE_CODE`, which says plainly that
-        this is salvage rather than a declared reply.
+        So: a long silence, over a screen that shows a bare prompt, with jobs
+        still running, is taken as a turn that ended unobserved. The caller
+        gets the last thing the agent said and `RESCUE_CODE`, which says
+        plainly that this is salvage rather than a declared reply.
 
         Deliberately narrow. An unreadable screen decides nothing — the same
         rule `_watch_screen` follows — and a participant with no pane cannot
-        be rescued at all. Status is left alone: `_check_idle_screen` has
-        already had its say at a much shorter timeout, and this is about the
-        promise, not the participant.
+        be rescued at all. Only `ScreenKind.PROMPT` triggers rescue:
+        `APPROVAL`/`TRUST` mean the agent is blocked on a modal, not that a
+        turn ended, and rescuing there would finish a job the human could
+        still complete by acting on the dialog. Status is left alone:
+        `_check_idle_screen` has already had its say at a much shorter
+        timeout, and this is about the promise, not the participant.
         """
         if self.jobs is None or not self.store.running_jobs_for_target(pid):
             return
@@ -793,7 +820,12 @@ class Observer:
         if p is None or not p.tmux_pane:
             return
         capture = await self._capture(p.tmux_pane)
-        if capture is None or not observer.is_idle_screen(capture):
+        if capture is None:
+            return
+        # Only a bare PROMPT justifies rescue. APPROVAL/TRUST mean the agent is
+        # blocked on a modal the human has not dismissed, not that a turn ended
+        # unobserved — the job may still complete once the human acts.
+        if observer.screen_reading(capture).kind is not ScreenKind.PROMPT:
             return
         logger.warning(
             "no turn end seen for %s after %.0fs of quiet; finishing its jobs",
