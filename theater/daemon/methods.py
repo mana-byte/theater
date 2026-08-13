@@ -54,6 +54,19 @@ METHODS: dict[str, Handler] = {}
 #: still wants more can simply await again — the job keeps running either way.
 MAX_AWAIT = 300.0
 
+#: How long a running send job keeps its exclusive claim on a pane. `send`
+#: types the prompt into the pane and creates a job, but nothing verifies the
+#: prompt reached the agent — a human at the pane can clear the composer (Esc),
+#: and the prompt never enters the transcript. The job stays RUNNING, the
+#: observer never sees a matching turn end, and the rescue timer cannot fire
+#: on a participant that is actively working (every transcript event resets
+#: the quiet clock). Past this TTL the job stops blocking the pane; it is not
+#: finished, and the observer may still answer it, it has only lost its
+#: reservation. Five minutes is long enough that a genuinely queued prompt
+#: has had every chance to be read, and short enough that a lost one does not
+#: wedge the participant for the rest of the session.
+SEND_CLAIM_TTL = 300.0
+
 
 def method(name: str) -> Callable[[Handler], Handler]:
     def register(fn: Handler) -> Handler:
@@ -479,7 +492,22 @@ async def _send(daemon, params: dict) -> dict:
     # and has been wrong before; a stuck WORKING would silently make a
     # participant unreachable, and that failure is worse than a prompt landing
     # while a human's turn is still running.
-    if [j for j in daemon.store.running_jobs_for_target(target_id) if j.prompt]:
+    #
+    # The same argument applies to a stuck job. A running job is an
+    # unverifiable claim that a prompt sits in the pane's queue — `send`
+    # typed it, but nothing confirms the agent received it, and a human at the
+    # pane can clear the composer before it is read. A job that has held its
+    # reservation past `SEND_CLAIM_TTL` is dropped from this check: it is not
+    # finished, and the observer may still answer it if a matching turn end
+    # arrives, but it no longer blocks the pane. This is the exception the
+    # paragraph above already makes for a stuck status, extended to the case
+    # it missed.
+    stale = now() - SEND_CLAIM_TTL
+    if [
+        j
+        for j in daemon.store.running_jobs_for_target(target_id)
+        if j.prompt and j.created_at > stale
+    ]:
         refuse(
             Busy(f"participant {target_id!r} has a running send job"),
             reason="busy",

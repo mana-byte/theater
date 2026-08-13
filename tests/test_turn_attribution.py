@@ -33,6 +33,7 @@ from shipped import ClaudeCodeObserver, CodexObserver, VibeObserver
 from theater.daemon.jobs import JobManager
 from theater.daemon.observer import (
     _PROMPT_MATCH,
+    UNDELIVERED_CODE,
     Observer,
     QuietClock,
     TurnAccumulator,
@@ -160,6 +161,90 @@ def test_a_split_human_turn_is_skipped_on_both_records(registry):
     observer._apply(p.id, batch, QuietClock(), TurnAccumulator())
 
     assert str(jobs.get("h1").state) == "running"
+
+
+def test_one_unmatched_turn_end_leaves_the_job_running(registry):
+    """A single miss is legitimate — the human's turn is ahead of ours.
+
+    The prompt is genuinely still queued, and the next turn may answer it.
+    The job survives one miss, matching the documented off-by-one.
+    """
+    observer, p, jobs = poised(registry)
+    clock, turns = QuietClock(), TurnAccumulator()
+
+    observer._apply(
+        p.id,
+        Batch(events=[heard("what branch am i on?"), said("main", "m1")]),
+        clock,
+        turns,
+    )
+
+    assert str(jobs.get("h1").state) == "running"
+    assert jobs.get("h1").error_code is None
+    # The counter is tracking the miss but has not released the job.
+    assert observer._unmatched.get("h1") == 1
+
+
+def test_two_consecutive_unmatched_turn_ends_finish_the_job(registry):
+    """Two misses mean the prompt never reached the queue.
+
+    The pane processed two other turns while ours supposedly waited — no
+    real queue does that. The job is released with `UNDELIVERED_CODE` so the
+    caller knows the prompt was never seen, not merely that the turn ended
+    unobserved.
+    """
+    observer, p, jobs = poised(registry)
+    clock, turns = QuietClock(), TurnAccumulator()
+
+    observer._apply(
+        p.id,
+        Batch(events=[heard("what branch am i on?"), said("main", "m1")]),
+        clock,
+        turns,
+    )
+    assert str(jobs.get("h1").state) == "running"
+
+    observer._apply(
+        p.id,
+        Batch(events=[heard("any merge conflicts?"), said("no", "m2")]),
+        clock,
+        turns,
+    )
+
+    job = jobs.get("h1")
+    assert str(job.state) == "done"
+    assert job.error_code == UNDELIVERED_CODE
+    # The counter was cleaned up.
+    assert "h1" not in observer._unmatched
+
+
+def test_a_match_after_one_miss_clears_the_counter(registry):
+    """A matching turn resets the miss count, so a later miss starts fresh.
+
+    Without this, a human interjecting once and then again two turns later
+    would reach the limit on a sequence that is perfectly normal.
+    """
+    observer, p, jobs = poised(registry)
+    clock, turns = QuietClock(), TurnAccumulator()
+
+    # Miss one: human interjects.
+    observer._apply(
+        p.id,
+        Batch(events=[heard("hold on"), said("ok", "m1")]),
+        clock,
+        turns,
+    )
+    assert observer._unmatched.get("h1") == 1
+
+    # Match: the peer's turn.
+    observer._apply(
+        p.id,
+        Batch(events=[heard(PROMPT), said("the answer", "m2")]),
+        clock,
+        turns,
+    )
+    assert jobs.get("h1").result == "the answer"
+    assert "h1" not in observer._unmatched
 
 
 def test_the_user_record_may_arrive_in_an_earlier_batch(registry):

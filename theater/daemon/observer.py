@@ -131,6 +131,24 @@ _ANSWERED_TURNS = 32
 #: short enough that the clip point is nowhere near it.
 _PROMPT_MATCH = 120
 
+#: How many consecutive turn ends that do not match the waiting job's prompt
+#: are tolerated before the job is released. One is legitimate: a human
+#: interjects, and the injected prompt is genuinely still queued behind
+#: theirs. Two means the pane processed two other turns while ours supposedly
+#: waited, which no real queue does — the prompt was never delivered, and the
+#: job would otherwise stay running forever, because the rescue timer cannot
+#: fire on a participant that is actively working. The accepted cost: a human
+#: taking two turns back to back while our prompt legitimately waits behind
+#: them will fail the job early. That is cheaper than an unbounded wedge, and
+#: the error code says which happened.
+UNMATCHED_LIMIT = 2
+
+#: Set on a job released because its prompt was never seen in the transcript
+#: after `UNMATCHED_LIMIT` turn ends answered someone else. Distinct from
+#: `RESCUE_CODE` (a turn end that was never observed at all) so a caller can
+#: tell the two apart.
+UNDELIVERED_CODE = "prompt_never_seen"
+
 
 def answers_prompt(heard: Sequence[str], prompt: str | None) -> bool:
     """Did this turn begin with the prompt we injected?
@@ -334,6 +352,9 @@ class Observer:
         #: accepts any harness string, so a session that misreports its own
         #: harness would otherwise be invisible with nothing anywhere saying so.
         self._unobservable: set[str] = set()
+        #: Per-job count of consecutive turn ends that did not match the
+        #: waiting prompt. Cleared on a match or when the job is finished.
+        self._unmatched: dict[str, int] = {}
         self._supervisor: asyncio.Task | None = None
         self._stopping = asyncio.Event()
 
@@ -787,10 +808,19 @@ class Observer:
         answer to its question. Both halves of that are bad — a wrong answer,
         and the operator's private text handed to another agent.
 
-        A turn that does not answer the waiting job leaves it running, which
-        is the honest state: the prompt is still in the pane's queue and the
-        reply is still coming. If it never does, rescue releases the job with
-        `RESCUE_CODE` as before.
+        A turn that does not answer the waiting job leaves it running, up to
+        `UNMATCHED_LIMIT` consecutive misses. One unmatched turn is legitimate
+        — a human interjects, and the injected prompt is genuinely still queued
+        behind theirs — so the job survives a single miss and the next turn may
+        answer it. Two consecutive misses mean the pane processed two other
+        turns while ours supposedly waited, which no real queue does: the
+        prompt was never delivered (a human at the pane can clear the composer
+        before it is read), and the job is released with `UNDELIVERED_CODE`
+        rather than left running indefinitely. The rescue timer cannot save
+        this case, because it requires an idle screen and the participant is
+        actively working. The accepted cost: a human taking two turns back to
+        back while our prompt legitimately waits behind them will fail the job
+        early, which is cheaper than an unbounded wedge.
 
         A participant with nothing running is the normal case for a session
         nobody sent to: no-op.
@@ -808,12 +838,25 @@ class Observer:
         if job is None:
             return
         if not answers_prompt(heard, job.prompt):
-            logger.info(
-                "turn at %s replies to something else; %s keeps waiting",
-                pid,
+            missed = self._unmatched.get(job.handle, 0) + 1
+            self._unmatched[job.handle] = missed
+            if missed < UNMATCHED_LIMIT:
+                logger.info(
+                    "turn at %s replies to something else; %s keeps waiting",
+                    pid,
+                    job.handle,
+                )
+                return
+            logger.warning(
+                "%s saw %d turns at %s answer someone else; "
+                "its prompt never reached the queue",
                 job.handle,
+                missed,
+                pid,
             )
+            self._finish(job.handle, "", error_code=UNDELIVERED_CODE)
             return
+        self._unmatched.pop(job.handle, None)
         self._finish(job.handle, result_text)
 
     def _release_jobs(
@@ -838,11 +881,12 @@ class Observer:
     ) -> None:
         """Resolve one job. The result is already clipped by the parser.
 
-        `error_code` is set only by the rescue path. The state stays DONE
-        either way: the caller has a usable answer and blocking on a FAILED
-        job would defeat the point of rescuing it.
+        `error_code` is set only by the rescue and undelivered paths. The
+        state stays DONE either way: the caller has a usable answer and
+        blocking on a FAILED job would defeat the point of rescuing it.
         """
         assert self.jobs is not None
+        self._unmatched.pop(handle, None)
         self.jobs.finish(
             handle,
             state=JobState.DONE,
