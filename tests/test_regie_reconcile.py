@@ -16,7 +16,7 @@ import pytest
 
 from theater.config import Config, RegieSection
 from theater.regie import app as app_mod
-from theater.regie.app import RegieApp
+from theater.regie.app import AgentLeaf, RegieApp
 from theater.regie.tree import render_tree
 
 PARENT = {
@@ -232,7 +232,7 @@ async def test_row_order_matches_data_order_after_reconcile(daemon, tmux):
             daemon["answers"]["participants.tree"],
             daemon["answers"]["participants.unmanaged"],
         )
-        keys = [key for _, _, key in lines]
+        keys = [key for _, _, key, _ in lines]
         assert [k for k in panel._key_widgets] == keys
         assert [
             panel._key_widgets[k] for k in keys
@@ -296,3 +296,76 @@ async def test_empty_tree_and_back(daemon, tmux):
         assert "no participants" not in str(panel.children[0].render())
         assert ("p", PARENT["id"]) in panel._key_widgets
         assert ("p", CHILD["id"]) in panel._key_widgets
+
+
+# ---- AgentLeaf and spinner timer ----------------------------------------
+
+
+async def test_one_widget_per_participant(daemon, tmux):
+    """Each participant is one AgentLeaf, not three rows."""
+    app = make_app()
+    async with app.run_test():
+        panel = _panel(app)
+        assert len(panel.children) == 2
+        assert all(isinstance(w, AgentLeaf) for w in panel.children)
+
+
+async def test_spinner_timer_exists_only_while_working(daemon, tmux):
+    """A working leaf has a timer; an idle leaf does not."""
+    app = make_app()
+    async with app.run_test():
+        panel = _panel(app)
+        # PARENT is idle, CHILD is working.
+        parent_widget = panel._key_widgets[("p", PARENT["id"])]
+        child_widget = panel._key_widgets[("p", CHILD["id"])]
+        assert parent_widget._timer is None
+        assert child_widget._timer is not None
+
+
+async def test_spinner_timer_stops_when_status_leaves_working(daemon, tmux):
+    """When a working participant becomes idle, the timer stops."""
+    app = make_app()
+    async with app.run_test():
+        panel = _panel(app)
+        child_widget = panel._key_widgets[("p", CHILD["id"])]
+        assert child_widget._timer is not None
+
+        # Child becomes idle.
+        daemon["answers"]["participants.tree"] = [
+            dict(PARENT, children=[{**dict(CHILD), "status": "idle"}])
+        ]
+        await app._refresh_tree()
+
+        assert child_widget._timer is None
+
+
+async def test_spinner_timer_is_gone_after_unmount(daemon, tmux):
+    """When a leaf is unmounted, its timer is stopped."""
+    app = make_app()
+    async with app.run_test() as pilot:
+        panel = _panel(app)
+        child_widget = panel._key_widgets[("p", CHILD["id"])]
+        assert child_widget._timer is not None
+
+        # Child disappears.
+        daemon["answers"]["participants.tree"] = [dict(PARENT, children=[])]
+        await app._refresh_tree()
+        await pilot.pause()
+
+        assert child_widget._timer is None
+        assert child_widget.is_running is False
+
+
+async def test_spinner_frame_advances_and_wraps(daemon, tmux):
+    """Calling _tick advances the frame and wraps at 10."""
+    app = make_app()
+    async with app.run_test():
+        panel = _panel(app)
+        child_widget = panel._key_widgets[("p", CHILD["id"])]
+        assert child_widget._frame == 0
+        child_widget._tick()
+        assert child_widget._frame == 1
+        # Advance 9 more to wrap.
+        for _ in range(9):
+            child_widget._tick()
+        assert child_widget._frame == 0

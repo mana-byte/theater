@@ -1,8 +1,9 @@
 """Tests for the régie tree rendering.
 
 Rendering is tested against plain dicts — the same shape the daemon returns.
-What can actually be wrong here is the tier mark, the status color, the
-indentation of children, and whether unmanaged panes appear below the tree.
+What can actually be wrong here is the status glyph, the indentation of
+children, whether unmanaged panes appear below the tree, and the three-row
+leaf shape.
 """
 
 from __future__ import annotations
@@ -41,34 +42,49 @@ UNMANAGED = {
 }
 
 
+def _rows(label) -> list[str]:
+    """Split a Content label into its three rows, stripping the leading blank."""
+    return str(label).split("\n")
+
+
 def test_empty_tree_renders_no_participants():
     lines = render_tree([])
     assert len(lines) == 0
 
 
-def test_single_participant_renders_with_tier_mark():
+def test_single_participant_renders_harness_and_id():
     lines = render_tree([{**PARENT, "children": []}])
     assert len(lines) == 1
-    label = lines[0][0]
-    assert "S" in str(label)  # spawned
-    assert "vibe" in str(label)
-    assert "working" in str(label)
-    assert "aabbccdd" in str(label)  # short id
+    rows = _rows(lines[0][0])
+    assert len(rows) == 3
+    assert rows[0] == ""  # blank leading row
+    assert "vibe" in rows[1]
+    assert "aabbccdd" in rows[1]  # short id
+    assert "/tmp/proj" in rows[2]
 
 
 def test_children_hang_off_a_branch():
     """Indentation alone could not tell a sibling from a nephew. Rails can."""
     lines = render_tree([{**PARENT, "children": [CHILD]}])
     assert len(lines) == 2
-    assert not str(lines[0][0]).startswith(("├", "└", " "))
-    assert str(lines[1][0]).startswith("└── ")
+    parent_rows = _rows(lines[0][0])
+    child_rows = _rows(lines[1][0])
+    # Roots have no branch of their own.
+    assert not parent_rows[1].startswith(("├", "└", " "))
+    # Children get a branch, on both content rows.
+    assert child_rows[1].startswith("└── ")
+    assert child_rows[2].startswith("└── ")
 
 
 def test_only_the_last_sibling_closes_the_branch():
     second = {**CHILD, "id": "778899aabbcc"}
     lines = render_tree([{**PARENT, "children": [CHILD, second]}])
-    assert str(lines[1][0]).startswith("├── ")
-    assert str(lines[2][0]).startswith("└── ")
+    first_rows = _rows(lines[1][0])
+    second_rows = _rows(lines[2][0])
+    assert first_rows[1].startswith("├── ")
+    assert first_rows[2].startswith("├── ")
+    assert second_rows[1].startswith("└── ")
+    assert second_rows[2].startswith("└── ")
 
 
 def test_the_rail_continues_past_a_parent_that_has_siblings_below():
@@ -77,23 +93,32 @@ def test_the_rail_continues_past_a_parent_that_has_siblings_below():
     first = {**CHILD, "children": [grandchild]}
     second = {**CHILD, "id": "778899aabbcc"}
     lines = render_tree([{**PARENT, "children": [first, second]}])
-    assert str(lines[1][0]).startswith("├── ")
-    assert str(lines[2][0]).startswith("│   └── ")
-    assert str(lines[3][0]).startswith("└── ")
+    first_rows = _rows(lines[1][0])
+    grandchild_rows = _rows(lines[2][0])
+    second_rows = _rows(lines[3][0])
+    assert first_rows[1].startswith("├── ")
+    assert grandchild_rows[1].startswith("│   └── ")
+    assert grandchild_rows[2].startswith("│   └── ")
+    assert second_rows[1].startswith("└── ")
 
 
 def test_the_rail_stops_under_a_last_child():
     grandchild = {**CHILD, "id": "ddeeff001122"}
     lines = render_tree([{**PARENT, "children": [{**CHILD, "children": [grandchild]}]}])
-    assert str(lines[1][0]).startswith("└── ")
-    assert str(lines[2][0]).startswith("    └── ")
+    child_rows = _rows(lines[1][0])
+    grandchild_rows = _rows(lines[2][0])
+    assert child_rows[1].startswith("└── ")
+    assert grandchild_rows[1].startswith("    └── ")
+    assert grandchild_rows[2].startswith("    └── ")
 
 
 def test_separate_roots_are_not_drawn_as_siblings():
     """Two unrelated agents are not children of anything, so no rails."""
     other = {**PARENT, "id": "998877665544"}
     lines = render_tree([PARENT, other])
-    assert all(not str(line[0]).startswith(("├", "└")) for line in lines)
+    assert all(
+        not _rows(line[0])[1].startswith(("├", "└")) for line in lines
+    )
 
 
 def test_unmanaged_panes_append_after_separator():
@@ -125,11 +150,14 @@ def test_selected_participant_on_separator_returns_none():
     assert selected_participant(lines, 1) is None
 
 
-def test_external_tier_mark_renders():
+def test_unaddressable_id_renders_with_no_star():
+    """The * reach mark is gone; the id is styled dim italic instead."""
     ext = {**PARENT, "tier": "external", "addressable": False}
     lines = render_tree([ext])
-    assert "E" in str(lines[0][0])
-    assert "*" in str(lines[0][0])  # not addressable
+    label = lines[0][0]
+    assert "*" not in str(label)
+    # The id is still present in plain text.
+    assert "aabbccdd" in str(label)
 
 
 # ---- shorten_path --------------------------------------------------------
@@ -177,3 +205,62 @@ def test_shorten_path_non_default_keep_one():
 
 def test_shorten_path_home_relative_non_default_keep():
     assert shorten_path("~/a/b/c/d", keep=3) == "~/…/b/c/d"
+
+
+# ---- status glyphs --------------------------------------------------------
+
+
+def test_idle_status_uses_harness_icon():
+    """Idle renders the harness's own icon, not a separate glyph column."""
+    node = {**PARENT, "status": "idle", "harness": "claude"}
+    lines = render_tree([node])
+    rows = _rows(lines[0][0])
+    # The harness icon for claude is ✻ (or whatever harness_icon returns).
+    from theater.harness import harness_icon
+    assert harness_icon("claude") in rows[1]
+
+
+def test_working_status_uses_braille_spinner():
+    """Working renders a braille spinner frame."""
+    lines = render_tree([PARENT])  # PARENT is working
+    rows = _rows(lines[0][0])
+    from theater.regie.tree import _SPINNER_FRAMES
+    assert rows[1].split()[0] in list(_SPINNER_FRAMES)
+
+
+def test_awaiting_input_status_uses_bang():
+    """Awaiting input renders a bold !."""
+    node = {**PARENT, "status": "awaiting_input"}
+    lines = render_tree([node])
+    rows = _rows(lines[0][0])
+    assert rows[1].startswith("!")
+
+
+def test_dead_status_uses_cross():
+    """Dead renders ✗."""
+    node = {**PARENT, "status": "dead"}
+    lines = render_tree([node])
+    rows = _rows(lines[0][0])
+    assert rows[1].startswith("✗")
+
+
+def test_unknown_status_uses_question_mark():
+    """An unknown status renders ?."""
+    node = {**PARENT, "status": "bogus"}
+    lines = render_tree([node])
+    rows = _rows(lines[0][0])
+    assert rows[1].startswith("?")
+
+
+# ---- cwd_segments driven by config ----------------------------------------
+
+
+def test_cwd_segments_controls_path_shortening():
+    """shorten_path is driven by cwd_segments, not a hardcoded 2."""
+    node = {**PARENT, "cwd": "/a/b/c/d/e"}
+    lines_default = render_tree([node])
+    lines_keep3 = render_tree([node], cwd_segments=3)
+    rows_default = _rows(lines_default[0][0])
+    rows_keep3 = _rows(lines_keep3[0][0])
+    assert rows_default[2] == "…/d/e"
+    assert rows_keep3[2] == "…/c/d/e"

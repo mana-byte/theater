@@ -35,14 +35,22 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Vertical, VerticalScroll
+from textual.content import Content
 from textual.reactive import reactive
-from textual.widgets import Footer, Label, RichLog
+from textual.timer import Timer
+from textual.widget import Widget
+from textual.widgets import Footer, Label, RichLog, Static
 
 from theater.client import DaemonClient
 from theater.config import Config, RegieSection
 from theater.regie.bus_view import format_bus_line
 from theater.regie.palette import SpawnCommands
-from theater.regie.tree import Key, render_tree, selected_participant
+from theater.regie.tree import (
+    Key,
+    node_label,
+    render_tree,
+    selected_participant,
+)
 from theater.tmux import client as tmux
 from theater.tmux import panes
 
@@ -57,20 +65,129 @@ BUS_INTERVAL = _DEFAULTS.bus_interval
 BUS_BATCH = _DEFAULTS.bus_batch
 
 
-class TreePanel(VerticalScroll):
-    """A scrollable list of participant tree lines.
+def _is_participant_key(key: Key) -> bool:
+    """Whether *key* identifies a participant or unmanaged pane (not a separator)."""
+    return key[0] in ("p", "u")
 
-    Each line is a separate Label widget, so the panel scrolls natively when
-    the list is longer than the viewport. Cursor and staged highlighting are
-    done via Textual CSS classes (which respect the user's theme) rather than
-    hardcoded Rich colors.
+
+class AgentLeaf(Static):
+    """A three-row participant leaf with its own spinner timer.
+
+    Renders three rows of Content (blank, status row, cwd row) so that
+    WORKING and AWAITING_INPUT are unmissable. One widget per participant —
+    the cursor stays 1:1 with participants, not with lines.
+
+    The spinner timer is owned by the leaf itself: ``set_interval(0.1, tick)``
+    advancing the braille frame and calling ``update(..., layout=False)``.
+    Started only while the participant is WORKING, stopped when it leaves
+    that state or on unmount. An idle régie costs no frames. This is vibe's
+    pattern: the timer lives on the widget that needs it, not on the app.
+    """
+
+    DEFAULT_CSS = """
+    AgentLeaf {
+        height: 3;
+        padding: 0 1;
+        margin: 0 0;
+    }
+    AgentLeaf.tree-cursor {
+        background: $accent 20%;
+        text-style: bold;
+    }
+    AgentLeaf.tree-staged {
+        background: $primary 20%;
+    }
+    AgentLeaf.tree-cursor.tree-staged {
+        background: $accent 30%;
+        text-style: bold;
+    }
+    AgentLeaf:hover {
+        background: $boost;
+    }
+    """
+
+    def __init__(
+        self,
+        node: dict,
+        prefix: str = "",
+        *,
+        key: Key | None = None,
+        cwd_segments: int = 2,
+        **kwargs,
+    ) -> None:
+        super().__init__("", **kwargs)
+        self._node = node
+        self._prefix = prefix
+        self._key = key or ("p", node.get("id", ""))
+        self._cwd_segments = cwd_segments
+        self._frame: int = 0
+        self._timer: Timer | None = None
+        # Render the initial content so the leaf is not blank before its
+        # first update_node call.
+        self.update(self._render_label(), layout=False)
+
+    def _render_label(self) -> Content:
+        return node_label(
+            self._node,
+            self._prefix,
+            cwd_segments=self._cwd_segments,
+            frame=self._frame,
+        )
+
+    def _tick(self) -> None:
+        self._frame = (self._frame + 1) % 10
+        self.update(self._render_label(), layout=False)
+
+    def _start_timer(self) -> None:
+        if self._timer is not None:
+            return
+        self._timer = self.set_interval(0.1, self._tick)
+
+    def _stop_timer(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+
+    def update_node(self, node: dict, prefix: str = "") -> None:
+        """Refresh the leaf's data from a new tree tick.
+
+        Re-renders the content, and starts or stops the spinner timer
+        depending on whether the participant is now WORKING. The timer
+        surviving across refreshes is the whole point of reconciliation.
+        """
+        self._node = node
+        self._prefix = prefix
+        self.update(self._render_label(), layout=False)
+        if node.get("status") == "working":
+            self._start_timer()
+        else:
+            self._stop_timer()
+
+    def on_mount(self) -> None:
+        if self._node.get("status") == "working":
+            self._start_timer()
+
+    def on_unmount(self) -> None:
+        self._stop_timer()
+
+
+class TreePanel(VerticalScroll):
+    """A scrollable list of participant tree leaves.
+
+    Each participant is an :class:`AgentLeaf` widget spanning three rows.
+    Separator rows and the "no participants" placeholder stay plain
+    ``Label`` widgets. The panel scrolls natively when the list is longer
+    than the viewport. Cursor and staged highlighting are done via Textual
+    CSS classes (which respect the user's theme) rather than hardcoded Rich
+    colours.
 
     The panel reconciles by key rather than rebuilding on every refresh: a
-    Label that survives a tick is updated in place with ``Label.update`` so
-    that per-widget state (a hover class, an animation timer) is not
-    destroyed. Widgets for rows that have disappeared are removed, and
-    widgets for new rows are mounted at the right position. Final child
-    order always matches the row order.
+    widget that survives a tick is updated in place with
+    ``AgentLeaf.update_node`` (or ``Label.update`` for separators) so that
+    per-widget state (a hover class, an animation timer) is not destroyed.
+    Widgets for rows that have disappeared are removed, and widgets for
+    new rows are mounted at the right position. Final child order always
+    matches the row order.
 
     Removal is async in Textual — ``Widget.remove`` returns an
     ``AwaitRemove`` and the widget stays in ``self.children`` until the
@@ -82,7 +199,7 @@ class TreePanel(VerticalScroll):
     cannot corrupt the highlight or the scroll target.
     """
 
-    lines: reactive[list[tuple[Text, dict, Key]]] = reactive([])
+    lines: reactive[list[tuple[Content, dict, Key, str]]] = reactive([])
 
     #: Key for the placeholder shown when the tree is empty.
     _EMPTY_KEY: Key = ("empty", "")
@@ -91,10 +208,13 @@ class TreePanel(VerticalScroll):
         super().__init__(**kwargs)
         #: Set by the app so apply_cursor can map a line index back to its
         #: node. Per-instance: the app rebinds it on every redraw.
-        self._lines_data: list[tuple[Text, dict, Key]] = []
+        self._lines_data: list[tuple[Content, dict, Key, str]] = []
         #: Stable widget map, keyed by the row key from render_tree.
-        #: Survives a refresh so per-widget state is not lost.
-        self._key_widgets: dict[Key, Label] = {}
+        #: Survives a refresh so per-widget state is not lost. The value is
+        #: ``AgentLeaf`` for participants and unmanaged panes, ``Label`` for
+        #: the separator and the empty placeholder — both are ``Widget``
+        #: subclasses, so the annotation is widened honestly.
+        self._key_widgets: dict[Key, Widget] = {}
 
     DEFAULT_CSS = """
     TreePanel {
@@ -106,32 +226,24 @@ class TreePanel(VerticalScroll):
         padding: 0 1;
         margin: 0 0;
     }
-    TreePanel > Label.tree-cursor {
-        background: $accent 20%;
-        text-style: bold;
-    }
-    TreePanel > Label.tree-staged {
-        background: $primary 20%;
-    }
-    TreePanel > Label.tree-cursor.tree-staged {
-        background: $accent 30%;
-        text-style: bold;
-    }
     """
 
-    def watch_lines(self, lines: list[tuple[Text, dict, Key]]) -> None:
+    def watch_lines(self, lines: list[tuple[Content, dict, Key, str]]) -> None:
         """Reconcile widget children with the new row list.
 
         Existing widgets are updated in place; only new keys are mounted and
         only gone keys are unmounted. Final child order matches the row
         order, driven by widget references rather than integer indices so
         that a pending async removal cannot corrupt the arithmetic.
+
+        Participant rows become ``AgentLeaf`` widgets with their own spinner
+        timers; separator and placeholder rows stay plain ``Label`` widgets.
         """
         if not lines:
             self._reconcile_empty()
             return
 
-        new_key_set = {key for _, _, key in lines}
+        new_key_set = {key for _, _, key, _ in lines}
 
         # Remove the empty placeholder if it was there.
         if self._EMPTY_KEY in self._key_widgets:
@@ -144,15 +256,10 @@ class TreePanel(VerticalScroll):
 
         # Update existing widgets and mount new ones, tracking the desired
         # order as we go.
-        ordered_widgets: list[Label] = []
-        for label, _node, key in lines:
-            if key in self._key_widgets:
-                widget = self._key_widgets[key]
-                widget.update(label)
-            else:
-                widget = Label(label)
-                self._key_widgets[key] = widget
-                self.mount(widget)
+        cwd_segments = self.app.settings.regie.cwd_segments
+        ordered_widgets: list[Widget] = []
+        for label, node, key, prefix in lines:
+            widget = self._reconcile_row(label, node, key, prefix, cwd_segments)
             ordered_widgets.append(widget)
 
         # Ensure final child order matches the row order. move_child is
@@ -164,17 +271,52 @@ class TreePanel(VerticalScroll):
                 continue
             self.move_child(widget, after=ordered_widgets[i - 1])
 
+    def _reconcile_row(
+        self,
+        label: Content,
+        node: dict,
+        key: Key,
+        prefix: str,
+        cwd_segments: int,
+    ) -> Widget:
+        """Update or create the widget for a single row.
+
+        Existing ``AgentLeaf`` widgets are updated in place with
+        ``update_node``; existing ``Label`` widgets (separators) with
+        ``update``. New participant rows get a fresh ``AgentLeaf``, new
+        separator rows get a plain ``Label``.
+        """
+        if key in self._key_widgets:
+            widget = self._key_widgets[key]
+            if isinstance(widget, AgentLeaf):
+                widget.update_node(node, prefix=prefix)
+            else:
+                widget.update(label)
+            return widget
+        if _is_participant_key(key):
+            widget = AgentLeaf(
+                node,
+                prefix,
+                key=key,
+                cwd_segments=cwd_segments,
+            )
+        else:
+            widget = Label(label)
+        self._key_widgets[key] = widget
+        self.mount(widget)
+        return widget
+
     def _reconcile_empty(self) -> None:
         """Show the 'no participants' placeholder, removing all row widgets."""
         for key in list(self._key_widgets):
             if key != self._EMPTY_KEY:
                 self._remove_widget(self._key_widgets.pop(key))
         if self._EMPTY_KEY not in self._key_widgets:
-            widget = Label(Text("no participants", style="dim italic"))
+            widget = Label(Content.assemble(("no participants", "$text dim italic")))
             self._key_widgets[self._EMPTY_KEY] = widget
             self.mount(widget)
 
-    def _remove_widget(self, widget: Label) -> None:
+    def _remove_widget(self, widget: Widget) -> None:
         """Remove a widget via Textual's public API.
 
         ``widget.remove()`` returns an ``AwaitRemove`` and the widget stays
@@ -194,7 +336,7 @@ class TreePanel(VerticalScroll):
         leave a stale widget in ``self.children`` for one frame; resolving
         by key means the highlight always lands on the right row.
         """
-        for i, (_, node, key) in enumerate(self._lines_data):
+        for i, (_, node, key, _) in enumerate(self._lines_data):
             widget = self._key_widgets.get(key)
             if widget is None:
                 continue
@@ -259,7 +401,7 @@ class RegieApp(App):
     title = "theater régie"
 
     cursor: reactive[int] = reactive(0)
-    tree_lines: reactive[list[tuple[Text, dict, Key]]] = reactive([])
+    tree_lines: reactive[list[tuple[Content, dict, Key, str]]] = reactive([])
     bus_cursor: int = 0
     #: The régie's own pane id (from $TMUX_PANE), discovered at mount.
     my_pane: str | None = None
@@ -467,7 +609,9 @@ class RegieApp(App):
         except Exception as exc:
             logger.debug("tree refresh failed: %s", exc)
             return
-        self.tree_lines = render_tree(tree, unmanaged)
+        self.tree_lines = render_tree(
+            tree, unmanaged, cwd_segments=self.settings.regie.cwd_segments
+        )
         # Clamp cursor
         if self.cursor >= len(self.tree_lines):
             self.cursor = max(0, len(self.tree_lines) - 1)
