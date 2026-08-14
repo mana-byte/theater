@@ -43,7 +43,11 @@ UNMANAGED = {
 
 
 def _rows(label) -> list[str]:
-    """Split a Content label into its three rows, stripping the leading blank."""
+    """Split a Content label into its three rows.
+
+    Row 0 is the spacing row, blank for a root and the incoming rail for a
+    child; row 1 is the branch row; row 2 is the cwd row.
+    """
     return str(label).split("\n")
 
 
@@ -163,6 +167,46 @@ def test_row3_no_rail_for_root():
     rows = _rows(lines[0][0])
     assert not rows[1].startswith(("├", "└", "│"))
     assert not rows[2].startswith(("├", "└", "│"))
+
+
+def test_row1_carries_the_rail_into_a_childs_branch():
+    """The spacing row of a child continues the line coming from the parent.
+
+    Leaving it blank breaks the vertical rail in the gap between every pair
+    of siblings, which is what the tree drawing is for.
+    """
+    second = {**CHILD, "id": "778899aabbcc"}
+    lines = render_tree([{**PARENT, "children": [CHILD, second]}])
+    assert _rows(lines[1][0])[0] == "│   "
+
+
+def test_row1_of_a_last_child_is_still_a_rail():
+    """``└`` closes a line arriving from above rather than starting one.
+
+    So a last child's spacing row is a rail like everyone else's; only its
+    row 3 turns into a gap, because that is where the line actually stops.
+    """
+    second = {**CHILD, "id": "778899aabbcc"}
+    lines = render_tree([{**PARENT, "children": [CHILD, second]}])
+    last_rows = _rows(lines[2][0])
+    assert last_rows[0] == "│   "
+    assert last_rows[1].startswith("└── ")
+    assert last_rows[2].startswith("    ")
+
+
+def test_row1_keeps_the_ancestry_of_a_grandchild():
+    """A grandchild's spacing row shows its aunt's rail plus its own."""
+    grandchild = {**CHILD, "id": "ddeeff001122"}
+    first = {**CHILD, "children": [grandchild]}
+    second = {**CHILD, "id": "778899aabbcc"}
+    lines = render_tree([{**PARENT, "children": [first, second]}])
+    assert _rows(lines[2][0])[0] == "│   │   "
+
+
+def test_row1_of_a_root_stays_blank():
+    """A root has no branch, so there is no line above it to continue."""
+    lines = render_tree([PARENT, {**PARENT, "id": "998877665544"}])
+    assert all(_rows(line[0])[0] == "" for line in lines)
 
 
 def test_unmanaged_panes_append_after_separator():

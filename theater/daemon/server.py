@@ -214,6 +214,12 @@ class Daemon:
         for p in self.registry.list():
             if p.tmux_pane and p.tmux_pane not in alive_panes and p.status is not Status.DEAD:
                 logger.info("reconcile: %s lost its pane %s", p.id, p.tmux_pane)
+                # Same reasoning as the reaper: the pane is gone but the
+                # worktree is not, and a restart is the other moment we
+                # discover that. Branch kept — we cannot tell from here
+                # whether the child finished or the machine rebooted, and
+                # only one of those two guesses is recoverable.
+                self.spawner.retire(p, delete_branch=False)
                 self.registry.mark_dead(p.id)
 
         for p in self.registry.list(include_dead=True):
@@ -384,6 +390,10 @@ class Daemon:
         for p in tracked:
             if p.tmux_pane not in alive:
                 logger.info("participant %s lost its pane %s", p.id, p.tmux_pane)
+                # The child exited on its own. Prune its worktree
+                # directory but keep the branch: it left because it
+                # finished, and the branch holds whatever it committed.
+                self.spawner.retire(p, delete_branch=False)
                 self.registry.mark_dead(p.id)
                 running = self.store.running_jobs_for_target(p.id)
                 for job in running:

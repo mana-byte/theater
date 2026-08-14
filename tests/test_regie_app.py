@@ -165,7 +165,7 @@ def make_app(**regie) -> tuple[RegieApp, list[tuple[str, str]]]:
 
 async def test_mount_fills_the_tree_and_the_bus(daemon, tmux):
     daemon["answers"]["bus.tail"] = [BUS_ROW]
-    app, _ = make_app()
+    app, _ = make_app(bus_visible=True)
     async with app.run_test():
         assert len(app.tree_lines) == 2  # parent and child
         assert app.bus_cursor == 1
@@ -176,6 +176,39 @@ async def test_mount_fills_the_tree_and_the_bus(daemon, tmux):
         assert panel._lines_data[1][1]["id"] == CHILD["id"]
 
 
+async def test_every_tree_row_shares_one_left_inset(daemon, tmux):
+    """Leaves and separators are different widgets on one visual column.
+
+    A participant row is an AgentLeaf and the "unmanaged" divider is a plain
+    Label, styled by two different rules. Nothing but this test makes them
+    agree, and a one-cell disagreement is the kind of thing that reads as a
+    rendering bug rather than a stylesheet one.
+
+    The height assertion guards the other half: the leaf draws exactly three
+    rows in exactly three cells, so vertical padding does not space the rows
+    out, it truncates the cwd line off the bottom.
+    """
+    daemon["answers"]["participants.unmanaged"] = [
+        {"pane": "%20", "command": "vibe", "harness": "vibe", "cwd": "/tmp/x"},
+    ]
+    app, _ = make_app()
+    async with app.run_test():
+        panel = app.query_one("#tree-panel", app_mod.TreePanel)
+        leaves = [w for w in panel.children if isinstance(w, app_mod.AgentLeaf)]
+        labels = [w for w in panel.children if not isinstance(w, app_mod.AgentLeaf)]
+        assert leaves and labels, "need both row kinds on screen to compare them"
+
+        insets = {w.styles.padding.left for w in panel.children} | {
+            w.styles.padding.right for w in panel.children
+        }
+        assert insets == {2}
+
+        for leaf in leaves:
+            assert leaf.styles.padding.top == 0
+            assert leaf.styles.padding.bottom == 0
+            assert leaf.styles.height.value == 3
+
+
 async def test_mount_learns_its_own_window_and_session(daemon, tmux):
     app, _ = make_app()
     async with app.run_test():
@@ -184,6 +217,8 @@ async def test_mount_learns_its_own_window_and_session(daemon, tmux):
         assert app.my_session_name == "work"
         # Mouse reporting is turned on for that session, not globally.
         assert ("set", "mouse", "on") in tmux
+        # tmux's own status line is hidden for the duration, same scope.
+        assert ("set", "status", "off") in tmux
 
 
 async def test_an_empty_tree_says_so_instead_of_rendering_nothing(daemon, tmux):
@@ -263,8 +298,10 @@ async def test_enter_joins_the_selected_pane_and_narrows_the_regie(daemon, tmux)
         await pilot.press("enter")
         assert app.staged_pane == "%10"
     assert ("join", "%10", "@7") in tmux
-    assert ("resize", "%1", 60) in tmux
-    assert any("staged vibe" in msg for msg, _ in notes)
+    assert ("resize", "%1", 52) in tmux
+    # Silence is the contract: the pane arriving on the stage is the feedback,
+    # and a toast on every Enter was noise on top of a visible result.
+    assert notes == []
 
 
 async def test_enter_on_the_staged_agent_unstages_it(daemon, tmux):
@@ -347,7 +384,8 @@ async def test_kill_asks_the_daemon_and_refreshes(daemon, tmux):
         assert client.asked("participant.kill") == [{"id": PARENT["id"]}]
         # A kill changes the tree, so it is re-read rather than waited for.
         assert len(client.asked("participants.tree")) == 2
-    assert any("killed" in msg for msg, _ in notes)
+    # The row leaving the tree is the feedback; a successful kill says nothing.
+    assert notes == []
 
 
 async def test_a_refused_kill_is_reported(daemon, tmux):
@@ -385,7 +423,8 @@ async def test_the_palette_spawns_into_the_regie_session(daemon, tmux):
     assert params["harness"] == "claude"
     assert params["prompt"] == ""
     assert params["tmux_session"] == "work"
-    assert any("spawned claude (%30)" in msg for msg, _ in notes)
+    # The new agent appearing in the tree is the feedback, so nothing is said.
+    assert notes == []
 
 
 async def test_a_failed_spawn_is_reported(daemon, tmux):
@@ -401,7 +440,7 @@ async def test_a_failed_spawn_is_reported(daemon, tmux):
 
 
 async def test_the_bus_advances_its_cursor_and_asks_only_for_new_rows(daemon, tmux):
-    app, _ = make_app()
+    app, _ = make_app(bus_visible=True)
     async with app.run_test():
         daemon["answers"]["bus.tail"] = [BUS_ROW, dict(BUS_ROW, id=2)]
         await app._refresh_bus()
@@ -412,7 +451,7 @@ async def test_the_bus_advances_its_cursor_and_asks_only_for_new_rows(daemon, tm
 
 async def test_a_gap_in_the_feed_is_admitted(daemon, tmux):
     """Dropping events silently would make the panel lie about being complete."""
-    app, _ = make_app()
+    app, _ = make_app(bus_visible=True)
     async with app.run_test():
         daemon["answers"]["bus.tail"] = [BUS_ROW]
         await app._refresh_bus()
@@ -421,6 +460,57 @@ async def test_a_gap_in_the_feed_is_admitted(daemon, tmux):
         assert app.bus_cursor == 9
         log = app.query_one("#bus-panel", app_mod.RichLog)
         assert any("7 events dropped" in str(line) for line in log.lines)
+
+
+async def test_the_bus_panel_is_hidden_until_it_is_asked_for(daemon, tmux):
+    """Off unless the config says otherwise, and the panel obeys at compose.
+
+    A reactive assigned its own default fires no watcher, so a settings-driven
+    initial state has to be applied while the widget is built rather than left
+    to `watch_bus_visible`. Both directions are pinned here because getting
+    that wrong is invisible in one of them.
+    """
+    app, _ = make_app()
+    async with app.run_test():
+        assert app.query_one("#bus-panel", app_mod.RichLog).has_class("-hidden")
+
+    app, _ = make_app(bus_visible=True)
+    async with app.run_test():
+        assert not app.query_one("#bus-panel", app_mod.RichLog).has_class("-hidden")
+
+
+async def test_toggling_the_bus_panel_shows_and_hides_it(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test():
+        log = app.query_one("#bus-panel", app_mod.RichLog)
+        assert log.has_class("-hidden")
+        app.action_toggle_bus()
+        assert not log.has_class("-hidden")
+        app.action_toggle_bus()
+        assert log.has_class("-hidden")
+
+
+async def test_a_hidden_bus_does_not_consume_the_events_it_cannot_show(daemon, tmux):
+    """A display:none RichLog keeps no writes, so the cursor must not move.
+
+    Otherwise the panel would silently eat every event that arrived while it
+    was away, and showing it would resume from a line the user never saw.
+    """
+    app, _ = make_app()
+    async with app.run_test() as pilot:
+        daemon["answers"]["bus.tail"] = [BUS_ROW, dict(BUS_ROW, id=2)]
+        await app._refresh_bus()
+        assert app.bus_cursor == 0
+        # Showing it picks the same rows up and draws them. The pause is not
+        # decoration: a RichLog that has never been displayed has no width
+        # yet, and wraps every write to nothing until a layout pass gives it
+        # one. In the app that frame happens long before the next poll.
+        app.action_toggle_bus()
+        await pilot.pause()
+        await app._refresh_bus()
+        assert app.bus_cursor == 2
+        log = app.query_one("#bus-panel", app_mod.RichLog)
+        assert log.lines
 
 
 # ---- exit ----------------------------------------------------------------
@@ -434,6 +524,7 @@ async def test_quitting_unstages_and_gives_the_mouse_back(daemon, tmux):
     assert ("break", "%10") in tmux
     # No prior session-local value, so ours is removed rather than pinned.
     assert ("unset", "mouse") in tmux
+    assert ("unset", "status") in tmux
     assert daemon["client"].closed
 
 
@@ -456,7 +547,7 @@ async def test_configured_sidebar_width_reaches_both_style_and_resize(daemon, tm
 async def test_single_click_moves_the_cursor(daemon, tmux):
     """A single click on a leaf moves the cursor to that participant."""
     app, _ = make_app()
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(80, 40)) as pilot:
         assert app.cursor == 0
         panel = app.query_one("#tree-panel", app_mod.TreePanel)
         child_widget = panel._key_widgets[("p", CHILD["id"])]
@@ -478,7 +569,7 @@ async def test_double_click_stages_the_agent(daemon, tmux):
 async def test_click_on_any_row_of_a_leaf_moves_the_cursor(daemon, tmux):
     """All three rows of a leaf are one click target."""
     app, _ = make_app()
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(80, 40)) as pilot:
         assert app.cursor == 0
         panel = app.query_one("#tree-panel", app_mod.TreePanel)
         child_widget = panel._key_widgets[("p", CHILD["id"])]

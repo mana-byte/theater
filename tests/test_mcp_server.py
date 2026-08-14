@@ -61,6 +61,38 @@ async def test_every_tool_is_documented(daemon):
         assert tool.description and len(tool.description) > 40, tool.name
 
 
+async def test_the_server_carries_its_instructions(daemon):
+    """The initialize response is the only place the whole loop is described.
+
+    Wiring it is one keyword argument, and losing it would be silent: the
+    server still starts, every tool still works, and only the orchestration
+    guidance disappears. Nothing else would notice.
+    """
+    assert build("p1", "vibe").instructions
+
+
+async def test_orchestration_directives_reach_the_tools_that_need_them(daemon):
+    """The directives must live on the tools, not only in `instructions`.
+
+    Clients decide for themselves whether a model ever sees a server's
+    instructions, and the harnesses Theater spawns do not agree. A tool
+    description is the one channel that always arrives, so each warning is
+    asserted where the mistake it prevents is actually made.
+    """
+    tools = {t.name: t.description or "" for t in await build("p1", "vibe").list_tools()}
+
+    # Concurrent children whose files overlap produce a conflict, not speed.
+    assert "sibling" in tools["spawn_session"]
+    # A "manual" child that nobody is watching never answers its prompt.
+    assert "manual" in tools["spawn_session"]
+    # An await can outlive the caller's own tool timeout.
+    assert "timeout" in tools["await_sessions"]
+    # "done" is the end of a turn, not a verdict on the work.
+    assert "done" in tools["await_sessions"]
+    # Killing a worktree child deletes the branch its work lives on.
+    assert "collect before you kill" in tools["put_child_back_in_the_wound"]
+
+
 async def test_spawn_session_forces_a_choice_of_approval(daemon):
     schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
     required = schema["spawn_session"]["required"]

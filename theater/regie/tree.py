@@ -8,14 +8,15 @@ renders as three-row leaves.
 
 The leaf is three rows of Content in one widget (spec §v1.9):
 
-    row 1: blank spacing
+    row 1: <incoming rail>, dim — blank for a root
     row 2: <rails><status glyph> <harness name> <short id>
     row 3: <continuation rails><shortened cwd>, dim
 
 Row 2 carries the branch prefix (``├── `` / ``└── ``); row 3 carries the
 continuation prefix (the rail or gap that follows the branch), so the tree
 structure reads correctly across all three lines without a second branch
-glyph appearing to start a new node.
+glyph appearing to start a new node. Row 1 carries the rail that leads down
+into the branch, so the line does not break in the gap between siblings.
 Content is used rather than Rich Text so that ``$primary`` and friends are
 resolved natively by Textual against the active theme.
 """
@@ -149,6 +150,29 @@ def _id_style(node: dict) -> str:
     return "$text dim italic" if not node.get("addressable", True) else ""
 
 
+def _rail_above(prefix: str) -> str:
+    """The rail for row 1: the line that leads down into this node's branch.
+
+    Row 2 draws ``├── `` or ``└── `` at this node's own depth, and the line
+    arriving there comes down from the parent — so the cell directly above
+    the branch glyph is a rail. That holds for a last child too: ``└``
+    closes a line that comes from above rather than starting one, so its row
+    1 is a rail like everyone else's. Only row 3 turns on last-ness, because
+    row 3 is where the line either continues past this node or stops.
+
+    A root gets nothing. It has no branch, so there is no line above it to
+    continue, and a rail hanging off nothing reads as a sibling that failed
+    to render.
+
+    The ancestry to the left is copied through unchanged, gaps and all; only
+    this node's own branch column is replaced. Every rail piece is the same
+    width, so swapping one for another keeps the columns aligned.
+    """
+    if not prefix.endswith((_BRANCH, _LAST_BRANCH)):
+        return ""
+    return prefix[: -len(_BRANCH)] + _RAIL
+
+
 def node_label(
     node: dict,
     prefix: str = "",
@@ -159,9 +183,13 @@ def node_label(
 ) -> Content:
     """Three rows of Content for one participant leaf.
 
-    Row 1 is blank spacing — leading rather than trailing, so the first leaf
-    gets breathing room under the panel border for free, and the row cannot
-    be landed on by a cursor or miscounted by a test.
+    Row 1 is the spacing row — leading rather than trailing, so the first
+    leaf gets breathing room under the panel border for free, and the row
+    cannot be landed on by a cursor or miscounted by a test. For a child it
+    is not empty: it carries the rail arriving from the parent (see
+    :func:`_rail_above`), because a blank row there would break the vertical
+    line in the gap between every pair of siblings. A root's row 1 stays
+    blank.
 
     Row 2 carries the *branch* prefix (``├── `` / ``└── ``); row 3 carries
     the *continuation* prefix (``cont_prefix``), which is the rail or gap
@@ -176,6 +204,12 @@ def node_label(
     id_style = _id_style(node)
     cwd = shorten_path(tilde(node.get("cwd")), keep=cwd_segments)
     harness = node.get("harness", "?")
+
+    # Row 1: the rail leading down into this node's branch, blank for a root.
+    row1_parts: list = []
+    lead = _rail_above(prefix)
+    if lead:
+        row1_parts.append((lead, "$text dim"))
 
     # Row 2: rails, glyph, harness name, short id. The id is split out so
     # the dim-italic reach mark applies to the id portion only.
@@ -196,7 +230,7 @@ def node_label(
     row3_parts.append((cwd, "$text dim"))
 
     return Content.assemble(
-        "",
+        *row1_parts,
         "\n",
         *row2_parts,
         "\n",

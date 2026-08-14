@@ -70,7 +70,14 @@ cwd_segments = 2
 # Textual and tmux tear at the boundary. Below 40, depth-3 rails plus a
 # two-segment path no longer fit, so the feature the width exists for is
 # already broken. No ceiling: tmux refuses anything the window cannot honour.
-sidebar_width = 60
+sidebar_width = 52
+
+# Whether the régie opens with the bus panel showing. Off by default: the tree
+# is what the régie is for, and the event log is a debugging surface most
+# sessions never need. ctrl+p offers "Show bus panel" when you do. While it is
+# hidden the bus is not polled, so showing it resumes from the last event drawn
+# rather than skipping whatever arrived meanwhile.
+bus_visible = false
 
 
 [rails]

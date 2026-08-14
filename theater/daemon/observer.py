@@ -48,6 +48,14 @@ leaves the status untouched. The reducer acts on this reading regardless of
 confidence — being wrong here costs a mislabel in the display, which is
 cheaper than the unrecoverable cost a send gate would pay for the same
 mistake, so the two consumers use different confidence thresholds.
+
+That check runs on both paths through the watch loop, and it has to. A source
+that has not attached yet reports `waiting` rather than silence, and the
+waiting path used to skip every timer — so a harness that writes no transcript
+until its first message (Claude) had no status channel at all before it was
+first prompted, and sat at the IDLE its spawn set. `_screen_only` runs the
+screen arm there, and only that arm; see its docstring for why the other two
+are not merely unnecessary but wrong.
 """
 
 from __future__ import annotations
@@ -467,9 +475,17 @@ class Observer:
                 try:
                     batch = await source.read()
                     if batch.waiting:
-                        # Nothing to read from yet. Back off on the search
-                        # interval and start no timers: silence from a source
-                        # that has not attached says nothing about the agent.
+                        # Nothing to read from yet, so back off on the search
+                        # interval. Silence from a source that has not attached
+                        # says nothing about the agent — but the *screen* does,
+                        # and the pane has existed since the spawn. Claude
+                        # writes its transcript only once the session records
+                        # its first message, so a pane parked on the trust
+                        # dialog has no transcript to find and used to hold the
+                        # IDLE its spawn set for as long as nobody prompted it:
+                        # no status at all, in exactly the state a human most
+                        # needs to see.
+                        await self._screen_only(pid, observer, clock)
                         await self._sleep(self.search)
                         continue
                     if self._apply(pid, batch, clock, turns):
@@ -710,6 +726,29 @@ class Observer:
         if clock.rescue_quiet_for(now) > self.rescue:
             await self._rescue_jobs(pid, observer, clock)
             clock.rescue_since = now  # throttle, same as above
+
+    async def _screen_only(
+        self, pid: str, observer: HarnessObserver, clock: QuietClock
+    ) -> None:
+        """The screen arm of `_on_quiet`, for a source that has not attached.
+
+        One arm of the three, not all of them, and that is the whole point of
+        keeping it separate rather than calling `_on_quiet` here. A relocate
+        asks a source to look somewhere else, which is meaningless before it
+        has looked anywhere; and `_rescue_jobs` would finish a caller's job
+        with `clock.last_text`, which for a participant nothing has ever been
+        read from is the empty string — a silent wrong answer in place of a
+        wait. The screen needs neither: it needs a pane, and there is one.
+
+        Same window and same throttle as the arm it mirrors, so a participant
+        does not get checked faster for having no transcript.
+        """
+        now = time.monotonic()
+        if clock.screen_quiet_since is None:
+            clock.screen_quiet_since = now
+        if clock.screen_quiet_for(now) > self.awaiting:
+            await self._check_idle_screen(pid, observer)
+            clock.screen_quiet_since = now  # throttle, as in `_on_quiet`
 
     def _on_attach(self, pid: str, attached: Attachment) -> None:
         """A source started reading somewhere. Say so, and settle the status."""

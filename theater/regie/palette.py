@@ -2,7 +2,9 @@
 
 Textual's palette (ctrl+p) already carries the built-in system commands. This
 adds one entry per registered harness so that starting a plain CLI does not
-mean leaving the régie for a shell and typing `theater spawn`.
+mean leaving the régie for a shell and typing `theater spawn`, plus the view
+toggles that have no keybinding of their own — the footer has room for the
+keys used in every session, not for the ones set once and left alone.
 
 What these entries spawn is deliberately the least opinionated thing possible:
 no prompt, no parent, `manual` approval — which for both harnesses means no
@@ -96,3 +98,46 @@ class SpawnCommands(Provider):
                     self._hit_command(name),
                     help=help_text,
                 )
+
+
+class ViewCommands(Provider):
+    """Show and hide the parts of the régie that can be turned off.
+
+    The entry is named for what it will do, not for what it controls: an
+    entry reading "Bus panel" would leave the user to guess which way the
+    switch is about to move, and the palette closes before they find out.
+    """
+
+    def _toggle(self):
+        # Defensive for the same reason as SpawnCommands._favourite: Textual
+        # builds providers against whatever app is running, and that is not
+        # always a RegieApp.
+        return getattr(self.app, "action_toggle_bus", None)
+
+    def _entry(self) -> tuple[str, str]:
+        if getattr(self.app, "bus_visible", True):
+            return (
+                "Hide bus panel",
+                "Give the whole sidebar to the tree; the log stops consuming events",
+            )
+        return (
+            "Show bus panel",
+            "Bring the event log back, resuming where it left off",
+        )
+
+    async def discover(self) -> Hits:
+        toggle = self._toggle()
+        if toggle is None:
+            return
+        display, help_text = self._entry()
+        yield DiscoveryHit(display, toggle, help=help_text)
+
+    async def search(self, query: str) -> Hits:
+        toggle = self._toggle()
+        if toggle is None:
+            return
+        matcher = self.matcher(query)
+        display, help_text = self._entry()
+        score = matcher.match(display)
+        if score > 0:
+            yield Hit(score, matcher.highlight(display), toggle, help=help_text)

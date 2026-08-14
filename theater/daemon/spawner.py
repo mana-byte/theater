@@ -14,6 +14,8 @@ ghost that the régie would draw forever.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import shutil
 from dataclasses import dataclass
 
@@ -22,8 +24,10 @@ from theater.daemon import worktree as worktree_mod
 from theater.daemon.registry import Registry
 from theater.harness import check_model, plan_launch
 from theater.harness import get as get_harness
-from theater.models import BadRequest, Participant
+from theater.models import BadRequest, Participant, TheaterError
 from theater.tmux import client as tmux
+
+logger = logging.getLogger("theater.spawner")
 
 #: Where windows go when the caller is not itself inside tmux.
 FALLBACK_SESSION = "theater"
@@ -152,15 +156,98 @@ class Spawner:
                 return requested
         return await tmux.ensure_session(FALLBACK_SESSION, cwd=cwd)
 
+    #: How many times `kill` polls `pane_info` to confirm the pane is gone,
+    #: and how long it waits between attempts. tmux reaps a pane asynchronously
+    #: rather than before `kill-pane` returns, so a single check immediately
+    #: after the call is a race that the pane is about to disappear — it has
+    #: been told to die but may not have done so yet. A few short polls over
+    #: roughly a second is long enough for tmux to finish reaping in every case
+    #: observed, and short enough that a caller blocking on the kill is not
+    #: held for a perceptible time. If the pane is still there after all
+    #: attempts, the record is left alive and the call fails loudly: marking
+    #: the record dead while the pane lives produces the exact ghost row the
+    #: `participants.unmanaged` sweep rediscovers, and that is the failure
+    #: this polling exists to prevent.
+    KILL_POLL_ATTEMPTS = 5
+    KILL_POLL_INTERVAL = 0.25
+
     async def kill(self, participant_id: str) -> None:
         p = self.registry.get(participant_id)
         if p.tmux_pane:
             await tmux.kill_pane(p.tmux_pane)
-        # Clean up the worktree if the participant had one.
-        if p.branch and p.branch.startswith(worktree_mod.BRANCH_PREFIX):
-            root = worktree_mod.repo_root(p.cwd or "")
-            if root:
-                worktree_mod.remove_worktree(
-                    repo_root=root, child_id=participant_id
+            # Confirm the pane is really gone before marking the record dead.
+            # `kill_pane` is a fire-and-forget call with check=False, so it
+            # cannot report whether tmux honoured it. A pane that survives
+            # the kill and is marked dead anyway becomes a ghost: the
+            # unmanaged sweep sees a known harness running in a pane with no
+            # live record, and draws it back in the régie as a row the UI
+            # cannot kill.
+            for _ in range(self.KILL_POLL_ATTEMPTS):
+                info = await tmux.pane_info(p.tmux_pane)
+                if info is None:
+                    break
+                await asyncio.sleep(self.KILL_POLL_INTERVAL)
+            else:
+                raise TheaterError(
+                    f"pane {p.tmux_pane} of {participant_id!r} survived "
+                    f"kill-pane; record left alive to avoid a ghost"
                 )
+        # An explicit kill discards the child's work, branch included.
+        self.retire(p, delete_branch=True)
         self.registry.mark_dead(participant_id)
+
+    def retire(self, p: Participant, *, delete_branch: bool) -> None:
+        """Reclaim the git worktree of a participant that is going away.
+
+        Every path that marks a participant dead should come through
+        here, because a worktree outlives the pane that used it: the
+        directory and the branch are repo state, not tmux state, and
+        nothing else ever collects them. Before this existed only the
+        explicit kill path tried, so a child that exited on its own left
+        its worktree behind forever — the reason a repo with two dozen
+        spawns accumulates two dozen directories under
+        ``.theater/worktrees``.
+
+        *delete_branch* encodes the difference between the two ways a
+        child goes away; see :func:`worktree.remove_worktree`. A kill is
+        destructive by intent, so the branch goes. A self-exit is a
+        child finishing, so the branch stays and only the directory is
+        pruned.
+
+        Failure is logged, never raised. The caller is in the middle of
+        retiring a participant, and refusing to mark it dead because git
+        could not delete a directory would trade a leaked worktree for a
+        ghost row — strictly the worse of the two.
+        """
+        if not (p.branch and p.branch.startswith(worktree_mod.BRANCH_PREFIX)):
+            return
+
+        # main_repo_root, not repo_root: the child's cwd *is* its
+        # worktree, and `git rev-parse --show-toplevel` from in there
+        # answers with the worktree itself. Feeding that back as the
+        # repo root is what produced the doubled
+        # `<worktree>/.theater/worktrees/<id>` path that git rejected on
+        # every removal this daemon has ever attempted. child_id lets it
+        # fall back to stripping the suffix when the directory is
+        # already gone and git cannot answer at all.
+        root = worktree_mod.main_repo_root(p.cwd or "", child_id=p.id)
+        if root is None:
+            logger.warning(
+                "cannot retire worktree for %s: no repo root from cwd %r",
+                p.id,
+                p.cwd,
+            )
+            return
+
+        result = worktree_mod.remove_worktree(
+            repo_root=root, child_id=p.id, delete_branch=delete_branch
+        )
+        if not result.ok:
+            logger.warning(
+                "worktree cleanup incomplete for %s "
+                "(directory removed: %s, branch removed: %s): %s",
+                p.id,
+                result.worktree_removed,
+                result.branch_removed,
+                "; ".join(result.errors) or "no git error reported",
+            )

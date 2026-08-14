@@ -173,7 +173,14 @@ class RegieSection:
     #: rails plus a two-segment path no longer fit — so the feature the
     #: width exists for is already broken. No ceiling: tmux refuses anything
     #: the window cannot honour.
-    sidebar_width: int = field(default=60, metadata={"min": 40})
+    sidebar_width: int = field(default=52, metadata={"min": 40})
+    #: Whether the régie starts with the bus panel showing. Off by default:
+    #: the tree is what the régie is for, and the event log is a debugging
+    #: surface most sessions never need. The palette toggles it either way
+    #: for the current session; this only decides the state it opens in.
+    #: While hidden the bus is not polled at all, so nothing is consumed
+    #: that could not be shown — see `RegieApp._refresh_bus`.
+    bus_visible: bool = False
 
 
 #: Section name in the file -> the dataclass holding it. Drives both parsing
@@ -242,6 +249,13 @@ def _suggest(name: str, known: list[str]) -> str:
     return "known keys: " + ", ".join(sorted(known))
 
 
+def _check_bool(value: Any) -> bool | None:
+    # The strict inverse of _check_int's exclusion: an integer is not a
+    # truth value here, so `bus_visible = 1` is a type error rather than
+    # a quiet yes.
+    return value if isinstance(value, bool) else None
+
+
 def _check_int(value: Any) -> int | None:
     # bool is a subclass of int, so `depth_cap = true` would otherwise parse as
     # 1 and configure a working cap out of a nonsense value.
@@ -274,6 +288,7 @@ def _check_str_list(value: Any) -> list[str] | None:
 #: dispatch on the written form. Explicit beats get_type_hints() here: the set
 #: of legal field types is small and closed on purpose.
 _CHECKERS = {
+    "bool": (_check_bool, "true or false"),
     "int": (_check_int, "an integer"),
     "float": (_check_float, "a number"),
     "str": (_check_str, "a string"),
