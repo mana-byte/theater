@@ -112,6 +112,7 @@ class AgentLeaf(Static):
         node: dict,
         prefix: str = "",
         *,
+        cont_prefix: str = "",
         key: Key | None = None,
         cwd_segments: int = 2,
         **kwargs,
@@ -119,6 +120,7 @@ class AgentLeaf(Static):
         super().__init__("", **kwargs)
         self._node = node
         self._prefix = prefix
+        self._cont_prefix = cont_prefix
         self._key = key or ("p", node.get("id", ""))
         self._cwd_segments = cwd_segments
         self._frame: int = 0
@@ -135,6 +137,7 @@ class AgentLeaf(Static):
         return node_label(
             self._node,
             self._prefix,
+            cont_prefix=self._cont_prefix,
             cwd_segments=self._cwd_segments,
             frame=self._frame,
         )
@@ -153,7 +156,7 @@ class AgentLeaf(Static):
             self._timer.stop()
             self._timer = None
 
-    def update_node(self, node: dict, prefix: str = "") -> None:
+    def update_node(self, node: dict, prefix: str = "", *, cont_prefix: str = "") -> None:
         """Refresh the leaf's data from a new tree tick.
 
         Re-renders the content, and starts or stops the spinner timer
@@ -162,6 +165,7 @@ class AgentLeaf(Static):
         """
         self._node = node
         self._prefix = prefix
+        self._cont_prefix = cont_prefix
         self.update(self._render_label(), layout=False)
         if node.get("status") == "working":
             self._start_timer()
@@ -223,7 +227,7 @@ class TreePanel(VerticalScroll):
     cannot corrupt the highlight or the scroll target.
     """
 
-    lines: reactive[list[tuple[Content, dict, Key, str]]] = reactive([])
+    lines: reactive[list[tuple[Content, dict, Key, str, str]]] = reactive([])
 
     #: Key for the placeholder shown when the tree is empty.
     _EMPTY_KEY: Key = ("empty", "")
@@ -232,7 +236,7 @@ class TreePanel(VerticalScroll):
         super().__init__(**kwargs)
         #: Set by the app so apply_cursor can map a line index back to its
         #: node. Per-instance: the app rebinds it on every redraw.
-        self._lines_data: list[tuple[Content, dict, Key, str]] = []
+        self._lines_data: list[tuple[Content, dict, Key, str, str]] = []
         #: Stable widget map, keyed by the row key from render_tree.
         #: Survives a refresh so per-widget state is not lost. The value is
         #: ``AgentLeaf`` for participants and unmanaged panes, ``Label`` for
@@ -252,7 +256,7 @@ class TreePanel(VerticalScroll):
     }
     """
 
-    def watch_lines(self, lines: list[tuple[Content, dict, Key, str]]) -> None:
+    def watch_lines(self, lines: list[tuple[Content, dict, Key, str, str]]) -> None:
         """Reconcile widget children with the new row list.
 
         Existing widgets are updated in place; only new keys are mounted and
@@ -267,7 +271,7 @@ class TreePanel(VerticalScroll):
             self._reconcile_empty()
             return
 
-        new_key_set = {key for _, _, key, _ in lines}
+        new_key_set = {key for _, _, key, _, _ in lines}
 
         # Remove the empty placeholder if it was there.
         if self._EMPTY_KEY in self._key_widgets:
@@ -282,8 +286,8 @@ class TreePanel(VerticalScroll):
         # order as we go.
         cwd_segments = self.app.settings.regie.cwd_segments
         ordered_widgets: list[Widget] = []
-        for label, node, key, prefix in lines:
-            widget = self._reconcile_row(label, node, key, prefix, cwd_segments)
+        for label, node, key, prefix, cont_prefix in lines:
+            widget = self._reconcile_row(label, node, key, prefix, cont_prefix, cwd_segments)
             ordered_widgets.append(widget)
 
         # Ensure final child order matches the row order. move_child is
@@ -301,6 +305,7 @@ class TreePanel(VerticalScroll):
         node: dict,
         key: Key,
         prefix: str,
+        cont_prefix: str,
         cwd_segments: int,
     ) -> Widget:
         """Update or create the widget for a single row.
@@ -313,7 +318,7 @@ class TreePanel(VerticalScroll):
         if key in self._key_widgets:
             widget = self._key_widgets[key]
             if isinstance(widget, AgentLeaf):
-                widget.update_node(node, prefix=prefix)
+                widget.update_node(node, prefix=prefix, cont_prefix=cont_prefix)
             else:
                 widget.update(label)
             return widget
@@ -321,6 +326,7 @@ class TreePanel(VerticalScroll):
             widget = AgentLeaf(
                 node,
                 prefix,
+                cont_prefix=cont_prefix,
                 key=key,
                 cwd_segments=cwd_segments,
             )
@@ -360,7 +366,7 @@ class TreePanel(VerticalScroll):
         leave a stale widget in ``self.children`` for one frame; resolving
         by key means the highlight always lands on the right row.
         """
-        for i, (_, node, key, _) in enumerate(self._lines_data):
+        for i, (_, node, key, _, _) in enumerate(self._lines_data):
             widget = self._key_widgets.get(key)
             if widget is None:
                 continue
@@ -425,7 +431,7 @@ class RegieApp(App):
     title = "theater régie"
 
     cursor: reactive[int] = reactive(0)
-    tree_lines: reactive[list[tuple[Content, dict, Key, str]]] = reactive([])
+    tree_lines: reactive[list[tuple[Content, dict, Key, str, str]]] = reactive([])
     bus_cursor: int = 0
     #: The régie's own pane id (from $TMUX_PANE), discovered at mount.
     my_pane: str | None = None
@@ -697,7 +703,7 @@ class RegieApp(App):
 
     def _index_for_key(self, key: Key) -> int | None:
         """The line index of *key* in the current tree, or None."""
-        for i, (_, _, k, _) in enumerate(self.tree_lines):
+        for i, (_, _, k, _, _) in enumerate(self.tree_lines):
             if k == key:
                 return i
         return None

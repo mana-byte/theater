@@ -232,7 +232,7 @@ async def test_row_order_matches_data_order_after_reconcile(daemon, tmux):
             daemon["answers"]["participants.tree"],
             daemon["answers"]["participants.unmanaged"],
         )
-        keys = [key for _, _, key, _ in lines]
+        keys = [key for _, _, key, _, _ in lines]
         assert [k for k in panel._key_widgets] == keys
         assert [
             panel._key_widgets[k] for k in keys

@@ -2,16 +2,20 @@
 
 Takes the daemon's `participants.tree` output (a nested dict structure) and
 `participants.unmanaged` output (flat list of panes running harnesses Theater
-doesn't know about yet), and produces a list of ``(Content, node, Key, prefix)``
-4-tuples that the Textual app renders as three-row leaves.
+doesn't know about yet), and produces a list of
+``(Content, node, Key, prefix, cont_prefix)`` 5-tuples that the Textual app
+renders as three-row leaves.
 
 The leaf is three rows of Content in one widget (spec §v1.9):
 
     row 1: blank spacing
     row 2: <rails><status glyph> <harness name> <short id>
-    row 3: <rails><shortened cwd>, dim
+    row 3: <continuation rails><shortened cwd>, dim
 
-Rails are carried on both content rows or the tree structure breaks visually.
+Row 2 carries the branch prefix (``├── `` / ``└── ``); row 3 carries the
+continuation prefix (the rail or gap that follows the branch), so the tree
+structure reads correctly across all three lines without a second branch
+glyph appearing to start a new node.
 Content is used rather than Rich Text so that ``$primary`` and friends are
 resolved natively by Textual against the active theme.
 """
@@ -77,15 +81,21 @@ def shorten_path(path: str | None, keep: int = 2) -> str:
     return f"{prefix}…/{tail}"
 
 
-def _walk(nodes: list[dict], prefix: str = "", depth: int = 0) -> list[tuple[str, dict, Key]]:
+def _walk(
+    nodes: list[dict], prefix: str = "", depth: int = 0
+) -> list[tuple[str, dict, Key, str]]:
     """Depth-first walk that pairs each node with its drawn ancestry.
 
     Roots get no branch of their own: they are separate agents, not siblings
     under some invisible parent, and a rail hanging off nothing reads as a
     missing row. Children get a branch, and the rail continues past them only
     while their parent still has siblings below.
+
+    Each row is ``(prefix, node, key, cont_prefix)`` where *prefix* is the
+    branch rail for row 2 and *cont_prefix* is the continuation rail for row 3
+    (the rail or gap that follows the branch at this depth).
     """
-    rows: list[tuple[str, dict, Key]] = []
+    rows: list[tuple[str, dict, Key, str]] = []
     last_index = len(nodes) - 1
     for i, node in enumerate(nodes):
         last = i == last_index
@@ -94,8 +104,12 @@ def _walk(nodes: list[dict], prefix: str = "", depth: int = 0) -> list[tuple[str
         else:
             branch = _LAST_BRANCH if last else _BRANCH
             child_prefix = prefix + (_GAP if last else _RAIL)
+        # The continuation prefix for row 3 is the same rail/gap that
+        # children at this depth would inherit — it is already computed
+        # as child_prefix, including the "" case for roots.
+        cont_prefix = child_prefix
         key: Key = ("p", node.get("id", ""))
-        rows.append((prefix + branch, node, key))
+        rows.append((prefix + branch, node, key, cont_prefix))
         rows += _walk(node.get("children") or [], child_prefix, depth + 1)
     return rows
 
@@ -136,7 +150,12 @@ def _id_style(node: dict) -> str:
 
 
 def node_label(
-    node: dict, prefix: str = "", *, cwd_segments: int = 2, frame: int = 0
+    node: dict,
+    prefix: str = "",
+    *,
+    cont_prefix: str = "",
+    cwd_segments: int = 2,
+    frame: int = 0,
 ) -> Content:
     """Three rows of Content for one participant leaf.
 
@@ -144,8 +163,10 @@ def node_label(
     gets breathing room under the panel border for free, and the row cannot
     be landed on by a cursor or miscounted by a test.
 
-    Rails (``prefix``) are carried on both content rows. A tree whose rails
-    work on every other line is not a tree.
+    Row 2 carries the *branch* prefix (``├── `` / ``└── ``); row 3 carries
+    the *continuation* prefix (``cont_prefix``), which is the rail or gap
+    that follows the branch at this depth. Using the branch prefix on row 3
+    would make it look like a second node starts there.
 
     ``Content.assemble`` is used rather than line-by-line ``append`` because
     ``Content.append`` returns a new object rather than mutating in place.
@@ -168,10 +189,10 @@ def node_label(
     else:
         row2_parts.append(sid)
 
-    # Row 3: rails (same prefix), shortened cwd, dim.
+    # Row 3: continuation rails (not the branch prefix), shortened cwd, dim.
     row3_parts: list = []
-    if prefix:
-        row3_parts.append((prefix, "$text dim"))
+    if cont_prefix:
+        row3_parts.append((cont_prefix, "$text dim"))
     row3_parts.append((cwd, "$text dim"))
 
     return Content.assemble(
@@ -184,10 +205,16 @@ def node_label(
 
 
 def _labelled(
-    row: tuple[str, dict, Key], *, cwd_segments: int = 2, frame: int = 0
-) -> tuple[Content, dict, Key, str]:
-    prefix, node, key = row
-    return node_label(node, prefix, cwd_segments=cwd_segments, frame=frame), node, key, prefix
+    row: tuple[str, dict, Key, str], *, cwd_segments: int = 2, frame: int = 0
+) -> tuple[Content, dict, Key, str, str]:
+    prefix, node, key, cont_prefix = row
+    return (
+        node_label(node, prefix, cont_prefix=cont_prefix, cwd_segments=cwd_segments, frame=frame),
+        node,
+        key,
+        prefix,
+        cont_prefix,
+    )
 
 
 def render_tree(
@@ -195,8 +222,8 @@ def render_tree(
     unmanaged: list[dict] | None = None,
     *,
     cwd_segments: int = 2,
-) -> list[tuple[Content, dict, Key, str]]:
-    """Produce (label, data, key, prefix) 4-tuples for the Tree widget.
+) -> list[tuple[Content, dict, Key, str, str]]:
+    """Produce (label, data, key, prefix, cont_prefix) 5-tuples for the Tree widget.
 
     Each participant node is a dict with id, harness, tier, status, cwd,
     tmux_pane, parent_id, addressable, and children. Unmanaged panes are
@@ -210,7 +237,9 @@ def render_tree(
     ``[1]`` (node) indexing is unaffected. The fourth element is the rail
     prefix (``""`` for roots, the separator, and unmanaged panes), carried
     explicitly so the panel can pass it to ``AgentLeaf`` for re-rendering on
-    spinner ticks without re-walking the tree.
+    spinner ticks without re-walking the tree. The fifth element is the
+    continuation prefix used for row 3 (the cwd row), which is the rail or
+    gap that follows the branch rather than a repeat of the branch itself.
 
     *cwd_segments* is forwarded to :func:`shorten_path` and defaults to the
     ``[regie] cwd_segments`` value. It is read from config so the tree does
@@ -227,6 +256,7 @@ def render_tree(
             {},
             ("sep", "unmanaged"),
             "",
+            "",
         ))
         for u in unmanaged:
             fake_node = {
@@ -241,13 +271,13 @@ def render_tree(
             }
             key: Key = ("u", u.get("pane", ""))
             lines.append(
-                (node_label(fake_node, cwd_segments=cwd_segments), fake_node, key, "")
+                (node_label(fake_node, cwd_segments=cwd_segments), fake_node, key, "", "")
             )
     return lines
 
 
 def selected_participant(
-    lines: list[tuple[Content, dict, Key, str]], index: int
+    lines: list[tuple[Content, dict, Key, str, str]], index: int
 ) -> dict | None:
     """The participant dict at a given line index, or None if it's a separator."""
     if 0 <= index < len(lines):
