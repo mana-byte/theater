@@ -875,27 +875,18 @@ def test_vibe_agent_output_containing_to_interrupt_is_not_working():
     """The whole-capture match made agent output impersonate the spinner.
 
     `to interrupt` is ordinary English prose that an agent can echo in its
-    own output. A whole-capture match reads an idle pane (composer prompt at
-    the bottom) as WORKING, so `_rescue_jobs` never sees a PROMPT and the
-    caller's job hangs. The working scan is tail-scoped to prevent this.
+    own output. A whole-capture (or even tail-scoped) match reads an idle
+    pane as WORKING, so `_rescue_jobs` never sees a PROMPT and the caller's
+    job hangs. The working arm requires `Esc` to co-occur on the same line,
+    which the spinner always does and prose never does.
+
+    This probes the boundary: the prose sits on the line immediately above
+    the composer, with nothing between — the case where tail-scoping alone
+    still fails.
     """
     capture = (
         "  I added a signal handler to interrupt the loop.\n"
-        "\n"
-        "⏵ Ran some command\n"
-        "\n"
-        "  Done.\n"
-        "\n"
-        "⏵ Ran another command\n"
-        "\n"
-        "  All good.\n"
-        "\n"
-        "───────────────────────────────────────────────────────────────────── default ─\n"
-        "> \n"
-        "\n"
-        "\n"
-        "─────────────────────────────────────────────────────────────────────\n"
-        "~/work                                                0/254k tokens (0%)"
+        "> "
     )
     assert "to interrupt" in capture
     reading = VibeObserver().screen_reading(capture)

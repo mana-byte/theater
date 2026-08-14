@@ -94,19 +94,32 @@ APPROVAL_MARKER = "Esc reject"
 #: of the spinner hint (`loading.py:170-177`):
 #:   plain:   `(9m45s Esc/Ctrl+C to interrupt)`
 #:   queued:  `(1m23s Esc to interrupt · Ctrl+C to cancel last queued message)`
-#: The substring `to interrupt` matches both and nothing else in the vibe UI
-#: emits it outside a working turn. A looser match is deliberate here because
-#: the queued variant misses the old `Esc/Ctrl+C` prefix entirely.
+#: The substring `to interrupt` matches both spellings, but it is also
+#: ordinary English prose that an agent can echo in its own output, so it
+#: cannot be used alone.
 #:
-#: The loose substring and the tail-scoping in `screen_reading` are a pair:
-#: the looseness is required to catch the queued variant, the scoping is what
-#: makes the looseness safe. `to interrupt` is ordinary English prose that an
-#: agent can echo in its own output, so a whole-capture match lets agent text
-#: impersonate the spinner and read an idle pane as WORKING — which hangs the
-#: caller's job because `_rescue_jobs` never sees a PROMPT. Scoping to the tail
-#: is safe because the spinner always renders near the bottom of the pane. Do
-#: not separate the two.
+#: `WORKING_MARKER_KEY` is the other token that identifies the spinner line.
+#: Both spellings put `Esc` and `to interrupt` on the SAME line, and ordinary
+#: prose containing "to interrupt" — e.g. "I added a signal handler to
+#: interrupt the loop" — does not also contain `Esc` on that line.
+#:
+#: The safety of the loose substring rests on TWO things together: the tail
+#: window (`_SPINNER_TAIL_LINES`) and the `Esc` co-occurrence requirement.
+#: Neither alone is enough, because the tail window unavoidably contains the
+#: agent's closing lines of output — the spinner renders directly above the
+#: composer, and the agent's closing sentences render directly above the
+#: spinner. Do not separate any of the three: the substring, the key, and the
+#: tail window.
+#:
+#: Codex's working arm uses an endswith anchor on its spinner line, but that
+#: does NOT work here: the plain hint ends with `)` and the queued hint ends
+#: with `message)`, so anchoring on the end of the line would break both. The
+#: two-token co-occurrence test is the right discriminator for vibe.
 WORKING_MARKER = "to interrupt"
+
+#: The second token that must co-occur with `WORKING_MARKER` on the same tail
+#: line. See `WORKING_MARKER` for why both are required.
+WORKING_MARKER_KEY = "Esc"
 
 #: Rendered by the workspace-trust dialog (`trust_folder_dialog.py:95-97`),
 #: which runs at startup when vibe detects config files in an untrusted folder
@@ -143,16 +156,20 @@ _SPINNER_TAIL_LINES = 8
 _SCAN_LIMIT = 200
 
 
-def _in_screen_tail(capture: str, marker: str, limit: int) -> bool:
-    """Whether `marker` appears in the last `limit` lines of `capture`.
+def _in_screen_tail(capture: str, markers: tuple[str, ...], limit: int) -> bool:
+    """Whether some tail line contains every marker in `markers`.
 
     The spinner and footer chrome always render at the bottom of the pane, and
     matching the whole pane lets agent output impersonate chrome — e.g. the
     phrase ``to interrupt`` is ordinary English that an agent can echo. Scoping
-    to the tail is what makes a loose substring marker safe.
+    to the tail is necessary but not sufficient: the tail also contains the
+    agent's closing lines. Requiring a second token (``Esc``) on the same line
+    is what distinguishes the spinner from prose.
     """
     lines = capture.splitlines()
-    return any(marker in line for line in lines[-limit:] if line)
+    return any(
+        all(m in line for m in markers) for line in lines[-limit:] if line
+    )
 
 
 class VibeHarness(Harness):
@@ -474,7 +491,9 @@ class VibeObserver(TranscriptObserver):
             return ScreenReading(
                 kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH
             )
-        if _in_screen_tail(capture, WORKING_MARKER, _SPINNER_TAIL_LINES):
+        if _in_screen_tail(
+            capture, (WORKING_MARKER, WORKING_MARKER_KEY), _SPINNER_TAIL_LINES
+        ):
             return ScreenReading(
                 kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH
             )
