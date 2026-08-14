@@ -101,12 +101,22 @@ WORKING_MARKER = "esc to interrupt"
 #: prompt — all three are awaiting-input screens. NOT `to confirm`: the
 #: `/approvals` settings popup renders `to confirm or … to go back`, and
 #: keying on `to confirm` would wrongly classify that settings popup as an
-#: approval modal.
+#: approval modal. The substring is deliberately loose for keymap-independence
+#: (the labels are `&'static str`; only the key glyph varies), and that
+#: looseness is safe ONLY because the APPROVAL arm scopes the match to the
+#: tail window via `_in_screen_tail` — the footer always renders at the
+#: bottom, so a whole-capture match would let agent prose impersonate chrome.
+#: The loose marker and the tail-scoping are a pair; do not separate them.
 APPROVAL_MARKER = "to cancel"
 
 #: The first-launch trust dialog. The full sentence is longer, but the
 #: paragraph has a 2-column inset and wraps mid-sentence on panes narrower
 #: than ~46 columns, so only the first few words are a reliable marker.
+#: Unlike APPROVAL_MARKER this is a whole-capture match, not tail-scoped:
+#: the trust paragraph is body text above the selection rows, not footer
+#: chrome, so tail-scoping would miss it. The residual risk is acceptable
+#: because the trust dialog only appears at startup, when there is no agent
+#: output on the pane at all.
 TRUST_MARKER = "Do you trust the contents"
 
 #: How far up from the bottom to look for the composer. The footer is one line,
@@ -123,6 +133,18 @@ _CWD_PROBE_BYTES = 256 * 1024
 #: The filename is `rollout-<local ISO with - separators>-<uuid>`. Anchoring on
 #: the fixed-width timestamp is what lets the uuid keep its own hyphens.
 _STEM = re.compile(r"^rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-(.+)$")
+
+
+def _in_screen_tail(capture: str, marker: str) -> bool:
+    """Whether *marker* appears in the last few non-blank lines of *capture*.
+
+    The approval footer is chrome the CLI always draws at the bottom of the
+    modal, so searching the whole pane buys nothing — and matching the whole
+    pane lets agent output (ordinary prose) impersonate the footer. Scoping
+    to the same tail window ``is_idle_screen`` uses prevents that.
+    """
+    lines = [line.strip() for line in capture.splitlines() if line.strip()]
+    return any(marker in line for line in lines[-_SCREEN_TAIL_LINES:])
 
 
 def _epoch(value) -> float | None:
@@ -476,7 +498,7 @@ class CodexObserver(TranscriptObserver):
             return ScreenReading(
                 kind=ScreenKind.TRUST, confidence=ScreenConfidence.HIGH
             )
-        if APPROVAL_MARKER in capture:
+        if _in_screen_tail(capture, APPROVAL_MARKER):
             return ScreenReading(
                 kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH
             )

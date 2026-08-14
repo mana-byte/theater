@@ -794,6 +794,32 @@ def test_codex_approvals_settings_popup_is_not_an_approval():
     assert reading.kind is not ScreenKind.APPROVAL
 
 
+def test_codex_agent_output_containing_to_cancel_is_not_an_approval():
+    """The APPROVAL_MARKER substring `to cancel` is deliberately loose for
+    keymap-independence. A whole-capture match let agent prose impersonate the
+    approval footer, making the pane unreachable. The marker is tail-scoped
+    so that ordinary output above an idle composer does not trip the arm."""
+    capture = "\n".join(
+        [
+            "  I looked at the checkout flow. The Stripe webhook has no way",
+            "    to cancel an in-flight payment intent, so we need to add one.",
+            "",
+            "  Let me check the webhook handler.",
+            "",
+            "  Ran: grep -r 'webhook' src/",
+            "  src/webhooks/stripe.rs",
+            "",
+            "  The handler is in src/webhooks/stripe.rs:42.",
+            "",
+            "\u203a ",
+            "  Ctrl+J newline   Ctrl+T transcript   Ctrl+C quit",
+        ]
+    )
+    reading = CodexObserver().screen_reading(capture)
+    assert reading.kind is not ScreenKind.APPROVAL
+    assert reading.kind is ScreenKind.PROMPT
+
+
 def test_opencode_idle_fixture_classifies_as_prompt():
     capture = _screen("opencode_idle.txt")
     reading = OpenCodeObserver().screen_reading(capture)
