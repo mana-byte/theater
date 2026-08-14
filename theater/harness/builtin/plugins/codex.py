@@ -29,7 +29,10 @@ and rejected — writing the trust entry into the user's config (Theater does no
 own that file) and pointing CODEX_HOME elsewhere (loses auth.json, the user's
 MCP servers, and session history). So a spawn into a fresh directory sits at the
 dialog until someone answers it once. `is_idle_screen` reports that pane as
-awaiting input, which is exactly right.
+awaiting input because the trust dialog renders a `›` selection row, which
+is the same glyph the idle composer uses. `screen_reading` checks the modal
+markers before falling through to `is_idle_screen`, so the trust dialog
+classifies as TRUST rather than PROMPT.
 
 Transcript layout
 -----------------
@@ -94,6 +97,31 @@ PROMPT = "\u203a"
 #: bottom line is never the prompt and `last_screen_line` cannot be used.
 WORKING_MARKER = "esc to interrupt"
 
+#: Rendered by the approval overlay, the MCP elicitation prompt, and the auth
+#: prompt — all three are awaiting-input screens. NOT `to confirm`: the
+#: `/approvals` settings popup renders `to confirm or … to go back`, and
+#: keying on `to confirm` would wrongly classify that settings popup as an
+#: approval modal. The substring is deliberately loose for keymap-independence
+#: (the labels are `&'static str`; only the key glyph varies), and that
+#: looseness is safe ONLY because of TWO guards together: (1) the match is
+#: scoped to the tail window via `_in_screen_tail`, and (2) the match is an
+#: `endswith` test, not a containment test. Neither alone is enough — the
+#: tail window unavoidably contains agent output (three of five lines in a
+#: real codex idle pane are prose), and prose can contain the phrase
+#: mid-line. The footer is a whole line that ends with the marker; prose
+#: virtually never does. Both guards are required; do not drop either.
+APPROVAL_MARKER = "to cancel"
+
+#: The first-launch trust dialog. The full sentence is longer, but the
+#: paragraph has a 2-column inset and wraps mid-sentence on panes narrower
+#: than ~46 columns, so only the first few words are a reliable marker.
+#: Unlike APPROVAL_MARKER this is a whole-capture match, not tail-scoped:
+#: the trust paragraph is body text above the selection rows, not footer
+#: chrome, so tail-scoping would miss it. The residual risk is acceptable
+#: because the trust dialog only appears at startup, when there is no agent
+#: output on the pane at all.
+TRUST_MARKER = "Do you trust the contents"
+
 #: How far up from the bottom to look for the composer. The footer is one line,
 #: but a multi-line composer or a notice above it can push the prompt further
 #: up; beyond this the pane is showing something else entirely.
@@ -108,6 +136,24 @@ _CWD_PROBE_BYTES = 256 * 1024
 #: The filename is `rollout-<local ISO with - separators>-<uuid>`. Anchoring on
 #: the fixed-width timestamp is what lets the uuid keep its own hyphens.
 _STEM = re.compile(r"^rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-(.+)$")
+
+
+def _in_screen_tail(capture: str, marker: str) -> bool:
+    """Whether any of the last few non-blank lines *ends with* *marker*.
+
+    The approval footer is chrome the CLI always draws at the bottom of the
+    modal, so searching the whole pane buys nothing — and matching the whole
+    pane lets agent output (ordinary prose) impersonate the footer. Scoping
+    to the same tail window ``is_idle_screen`` uses is necessary but not
+    sufficient on its own: a real codex idle pane has agent output in three
+    of the five scanned tail lines (see ``codex_idle.txt``), so the window
+    unavoidably contains prose. The end-of-line anchor is the second guard:
+    the footer is a whole line that ends with the marker, while prose
+    containing the phrase virtually never ends a line with it. Neither the
+    tail window nor the endswith test alone is enough; both are required.
+    """
+    lines = [line.strip() for line in capture.splitlines() if line.strip()]
+    return any(line.endswith(marker) for line in lines[-_SCREEN_TAIL_LINES:])
 
 
 def _epoch(value) -> float | None:
@@ -437,8 +483,11 @@ class CodexObserver(TranscriptObserver):
         only feeds the AWAITING_INPUT display hint; whether a human is present
         is decided separately, from `pane_in_mode`, and never from a scrape.
 
-        The first-launch trust dialog also reads as idle here. It genuinely is:
-        nothing proceeds until someone answers it.
+        The first-launch trust dialog also trips this boolean, because it
+        renders a `›` selection row just like the idle composer. That is why
+        `screen_reading` must check the TRUST and APPROVAL markers before
+        falling through to this method: without that guard both modals would
+        classify as PROMPT and the send gate would inject into them.
         """
         if WORKING_MARKER in capture:
             return False
@@ -446,15 +495,22 @@ class CodexObserver(TranscriptObserver):
         return any(line.startswith(PROMPT) for line in lines[-_SCREEN_TAIL_LINES:])
 
     def screen_reading(self, capture: str) -> ScreenReading:
-        """Classify the rendered screen as `working`, `prompt`, or `unknown`.
+        """Classify the rendered screen as trust, approval, working, or prompt.
 
-        Codex's idle screen and working screen are already distinguishable by
-        the presence or absence of `WORKING_MARKER`, so `prompt` and `working`
-        both carry `high` confidence. The approval arm is unimplemented because
-        this host's config auto-approves codex, so the dialog could not be
-        captured — an unverified approval marker is the exact failure this phase
-        is meant to avoid.
+        Arm order is load-bearing: both the trust dialog and the approval
+        overlay render a selection row starting with `›`, so
+        `is_idle_screen` returns True on both. The modal arms must therefore
+        come before the `is_idle_screen` call, or both modals would classify
+        as PROMPT and the send gate would inject into a live approval.
         """
+        if TRUST_MARKER in capture:
+            return ScreenReading(
+                kind=ScreenKind.TRUST, confidence=ScreenConfidence.HIGH
+            )
+        if _in_screen_tail(capture, APPROVAL_MARKER):
+            return ScreenReading(
+                kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH
+            )
         if WORKING_MARKER in capture:
             return ScreenReading(
                 kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH
