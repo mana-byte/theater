@@ -71,9 +71,9 @@ def test_children_hang_off_a_branch():
     child_rows = _rows(lines[1][0])
     # Roots have no branch of their own.
     assert not parent_rows[1].startswith(("├", "└", " "))
-    # Children get a branch, on both content rows.
+    # Children get a branch on row 2; row 3 carries the continuation gap.
     assert child_rows[1].startswith("└── ")
-    assert child_rows[2].startswith("└── ")
+    assert child_rows[2].startswith("    ")
 
 
 def test_only_the_last_sibling_closes_the_branch():
@@ -82,9 +82,11 @@ def test_only_the_last_sibling_closes_the_branch():
     first_rows = _rows(lines[1][0])
     second_rows = _rows(lines[2][0])
     assert first_rows[1].startswith("├── ")
-    assert first_rows[2].startswith("├── ")
+    # Row 3: continuation rail (non-last child shows the rail).
+    assert first_rows[2].startswith("│   ")
     assert second_rows[1].startswith("└── ")
-    assert second_rows[2].startswith("└── ")
+    # Row 3: continuation gap (last child).
+    assert second_rows[2].startswith("    ")
 
 
 def test_the_rail_continues_past_a_parent_that_has_siblings_below():
@@ -98,7 +100,8 @@ def test_the_rail_continues_past_a_parent_that_has_siblings_below():
     second_rows = _rows(lines[3][0])
     assert first_rows[1].startswith("├── ")
     assert grandchild_rows[1].startswith("│   └── ")
-    assert grandchild_rows[2].startswith("│   └── ")
+    # Row 3: continuation = parent's rail + gap (grandchild is last child).
+    assert grandchild_rows[2].startswith("│       ")
     assert second_rows[1].startswith("└── ")
 
 
@@ -109,7 +112,8 @@ def test_the_rail_stops_under_a_last_child():
     grandchild_rows = _rows(lines[2][0])
     assert child_rows[1].startswith("└── ")
     assert grandchild_rows[1].startswith("    └── ")
-    assert grandchild_rows[2].startswith("    └── ")
+    # Row 3: continuation = parent's gap + gap (both last children).
+    assert grandchild_rows[2].startswith("        ")
 
 
 def test_separate_roots_are_not_drawn_as_siblings():
@@ -119,6 +123,46 @@ def test_separate_roots_are_not_drawn_as_siblings():
     assert all(
         not _rows(line[0])[1].startswith(("├", "└")) for line in lines
     )
+
+
+def test_row3_continuation_rail_for_middle_child_at_depth_2():
+    """A non-last child at depth >= 2 shows the continuation rail on row 3.
+
+    Row 3 must carry the continuation prefix (rail), not the branch prefix,
+    so it does not look like a second node starting there.
+    """
+    grandchild_a = {**CHILD, "id": "ddeeff001122"}
+    grandchild_b = {**CHILD, "id": "778899aabbcc"}
+    parent = {**CHILD, "children": [grandchild_a, grandchild_b]}
+    lines = render_tree([{**PARENT, "children": [parent]}])
+    middle_rows = _rows(lines[2][0])
+    # Row 2 carries the branch.
+    assert middle_rows[1].startswith("    ├── ")
+    # Row 3 carries the continuation rail, not the branch.
+    assert middle_rows[2].startswith("    │   ")
+    assert not middle_rows[2].startswith("    ├── ")
+
+
+def test_row3_continuation_gap_for_last_child_at_depth_2():
+    """A last child at depth >= 2 shows the continuation gap on row 3."""
+    grandchild_a = {**CHILD, "id": "ddeeff001122"}
+    grandchild_b = {**CHILD, "id": "778899aabbcc"}
+    parent = {**CHILD, "children": [grandchild_a, grandchild_b]}
+    lines = render_tree([{**PARENT, "children": [parent]}])
+    last_rows = _rows(lines[3][0])
+    # Row 2 carries the closing branch.
+    assert last_rows[1].startswith("    └── ")
+    # Row 3 carries the continuation gap, not the branch.
+    assert last_rows[2].startswith("        ")
+    assert not last_rows[2].startswith("    └── ")
+
+
+def test_row3_no_rail_for_root():
+    """A root participant has no rail on any row."""
+    lines = render_tree([PARENT])
+    rows = _rows(lines[0][0])
+    assert not rows[1].startswith(("├", "└", "│"))
+    assert not rows[2].startswith(("├", "└", "│"))
 
 
 def test_unmanaged_panes_append_after_separator():
