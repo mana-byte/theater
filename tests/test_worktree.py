@@ -290,3 +290,126 @@ def test_remove_worktree_already_deleted_with_wrong_root(repo):
         cwd=repo, capture_output=True, text=True, check=False,
     )
     assert verify.returncode != 0
+
+
+def test_remove_worktree_keeps_the_branch_when_asked(repo):
+    """delete_branch=False prunes the directory and leaves the branch.
+
+    This is the self-exit policy: a child that ended on its own usually
+    ended because it finished, and the branch is the only handle on
+    whatever it committed. Reclaiming the directory must not throw the
+    commits away with it.
+    """
+    wt_path = wt.create_worktree(repo_root=repo, child_id="keepbranch")
+    subprocess.run(["git", "commit", "--allow-empty", "-m", "child work"],
+                   cwd=wt_path, check=True, capture_output=True)
+
+    result = wt.remove_worktree(
+        repo_root=repo, child_id="keepbranch", delete_branch=False
+    )
+
+    # ok reflects the directory alone; nothing was asked of the branch,
+    # so branch_removed stays False rather than claiming a success.
+    assert result.ok
+    assert result.worktree_removed
+    assert not result.branch_removed
+    assert not Path(wt_path).exists()
+
+    verify = subprocess.run(
+        ["git", "rev-parse", "--verify", "theater/keepbranch"],
+        cwd=repo, capture_output=True, text=True, check=False,
+    )
+    assert verify.returncode == 0, "the child's branch must survive"
+
+
+# ---- Spawner.retire ----------------------------------------------------
+#
+# retire() is the single door every death path goes through, and what it
+# has to get right is a git question, not a daemon question: it must
+# derive the main repo root from a cwd that *is* a worktree. So it is
+# tested here, against the same real repo fixture, rather than against a
+# mocked spawner elsewhere.
+
+
+def _participant(child_id: str, cwd: str):
+    from theater.models import Participant, Tier
+
+    return Participant(
+        id=child_id,
+        harness="vibe",
+        tier=Tier.SPAWNED,
+        cwd=cwd,
+        branch=wt.branch_name(child_id),
+    )
+
+
+def _spawner():
+    from theater.daemon.spawner import Spawner
+
+    # retire() never touches the registry; passing None keeps the test
+    # to the one behaviour it is about.
+    return Spawner(registry=None)
+
+
+def test_retire_removes_worktree_and_branch_of_a_killed_child(repo):
+    """The kill path, end to end, with the cwd shape production has.
+
+    The child's cwd is its worktree — the exact input that made every
+    real removal fail before, because deriving the repo root from it
+    with `--show-toplevel` yields the worktree itself.
+    """
+    wt_path = wt.create_worktree(repo_root=repo, child_id="killme")
+    p = _participant("killme", wt_path)
+
+    _spawner().retire(p, delete_branch=True)
+
+    assert not Path(wt_path).exists()
+    verify = subprocess.run(
+        ["git", "rev-parse", "--verify", "theater/killme"],
+        cwd=repo, capture_output=True, text=True, check=False,
+    )
+    assert verify.returncode != 0
+    listing = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=repo, capture_output=True, text=True, check=False,
+    )
+    assert "killme" not in listing.stdout
+
+
+def test_retire_keeps_the_branch_of_a_child_that_exited(repo):
+    """The reaper path: directory reclaimed, commits preserved."""
+    wt_path = wt.create_worktree(repo_root=repo, child_id="exited")
+    subprocess.run(["git", "commit", "--allow-empty", "-m", "child work"],
+                   cwd=wt_path, check=True, capture_output=True)
+    p = _participant("exited", wt_path)
+
+    _spawner().retire(p, delete_branch=False)
+
+    assert not Path(wt_path).exists()
+    verify = subprocess.run(
+        ["git", "rev-parse", "--verify", "theater/exited"],
+        cwd=repo, capture_output=True, text=True, check=False,
+    )
+    assert verify.returncode == 0
+
+
+def test_retire_ignores_a_participant_without_a_theater_branch(repo):
+    """A child spawned without worktree=True shares the parent's checkout.
+
+    Its cwd is the repo itself and its branch is whatever the user is on.
+    Retiring it must touch nothing: the alternative is a daemon that
+    deletes the branch a human is working on.
+    """
+    from theater.models import Participant, Tier
+
+    p = Participant(id="plain", harness="vibe", tier=Tier.SPAWNED,
+                    cwd=repo, branch="main")
+
+    _spawner().retire(p, delete_branch=True)
+
+    verify = subprocess.run(
+        ["git", "rev-parse", "--verify", "main"],
+        cwd=repo, capture_output=True, text=True, check=False,
+    )
+    assert verify.returncode == 0
+    assert Path(repo, "README.md").exists()

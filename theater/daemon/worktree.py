@@ -202,6 +202,7 @@ def remove_worktree(
     *,
     repo_root: str,
     child_id: str,
+    delete_branch: bool = True,
 ) -> WorktreeRemoveResult:
     """Remove a worktree and its branch, reporting what actually happened.
 
@@ -209,6 +210,16 @@ def remove_worktree(
     so uncommitted changes are discarded (the child is dead; its
     uncommitted work is not ours to preserve). The branch is deleted
     with ``-D`` for the same reason.
+
+    Pass ``delete_branch=False`` to prune only the directory. That is
+    the right call for a child that exited on its own rather than being
+    killed: it usually exited because it *finished*, and its branch is
+    the only handle anyone has on the commits it made. Removing the
+    directory there reclaims the disk and the worktree slot; removing
+    the branch would silently destroy the result. With this flag,
+    ``ok`` reflects the directory alone and ``branch_removed`` stays
+    ``False`` — nothing was asked of the branch, so nothing is claimed
+    about it.
 
     The *repo_root* argument is typically derived by the caller from
     the child's cwd via :func:`repo_root` — which, for a worktree child,
@@ -292,50 +303,58 @@ def remove_worktree(
     # still has checked out. We only reach here after the worktree was
     # removed (or pruned). If the branch was already gone, treat that as
     # success — the desired end state is "no branch".
-    br_result = subprocess.run(
-        ["git", "branch", "-D", branch],
-        cwd=real_root,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    branch_removed = br_result.returncode == 0
-
-    if not branch_removed:
-        stderr = br_result.stderr.strip()
-        # git branch -D returns nonzero if the branch doesn't exist.
-        # Verify: if rev-parse can't find it, it's already gone — that's
-        # the desired end state, so treat it as success.
-        verify = subprocess.run(
-            ["git", "rev-parse", "--verify", branch],
+    branch_removed = False
+    if delete_branch:
+        br_result = subprocess.run(
+            ["git", "branch", "-D", branch],
             cwd=real_root,
             check=False,
             capture_output=True,
             text=True,
             timeout=5,
         )
-        if verify.returncode != 0:
-            branch_removed = True
-        else:
-            result.errors.append(f"branch delete: {stderr}")
-            logger.warning(
-                "git branch -D failed for %s (branch %s): %s",
-                child_id,
-                branch,
-                stderr,
+        branch_removed = br_result.returncode == 0
+
+        if not branch_removed:
+            stderr = br_result.stderr.strip()
+            # git branch -D returns nonzero if the branch doesn't exist.
+            # Verify: if rev-parse can't find it, it's already gone — that's
+            # the desired end state, so treat it as success.
+            verify = subprocess.run(
+                ["git", "rev-parse", "--verify", branch],
+                cwd=real_root,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
+            if verify.returncode != 0:
+                branch_removed = True
+            else:
+                result.errors.append(f"branch delete: {stderr}")
+                logger.warning(
+                    "git branch -D failed for %s (branch %s): %s",
+                    child_id,
+                    branch,
+                    stderr,
+                )
 
     result = WorktreeRemoveResult(
-        ok=worktree_removed and branch_removed,
+        ok=worktree_removed and (branch_removed or not delete_branch),
         worktree_removed=worktree_removed,
         branch_removed=branch_removed,
         errors=result.errors,
     )
 
     if result.ok:
+        # Say which of the two things actually happened. The old
+        # unconditional "removed worktree (branch ...)" line was the
+        # reason this bug survived so long in the logs: it claimed a
+        # branch deletion that had never once succeeded.
         logger.info(
-            "removed worktree for %s (branch %s)", child_id, branch
+            "removed worktree for %s (%s)",
+            child_id,
+            f"branch {branch} deleted" if delete_branch else f"branch {branch} kept",
         )
     else:
         logger.error(
