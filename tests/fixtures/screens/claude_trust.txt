@@ -1,0 +1,96 @@
+╭─── Claude Code v2.1.220 ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                    │ Tips for getting started                                                                                                                                  │
+│                    Welcome back!                   │ Ask Claude to create a new app or clone a repository                                                                                                      │
+│                                                    │ ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
+│                       ▐▛███▜▌                      │ What's new                                                                                                                                                │
+│                      ▝▜█████▛▘                     │ Fixed Fable 5 model names with a `[1m]` suffix not being normalized — Fable 5 includes 1M context by default, so the suffix is now stripped automatically │
+│                        ▘▘ ▝▝                       │ Fixed a spurious "sandbox dependencies missing" startup warning on Windows when sandbox was enabled in settings                                           │
+│                                                    │ Sub-agents can now spawn their own sub-agents (up to 5 levels deep)                                                                                       │
+│            Opus 4.8 · Microsoft Foundry            │ /release-notes for more                                                                                                                                   │
+│  /…/vibe-scratchpad-72558813-d_911zan/probe/claude │                                                                                                                                                           │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+ Accessing workspace: /Users/manaiki.laut/Desktop/tui_cli_orchestration
+
+ Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open
+ source project, or work from your team). If not, take a moment to review the contents of this folder first.
+
+ Claude Code will be able to read, edit, and execute files here.
+
+ This folder pre-approves 3 tool permissions
+
+ These will apply without asking. Only proceed if you trust this configuration.
+
+ Security guide: https://code.claude.com/docs/en/security
+
+ ❯ 1. Yes, I trust this folder
+   2. No, continue without these permissions
+   3. No, exit
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -810,3 +810,39 @@ def test_claude_bash_approval_fixture_classifies_as_approval():
     reading = ClaudeCodeObserver().screen_reading(capture)
     assert reading.kind is ScreenKind.APPROVAL
     assert reading.confidence is ScreenConfidence.HIGH
+
+
+def test_claude_trust_fixture_classifies_as_trust_with_high_confidence():
+    """The workspace-trust onboarding dialog has no approval footer.
+
+    Without a dedicated ``TRUST`` arm it falls through to ``UNKNOWN``: the
+    reducer leaves the status untouched and the send gate lets keystrokes
+    through into a trust prompt, which can accept trust no human granted.
+    """
+    capture = _screen("claude_trust.txt")
+    reading = ClaudeCodeObserver().screen_reading(capture)
+    assert reading.kind is ScreenKind.TRUST
+    assert reading.confidence is ScreenConfidence.HIGH
+
+
+def test_claude_trust_marker_does_not_match_remote_control_add_server_dialog():
+    """The ``Trust this directory?`` dialog is a different screen.
+
+    It is the remote-control add-server confirmation with options
+    ``Yes, trust and add server`` / ``No, go back``. The workspace-trust
+    marker ``Yes, I trust this folder`` must not fire here: matching this
+    neighbour would be non-dangerous (both are genuinely awaiting input)
+    but it conflates two distinct screens, and a looser marker — say a bare
+    ``trust`` substring — would also catch the cloud-gateway TLS-pinning
+    dialog.
+    """
+    capture = "\n".join(
+        [
+            " Trust this directory?",
+            "",
+            " Yes, trust and add server",
+            " No, go back",
+        ]
+    )
+    reading = ClaudeCodeObserver().screen_reading(capture)
+    assert reading.kind is not ScreenKind.TRUST

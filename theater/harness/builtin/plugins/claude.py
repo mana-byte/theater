@@ -75,6 +75,16 @@ IDLE_PROMPTS = (">", "> ")
 #: false-positive. Present in `tests/fixtures/screens/claude_approval.txt`.
 APPROVAL_MARKER = "Esc to cancel"
 
+#: The workspace-trust onboarding dialog's primary option label. Unique to
+#: that dialog and rendered on its own line (24 chars, so it does not wrap on
+#: any realistic pane width). Unlike the header-ish strings `Accessing
+#: workspace:` or `Quick safety check`, it cannot collide with the two
+#: neighbour trust dialogs (`Trust this directory?` — the remote-control
+#: add-server confirmation, and `Trust gateway <host>` — cloud-gateway TLS
+#: pinning), which use different option labels entirely. The marker is an
+#: option label, not body text, so it will not appear in echoed agent output.
+TRUST_MARKER = "Yes, I trust this folder"
+
 #: The middle segment of the status footer while a turn is in flight. The
 #: footer keeps its shape and swaps this segment for `IDLE_FOOTER` when the
 #: turn ends, so the two are mutually exclusive. Present in
@@ -434,9 +444,17 @@ class ClaudeCodeObserver(TranscriptObserver):
         return last_screen_line(capture) in IDLE_PROMPTS
 
     def screen_reading(self, capture: str) -> ScreenReading:
-        """Classify the screen as `approval`, `working`, `prompt` or `unknown`.
+        """Classify the screen as `trust`, `approval`, `working`, `prompt` or `unknown`.
 
-        Approval first: the dialog's footer chrome (`Esc to cancel`) is a
+        Trust first: the workspace-trust onboarding dialog has no
+        ``Esc to cancel`` footer (it predates the approval chrome) and no
+        status footer, so without a dedicated arm it falls through to
+        ``UNKNOWN`` — the reducer leaves the status untouched and the send
+        gate lets keystrokes through into a trust prompt. That is
+        safety-critical: injecting Enter into a trust dialog accepts trust
+        no human granted.
+
+        Approval next: the dialog's footer chrome (`Esc to cancel`) is a
         frame element the CLI draws, not text the agent produced, so it cannot
         appear in echoed output. The dialog replaces the status footer, so all
         three markers are mutually exclusive on a real capture — the order is
@@ -452,6 +470,10 @@ class ClaudeCodeObserver(TranscriptObserver):
         last non-blank line and `is_idle_screen` does not fire on a real
         screen.
         """
+        if TRUST_MARKER in capture:
+            return ScreenReading(
+                kind=ScreenKind.TRUST, confidence=ScreenConfidence.HIGH
+            )
         if APPROVAL_MARKER in capture:
             return ScreenReading(
                 kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH
