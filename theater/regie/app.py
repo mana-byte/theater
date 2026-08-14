@@ -42,7 +42,7 @@ from theater.client import DaemonClient
 from theater.config import Config, RegieSection
 from theater.regie.bus_view import format_bus_line
 from theater.regie.palette import SpawnCommands
-from theater.regie.tree import render_tree, selected_participant
+from theater.regie.tree import Key, render_tree, selected_participant
 from theater.tmux import client as tmux
 from theater.tmux import panes
 
@@ -64,15 +64,37 @@ class TreePanel(VerticalScroll):
     the list is longer than the viewport. Cursor and staged highlighting are
     done via Textual CSS classes (which respect the user's theme) rather than
     hardcoded Rich colors.
+
+    The panel reconciles by key rather than rebuilding on every refresh: a
+    Label that survives a tick is updated in place with ``Label.update`` so
+    that per-widget state (a hover class, an animation timer) is not
+    destroyed. Widgets for rows that have disappeared are removed, and
+    widgets for new rows are mounted at the right position. Final child
+    order always matches the row order.
+
+    Removal is async in Textual — ``Widget.remove`` returns an
+    ``AwaitRemove`` and the widget stays in ``self.children`` until the
+    event loop pumps. The panel never depends on ``self.children`` for
+    positional indexing: ``apply_cursor`` and ``scroll_to_cursor`` resolve
+    widgets by key through ``self._key_widgets``, and ordering uses
+    ``move_child`` with widget references rather than integer indices. A
+    removed-but-not-yet-pumped widget still sitting in the list therefore
+    cannot corrupt the highlight or the scroll target.
     """
 
-    lines: reactive[list[tuple[Text, dict]]] = reactive([])
+    lines: reactive[list[tuple[Text, dict, Key]]] = reactive([])
+
+    #: Key for the placeholder shown when the tree is empty.
+    _EMPTY_KEY: Key = ("empty", "")
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         #: Set by the app so apply_cursor can map a line index back to its
         #: node. Per-instance: the app rebinds it on every redraw.
-        self._lines_data: list[tuple[Text, dict]] = []
+        self._lines_data: list[tuple[Text, dict, Key]] = []
+        #: Stable widget map, keyed by the row key from render_tree.
+        #: Survives a refresh so per-widget state is not lost.
+        self._key_widgets: dict[Key, Label] = {}
 
     DEFAULT_CSS = """
     TreePanel {
@@ -97,37 +119,103 @@ class TreePanel(VerticalScroll):
     }
     """
 
-    def watch_lines(self, lines: list[tuple[Text, dict]]) -> None:
-        """Rebuild the widget children when lines change."""
-        self.remove_children()
+    def watch_lines(self, lines: list[tuple[Text, dict, Key]]) -> None:
+        """Reconcile widget children with the new row list.
+
+        Existing widgets are updated in place; only new keys are mounted and
+        only gone keys are unmounted. Final child order matches the row
+        order, driven by widget references rather than integer indices so
+        that a pending async removal cannot corrupt the arithmetic.
+        """
         if not lines:
-            self.mount(Label(Text("no participants", style="dim italic")))
+            self._reconcile_empty()
             return
-        widgets = [Label(label) for label, _ in lines]
-        self.mount(*widgets)
+
+        new_key_set = {key for _, _, key in lines}
+
+        # Remove the empty placeholder if it was there.
+        if self._EMPTY_KEY in self._key_widgets:
+            self._remove_widget(self._key_widgets.pop(self._EMPTY_KEY))
+
+        # Remove gone widgets.
+        for key in list(self._key_widgets):
+            if key not in new_key_set:
+                self._remove_widget(self._key_widgets.pop(key))
+
+        # Update existing widgets and mount new ones, tracking the desired
+        # order as we go.
+        ordered_widgets: list[Label] = []
+        for label, _node, key in lines:
+            if key in self._key_widgets:
+                widget = self._key_widgets[key]
+                widget.update(label)
+            else:
+                widget = Label(label)
+                self._key_widgets[key] = widget
+                self.mount(widget)
+            ordered_widgets.append(widget)
+
+        # Ensure final child order matches the row order. move_child is
+        # synchronous and accepts widget references, so a removed-but-
+        # not-yet-pumped widget still in the list cannot shift the
+        # arithmetic — there is no arithmetic.
+        for i, widget in enumerate(ordered_widgets):
+            if i == 0:
+                continue
+            self.move_child(widget, after=ordered_widgets[i - 1])
+
+    def _reconcile_empty(self) -> None:
+        """Show the 'no participants' placeholder, removing all row widgets."""
+        for key in list(self._key_widgets):
+            if key != self._EMPTY_KEY:
+                self._remove_widget(self._key_widgets.pop(key))
+        if self._EMPTY_KEY not in self._key_widgets:
+            widget = Label(Text("no participants", style="dim italic"))
+            self._key_widgets[self._EMPTY_KEY] = widget
+            self.mount(widget)
+
+    def _remove_widget(self, widget: Label) -> None:
+        """Remove a widget via Textual's public API.
+
+        ``widget.remove()`` returns an ``AwaitRemove`` and the widget stays
+        in ``self.children`` until the event loop pumps. That is fine: the
+        panel never indexes ``self.children`` positionally. Cursor and
+        staged state are resolved by key through ``self._key_widgets``, and
+        ordering uses widget references, so a pending removal cannot land
+        the highlight on the wrong row.
+        """
+        widget.remove()
 
     def apply_cursor(self, cursor: int, staged_pane: str | None) -> None:
-        """Add CSS classes to the cursor and staged lines, remove from others."""
-        for i, child in enumerate(self.children):
-            child.remove_class("tree-cursor")
-            child.remove_class("tree-staged")
-            # Need to find the node for this line to check staged
-            if i < len(self._lines_data):
-                _, node = self._lines_data[i]
-                if staged_pane and node.get("tmux_pane") == staged_pane:
-                    child.add_class("tree-staged")
+        """Add CSS classes to the cursor and staged lines, remove from others.
+
+        Widgets are resolved by key through ``self._key_widgets`` rather
+        than by position in ``self.children``. A pending async removal may
+        leave a stale widget in ``self.children`` for one frame; resolving
+        by key means the highlight always lands on the right row.
+        """
+        for i, (_, node, key) in enumerate(self._lines_data):
+            widget = self._key_widgets.get(key)
+            if widget is None:
+                continue
+            widget.remove_class("tree-cursor")
+            widget.remove_class("tree-staged")
+            if staged_pane and node.get("tmux_pane") == staged_pane:
+                widget.add_class("tree-staged")
             if i == cursor:
-                child.add_class("tree-cursor")
+                widget.add_class("tree-cursor")
 
     def scroll_to_cursor(self, cursor: int) -> None:
         """Ensure the cursor line is visible."""
-        if cursor < 0 or cursor >= len(self.children):
+        if cursor < 0 or cursor >= len(self._lines_data):
             return
-        try:
-            child = self.children[cursor]
-            self.scroll_to_widget(child)
-        except Exception:
-            pass
+        key = self._lines_data[cursor][2]
+        widget = self._key_widgets.get(key)
+        if widget is not None:
+            try:
+                self.scroll_to_widget(widget)
+            except Exception:
+                pass
 
 
 class RegieApp(App):
@@ -172,7 +260,7 @@ class RegieApp(App):
     title = "theater régie"
 
     cursor: reactive[int] = reactive(0)
-    tree_lines: reactive[list[tuple[Text, dict]]] = reactive([])
+    tree_lines: reactive[list[tuple[Text, dict, Key]]] = reactive([])
     bus_cursor: int = 0
     #: The régie's own pane id (from $TMUX_PANE), discovered at mount.
     my_pane: str | None = None

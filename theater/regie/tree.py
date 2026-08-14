@@ -17,6 +17,8 @@ kinds when they arrive.
 
 from __future__ import annotations
 
+from typing import TypeAlias
+
 from rich.text import Text
 
 from theater.formatting import (
@@ -27,6 +29,12 @@ from theater.formatting import (
     tilde,
 )
 from theater.harness import harness_icon
+
+#: A stable identity for a row, used by the panel to reconcile widgets
+#: across refreshes rather than rebuilding the whole tree each tick.
+#: The first element namespaces the row kind so a pane id and a
+#: participant id can never collide.
+Key: TypeAlias = tuple[str, str]
 
 _STATUS_COLOR = {
     "idle": "green",
@@ -43,7 +51,7 @@ _RAIL = "│   "
 _GAP = "    "
 
 
-def _walk(nodes: list[dict], prefix: str = "", depth: int = 0) -> list[tuple[str, dict]]:
+def _walk(nodes: list[dict], prefix: str = "", depth: int = 0) -> list[tuple[str, dict, Key]]:
     """Depth-first walk that pairs each node with its drawn ancestry.
 
     Roots get no branch of their own: they are separate agents, not siblings
@@ -51,7 +59,7 @@ def _walk(nodes: list[dict], prefix: str = "", depth: int = 0) -> list[tuple[str
     missing row. Children get a branch, and the rail continues past them only
     while their parent still has siblings below.
     """
-    rows: list[tuple[str, dict]] = []
+    rows: list[tuple[str, dict, Key]] = []
     last_index = len(nodes) - 1
     for i, node in enumerate(nodes):
         last = i == last_index
@@ -60,7 +68,8 @@ def _walk(nodes: list[dict], prefix: str = "", depth: int = 0) -> list[tuple[str
         else:
             branch = _LAST_BRANCH if last else _BRANCH
             child_prefix = prefix + (_GAP if last else _RAIL)
-        rows.append((prefix + branch, node))
+        key: Key = ("p", node.get("id", ""))
+        rows.append((prefix + branch, node, key))
         rows += _walk(node.get("children") or [], child_prefix, depth + 1)
     return rows
 
@@ -82,15 +91,15 @@ def _node_label(node: dict, prefix: str = "") -> Text:
     return label
 
 
-def _labelled(row: tuple[str, dict]) -> tuple[Text, dict]:
-    prefix, node = row
-    return _node_label(node, prefix), node
+def _labelled(row: tuple[str, dict, Key]) -> tuple[Text, dict, Key]:
+    prefix, node, key = row
+    return _node_label(node, prefix), node, key
 
 
 def render_tree(
     tree: list[dict], unmanaged: list[dict] | None = None
-) -> list[tuple[Text, dict]]:
-    """Produce (label, data) pairs for the Tree widget.
+) -> list[tuple[Text, dict, Key]]:
+    """Produce (label, data, key) triples for the Tree widget.
 
     Each participant node is a dict with id, harness, tier, status, cwd,
     tmux_pane, parent_id, addressable, and children. Unmanaged panes are
@@ -98,13 +107,18 @@ def render_tree(
     no id and no children, so they are rendered as leaf nodes with a '?'
     tier mark.
 
+    The third element is a stable key the panel reconciles on: ``("p", id)``
+    for participants, ``("u", pane)`` for unmanaged panes, and
+    ``("sep", "unmanaged")`` for the separator. Existing ``[0]`` (label) and
+    ``[1]`` (node) indexing is unaffected.
+
     Returns a flat list so the Textual Tree can map selection back to the
     data without walking the widget's own tree.
     """
     lines = [_labelled(row) for row in _walk(tree)]
     if unmanaged:
         # Separator line
-        lines.append((Text("── unmanaged ──", style="dim italic"), {}))
+        lines.append((Text("── unmanaged ──", style="dim italic"), {}, ("sep", "unmanaged")))
         for u in unmanaged:
             fake_node = {
                 "id": u.get("pane", "????????"),
@@ -116,12 +130,13 @@ def render_tree(
                 "addressable": False,
                 "children": [],
             }
-            lines.append((_node_label(fake_node), fake_node))
+            key: Key = ("u", u.get("pane", ""))
+            lines.append((_node_label(fake_node), fake_node, key))
     return lines
 
 
 def selected_participant(
-    lines: list[tuple[Text, dict]], index: int
+    lines: list[tuple[Text, dict, Key]], index: int
 ) -> dict | None:
     """The participant dict at a given line index, or None if it's a separator."""
     if 0 <= index < len(lines):
