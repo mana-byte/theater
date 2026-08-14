@@ -35,6 +35,28 @@ from theater.mcp.tools import Session
 #: its own when it started, and a config edit between the two leaves them
 #: disagreeing. `list_harnesses` asks the daemon, and is what the text points
 #: at for anything load-bearing.
+#: Sent once, in the initialize response. Whether a model ever reads it is the
+#: client's decision, and the four harnesses Theater spawns do not make the
+#: same one — so nothing load-bearing lives only here. Every directive that
+#: changes what a call does is repeated in the description of the tool it
+#: applies to, where it is certain to be seen. What is left is the shape of
+#: the whole, which belongs to no single tool: the order of the steps, and
+#: the two mistakes that only appear once there is more than one child.
+INSTRUCTIONS = """Theater makes the other agents on this machine addressable,
+so you can hand work to them and collect it back.
+
+The loop: spawn_session to create a child, await_sessions to wait for it,
+read_transcript to read what it actually said, the repo to see what it
+actually did, a merge to keep the work, and only then ask the user whether
+to kill it.
+
+Two failures belong to orchestration rather than to any one call. Children
+that share a file do not run in parallel, they produce a conflict; split the
+work so each owns files no sibling touches. And a child reports on itself —
+"done" is the end of its turn, not a verdict on its work — so check the repo
+before you trust it.
+"""
+
 SPAWN_DOC = """Start a new agent in its own tmux window as your child.
 
 harness:  which CLI to run. This machine has: {harnesses}. Call
@@ -42,9 +64,16 @@ harness:  which CLI to run. This machine has: {harnesses}. Call
           decides whether a spawn succeeds.
 prompt:   the task, delivered on the child's command line at startup.
           Optional; omit it or pass null to start a plain CLI with no task.
+          The child inherits nothing you know. This string is the entire
+          handoff, so it has to carry the goal, the files it may change,
+          what it must leave alone, how to check its own work, and what
+          to report back. Everything you leave out, it will invent.
 approval: "manual" | "edits" | "yolo" — required, no default. This is
           the only thing standing between an unattended child and your
-          filesystem, so choose it deliberately.
+          filesystem, so choose it deliberately. A child you intend to
+          await must not be "manual": it stops at its first permission
+          prompt with nobody sitting there to answer, and from the
+          outside that is indistinguishable from slow work.
 cwd:      where the child works. Defaults to your own directory.
 model:    which model the child runs, spelled the way its own CLI spells it
           (opencode wants provider/model). Optional; omit it and the harness
@@ -58,6 +87,12 @@ worktree: if True, create a git worktree for the child with its own
           isolated index and HEAD. The branch name theater/<child-id>
           is in the result so you can merge it explicitly. The child's
           repo must be a git repo for this to work.
+          What is isolated is the index, not the merge. Two children
+          editing the same file are not working in parallel, they are
+          writing a conflict you will resolve by hand later. Give each
+          one files no sibling touches, and put whatever they share —
+          a function signature, a schema — in both prompts, unchanged,
+          so the branches still compose when they come back.
 base_branch: the branch to base the worktree on. Defaults to current HEAD.
 """
 
@@ -81,7 +116,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         harness=harness,
         client=DaemonClient(),
     )
-    mcp = MCPServer("theater")
+    mcp = MCPServer("theater", instructions=INSTRUCTIONS)
 
     @mcp.tool()
     async def whoami() -> dict:
@@ -171,6 +206,18 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         result (the assistant's final response text), and error_code.
         This blocks your current request only; the daemon and other agents
         continue running.
+
+        Keep each wait shorter than your own client's tool timeout, which
+        Theater does not set and cannot see. When that timeout is the
+        shorter of the two, your call dies on your side while the child
+        works on regardless, and what gets you the answer is another
+        await, not a longer one.
+
+        "done" means the child's turn ended, not that the work is right,
+        and `result` is its own account of what it did, clipped to 2000
+        characters. read_transcript returns the text in full. Neither is
+        evidence: before you build on a child's answer, or merge its
+        branch, look at what it changed in the repo.
         """
         return await tools.await_sessions(
             session, handles=handles, max_wait=max_wait
@@ -253,6 +300,12 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         confirmation prompt and no undo anywhere below this tool — the
         user's yes is the only thing standing between a call and lost
         work, which is why it has to be asked for every time.
+
+        So collect before you kill. Merge the branch, or record the
+        commits somewhere outside the worktree, and only then ask. A
+        child that has finished still holds its entire output in a
+        branch that this call deletes; the natural order — it says it
+        is done, so tidy it away — is the order that loses the work.
         """
         return await tools.put_child_back_in_the_wound(
             session, target_id=target_id
