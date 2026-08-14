@@ -884,6 +884,33 @@ def test_claude_trust_fixture_classifies_as_trust_with_high_confidence():
     assert reading.confidence is ScreenConfidence.HIGH
 
 
+# ---- vibe: trust dialog and queued-message working variant -----------------
+#
+# Two separate defects in the vibe classifier, both caused by markers that
+# were too narrow for the real UI:
+#
+#   1. WORKING_MARKER was `Esc/Ctrl+C to interrupt`, but vibe's spinner hint
+#      has a *second* spelling when a message is queued:
+#        `(1m23s Esc to interrupt · Ctrl+C to cancel last queued message)`
+#      The old marker missed it, so a working pane with a queued message fell
+#      through to the tail scan, hit the composer prompt (which stays on
+#      screen during a turn), read PROMPT -> IDLE, and `_rescue_jobs`
+#      prematurely finished the caller's job mid-turn.
+#
+#   2. The workspace-trust dialog (`trust_folder_dialog.py`) was entirely
+#      unhandled — Theater never classified it at all.
+
+
+def test_vibe_trust_fixture_classifies_as_trust_with_high_confidence():
+    """The trust dialog renders before any turn or prompt and blocks all
+    interaction, so it must be classified as TRUST — the send gate refuses to
+    inject on a TRUST reading at HIGH confidence."""
+    capture = _screen("vibe_trust.txt")
+    reading = VibeObserver().screen_reading(capture)
+    assert reading.kind is ScreenKind.TRUST
+    assert reading.confidence is ScreenConfidence.HIGH
+
+
 def test_claude_trust_marker_does_not_match_remote_control_add_server_dialog():
     """The ``Trust this directory?`` dialog is a different screen.
 
@@ -905,3 +932,57 @@ def test_claude_trust_marker_does_not_match_remote_control_add_server_dialog():
     )
     reading = ClaudeCodeObserver().screen_reading(capture)
     assert reading.kind is not ScreenKind.TRUST
+
+
+def test_vibe_working_queued_fixture_classifies_as_working_not_prompt():
+    """The queued-message spinner hint spells `Esc to interrupt`, not
+    `Esc/Ctrl+C to interrupt`. The composer's empty prompt line is still
+    visible below the spinner, so without a matching WORKING_MARKER this
+    screen reads as PROMPT -> IDLE and `_rescue_jobs` ends the caller's job
+    mid-turn. This test must fail before the marker fix and pass after."""
+    capture = _screen("vibe_working_queued.txt")
+    assert "Esc to interrupt" in capture  # the queued variant
+    assert "Esc/Ctrl+C to interrupt" not in capture  # NOT the plain variant
+    reading = VibeObserver().screen_reading(capture)
+    assert reading.kind is ScreenKind.WORKING
+    assert reading.kind is not ScreenKind.PROMPT
+    assert reading.confidence is ScreenConfidence.HIGH
+
+
+def test_vibe_picker_footer_esc_cancel_is_not_approval():
+    """Vibe's picker footers render `Esc Cancel`, `Esc Close`, `Esc Back`,
+    `Esc exit`, and lowercase `Esc cancel` — all user-initiated menus that
+    must NOT be classified as APPROVAL. Only `Esc reject` is the permission
+    box. Case is the only discriminator, so the approval marker must not
+    widen."""
+    capture = (
+        "  Session picker\n"
+        "  › recent session\n"
+        "    older session\n"
+        "\n"
+        "↑↓/jk navigate  Enter select  Esc Cancel\n"
+    )
+    reading = VibeObserver().screen_reading(capture)
+    assert reading.kind is not ScreenKind.APPROVAL
+
+
+def test_vibe_agent_output_containing_to_interrupt_is_not_working():
+    """The whole-capture match made agent output impersonate the spinner.
+
+    `to interrupt` is ordinary English prose that an agent can echo in its
+    own output. A whole-capture (or even tail-scoped) match reads an idle
+    pane as WORKING, so `_rescue_jobs` never sees a PROMPT and the caller's
+    job hangs. The working arm requires `Esc` to co-occur on the same line,
+    which the spinner always does and prose never does.
+
+    This probes the boundary: the prose sits on the line immediately above
+    the composer, with nothing between — the case where tail-scoping alone
+    still fails.
+    """
+    capture = (
+        "  I added a signal handler to interrupt the loop.\n"
+        "> "
+    )
+    assert "to interrupt" in capture
+    reading = VibeObserver().screen_reading(capture)
+    assert reading.kind is not ScreenKind.WORKING

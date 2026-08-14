@@ -83,15 +83,58 @@ _SCREEN_IDLE_PROMPTS = (*IDLE_PROMPTS, ">")
 #: Vibe renders its working spinner (`Esc/Ctrl+C to interrupt`) *and* the
 #: permission box simultaneously, so approval must be tested before the working
 #: marker or every approval dialog is misclassified as `working`.
+#:
+#: Case matters: vibe's picker footers render `Esc Cancel`, `Esc Close`,
+#: `Esc Back`, `Esc exit`, and `Esc cancel` (lowercase) — all user-initiated
+#: menus that must NOT be classified as approval. Only the lowercase `reject`
+#: is the permission box.
 APPROVAL_MARKER = "Esc reject"
 
-#: Drawn in the spinner line while a turn is in flight. Unlike the other
-#: harnesses this does *not* imply the absence of a dialog — vibe keeps the
-#: spinner on screen underneath its permission box — so `screen_reading` must
-#: test `APPROVAL_MARKER` first. Present in both
-#: `tests/fixtures/screens/vibe_working.txt` and `vibe_approval.txt`, which is
-#: what makes that ordering testable rather than merely asserted.
-WORKING_MARKER = "Esc/Ctrl+C to interrupt"
+#: Drawn in the spinner line while a turn is in flight. Vibe has two spellings
+#: of the spinner hint (`loading.py:170-177`):
+#:   plain:   `(9m45s Esc/Ctrl+C to interrupt)`
+#:   queued:  `(1m23s Esc to interrupt · Ctrl+C to cancel last queued message)`
+#: The substring `to interrupt` matches both spellings, but it is also
+#: ordinary English prose that an agent can echo in its own output, so it
+#: cannot be used alone.
+#:
+#: `WORKING_MARKER_KEY` is the other token that identifies the spinner line.
+#: Both spellings put `Esc` and `to interrupt` on the SAME line, and ordinary
+#: prose containing "to interrupt" — e.g. "I added a signal handler to
+#: interrupt the loop" — does not also contain `Esc` on that line.
+#:
+#: The safety of the loose substring rests on TWO things together: the tail
+#: window (`_SPINNER_TAIL_LINES`) and the `Esc` co-occurrence requirement.
+#: Neither alone is enough, because the tail window unavoidably contains the
+#: agent's closing lines of output — the spinner renders directly above the
+#: composer, and the agent's closing sentences render directly above the
+#: spinner. Do not separate any of the three: the substring, the key, and the
+#: tail window.
+#:
+#: Codex's working arm uses an endswith anchor on its spinner line, but that
+#: does NOT work here: the plain hint ends with `)` and the queued hint ends
+#: with `message)`, so anchoring on the end of the line would break both. The
+#: two-token co-occurrence test is the right discriminator for vibe.
+WORKING_MARKER = "to interrupt"
+
+#: The second token that must co-occur with `WORKING_MARKER` on the same tail
+#: line. See `WORKING_MARKER` for why both are required.
+WORKING_MARKER_KEY = "Esc"
+
+#: Rendered by the workspace-trust dialog (`trust_folder_dialog.py:95-97`),
+#: which runs at startup when vibe detects config files in an untrusted folder
+#: (`startup.py:127-147`). The warning paragraph starts with this fragment on
+#: its own rendered line, so it survives Textual's line wrapping. Chosen over
+#: the title (`Trust this folder?` / `Trust folder or repository?`) because the
+#: title varies by context, and over the button labels (`Don't trust` etc.)
+#: because the warning is unique to this dialog — a button label like
+#: `Don't trust` could in principle appear in echoed output, whereas
+#: `Malicious configs can modify` is prose that only this screen renders.
+#: Unlike `WORKING_MARKER`, this stays a whole-capture match: the trust dialog
+#: only appears at startup when there is no agent output on the pane, and the
+#: marker is body text in the middle of the dialog, not footer chrome, so
+#: tail-scoping would break it.
+TRUST_MARKER = "Malicious configs can modify"
 
 #: How far up from the bottom to look for the prompt. A real capture has a
 #: separator and a cwd/token footer below the prompt, so the prompt is not
@@ -99,10 +142,34 @@ WORKING_MARKER = "Esc/Ctrl+C to interrupt"
 #: line — does not fire on a real screen.
 _SCREEN_TAIL_LINES = 6
 
+#: How far up from the bottom to scan for the working spinner. Measured in
+#: both `vibe_working.txt` and `vibe_working_queued.txt` the spinner sits 6
+#: lines above the bottom of the capture (separator, composer prompt, blank,
+#: blank, separator, cwd/token footer). The queued hint is longer and may wrap
+#: on a narrow terminal, adding a line or two, so 8 leaves a 2-line margin
+#: without reaching into the agent's output area.
+_SPINNER_TAIL_LINES = 8
+
 #: How many session directories to inspect when searching by working directory.
 #: They are scanned newest first and a live session is always near the top, so
 #: this bounds the cost of a home directory with thousands of old sessions.
 _SCAN_LIMIT = 200
+
+
+def _in_screen_tail(capture: str, markers: tuple[str, ...], limit: int) -> bool:
+    """Whether some tail line contains every marker in `markers`.
+
+    The spinner and footer chrome always render at the bottom of the pane, and
+    matching the whole pane lets agent output impersonate chrome — e.g. the
+    phrase ``to interrupt`` is ordinary English that an agent can echo. Scoping
+    to the tail is necessary but not sufficient: the tail also contains the
+    agent's closing lines. Requiring a second token (``Esc``) on the same line
+    is what distinguishes the spinner from prose.
+    """
+    lines = capture.splitlines()
+    return any(
+        all(m in line for m in markers) for line in lines[-limit:] if line
+    )
 
 
 class VibeHarness(Harness):
@@ -393,10 +460,14 @@ class VibeObserver(TranscriptObserver):
         return last_screen_line(capture) in IDLE_PROMPTS
 
     def screen_reading(self, capture: str) -> ScreenReading:
-        """Classify the screen as `approval`, `working`, `prompt` or `unknown`.
+        """Classify the screen as `trust`, `approval`, `working`, `prompt` or `unknown`.
 
         Order is load-bearing here, twice over, because vibe keeps drawing the
         composer and the spinner underneath its permission box:
+
+        Trust before everything: the trust dialog runs at startup, before any
+        turn or prompt, and is a modal that blocks all interaction — including
+        the send gate. It must win over any other marker.
 
         Approval before working, because `WORKING_MARKER` is on screen in the
         same capture as the permission box — check working first and every
@@ -412,11 +483,17 @@ class VibeObserver(TranscriptObserver):
         last line: a real capture has a separator and a cwd/token footer below
         it, so `is_idle_screen` does not fire on a real screen.
         """
+        if TRUST_MARKER in capture:
+            return ScreenReading(
+                kind=ScreenKind.TRUST, confidence=ScreenConfidence.HIGH
+            )
         if APPROVAL_MARKER in capture:
             return ScreenReading(
                 kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH
             )
-        if WORKING_MARKER in capture:
+        if _in_screen_tail(
+            capture, (WORKING_MARKER, WORKING_MARKER_KEY), _SPINNER_TAIL_LINES
+        ):
             return ScreenReading(
                 kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH
             )
