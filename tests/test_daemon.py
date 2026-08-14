@@ -307,6 +307,101 @@ async def test_kill_without_caller_id_is_unrestricted(client, fake_tmux):
     assert result == {"id": parent["id"], "killed": True}
 
 
+async def test_kill_confirms_pane_gone_before_marking_dead(client, fake_tmux):
+    """The pane disappearing immediately on the first poll marks the record dead.
+
+    FakeTmux.kill_pane removes the pane from visible_panes synchronously, so
+    pane_info returns None on the first poll. The record is marked dead and the
+    kill succeeds.
+    """
+    record = await client.call(
+        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
+    )
+    result = await client.call("participant.kill", id=record["id"])
+    assert result == {"id": record["id"], "killed": True}
+    dead = await client.call("participants.get", id=record["id"])
+    assert dead["status"] == "dead"
+
+
+async def test_kill_leaves_record_alive_when_pane_survives(client, fake_tmux, monkeypatch):
+    """A pane that survives kill-pane must not be marked dead.
+
+    The whole point of the polling: a live pane with a dead record is the ghost
+    row the unmanaged sweep rediscovers. Here kill_pane is a no-op, so the pane
+    is still in visible_panes and pane_info finds it on every poll. The call
+    must fail, and the record must stay alive.
+    """
+    record = await client.call(
+        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
+    )
+    # Override kill_pane so it does not remove the pane, simulating a pane
+    # that tmux failed to reap.
+    async def noop_kill(pane_id):
+        pass
+
+    from theater.tmux import client as tmux_client
+
+    monkeypatch.setattr(tmux_client, "kill_pane", noop_kill)
+
+    # Patch asyncio.sleep so the test does not actually wait through the poll
+    # interval. The bounded retry runs its full course; only the sleep is
+    # elided.
+    async def noop_sleep(_):
+        return
+
+    monkeypatch.setattr(asyncio, "sleep", noop_sleep)
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call("participant.kill", id=record["id"])
+    assert exc.value.code == "error"
+    alive = await client.call("participants.get", id=record["id"])
+    assert alive["status"] != "dead"
+
+
+async def test_kill_succeeds_when_pane_disappears_on_a_later_poll(
+    client, fake_tmux, monkeypatch
+):
+    """A pane that only vanishes after the second poll still succeeds.
+
+    tmux reaps panes asynchronously, so the first pane_info may still see the
+    pane. The poll loop must keep trying until the pane is gone rather than
+    giving up after one check.
+    """
+    record = await client.call(
+        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
+    )
+
+    from theater.tmux import client as tmux_client
+
+    pane_id = record["tmux_pane"]
+    poll_count = 0
+
+    async def noop_kill(pid):
+        pass
+
+    async def pane_info_delayed(pid):
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count == 1:
+            # First poll: tmux has not reaped the pane yet.
+            return _make_pane(pane_id)
+        # Second poll: pane is gone.
+        return None
+
+    monkeypatch.setattr(tmux_client, "kill_pane", noop_kill)
+    monkeypatch.setattr(tmux_client, "pane_info", pane_info_delayed)
+
+    async def noop_sleep(_):
+        return
+
+    monkeypatch.setattr(asyncio, "sleep", noop_sleep)
+
+    result = await client.call("participant.kill", id=record["id"])
+    assert result == {"id": record["id"], "killed": True}
+    dead = await client.call("participants.get", id=record["id"])
+    assert dead["status"] == "dead"
+
+
 async def test_the_reaper_notices_a_vanished_pane(daemon, client, fake_tmux, monkeypatch):
     record = await client.call(
         "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
