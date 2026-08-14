@@ -116,15 +116,16 @@ def test_remove_worktree(repo):
     wt_path = wt.create_worktree(repo_root=repo, child_id="child4")
     assert Path(wt_path).exists()
 
-    wt.remove_worktree(repo_root=repo, child_id="child4")
+    result = wt.remove_worktree(repo_root=repo, child_id="child4")
 
+    assert result.ok
     assert not Path(wt_path).exists()
     # The branch is gone
-    result = subprocess.run(
+    verify = subprocess.run(
         ["git", "rev-parse", "--verify", "theater/child4"],
         cwd=repo, capture_output=True, text=True, check=False,
     )
-    assert result.returncode != 0
+    assert verify.returncode != 0
 
 
 def test_remove_worktree_with_uncommitted_changes(repo):
@@ -132,5 +133,160 @@ def test_remove_worktree_with_uncommitted_changes(repo):
     wt_path = wt.create_worktree(repo_root=repo, child_id="child5")
     (Path(wt_path) / "uncommitted.txt").write_text("dirty\n")
     # Should not raise
-    wt.remove_worktree(repo_root=repo, child_id="child5")
+    result = wt.remove_worktree(repo_root=repo, child_id="child5")
+    assert result.ok
     assert not Path(wt_path).exists()
+
+
+def test_main_repo_root_from_inside_worktree(repo):
+    """main_repo_root returns the *main* root, not the worktree's top level.
+
+    This is the core of the bug: the caller derives repo_root from the
+    child's cwd via repo_root(), which for a worktree child returns the
+    worktree path. main_repo_root must see through that to the shared root.
+    """
+    wt_path = wt.create_worktree(repo_root=repo, child_id="wtroot1")
+
+    # repo_root (the buggy caller) returns the worktree's own top level.
+    wrong_root = wt.repo_root(wt_path)
+    assert wrong_root == wt_path
+
+    # main_repo_root returns the actual main repo root.
+    right_root = wt.main_repo_root(wt_path)
+    assert right_root is not None
+    # Resolve both for comparison (macOS may canonicalise paths).
+    assert Path(right_root).resolve() == Path(repo).resolve()
+
+
+def test_main_repo_root_fallback_when_dir_gone(repo):
+    """When the worktree directory is deleted, main_repo_root falls back
+    to stripping the .theater/worktrees/<id> suffix."""
+    wt_path = wt.create_worktree(repo_root=repo, child_id="wtroot2")
+    child_id = "wtroot2"
+
+    # Simulate the directory being gone (as happens when a worktree is
+    # deleted out from under us, or the child's cwd is stale).
+    import shutil
+
+    shutil.rmtree(wt_path)
+
+    # git rev-parse will fail because the cwd no longer exists. The
+    # fallback strips the suffix to recover the main repo root.
+    result = wt.main_repo_root(wt_path, child_id=child_id)
+    assert result is not None
+    assert Path(result).resolve() == Path(repo).resolve()
+
+
+def test_remove_worktree_with_wrong_root_from_caller(repo):
+    """remove_worktree must succeed even when repo_root is the worktree
+    path (the buggy caller's derivation), not the main repo root.
+
+    This is the test that would have caught the original bug: the caller
+    derives repo_root from inside the child's worktree cwd, which
+    repo_root() returns as the worktree path. remove_worktree must
+    internally re-derive the true main root.
+    """
+    wt_path = wt.create_worktree(repo_root=repo, child_id="bugrepro1")
+    assert Path(wt_path).exists()
+
+    # Derive repo_root the way the buggy caller does: from inside the
+    # worktree. This returns the worktree's own top level, not the main
+    # repo root.
+    wrong_root = wt.repo_root(wt_path)
+    assert wrong_root == wt_path  # the bug
+
+    # remove_worktree must handle this and still clean up correctly.
+    result = wt.remove_worktree(
+        repo_root=wrong_root, child_id="bugrepro1"
+    )
+
+    assert result.ok
+    assert result.worktree_removed
+    assert result.branch_removed
+    assert not Path(wt_path).exists()
+    # Branch genuinely gone
+    verify = subprocess.run(
+        ["git", "rev-parse", "--verify", "theater/bugrepro1"],
+        cwd=repo, capture_output=True, text=True, check=False,
+    )
+    assert verify.returncode != 0
+    # No stale worktree list entries
+    list_result = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=repo, capture_output=True, text=True, check=False,
+    )
+    assert "bugrepro1" not in list_result.stdout
+
+
+def test_remove_worktree_already_deleted_directory(repo):
+    """remove_worktree handles the case where the worktree directory was
+    already deleted (e.g. by rm -rf or a prior partial removal).
+
+    git worktree remove fails with 'not a working tree', but we must
+    prune the stale admin record and still delete the branch. The
+    original code silently failed here too.
+    """
+    import shutil
+
+    wt_path = wt.create_worktree(repo_root=repo, child_id="bugrepro2")
+    assert Path(wt_path).exists()
+
+    # Delete the directory out from under git, leaving a stale admin
+    # record. This simulates a crash or manual cleanup that removed the
+    # directory but not the git metadata.
+    shutil.rmtree(wt_path)
+    assert not Path(wt_path).exists()
+
+    # The branch still exists and the worktree admin record is stale.
+    verify_before = subprocess.run(
+        ["git", "rev-parse", "--verify", "theater/bugrepro2"],
+        cwd=repo, capture_output=True, text=True, check=False,
+    )
+    assert verify_before.returncode == 0  # branch still there
+
+    result = wt.remove_worktree(
+        repo_root=repo, child_id="bugrepro2"
+    )
+
+    assert result.ok
+    assert result.branch_removed
+    # Branch genuinely gone
+    verify_after = subprocess.run(
+        ["git", "rev-parse", "--verify", "theater/bugrepro2"],
+        cwd=repo, capture_output=True, text=True, check=False,
+    )
+    assert verify_after.returncode != 0
+    # No stale worktree list entries
+    list_result = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=repo, capture_output=True, text=True, check=False,
+    )
+    assert "bugrepro2" not in list_result.stdout
+
+
+def test_remove_worktree_already_deleted_with_wrong_root(repo):
+    """The already-deleted case must also work when the caller passes
+    the worktree path as repo_root (the buggy derivation). The fallback
+    in main_repo_root strips the suffix to recover the main root.
+    """
+    import shutil
+
+    wt_path = wt.create_worktree(repo_root=repo, child_id="bugrepro3")
+    shutil.rmtree(wt_path)
+
+    # Derive root the buggy way: from the now-deleted worktree path.
+    # repo_root() will fail (cwd doesn't exist), but we pass the path
+    # directly as repo_root — which is the worktree path.
+    wrong_root = wt_path  # the worktree path itself
+
+    result = wt.remove_worktree(
+        repo_root=wrong_root, child_id="bugrepro3"
+    )
+
+    assert result.ok
+    assert result.branch_removed
+    verify = subprocess.run(
+        ["git", "rev-parse", "--verify", "theater/bugrepro3"],
+        cwd=repo, capture_output=True, text=True, check=False,
+    )
+    assert verify.returncode != 0
