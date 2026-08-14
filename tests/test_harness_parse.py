@@ -756,6 +756,44 @@ def test_codex_idle_fixture_classifies_as_prompt():
     assert reading.kind is ScreenKind.PROMPT
 
 
+def test_codex_approval_fixture_classifies_as_approval_with_high_confidence():
+    """The approval overlay renders a `›` selection row, so `is_idle_screen`
+    returns True on it. The APPROVAL_MARKER (`to cancel`) must be checked
+    before the idle fallthrough, or the send gate would inject into a live
+    approval modal."""
+    capture = _screen("codex_approval.txt")
+    reading = CodexObserver().screen_reading(capture)
+    assert reading.kind is ScreenKind.APPROVAL
+    assert reading.confidence is ScreenConfidence.HIGH
+
+
+def test_codex_trust_fixture_classifies_as_trust_with_high_confidence():
+    """The trust dialog also renders a `›` selection row. TRUST_MARKER must
+    be checked before the idle fallthrough for the same reason as approval."""
+    capture = _screen("codex_trust.txt")
+    reading = CodexObserver().screen_reading(capture)
+    assert reading.kind is ScreenKind.TRUST
+    assert reading.confidence is ScreenConfidence.HIGH
+
+
+def test_codex_approvals_settings_popup_is_not_an_approval():
+    """The `/approvals` settings popup renders `to confirm or … to go back`.
+    Keying on `to confirm` would wrongly classify it as an approval; the
+    marker is `to cancel`, which that popup does not render."""
+    capture = "\n".join(
+        [
+            "  Approval settings",
+            "",
+            "› 1. Always ask",
+            "  2. Auto-approve edits",
+            "",
+            "Press enter to confirm or esc to go back",
+        ]
+    )
+    reading = CodexObserver().screen_reading(capture)
+    assert reading.kind is not ScreenKind.APPROVAL
+
+
 def test_opencode_idle_fixture_classifies_as_prompt():
     capture = _screen("opencode_idle.txt")
     reading = OpenCodeObserver().screen_reading(capture)

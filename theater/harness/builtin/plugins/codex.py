@@ -29,7 +29,10 @@ and rejected — writing the trust entry into the user's config (Theater does no
 own that file) and pointing CODEX_HOME elsewhere (loses auth.json, the user's
 MCP servers, and session history). So a spawn into a fresh directory sits at the
 dialog until someone answers it once. `is_idle_screen` reports that pane as
-awaiting input, which is exactly right.
+awaiting input because the trust dialog renders a `›` selection row, which
+is the same glyph the idle composer uses. `screen_reading` checks the modal
+markers before falling through to `is_idle_screen`, so the trust dialog
+classifies as TRUST rather than PROMPT.
 
 Transcript layout
 -----------------
@@ -93,6 +96,18 @@ PROMPT = "\u203a"
 #: persistent footer under the composer, so unlike the other two harnesses the
 #: bottom line is never the prompt and `last_screen_line` cannot be used.
 WORKING_MARKER = "esc to interrupt"
+
+#: Rendered by the approval overlay, the MCP elicitation prompt, and the auth
+#: prompt — all three are awaiting-input screens. NOT `to confirm`: the
+#: `/approvals` settings popup renders `to confirm or … to go back`, and
+#: keying on `to confirm` would wrongly classify that settings popup as an
+#: approval modal.
+APPROVAL_MARKER = "to cancel"
+
+#: The first-launch trust dialog. The full sentence is longer, but the
+#: paragraph has a 2-column inset and wraps mid-sentence on panes narrower
+#: than ~46 columns, so only the first few words are a reliable marker.
+TRUST_MARKER = "Do you trust the contents"
 
 #: How far up from the bottom to look for the composer. The footer is one line,
 #: but a multi-line composer or a notice above it can push the prompt further
@@ -437,8 +452,11 @@ class CodexObserver(TranscriptObserver):
         only feeds the AWAITING_INPUT display hint; whether a human is present
         is decided separately, from `pane_in_mode`, and never from a scrape.
 
-        The first-launch trust dialog also reads as idle here. It genuinely is:
-        nothing proceeds until someone answers it.
+        The first-launch trust dialog also trips this boolean, because it
+        renders a `›` selection row just like the idle composer. That is why
+        `screen_reading` must check the TRUST and APPROVAL markers before
+        falling through to this method: without that guard both modals would
+        classify as PROMPT and the send gate would inject into them.
         """
         if WORKING_MARKER in capture:
             return False
@@ -446,15 +464,22 @@ class CodexObserver(TranscriptObserver):
         return any(line.startswith(PROMPT) for line in lines[-_SCREEN_TAIL_LINES:])
 
     def screen_reading(self, capture: str) -> ScreenReading:
-        """Classify the rendered screen as `working`, `prompt`, or `unknown`.
+        """Classify the rendered screen as trust, approval, working, or prompt.
 
-        Codex's idle screen and working screen are already distinguishable by
-        the presence or absence of `WORKING_MARKER`, so `prompt` and `working`
-        both carry `high` confidence. The approval arm is unimplemented because
-        this host's config auto-approves codex, so the dialog could not be
-        captured — an unverified approval marker is the exact failure this phase
-        is meant to avoid.
+        Arm order is load-bearing: both the trust dialog and the approval
+        overlay render a selection row starting with `›`, so
+        `is_idle_screen` returns True on both. The modal arms must therefore
+        come before the `is_idle_screen` call, or both modals would classify
+        as PROMPT and the send gate would inject into a live approval.
         """
+        if TRUST_MARKER in capture:
+            return ScreenReading(
+                kind=ScreenKind.TRUST, confidence=ScreenConfidence.HIGH
+            )
+        if APPROVAL_MARKER in capture:
+            return ScreenReading(
+                kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH
+            )
         if WORKING_MARKER in capture:
             return ScreenReading(
                 kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH
