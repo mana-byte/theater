@@ -83,15 +83,32 @@ _SCREEN_IDLE_PROMPTS = (*IDLE_PROMPTS, ">")
 #: Vibe renders its working spinner (`Esc/Ctrl+C to interrupt`) *and* the
 #: permission box simultaneously, so approval must be tested before the working
 #: marker or every approval dialog is misclassified as `working`.
+#:
+#: Case matters: vibe's picker footers render `Esc Cancel`, `Esc Close`,
+#: `Esc Back`, `Esc exit`, and `Esc cancel` (lowercase) — all user-initiated
+#: menus that must NOT be classified as approval. Only the lowercase `reject`
+#: is the permission box.
 APPROVAL_MARKER = "Esc reject"
 
-#: Drawn in the spinner line while a turn is in flight. Unlike the other
-#: harnesses this does *not* imply the absence of a dialog — vibe keeps the
-#: spinner on screen underneath its permission box — so `screen_reading` must
-#: test `APPROVAL_MARKER` first. Present in both
-#: `tests/fixtures/screens/vibe_working.txt` and `vibe_approval.txt`, which is
-#: what makes that ordering testable rather than merely asserted.
-WORKING_MARKER = "Esc/Ctrl+C to interrupt"
+#: Drawn in the spinner line while a turn is in flight. Vibe has two spellings
+#: of the spinner hint (`loading.py:170-177`):
+#:   plain:   `(9m45s Esc/Ctrl+C to interrupt)`
+#:   queued:  `(1m23s Esc to interrupt · Ctrl+C to cancel last queued message)`
+#: The substring `to interrupt` matches both and nothing else in the vibe UI
+#: emits it outside a working turn. A looser match is deliberate here because
+#: the queued variant misses the old `Esc/Ctrl+C` prefix entirely.
+WORKING_MARKER = "to interrupt"
+
+#: Rendered by the workspace-trust dialog (`trust_folder_dialog.py:95-97`),
+#: which runs at startup when vibe detects config files in an untrusted folder
+#: (`startup.py:127-147`). The warning paragraph starts with this fragment on
+#: its own rendered line, so it survives Textual's line wrapping. Chosen over
+#: the title (`Trust this folder?` / `Trust folder or repository?`) because the
+#: title varies by context, and over the button labels (`Don't trust` etc.)
+#: because the warning is unique to this dialog — a button label like
+#: `Don't trust` could in principle appear in echoed output, whereas
+#: `Malicious configs can modify` is prose that only this screen renders.
+TRUST_MARKER = "Malicious configs can modify"
 
 #: How far up from the bottom to look for the prompt. A real capture has a
 #: separator and a cwd/token footer below the prompt, so the prompt is not
@@ -393,10 +410,14 @@ class VibeObserver(TranscriptObserver):
         return last_screen_line(capture) in IDLE_PROMPTS
 
     def screen_reading(self, capture: str) -> ScreenReading:
-        """Classify the screen as `approval`, `working`, `prompt` or `unknown`.
+        """Classify the screen as `trust`, `approval`, `working`, `prompt` or `unknown`.
 
         Order is load-bearing here, twice over, because vibe keeps drawing the
         composer and the spinner underneath its permission box:
+
+        Trust before everything: the trust dialog runs at startup, before any
+        turn or prompt, and is a modal that blocks all interaction — including
+        the send gate. It must win over any other marker.
 
         Approval before working, because `WORKING_MARKER` is on screen in the
         same capture as the permission box — check working first and every
@@ -412,6 +433,10 @@ class VibeObserver(TranscriptObserver):
         last line: a real capture has a separator and a cwd/token footer below
         it, so `is_idle_screen` does not fire on a real screen.
         """
+        if TRUST_MARKER in capture:
+            return ScreenReading(
+                kind=ScreenKind.TRUST, confidence=ScreenConfidence.HIGH
+            )
         if APPROVAL_MARKER in capture:
             return ScreenReading(
                 kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH
