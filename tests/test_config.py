@@ -195,6 +195,8 @@ def test_section_must_be_a_table():
         "[rails]\nbudget = 0\n",
         "[rails]\ndepth_cap = -1\n",
         "[regie]\nbus_batch = 0\n",
+        "[regie]\ncwd_segments = 0\n",
+        "[regie]\nsidebar_width = 10\n",
     ],
 )
 def test_out_of_range_is_fatal(body):

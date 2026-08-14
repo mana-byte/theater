@@ -58,6 +58,20 @@ bus_interval = 0.4
 # How many bus events to pull per poll.
 bus_batch = 50
 
+# How many trailing directory segments of a participant's cwd the tree keeps;
+# the rest is elided with …/. Applied after ~ abbreviation, so ~ is a preserved
+# prefix rather than a counted segment: ~/a/b/c with the default of 2 becomes
+# ~/…/b/c. A leaf with no directory at all is a different feature, so the
+# minimum is 1.
+cwd_segments = 2
+
+# Column width of the sidebar. Read once, used twice: the sidebar's Textual
+# style and the tmux resize when an agent is staged — the two must agree or
+# Textual and tmux tear at the boundary. Below 40, depth-3 rails plus a
+# two-segment path no longer fit, so the feature the width exists for is
+# already broken. No ceiling: tmux refuses anything the window cannot honour.
+sidebar_width = 60
+
 
 [rails]
 

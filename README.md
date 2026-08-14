@@ -339,6 +339,8 @@ theme = "nord"            # any Textual theme name
 tree_interval = 1.0
 bus_interval  = 0.4
 bus_batch     = 50
+cwd_segments  = 2         # trailing cwd segments kept in the sidebar tree
+sidebar_width = 60        # sidebar columns; used for both Textual and tmux
 
 [rails]
 depth_cap = 3             # how deep a spawn chain may go

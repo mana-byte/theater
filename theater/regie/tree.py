@@ -43,6 +43,40 @@ _RAIL = "│   "
 _GAP = "    "
 
 
+def shorten_path(path: str | None, keep: int = 2) -> str:
+    """Keep the last *keep* segments, elide the rest with ``…/``.
+
+    Applied *after* :func:`theater.formatting.tilde`, so ``~`` is a preserved
+    prefix and is not counted as a segment::
+
+        ~/a/b/c  ->  ~/…/b/c
+        /var/a/b/c -> …/b/c
+
+    A path already at or under the threshold is returned unchanged.
+    ``None`` or empty behaves like ``tilde()`` — returns ``"-"``.
+    """
+    if not path:
+        return "-"
+
+    # Separate a leading ``~`` (or ``~/``) prefix from the segments that
+    # follow, so the home mark is carried through without being counted.
+    prefix = ""
+    rest = path
+    if rest.startswith("~/"):
+        prefix = "~/"
+        rest = rest[2:]
+    elif rest == "~":
+        return "~"
+
+    segments = [s for s in rest.split("/") if s]
+
+    if len(segments) <= keep:
+        return path
+
+    tail = "/".join(segments[-keep:])
+    return f"{prefix}…/{tail}"
+
+
 def _walk(nodes: list[dict], prefix: str = "", depth: int = 0) -> list[tuple[str, dict]]:
     """Depth-first walk that pairs each node with its drawn ancestry.
 

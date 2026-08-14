@@ -138,7 +138,6 @@ class RegieApp(App):
         layout: horizontal;
     }
     #sidebar {
-        width: 52;
         layout: vertical;
         border: round $primary;
     }
@@ -218,6 +217,12 @@ class RegieApp(App):
     async def on_mount(self) -> None:
         self._client = DaemonClient()
         await self._client.connect()
+        # The sidebar width is applied imperatively rather than in CSS because
+        # App.CSS is a class attribute parsed once and cannot read the config.
+        # The same value is used at the resize_pane call in action_stage; the
+        # two must agree or Textual and tmux disagree about where the sidebar
+        # ends.
+        self.query_one("#sidebar").styles.width = self.settings.regie.sidebar_width
         # Discover our own pane and window id. The régie is itself a tmux
         # pane — staging means joining another pane into this window, so we
         # need to know which window we are in.
@@ -508,7 +513,7 @@ class RegieApp(App):
             # actual column count.
             if self.my_pane:
                 try:
-                    await panes.resize_pane(self.my_pane, width=52)
+                    await panes.resize_pane(self.my_pane, width=self.settings.regie.sidebar_width)
                 except Exception as exc:
                     logger.debug("resize after stage failed: %s", exc)
             self.notify(f"staged {node.get('harness', '?')} ({pane})")

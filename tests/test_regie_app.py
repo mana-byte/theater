@@ -263,7 +263,7 @@ async def test_enter_joins_the_selected_pane_and_narrows_the_regie(daemon, tmux)
         await pilot.press("enter")
         assert app.staged_pane == "%10"
     assert ("join", "%10", "@7") in tmux
-    assert ("resize", "%1", 52) in tmux
+    assert ("resize", "%1", 60) in tmux
     assert any("staged vibe" in msg for msg, _ in notes)
 
 
@@ -435,3 +435,16 @@ async def test_quitting_unstages_and_gives_the_mouse_back(daemon, tmux):
     # No prior session-local value, so ours is removed rather than pinned.
     assert ("unset", "mouse") in tmux
     assert daemon["client"].closed
+
+
+# ---- sidebar width --------------------------------------------------------
+
+
+async def test_configured_sidebar_width_reaches_both_style_and_resize(daemon, tmux):
+    """The width is read once and used twice: the #sidebar style and resize_pane."""
+    app, _ = make_app(sidebar_width=44)
+    async with app.run_test() as pilot:
+        sidebar = app.query_one("#sidebar")
+        assert sidebar.styles.width.value == 44
+        await pilot.press("enter")
+    assert ("resize", "%1", 44) in tmux
