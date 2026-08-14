@@ -103,10 +103,13 @@ WORKING_MARKER = "esc to interrupt"
 #: keying on `to confirm` would wrongly classify that settings popup as an
 #: approval modal. The substring is deliberately loose for keymap-independence
 #: (the labels are `&'static str`; only the key glyph varies), and that
-#: looseness is safe ONLY because the APPROVAL arm scopes the match to the
-#: tail window via `_in_screen_tail` — the footer always renders at the
-#: bottom, so a whole-capture match would let agent prose impersonate chrome.
-#: The loose marker and the tail-scoping are a pair; do not separate them.
+#: looseness is safe ONLY because of TWO guards together: (1) the match is
+#: scoped to the tail window via `_in_screen_tail`, and (2) the match is an
+#: `endswith` test, not a containment test. Neither alone is enough — the
+#: tail window unavoidably contains agent output (three of five lines in a
+#: real codex idle pane are prose), and prose can contain the phrase
+#: mid-line. The footer is a whole line that ends with the marker; prose
+#: virtually never does. Both guards are required; do not drop either.
 APPROVAL_MARKER = "to cancel"
 
 #: The first-launch trust dialog. The full sentence is longer, but the
@@ -136,15 +139,21 @@ _STEM = re.compile(r"^rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-(.+)$")
 
 
 def _in_screen_tail(capture: str, marker: str) -> bool:
-    """Whether *marker* appears in the last few non-blank lines of *capture*.
+    """Whether any of the last few non-blank lines *ends with* *marker*.
 
     The approval footer is chrome the CLI always draws at the bottom of the
     modal, so searching the whole pane buys nothing — and matching the whole
     pane lets agent output (ordinary prose) impersonate the footer. Scoping
-    to the same tail window ``is_idle_screen`` uses prevents that.
+    to the same tail window ``is_idle_screen`` uses is necessary but not
+    sufficient on its own: a real codex idle pane has agent output in three
+    of the five scanned tail lines (see ``codex_idle.txt``), so the window
+    unavoidably contains prose. The end-of-line anchor is the second guard:
+    the footer is a whole line that ends with the marker, while prose
+    containing the phrase virtually never ends a line with it. Neither the
+    tail window nor the endswith test alone is enough; both are required.
     """
     lines = [line.strip() for line in capture.splitlines() if line.strip()]
-    return any(marker in line for line in lines[-_SCREEN_TAIL_LINES:])
+    return any(line.endswith(marker) for line in lines[-_SCREEN_TAIL_LINES:])
 
 
 def _epoch(value) -> float | None:

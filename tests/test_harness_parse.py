@@ -798,21 +798,16 @@ def test_codex_agent_output_containing_to_cancel_is_not_an_approval():
     """The APPROVAL_MARKER substring `to cancel` is deliberately loose for
     keymap-independence. A whole-capture match let agent prose impersonate the
     approval footer, making the pane unreachable. The marker is tail-scoped
-    so that ordinary output above an idle composer does not trip the arm."""
+    AND endswith-anchored: the footer is a whole line ending with the marker,
+    while prose containing the phrase mid-line does not. This is the boundary
+    case — the phrase is on the line immediately above the composer, inside
+    the tail window — and it must still classify as PROMPT, not APPROVAL."""
     capture = "\n".join(
         [
             "  I looked at the checkout flow. The Stripe webhook has no way",
-            "    to cancel an in-flight payment intent, so we need to add one.",
-            "",
-            "  Let me check the webhook handler.",
-            "",
-            "  Ran: grep -r 'webhook' src/",
-            "  src/webhooks/stripe.rs",
-            "",
-            "  The handler is in src/webhooks/stripe.rs:42.",
-            "",
+            "  to cancel an in-flight payment intent, so we need to add one.",
             "\u203a ",
-            "  Ctrl+J newline   Ctrl+T transcript   Ctrl+C quit",
+            "  gpt-5.5 high \u00b7 /tmp/example",
         ]
     )
     reading = CodexObserver().screen_reading(capture)
