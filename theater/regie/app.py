@@ -45,7 +45,7 @@ from textual.widgets import Footer, Label, RichLog, Static
 from theater.client import DaemonClient
 from theater.config import Config, RegieSection
 from theater.regie.bus_view import format_bus_line
-from theater.regie.palette import SpawnCommands
+from theater.regie.palette import SpawnCommands, ViewCommands
 from theater.regie.tree import (
     Key,
     node_label,
@@ -85,25 +85,39 @@ class AgentLeaf(Static):
     pattern: the timer lives on the widget that needs it, not on the app.
     """
 
+    #: Text selection is disabled so dragging across leaves selects tmux
+    #: output in the stage, not the tree's own text.
+    ALLOW_SELECT: ClassVar[bool] = False
+
     DEFAULT_CSS = """
     AgentLeaf {
         height: 3;
         padding: 0 1;
         margin: 0 0;
     }
-    AgentLeaf.tree-cursor {
-        background: $accent 20%;
-        text-style: bold;
+    /* Row states are tinted with $accent and $primary, never $boost.
+       $boost resolves to #00000000 on 20 of Textual's 21 built-in themes —
+       only textual-dark, the default, gives it a value. A $boost tint is
+       therefore invisible on the ansi themes, a black smear on the light
+       ones, and convincing only on the theme it was authored against.
+       Weakest to strongest: hover, cursor, staged. Order matters as much
+       as specificity here: these selectors tie, so the later rule wins. */
+    AgentLeaf:hover {
+        background: $accent 10%;
     }
     AgentLeaf.tree-staged {
         background: $primary 20%;
     }
+    AgentLeaf.tree-staged:hover {
+        background: $primary 20%;
+    }
+    AgentLeaf.tree-cursor {
+        background: $accent 20%;
+        text-style: bold;
+    }
     AgentLeaf.tree-cursor.tree-staged {
         background: $accent 30%;
         text-style: bold;
-    }
-    AgentLeaf:hover {
-        background: $boost;
     }
     """
 
@@ -247,7 +261,7 @@ class TreePanel(VerticalScroll):
     DEFAULT_CSS = """
     TreePanel {
         height: 1fr;
-        scrollbar-size: 1 1;
+        scrollbar-size: 0 0;
     }
     TreePanel > Label {
         height: 1;
@@ -284,10 +298,12 @@ class TreePanel(VerticalScroll):
 
         # Update existing widgets and mount new ones, tracking the desired
         # order as we go.
-        cwd_segments = self.app.settings.regie.cwd_segments
+        # TreePanel.app is RegieApp at runtime but Textual's Widget.app is
+        # typed as App[Any]; the ignore matches the same pattern in palette.py.
+        cwd_segments = self.app.settings.regie.cwd_segments  # type: ignore[attr-defined]
         ordered_widgets: list[Widget] = []
-        for label, node, key, prefix, cont_prefix in lines:
-            widget = self._reconcile_row(label, node, key, prefix, cont_prefix, cwd_segments)
+        for i, (label, node, key, prefix, cont_prefix) in enumerate(lines):
+            widget = self._reconcile_row(label, node, key, prefix, cont_prefix, cwd_segments, i)
             ordered_widgets.append(widget)
 
         # Ensure final child order matches the row order. move_child is
@@ -307,6 +323,7 @@ class TreePanel(VerticalScroll):
         prefix: str,
         cont_prefix: str,
         cwd_segments: int,
+        index: int = 0,
     ) -> Widget:
         """Update or create the widget for a single row.
 
@@ -314,12 +331,19 @@ class TreePanel(VerticalScroll):
         ``update_node``; existing ``Label`` widgets (separators) with
         ``update``. New participant rows get a fresh ``AgentLeaf``, new
         separator rows get a plain ``Label``.
+
+        *index* is the row's position in the flat line list, used only at
+        creation time to apply the alternating ``tree-alt`` class so the
+        list reads as stripes rather than a wall of identical rows. It is
+        not re-evaluated on updates: the class is set once when the widget
+        is mounted and left alone afterward, so a refresh tick cannot
+        trigger the re-render that would drop a pending click target.
         """
         if key in self._key_widgets:
             widget = self._key_widgets[key]
             if isinstance(widget, AgentLeaf):
                 widget.update_node(node, prefix=prefix, cont_prefix=cont_prefix)
-            else:
+            elif isinstance(widget, Label):
                 widget.update(label)
             return widget
         if _is_participant_key(key):
@@ -334,6 +358,8 @@ class TreePanel(VerticalScroll):
             widget = Label(label)
         self._key_widgets[key] = widget
         self.mount(widget)
+        if _is_participant_key(key) and index % 2 == 0:
+            widget.add_class("tree-alt")
         return widget
 
     def _reconcile_empty(self) -> None:
@@ -399,17 +425,52 @@ class RegieApp(App):
     }
     #sidebar {
         layout: vertical;
-        border: round $primary;
     }
     #tree-panel {
         height: 1fr;
     }
     #bus-panel {
-        height: 12;
-        border: round $accent;
+        height: 18;
+        padding: 1 2;
+        scrollbar-size: 0 0;
+    }
+    #bus-panel.-hidden {
+        display: none;
+    }
+    /* The zebra stripe and its row states. These live in App.CSS, which
+       outranks AgentLeaf.DEFAULT_CSS whatever the specificity, so every
+       state an alt row can be in has to be restated here or the widget's
+       own cursor rule never applies to every other row. The stripe is a
+       3% ink wash: $foreground darkens light themes and lightens dark
+       ones, and 3% keeps it below the hover tint on all 21 themes. */
+    AgentLeaf.tree-alt {
+        background: $foreground 3%;
+    }
+    AgentLeaf.tree-alt:hover {
+        background: $accent 10%;
+    }
+    AgentLeaf.tree-alt.tree-staged {
+        background: $primary 20%;
+    }
+    AgentLeaf.tree-alt.tree-staged:hover {
+        background: $primary 20%;
+    }
+    AgentLeaf.tree-alt.tree-cursor {
+        background: $accent 20%;
+        text-style: bold;
+    }
+    AgentLeaf.tree-alt.tree-cursor.tree-staged {
+        background: $accent 30%;
+        text-style: bold;
     }
     .log {
         background: $surface;
+    }
+    Footer {
+        dock: none;
+        height: 1;
+        background: $surface;
+        color: $text-muted;
     }
     """
 
@@ -426,13 +487,18 @@ class RegieApp(App):
 
     #: ctrl+p opens the palette. Ours adds one `Spawn <harness>` entry per
     #: registered harness on top of Textual's system commands.
-    COMMANDS = App.COMMANDS | {SpawnCommands}
+    COMMANDS = App.COMMANDS | {SpawnCommands, ViewCommands}
 
     title = "theater régie"
 
     cursor: reactive[int] = reactive(0)
     tree_lines: reactive[list[tuple[Content, dict, Key, str, str]]] = reactive([])
     bus_cursor: int = 0
+    #: Whether the bus panel is showing. Seeded from `regie.bus_visible` in
+    #: `__init__` and toggled from the palette rather than a key: it is a
+    #: decision made once a session, not per keystroke. Hiding it also pauses
+    #: the poll — see `_refresh_bus`.
+    bus_visible: reactive[bool] = reactive(False)
     #: The régie's own pane id (from $TMUX_PANE), discovered at mount.
     my_pane: str | None = None
     #: The window id the régie lives in, discovered at mount.
@@ -450,6 +516,12 @@ class RegieApp(App):
     #: Whether we actually changed the option, so a failed enable does not
     #: cause a restore that clobbers a setting we never touched.
     _mouse_set: bool = False
+    #: The session-local value of tmux's `status` option before we hid it,
+    #: or None if the session had no override of its own.
+    _status_prev: str | None = None
+    #: Whether we actually hid the status line, on the same terms as
+    #: `_mouse_set`: a failed hide must not trigger a restore.
+    _status_set: bool = False
     #: Teardown runs from two places and must not run twice.
     _torn_down: bool = False
 
@@ -464,6 +536,7 @@ class RegieApp(App):
         #: and after a failed call — the palette reads that as "ask the local
         #: registry instead", which is right more often than an empty list.
         self.harnesses: list[dict] | None = None
+        self.bus_visible = self.settings.regie.bus_visible
 
     def compose(self) -> ComposeResult:
         # No Header: it spent a whole row restating the app's own class name to
@@ -471,8 +544,14 @@ class RegieApp(App):
         # carries the keybindings, which is the only thing worth the space.
         with Vertical(id="sidebar"):
             yield TreePanel(id="tree-panel")
-            yield RichLog(id="bus-panel", max_lines=200, wrap=False, markup=True)
-        yield Footer()
+            yield Footer()
+            bus = RichLog(id="bus-panel", max_lines=200, wrap=False, markup=True)
+            # The initial state is applied here rather than left to
+            # `watch_bus_visible`: a reactive assigned its own default fires
+            # no watcher, so a config of `false` against a default of `false`
+            # would mount the panel visible and never correct it.
+            bus.set_class(not self.bus_visible, "-hidden")
+            yield bus
 
     async def on_mount(self) -> None:
         self._client = DaemonClient()
@@ -502,6 +581,7 @@ class RegieApp(App):
             except Exception as exc:
                 logger.debug("could not discover window/session id: %s", exc)
         await self._enable_mouse()
+        await self._hide_status()
         self._apply_theme()
         await self._load_harnesses()
         self.set_interval(self.settings.regie.tree_interval, self._refresh_tree)
@@ -595,6 +675,41 @@ class RegieApp(App):
         except Exception as exc:
             logger.debug("could not restore mouse: %s", exc)
 
+    async def _hide_status(self) -> None:
+        """Hide tmux's own status line while the régie is up.
+
+        The régie already draws a footer carrying the keybindings, and the
+        rest of the window is the stage — a real agent pane. tmux's status
+        bar underneath duplicates neither and costs a row of a terminal the
+        stage wants. Scoped to the session and remembered on exactly the
+        terms `_enable_mouse` uses: a `-g` set would change every session on
+        the server and outlive this process.
+        """
+        if not self.my_session:
+            return
+        try:
+            self._status_prev = await tmux.show_option("status", target=self.my_session)
+            await tmux.set_option("status", "off", target=self.my_session)
+            self._status_set = True
+        except Exception as exc:
+            logger.debug("could not hide status line: %s", exc)
+
+    async def _restore_status(self) -> None:
+        if not self._status_set or not self.my_session:
+            return
+        self._status_set = False
+        try:
+            if self._status_prev is None:
+                # The session had no override before us, so remove ours rather
+                # than pinning it to whatever the global value happened to be.
+                await tmux.unset_option("status", target=self.my_session)
+            else:
+                await tmux.set_option(
+                    "status", self._status_prev, target=self.my_session
+                )
+        except Exception as exc:
+            logger.debug("could not restore status line: %s", exc)
+
     async def _teardown(self) -> None:
         """Leave tmux as we found it: nothing staged, options restored.
 
@@ -614,6 +729,7 @@ class RegieApp(App):
             except Exception as exc:
                 logger.debug("unstage on exit failed: %s", exc)
         await self._restore_mouse()
+        await self._restore_status()
 
     async def action_quit(self) -> None:
         """Quit, but put the stage back first.
@@ -649,6 +765,15 @@ class RegieApp(App):
 
     async def _refresh_bus(self) -> None:
         if not self._client:
+            return
+        if not self.bus_visible:
+            # Do not consume events nobody can see. A display:none RichLog
+            # accepts writes and keeps none of them, so polling on would
+            # advance the cursor past lines that were never rendered and can
+            # never be asked for again. Leaving the cursor where it is means
+            # showing the panel resumes from the last line actually drawn,
+            # and if the daemon's buffer wrapped while it was hidden the gap
+            # check below says so instead of quietly skipping.
             return
         try:
             rows = await self._client.call(
@@ -723,7 +848,21 @@ class RegieApp(App):
             return
         panel.apply_cursor(self.cursor, self.staged_pane)
 
+    def watch_bus_visible(self, visible: bool) -> None:
+        """Show or hide the bus panel, giving the tree the space either way."""
+        try:
+            panel = self.query_one("#bus-panel", RichLog)
+        except Exception:
+            # Reactives can be assigned before mount and during teardown; a
+            # missing widget in those windows is expected, as in `_panel`.
+            return
+        panel.set_class(not visible, "-hidden")
+
     # ---- actions -------------------------------------------------------
+
+    def action_toggle_bus(self) -> None:
+        """Show or hide the bus panel. Offered by the command palette."""
+        self.bus_visible = not self.bus_visible
 
     def action_cursor_down(self) -> None:
         if self.cursor < len(self.tree_lines) - 1:
@@ -757,7 +896,6 @@ class RegieApp(App):
         if self.staged_pane and self.staged_pane != pane:
             try:
                 await panes.break_pane(self.staged_pane)
-                self.notify(f"unstaged {self.staged_pane}")
             except Exception as exc:
                 logger.debug("unstage failed: %s", exc)
 
@@ -766,7 +904,6 @@ class RegieApp(App):
             try:
                 await panes.break_pane(pane)
                 self.staged_pane = None
-                self.notify(f"unstaged {node.get('harness', '?')} ({pane})")
             except Exception as exc:
                 self.notify(f"unstage failed: {exc}", severity="error")
             return
@@ -785,7 +922,6 @@ class RegieApp(App):
                     await panes.resize_pane(self.my_pane, width=self.settings.regie.sidebar_width)
                 except Exception as exc:
                     logger.debug("resize after stage failed: %s", exc)
-            self.notify(f"staged {node.get('harness', '?')} ({pane})")
         except Exception as exc:
             self.notify(f"stage failed: {exc}", severity="error")
 
@@ -803,7 +939,6 @@ class RegieApp(App):
             return
         try:
             await self._client.call("participant.kill", id=pid)
-            self.notify(f"killed {pid[:8]}")
         except Exception as exc:
             self.notify(f"kill failed: {exc}", severity="error")
         await self._refresh_tree()
@@ -821,7 +956,7 @@ class RegieApp(App):
         if not self._client:
             return
         try:
-            record = await self._client.call(
+            await self._client.call(
                 "spawn",
                 harness=harness,
                 # No prompt and no parent: the palette starts a CLI, it does
@@ -837,8 +972,8 @@ class RegieApp(App):
         except Exception as exc:
             self.notify(f"spawn failed: {exc}", severity="error")
             return
-        pane = record.get("tmux_pane") if isinstance(record, dict) else None
-        self.notify(f"spawned {harness} ({pane or 'no pane'})")
+        # The new agent announces itself by appearing in the tree on the next
+        # refresh, which is why nothing is said about it here.
         await self._refresh_tree()
 
     async def action_focus_stage(self) -> None:
@@ -854,7 +989,6 @@ class RegieApp(App):
             return
         try:
             await panes.select_pane(self.staged_pane)
-            self.notify(f"focusing {self.staged_pane} — press Ctrl-B o to return to régie")
         except Exception as exc:
             self.notify(f"focus failed: {exc}", severity="error")
 

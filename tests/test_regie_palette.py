@@ -17,7 +17,7 @@ from theater import harness as harness_registry
 from theater.config import Config, TheaterSection
 from theater.harness import HARNESSES
 from theater.regie.app import RegieApp
-from theater.regie.palette import SpawnCommands, entries
+from theater.regie.palette import SpawnCommands, ViewCommands, entries
 
 
 class FakeApp:
@@ -339,3 +339,55 @@ async def test_loading_without_a_client_is_not_an_error():
     app._client = None
     await app._load_harnesses()
     assert app.harnesses is None
+
+
+# ---- view commands -------------------------------------------------------
+
+
+class TogglingApp:
+    """The two attributes ViewCommands reads, and nothing else."""
+
+    def __init__(self, bus_visible: bool = True) -> None:
+        self.bus_visible = bus_visible
+        self.toggled = 0
+
+    def action_toggle_bus(self) -> None:
+        self.toggled += 1
+
+
+async def test_a_showing_bus_panel_is_offered_the_hide():
+    prov = ViewCommands(FakeScreen(TogglingApp(bus_visible=True)))
+    hit = await anext(prov.discover())
+    assert hit.display == "Hide bus panel"
+
+
+async def test_a_hidden_bus_panel_is_offered_the_show():
+    """The entry names the action, so the user is not guessing at the state."""
+    prov = ViewCommands(FakeScreen(TogglingApp(bus_visible=False)))
+    hit = await anext(prov.discover())
+    assert hit.display == "Show bus panel"
+
+
+async def test_running_the_hit_toggles_the_panel():
+    app = TogglingApp()
+    prov = ViewCommands(FakeScreen(app))
+    hit = await anext(prov.discover())
+    hit.command()
+    assert app.toggled == 1
+
+
+async def test_the_toggle_is_searchable_by_name():
+    prov = ViewCommands(FakeScreen(TogglingApp()))
+    assert [hit.command async for hit in prov.search("bus")]
+    assert [hit async for hit in prov.search("zzzzz")] == []
+
+
+async def test_an_app_that_cannot_toggle_offers_nothing():
+    """Textual builds providers against whatever app is running."""
+    prov = ViewCommands(FakeScreen(FakeApp()))
+    assert [hit async for hit in prov.discover()] == []
+    assert [hit async for hit in prov.search("bus")] == []
+
+
+async def test_the_view_provider_is_registered_on_the_app():
+    assert ViewCommands in RegieApp.COMMANDS
