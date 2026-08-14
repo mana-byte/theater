@@ -118,13 +118,48 @@ DB_NAME = "opencode-stable.db"
 #: short enough to fail rather than hang.
 MODELS_TIMEOUT = 20
 
-#: In the footer for exactly as long as a turn is running — present from the
-#: instant after Enter. See `is_idle_screen` for why this is the whole test.
-WORKING_MARKER = "esc interrupt"
+#: The two spellings of the working footer, rendered by the Prompt component
+#: (`component/prompt/index.tsx:1587-1592`). The footer draws `esc ` followed
+#: by a span that is `"interrupt"` normally and `"again to interrupt"` after
+#: one Esc press (for ~5s, see `:410-418`). So the two rendered spellings are
+#: `esc interrupt` and `esc again to interrupt`. Both must be matched.
+#:
+#: Do NOT shorten to `"interrupt"`: `routes/session/index.tsx:1569` renders
+#: `· interrupted` in the message log after an abort, and `"interrupt"` is a
+#: substring of `"interrupted"` — an idle pane after an abort would read WORKING
+#: forever. Neither full spelling is a substring of `· interrupted`.
+#:
+#: These are footer chrome, not body text, so a bare `marker in capture` test
+#: lets ordinary agent output impersonate chrome (an agent working on THIS repo
+#: will print `esc interrupt` in its own output). They are therefore matched
+#: only inside `_in_screen_tail` with a co-occurrence guard, not by a
+#: whole-capture containment test.
+WORKING_MARKERS = ("esc interrupt", "again to interrupt")
 
-#: The idle footer's right-hand hint. Also present while working, so it is a
-#: guard that the footer has drawn at all, not evidence of idleness.
+#: The idle footer's right-hand hint. Keybinding-derived: `ctrl+p` is bound to
+#: `command.palette.show` (`keybind.ts:57`), and the footer renders
+#: `{paletteShortcut()} commands`. The shortcut degrades gracefully — if the
+#: keymap is rebound, the rendered text changes, but the `commands` label
+#: survives. Also present while working (the footer's right side does not
+#: change between idle and working), so it is a guard that the footer has drawn
+#: at all, not evidence of idleness.
 FOOTER_MARKER = "ctrl+p commands"
+
+#: Rendered as the header of the permission modal
+#: (`routes/session/permission.tsx:389`, also `:402` as the title).
+APPROVAL_MARKER = "Permission required"
+
+#: Rendered in the question modal's footer (`routes/session/question.tsx:509`,
+#: JSX `esc <span>dismiss</span>`). The full footer is
+#: `⇆ tab   ↑↓ select   enter submit   esc dismiss`.
+QUESTION_MARKER = "esc dismiss"
+
+#: How far up from the bottom to look for the working footer. Measured from
+#: `tests/fixtures/screens/opencode_working.txt`: the footer line is the last
+#: non-blank line before the tmux status bar, with 5 non-blank lines of
+#: composer chrome above it. A real working pane may have agent output above
+#: the composer, so the window reaches only into the composer area.
+_SCREEN_TAIL_LINES = 5
 
 #: A finish that ends a step but not the turn.
 STEP_FINISH = "tool-calls"
@@ -133,6 +168,31 @@ STEP_FINISH = "tool-calls"
 #: while the daemon was down could have thousands queued, and reading them in
 #: one gulp would block the observer's loop for as long as it takes to parse.
 DRAIN_LIMIT = 500
+
+
+def _in_screen_tail(capture: str, marker: str) -> bool:
+    """Whether any of the last few non-blank lines contains *marker* AND
+    ``FOOTER_MARKER``.
+
+    The working footer is chrome the CLI draws at the bottom of the pane, so
+    searching the whole pane buys nothing — and matching the whole pane lets
+    agent output (ordinary prose) impersonate chrome. An agent working on THIS
+    repo will print the literal string ``esc interrupt`` in its own output.
+
+    Scoping to the tail window is necessary but not sufficient on its own: the
+    tail also contains the agent's closing lines. The co-occurrence guard is
+    the second discriminator: the working footer renders the working marker
+    and ``ctrl+p commands`` on the *same* line (the Prompt component's footer
+    is a flexbox row with ``justifyContent="space-between"``, see
+    ``component/prompt/index.tsx:1513``). Prose containing ``esc interrupt``
+    does not also contain ``ctrl+p commands`` on the same line. Neither the
+    tail window nor the co-occurrence test alone is enough; both are required.
+    """
+    lines = [line for line in capture.splitlines() if line.strip()]
+    return any(
+        marker in line and FOOTER_MARKER in line
+        for line in lines[-_SCREEN_TAIL_LINES:]
+    )
 
 
 def data_dir() -> Path:
@@ -314,32 +374,67 @@ class OpenCodeObserver(HarnessObserver):
         )
 
     def is_idle_screen(self, capture: str) -> bool:
-        """Decided by the absence of `esc interrupt` from the footer.
+        """Decided by the absence of the working markers from the footer.
 
         Weaker than the other adapters, which match a prompt they can see. The
         composer placeholder (`Ask anything...`) disappears once a conversation
         exists, so there is no positive marker to match after the first turn —
-        only the working marker, and its absence. The footer hint guards the
+        only the working markers, and their absence. The footer hint guards the
         case that costs the most: a pane that has not drawn yet is blank, and a
         blank capture must not read as a prompt.
+
+        Uses the same tail-scoped co-occurrence test as ``screen_reading`` so
+        that agent prose containing ``esc interrupt`` on an idle pane does not
+        suppress idleness.
         """
-        if WORKING_MARKER in capture:
+        if any(_in_screen_tail(capture, m) for m in WORKING_MARKERS):
             return False
         return FOOTER_MARKER in capture
 
     def screen_reading(self, capture: str) -> ScreenReading:
-        """Classify the rendered screen as `working`, `prompt`, or `unknown`.
+        """Classify the rendered screen as `working`, `approval`, or `prompt`.
 
-        Opencode's idle screen and working screen are already distinguishable
-        by the presence or absence of `WORKING_MARKER`, so `prompt` and
-        `working` both carry `high` confidence. The approval arm is
-        unimplemented because this host's config auto-approves opencode, so the
-        dialog could not be captured — an unverified approval marker is the
-        exact failure this phase is meant to avoid.
+        The arms and their ordering are load-bearing:
+
+        Working first, because the working footer (`esc interrupt` /
+        `esc again to interrupt`) is tail-scoped with a co-occurrence guard
+        (see ``_in_screen_tail``). Both spellings are matched, and neither is
+        a substring of `· interrupted` (rendered in the message log after an
+        abort, `routes/session/index.tsx:1569`), so an idle pane after an abort
+        does not read WORKING.
+
+        Modal arms (approval, question) are gated on the *absence* of all
+        prompt-component chrome. When a permission or question modal is up,
+        `routes/session/index.tsx:241` defines
+        ``visible = !session().parentID && permissions().length === 0 &&
+        questions().length === 0`` and the Prompt component only renders inside
+        ``<Show when={visible()}>`` (index.tsx:1313). So when a modal is up,
+        neither `esc interrupt` (WORKING_MARKERS) nor `ctrl+p commands`
+        (FOOTER_MARKER) is on screen. On a genuine modal the prompt chrome is
+        absent; on an agent merely echoing the words `Permission required` or
+        `esc dismiss`, the composer footer or spinner is still there. This gate
+        prevents agent output from impersonating a modal — an agent working on
+        THIS repo that prints the fixture text would otherwise classify itself
+        APPROVAL and become unreachable through the send gate.
+
+        Both modals classify as APPROVAL (HIGH), not as distinct screen kinds.
+        A question screen is functionally an approval: the agent is blocked
+        and Enter commits a choice. This keeps the reducer and send gate
+        untouched — the send gate blocks APPROVAL at HIGH confidence
+        (``theater/daemon/methods.py:527-537``).
         """
-        if WORKING_MARKER in capture:
+        if any(_in_screen_tail(capture, m) for m in WORKING_MARKERS):
             return ScreenReading(
                 kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH
+            )
+        prompt_chrome = FOOTER_MARKER in capture or any(
+            m in capture for m in WORKING_MARKERS
+        )
+        if not prompt_chrome and (
+            APPROVAL_MARKER in capture or QUESTION_MARKER in capture
+        ):
+            return ScreenReading(
+                kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH
             )
         if self.is_idle_screen(capture):
             return ScreenReading(
