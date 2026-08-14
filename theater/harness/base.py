@@ -64,6 +64,23 @@ if TYPE_CHECKING:
 #: Name the theater MCP server is registered under inside each harness.
 SERVER_NAME = "theater"
 
+#: How long a harness should let a single theater MCP call run before giving up.
+#:
+#: `jobs.await` blocks on purpose, for up to `daemon.methods.MAX_AWAIT` (300s).
+#: A harness whose own per-tool timeout is shorter kills the call on the wire
+#: while the daemon is still waiting, so the agent sees a transport error
+#: instead of a result and — worse — learns that awaiting does not work and
+#: falls back to polling. Vibe's default is 60s, which is what made every
+#: await look like it timed out regardless of the `max_wait` asked for.
+#:
+#: The value is MAX_AWAIT plus the same slack theater's own client adds around
+#: a blocking call (`client.py`: `max_wait + CALL_TIMEOUT`, CALL_TIMEOUT being
+#: 4 x the tmux run timeout, so 40s). A full-length await therefore returns its
+#: result rather than racing the deadline. It is duplicated rather than
+#: imported because daemon imports harness and not the other way around;
+#: keep it in step with `daemon.methods.MAX_AWAIT` if that ceiling moves.
+MCP_TOOL_TIMEOUT = 340.0
+
 
 def theater_binary() -> str:
     """Resolve the absolute path to the ``theater`` executable.

@@ -44,6 +44,7 @@ from pathlib import Path
 
 from theater.harness.base import (
     APPROVALS,
+    MCP_TOOL_TIMEOUT,
     SERVER_NAME,
     Event,
     EventKind,
@@ -209,6 +210,9 @@ class VibeHarness(Harness):
                 "transport": "stdio",
                 "command": theater_binary(),
                 "args": ["mcp", "--id", participant_id],
+                # Without this vibe applies its own 60s default and cuts off
+                # `await_sessions` long before the daemon's 300s ceiling.
+                "tool_timeout_sec": MCP_TOOL_TIMEOUT,
             }
         ]
         argv = ["vibe"]

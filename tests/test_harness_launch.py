@@ -51,6 +51,28 @@ def test_vibe_carries_the_id_in_an_env_override(tmp_path):
     assert servers[0]["args"] == ["mcp", "--id", "abc123"]
 
 
+def test_vibe_outlasts_a_full_length_await(tmp_path):
+    """The MCP tool timeout must exceed the daemon's own await ceiling.
+
+    Vibe's default is 60s, so a `jobs.await` that legitimately blocks for
+    minutes dies on the wire and the agent concludes awaiting is broken.
+    Asserted against MAX_AWAIT rather than a literal so the two cannot drift
+    apart silently.
+    """
+    from theater.daemon.methods import MAX_AWAIT
+
+    plan = plan_launch(
+        "vibe",
+        participant_id="abc123",
+        prompt="say hello",
+        config_path=tmp_path / "unused.json",
+        approval="manual",
+    )
+
+    servers = json.loads(plan.env["VIBE_MCP_SERVERS"])
+    assert servers[0]["tool_timeout_sec"] > MAX_AWAIT
+
+
 def test_codex_carries_the_id_in_a_config_override(tmp_path):
     plan = plan_launch(
         "codex",
