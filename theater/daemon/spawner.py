@@ -14,6 +14,7 @@ ghost that the régie would draw forever.
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 from dataclasses import dataclass
 
@@ -22,7 +23,7 @@ from theater.daemon import worktree as worktree_mod
 from theater.daemon.registry import Registry
 from theater.harness import check_model, plan_launch
 from theater.harness import get as get_harness
-from theater.models import BadRequest, Participant
+from theater.models import BadRequest, Participant, TheaterError
 from theater.tmux import client as tmux
 
 #: Where windows go when the caller is not itself inside tmux.
@@ -152,10 +153,42 @@ class Spawner:
                 return requested
         return await tmux.ensure_session(FALLBACK_SESSION, cwd=cwd)
 
+    #: How many times `kill` polls `pane_info` to confirm the pane is gone,
+    #: and how long it waits between attempts. tmux reaps a pane asynchronously
+    #: rather than before `kill-pane` returns, so a single check immediately
+    #: after the call is a race that the pane is about to disappear — it has
+    #: been told to die but may not have done so yet. A few short polls over
+    #: roughly a second is long enough for tmux to finish reaping in every case
+    #: observed, and short enough that a caller blocking on the kill is not
+    #: held for a perceptible time. If the pane is still there after all
+    #: attempts, the record is left alive and the call fails loudly: marking
+    #: the record dead while the pane lives produces the exact ghost row the
+    #: `participants.unmanaged` sweep rediscovers, and that is the failure
+    #: this polling exists to prevent.
+    KILL_POLL_ATTEMPTS = 5
+    KILL_POLL_INTERVAL = 0.25
+
     async def kill(self, participant_id: str) -> None:
         p = self.registry.get(participant_id)
         if p.tmux_pane:
             await tmux.kill_pane(p.tmux_pane)
+            # Confirm the pane is really gone before marking the record dead.
+            # `kill_pane` is a fire-and-forget call with check=False, so it
+            # cannot report whether tmux honoured it. A pane that survives
+            # the kill and is marked dead anyway becomes a ghost: the
+            # unmanaged sweep sees a known harness running in a pane with no
+            # live record, and draws it back in the régie as a row the UI
+            # cannot kill.
+            for _ in range(self.KILL_POLL_ATTEMPTS):
+                info = await tmux.pane_info(p.tmux_pane)
+                if info is None:
+                    break
+                await asyncio.sleep(self.KILL_POLL_INTERVAL)
+            else:
+                raise TheaterError(
+                    f"pane {p.tmux_pane} of {participant_id!r} survived "
+                    f"kill-pane; record left alive to avoid a ghost"
+                )
         # Clean up the worktree if the participant had one.
         if p.branch and p.branch.startswith(worktree_mod.BRANCH_PREFIX):
             root = worktree_mod.repo_root(p.cwd or "")
