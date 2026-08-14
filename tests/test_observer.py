@@ -642,6 +642,105 @@ async def test_a_dead_participant_is_never_screen_checked(registry):
     assert registry.get(p.id).status is Status.DEAD
 
 
+# ---- the screen check on the path where nothing has attached -----------
+#
+# A source that has not found its input yet reports `waiting`, and that path
+# used to skip every timer. The screen check is the only status channel that
+# needs no transcript, so skipping it left Claude — which writes no transcript
+# until its first message — pinned at its spawn-time IDLE, showing no status
+# in the régie while it sat on a trust dialog.
+
+
+class WaitingSource(Source):
+    """Never attaches. What a transcript that does not exist yet looks like."""
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    async def read(self) -> Batch:
+        self.reads += 1
+        return Batch(waiting=True)
+
+    async def aclose(self) -> None:
+        return None
+
+
+class WaitingHarness:
+    """Carries an observer whose source waits forever and whose screen speaks."""
+
+    binary = "waiting"
+
+    def __init__(self, reading: ScreenReading):
+        self.observer = ReadingObserver(reading)
+        self.observer.open_source = lambda **_: WaitingSource()  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
+async def test_a_source_that_never_attaches_still_gets_a_screen_check(registry):
+    """The regression, at the loop rather than the arm.
+
+    Nothing is ever read, so only the waiting path runs. The pane shows an
+    approval, and the participant must reach AWAITING_INPUT anyway.
+    """
+    harness = WaitingHarness(ScreenReading(ScreenKind.APPROVAL, ScreenConfidence.HIGH))
+    observer = Observer(
+        registry, {"waiting": harness}, poll=0.01, search=0.01, sync=0.01, awaiting=0.0
+    )
+
+    async def capture_pane(_pane):
+        return "Do you want to proceed?"
+
+    observer._capture = capture_pane
+    observer.start()
+    try:
+        p = registry.register(harness="waiting", pane="%1", cwd="/tmp")
+        assert await until(lambda: registry.get(p.id).status is Status.AWAITING_INPUT)
+    finally:
+        await observer.aclose()
+
+
+@pytest.mark.asyncio
+async def test_the_waiting_path_starts_neither_the_relocate_nor_the_rescue_clock(
+    registry,
+):
+    """Only the screen arm runs there, and the other two must stay unstarted.
+
+    A rescue over a source that has never read anything would finish a caller's
+    job with an empty `last_text` — a wrong answer where a wait belongs.
+    """
+    observer, screen, p = screen_checked(
+        registry,
+        reading=ScreenReading(ScreenKind.APPROVAL, ScreenConfidence.HIGH),
+    )
+    observer.awaiting = 0.0
+    clock = QuietClock()
+
+    await observer._screen_only(p.id, screen, clock)
+    assert clock.screen_quiet_since is not None
+    assert clock.quiet_since is None
+    assert clock.rescue_since is None
+
+
+@pytest.mark.asyncio
+async def test_the_waiting_screen_check_honours_its_own_window(registry):
+    """No check until a full `awaiting` window of not-attaching has passed."""
+    observer, screen, p = screen_checked(
+        registry,
+        reading=ScreenReading(ScreenKind.APPROVAL, ScreenConfidence.HIGH),
+    )
+    observer.awaiting = AWAITING_INPUT_TIMEOUT
+    clock = QuietClock()
+
+    # First pass only starts the clock.
+    await observer._screen_only(p.id, screen, clock)
+    assert registry.get(p.id).status is Status.IDLE
+
+    # A window later, it fires.
+    clock.screen_quiet_since = time.monotonic() - AWAITING_INPUT_TIMEOUT - 1
+    await observer._screen_only(p.id, screen, clock)
+    assert registry.get(p.id).status is Status.AWAITING_INPUT
+
+
 # ---- a harness that brings its own source ------------------------------
 
 
