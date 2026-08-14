@@ -20,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-from theater import config, paths
+from theater import __version__, config, paths
 from theater import harness as harness_registry
 from theater.client import DaemonClient, call_sync
 from theater.formatting import (
@@ -83,6 +83,14 @@ def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="theater",
         description="Cross-harness orchestration for coding agents.",
+    )
+    # Sits above the required subcommand: `theater --version` prints and exits
+    # during parsing, before argparse checks that a subcommand was given.
+    p.add_argument(
+        "--version",
+        "-v",
+        action="version",
+        version=f"theater {__version__}",
     )
     sub = p.add_subparsers(dest="command", required=True)
 

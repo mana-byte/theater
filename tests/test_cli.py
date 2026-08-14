@@ -97,6 +97,28 @@ def test_watch_and_json_cannot_be_combined():
         parse("ls", "--watch", "--json")
 
 
+# ---- version ------------------------------------------------------------
+
+
+@pytest.mark.parametrize("flag", ["--version", "-v"])
+def test_version_flag_prints_the_version_and_exits_clean(flag, capsys):
+    """Both spellings print `theater <version>` and exit 0, above the
+    required subcommand — argparse resolves --version during parsing."""
+    from theater import __version__
+
+    with pytest.raises(SystemExit) as exc:
+        parse(flag)
+    assert exc.value.code == 0
+    assert capsys.readouterr().out.strip() == f"theater {__version__}"
+
+
+def test_a_bare_invocation_still_requires_a_subcommand():
+    """--version is optional; without it a subcommand is still mandatory."""
+    with pytest.raises(SystemExit) as exc:
+        parse()
+    assert exc.value.code != 0
+
+
 # ---- bus ----------------------------------------------------------------
 
 
