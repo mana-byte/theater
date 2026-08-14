@@ -7,7 +7,7 @@ indentation of children, and whether unmanaged panes appear below the tree.
 
 from __future__ import annotations
 
-from theater.regie.tree import render_tree, selected_participant
+from theater.regie.tree import render_tree, selected_participant, shorten_path
 
 PARENT = {
     "id": "aabbccddeeff",
@@ -130,3 +130,50 @@ def test_external_tier_mark_renders():
     lines = render_tree([ext])
     assert "E" in str(lines[0][0])
     assert "*" in str(lines[0][0])  # not addressable
+
+
+# ---- shorten_path --------------------------------------------------------
+
+
+def test_shorten_path_deeper_than_threshold_elides_the_prefix():
+    assert shorten_path("/var/a/b/c") == "…/b/c"
+
+
+def test_shorten_path_exactly_at_threshold_is_unchanged():
+    assert shorten_path("/b/c") == "/b/c"
+
+
+def test_shorten_path_shorter_than_threshold_is_unchanged():
+    assert shorten_path("/c") == "/c"
+
+
+def test_shorten_path_root_is_unchanged():
+    assert shorten_path("/") == "/"
+
+
+def test_shorten_path_home_relative_preserves_tilde_prefix():
+    assert shorten_path("~/a/b/c") == "~/…/b/c"
+
+
+def test_shorten_path_home_alone_is_tilde():
+    assert shorten_path("~") == "~"
+
+
+def test_shorten_path_none_returns_dash():
+    assert shorten_path(None) == "-"
+
+
+def test_shorten_path_empty_returns_dash():
+    assert shorten_path("") == "-"
+
+
+def test_shorten_path_non_default_keep():
+    assert shorten_path("/a/b/c/d/e", keep=3) == "…/c/d/e"
+
+
+def test_shorten_path_non_default_keep_one():
+    assert shorten_path("/a/b/c", keep=1) == "…/c"
+
+
+def test_shorten_path_home_relative_non_default_keep():
+    assert shorten_path("~/a/b/c/d", keep=3) == "~/…/b/c/d"

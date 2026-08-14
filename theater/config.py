@@ -162,6 +162,18 @@ class RegieSection:
     bus_interval: float = field(default=0.4, metadata={"min": MIN_INTERVAL})
     #: How many bus events to pull per poll.
     bus_batch: int = field(default=50, metadata={"min": 1})
+    #: How many trailing segments of a participant's cwd the tree keeps;
+    #: the rest is elided with ``…/``. Applied after ``tilde()``, so ``~`` is
+    #: a preserved prefix rather than a counted segment. A leaf with no
+    #: directory at all is a different feature, so the minimum is 1.
+    cwd_segments: int = field(default=2, metadata={"min": 1})
+    #: Column width of the sidebar in the régie. Read once, used twice: the
+    #: ``#sidebar`` Textual style and the ``resize_pane`` call. If the two
+    #: disagree, Textual and tmux tear at the boundary. Below 40, depth-3
+    #: rails plus a two-segment path no longer fit — so the feature the
+    #: width exists for is already broken. No ceiling: tmux refuses anything
+    #: the window cannot honour.
+    sidebar_width: int = field(default=60, metadata={"min": 40})
 
 
 #: Section name in the file -> the dataclass holding it. Drives both parsing
