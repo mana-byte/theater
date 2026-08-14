@@ -90,9 +90,15 @@ class AgentLeaf(Static):
     ALLOW_SELECT: ClassVar[bool] = False
 
     DEFAULT_CSS = """
+    /* Horizontal padding only. The leaf renders exactly three rows and is
+       exactly three cells tall, so vertical padding would clip the cwd row
+       rather than space the leaves apart — the blank first row is already
+       what separates them. Kept equal to `TreePanel > Label` so separators
+       line up with the leaves they sit between, and to the bus panel's own
+       inset so the two halves of the sidebar share one left margin. */
     AgentLeaf {
         height: 3;
-        padding: 0 1;
+        padding: 0 2;
         margin: 0 0;
     }
     /* Row states are tinted with $accent and $primary, never $boost.
@@ -263,9 +269,12 @@ class TreePanel(VerticalScroll):
         height: 1fr;
         scrollbar-size: 0 0;
     }
+    /* Matches AgentLeaf's padding on purpose: these are the separator and
+       placeholder rows, and a different inset would step them out of line
+       with the leaves above and below. */
     TreePanel > Label {
         height: 1;
-        padding: 0 1;
+        padding: 0 2;
         margin: 0 0;
     }
     """

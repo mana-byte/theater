@@ -176,6 +176,39 @@ async def test_mount_fills_the_tree_and_the_bus(daemon, tmux):
         assert panel._lines_data[1][1]["id"] == CHILD["id"]
 
 
+async def test_every_tree_row_shares_one_left_inset(daemon, tmux):
+    """Leaves and separators are different widgets on one visual column.
+
+    A participant row is an AgentLeaf and the "unmanaged" divider is a plain
+    Label, styled by two different rules. Nothing but this test makes them
+    agree, and a one-cell disagreement is the kind of thing that reads as a
+    rendering bug rather than a stylesheet one.
+
+    The height assertion guards the other half: the leaf draws exactly three
+    rows in exactly three cells, so vertical padding does not space the rows
+    out, it truncates the cwd line off the bottom.
+    """
+    daemon["answers"]["participants.unmanaged"] = [
+        {"pane": "%20", "command": "vibe", "harness": "vibe", "cwd": "/tmp/x"},
+    ]
+    app, _ = make_app()
+    async with app.run_test():
+        panel = app.query_one("#tree-panel", app_mod.TreePanel)
+        leaves = [w for w in panel.children if isinstance(w, app_mod.AgentLeaf)]
+        labels = [w for w in panel.children if not isinstance(w, app_mod.AgentLeaf)]
+        assert leaves and labels, "need both row kinds on screen to compare them"
+
+        insets = {w.styles.padding.left for w in panel.children} | {
+            w.styles.padding.right for w in panel.children
+        }
+        assert insets == {2}
+
+        for leaf in leaves:
+            assert leaf.styles.padding.top == 0
+            assert leaf.styles.padding.bottom == 0
+            assert leaf.styles.height.value == 3
+
+
 async def test_mount_learns_its_own_window_and_session(daemon, tmux):
     app, _ = make_app()
     async with app.run_test():
