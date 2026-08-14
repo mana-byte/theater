@@ -97,6 +97,15 @@ APPROVAL_MARKER = "Esc reject"
 #: The substring `to interrupt` matches both and nothing else in the vibe UI
 #: emits it outside a working turn. A looser match is deliberate here because
 #: the queued variant misses the old `Esc/Ctrl+C` prefix entirely.
+#:
+#: The loose substring and the tail-scoping in `screen_reading` are a pair:
+#: the looseness is required to catch the queued variant, the scoping is what
+#: makes the looseness safe. `to interrupt` is ordinary English prose that an
+#: agent can echo in its own output, so a whole-capture match lets agent text
+#: impersonate the spinner and read an idle pane as WORKING — which hangs the
+#: caller's job because `_rescue_jobs` never sees a PROMPT. Scoping to the tail
+#: is safe because the spinner always renders near the bottom of the pane. Do
+#: not separate the two.
 WORKING_MARKER = "to interrupt"
 
 #: Rendered by the workspace-trust dialog (`trust_folder_dialog.py:95-97`),
@@ -108,6 +117,10 @@ WORKING_MARKER = "to interrupt"
 #: because the warning is unique to this dialog — a button label like
 #: `Don't trust` could in principle appear in echoed output, whereas
 #: `Malicious configs can modify` is prose that only this screen renders.
+#: Unlike `WORKING_MARKER`, this stays a whole-capture match: the trust dialog
+#: only appears at startup when there is no agent output on the pane, and the
+#: marker is body text in the middle of the dialog, not footer chrome, so
+#: tail-scoping would break it.
 TRUST_MARKER = "Malicious configs can modify"
 
 #: How far up from the bottom to look for the prompt. A real capture has a
@@ -116,10 +129,30 @@ TRUST_MARKER = "Malicious configs can modify"
 #: line — does not fire on a real screen.
 _SCREEN_TAIL_LINES = 6
 
+#: How far up from the bottom to scan for the working spinner. Measured in
+#: both `vibe_working.txt` and `vibe_working_queued.txt` the spinner sits 6
+#: lines above the bottom of the capture (separator, composer prompt, blank,
+#: blank, separator, cwd/token footer). The queued hint is longer and may wrap
+#: on a narrow terminal, adding a line or two, so 8 leaves a 2-line margin
+#: without reaching into the agent's output area.
+_SPINNER_TAIL_LINES = 8
+
 #: How many session directories to inspect when searching by working directory.
 #: They are scanned newest first and a live session is always near the top, so
 #: this bounds the cost of a home directory with thousands of old sessions.
 _SCAN_LIMIT = 200
+
+
+def _in_screen_tail(capture: str, marker: str, limit: int) -> bool:
+    """Whether `marker` appears in the last `limit` lines of `capture`.
+
+    The spinner and footer chrome always render at the bottom of the pane, and
+    matching the whole pane lets agent output impersonate chrome — e.g. the
+    phrase ``to interrupt`` is ordinary English that an agent can echo. Scoping
+    to the tail is what makes a loose substring marker safe.
+    """
+    lines = capture.splitlines()
+    return any(marker in line for line in lines[-limit:] if line)
 
 
 class VibeHarness(Harness):
@@ -441,7 +474,7 @@ class VibeObserver(TranscriptObserver):
             return ScreenReading(
                 kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH
             )
-        if WORKING_MARKER in capture:
+        if _in_screen_tail(capture, WORKING_MARKER, _SPINNER_TAIL_LINES):
             return ScreenReading(
                 kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH
             )
