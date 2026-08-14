@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Vertical, VerticalScroll
@@ -126,6 +127,10 @@ class AgentLeaf(Static):
         # first update_node call.
         self.update(self._render_label(), layout=False)
 
+    @property
+    def key(self) -> Key:
+        return self._key
+
     def _render_label(self) -> Content:
         return node_label(
             self._node,
@@ -162,6 +167,25 @@ class AgentLeaf(Static):
             self._start_timer()
         else:
             self._stop_timer()
+
+    async def _on_click(self, event: events.Click) -> None:
+        """Single click moves the cursor; double click stages.
+
+        Staging mutates the user's tmux window layout, so it takes a
+        deliberate gesture — a stray click should not join a pane. The
+        check is ``event.chain >= 2``, the same discrimination vibe makes
+        in its config screen.
+        """
+        event.stop()
+        app = self.app
+        if not isinstance(app, RegieApp):
+            return
+        index = app._index_for_key(self._key)
+        if index is None:
+            return
+        app.cursor = index
+        if event.chain >= 2:
+            await app.action_stage()
 
     def on_mount(self) -> None:
         if self._node.get("status") == "working":
@@ -670,6 +694,13 @@ class RegieApp(App):
         panel.lines = self.tree_lines
         panel.apply_cursor(self.cursor, self.staged_pane)
         panel.scroll_to_cursor(self.cursor)
+
+    def _index_for_key(self, key: Key) -> int | None:
+        """The line index of *key* in the current tree, or None."""
+        for i, (_, _, k, _) in enumerate(self.tree_lines):
+            if k == key:
+                return i
+        return None
 
     def watch_cursor(self, cursor: int) -> None:
         """Redraw the tree with the cursor highlighted."""

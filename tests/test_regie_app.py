@@ -448,3 +448,40 @@ async def test_configured_sidebar_width_reaches_both_style_and_resize(daemon, tm
         assert sidebar.styles.width.value == 44
         await pilot.press("enter")
     assert ("resize", "%1", 44) in tmux
+
+
+# ---- mouse --------------------------------------------------------------
+
+
+async def test_single_click_moves_the_cursor(daemon, tmux):
+    """A single click on a leaf moves the cursor to that participant."""
+    app, _ = make_app()
+    async with app.run_test() as pilot:
+        assert app.cursor == 0
+        panel = app.query_one("#tree-panel", app_mod.TreePanel)
+        child_widget = panel._key_widgets[("p", CHILD["id"])]
+        await pilot.click(widget=child_widget)
+        assert app.cursor == 1
+
+
+async def test_double_click_stages_the_agent(daemon, tmux):
+    """A double click on a leaf stages it, the same as pressing enter."""
+    app, _ = make_app()
+    async with app.run_test() as pilot:
+        panel = app.query_one("#tree-panel", app_mod.TreePanel)
+        parent_widget = panel._key_widgets[("p", PARENT["id"])]
+        await pilot.click(widget=parent_widget, times=2)
+        assert app.staged_pane == "%10"
+    assert ("join", "%10", "@7") in tmux
+
+
+async def test_click_on_any_row_of_a_leaf_moves_the_cursor(daemon, tmux):
+    """All three rows of a leaf are one click target."""
+    app, _ = make_app()
+    async with app.run_test() as pilot:
+        assert app.cursor == 0
+        panel = app.query_one("#tree-panel", app_mod.TreePanel)
+        child_widget = panel._key_widgets[("p", CHILD["id"])]
+        # Click at offset (0, 2) — the third row (cwd), still inside the leaf.
+        await pilot.click(widget=child_widget, offset=(0, 2))
+        assert app.cursor == 1
