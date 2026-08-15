@@ -57,6 +57,8 @@ def _summarise(p: dict) -> dict:
     """Trim a participant record to what another agent needs to route work.
 
     Everything here answers one of: who are you, where are you, can I reach you.
+    ``session_id`` is the harness's opaque identifier for resuming a session;
+    it remains None until the observer discovers the participant's transcript.
     The ``name`` field is None for dead participants — names are live-only
     aliases, recyclable across deaths. The ``id`` is the stable reference for
     as long as the row is retained (dead rows are eventually deleted by
@@ -71,6 +73,7 @@ def _summarise(p: dict) -> dict:
         "status": p["status"],
         "cwd": p["cwd"],
         "branch": p["branch"],
+        "session_id": p["session_id"],
         "parent_id": p["parent_id"],
         "addressable": p["addressable"],
     }
@@ -169,6 +172,10 @@ async def spawn_session(
     for a harness whose `plan_launch` has no `resume` parameter. Some
     harnesses accept resume but cannot carry a prompt through it — see
     the tool description for the harness-specific behaviour.
+
+    The returned ``session_id`` is populated asynchronously by the observer,
+    so it is normally None for a newly spawned child. Re-list participants
+    later to retrieve it after Theater has attached to the child's transcript.
     """
     if not session._resolved:
         await session.identify()
@@ -193,7 +200,8 @@ async def register_pane(session: Session, *, pane: str) -> dict:
     """Adoption fallback: the agent looked up its own $TMUX_PANE and tells us.
 
     Needed because the MCP environment allowlist hides TMUX_PANE from this
-    process. An agent can still read it from its own shell tool.
+    process. An agent can still read it from its own shell tool. The returned
+    ``session_id`` may remain None until the observer discovers the transcript.
     """
     record = await session.client.call(
         "hello",

@@ -88,6 +88,10 @@ resume:    a session id, from `recall`, to resume instead of starting cold.
            through it: opencode's `-s` routes to the session view and drops
            `--prompt`, so resuming opencode with a prompt is refused. Resume
            without a prompt and use send to deliver the task.
+
+The returned participant record includes `session_id`, the harness's opaque
+resume identifier. It is normally null at spawn time because the observer
+discovers it asynchronously; call list_participants later to retrieve it.
 """
 
 
@@ -114,10 +118,12 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
 
     @mcp.tool()
     async def whoami() -> dict:
-        """Identify yourself: your participant id, tier, working directory and status.
+        """Identify yourself: your id, harness session id, tier, cwd and status.
 
         Call this before addressing anyone else, so you can tell yourself apart
-        from the other participants in the list.
+        from the other participants in the list. `session_id` is the harness's
+        opaque resume identifier and may be null until Theater's observer finds
+        your transcript; call this tool again later to refresh it.
         """
         return await tools.whoami(session)
 
@@ -125,10 +131,13 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
     async def list_participants(include_dead: bool = False) -> list[dict]:
         """List every agent on this machine that Theater knows about.
 
-        Each entry says who they are (harness, id), where they are (cwd, branch),
-        how they got here (tier, parent_id) and whether you can send work to them
-        (addressable). External participants can call out but can never be
-        called: they have no pane to deliver into.
+        Each entry says who they are (harness, id, session_id), where they are
+        (cwd, branch), how they got here (tier, parent_id) and whether you can
+        send work to them (addressable). `session_id` is the harness's opaque
+        resume identifier; it may be null until Theater's observer discovers
+        the transcript, so list again later if you need it. External
+        participants can call out but can never be called: they have no pane
+        to deliver into.
 
         Names are live-only aliases: a dead participant's name is null, shown
         as "-" in the CLI. Names are recyclable — after a death, a later
@@ -187,7 +196,8 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
 
         Only needed if `whoami` reports tier "external" while you are in fact
         running inside tmux. Get the value by running `echo $TMUX_PANE` with your
-        shell tool; it looks like "%12".
+        shell tool; it looks like "%12". The returned `session_id` may be null
+        until Theater's observer discovers your transcript.
         """
         return await tools.register_pane(session, pane=pane)
 

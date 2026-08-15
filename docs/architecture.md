@@ -110,6 +110,16 @@ which is why `register_pane` exists as an adoption fallback — the agent reads
 its own pane id with its shell tool and hands it over, because it can see what
 its MCP server cannot.
 
+The participant id belongs to Theater; `session_id` belongs to the underlying
+harness and is the opaque value accepted by `spawn_session(resume=...)`. The
+observer fills it in only after finding the participant's transcript, so the
+agent-facing `whoami`, `list_participants`, `spawn_session`, and `register_pane`
+records always carry the field but may initially report it as null. A later
+`whoami` or `list_participants` call reads the persisted value once discovery
+has completed. Like the rest of the machine-wide participant list, session ids
+follow Theater's single-user trust model; they are routing metadata, not
+authorization tokens.
+
 ---
 
 ## 4. Transport

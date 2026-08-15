@@ -148,6 +148,16 @@ async def test_name_semantics_reach_the_tools_that_target_by_name(daemon):
     assert "recycl" in tools["put_child_back_in_the_wound"].lower()
 
 
+async def test_lazy_session_id_semantics_reach_participant_record_tools(daemon):
+    """Every tool returning a participant record explains its nullable id."""
+    descriptions = {
+        t.name: (t.description or "").lower() for t in await build("p1", "vibe").list_tools()
+    }
+    for name in ("whoami", "list_participants", "spawn_session", "register_pane"):
+        assert "session_id" in descriptions[name]
+        assert "null" in descriptions[name]
+
+
 async def test_spawn_session_forces_a_choice_of_approval(daemon):
     schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
     required = schema["spawn_session"]["required"]
@@ -162,6 +172,8 @@ async def test_whoami_registers_on_first_call(daemon):
 
     assert me["id"] == "chosen-id"
     assert me["harness"] == "vibe"
+    assert "session_id" in me
+    assert me["session_id"] is None
     # No pane reached us: TMUX_PANE is not in the SDK's env allowlist.
     assert me["tier"] == "external"
 
@@ -178,6 +190,8 @@ async def test_register_pane_promotes_external_to_adopted(daemon):
     assert promoted["tier"] == "adopted"
     assert promoted["addressable"] is True
     assert promoted["id"] == "chosen-id"
+    assert "session_id" in promoted
+    assert promoted["session_id"] is None
 
 
 async def test_list_participants_marks_the_caller(daemon):
@@ -186,9 +200,22 @@ async def test_list_participants_marks_the_caller(daemon):
     await mine.call_tool("whoami", {})
     await theirs.call_tool("whoami", {})
 
+    # The observer normally fills this asynchronously. Updating the raw daemon
+    # record gives the MCP boundary a deterministic populated value to expose.
+    async with DaemonClient(autostart=False) as c:
+        await c.call(
+            "hello",
+            id="them",
+            harness="claude",
+            cwd="/tmp",
+            session_id="ses-them",
+        )
+
     rows = _payload(await mine.call_tool("list_participants", {}))
     flags = {r["id"]: r["is_self"] for r in rows}
     assert flags == {"me": True, "them": False}
+    session_ids = {r["id"]: r["session_id"] for r in rows}
+    assert session_ids == {"me": None, "them": "ses-them"}
 
 
 async def test_a_failing_tool_reports_the_daemon_error(daemon, monkeypatch):

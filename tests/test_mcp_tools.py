@@ -18,6 +18,7 @@ RECORD = {
     "status": "idle",
     "cwd": "/tmp/project",
     "branch": None,
+    "session_id": "ses-me",
     "parent_id": None,
     "addressable": True,
     "tmux_pane": "%3",
@@ -92,6 +93,7 @@ async def test_whoami_answers_who_where_and_reachable():
         "status": "idle",
         "cwd": "/tmp/project",
         "branch": None,
+        "session_id": "ses-me",
         "parent_id": None,
         "addressable": True,
     }
@@ -99,11 +101,21 @@ async def test_whoami_answers_who_where_and_reachable():
     assert got["name"] == "Arlequin"
 
 
+async def test_whoami_keeps_a_lazy_session_id_as_null():
+    got = await tools.whoami(resolved(**{"participants.get": {**RECORD, "session_id": None}}))
+    assert "session_id" in got
+    assert got["session_id"] is None
+
+
 async def test_list_participants_marks_which_row_is_the_caller():
     """Without this an agent can send a prompt to itself and wait on its own turn."""
-    rows = [{**RECORD, "id": "p-me"}, {**RECORD, "id": "p-other"}]
+    rows = [
+        {**RECORD, "id": "p-me"},
+        {**RECORD, "id": "p-other", "session_id": None},
+    ]
     got = await tools.list_participants(resolved(**{"participants.list": rows}))
     assert [r["is_self"] for r in got] == [True, False]
+    assert [r["session_id"] for r in got] == ["ses-me", None]
 
 
 async def test_list_participants_identifies_before_it_can_say_who_is_self():
@@ -127,8 +139,9 @@ async def test_harnesses_hides_the_ones_that_cannot_be_spawned():
 async def test_spawn_names_the_caller_as_the_parent():
     """Lineage is set here or never — the child cannot know who asked for it."""
     s = resolved()
-    await tools.spawn_session(s, harness="vibe", prompt="hi", approval="manual")
+    child = await tools.spawn_session(s, harness="vibe", prompt="hi", approval="manual")
     assert s.client.params("spawn")["parent_id"] == "p-me"
+    assert child["session_id"] == "ses-me"
 
 
 async def test_spawn_accepts_no_prompt():
@@ -147,9 +160,10 @@ async def test_spawn_defaults_the_cwd_to_this_process():
 async def test_register_pane_settles_identity_on_the_pane_it_was_told():
     """The MCP env allowlist hides TMUX_PANE, so the agent reads it and tells us."""
     s = session(hello={**RECORD, "id": "p-adopted"})
-    await tools.register_pane(s, pane="%12")
+    adopted = await tools.register_pane(s, pane="%12")
     assert s.client.params("hello")["pane"] == "%12"
     assert (s.participant_id, s._resolved) == ("p-adopted", True)
+    assert adopted["session_id"] == "ses-me"
 
 
 async def test_await_names_the_caller_so_a_deadlock_can_be_refused():

@@ -456,13 +456,13 @@ Each agent harness connects to Theater by running `theater mcp` as a stdio MCP s
 Once connected, the agent has access to these tools:
 
 ### `whoami`
-Returns the agent's own participant record (id, tier, status, cwd, branch). Call this first to learn your own id before addressing others.
+Returns the agent's own participant record (id, session id, tier, status, cwd, branch). Call this first to learn your own id before addressing others. `session_id` is the harness's opaque resume identifier and may initially be null; call `whoami` again after Theater has discovered the transcript.
 
 ### `list_participants`
-Lists every participant Theater knows about — id, harness, status, cwd, addressable flag.
+Lists every participant Theater knows about — id, session id, harness, status, cwd, addressable flag. Session ids are populated asynchronously, so a newly discovered participant may report `session_id: null`; list again later to refresh it.
 
 ### `spawn_session`
-Starts a new agent in a child tmux window. Returns the child's id and a handle for `await_sessions`.
+Starts a new agent in a child tmux window. Returns the child's id, session id, and a handle for `await_sessions`. A cold spawn normally returns `session_id: null` because the observer learns the harness session id only after attaching to its transcript; use `list_participants` to retrieve it later.
 
 ```
 harness:     "claude" | "codex" | "opencode" | "vibe"
@@ -502,7 +502,7 @@ last_n:     number of events to return (0 = all); default 5
 Returns events with `role`, `text` (full), `tool_name`, and `turn_end`.
 
 ### `register_pane`
-Makes the calling agent addressable by registering its tmux pane. Only needed if `whoami` reports tier `external` while the agent is actually inside tmux.
+Makes the calling agent addressable by registering its tmux pane. Only needed if `whoami` reports tier `external` while the agent is actually inside tmux. The returned participant record includes the nullable, asynchronously discovered `session_id`.
 
 ---
 
