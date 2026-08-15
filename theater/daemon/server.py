@@ -387,10 +387,11 @@ class Daemon:
             if p.tmux_pane not in alive:
                 # An explicit kill owns this participant's whole teardown —
                 # including deleting the branch, which this path must not do.
-                # `spawner.kill` removes the pane before it marks the record
-                # dead, so the reaper can see a pane-less live participant
-                # mid-kill; skipping it here keeps the two paths from both
-                # retiring it and from racing over the job's final state.
+                # `spawner.kill_pane` removes the pane before `teardown`
+                # marks the record dead, so the reaper can see a pane-less
+                # live participant mid-kill; skipping it here keeps the two
+                # paths from both retiring it and from racing over the job's
+                # final state.
                 if p.id in self._explicit_kills:
                     continue
                 logger.info("participant %s lost its pane %s", p.id, p.tmux_pane)

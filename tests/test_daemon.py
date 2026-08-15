@@ -9,6 +9,7 @@ is exercised for real.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -391,7 +392,7 @@ async def test_kill_finishes_running_jobs_as_killed(client, fake_tmux):
     Before the fix, _kill never touched jobs: the job row stayed RUNNING
     forever and the parent's await_sessions never woke. The kill path now
     finishes every still-running job targeting the killed participant with
-    state KILLED after spawner.kill succeeds.
+    state KILLED after spawner.kill_pane succeeds.
     """
     parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
     child = await client.call(
@@ -481,6 +482,70 @@ async def test_kill_finishes_jobs_before_removing_worktree(daemon, client, fake_
     job = await client.call("jobs.status", handle=handle)
     assert job["state"] == "killed"
     assert order.index("finish") < order.index("retire")
+
+
+def _make_repo(tmp_path):
+    """A real git repo with one commit, for worktree tests."""
+    import subprocess
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+    (root / "README.md").write_text("# test repo\n")
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=root, check=True, capture_output=True)
+    return str(root)
+
+
+async def test_kill_of_worktree_child_preserves_non_null_sha_after(
+    daemon, client, fake_tmux, tmp_path
+):
+    """A worktree child killed mid-job must record real sha_after, not NULL.
+
+    The touch table records sha_after by hashing files in the child's worktree
+    at job-finish time. If the worktree directory is deleted before the job
+    finishes, every path reads as gone and every row gets sha_after=NULL — a
+    spurious deletion. This end-to-end test uses a real git repo and worktree
+    and asserts the touch row carries a real hash.
+    """
+    from theater.daemon.schema import touch as touch_table
+    from theater.harness.base import EventPath
+
+    repo_root = _make_repo(tmp_path)
+
+    parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
+    child = await client.call(
+        "spawn",
+        harness="vibe",
+        prompt="do some work",
+        approval="manual",
+        cwd=repo_root,
+        parent_id=parent["id"],
+        worktree=True,
+    )
+    handle = child["handle"]
+
+    # The worktree directory is the child's cwd. Write a file there and feed
+    # it to the accumulator, the way the observer would for an event carrying
+    # Event.paths.
+    wt_cwd = child["cwd"]
+    (Path(wt_cwd) / "touched.py").write_bytes(b"content")
+
+    daemon.jobs.observe_paths(handle, (EventPath(path="touched.py", mode="write"),))
+
+    await client.call("participant.kill", id=child["id"], caller_id=parent["id"])
+
+    job = await client.call("jobs.status", handle=handle)
+    assert job["state"] == "killed"
+
+    rows = list(daemon.store.conn.execute(touch_table.select()))
+    assert len(rows) == 1
+    row = rows[0]._mapping
+    assert row["path"] == "touched.py"
+    # sha_after must not be NULL — the worktree existed when finish ran.
+    assert row["sha_after"] is not None
 
 
 async def test_a_child_that_loses_its_pane_without_explicit_kill_crashes(
