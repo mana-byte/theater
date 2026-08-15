@@ -54,7 +54,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from theater.models import Status
 
@@ -156,6 +156,27 @@ class EventKind(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class EventPath:
+    """One file an event touched, as the harness reported it.
+
+    `recall` records which files each job touched, and the source of that
+    information is the harness's own transcript. An event that reads or writes
+    a file carries one of these for each path it names; the observer
+    accumulates them across events into the per-job set that becomes `touch`
+    rows at job end.
+    """
+
+    #: ALWAYS repo-relative, never absolute. An absolute path leaks the
+    #: developer's home directory into a SQLite index that gets pasted into
+    #: agent prompts, which is a privacy breach, not a formatting issue.
+    path: str
+    #: Whether the file was read or written. A single tool call that reads a
+    #: file and writes it back produces two EventPaths with the same path
+    #: and different modes, which is the honest record of what happened.
+    mode: Literal["read", "write"]
+
+
+@dataclass(frozen=True, slots=True)
 class Event:
     """One thing that happened inside an agent, stripped of harness dialect."""
 
@@ -190,6 +211,13 @@ class Event:
     #: Index of the source record in the transcript. Several events can share
     #: one index: a Vibe assistant turn with three tool calls is four events.
     raw_index: int = 0
+    #: The files this single event touched, as the harness reported them. Each
+    #: entry is one path and one mode; the observer accumulates them across
+    #: events into the per-job set that becomes `touch` rows. Defaulted so the
+    #: four shipped plugins keep working unchanged until their owners fill them
+    #: in — an empty tuple means "the harness reported no paths for this
+    #: event", which is the honest answer until the plugin is updated.
+    paths: tuple[EventPath, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +274,15 @@ class Harness(ABC):
     #: buy. `plugins._check_observer` rejects a plugin that omits it, which is
     #: the same place `name`, `binary` and `icon` are checked.
     observer: HarnessObserver
+    #: Whether a resumed session can still be handed a prompt on the command
+    #: line. A class attribute and not signature introspection because a
+    #: signature cannot express "accepts a resume flag but silently drops the
+    #: prompt" — which is exactly opencode's behaviour: `-s` routes to the
+    #: session view, and `--prompt` is only read on the home screen, so the
+    #: task would vanish with no error. The opencode plugin's owner sets this
+    #: False; the default True is correct for every harness whose resume mode
+    #: still delivers the prompt.
+    resume_takes_prompt: bool = True
 
     # ---- launching ------------------------------------------------------
 

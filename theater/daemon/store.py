@@ -42,13 +42,33 @@ MIGRATIONS = Path(__file__).parent / "migrations"
 #: The revision a pre-Alembic database is already at. See `_stamp_legacy`.
 BASELINE = "0001"
 
+#: The latest revision. A legacy database is stamped at BASELINE and then
+#: upgraded to this; a fresh database lands here directly. Tests assert
+#: against this rather than hardcoding a revision string, so adding a new
+#: revision does not silently weaken the assertion to "not BASELINE".
+HEAD = "0002"
+
 
 def _set_pragmas(dbapi_connection, _record) -> None:
     """WAL so a reader never blocks the daemon's writes; foreign keys because
-    SQLite disables them per connection, not per database."""
+    SQLite disables them per connection, not per database; busy_timeout so a
+    writer that cannot acquire the lock immediately waits up to 5s rather than
+    failing instantly.
+
+    The daemon owns this file alone, so contention is not between two
+    daemons — it is between the long-lived autocommit connection and the
+    fresh transactional connections that `_finish_with_touches` opens. Both
+    write, and without a busy_timeout the second writer fails with
+    SQLITE_BUSY if it happens to land while the first is mid-commit. Five
+    seconds is long enough to absorb any realistic hold (a single SQLite
+    write is sub-millisecond) and short enough that a genuinely stuck lock —
+    which would mean something is wrong with the database file or the
+    filesystem — surfaces as an error rather than hanging the daemon's event
+    loop indefinitely. """
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.execute("PRAGMA busy_timeout=5000")
     cursor.close()
 
 

@@ -83,3 +83,25 @@ budgets = Table(
     Column("cents", Integer, nullable=False, server_default=text("0")),
     Column("limit_cents", Integer),
 )
+
+touch = Table(
+    "touch",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("job_handle", Text, nullable=False),
+    Column("path", Text, nullable=False),
+    Column("mode", Text, nullable=False),
+    # Null means the file was absent at that point: a null sha_before is a
+    # file the job created, a null sha_after is a file the job deleted. The
+    # pair is what makes drift detection work — same before and after means
+    # the file was touched but not changed, different means it was modified.
+    Column("sha_before", Text),
+    Column("sha_after", Text),
+    sqlite_autoincrement=True,
+)
+
+# Two read patterns: "all rows for this path, newest first" (recall_search by
+# path) and "all rows for this job handle" (recall_read of a segment). The
+# path index serves the first; the job-handle index serves the second.
+Index("idx_touch_path", touch.c.path)
+Index("idx_touch_job", touch.c.job_handle)

@@ -35,6 +35,7 @@ from theater.harness.base import (
     SERVER_NAME,
     Event,
     EventKind,
+    EventPath,
     Harness,
     LaunchPlan,
     NativeChild,
@@ -238,6 +239,30 @@ def check_model(harness: str, model: str | None) -> None:
         raise BadRequest(f"harness {harness!r} does not support model selection")
 
 
+def supports_resume(harness: Harness) -> bool:
+    """Whether this adapter accepts a `resume` in `plan_launch`.
+
+    Read off the signature rather than declared as a class attribute, for the
+    same reason `supports_model` is: the signature is the thing that is
+    actually true. An adapter that says it supports resume and does not take
+    the parameter would fail at the call, which is the failure this check
+    exists to prevent.
+    """
+    return "resume" in inspect.signature(harness.plan_launch).parameters
+
+
+def check_resume(harness: str, resume: str | None) -> None:
+    """Raise if this harness cannot honour a resume request.
+
+    Pure and cheap, so a caller can gate on it *before* creating anything —
+    the same contract `check_model` offers. A resume asked of a harness whose
+    `plan_launch` has no `resume` parameter is refused here, by name, rather
+    than surfacing as a `TypeError` from inside the plugin.
+    """
+    if resume is not None and not supports_resume(get(harness)):
+        raise BadRequest(f"harness {harness!r} does not support resume")
+
+
 def plan_launch(
     harness: str,
     *,
@@ -246,20 +271,27 @@ def plan_launch(
     config_path: Path,
     approval: str,
     model: str | None = None,
+    resume: str | None = None,
 ) -> LaunchPlan:
     """The one funnel every spawn goes through, and so the one compat seam.
 
-    `model` is only forwarded when the caller named one. That is what keeps a
-    third-party adapter written against the older signature working: it is
-    never called with a keyword it does not accept, and the only launches it
-    cannot serve are the ones that ask for something it has no way to deliver.
-    Those are refused here, with a message that names the harness, rather than
-    surfacing as a `TypeError` from inside the plugin or — far worse — as a
-    child that silently came up on the wrong model.
+    `model` and `resume` are each forwarded only when the caller named one.
+    That is what keeps a third-party adapter written against the older
+    signature working: it is never called with a keyword it does not accept,
+    and the only launches it cannot serve are the ones that ask for something
+    it has no way to deliver. Those are refused here, with a message that
+    names the harness, rather than surfacing as a `TypeError` from inside the
+    plugin or — far worse — as a child that silently came up on the wrong
+    model or dropped the prompt.
     """
     found = get(harness)
     check_model(harness, model)
-    extra = {"model": model} if model is not None else {}
+    check_resume(harness, resume)
+    extra: dict[str, str] = {}
+    if model is not None:
+        extra["model"] = model
+    if resume is not None:
+        extra["resume"] = resume
     return found.plan_launch(
         participant_id=participant_id,
         prompt=prompt,
@@ -354,6 +386,7 @@ __all__ = [
     "Batch",
     "Event",
     "EventKind",
+    "EventPath",
     "Harness",
     "HarnessObserver",
     "History",
@@ -368,6 +401,7 @@ __all__ = [
     "TranscriptObserver",
     "TranscriptSource",
     "check_model",
+    "check_resume",
     "clip",
     "clipper",
     "describe",
@@ -380,5 +414,6 @@ __all__ = [
     "plan_launch",
     "status_after",
     "supports_model",
+    "supports_resume",
     "theater_binary",
 ]
