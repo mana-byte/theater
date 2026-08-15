@@ -28,6 +28,26 @@ def theater_home(monkeypatch):
     shutil.rmtree(root, ignore_errors=True)
 
 
+@pytest.fixture(autouse=True)
+def no_inherited_pane(monkeypatch):
+    """Hide the developer's own $TMUX_PANE from every test.
+
+    A real MCP server never sees this variable: the SDK replaces the inherited
+    environment with a six-variable allowlist, which is why a participant that
+    reports no pane is filed as External. Under pytest the server runs
+    in-process, so a suite run from inside tmux inherits a live pane instead:
+    every participant is born addressable, and two registered from the same
+    shell collapse into one. Three tests in test_mcp_server.py assert the real
+    behaviour and so failed on a developer's machine and nowhere else.
+
+    Autouse rather than a line in each `daemon` fixture, of which there are
+    five: the leak is not the daemon's, it reaches any test that builds an MCP
+    tool context. `TMUX` is left alone — the one place that nests a real tmux
+    server, tests/test_tmux_rig.py:56, already clears both for itself.
+    """
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def shipped_harnesses():
     """Register the shipped adapters once, as every real entry point does.
