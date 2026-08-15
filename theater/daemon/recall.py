@@ -29,7 +29,7 @@ import datetime
 import subprocess
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from theater.daemon.blob import blob_sha
 from theater.daemon.schema import jobs, participants, touch
@@ -208,7 +208,17 @@ def _build_timeline(
             # startswith(autoescape=True), not like(f"{root}%"): LIKE
             # treats `_` and `%` as wildcards, both legal in a directory
             # name — a privacy wall that widens on punctuation is no wall.
-            .where(participants.c.cwd.startswith(git_root, autoescape=True))
+            # The boundary is enforced too: exact root equality OR a prefix
+            # that ends at a path separator, so ``/work/repo`` does not
+            # match a sibling at ``/work/repo-secret``.
+            .where(
+                or_(
+                    participants.c.cwd == git_root,
+                    participants.c.cwd.startswith(
+                        git_root.rstrip("/") + "/", autoescape=True
+                    ),
+                )
+            )
             .order_by(jobs.c.finished_at.desc())
         )
         rows = store.conn.execute(stmt).fetchall()

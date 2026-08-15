@@ -463,6 +463,81 @@ def test_underscore_in_root_is_not_a_sql_wildcard(store, tmp_path):
     )
 
 
+def test_worktree_child_is_visible_to_parent(store, tmp_path):
+    """A managed worktree child at ``<root>/.theater/worktrees/<id>`` is a
+    descendant of the repo root and must remain visible to the parent.
+
+    This is the primary use case of recall: a parent recalling its own
+    worktree child's work. The boundary fix must not exclude descendants.
+    """
+    root = _setup_repo(tmp_path)
+    child_cwd = f"{root}/.theater/worktrees/child-abc"
+    p = _participant(store, pid="p-child", cwd=child_cwd, session_id="ses-child")
+    _job(
+        store,
+        handle="h-child",
+        target_id=p.id,
+        prompt="fix the bug",
+        result="all good",
+    )
+    _touch(
+        store,
+        job_handle="h-child",
+        path="main.py",
+        sha_before="aaa",
+        sha_after="bbb",
+    )
+
+    result = recall(store, paths=["main.py"], caller_cwd=root)
+    timeline = result["main.py"]["timeline"]
+    assert len(timeline) == 1
+    assert timeline[0]["handle"] == "h-child"
+    assert timeline[0]["task"] == "fix the bug"
+    assert timeline[0]["result"] == "all good"
+
+
+def test_prefix_named_sibling_repo_is_excluded(store, tmp_path):
+    """A participant in a prefix-named sibling repo must not leak.
+
+    root ``/tmp/xxx/repo`` vs participant cwd ``/tmp/xxx/repo-secret``:
+    the old bare ``startswith`` matched because ``repo`` is a prefix of
+    ``repo-secret``. The boundary fix requires exact equality or a
+    separator after the root, so the sibling's prompt and result must
+    not appear in the output.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    root = _setup_repo(repo)
+
+    sibling_cwd = str((tmp_path / "repo-secret").resolve())
+    p = _participant(
+        store,
+        pid="p-sibling",
+        cwd=sibling_cwd,
+        session_id="ses-secret",
+    )
+    _job(
+        store,
+        handle="h-secret",
+        target_id=p.id,
+        prompt="top secret prompt",
+        result="top secret result",
+    )
+    _touch(
+        store,
+        job_handle="h-secret",
+        path="shared.py",
+        sha_before="aaa",
+        sha_after="bbb",
+    )
+
+    result = recall(store, paths=["shared.py"], caller_cwd=root)
+    timeline = result["shared.py"]["timeline"]
+    assert timeline == [], (
+        "a prefix-named sibling repo's touch rows came back through the privacy wall"
+    )
+
+
 # ---- resume is a capability ------------------------------------------------
 
 
