@@ -385,6 +385,84 @@ async def test_kill_succeeds_when_pane_disappears_on_a_later_poll(client, fake_t
     assert dead["status"] == "dead"
 
 
+async def test_kill_finishes_running_jobs_as_killed(client, fake_tmux):
+    """A child killed mid-job must end KILLED, not stranded RUNNING.
+
+    Before the fix, _kill never touched jobs: the job row stayed RUNNING
+    forever and the parent's await_sessions never woke. The kill path now
+    finishes every still-running job targeting the killed participant with
+    state KILLED after spawner.kill succeeds.
+    """
+    parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
+    child = await client.call(
+        "spawn",
+        harness="vibe",
+        prompt="do some work",
+        approval="manual",
+        cwd="/tmp",
+        parent_id=parent["id"],
+    )
+    handle = child["handle"]
+
+    job = await client.call("jobs.status", handle=handle)
+    assert job["state"] == "running"
+
+    await client.call("participant.kill", id=child["id"], caller_id=parent["id"])
+
+    job = await client.call("jobs.status", handle=handle)
+    assert job["state"] == "killed"
+    assert job["error_code"] == "killed"
+
+
+async def test_kill_wakes_the_awaiter_immediately(client, fake_tmux):
+    """The job is terminal the moment the kill returns, not after a reaper tick.
+
+    await_sessions returns the current job state; a KILLED job must read as
+    terminal right away so the parent is not blocked until the reaper runs.
+    """
+    parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
+    child = await client.call(
+        "spawn",
+        harness="vibe",
+        prompt="do some work",
+        approval="manual",
+        cwd="/tmp",
+        parent_id=parent["id"],
+    )
+    handle = child["handle"]
+
+    await client.call("participant.kill", id=child["id"], caller_id=parent["id"])
+
+    jobs = await client.call("jobs.await", handles=[handle], max_wait=1.0)
+    assert len(jobs) == 1
+    assert jobs[0]["state"] == "killed"
+
+
+async def test_a_child_that_loses_its_pane_without_explicit_kill_crashes(
+    client, fake_tmux, daemon, monkeypatch
+):
+    """A child whose pane vanishes on its own (not via kill) still finishes CRASHED.
+
+    The explicit-kill marker only suppresses CRASHED for kills in flight;
+    a self-exit must keep its old behaviour so the distinction between
+    crashed and killed stays meaningful.
+    """
+    record = await client.call(
+        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
+    )
+    handle = record["handle"]
+
+    import theater.daemon.server as server_mod
+
+    monkeypatch.setattr(server_mod.tmux, "available", lambda: True)
+    monkeypatch.setattr(server_mod.tmux, "run", _fake_list_panes(""))
+    await daemon._reap_once()
+
+    job = await client.call("jobs.status", handle=handle)
+    assert job["state"] == "crashed"
+    assert job["error_code"] == "crashed"
+
+
 async def test_the_reaper_notices_a_vanished_pane(daemon, client, fake_tmux, monkeypatch):
     record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
 
