@@ -142,6 +142,58 @@ rescue_timeout = 60.0
 sync_interval = 1.0
 
 
+[retention]
+
+# The database grows without bound unless old rows are swept. The daemon runs
+# a garbage-collection loop on the interval below; it is on by default, because
+# the whole point is that the database is bounded without the user having to
+# configure anything. Set `enabled = false` to disable it entirely.
+#
+# Measured on a real machine over 4.26 days: the `bus` table was 94.2% of the
+# file (30.20 MB, 7.1 MB/day). Jobs were 3.4%, participants 0.16%, touch 0.06%.
+
+# Whether the GC loop runs at all. Off only for debugging; the database grows
+# without it.
+enabled = true
+
+# Seconds between sweeps.
+interval = 3600.0
+
+# Rows per DELETE statement. The Store is synchronous on the daemon's event
+# loop, so a single large blocking DELETE freezes every agent's status polling
+# and every await. Measured: 32,217 rows in 96 ms.
+batch = 5000
+
+# Bus events older than this many days are deleted. The régie's bus feed is
+# forward-only (cursor-based), and nothing anywhere reads a week-old bus event.
+# `send.refused` events are exempt — they are the only record of a refused
+# send — and capped by `refused_cap` instead.
+bus_days = 7
+
+# Finished jobs older than this many days are deleted, along with their `touch`
+# rows. Two months: recall over a job older than that is nearly worthless,
+# because the code has moved, branches are merged or deleted, and the harness
+# transcript is usually gone from disk already.
+#
+# Jobs are filtered on `finished_at`, never `created_at`: a running job has
+# finished_at = NULL, and NULL < x is never true in SQL, so a sweep can never
+# delete a job whose caller is still waiting on it.
+jobs_days = 60
+
+# Maximum number of `send.refused` bus rows to keep. These are exempt from the
+# age TTL because they are the only record of a refused send. Observed rate is
+# ~3/day, so this cap is roughly a century of headroom; it exists to make the
+# growth bounded rather than because it is expected to bind.
+refused_cap = 10000
+
+# A running job whose daemon was killed mid-turn has finished_at = NULL forever.
+# After this many days, such a job is marked crashed/abandoned so it does not
+# accumulate and pin its participant against deletion. 7 days is orders of
+# magnitude longer than the observer's 60 s rescue timeout, so it can only
+# ever catch jobs from a previous daemon lifetime.
+stale_running_days = 7
+
+
 [harness]
 
 # Harness plugins to leave out of the registry, by name. Everything Theater can

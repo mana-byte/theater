@@ -121,6 +121,7 @@ class Daemon:
             )
             self._server: asyncio.Server | None = None
             self._reaper: asyncio.Task | None = None
+            self._gc: asyncio.Task | None = None
             #: Participant ids whose kill is in flight. While a pid is in
             #: here, the reaper skips it when assigning CRASHED — the
             #: explicit-kill path must win the first-terminal-write race so
@@ -198,6 +199,8 @@ class Daemon:
         await self._reconcile()
         self._init_send_seq()
         self._reaper = asyncio.create_task(self._reap_loop())
+        if self.config.retention.enabled:
+            self._gc = asyncio.create_task(self._gc_loop())
         self.observer.start()
         logger.info("listening on %s", sock)
 
@@ -290,6 +293,10 @@ class Daemon:
             self._reaper.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._reaper
+        if self._gc:
+            self._gc.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._gc
         for task in list(self._conns):
             task.cancel()
         if self._conns:
@@ -417,6 +424,56 @@ class Daemon:
                     self.jobs.finish(
                         job.handle, state=JobState.CRASHED, error_code="crashed"
                     )
+
+    # ---- garbage collection --------------------------------------------
+
+    async def _gc_loop(self) -> None:
+        """Bound the database size by sweeping old rows on a timer.
+
+        Not in ``_reap_once``: that method early-returns when there are no
+        tracked panes or tmux is unavailable — precisely the idle machine
+        where GC should run. Mirrors ``_reap_loop``'s structure: the
+        try/except that logs and continues, and ``wait_for`` on the stop
+        event so shutdown is prompt rather than waiting out the interval.
+
+        Waits before the first sweep, unlike the reaper: the reaper's first
+        tick is safe because it only reads. GC writes, and on a freshly
+        started daemon reconcile may still be settling — a sweep that runs
+        before the first interval would race the reconcile's dead-participant
+        marking and delete rows the test suite (and a user restarting) expects
+        to see. Waiting one interval costs nothing: the database grew for
+        hours before the daemon restarted; it can grow one more.
+
+        An exception inside GC must never take the daemon down. The loop
+        logs and continues; the next interval tries again.
+        """
+        from theater.daemon.gc import sweep
+
+        retention = self.config.retention
+        while not self._stopping.is_set():
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    self._stopping.wait(), timeout=retention.interval
+                )
+            try:
+                result = await sweep(
+                    self.store,
+                    retention,
+                    live_handles=frozenset(self.jobs._events),
+                )
+                if (result.bus or result.jobs or result.touch
+                        or result.participants or result.running_marked):
+                    logger.info(
+                        "gc sweep: %d bus, %d jobs, %d touch, "
+                        "%d participants, %d running marked",
+                        result.bus,
+                        result.jobs,
+                        result.touch,
+                        result.participants,
+                        result.running_marked,
+                    )
+            except Exception:
+                logger.exception("gc sweep failed")
 
     # ---- connection handling -------------------------------------------
 
