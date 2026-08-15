@@ -74,6 +74,7 @@ from theater.harness.base import (
     SERVER_NAME,
     Event,
     EventKind,
+    EventPath,
     Harness,
     LaunchPlan,
     NativeChild,
@@ -136,6 +137,36 @@ _CWD_PROBE_BYTES = 256 * 1024
 #: The filename is `rollout-<local ISO with - separators>-<uuid>`. Anchoring on
 #: the fixed-width timestamp is what lets the uuid keep its own hyphens.
 _STEM = re.compile(r"^rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-(.+)$")
+
+#: apply_patch hunks are delimited by these markers, one per line. The paths
+#: that follow them are repo-relative — codex's own parser
+#: (apply-patch/src/parser.rs:39-41) treats them as relative to the session
+#: cwd, so no relativisation is needed here. A fourth marker, "*** End Patch",
+#: is the terminator and carries no path.
+_PATCH_FILE_RE = re.compile(
+    r"^\*\*\* (?:Update|Add|Delete) File: (.+)$", re.MULTILINE
+)
+
+
+def _apply_patch_paths(text: str) -> tuple[EventPath, ...]:
+    """Extract file paths from an ``apply_patch`` tool input string.
+
+    The apply_patch format is a structured patch grammar with explicit
+    per-file markers (``*** Update File:``, ``*** Add File:``, ``*** Delete
+    File:``), not prose or a shell command. The markers and their grammar are
+    defined in codex-rs/apply-patch/src/parser.rs:39-41. Every hunk is a write
+    — update, create, and delete are all mutations — so every path gets
+    ``mode="write"``.
+
+    A malformed input yields nothing rather than a partial guess: a wrong
+    path in the touch index is worse than a missing one.
+    """
+    if not isinstance(text, str):
+        return ()
+    return tuple(
+        EventPath(path=match.strip(), mode="write")
+        for match in _PATCH_FILE_RE.findall(text)
+    )
 
 
 def _in_screen_tail(capture: str, marker: str) -> bool:
@@ -221,6 +252,7 @@ class CodexHarness(Harness):
         config_path: Path,
         approval: str,
         model: str | None = None,
+        resume: str | None = None,
     ) -> LaunchPlan:
         if approval not in APPROVALS:
             raise BadRequest(
@@ -228,8 +260,18 @@ class CodexHarness(Harness):
             )
         command = json.dumps(theater_binary())
         args = json.dumps(["mcp", "--id", participant_id])
+        # `codex resume <SESSION_ID>` is a subcommand (cli/src/main.rs:181-182,
+        # 315-339), not a flag. It shares the same `-c` config overrides and
+        # approval flags as the base command via the `SessionTuiCli` wrapper
+        # (tui/src/cli.rs:403), so the only structural difference is the
+        # `resume` subcommand token and the session id positional.
         argv = [
             "codex",
+        ]
+        if resume is not None:
+            argv.append("resume")
+            argv.append(resume)
+        argv += [
             "-c",
             f"mcp_servers.{SERVER_NAME}.command={command}",
             "-c",
@@ -442,12 +484,23 @@ class CodexObserver(TranscriptObserver):
         ptype = payload.get("type")
 
         if ptype in ("custom_tool_call", "function_call"):
+            name = payload.get("name")
+            paths: tuple[EventPath, ...] = ()
+            if name == "apply_patch":
+                # apply_patch is a freeform custom tool whose input is the raw
+                # patch text. The patch markers are a structured grammar
+                # (parser.rs:39-41), not prose or a shell command string, so
+                # extracting paths from them is reading a structured field.
+                # Other custom tools (exec, wait) take freeform strings whose
+                # contents are code or commands — those yield nothing.
+                paths = _apply_patch_paths(payload.get("input"))
             return [
                 Event(
                     kind=EventKind.TOOL_CALL,
-                    tool_name=payload.get("name"),
+                    tool_name=name,
                     ts=ts,
                     raw_index=index,
+                    paths=paths,
                 )
             ]
         if ptype in ("custom_tool_call_output", "function_call_output"):
