@@ -421,10 +421,22 @@ blocks the caller's MCP request only** — the daemon and every other participan
 keep running. That is the whole trick: the reply arrives as the return value of
 a tool call the agent already made, so no inbound-reply channel is needed.
 
+A multi-handle await blocks until **any** requested handle reaches a terminal
+state, not until all of them do. If any handle is already terminal when the
+call arrives, it returns immediately. The reply carries one current-state entry
+per requested handle, so the caller processes the terminal entries and re-awaits
+the still-running ones. This lets a caller fan out and react to the first
+finisher without waiting on the slowest.
+
 Job states are `running`, `done`, `crashed`, `killed`. `timeout` is
 deliberately **not** a state: it is what `await` returns when the caller stops
 waiting, not something that happens to the job. A job still running at the
 ceiling comes back as `running` and the caller decides whether to re-await.
+
+The agent-facing reply drops `prompt` and `result` from each entry. The prompt
+is what the caller already sent, and `result` was only ever a 2000-char clip of
+the child's turn; an agent that wants what the child said or did reads the
+transcript directly via `read_transcript`, which returns it whole.
 
 The in-memory events do not survive a daemon restart, and that is correct — a
 restarted daemon has no observer attached yet, so an in-flight await would have

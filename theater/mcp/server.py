@@ -197,15 +197,19 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
     ) -> list[dict]:
         """Wait for spawned child sessions to finish.
 
+        Blocks until ANY of the requested handles reaches a terminal state
+        ("done", "crashed", "killed") or max_wait expires. If any handle is
+        already terminal when the call arrives, returns immediately — it does
+        not wait for all handles.
+
         handles:   the handle values returned by spawn_session (same as the
                    participant id).
-        max_wait:  maximum seconds to block. Default 150. If the timeout
-                   expires, jobs still running are returned with state="running"
-                   and you should re-await.
+        max_wait:  maximum seconds to block. Default 150.
 
-        Returns one entry per handle with state ("done", "crashed", "running")
-        and error_code. This blocks your current request only; the daemon and
-        other agents continue running.
+        Returns one entry per requested handle with state ("done", "crashed",
+        "running") and error_code. Process the terminal entries; the rest are
+        still running and can be re-awaited in a subsequent call. This blocks
+        your current request only; the daemon and other agents continue running.
 
         Keep each wait shorter than your own client's tool timeout, which
         Theater does not set and cannot see. When that timeout is the
@@ -213,9 +217,10 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         works on regardless, and what gets you the answer is another
         await, not a longer one.
 
-        "done" means the child's turn ended, not that the work is right. This
-        result does not carry the child's response text: read_transcript
-        returns what it said in full, and the transcript is not evidence
+        "done" means the child's turn ended, not that the work is right. The
+        agent-facing reply drops prompt and result text entirely: an agent that
+        wants what the child said or did reads the transcript via
+        read_transcript, which returns it whole. The transcript is not evidence
         either — before you build on a child's answer, or merge its branch,
         look at what it changed in the repo.
         """
@@ -252,8 +257,8 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
     async def read_transcript(target_id: str, last_n: int = 5) -> dict:
         """Read the transcript of a participant, returning full unclipped text.
 
-        The job result from spawn/send is clipped to 2000 chars. This
-        method reads the full transcript from disk and returns the last
+        The agent-facing await_sessions reply drops prompt and result text.
+        This method reads the full transcript from disk and returns the last
         `last_n` events (user, assistant, tool_call, tool_result) with
         complete, unclipped text.
 

@@ -91,6 +91,33 @@ async def test_orchestration_directives_reach_the_tools_that_need_them(daemon):
     assert "done" in tools["await_sessions"]
 
 
+async def test_await_description_communicates_first_any_completion(daemon):
+    """The await_sessions description must say it returns on the FIRST terminal
+    handle, not after all handles finish.
+
+    A model that thinks await waits for every handle will block longer than
+    necessary, or never return when one child hangs. The description is the
+    only channel that always reaches the model, so the contract — first/any
+    completion, re-await the rest — has to be stated there explicitly.
+    """
+    desc = next(
+        t.description or ""
+        for t in await build("p1", "vibe").list_tools()
+        if t.name == "await_sessions"
+    )
+    lower = desc.lower()
+
+    # Must communicate first/any completion, not all.
+    assert "any" in lower, "description must say it returns when ANY handle is terminal"
+    assert "not wait for all" in lower, "description must say it does NOT wait for all handles"
+
+    # Must communicate that already-terminal handles return immediately.
+    assert "already" in lower, "description must say already-terminal handles return immediately"
+
+    # Must communicate re-awaiting still-running handles.
+    assert "re-await" in lower, "description must say to re-await still-running handles"
+
+
 async def test_name_semantics_reach_the_tools_that_target_by_name(daemon):
     """Names are live-only, recyclable aliases; the id is stable.
 
