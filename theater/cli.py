@@ -114,13 +114,9 @@ def _parser() -> argparse.ArgumentParser:
     ls.add_argument("--interval", type=float, default=1.0, help="Seconds per redraw.")
 
     spawn = sub.add_parser("spawn", help="Start an agent in a new tmux window.")
-    # Optional, and deliberately without `choices`: the legal set now includes
-    # harnesses declared in config, which is not read until after the parser is
-    # built. `_spawn_harness` validates instead, against the registry as it
-    # actually is. A wrong name still fails loudly rather than being mistaken
-    # for the prompt — which is why the prompt also has a flag form, since with
-    # two optional positionals `theater spawn "do the thing"` would otherwise
-    # bind the prompt to the harness slot and guess at what the user meant.
+    # No `choices`: the legal set includes harnesses declared in config, which
+    # is not read until after the parser is built. `_spawn_harness` validates
+    # against the registry as it actually is.
     spawn.add_argument("harness", nargs="?", default=None)
     spawn.add_argument("prompt", nargs="?", default="")
     spawn.add_argument(
@@ -286,8 +282,6 @@ def _format_ls(rows: list[dict], *, tree: bool, unmanaged: list[dict] | None = N
             pane = u.get("pane") or "-"
             icon = harness_icon(u.get("harness") or u.get("command"))
             lines.append(
-                # The 2-space indent eats into the id column so the tier and
-                # harness columns still line up with the participants above.
                 f"  {'-':<12}{'?':<2} {icon} {cmd:<11} "
                 f"{'-':<15} {pane:<6} {tilde(u.get('cwd'))}"
             )
@@ -340,8 +334,8 @@ def _spawn_harness(args) -> str:
     known = ", ".join(sorted(HARNESSES))
     if args.harness:
         if args.harness not in HARNESSES:
-            # Checked here rather than by argparse `choices`, because declared
-            # harnesses are not in the registry when the parser is built.
+            # Validated here, not by argparse `choices`: declared harnesses are
+            # not in the registry when the parser is built.
             raise BadUsage(
                 f"unknown harness {args.harness!r} (known: {known}). If you "
                 "meant this as the prompt, pass it with --prompt."

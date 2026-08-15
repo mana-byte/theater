@@ -24,24 +24,11 @@ from theater.mcp.tools import Session
 
 #: `spawn_session`'s description, with the harness list left open.
 #:
-#: A literal here was the bug: it read `"vibe" or "claude"` while the registry
-#: had grown codex and opencode, so the two newer adapters were spawnable by
-#: every path except the one an agent uses. An agent cannot spawn what its tool
-#: schema does not name, and nothing in the daemon was ever going to say
-#: otherwise — the schema is the whole of what it knows.
-#:
-#: Filled from the local registry, which is a hint and not the authority: this
-#: process built its registry from the config as it is now, the daemon built
-#: its own when it started, and a config edit between the two leaves them
-#: disagreeing. `list_harnesses` asks the daemon, and is what the text points
-#: at for anything load-bearing.
-#: Sent once, in the initialize response. Whether a model ever reads it is the
-#: client's decision, and the four harnesses Theater spawns do not make the
-#: same one — so nothing load-bearing lives only here. Every directive that
-#: changes what a call does is repeated in the description of the tool it
-#: applies to, where it is certain to be seen. What is left is the shape of
-#: the whole, which belongs to no single tool: the order of the steps, and
-#: the two mistakes that only appear once there is more than one child.
+#: Filled from the local registry, which is a hint and not the authority: the
+#: daemon built its own when it started, and a config edit leaves them
+#: disagreeing. `list_harnesses` asks the daemon for anything load-bearing.
+#: The schema is the whole of what an agent knows — nothing load-bearing
+#: lives only here; every directive is repeated in the tool it applies to.
 INSTRUCTIONS = """Theater makes the other agents on this machine addressable,
 so you can hand work to them and collect it back.
 
@@ -181,8 +168,6 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         model: str | None = None,
         resume: str | None = None,
     ) -> dict:
-        # Description comes from SPAWN_DOC, since the harness names in it are
-        # only known once the registry is built. See `_spawn_description`.
         return await tools.spawn_session(
             session, harness=harness, prompt=prompt, approval=approval, cwd=cwd,
             worktree=worktree, base_branch=base_branch, model=model, resume=resume,

@@ -39,8 +39,6 @@ async def human_present(pane_id: str) -> bool:
     Returns False when unsure — the caller queues rather than errors,
     so a false negative is safe.
     """
-    # Signal: copy mode or another tmux mode — definitely present.
-    # This is a tmux fact, not a heuristic.
     try:
         in_mode = await run(
             "display-message", "-p", "-t", pane_id, "#{pane_in_mode}"

@@ -33,7 +33,6 @@ from dataclasses import dataclass
 
 from theater.models import TheaterError
 
-# Fields we ask tmux for when enumerating panes, in order.
 _PANE_FORMAT = (
     "#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{window_id}\t"
     "#{session_name}\t#{window_name}\t#{pane_current_command}"
@@ -293,11 +292,9 @@ async def display_message(fmt: str, *, target: str | None = None) -> str:
 
 # ---- options -----------------------------------------------------------
 #
-# Scoped to a session on purpose. `set-option -g` would rewrite the user's
-# tmux behaviour for every session on the server and outlive the process that
-# did it, which is not a side effect a TUI gets to have. Session scope plus
-# `unset_option` on the way out keeps the blast radius to the session the
-# régie is actually running in.
+# Session scope on purpose: `set-option -g` would rewrite the user's tmux
+# behaviour for every session and outlive this process. `unset_option` on the
+# way out keeps the blast radius to the session the régie runs in.
 
 
 async def show_option(name: str, *, target: str) -> str | None:
