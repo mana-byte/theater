@@ -230,8 +230,10 @@ async def test_swap_panes(monkeypatch):
 
 
 async def test_window_for_pane(monkeypatch):
+    sep = "\u241e"
+
     async def fake_run(*args: str, check: bool = True) -> str:
-        return "%5\t@3\n%6\t@4"
+        return f"%5{sep}@3\n%6{sep}@4"
 
     monkeypatch.setattr(panes, "run", fake_run)
     result = await panes.window_for_pane("%5")

@@ -34,9 +34,16 @@ from dataclasses import dataclass
 
 from theater.models import TheaterError
 
+#: U+241E (SYMBOL FOR RECORD SEPARATOR) — no tmux field value can contain it,
+#: so it is a safe delimiter for list-panes format output. A literal tab in
+#: `pane_current_path` or `window_name` would break the old `\t` separator.
+#: libtmux uses the same character (formats.py:21).
+_FORMAT_SEP = "\u241e"
+
 _PANE_FORMAT = (
-    "#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{window_id}\t"
-    "#{session_name}\t#{window_name}\t#{pane_current_command}"
+    f"#{{pane_id}}{_FORMAT_SEP}#{{pane_pid}}{_FORMAT_SEP}#{{pane_current_path}}{_FORMAT_SEP}"
+    f"#{{window_id}}{_FORMAT_SEP}#{{session_name}}{_FORMAT_SEP}#{{window_name}}{_FORMAT_SEP}"
+    f"#{{pane_current_command}}"
 )
 
 
@@ -67,7 +74,7 @@ class Pane:
 
     @classmethod
     def parse(cls, line: str) -> Pane:
-        parts = line.split("\t")
+        parts = line.split(_FORMAT_SEP)
         if len(parts) != 7:
             raise TmuxError(f"unexpected list-panes row: {line!r}")
         return cls(

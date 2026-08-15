@@ -27,7 +27,7 @@ in tests/test_tmux_panes.py. Behaviour must be verified by the user.
 
 from __future__ import annotations
 
-from theater.tmux.client import TmuxError, run, tmux_version
+from theater.tmux.client import _FORMAT_SEP, TmuxError, run, tmux_version
 
 
 async def break_pane(pane_id: str, *, target_window: str | None = None) -> None:
@@ -174,11 +174,10 @@ async def move_window_to_index(window_id: str, index: int, *, session: str) -> N
 
 async def window_for_pane(pane_id: str) -> str | None:
     """Which window id does a pane belong to?"""
-    out = await run(
-        "list-panes", "-a", "-F", "#{pane_id}\t#{window_id}", check=False
-    )
+    fmt = f"#{{pane_id}}{_FORMAT_SEP}#{{window_id}}"
+    out = await run("list-panes", "-a", "-F", fmt, check=False)
     for line in out.splitlines():
-        parts = line.split("\t")
+        parts = line.split(_FORMAT_SEP)
         if len(parts) == 2 and parts[0] == pane_id:
             return parts[1]
     return None
