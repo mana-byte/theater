@@ -92,10 +92,10 @@ def _add_name_parser(sub) -> None:
     kill.add_argument(
         "id",
         help=(
-            "Participant id or name. Names work only while live; a dead "
-            "participant has no name. Already-dead is a no-op only when "
-            "addressed by id. Use the id for destructive targeting: names "
-            "are recyclable, so a name can later point at a successor."
+            "Participant id or name. Names are live-only and recyclable; a "
+            "dead participant has no name. Already-dead is a no-op only by "
+            "id. Use the id for destructive targeting — a recycled name can "
+            "point at a successor."
         ),
     )
 
@@ -158,7 +158,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Include dead participants. Dead rows have no name (shown as '-'); "
-            "use the id for historical access."
+            "use the id for historical access (retention-bounded)."
         ),
     )
     ls.add_argument("--tree", action="store_true", help="Show lineage.")

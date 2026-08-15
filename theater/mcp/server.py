@@ -132,10 +132,11 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
 
         Names are live-only aliases: a dead participant's name is null, shown
         as "-" in the CLI. Names are recyclable — after a death, a later
-        participant can pick up the same mask. The id is stable and required
-        for historical access: use it, not the name, for any targeting that
-        spans time or has destructive consequences, because a recycled name
-        can identify a successor.
+        participant can pick up the same mask. The id is the stable reference
+        for as long as the row is retained (dead rows are eventually deleted
+        by retention GC, so historical access is retention-bounded). Use it,
+        not the name, for any targeting that spans time or has destructive
+        consequences, because a recycled name can identify a successor.
         """
         return await tools.list_participants(session, include_dead=include_dead)
 
@@ -259,8 +260,10 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         target_id: the participant id or its name. Names work only while
                    the participant is live; a dead participant's name is
                    null and cannot be resolved. Use the id to read the
-                   transcript of a dead participant — the id is stable
-                   and survives death.
+                   transcript of a dead participant — the id is the stable
+                   reference for as long as the row is retained (historical
+                   access is retention-bounded; dead rows are eventually
+                   deleted by GC).
         last_n:    number of events to return, newest. Default 5. Set to
                    0 for all events in the current transcript.
 

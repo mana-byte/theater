@@ -58,9 +58,10 @@ def _summarise(p: dict) -> dict:
 
     Everything here answers one of: who are you, where are you, can I reach you.
     The ``name`` field is None for dead participants — names are live-only
-    aliases, recyclable across deaths. The ``id`` is the stable identity and
-    the one to use for any targeting that spans time or has destructive
-    consequences.
+    aliases, recyclable across deaths. The ``id`` is the stable reference for
+    as long as the row is retained (dead rows are eventually deleted by
+    retention GC); use it, not the name, for any targeting that spans time
+    or has destructive consequences.
     """
     return {
         "id": p["id"],
@@ -325,7 +326,9 @@ async def read_transcript(
     ``target_id`` may be a participant id or a name. Names work only
     while the participant is live; a dead participant's name is null
     and cannot be resolved. Use the id to read the transcript of a dead
-    participant — the id is stable and survives death.
+    participant — the id is the stable reference for as long as the row
+    is retained (historical access is retention-bounded; dead rows are
+    eventually deleted by GC).
 
     Returns the last `last_n` events (user, assistant, tool_call,
     tool_result) from the transcript, in chronological order. Each entry

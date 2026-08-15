@@ -110,8 +110,10 @@ async def test_name_semantics_reach_the_tools_that_target_by_name(daemon):
     assert "live" in tools["send"].lower()
     assert "recycl" in tools["send"].lower()
 
-    # read_transcript: names work only while live; use id for dead participants.
-    assert "live" in tools["read_transcript"].lower()
+    # read_transcript: names work only while live; dead participants need the id.
+    desc = tools["read_transcript"].lower()
+    assert "dead" in desc
+    assert "id" in desc
 
     # put_child_back_in_the_wound: already-dead is a no-op only by id;
     # names are recyclable.

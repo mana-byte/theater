@@ -569,6 +569,15 @@ def test_a_dead_participant_renders_with_a_dash_for_its_name():
     assert lines[1][name_idx] == "-"
 
 
+def test_ls_all_json_preserves_null_name_for_dead_participants(answers, capsys):
+    """A dead row's name is JSON null, not the CLI dash — the dash is rendering."""
+    dead = {**ROW, "name": None, "status": "dead", "addressable": False}
+    answers["replies"] = {"participants.list": [dead], "participants.unmanaged": []}
+    assert cli.cmd_ls(parse("ls", "--all", "--json")) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["participants"][0]["name"] is None
+
+
 def test_kill_help_says_names_are_live_only_and_recyclable(capsys):
     """The kill help must warn that names are recyclable and live-only."""
     with pytest.raises(SystemExit):

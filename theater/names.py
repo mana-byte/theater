@@ -7,10 +7,11 @@ random commedia dell'arte mask gives it a name the human can speak and type, so
 Names are recyclable aliases held only by live participants. When a participant
 dies its name is released — a later participant may pick up the same mask, so
 a name that appears in a user's scrollback can point at a *different* agent
-after a death and respawn. The id is the stable identity: it survives death,
-daemon restarts, and name recycling. Use the id — not the name — for any
-targeting that spans time or that has destructive consequences, because a
-recycled name can identify a successor.
+after a death and respawn. The id is the stable identity for as long as the
+row is retained: it outlives death and daemon restarts, but dead rows are
+eventually deleted by retention GC, so historical access is retention-bounded.
+Use the id — not the name — for any targeting that spans time or that has
+destructive consequences, because a recycled name can identify a successor.
 
 The name is never persisted: it lives in the Registry's in-memory map and is
 regenerated when the daemon restarts. Dead rows have ``name = None``, so a
