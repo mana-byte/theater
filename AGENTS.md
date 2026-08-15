@@ -113,7 +113,8 @@ theater/
   destroy, respawn, or inject input into participant panes; other processes may
   query tmux, and the régie may change presentation — session-local options,
   focus, size, or window placement — only while preserving each participant's
-  pane ID and occupant. MCP servers and the régie forward RPCs; keep it that way.
+  pane ID and occupant. Every write to registry state goes through the daemon —
+  MCP servers and the régie forward RPCs for that; keep it that way.
 - **`Participant.addressable` is physical, not a permission.** No pane, no
   `send-keys`. Never treat `EXTERNAL` as merely "unprivileged".
 - **Human-presence uses copy mode (`pane_in_mode`) only** (`tmux/presence.py`).

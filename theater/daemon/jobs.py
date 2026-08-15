@@ -25,8 +25,8 @@ the return value of a tool call the agent already made. No inbound-reply
 channel is needed.
 
 Implementation: `await_jobs` creates an asyncio.Event per job, then waits
-on them with a timeout. The observer calls `self.jobs.finish(handle, …)` when
-it detects turn-end, which sets the event. The caller wakes up, reads the result, and
+on them with a timeout. The observer calls `JobManager.finish` when it detects
+turn-end, which sets the event. The caller wakes up, reads the result, and
 returns it as the MCP tool response.
 
 The touch accumulator
