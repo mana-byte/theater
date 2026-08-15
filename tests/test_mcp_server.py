@@ -52,6 +52,7 @@ async def test_tools_are_registered(daemon):
         "send",
         "read_transcript",
         "put_child_back_in_the_wound",
+        "recall",
     }
 
 

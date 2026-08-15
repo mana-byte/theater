@@ -764,3 +764,29 @@ async def _read_transcript(daemon, params: dict) -> dict:
         if event.kind.value in _READABLE
     ]
     return {"id": pid, "events": events, "path": history.location}
+
+
+@method("recall")
+async def _recall(daemon, params: dict) -> dict:
+    """Per-file timelines of what Theater watched happen.
+
+    A join over ``touch``, ``jobs`` and ``participants``, ordered by
+    ``finished_at`` descending per path. Gap detection is pure SQL: a
+    row whose ``sha_before`` does not match the previous row's
+    ``sha_after`` marks a transition no job claims. Three subprocess
+    calls per query regardless of path count — see
+    ``theater.daemon.recall`` for the budget.
+    """
+    from theater.daemon.recall import recall as _do_recall
+
+    paths = _require(params, "paths")
+    if not isinstance(paths, list) or not paths:
+        raise BadRequest("paths must be a non-empty list")
+    depth = int(params.get("depth", 5))
+    caller_cwd = params.get("caller_cwd")
+    return _do_recall(
+        daemon.store,
+        paths=paths,
+        depth=depth,
+        caller_cwd=caller_cwd,
+    )

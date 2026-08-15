@@ -189,3 +189,26 @@ async def test_put_child_back_in_the_wound_identifies_first_or_the_daemon_cannot
     s = session(**{"participant.kill": {"id": "p-child", "killed": True}})
     await tools.put_child_back_in_the_wound(s, target_id="p-child")
     assert s.client.methods == ["hello", "participant.kill"]
+
+
+async def test_recall_passes_paths_and_depth_to_the_daemon():
+    """The daemon does the query; the tool body just forwards the args."""
+    s = resolved(recall={"src/main.py": {"timeline": []}})
+    await tools.recall(s, paths=["src/main.py"], depth=3)
+    p = s.client.params("recall")
+    assert p["paths"] == ["src/main.py"]
+    assert p["depth"] == 3
+    assert p["caller_cwd"]  # the tool sends its own cwd
+
+
+async def test_recall_identifies_first_so_the_daemon_knows_the_caller():
+    """The caller_cwd is what the daemon uses for the privacy wall."""
+    s = session(recall={})
+    await tools.recall(s, paths=["x.py"])
+    assert s.client.methods == ["hello", "recall"]
+
+
+async def test_recall_defaults_depth_to_five():
+    s = resolved(recall={})
+    await tools.recall(s, paths=["x.py"])
+    assert s.client.params("recall")["depth"] == 5

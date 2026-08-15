@@ -319,6 +319,30 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
             session, target_id=target_id
         )
 
+    @mcp.tool()
+    async def recall(paths: list[str], depth: int = 5) -> dict:
+        """What happened to these files, and who can tell me more.
+
+        Returns a per-file timeline of every job that touched the path,
+        newest first, with enough on each point to resume the session
+        that made it. The ``session_id`` from a timeline point goes
+        straight into ``spawn_session(resume=<session_id>)`` — these
+        two tools compose.
+
+        Each point carries the harness, the session id, and the segment
+        id. A gap point marks a transition no job claims — call
+        ``recall_read`` with the segment id to learn what happened
+        inside it.
+
+        paths: repo-relative or absolute paths to query.
+        depth:  max points per path timeline, after gaps are
+                interleaved. Default 5.
+
+        A path that has never been touched returns an empty timeline,
+        not an error. The result is keyed by path.
+        """
+        return await tools.recall(session, paths=paths, depth=depth)
+
     return mcp
 
 

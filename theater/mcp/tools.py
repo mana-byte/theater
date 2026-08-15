@@ -309,3 +309,29 @@ async def read_transcript(
     )
     assert isinstance(record, dict)
     return record
+
+
+async def recall(
+    session: Session, *, paths: list[str], depth: int = 5
+) -> dict[str, dict]:
+    """Per-file timelines of what Theater watched happen.
+
+    Returns one timeline per path, keyed by the repo-relative path.
+    Each job point carries a ``session_id`` that composes with
+    ``spawn_session(resume=<session_id>)`` — the session id out of
+    ``recall`` goes straight into ``resume``.
+
+    Paths may be absolute or repo-relative; they are normalised to
+    repo-relative before querying, since that is how they are stored.
+    A path that has never been touched comes back as an empty timeline.
+    """
+    if not session._resolved:
+        await session.identify()
+    result = await session.client.call(
+        "recall",
+        paths=paths,
+        depth=depth,
+        caller_cwd=str(Path.cwd()),
+    )
+    assert isinstance(result, dict)
+    return result

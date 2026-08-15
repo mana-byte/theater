@@ -1,0 +1,459 @@
+"""The recall query engine: per-file timelines from the touch table.
+
+A timeline is a path's history of job touches, newest first, interleaved
+with gap points where the hash chain breaks. Each job point carries
+enough to resume the session that made it; each gap point carries enough
+to decide whether to spend a ``recall_read`` explaining it.
+
+The design has three budgets. SQL does everything that can be done in
+SQL: the join, the privacy wall, the gap detection. ``blob_sha`` does
+the hashing without forking git. Exactly three subprocess calls per
+query — ``rev-parse``, ``status``, ``diff`` — cover the live-git
+questions that must not be reimplemented. See ``docs/v2_recall.md``
+Piece 3 for the reasoning.
+"""
+
+from __future__ import annotations
+
+import datetime
+import subprocess
+from pathlib import Path
+
+from sqlalchemy import select
+
+from theater.daemon.blob import blob_sha
+from theater.daemon.schema import jobs, participants, touch
+from theater.daemon.store import Store
+from theater.harness import HARNESSES, supports_resume
+
+#: Ceiling on ``task`` and ``result`` text in the timeline. Full text lives
+#: behind ``recall_read``, which the sibling agent owns.
+CLIP = 300
+
+#: Default and maximum points per path timeline. Counted after gaps are
+#: interleaved, so a depth of 5 means five points total — not five jobs
+#: plus the gaps between them.
+DEFAULT_DEPTH = 5
+
+
+def _clip(text: str | None) -> str | None:
+    """Clip to ``CLIP`` chars, preserving the first ``CLIP`` of the text.
+
+    ``None`` stays ``None``: a crashed job has no result, and converting
+    that to an empty string would read as "the job said nothing" rather
+    than "the job never produced a result".
+    """
+    if text is None:
+        return None
+    return text[:CLIP]
+
+
+def _sha_or_dash(sha: str | None) -> str:
+    """Render a sha as ``-`` when null, for the gap segment id format.
+
+    A null ``sha_before`` means the file was created; a null ``sha_after``
+    means it was deleted. The segment id uses ``-`` so a gap spanning a
+    creation or deletion still parses as three ``:`` -delimited fields.
+    """
+    return sha if sha is not None else "-"
+
+
+def _segment_id_for_gap(path: str, before: str | None, after: str | None) -> str:
+    """The segment id for a gap point: ``gap:<path>:<before>..<after>``.
+
+    A sibling agent parses this exact format. Shas use ``-`` for null,
+    matching ``_sha_or_dash``, so a gap at a creation or deletion is
+    still three colon-delimited fields.
+    """
+    return f"gap:{path}:{_sha_or_dash(before)}..{_sha_or_dash(after)}"
+
+
+def _resume_info(harness_name: str, session_id: str | None) -> tuple[bool, str | None]:
+    """Whether the caller can resume this session, and why not if not.
+
+    ``resume: true`` only when the harness adapter accepts a ``resume``
+    parameter in ``plan_launch`` AND a session id was actually recorded.
+    The caller must learn this here rather than discovering it at spawn
+    time — a spawn that fails after the participant exists leaves work
+    behind. See ``docs/v2_recall.md`` §"resume is a capability".
+    """
+    harness = HARNESSES.get(harness_name)
+    if harness is None:
+        return False, "harness not registered"
+    if not supports_resume(harness):
+        return False, f"harness {harness_name!r} does not support resume"
+    if not session_id:
+        return False, "no session id recorded"
+    return True, None
+
+
+def _git_root(cwd: str) -> str | None:
+    """``git rev-parse --show-toplevel`` — one fork, finds the repo root.
+
+    Returns ``None`` if ``cwd`` is not inside a git repo. A participant
+    whose cwd is not under git has no dirty set and no diff to compute,
+    so the caller simply sees ``current`` from ``blob_sha`` and no
+    dirty flag.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _dirty_set(cwd: str) -> set[str]:
+    """``git status --porcelain`` — one fork, the set of dirty paths.
+
+    Repo-relative paths, because that is how ``touch.path`` is stored.
+    A path is dirty when the working tree differs from HEAD —
+    uncommitted edits, untracked files, staged changes all qualify.
+    This is the one place we depend on gitignore rules and index state,
+    which is why it stays a subprocess rather than being reimplemented.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    if result.returncode != 0:
+        return set()
+    paths: set[str] = set()
+    for line in result.stdout.splitlines():
+        if not line:
+            continue
+        # --porcelain output: "XY path" where XY is two status chars
+        # followed by a space. Do NOT strip the line first: the
+        # leading char is part of the status field and may be a space,
+        # so stripping would shift the path by one byte.
+        # Renames show "XY  old -> new"; we take the new path.
+        path = line[3:]
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        paths.add(path)
+    return paths
+
+
+def _committed_change_set(cwd: str, oldest_sha: str) -> set[str]:
+    """``git diff --name-only <oldest_sha>..HEAD`` — one fork, committed changes.
+
+    ``oldest_sha`` is the earliest ``sha_before`` or ``sha_after`` across
+    all paths in the query, so this captures every committed change that
+    could have broken the hash chain for any of them. Without it, a
+    ``git commit`` between two jobs would look like an unattributed gap
+    when it is really just a commit the daemon never observed as a job.
+    """
+    if not oldest_sha:
+        return set()
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", f"{oldest_sha}..HEAD"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    if result.returncode != 0:
+        return set()
+    return {line for line in result.stdout.splitlines() if line}
+
+
+def _build_timeline(
+    store: Store,
+    *,
+    repo_paths: list[str],
+    git_root: str,
+    depth: int,
+    dirty_set: set[str],
+    committed_changes: set[str],
+) -> dict[str, dict]:
+    """Query the touch table and build per-path timelines.
+
+    The privacy wall is in SQL: ``participants.cwd`` must start with the
+    caller's git root, so a job from another repo is excluded before it
+    reaches Python. A job whose participant row is gone, or whose cwd is
+    null, is excluded — a row you cannot attribute to a repo is a row
+    you cannot safely return.
+
+    Gap detection is pure SQL-shaped: rows come back ordered by
+    ``finished_at`` descending per path, and each row's ``sha_before``
+    is compared against the previous row's ``sha_after``. A mismatch
+    means something changed the file that no job claims.
+    """
+    result: dict[str, dict] = {}
+
+    for path in repo_paths:
+        # Join touch -> jobs -> participants. The privacy wall is the
+        # cwd prefix match: only participants in the caller's repo
+        # contribute. A left join on participants would include rows
+        # we cannot attribute; an inner join excludes them, which is
+        # the correct failure mode.
+        stmt = (
+            select(
+                touch.c.job_handle,
+                touch.c.path,
+                touch.c.mode,
+                touch.c.sha_before,
+                touch.c.sha_after,
+                jobs.c.state.label("outcome"),
+                jobs.c.prompt,
+                jobs.c.result,
+                jobs.c.finished_at,
+                participants.c.harness,
+                participants.c.session_id,
+                participants.c.cwd,
+                participants.c.branch,
+            )
+            .select_from(
+                touch.join(jobs, touch.c.job_handle == jobs.c.handle).join(
+                    participants, jobs.c.target_id == participants.c.id
+                )
+            )
+            .where(touch.c.path == path)
+            .where(participants.c.cwd.like(f"{git_root}%"))
+            .order_by(jobs.c.finished_at.desc())
+        )
+        rows = store.conn.execute(stmt).fetchall()
+
+        # Reads are a count, not timeline points. A read has
+        # sha_before == sha_after, and rendering them as points buries
+        # the writes. One integer per path keeps the signal without
+        # the noise. See docs/v2_recall.md §"Reads are a count".
+        writes = [r for r in rows if r.sha_before != r.sha_after]
+        reads = len(rows) - len(writes)
+
+        # Build the interleaved timeline: job points and gap points,
+        # newest first, capped at depth. Rows are ordered descending
+        # by finished_at, so the first row is the newest write.
+        #
+        # Gap detection: in descending order, each row is older than
+        # the one above it. A gap exists when this row's sha_after
+        # does not match the sha_before of the row above (newer). In
+        # time order, that means: this job left the file at sha_after,
+        # the newer job found it at sha_before, and a mismatch means
+        # something changed it in between that no job claims.
+        #
+        # We track ``prev_before`` (the sha_before of the row above)
+        # and ``_seen_prev`` (whether there is a row above at all).
+        # The latter is needed because ``prev_before`` can be None
+        # legitimately (the newer job created the file), and a simple
+        # ``prev_before is not None`` guard would suppress a real gap
+        # at a creation boundary.
+        timeline: list[dict] = []
+        prev_before: str | None = None
+        _seen_prev = False
+        for row in writes:
+            if _seen_prev and row.sha_after != prev_before:
+                timeline.append({
+                    "gap": True,
+                    "segment": _segment_id_for_gap(
+                        path, row.sha_after, prev_before
+                    ),
+                    "sha": f"{_sha_or_dash(row.sha_after)} → "
+                           f"{_sha_or_dash(prev_before)}",
+                    "note": "no job claims this transition",
+                })
+                if len(timeline) >= depth:
+                    break
+
+            resume, resume_note = _resume_info(
+                row.harness, row.session_id
+            )
+            point: dict = {
+                "segment": row.job_handle,
+                "sha": f"{_sha_or_dash(row.sha_before)} → "
+                       f"{_sha_or_dash(row.sha_after)}",
+                "when": _format_ts(row.finished_at),
+                "handle": row.job_handle,
+                "harness": row.harness,
+                "session_id": row.session_id,
+                "resume": resume,
+                "cwd": row.cwd,
+                "branch": row.branch,
+                "outcome": row.outcome,
+                "task": _clip(row.prompt),
+                "result": _clip(row.result),
+            }
+            if resume_note is not None:
+                point["resume_note"] = resume_note
+            timeline.append(point)
+            if len(timeline) >= depth:
+                break
+            prev_before = row.sha_before
+            _seen_prev = True
+
+        # Current is the file's blob sha right now — not a fork, just
+        # bytes through blob_sha. Dirty means the working tree differs
+        # from HEAD: the union of the dirty set and the committed-change
+        # set, intersected with the paths we were asked about.
+        abs_path = Path(git_root) / path
+        current = blob_sha(abs_path)
+        dirty = path in dirty_set or path in committed_changes
+
+        result[path] = {
+            "current": current,
+            "dirty": dirty,
+            "reads": reads,
+            "timeline": timeline,
+        }
+
+    return result
+
+
+def _format_ts(finished_at: float | None) -> str | None:
+    """Render a Unix epoch as ISO-8601 Z, or ``None`` if the job never finished.
+
+    A job that is still running has no ``finished_at``; a crashed job may
+    have one set by the observer's rescue path. ``None`` rather than an
+    empty string so the caller can distinguish "never finished" from
+    "finished at an unknown time".
+    """
+    if finished_at is None:
+        return None
+
+    return (
+        datetime.datetime.fromtimestamp(
+            finished_at, tz=datetime.UTC
+        )
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
+
+
+def _normalise_paths(paths: list[str], git_root: str) -> list[str]:
+    """Convert absolute or repo-relative paths to repo-relative.
+
+    ``touch.path`` is always repo-relative, so the query must match that
+    form. Absolute paths are stripped of the git root prefix; paths that
+    do not start with the root are passed through (they may be relative
+    already, or from a different repo, in which case the query returns
+    an empty timeline — which is the correct answer).
+    """
+    root = git_root.rstrip("/") + "/"
+    out = []
+    for p in paths:
+        if p.startswith(root):
+            out.append(p[len(root):])
+        elif p.startswith(git_root + "/"):
+            out.append(p[len(git_root) + 1:])
+        else:
+            out.append(p)
+    return out
+
+
+def recall(
+    store: Store,
+    *,
+    paths: list[str],
+    depth: int = DEFAULT_DEPTH,
+    caller_cwd: str | None = None,
+) -> dict[str, dict]:
+    """Build per-file timelines from the touch table.
+
+    Returns one ``PathTimeline`` per path, keyed by the repo-relative
+    path as stored. A path that has never been touched comes back as an
+    empty timeline — not an error and not a missing key — because the
+    caller asked about it and an answer about it is better than silence.
+
+    Three subprocess calls per query, regardless of how many paths were
+    asked for: one ``rev-parse`` to find the root, one ``status`` for
+    the dirty set, one ``diff`` for the committed-change set. The naive
+    shape — one fork per path — was measured at 985 ms across 43 files
+    and is forbidden. See ``docs/v2_recall.md`` §"The git budget".
+
+    ``caller_cwd`` is where the caller's git root is found. It defaults
+    to the process cwd, which is correct for the MCP tool (an agent's
+    cwd is its repo root) and for direct calls in tests.
+    """
+    if not paths:
+        return {}
+
+    cwd = caller_cwd or str(Path.cwd())
+    root = _git_root(cwd)
+    if root is None:
+        # Not a git repo: no dirty set, no diff, no root to normalise
+        # against. We can still answer "who touched this" if the touch
+        # table has rows, but we cannot filter by repo or compute
+        # current/dirty. Degraded but not broken.
+        root = cwd
+
+    repo_paths = _normalise_paths(paths, root)
+
+    # Three forks, total. The dirty set and the committed-change set are
+    # per-repo, not per-path — that is the whole point of the budget.
+    dirty = _dirty_set(cwd)
+
+    # The oldest sha across all query paths: the earliest sha_before or
+    # sha_after. This is the starting point for the committed-change diff,
+    # so one diff captures everything that could have broken any chain.
+    oldest_sha = _oldest_sha(store, repo_paths, root)
+    committed = _committed_change_set(cwd, oldest_sha)
+
+    return _build_timeline(
+        store,
+        repo_paths=repo_paths,
+        git_root=root,
+        depth=depth,
+        dirty_set=dirty,
+        committed_changes=committed,
+    )
+
+
+def _oldest_sha(store: Store, repo_paths: list[str], git_root: str) -> str:
+    """The earliest sha across all query paths, for the committed-change diff.
+
+    A single ``git diff`` from this sha to HEAD covers every committed
+    change that could have broken any path's hash chain. Without it, a
+    commit between two jobs would look like an unattributed gap when it
+    is really just a commit the daemon never observed as a job. The
+    sha is the ``sha_before`` of the oldest touch row — the content
+    that existed before any job touched the file — so the diff reaches
+    back to the beginning of the observed chain.
+
+    Returns an empty string if no shas exist. The diff call is skipped
+    in that case, which is correct: there is nothing to diff against,
+    and a path with no touch rows has no chain to break.
+    """
+    oldest: str | None = None
+    for path in repo_paths:
+        # The oldest row for this path, ordered by finished_at ascending.
+        # sha_before is what the file looked like before the first job
+        # touched it — that is the starting point for the diff.
+        stmt = (
+            select(touch.c.sha_before, touch.c.sha_after)
+            .select_from(
+                touch.join(jobs, touch.c.job_handle == jobs.c.handle).join(
+                    participants, jobs.c.target_id == participants.c.id
+                )
+            )
+            .where(touch.c.path == path)
+            .where(participants.c.cwd.like(f"{git_root}%"))
+            .order_by(jobs.c.finished_at.asc())
+            .limit(1)
+        )
+        row = store.conn.execute(stmt).first()
+        if row is None:
+            continue
+        candidate = row.sha_before or row.sha_after
+        # Keep the one that sorts first: blob shas are fixed-length
+        # hex, so lexicographic comparison is deterministic.
+        if candidate is not None and (oldest is None or candidate < oldest):
+            oldest = candidate
+    return oldest or ""
