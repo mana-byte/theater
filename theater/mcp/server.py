@@ -94,6 +94,13 @@ worktree: if True, create a git worktree for the child with its own
           a function signature, a schema — in both prompts, unchanged,
           so the branches still compose when they come back.
 base_branch: the branch to base the worktree on. Defaults to current HEAD.
+resume:    a session id, from `recall`, to resume instead of starting cold.
+           The harness must support it (call list_harnesses; a harness that
+           cannot is listed but will refuse the spawn with a message naming
+           itself). Some harnesses accept resume but cannot carry a prompt
+           through it: opencode's `-s` routes to the session view and drops
+           `--prompt`, so resuming opencode with a prompt is refused. Resume
+           without a prompt and use send to deliver the task.
 """
 
 
@@ -172,12 +179,13 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         cwd: str | None = None,
         worktree: bool = False, base_branch: str | None = None,
         model: str | None = None,
+        resume: str | None = None,
     ) -> dict:
         # Description comes from SPAWN_DOC, since the harness names in it are
         # only known once the registry is built. See `_spawn_description`.
         return await tools.spawn_session(
             session, harness=harness, prompt=prompt, approval=approval, cwd=cwd,
-            worktree=worktree, base_branch=base_branch, model=model,
+            worktree=worktree, base_branch=base_branch, model=model, resume=resume,
         )
 
     @mcp.tool()

@@ -140,6 +140,7 @@ async def spawn_session(
     worktree: bool = False,
     base_branch: str | None = None,
     model: str | None = None,
+    resume: str | None = None,
 ) -> dict:
     """Create a child agent in a new tmux window and return its record.
 
@@ -156,6 +157,12 @@ async def spawn_session(
     reports them. Membership is the whole of the check — Theater cannot confirm
     the name is real or that the CLI honoured it, so a typo the user vouched for
     surfaces as a child on the wrong model, not as an error here.
+
+    `resume` takes a session id from `recall` and attaches the new job to
+    that existing harness session instead of starting cold. Refused up front
+    for a harness whose `plan_launch` has no `resume` parameter. Some
+    harnesses accept resume but cannot carry a prompt through it — see
+    the tool description for the harness-specific behaviour.
     """
     if not session._resolved:
         await session.identify()
@@ -170,6 +177,7 @@ async def spawn_session(
         worktree=worktree,
         base_branch=base_branch,
         model=model,
+        resume=resume,
     )
     assert isinstance(record, dict)
     return _summarise(record)
