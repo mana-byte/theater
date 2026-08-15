@@ -263,7 +263,9 @@ class CodexHarness(Harness):
         # `codex resume <SESSION_ID>` is a subcommand (cli/src/main.rs:181-182,
         # 315-339), not a flag. It shares the same `-c` config overrides and
         # approval flags as the base command via the `SessionTuiCli` wrapper
-        # (tui/src/cli.rs:403), so the only structural difference is the
+        # (cli/src/main.rs:403), a newtype over TuiCli that only teaches the
+        # prompt positional to conflict with `--last`. We never pass `--last`,
+        # so the prompt still lands and the only structural difference is the
         # `resume` subcommand token and the session id positional.
         argv = [
             "codex",
