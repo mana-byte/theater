@@ -109,7 +109,14 @@ async def _tree(daemon, params: dict) -> list[dict]:
 
 @method("participants.get")
 async def _get(daemon, params: dict) -> dict:
-    return daemon.registry.get(_require(params, "id")).to_dict()
+    return daemon.registry.resolve(_require(params, "id")).to_dict()
+
+
+@method("participant.rename")
+async def _rename(daemon, params: dict) -> dict:
+    pid = _require(params, "id")
+    name = _require(params, "name")
+    return daemon.registry.rename(pid, name).to_dict()
 
 
 @method("participant.status")
@@ -120,8 +127,9 @@ async def _status(daemon, params: dict) -> dict:
         status = Status(raw)
     except ValueError:
         raise BadRequest(f"unknown status {raw!r}") from None
-    daemon.registry.set_status(pid, status)
-    return daemon.registry.get(pid).to_dict()
+    target = daemon.registry.resolve(pid)
+    daemon.registry.set_status(target.id, status)
+    return daemon.registry.get(target.id).to_dict()
 
 
 @method("participant.kill")
@@ -129,7 +137,8 @@ async def _kill(daemon, params: dict) -> dict:
     pid = _require(params, "id")
     caller_id = params.get("caller_id") or "cli"
 
-    target = daemon.registry.get(pid)
+    target = daemon.registry.resolve(pid)
+    pid = target.id
 
     if caller_id != "cli":
         if target.id == caller_id:
@@ -541,7 +550,8 @@ async def _check_approval_modal(
 @method("send")
 async def _send(daemon, params: dict) -> dict:
     """Send a prompt to an already-running agent by pasting into its pane."""
-    target_id = _require(params, "target")
+    target = daemon.registry.resolve(_require(params, "target"))
+    target_id = target.id
     prompt = _require(params, "prompt")
     caller_id = params.get("caller_id") or "cli"
 
@@ -549,7 +559,6 @@ async def _send(daemon, params: dict) -> dict:
         _refuse_send, daemon, caller_id=caller_id, target_id=target_id
     )
 
-    target = daemon.registry.get(target_id)
     if not target.addressable:
         refuse(
             NotAddressable(
@@ -708,12 +717,9 @@ async def _read_transcript(daemon, params: dict) -> dict:
     a file. The source opened here is short-lived and separate from the
     watcher's: reading history must not move the watcher's cursor.
     """
-    pid = _require(params, "id")
+    p = daemon.registry.resolve(_require(params, "id"))
+    pid = p.id
     last_n = int(params.get("last_n", 5))
-
-    p = daemon.registry.get(pid)
-    if p is None:
-        raise BadRequest(f"no participant {pid!r}")
 
     harness_name = normalize(p.harness)
     harness = HARNESSES.get(harness_name)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from theater.models import NotFound, Status, Tier
+from theater.models import BadRequest, NameTaken, NotFound, Status, Tier
 
 
 def test_pane_makes_you_adopted(registry):
@@ -122,3 +122,111 @@ def test_tree_nests_children(registry):
 def test_get_missing_raises(registry):
     with pytest.raises(NotFound):
         registry.get("nope")
+
+
+# ---- runtime names --------------------------------------------------------
+
+
+def test_a_fresh_participant_gets_a_name(registry):
+    p = registry.register(harness="vibe", pane="%3", cwd="/tmp")
+    assert p.name is not None
+    assert len(p.name) >= 4
+
+
+def test_name_is_stable_across_repeated_get(registry):
+    p = registry.register(harness="vibe", pane="%3", cwd="/tmp")
+    again = registry.get(p.id)
+    assert again.name == p.name
+
+
+def test_two_participants_never_share_a_name(registry):
+    a = registry.register(harness="vibe", pane="%1", cwd="/tmp")
+    b = registry.register(harness="vibe", pane="%2", cwd="/tmp")
+    assert a.name != b.name
+
+
+def test_name_survives_attach_pane(registry):
+    p = registry.create_spawned(harness="vibe", cwd="/tmp")
+    name_before = p.name
+    attached = registry.attach_pane(p.id, "%9")
+    assert attached.name == name_before
+
+
+def test_rename_rejects_a_taken_name(registry):
+    a = registry.register(harness="vibe", pane="%1", cwd="/tmp")
+    b = registry.register(harness="vibe", pane="%2", cwd="/tmp")
+    with pytest.raises(NameTaken):
+        registry.rename(b.id, a.name)
+
+
+def test_rename_to_own_current_name_succeeds(registry):
+    p = registry.register(harness="vibe", pane="%1", cwd="/tmp")
+    result = registry.rename(p.id, p.name)
+    assert result.name == p.name
+
+
+def test_rename_with_only_casing_changed_is_applied(registry):
+    p = registry.register(harness="vibe", pane="%1", cwd="/tmp")
+    upper = p.name.upper()
+    result = registry.rename(p.id, upper)
+    assert result.name == upper
+
+
+def test_rename_rejects_a_hex_string_id(registry):
+    p = registry.register(harness="vibe", pane="%1", cwd="/tmp")
+    with pytest.raises(BadRequest):
+        registry.rename(p.id, "deadbeefcafe")
+
+
+def test_rename_rejects_a_name_with_a_space(registry):
+    p = registry.register(harness="vibe", pane="%1", cwd="/tmp")
+    with pytest.raises(BadRequest):
+        registry.rename(p.id, "bad name")
+
+
+def test_resolve_finds_by_id(registry):
+    p = registry.register(harness="vibe", pane="%1", cwd="/tmp")
+    found = registry.resolve(p.id)
+    assert found.id == p.id
+
+
+def test_resolve_finds_by_exact_name(registry):
+    p = registry.register(harness="vibe", pane="%1", cwd="/tmp")
+    found = registry.resolve(p.name)
+    assert found.id == p.id
+
+
+def test_resolve_finds_by_differently_cased_name(registry):
+    p = registry.register(harness="vibe", pane="%1", cwd="/tmp")
+    found = registry.resolve(p.name.upper())
+    assert found.id == p.id
+
+
+def test_resolve_raises_for_a_stranger(registry):
+    with pytest.raises(NotFound):
+        registry.resolve("nobody")
+
+
+def test_resolve_returns_participant_with_name(registry):
+    p = registry.register(harness="vibe", pane="%1", cwd="/tmp")
+    found = registry.resolve(p.id)
+    assert found.name is not None
+
+
+def test_rename_changes_the_name(registry):
+    p = registry.register(harness="vibe", pane="%1", cwd="/tmp")
+    old_name = p.name
+    renamed = registry.rename(p.id, "Truffaldino")
+    assert renamed.name == "Truffaldino"
+    # The old name is freed and the new one resolves.
+    assert registry.resolve("Truffaldino").id == p.id
+    # Old name no longer resolves to this participant.
+    with pytest.raises(NotFound):
+        registry.resolve(old_name)
+
+
+def test_rename_by_current_name(registry):
+    p = registry.register(harness="vibe", pane="%1", cwd="/tmp")
+    renamed = registry.rename(p.name, "Scapino")
+    assert renamed.id == p.id
+    assert renamed.name == "Scapino"

@@ -88,3 +88,23 @@ def test_a_persisted_starting_status_loads_as_idle(store):
     got = store.get_participant(p.id)
     assert got is not None
     assert got.status is Status.IDLE
+
+
+def test_name_is_never_persisted_to_sqlite(store):
+    """The runtime name must not become a SQLite column.
+
+    A participant written through the registry has a name on the object, but
+    reading the same row directly from the store — bypassing the registry's
+    in-memory map — yields a participant whose ``name`` is ``None``.
+    """
+    from theater.daemon.registry import Registry
+    from theater.daemon.schema import participants as participants_table
+
+    reg = Registry(store)
+    p = reg.create_spawned(harness="vibe", cwd="/tmp")
+    assert p.name is not None  # the registry assigned one
+
+    raw = store.get_participant(p.id)
+    assert raw is not None
+    assert raw.name is None
+    assert "name" not in participants_table.c
