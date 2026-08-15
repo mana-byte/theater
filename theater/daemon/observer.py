@@ -890,10 +890,10 @@ class Observer:
 
         Note the queue this trusts is not entirely ours. A CLI spawn creates a
         job nobody awaits, and it legitimately takes the first turn end,
-        because the spawn prompt *is* the first turn. Spawning with an empty
-        prompt leaves that job to soak up the next turn instead — an
-        off-by-one bounded to a single job, and preferable to the alternative
-        of answering the wrong caller.
+        because the spawn prompt *is* the first turn. A promptless spawn does
+        the opposite — `methods.py` finishes it immediately as DONE, so it
+        never soaks up a turn end and never counts as work in flight that
+        would block a `send`.
         """
         if self.jobs is None:
             return
