@@ -129,6 +129,13 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         how they got here (tier, parent_id) and whether you can send work to them
         (addressable). External participants can call out but can never be
         called: they have no pane to deliver into.
+
+        Names are live-only aliases: a dead participant's name is null, shown
+        as "-" in the CLI. Names are recyclable — after a death, a later
+        participant can pick up the same mask. The id is stable and required
+        for historical access: use it, not the name, for any targeting that
+        spans time or has destructive consequences, because a recycled name
+        can identify a successor.
         """
         return await tools.list_participants(session, include_dead=include_dead)
 
@@ -224,7 +231,12 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         The returned handle can be passed to await_sessions.
 
         target_id: the participant id or its name. Names come from
-                   list_participants.
+                   list_participants and work only while the participant
+                   is live — a dead participant's name is null and cannot
+                   be resolved. Because names are recyclable, a name that
+                   pointed at one agent can later point at its successor
+                   after a death and respawn; use the id for any targeting
+                   that spans time or has destructive consequences.
         prompt:    the text to type into the target's pane.
 
         Fails with `human_present` if a human is detected at the target
@@ -244,8 +256,11 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         `last_n` events (user, assistant, tool_call, tool_result) with
         complete, unclipped text.
 
-        target_id: the participant id or its name. Names come from
-                   list_participants.
+        target_id: the participant id or its name. Names work only while
+                   the participant is live; a dead participant's name is
+                   null and cannot be resolved. Use the id to read the
+                   transcript of a dead participant — the id is stable
+                   and survives death.
         last_n:    number of events to return, newest. Default 5. Set to
                    0 for all events in the current transcript.
 
@@ -278,15 +293,20 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         entirely — the parent-child gate does not protect you there.
 
         target_id: the participant id or name of the child to kill.
-                   Names come from list_participants.
+                   Names work only while the participant is live; a dead
+                   participant's name is null and cannot be resolved. Use
+                   the id for destructive targeting: names are recyclable,
+                   so a name that pointed at one child can later point at
+                   a successor after a death and respawn.
 
         Refuses with `no_self_kill` if the target is you. Refuses with
         `not_your_child` if the target exists but is not your child
         (a sibling, a parent, a stranger, or a grandchild). A target
         that does not exist arrives as `not_found`. A target that is
-        already dead is a no-op that returns {"killed": false,
-        "reason": "already_dead"} rather than an error — killing a
-        dead thing is not a failure.
+        already dead is a no-op — but only when addressed by id, because
+        a dead participant has no name to resolve. The no-op returns
+        {"killed": false, "reason": "already_dead"} rather than an
+        error — killing a dead thing is not a failure.
 
         **Side effect: destroying a worktree child erases uncommitted
         work.** If the child was spawned with worktree=True, killing

@@ -551,6 +551,41 @@ def test_ls_all_asks_for_the_dead_too(answers):
     assert answers["calls"][0] == ("participants.list", {"include_dead": True})
 
 
+def test_ls_all_help_mentions_dead_rows_have_no_name(capsys):
+    """Dead rows have name=None; the help must say so so a user knows what '-' means."""
+    with pytest.raises(SystemExit):
+        parse("ls", "--all", "--help")
+    out = capsys.readouterr().out
+    assert "dead" in out.lower()
+    assert "name" in out.lower()
+
+
+def test_a_dead_participant_renders_with_a_dash_for_its_name():
+    """Dead rows have name=None; clip_name renders that as '-', not 'None'."""
+    dead = {**ROW, "name": None, "status": "dead", "addressable": False}
+    out = cli._format_ls([dead], tree=False)
+    lines = out.splitlines()
+    name_idx = lines[0].index("NAME")
+    assert lines[1][name_idx] == "-"
+
+
+def test_kill_help_says_names_are_live_only_and_recyclable(capsys):
+    """The kill help must warn that names are recyclable and live-only."""
+    with pytest.raises(SystemExit):
+        parse("kill", "--help")
+    out = capsys.readouterr().out
+    assert "live" in out.lower() or "dead" in out.lower()
+    assert "recycl" in out.lower()
+
+
+def test_name_help_says_live_participants_only(capsys):
+    """The name command's target help must say names work only while live."""
+    with pytest.raises(SystemExit):
+        parse("name", "--help")
+    out = capsys.readouterr().out
+    assert "live" in out.lower()
+
+
 def test_kill_names_what_it_killed(answers, capsys):
     assert cli.cmd_kill(parse("kill", "p-abc123")) == 0
     assert answers["calls"] == [("participant.kill", {"id": "p-abc123"})]

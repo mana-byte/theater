@@ -85,11 +85,25 @@ def _add_name_parser(sub) -> None:
     reason as `models`: ``_parser`` sits at the statement cap the linter
     enforces.
     """
-    kill = sub.add_parser("kill", help="Kill a participant's pane.")
-    kill.add_argument("id", help="Participant id or name.")
+    kill = sub.add_parser(
+        "kill",
+        help="Kill a participant's pane. Use the id for destructive actions.",
+    )
+    kill.add_argument(
+        "id",
+        help=(
+            "Participant id or name. Names work only while live; a dead "
+            "participant has no name. Already-dead is a no-op only when "
+            "addressed by id. Use the id for destructive targeting: names "
+            "are recyclable, so a name can later point at a successor."
+        ),
+    )
 
     name = sub.add_parser("name", help="Rename a participant.")
-    name.add_argument("target", help="Participant id or current name.")
+    name.add_argument(
+        "target",
+        help="Participant id or current name (live participants only).",
+    )
     name.add_argument("new_name", help="The new name.")
 
 
@@ -139,7 +153,14 @@ def _parser() -> argparse.ArgumentParser:
     once.add_argument(
         "--watch", action="store_true", help="Redraw until interrupted."
     )
-    ls.add_argument("--all", action="store_true", help="Include dead participants.")
+    ls.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "Include dead participants. Dead rows have no name (shown as '-'); "
+            "use the id for historical access."
+        ),
+    )
     ls.add_argument("--tree", action="store_true", help="Show lineage.")
     ls.add_argument("--interval", type=float, default=1.0, help="Seconds per redraw.")
 

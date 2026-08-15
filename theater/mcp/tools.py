@@ -57,6 +57,10 @@ def _summarise(p: dict) -> dict:
     """Trim a participant record to what another agent needs to route work.
 
     Everything here answers one of: who are you, where are you, can I reach you.
+    The ``name`` field is None for dead participants — names are live-only
+    aliases, recyclable across deaths. The ``id`` is the stable identity and
+    the one to use for any targeting that spans time or has destructive
+    consequences.
     """
     return {
         "id": p["id"],
@@ -249,6 +253,12 @@ async def send_prompt(
     a session a human is using. If the target is already processing a
     send prompt, the call fails with `busy`.
 
+    ``target_id`` may be a participant id or a name. Names work only
+    while the participant is live; a dead participant's name is null and
+    cannot be resolved. Because names are recyclable, use the id for any
+    targeting that spans time or has destructive consequences — a
+    recycled name can identify a successor.
+
     Returns a job handle that can be passed to `await_sessions`.
     """
     if not session._resolved:
@@ -277,6 +287,13 @@ async def put_child_back_in_the_wound(
     exactly as ``send_prompt`` does — so the gate covers this MCP path,
     and nothing else.
 
+    ``target_id`` may be a participant id or a name. Names work only while
+    the participant is live; a dead participant's name is null and cannot
+    be resolved. An already-dead kill is a no-op, but only when addressed
+    by id — a dead participant has no name to resolve. Because names are
+    recyclable, use the id for destructive targeting: a recycled name can
+    identify a successor.
+
     **Side effect: destroying a worktree child erases uncommitted work.**
     If the child was spawned with ``worktree=True``, killing it removes
     the git worktree and deletes its branch. Commits already made on the
@@ -304,6 +321,11 @@ async def read_transcript(
     The job result from spawn/send is clipped to 2000 chars. This method
     returns the full assistant responses from the transcript on disk,
     so a caller that needs the complete text can get it.
+
+    ``target_id`` may be a participant id or a name. Names work only
+    while the participant is live; a dead participant's name is null
+    and cannot be resolved. Use the id to read the transcript of a dead
+    participant — the id is stable and survives death.
 
     Returns the last `last_n` events (user, assistant, tool_call,
     tool_result) from the transcript, in chronological order. Each entry

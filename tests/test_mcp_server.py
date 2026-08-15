@@ -91,6 +91,34 @@ async def test_orchestration_directives_reach_the_tools_that_need_them(daemon):
     assert "done" in tools["await_sessions"]
 
 
+async def test_name_semantics_reach_the_tools_that_target_by_name(daemon):
+    """Names are live-only, recyclable aliases; the id is stable.
+
+    These directives must live on the tool descriptions, not only in
+    `instructions` — a model that never sees the server instructions
+    still reads every tool's description. Each tool that accepts a
+    participant id or name must warn that names work only while live
+    and that a recycled name can identify a successor.
+    """
+    tools = {t.name: t.description or "" for t in await build("p1", "vibe").list_tools()}
+
+    # list_participants: dead participants have no name; names are recyclable.
+    assert "dead" in tools["list_participants"].lower()
+    assert "recycl" in tools["list_participants"].lower()
+
+    # send: names work only while live; use id for destructive targeting.
+    assert "live" in tools["send"].lower()
+    assert "recycl" in tools["send"].lower()
+
+    # read_transcript: names work only while live; use id for dead participants.
+    assert "live" in tools["read_transcript"].lower()
+
+    # put_child_back_in_the_wound: already-dead is a no-op only by id;
+    # names are recyclable.
+    assert "already" in tools["put_child_back_in_the_wound"].lower()
+    assert "recycl" in tools["put_child_back_in_the_wound"].lower()
+
+
 async def test_spawn_session_forces_a_choice_of_approval(daemon):
     schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
     required = schema["spawn_session"]["required"]

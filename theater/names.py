@@ -1,11 +1,21 @@
-"""Runtime-only participant names.
+"""Live-only participant names.
 
 Every participant has a 12-hex-char id that a human cannot say out loud. A
 random commedia dell'arte mask gives it a name the human can speak and type, so
 ``tell Arlequin to run the tests'' works and so does ``theater kill Arlequin``.
 
+Names are recyclable aliases held only by live participants. When a participant
+dies its name is released — a later participant may pick up the same mask, so
+a name that appears in a user's scrollback can point at a *different* agent
+after a death and respawn. The id is the stable identity: it survives death,
+daemon restarts, and name recycling. Use the id — not the name — for any
+targeting that spans time or that has destructive consequences, because a
+recycled name can identify a successor.
+
 The name is never persisted: it lives in the Registry's in-memory map and is
-regenerated when the daemon restarts.  See ``theater/daemon/registry.py``.
+regenerated when the daemon restarts. Dead rows have ``name = None``, so a
+dead participant shows as ``-`` in the CLI and cannot be reached by name. See
+``theater/daemon/registry.py``.
 """
 
 from __future__ import annotations
