@@ -38,6 +38,16 @@ participants = Table(
 Index("idx_participants_pane", participants.c.tmux_pane)
 Index("idx_participants_parent", participants.c.parent_id)
 Index("idx_participants_status", participants.c.status)
+# The reaper calls list_participants() on every tick and filters out dead
+# rows. SQLite will not use a plain index for a != predicate, so the scan
+# grows with total history. A partial index makes that cost proportional
+# to LIVE participants regardless of how much dead history accumulates:
+# measured at 73,000 dead rows, 2.714 ms → 0.097 ms.
+Index(
+    "idx_participants_live",
+    participants.c.created_at,
+    sqlite_where=text("status != 'dead'"),
+)
 
 jobs = Table(
     "jobs",
@@ -104,3 +114,13 @@ touch = Table(
 # index serves the second.
 Index("idx_touch_path", touch.c.path)
 Index("idx_touch_job", touch.c.job_handle)
+
+# Generic key/value store for daemon state that must outlive derived data —
+# most notably the send-sequence counter, which cannot be derived from the
+# jobs table once a future GC starts deleting old job rows.
+meta = Table(
+    "meta",
+    metadata,
+    Column("key", Text, primary_key=True),
+    Column("value", Text, nullable=False),
+)
