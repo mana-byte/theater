@@ -121,6 +121,11 @@ class Daemon:
             )
             self._server: asyncio.Server | None = None
             self._reaper: asyncio.Task | None = None
+            #: Participant ids whose kill is in flight. While a pid is in
+            #: here, the reaper skips it when assigning CRASHED — the
+            #: explicit-kill path must win the first-terminal-write race so
+            #: the job lands KILLED, not CRASHED. In-memory only; see _kill.
+            self._explicit_kills: set[str] = set()
             #: (device, inode) of the bound socket, so shutdown can tell
             #: ours from a successor's at the same path.
             self._sock_id: tuple[int, int] | None = None
@@ -385,6 +390,11 @@ class Daemon:
                 # it left because it finished, and the branch holds its commits.
                 self.spawner.retire(p, delete_branch=False)
                 self.registry.mark_dead(p.id)
+                # An explicit kill in flight owns the terminal write: the
+                # job must land KILLED, not CRASHED, so the reaper leaves
+                # those jobs alone for the kill path to finish.
+                if p.id in self._explicit_kills:
+                    continue
                 running = self.store.running_jobs_for_target(p.id)
                 for job in running:
                     self.jobs.finish(
