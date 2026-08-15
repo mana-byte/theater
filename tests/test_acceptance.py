@@ -214,9 +214,10 @@ async def test_acceptance_multi_await_returns_on_first_completion(
 ):
     """Multi-handle await returns when ANY job finishes; unfinished siblings are running.
 
-    Fails on this branch: production awaits with ALL_COMPLETED, so finishing
-    one of two running jobs does not wake the call — the outer wait_for trips
-    the deadlock bound.
+    Under the FIRST_COMPLETED contract, finishing one of two running jobs
+    wakes the call immediately with that job done and the sibling still
+    running. This would fail under ALL_COMPLETED semantics: the call would
+    block waiting for both, and the outer wait_for deadlock bound would trip.
     """
     parent = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
     child_a = await client.call(
