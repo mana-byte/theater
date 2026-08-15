@@ -557,9 +557,7 @@ async def test_a_child_that_loses_its_pane_without_explicit_kill_crashes(
     a self-exit must keep its old behaviour so the distinction between
     crashed and killed stays meaningful.
     """
-    record = await client.call(
-        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
-    )
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
     handle = record["handle"]
 
     import theater.daemon.server as server_mod
@@ -820,3 +818,162 @@ async def test_kill_addressed_by_name_puts_id_in_explicit_kills(client, fake_tmu
     assert record["id"] not in daemon._explicit_kills
     dead = await client.call("participants.get", id=record["id"])
     assert dead["status"] == "dead"
+
+
+# ---- live-only names contract ---------------------------------------------
+#
+# Names are runtime-only, held by the Registry's in-memory ``_names`` map.
+# The contract under test: a dead participant's name is freed, so the name
+# becomes ``None`` on the dead record, the former name no longer resolves,
+# and a live successor can claim it.  These tests exercise every entry point
+# that can transition a participant to dead — ``participant.kill`` (by name
+# and by id) and ``participant.status`` with ``status="dead"`` — and then
+# verify the full set of post-death invariants through the RPC path.
+#
+# On the current base the core implementation is on another branch, so some
+# assertions about ``name is None`` and name reuse will fail for *expected*
+# semantic reasons.  See the cross-branch dependency note at the bottom.
+
+#: A fixed valid name used across these tests so assertions never depend on
+#: the random mask the Registry assigned.
+_FIXED_NAME = "Brighella"
+
+
+async def test_kill_by_live_name_still_works(client, fake_tmux):
+    """Killing by a live participant's name resolves and marks it dead."""
+    record = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    name = record["name"]
+    assert name is not None
+
+    await client.call("participant.kill", id=name)
+
+    dead = await client.call("participants.get", id=record["id"])
+    assert dead["status"] == "dead"
+
+
+async def test_after_death_get_by_id_returns_dead_with_name_none(client, fake_tmux):
+    """A dead participant's record reads status=dead, name=None."""
+    record = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    await client.call("participant.kill", id=record["id"])
+
+    dead = await client.call("participants.get", id=record["id"])
+    assert dead["status"] == "dead"
+    assert dead["name"] is None
+
+
+async def test_former_name_no_longer_resolves_after_death(client, fake_tmux):
+    """The name of a dead participant must not resolve to anything."""
+    record = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    # Rename to a known fixed name so the assertion is deterministic.
+    await client.call("participant.rename", id=record["id"], name=_FIXED_NAME)
+    await client.call("participant.kill", id=record["id"])
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call("participants.get", id=_FIXED_NAME)
+    assert exc.value.code == "not_found"
+
+
+async def test_already_dead_kill_by_id_returns_already_dead(client, fake_tmux):
+    """Killing an already-dead child by id is a no-op returning already_dead."""
+    parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
+    child = await client.call(
+        "spawn",
+        harness="vibe",
+        prompt="hi",
+        approval="manual",
+        cwd="/tmp",
+        parent_id=parent["id"],
+    )
+    await client.call("participant.kill", id=child["id"], caller_id=parent["id"])
+
+    result = await client.call("participant.kill", id=child["id"], caller_id=parent["id"])
+    assert result == {"id": child["id"], "killed": False, "reason": "already_dead"}
+
+
+async def test_status_dead_frees_name_through_rpc(client, fake_tmux):
+    """Setting status=dead via participant.status frees the name through the RPC path."""
+    record = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    await client.call("participant.rename", id=record["id"], name=_FIXED_NAME)
+
+    updated = await client.call("participant.status", id=record["id"], status="dead")
+    assert updated["status"] == "dead"
+    assert updated["name"] is None
+
+    # The freed name no longer resolves.
+    with pytest.raises(RemoteError) as exc:
+        await client.call("participants.get", id=_FIXED_NAME)
+    assert exc.value.code == "not_found"
+
+
+async def test_list_include_dead_returns_dead_rows_with_name_none(client, fake_tmux):
+    """participants.list(include_dead=True) returns dead rows with name=None."""
+    record = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    await client.call("participant.kill", id=record["id"])
+
+    rows = await client.call("participants.list", include_dead=True)
+    dead = [r for r in rows if r["id"] == record["id"]]
+    assert len(dead) == 1
+    assert dead[0]["status"] == "dead"
+    assert dead[0]["name"] is None
+
+
+async def test_live_successor_can_claim_released_name(client, fake_tmux):
+    """After death frees a name, a live successor renames to it and resolves by it."""
+    first = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    await client.call("participant.rename", id=first["id"], name=_FIXED_NAME)
+    await client.call("participant.kill", id=first["id"])
+
+    # A new participant claims the now-freed name.
+    successor = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    renamed = await client.call("participant.rename", id=successor["id"], name=_FIXED_NAME)
+    assert renamed["name"] == _FIXED_NAME
+
+    # The name now resolves to the successor.
+    fetched = await client.call("participants.get", id=_FIXED_NAME)
+    assert fetched["id"] == successor["id"]
+    assert fetched["name"] == _FIXED_NAME
+    assert fetched["status"] != "dead"
+
+
+async def test_read_transcript_by_dead_name_fails_not_found_before_source(client, fake_tmux):
+    """read_transcript called with a former dead name fails at resolution, not at source access."""
+    record = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    await client.call("participant.rename", id=record["id"], name=_FIXED_NAME)
+    await client.call("participant.kill", id=record["id"])
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call("read_transcript", id=_FIXED_NAME, last_n=5)
+    assert exc.value.code == "not_found"
+
+
+# ---- cross-branch dependency note -----------------------------------------
+#
+# The tests above depend on the core "live-only names" implementation that
+# lives on another branch.  Specifically, the production change makes
+# ``Registry.mark_dead`` (and the kill path) clear the participant's entry
+# from ``self._names`` and set ``participant.name = None``.  On the current
+# base (without that change):
+#
+#   * ``test_after_death_get_by_id_returns_dead_with_name_none`` — FAILS:
+#     the dead participant keeps its name in ``_names``, so
+#     ``dead["name"]`` is still the live mask, not ``None``.
+#   * ``test_former_name_no_longer_resolves_after_death`` — FAILS:
+#     the name still resolves to the dead participant.
+#   * ``test_status_dead_frees_name_through_rpc`` — FAILS:
+#     ``updated["name"]`` is non-None and the name still resolves.
+#   * ``test_list_include_dead_returns_dead_rows_with_name_none`` — FAILS:
+#     dead rows carry their live name rather than ``None``.
+#   * ``test_live_successor_can_claim_released_name`` — FAILS:
+#     ``participant.rename`` raises ``name_taken`` because the dead
+#     participant still holds the name.
+#   * ``test_read_transcript_by_dead_name_fails_not_found_before_source`` —
+#     FAILS: the name resolves to the dead participant rather than raising
+#     ``not_found``, so the call proceeds to source access (which may
+#     itself fail with a different error).
+#
+# The remaining tests pass on the current base:
+#   * ``test_kill_by_live_name_still_works`` — name resolution for a live
+#     participant is unchanged.
+#   * ``test_already_dead_kill_by_id_returns_already_dead`` — PASS: the
+#     ``already_dead`` no-op path predates the names change (it only fires
+#     when ``caller_id != "cli"``, hence the parent-child setup).
