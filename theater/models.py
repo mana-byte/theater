@@ -64,10 +64,9 @@ class Participant:
 
     @classmethod
     def from_row(cls, row) -> Participant:
-        # Migration shim: older daemons persisted 'starting' before STARTING was
-        # removed. A row from such a database loads as IDLE, since a participant
-        # that never left 'starting' was functionally idle. This can be deleted
-        # in a later version once no database can contain the old value.
+        # Migration shim: older daemons persisted 'starting' before that status
+        # was removed. A row with it loads as IDLE — a participant that never
+        # left 'starting' was functionally idle.
         raw_status = row["status"]
         status = Status.IDLE if raw_status == "starting" else Status(raw_status)
         return cls(

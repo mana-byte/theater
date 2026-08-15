@@ -167,14 +167,10 @@ class DaemonLock:
                 pid = read_pid(self.path)
                 os.close(fd)
                 raise LockHeld(pid) from exc
-            # NFS and some FUSE mounts have no working flock. Refusing to run
-            # there would be a worse failure than the race this closes, so
-            # carry on unlocked and leave a trace of why the guarantee is gone.
-            #
-            # Unlocked is not unchecked: the pid in the file still rules out
-            # the common case of a daemon that is plainly already running. What
-            # is lost is only atomicity — two daemons starting at the same
-            # instant can both find the file empty and both win.
+            # NFS and some FUSE mounts have no working flock. Carry on
+            # unlocked: the pid in the file still rules out the common case
+            # of a daemon already running. What is lost is atomicity — two
+            # daemons starting at once can both find the file empty and both win.
             live = _live_daemon_pid(self.path)
             if live is not None:
                 os.close(fd)

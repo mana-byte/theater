@@ -84,11 +84,8 @@ from theater.models import JobState, Status, Tier
 
 logger = logging.getLogger("theater.observer")
 
-#: Fallback timings, used when no config is passed in. Each is documented on
-#: `config.ObserverSection`, which owns the literal so the value a user can set
-#: and the value the code defaults to cannot drift apart. A live daemon passes
-#: the loaded config through `Daemon.__init__`; these matter for direct
-#: construction, which is mostly tests.
+#: Fallback timings. `config.ObserverSection` owns the literal so the
+#: default and the settable value cannot drift. Tests use these directly.
 _DEFAULTS = ObserverSection()
 
 POLL_INTERVAL = _DEFAULTS.poll_interval
@@ -100,15 +97,12 @@ SCREEN_INTERVAL = _DEFAULTS.screen_interval
 RESCUE_TIMEOUT = _DEFAULTS.rescue_timeout
 
 #: Marks a job the observer finished without ever reading a turn-end record.
-#: The caller gets the last thing the agent said, and this code to say that is
-#: what it is: a salvage, not a reply the harness declared complete.
+#: Salvage, not a reply the harness declared complete.
 RESCUE_CODE = "turn_end_unseen"
 
 #: Consecutive idle-looking screens before a turn is called finished. Two, not
-#: one: the screen is a rendering, and a harness that clears the pane between
-#: phases shows a bare prompt for one frame in the middle of working. Finishing
-#: a job there hands the caller a partial answer, which is worse than being a
-#: poll late — see `_watch_screen`.
+#: one: a harness that clears the pane between phases shows a bare prompt for
+#: one frame mid-work. Finishing there hands the caller a partial answer.
 IDLE_CONFIRMATIONS = 2
 
 
@@ -126,54 +120,45 @@ def screen_result(capture: str) -> str:
     while lines and not lines[-1].strip():
         lines.pop()
     if lines:
-        lines.pop()  # the prompt itself, which is not part of any answer
+        lines.pop()
     return "\n".join(lines).strip()
 
 
-#: How many handled turn ids one participant remembers. Its only job is to
-#: absorb a harness announcing the same boundary twice, and those duplicates
-#: are adjacent — Claude writes them as consecutive records of one split
-#: message — so a small window is enough. Bounded because a watcher lives as
-#: long as its participant does, and an unbounded set here would be a slow
-#: leak on a session that runs for a day.
+#: How many handled turn ids one participant remembers. Duplicates are
+#: adjacent — Claude writes them as consecutive records — so a small window
+#: suffices. Bounded because a watcher lives as long as its participant, and
+#: an unbounded set would leak on a day-long session.
 _ANSWERED_TURNS = 32
 
 #: How much of a prompt has to reappear before a turn is called an answer to
-#: it. Not the whole prompt: every harness clips what it reports at
-#: `harness.MAX_TEXT`, so a long prompt never comes back whole, and a wrapper
-#: around it would defeat equality anyway. Long enough to be specific — two
-#: prompts sharing 120 characters are the same question by any reading — and
-#: short enough that the clip point is nowhere near it.
+#: it. Not the whole prompt: every harness clips at `harness.MAX_TEXT`, so a
+#: long prompt never comes back whole. Long enough to be specific — two
+#: prompts sharing 120 characters are the same question — and short enough
+#: that the clip point is nowhere near it.
 _PROMPT_MATCH = 120
 
 #: How many consecutive turn ends that do not match the waiting job's prompt
 #: are tolerated before the job is released. One is legitimate: a human
 #: interjects, and the injected prompt is genuinely still queued behind
 #: theirs. Two means the pane processed two other turns while ours supposedly
-#: waited, which no real queue does — the prompt was never delivered, and the
-#: job would otherwise stay running forever, because the rescue timer cannot
-#: fire on a participant that is actively working. The accepted cost: a human
-#: taking two turns back to back while our prompt legitimately waits behind
-#: them will fail the job early. That is cheaper than an unbounded wedge, and
-#: the error code says which happened.
+#: waited — the prompt was never delivered, and the job would stay running
+#: forever, because rescue cannot fire on a participant that is actively
+#: working. The cost: a human taking two turns back to back while our prompt
+#: legitimately waits will fail the job early — cheaper than an unbounded wedge.
 UNMATCHED_LIMIT = 2
 
 #: How many entries the per-job miss counter (`Observer._unmatched`) holds
-#: before the oldest is evicted. The dict is cleared on a match and in
-#: `_finish`, but a job can end outside the observer — a `kill`, or the
-#: `send_failed` path in methods.py — which leaves its entry behind if a miss
-#: was already recorded. Unbounded, that is a slow leak on a watcher that
-#: lives as long as its participant does, exactly the class of bug
-#: `_ANSWERED_TURNS` above was sized for. A plain dict preserves insertion
-#: order, so popping the first key is enough to drop the oldest.
+#: before the oldest is evicted. A job can end outside the observer — a
+#: `kill`, or `send_failed` — leaving its entry behind. Unbounded, that is a
+#: slow leak on a watcher that lives as long as its participant. A plain dict
+#: preserves insertion order, so popping the first key drops the oldest.
 UNMATCHED_CAP = 256
 
 #: Set on a job released because its prompt was never seen in the transcript
-#: after `UNMATCHED_LIMIT` turn ends answered someone else. The job is
-#: finished as CRASHED, not DONE: no prompt landed and no answer exists, which
-#: is the same class of failure as a `send` whose `deliver_text` raised.
-#: Distinct from `RESCUE_CODE` (a turn end that was never observed at all,
-#: which salvages text and stays DONE) so a caller can tell the two apart.
+#: after `UNMATCHED_LIMIT` turn ends answered someone else. Finished as
+#: CRASHED: no prompt landed and no answer exists — the same class of failure
+#: as a `send` whose `deliver_text` raised. Distinct from `RESCUE_CODE`
+#: (salvages text, stays DONE) so a caller can tell the two apart.
 UNDELIVERED_CODE = "prompt_never_seen"
 
 
@@ -197,8 +182,7 @@ def answers_prompt(heard: Sequence[str], prompt: str | None) -> bool:
     and a harness is free to wrap the prompt in scaffolding of its own.
     """
     if not prompt or not prompt.strip():
-        # A spawn with no prompt has nothing to claim. Answering keeps the
-        # documented behaviour where such a job soaks up the next turn.
+        # No prompt to claim; answer yes so the job soaks up the next turn.
         return True
     if not heard:
         return True
@@ -239,8 +223,8 @@ class TurnAccumulator:
 
     #: Assistant text seen since the last boundary, in arrival order.
     _blocks: list[str] = field(default_factory=list)
-    #: User text seen since the last boundary, in arrival order. Kept for
-    #: attribution, not for display: it is how a turn says whose it is.
+    #: User text seen since the last boundary. Kept for attribution — how a
+    #: turn says whose it is — not for display.
     _heard: list[str] = field(default_factory=list)
     #: Turn ids already handled, newest last. A deque and a set together: the
     #: set answers the question, the deque decides what to forget.
@@ -307,8 +291,8 @@ class QuietClock:
     screen_quiet_since: float | None = None
     #: The same silence again, for the job rescue. Reset independently.
     rescue_since: float | None = None
-    #: The last thing the agent was heard to say. What a rescued job returns,
-    #: since by definition no turn-end event arrived to carry a result.
+    #: Last thing the agent said. What a rescued job returns, since no
+    #: turn-end event arrived to carry a result.
     last_text: str = ""
 
     def stir(self) -> None:
@@ -355,9 +339,8 @@ class Observer:
     ):
         self.registry = registry
         self.store = registry.store
-        #: Injectable, and an empty map is a legitimate value meaning "observe
-        #: nothing" — which is what socket-level tests want, since the real
-        #: harness roots point at the user's own ~/.claude and ~/.vibe.
+        #: Empty map is legitimate — "observe nothing" — which socket-level
+        #: tests want, since real harness roots point at ~/.claude and ~/.vibe.
         self.harnesses = HARNESSES if harnesses is None else harnesses
         self.poll = poll
         self.search = search
@@ -366,21 +349,19 @@ class Observer:
         self.awaiting = awaiting
         self.screen = screen
         self.rescue = rescue
-        #: Optional JobManager. When set, turn-end events for a participant
-        #: with a running job finish that job with the assistant text as
-        #: the result.
+        #: When set, turn-end events for a participant with a running job
+        #: finish that job with the assistant text as the result.
         self.jobs = jobs
         self._tasks: dict[str, asyncio.Task] = {}
         #: Participants whose watcher ended by itself. Not restarted: whatever
-        #: stopped it will stop it again, and a respawn loop would be worse
-        #: than a blind spot.
+        #: stopped it will stop it again.
         self._retired: set[str] = set()
         #: Participants we cannot observe, warned about once each. `hello`
-        #: accepts any harness string, so a session that misreports its own
-        #: harness would otherwise be invisible with nothing anywhere saying so.
+        #: accepts any harness string, so a misreported harness would otherwise
+        #: be invisible with nothing saying so.
         self._unobservable: set[str] = set()
         #: Per-job count of consecutive turn ends that did not match the
-        #: waiting prompt. Cleared on a match or when the job is finished.
+        #: waiting prompt.
         self._unmatched: dict[str, int] = {}
         self._supervisor: asyncio.Task | None = None
         self._stopping = asyncio.Event()
@@ -438,8 +419,8 @@ class Observer:
                 self._warn_unobservable(pid, p)
                 continue
             observer = harness.observer
-            # A transcript is found by working directory; a screen is found by
-            # pane. So cwd is required for one loop and irrelevant to the other.
+            # A transcript is found by cwd; a screen by pane. So cwd is
+            # required for one loop and irrelevant to the other.
             if observer.has_transcript and not p.cwd:
                 self._warn_unobservable(pid, p)
                 continue
@@ -461,8 +442,8 @@ class Observer:
     # ---- one participant -----------------------------------------------
 
     async def _watch(self, pid: str, harness_name: str) -> None:
-        # Resolved by name on every start rather than captured once, so a
-        # restarted watcher picks up a registry that has since been reinstalled.
+        # Resolved by name on every start so a restarted watcher picks up a
+        # registry that has since been reinstalled.
         observer = self.harnesses[harness_name].observer
         source = self._open_source(pid, observer)
         if source is None:
@@ -475,16 +456,12 @@ class Observer:
                 try:
                     batch = await source.read()
                     if batch.waiting:
-                        # Nothing to read from yet, so back off on the search
-                        # interval. Silence from a source that has not attached
-                        # says nothing about the agent — but the *screen* does,
-                        # and the pane has existed since the spawn. Claude
-                        # writes its transcript only once the session records
-                        # its first message, so a pane parked on the trust
-                        # dialog has no transcript to find and used to hold the
-                        # IDLE its spawn set for as long as nobody prompted it:
-                        # no status at all, in exactly the state a human most
-                        # needs to see.
+                        # Nothing to read from yet. Silence from an unattached
+                        # source says nothing about the agent — but the screen
+                        # does, and the pane has existed since the spawn. Claude
+                        # writes its transcript only on first message, so a pane
+                        # parked on the trust dialog has no transcript and no
+                        # status without the screen arm.
                         await self._screen_only(pid, observer, clock)
                         await self._sleep(self.search)
                         continue
@@ -502,9 +479,8 @@ class Observer:
             try:
                 await source.aclose()
             except (Exception, asyncio.CancelledError):
-                # Closing runs while unwinding, so it may itself be cancelled.
-                # Swallowing that here does not lose the cancellation: the
-                # exception that brought us into `finally` still propagates.
+                # Closing may itself be cancelled; the exception that brought
+                # us into `finally` still propagates.
                 logger.debug("closing source for %s failed", pid, exc_info=True)
 
     def _open_source(self, pid: str, observer: HarnessObserver) -> Source | None:
@@ -554,14 +530,11 @@ class Observer:
         if batch.attached is not None:
             self._on_attach(pid, batch.attached)
 
-        # Resolved lazily: the job handle for this participant, looked up at
-        # most once per _apply call, and only when at least one event in the
-        # batch carries paths. Most batches carry none — the plugins fill
-        # Event.paths only for tool calls that touch files — so this defers
-        # the database query to the minority of batches where it can pay off.
-        # A per-event lookup would run oldest_running_job_for_target on the
-        # hot path of every poll of every watched participant, which is a
-        # query per event on a batch that routinely holds dozens.
+        # Resolved lazily: the job handle is looked up at most once per
+        # _apply call, and only when at least one event carries paths. Most
+        # batches carry none, so this defers the database query to the
+        # minority where it can pay off. A per-event lookup would run
+        # oldest_running_job_for_target on every event of every poll.
         job_handle: str | None = None
 
         last = None
@@ -573,8 +546,7 @@ class Observer:
                     "text": event.text,
                     "tool": event.tool_name,
                     # The harness's own clock, null when it keeps none. The
-                    # bus row's own ts is observation time, which is a
-                    # different quantity; do not conflate them.
+                    # bus row's ts is observation time — do not conflate them.
                     "ts": event.ts,
                     "turn_end": event.turn_end,
                     "turn": event.turn_id,
@@ -595,22 +567,18 @@ class Observer:
                 turns.hear(event.text)
             if event.turn_end:
                 # Whatever the turn said, whether it came in this batch or an
-                # earlier one. Always taken, even when the boundary is a
-                # duplicate we will not answer: the text belongs to the turn
-                # that just ended and must not spill into the next one.
+                # earlier one. Always taken, even for a duplicate boundary we
+                # will not answer: text must not spill into the next turn.
                 turn = turns.take()
                 if not turns.already_handled(event.turn_id):
-                    # The boundary's own text still wins where it has any.
-                    # Codex repeats the whole reply on `task_complete` after a
-                    # preamble has already gone by, so joining the two would
-                    # hand the caller the preamble twice.
+                    # The boundary's own text wins where it has any. Codex
+                    # repeats the whole reply on `task_complete` after a
+                    # preamble has already gone by; joining would duplicate.
                     self._answer_turn(pid, event.text or turn.said, turn.heard)
                     turns.mark_handled(event.turn_id)
-                # Rescue salvages `last_text` when no boundary is ever read.
-                # Past this one, anything said before it has been delivered
-                # and is not a candidate answer to whatever comes next — a
-                # rescue returning it would look like a reply rather than the
-                # stale echo it is.
+                # Past this turn end, delivered text is not a candidate answer
+                # to whatever comes next — rescue returning it would look like
+                # a reply rather than a stale echo.
                 clock.last_text = ""
 
         if batch.status is not None:
@@ -661,7 +629,7 @@ class Observer:
                     elif idle_streak == 0:
                         ended = False
                         self._settle(pid, Status.WORKING)
-                    # A streak of one is undecided: say nothing.
+                    # A streak of one is undecided.
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -723,25 +691,21 @@ class Observer:
 
         # Ask the source whether it should be reading somewhere else. Vibe
         # opens a new session directory every turn, so a quiet transcript may
-        # just be the wrong transcript. Not done every poll: for a file-backed
-        # source this is a directory scan.
+        # be the wrong one. Not every poll: for a file-backed source this is
+        # a directory scan.
         if clock.quiet_for(now) > self.relocate:
             batch = await source.refresh()
             if self._apply(pid, batch, clock, turns):
                 clock.stir()
                 return
 
-        # Then ask the screen whether this silence is a prompt waiting on a
-        # human rather than an agent thinking.
         if clock.screen_quiet_for(now) > self.awaiting:
             await self._check_idle_screen(pid, observer)
-            clock.screen_quiet_since = now  # throttle to one check per window
+            clock.screen_quiet_since = now  # throttle
 
-        # Finally, much later, assume a turn end we never read and release
-        # anyone still waiting on this participant.
         if clock.rescue_quiet_for(now) > self.rescue:
             await self._rescue_jobs(pid, observer, clock)
-            clock.rescue_since = now  # throttle, same as above
+            clock.rescue_since = now  # throttle
 
     async def _screen_only(
         self, pid: str, observer: HarnessObserver, clock: QuietClock
@@ -764,7 +728,7 @@ class Observer:
             clock.screen_quiet_since = now
         if clock.screen_quiet_for(now) > self.awaiting:
             await self._check_idle_screen(pid, observer)
-            clock.screen_quiet_since = now  # throttle, as in `_on_quiet`
+            clock.screen_quiet_since = now  # throttle
 
     def _on_attach(self, pid: str, attached: Attachment) -> None:
         """A source started reading somewhere. Say so, and settle the status."""
@@ -785,10 +749,8 @@ class Observer:
             attached.skipped,
         )
         # Derive an initial status from the last record skipped, so a spawned
-        # agent that finished its turn before we attached does not stay IDLE
-        # when its last action was working. The bus gets no history replayed —
-        # only the status moves. A source with nothing behind it leaves the
-        # status as it was.
+        # agent that finished its turn before we attached does not stay IDLE.
+        # No history replayed — only the status moves.
         event = attached.last_event
         if event is not None:
             self._settle(pid, status_after(event))
@@ -800,8 +762,8 @@ class Observer:
         if p is None or p.status is Status.DEAD:
             return
         if p.status is desired:
-            # Same status, new evidence: last_activity still has to move, but
-            # writing a status event every quarter second would drown the bus.
+            # Same status, new evidence: last_activity moves, but a status
+            # event every quarter second would drown the bus.
             self.registry.touch(pid)
         else:
             self.registry.set_status(pid, desired)
@@ -831,9 +793,9 @@ class Observer:
         if capture is None:
             return
         reading = observer.screen_reading(capture)
-        # PROMPT -> IDLE is not safe to defer to the rescue timer: `_rescue_jobs`
-        # deliberately does not touch participant status, so a participant whose
-        # turn ended without an observed boundary would read WORKING forever.
+        # PROMPT -> IDLE cannot defer to rescue: `_rescue_jobs` does not touch
+        # status, so a participant whose turn ended unobserved would read
+        # WORKING forever.
         if reading.kind in (ScreenKind.APPROVAL, ScreenKind.TRUST):
             self._settle(pid, Status.AWAITING_INPUT)
             logger.info("participant %s awaiting input (%s on screen)", pid, reading.kind)
@@ -841,8 +803,7 @@ class Observer:
             self._settle(pid, Status.WORKING)
         elif reading.kind is ScreenKind.PROMPT:
             self._settle(pid, Status.IDLE)
-        # UNKNOWN: leave the status untouched. The screen said nothing the
-        # reducer can act on, and the previous status is the best guess.
+        # UNKNOWN: the screen said nothing the reducer can act on.
 
     async def _rescue_jobs(
         self, pid: str, observer: HarnessObserver, clock: QuietClock
@@ -877,9 +838,9 @@ class Observer:
         capture = await self._capture(p.tmux_pane)
         if capture is None:
             return
-        # Only a bare PROMPT justifies rescue. APPROVAL/TRUST mean the agent is
-        # blocked on a modal the human has not dismissed, not that a turn ended
-        # unobserved — the job may still complete once the human acts.
+        # Only a bare PROMPT justifies rescue. APPROVAL/TRUST mean the agent
+        # is blocked on a modal the human has not dismissed, not that a turn
+        # ended.
         if observer.screen_reading(capture).kind is not ScreenKind.PROMPT:
             return
         logger.warning(

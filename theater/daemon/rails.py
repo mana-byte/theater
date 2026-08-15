@@ -50,18 +50,16 @@ from theater.models import BadRequest
 
 logger = logging.getLogger("theater.rails")
 
-#: Fallbacks for direct calls. `config.RailsSection` owns both literals so the
-#: settable value and the default cannot drift; a live daemon passes the
-#: configured numbers in from `methods.spawn`.
+#: Fallbacks for direct calls. `config.RailsSection` owns both literals so
+#: the settable value and the default cannot drift; `methods.spawn` passes
+#: the configured numbers in.
 #:
-#: Depth: roots are depth 0, their children depth 1. A cap of 3 means a root
-#: can spawn children that spawn children that spawn children, but those
+#: Depth: roots are depth 0, children depth 1. A cap of 3 means a root can
+#: spawn children that spawn children that spawn children, but those
 #: grandchildren cannot spawn further.
 #:
-#: Budget: a count of participants in a tree, not a dollar amount — the spec
-#: mentions $0.10 as an example, but token/cost tracking is not available yet.
-#: A count cap is the honest version: it stops runaway spawning without
-#: pretending to know the cost.
+#: Budget: a count of participants in a tree, not a dollar amount. A count
+#: cap stops runaway spawning without pretending to know the cost.
 _DEFAULTS = RailsSection()
 
 DEFAULT_DEPTH_CAP = _DEFAULTS.depth_cap
@@ -127,7 +125,7 @@ def check_depth(
     parent is None (a root spawn), depth is 0 and the child would be 1.
     """
     if parent_id is None:
-        return  # root spawn, always allowed
+        return
     parent = store.get_participant(parent_id)
     if parent is None:
         return  # parent vanished; the spawner will fail anyway
@@ -228,7 +226,7 @@ def check_budget(
     spawns are allowed in that tree.
     """
     if parent_id is None:
-        return  # root spawn, always allowed
+        return
     root_id = lineage.root_of(store, parent_id)
     count = len(lineage.subtree_ids(store, root_id))
     if count >= limit:

@@ -62,9 +62,8 @@ from theater.models import Job, JobKind, JobState, now
 
 logger = logging.getLogger("theater.jobs")
 
-#: Re-exported for callers that think of these as job vocabulary rather than
-#: domain models. They live in theater.models so the store can build a Job
-#: without importing this module.
+#: Re-exported for callers that think of these as job vocabulary. They live in
+#: theater.models so the store can build a Job without importing this module.
 __all__ = [
     "Job",
     "JobKind",
@@ -99,20 +98,16 @@ class TouchAccumulator:
     #: repo-relative; this is how they resolve to a real file for hashing.
     cwd: str
     #: path -> sha_before, captured the first time the path is seen. A path
-    #: seen again does not re-hash: the before state is the state at first
-    #: sight, not at last sight, and re-hashing would overwrite it with a
-    #: mid-job hash that says nothing about what the job started from.
+    #: seen again does not re-hash: the before state is first sight, not last
+    #: sight, and re-hashing would overwrite it with a mid-job hash.
     _before: dict[str, str | None] = field(default_factory=dict)
-    #: All paths seen, in first-seen order. Preserved so the touch rows have
-    #: a stable, deterministic order — not because the query cares, but
-    #: because a non-deterministic row order makes test assertions flaky and
-    #: debugging harder.
+    #: All paths seen, in first-seen order. Preserved so touch rows have a
+    #: deterministic order — non-deterministic order makes test assertions
+    #: flaky and debugging harder.
     _paths: list[str] = field(default_factory=list)
-    #: mode per path, last write wins. A path that is read then written
-    #: records "write"; a path that is written then read records "read".
-    #: The design calls for the last mode observed, not the union, because
-    #: recall answers "what happened to this file" and the final action is
-    #: the one that left the file in the state the next job sees.
+    #: mode per path, last write wins. A path read then written records
+    #: "write"; written then read records "read". The final action is the
+    #: one that left the file in the state the next job sees.
     _mode: dict[str, str] = field(default_factory=dict)
 
     def observe(self, paths: tuple[EventPath, ...]) -> None:
@@ -168,15 +163,13 @@ class JobManager:
     def __init__(self, store: Store):
         self.store = store
         self._events: dict[str, asyncio.Event] = {}
-        #: Awaits currently in flight, keyed by an opaque token so two
-        #: concurrent awaits from the same caller can be torn down
-        #: independently. Read as a graph by `wait_graph`.
+        #: Awaits in flight, keyed by an opaque token so two concurrent awaits
+        #: from the same caller can be torn down independently. Read as a
+        #: graph by `wait_graph`.
         self._waits: dict[object, tuple[str, frozenset[str]]] = {}
-        #: Per-job path accumulators. Created in `create`, consumed and
-        #: dropped in `finish`. The cwd comes from the job's target
-        #: participant; a job whose target is None (a CLI spawn with no
-        #: target) gets no accumulator, which is correct — there is no
-        #: working directory to resolve paths against.
+        #: Per-job path accumulators. Created in `create`, consumed in
+        #: `finish`. A job whose target is None (CLI spawn, no target) gets
+        #: no accumulator — no working directory to resolve paths against.
         self._accumulators: dict[str, TouchAccumulator] = {}
 
     def create(
@@ -240,9 +233,8 @@ class JobManager:
         if job is None:
             return None
         if job.state != JobState.RUNNING:
-            # Already finished. An event can still be here if the daemon was
-            # restarted, lost the original, and `await_jobs` made a fresh one
-            # for a job the database already considers terminal.
+            # Already finished. The event may still be here after a daemon
+            # restart lost the original and `await_jobs` made a fresh one.
             event = self._events.pop(handle, None)
             if event:
                 event.set()
@@ -251,10 +243,9 @@ class JobManager:
 
         acc = self._accumulators.pop(handle, None)
         if acc:
-            # Write the job result and its touches in one transaction, so a
-            # job whose result committed but whose touches did not is
-            # impossible. The store's long-lived connection is autocommit, so
-            # we open an explicit transaction here to bind the two writes.
+            # Write job result and touches in one transaction so a result
+            # without its touches is impossible. The store's connection is
+            # autocommit, so we open an explicit transaction here.
             self._finish_with_touches(
                 handle,
                 state=str(state),
@@ -273,9 +264,8 @@ class JobManager:
             )
 
         # Wake anyone waiting, then drop the event: the job is terminal, so
-        # `await_jobs` will short-circuit on its state from here on and never
-        # look for it again. Keeping it would grow the dict for the life of
-        # the daemon, one entry per prompt ever sent.
+        # `await_jobs` short-circuits on state from here on. Keeping it would
+        # grow the dict one entry per prompt ever sent.
         event = self._events.pop(handle, None)
         if event:
             event.set()
@@ -380,10 +370,9 @@ class JobManager:
                 continue
             event = self._events.get(h)
             if event is None:
-                # Lost the event (daemon restart). The job is running — the
-                # guard above skipped every other state — so a fresh unset
-                # event is right: finish() will set it, or we time out and
-                # the caller re-awaits.
+                # Lost the event (daemon restart). The job is running, so a
+                # fresh unset event is right: finish() will set it, or we
+                # time out and the caller re-awaits.
                 event = asyncio.Event()
                 self._events[h] = event
             events.append(event)

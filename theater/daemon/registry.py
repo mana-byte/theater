@@ -160,8 +160,8 @@ class Registry:
         if p.tmux_pane == pane:
             return
         if p.tier is Tier.SPAWNED and p.tmux_pane:
-            # We read this pane id out of tmux ourselves when we made the
-            # window. That beats anything the occupant tells us about itself.
+            # We read this pane id from tmux when we made the window. That
+            # beats anything the occupant tells us about itself.
             return
         self._evict_pane_holder(pane, keep=p.id)
         p.tmux_pane = pane
