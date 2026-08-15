@@ -27,15 +27,23 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
 
 from theater.models import TheaterError
 
+#: U+241E (SYMBOL FOR RECORD SEPARATOR) — no tmux field value can contain it,
+#: so it is a safe delimiter for list-panes format output. A literal tab in
+#: `pane_current_path` or `window_name` would break the old `\t` separator.
+#: libtmux uses the same character (formats.py:21).
+_FORMAT_SEP = "\u241e"
+
 _PANE_FORMAT = (
-    "#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{window_id}\t"
-    "#{session_name}\t#{window_name}\t#{pane_current_command}"
+    f"#{{pane_id}}{_FORMAT_SEP}#{{pane_pid}}{_FORMAT_SEP}#{{pane_current_path}}{_FORMAT_SEP}"
+    f"#{{window_id}}{_FORMAT_SEP}#{{session_name}}{_FORMAT_SEP}#{{window_name}}{_FORMAT_SEP}"
+    f"#{{pane_current_command}}"
 )
 
 
@@ -66,7 +74,7 @@ class Pane:
 
     @classmethod
     def parse(cls, line: str) -> Pane:
-        parts = line.split("\t")
+        parts = line.split(_FORMAT_SEP)
         if len(parts) != 7:
             raise TmuxError(f"unexpected list-panes row: {line!r}")
         return cls(
@@ -93,6 +101,94 @@ def current_pane() -> str | None:
     return os.environ.get("TMUX_PANE")
 
 
+# ---- version probe ---------------------------------------------------------
+#
+# A running tmux server cannot change version underneath us, so the result is
+# cached after the first probe. This is called on every `deliver_text`, which is
+# a hot path — the blocking `tmux -V` subprocess is acceptable only because it
+# runs once.
+_UNPROBED = object()
+_VERSION_CACHE: list[str | object | None] = [_UNPROBED]
+
+
+def reset_version_cache() -> None:
+    """Clear the cached tmux version so tests can control the probe."""
+    _VERSION_CACHE[0] = _UNPROBED
+
+
+def tmux_version() -> str | None:
+    """The raw tmux version string, e.g. ``"3.7"``, ``"3.7a"``, ``"3.4"``.
+
+    Returns ``None`` if tmux is absent or the output is unparseable. Never
+    raises. The leading ``tmux `` prefix from ``tmux -V`` is stripped.
+    """
+    cached = _VERSION_CACHE[0]
+    if cached is not _UNPROBED:
+        return cached  # type: ignore[return-value]
+    if not available():
+        _VERSION_CACHE[0] = None
+        return None
+    try:
+        proc = subprocess.run(
+            ["tmux", "-V"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="backslashreplace",
+            timeout=RUN_TIMEOUT,
+            check=False,
+        )
+    except Exception:
+        _VERSION_CACHE[0] = None
+        return None
+    out = proc.stdout.strip()
+    # `tmux -V` prints "tmux 3.4" or "tmux 3.7a"; strip the leading "tmux ".
+    if not out.startswith("tmux "):
+        _VERSION_CACHE[0] = None
+        return None
+    version = out[len("tmux ") :]
+    _VERSION_CACHE[0] = version
+    return version
+
+
+def _parse_version_tuple(version: str) -> tuple[int, ...] | None:
+    """Parse numeric components: ``"3.7a"`` → ``(3, 7)``, ``"1.2.3"`` → ``(1, 2, 3)``.
+
+    Returns ``None`` for non-numeric garbage like ``"master"``. A letter suffix
+    is stripped, so ``"3.7a"`` parses as ``(3, 7)``. Strings like ``"next-3.8"``
+    are handled by searching for the first numeric component.
+    """
+    # Find the first run of digit-dot-digit groups in the string. A repeated
+    # regex capture group would keep only the last match, so we find the full
+    # numeric span then split on ".".
+    m = re.search(r"\d+(?:\.\d+)*", version)
+    if not m:
+        return None
+    return tuple(int(p) for p in m.group().split("."))
+
+
+def tmux_at_least(major: int, minor: int = 0) -> bool:
+    """True if the running tmux is at least ``major.minor``.
+
+    ``"3.7a"`` counts as ≥ 3.7 because the letter suffix denotes a patch
+    release on top of the bare version. Returns ``False`` if tmux is absent or
+    the version is unparseable.
+    """
+    version = tmux_version()
+    if version is None:
+        return False
+    parsed = _parse_version_tuple(version)
+    if parsed is None:
+        return False
+    # Pad the shorter tuple with zeros so (3,) >= (3, 0) is True.
+    target: tuple[int, ...] = (major, minor)
+    if len(parsed) < len(target):
+        parsed = parsed + (0,) * (len(target) - len(parsed))
+    elif len(target) < len(parsed):
+        target = target + (0,) * (len(parsed) - len(target))
+    return parsed >= target
+
+
 def _require() -> None:
     if not available():
         raise TmuxMissing("tmux is not on PATH; Theater cannot run without it")
@@ -100,8 +196,16 @@ def _require() -> None:
 
 def run_sync(*args: str, check: bool = True) -> str:
     _require()
+    # text=True decodes using locale.getpreferredencoding(False), which under
+    # LANG=C misdecodes any non-ASCII pane path. Pin UTF-8 explicitly.
     proc = subprocess.run(
-        ["tmux", *args], capture_output=True, text=True, timeout=RUN_TIMEOUT, check=False
+        ["tmux", *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="backslashreplace",
+        timeout=RUN_TIMEOUT,
+        check=False,
     )
     if check and proc.returncode != 0:
         raise TmuxError(f"tmux {' '.join(args)} failed: {proc.stderr.strip()}")
@@ -122,8 +226,11 @@ async def run(*args: str, check: bool = True) -> str:
         proc.kill()
         raise TmuxError(f"tmux {' '.join(args)} timed out") from None
     if check and proc.returncode != 0:
-        raise TmuxError(f"tmux {' '.join(args)} failed: {err.decode().strip()}")
-    return out.decode().rstrip("\n")
+        # errors="backslashreplace" so a pane emitting invalid UTF-8 in its
+        # stderr does not raise UnicodeDecodeError here.
+        msg = err.decode("utf-8", "backslashreplace").strip()
+        raise TmuxError(f"tmux {' '.join(args)} failed: {msg}")
+    return out.decode("utf-8", "backslashreplace").rstrip("\n")
 
 
 # ---- queries -----------------------------------------------------------
@@ -268,7 +375,15 @@ async def deliver_text(pane_id: str, text: str, *, enter: bool = True) -> None:
     buffer = f"theater-{pane_id.lstrip('%')}"
     await run("set-buffer", "-b", buffer, "--", text)
     try:
-        await run("paste-buffer", "-b", buffer, "-t", pane_id, "-p", "-d")
+        # tmux 3.7+ passes pasted content through vis(3) escaping by default;
+        # -S restores the raw bytes. The evidence is moderate — libtmux cites
+        # no upstream commit and their test string contains nothing vis(3)
+        # would alter — but -S is a no-op if they are wrong and a fix if they
+        # are right. See libtmux pane.py paste_buffer no_vis parameter.
+        paste_args = ["paste-buffer", "-b", buffer, "-t", pane_id, "-p", "-d"]
+        if tmux_at_least(3, 7):
+            paste_args.append("-S")
+        await run(*paste_args)
     finally:
         # -d already deletes it on success; this is for the failure path.
         await run("delete-buffer", "-b", buffer, check=False)
