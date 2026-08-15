@@ -145,6 +145,10 @@ class Daemon:
 
     def _next_send_seq(self) -> int:
         self._send_seq += 1
+        try:
+            self.store.set_send_seq(self._send_seq)
+        except Exception:
+            logger.debug("could not persist send sequence", exc_info=True)
         return self._send_seq
 
     def _init_send_seq(self) -> None:
@@ -154,9 +158,18 @@ class Daemon:
         already exist in the jobs table. `Store.max_send_seq` finds the
         highest one; see its docstring for why the obvious SQL got this
         wrong and handed out duplicate handles.
+
+        The persisted meta value protects against a future GC that deletes
+        the highest-numbered job rows: without it, the counter would regress
+        and re-mint handles the deleted jobs already used. Taking the MAX of
+        both is required: the meta value protects against deleted jobs, and
+        `max_send_seq()` protects against a database where jobs exist but the
+        meta row was never written (every DB that exists today, before the
+        migration seeds it).
         """
         try:
-            highest = self.store.max_send_seq()
+            persisted = self.store.get_send_seq()
+            highest = max(persisted, self.store.max_send_seq())
             if highest:
                 self._send_seq = highest
                 logger.info("send sequence initialized to %d", self._send_seq)
