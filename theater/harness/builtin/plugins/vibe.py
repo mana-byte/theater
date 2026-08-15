@@ -48,6 +48,7 @@ from theater.harness.base import (
     SERVER_NAME,
     Event,
     EventKind,
+    EventPath,
     Harness,
     LaunchPlan,
     NativeChild,
@@ -156,6 +157,84 @@ _SPINNER_TAIL_LINES = 8
 #: this bounds the cost of a home directory with thousands of old sessions.
 _SCAN_LIMIT = 200
 
+#: Vibe tool names that modify a file, mapped to the argument key that carries
+#: the path. The path is always under the tool's ``file_path`` argument; see
+#: ``read_file.py:54``, ``write_file.py:30``, ``edit.py:35`` in the vibe source.
+#:
+#: ``write_file`` creates (errors if the file exists), ``edit`` patches in
+#: place, and ``read_file`` reads. All three accept relative paths but the LLM
+#: is instructed to use absolute paths, so relativisation is the rule not the
+#: exception.
+#:
+#: ``grep`` is deliberately excluded: its ``path`` argument is a search root
+#: (a file or directory), not a file being read, and the default ``.`` is a
+#: directory. Emitting a directory as a ``read`` path would put a false claim
+#: in the index. ``bash`` is excluded too: parsing paths out of a shell command
+#: string would mean guessing at quoting, and a wrong path is worse than none.
+_WRITE_TOOLS: dict[str, str] = {
+    "write_file": "file_path",
+    "edit": "file_path",
+}
+_READ_TOOLS: dict[str, str] = {
+    "read_file": "file_path",
+}
+
+
+def _extract_paths(
+    tool_name: str | None, arguments: str | None, cwd: str | None
+) -> tuple[EventPath, ...]:
+    """Pull file paths from a vibe tool call's structured arguments.
+
+    Only the known file-path-taking tools produce paths, and only from their
+    declared argument keys — never from the shell command string of ``bash``
+    or from prose. An absolute path is relativised against ``cwd`` so the
+    recall index never carries a home directory. A path that cannot be
+    relativised (no cwd, or the path is not under it) is dropped: a missing
+    path is honest, a wrong one is a false claim in an index other agents
+    trust.
+    """
+    if not tool_name or not arguments:
+        return ()
+    key = _WRITE_TOOLS.get(tool_name) or _READ_TOOLS.get(tool_name)
+    if key is None:
+        return ()
+    mode = "write" if tool_name in _WRITE_TOOLS else "read"
+    try:
+        parsed = json.loads(arguments)
+    except (ValueError, TypeError):
+        return ()
+    if not isinstance(parsed, dict):
+        return ()
+    raw = parsed.get(key)
+    if not isinstance(raw, str) or not raw:
+        return ()
+    rel = _relativise(raw, cwd)
+    if rel is None:
+        return ()
+    return (EventPath(path=rel, mode=mode),)
+
+
+def _relativise(path: str, cwd: str | None) -> str | None:
+    """Make an absolute path repo-relative, or return None if it cannot be.
+
+    Vibe's tools accept both absolute and relative paths, but the LLM is
+    told to use absolute paths, so the common case is an absolute path that
+    needs stripping down to the repo root. A path that is already relative
+    is passed through. A path that does not resolve under ``cwd`` (a config
+    file outside the repo, or no cwd at all) returns None: emitting it as-is
+    would leak a home directory, and emitting nothing is the honest answer.
+    """
+    p = Path(path).expanduser()
+    if not p.is_absolute():
+        return path
+    if cwd is None:
+        return None
+    base = Path(cwd)
+    try:
+        return str(p.relative_to(base))
+    except ValueError:
+        return None
+
 
 def _in_screen_tail(capture: str, markers: tuple[str, ...], limit: int) -> bool:
     """Whether some tail line contains every marker in `markers`.
@@ -199,6 +278,7 @@ class VibeHarness(Harness):
         config_path: Path,
         approval: str,
         model: str | None = None,
+        resume: str | None = None,
     ) -> LaunchPlan:
         if approval not in APPROVALS:
             raise BadRequest(
@@ -220,6 +300,15 @@ class VibeHarness(Harness):
             argv.append("--yolo")
         elif approval == "edits":
             argv += ["--agent", "accept-edits"]
+        # --resume <SESSION_ID> appends to the same messages.jsonl and keeps
+        # the same session id (vibe/app_server/_runtime.py:256-269, which
+        # creates a replacement AgentLoop with the same session_id and
+        # session_dir). The positional prompt is still honoured on resume
+        # (vibe/cli/cli.py:258-264 passes initial_prompt to StartupOptions
+        # regardless of whether --resume was given), so resume_takes_prompt
+        # stays True.
+        if resume is not None:
+            argv += ["--resume", resume]
         if prompt:
             argv.append(prompt)
         env = {"VIBE_MCP_SERVERS": json.dumps(servers)}
@@ -294,6 +383,18 @@ class VibeObserver(TranscriptObserver):
     def __init__(self, root: Path | None = None):
         #: Injectable so tests never touch the real ~/.vibe.
         self.root = root or Path.home() / ".vibe" / "logs" / "session"
+        #: The working directory of the session whose transcript was found.
+        #: ``parse`` needs it to relativise the absolute paths that vibe's
+        #: tool arguments carry, and ``parse`` receives no cwd of its own.
+        #: Set in ``find_transcript`` because that is the one call that
+        #: receives the participant's cwd and precedes every ``parse`` call
+        #: for the same transcript. The observer is shared across
+        #: participants, so a cross-participant race is possible in theory;
+        #: in practice the daemon's watcher calls ``find_transcript`` once
+        #: at source creation and ``parse`` in the same watcher's event
+        #: loop, so the window is negligible. A path that cannot be
+        #: relativised is dropped rather than emitted as an absolute.
+        self._cwd: str | None = None
 
     def find_transcript(
         self,
@@ -302,6 +403,7 @@ class VibeObserver(TranscriptObserver):
         session_id: str | None = None,
         after: float | None = None,
     ) -> Path | None:
+        self._cwd = cwd
         if not self.root.is_dir():
             return None
         if session_id:
@@ -401,11 +503,15 @@ class VibeObserver(TranscriptObserver):
             if not isinstance(call, dict):
                 continue
             fn = call.get("function") or {}
+            fn_name = fn.get("name") if isinstance(fn, dict) else None
+            fn_args = fn.get("arguments") if isinstance(fn, dict) else None
+            paths = _extract_paths(fn_name, fn_args, self._cwd)
             out.append(
                 Event(
                     kind=EventKind.TOOL_CALL,
-                    tool_name=fn.get("name") if isinstance(fn, dict) else None,
+                    tool_name=fn_name,
                     raw_index=index,
+                    paths=paths,
                 )
             )
         if calls:
@@ -428,6 +534,7 @@ class VibeObserver(TranscriptObserver):
                 ts=last.ts,
                 turn_end=True,
                 raw_index=last.raw_index,
+                paths=last.paths,
             )
         else:
             out.append(
