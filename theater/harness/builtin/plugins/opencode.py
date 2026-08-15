@@ -89,6 +89,7 @@ from theater.harness.base import (
     SERVER_NAME,
     Event,
     EventKind,
+    EventPath,
     Harness,
     LaunchPlan,
     clip,
@@ -247,6 +248,82 @@ def _tool_output(state: dict) -> str:
     return "" if output is None else json.dumps(output, default=str)
 
 
+#: Tools whose `state.input.filePath` is a file they write to.
+_WRITE_TOOLS = frozenset({"write", "edit"})
+
+#: Tools whose `state.input.filePath` is a file they read.
+_READ_TOOLS = frozenset({"read"})
+
+
+def _relativise(path: str, cwd: str | None) -> str | None:
+    """Make a path repo-relative, or None if it cannot be done safely.
+
+    opencode's `filePath` may be absolute or relative to the session's
+    working directory (write.ts:41-43, edit.ts:80-82 resolve it against
+    `instance.directory`). We relativise against `cwd`, which is the
+    directory the source was constructed with — the same value the daemon
+    uses to locate the session row. A path already relative is returned
+    unchanged, on the assumption that it is already repo-relative; this is
+    correct for opencode, which resolves relative paths against the session
+    directory at execution time and stores them as given.
+
+    Both sides are resolved before comparison, because macOS aliases
+    ``/tmp`` as ``/private/tmp`` and a mismatch there would drop a path that
+    is genuinely inside the repo. The session directory in the database is
+    also stored resolved (see ``_locate``), so this is consistent with how
+    the source already treats paths.
+
+    None is returned when the path is outside the repo root, because an
+    absolute path that does not start with `cwd` is either a temp file or a
+    path into another project — both of which would pollute the index with
+    false entries. Better to record nothing than to record a wrong path.
+    """
+    if not path:
+        return None
+    p = Path(path)
+    if not p.is_absolute():
+        return path
+    if cwd is None:
+        # No cwd to relativise against. Returning the absolute path would
+        # leak a home directory into the index; returning None drops the
+        # path, which is the safer failure mode.
+        return None
+    try:
+        rel = p.resolve().relative_to(Path(cwd).resolve())
+    except (ValueError, OSError):
+        return None
+    return str(rel)
+
+
+def _paths_from_tool(name: str, state: dict, cwd: str | None) -> tuple[EventPath, ...]:
+    """Extract file paths from a tool call's structured input.
+
+    Only `state.input` is read — the decoded JSON arguments the LLM passed.
+    Paths are never parsed out of shell command strings or patch text; the
+    contract is that a wrong path is worse than a missing one, and parsing
+    prose or commands is exactly where wrong paths come from.
+
+    `glob` and `grep` take a `path` field, but it is a directory to search
+    within, not a file. Per the design, a search over a directory yields no
+    paths. `apply_patch` embeds paths inside a `patchText` string, which is
+    the same class of unstructured input we decline to parse. `bash`/`shell`
+    has no file path field in its structured input at all.
+    """
+    if not name or name in ("bash", "shell", "apply_patch", "glob", "grep", "webfetch"):
+        return ()
+    input_data = state.get("input")
+    if not isinstance(input_data, dict):
+        return ()
+    raw = input_data.get("filePath")
+    if not isinstance(raw, str):
+        return ()
+    rel = _relativise(raw, cwd)
+    if rel is None:
+        return ()
+    mode = "write" if name in _WRITE_TOOLS else "read"
+    return (EventPath(path=rel, mode=mode),)
+
+
 class OpenCodeHarness(Harness):
     name = "opencode"
     binary = "opencode"
@@ -257,6 +334,13 @@ class OpenCodeHarness(Harness):
     #: What an agent might call itself at registration. A spelling that does not
     #: normalize is observed as nothing at all, so these are not cosmetic.
     aliases = ("open-code", "open_code", "OpenCode", "opencode-ai")
+    #: `-s` routes to the session view (app.tsx:492-496) and `--prompt` is only
+    #: read on the home screen (home.tsx:53-54, 64-67), so a prompt passed
+    #: alongside `-s` is silently dropped and the task vanishes with no error.
+    #: This is why the capability is a class attribute and not signature
+    #: introspection: a signature can express "accepts a resume flag", but it
+    #: cannot express "accepts it and drops your prompt".
+    resume_takes_prompt: bool = False
 
     def __init__(self, db: Path | None = None):
         #: `db` is where the output lives, which is the observer's business
@@ -273,6 +357,7 @@ class OpenCodeHarness(Harness):
         config_path: Path,
         approval: str,
         model: str | None = None,
+        resume: str | None = None,
     ) -> LaunchPlan:
         if approval not in APPROVALS:
             raise BadRequest(
@@ -297,7 +382,14 @@ class OpenCodeHarness(Harness):
             argv += ["--model", model]
         if approval == "yolo":
             argv.append("--auto")
-        if prompt:
+        if resume is not None:
+            # `-s <session_id>` continues an existing session
+            # (tui.ts:91-95, alias "s"). `--prompt` is omitted here on purpose:
+            # `-s` routes to the session view (app.tsx:492) and `--prompt` is
+            # only read on the home screen (home.tsx:53-54, 64-67), so passing
+            # both would silently drop the task. See `resume_takes_prompt`.
+            argv += ["-s", resume]
+        elif prompt:
             # `--prompt` runs it and stays interactive, so a spawned session is
             # working from the start with no keystroke injection.
             argv += ["--prompt", prompt]
@@ -607,7 +699,15 @@ class OpenCodeSource(Source):
                 continue
             state = _table(part.get("state"))
             name = part.get("tool")
-            out.append(Event(kind=EventKind.TOOL_CALL, tool_name=name, ts=ts))
+            paths = _paths_from_tool(name or "", state, self._cwd)
+            out.append(
+                Event(
+                    kind=EventKind.TOOL_CALL,
+                    tool_name=name,
+                    ts=ts,
+                    paths=paths,
+                )
+            )
             if state.get("status") in ("completed", "error"):
                 out.append(
                     Event(
@@ -799,8 +899,19 @@ class OpenCodeSource(Source):
         seen = self._tools.get(call)
         out: list[Event] = []
         if seen is None:
+            # `running` is the first status that carries `state.input`, so
+            # paths are available here and not before. Attached to the
+            # TOOL_CALL rather than the TOOL_RESULT because the call is the
+            # event that references the file; the result is its outcome.
+            paths = _paths_from_tool(name or "", state, self._cwd)
             out.append(
-                Event(kind=EventKind.TOOL_CALL, tool_name=name, ts=ts, raw_index=seq)
+                Event(
+                    kind=EventKind.TOOL_CALL,
+                    tool_name=name,
+                    ts=ts,
+                    raw_index=seq,
+                    paths=paths,
+                )
             )
         done = ("completed", "error")
         if status in done and seen not in done:
