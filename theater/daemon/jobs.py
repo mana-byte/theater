@@ -29,20 +29,9 @@ on them with a timeout. The observer calls `JobManager.finish` when it detects
 turn-end, which sets the event. The caller wakes up, reads the result, and
 returns it as the MCP tool response.
 
-The multi-handle semantic
--------------------------
-When multiple known handles are awaited, `await_jobs` returns as soon as ANY
-requested job becomes terminal — not when all of them do. This lets a fan-out
-caller react to the first result without blocking on the slowest sibling.
-If any requested job is already terminal at call entry, the method returns
-immediately. The returned list always contains the current state of every
-requested handle (including still-running jobs), in input order. Timeout
-behavior is unchanged: on timeout, every job's current state is returned,
-running jobs still running.
-
-Unknown handles are silently skipped at this layer — the RPC handler
-(``jobs.await``) rejects them with ``bad_request`` before reaching here, so
-``await_jobs`` only ever sees handles that exist.
+With multiple handles, `await_jobs` returns as soon as ANY requested job
+becomes terminal (FIRST_COMPLETED), not when all do; already-terminal jobs
+at entry cause an immediate return.
 
 The touch accumulator
 ---------------------
@@ -62,7 +51,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -408,12 +397,8 @@ class JobManager:
                 )
             finally:
                 for task in tasks:
-                    task.cancel()
-                # Await cancelled tasks so they don't leak as "Task was
-                # destroyed but it is pending" warnings. Cancelled tasks
-                # raise CancelledError on await; suppress them all.
-                for task in tasks:
-                    with suppress(asyncio.CancelledError):
-                        await task
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
         return [j for j in (self.store.get_job(h) for h in handles) if j is not None]
