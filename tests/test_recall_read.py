@@ -453,3 +453,28 @@ async def test_read_segment_writes_nothing_to_the_database(registry, tmp_path):
 
     after = registry.store.conn.execute(select(func.count()).select_from(bus)).scalar()
     assert before == after
+
+
+async def test_job_segment_reports_the_parent_of_the_editing_session(
+    registry, tmp_path
+):
+    """The brief names whoever spawned the agent that ran the job.
+
+    ``recall`` gives the lineage of a timeline point; opening that point
+    must agree with it, so the two tools can be read together without
+    the caller cross-referencing ids by hand.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    pid = _make_job(
+        registry.store, registry, handle="h-child", target_cwd=str(project)
+    )
+    child = registry.store.get_participant(pid)
+    child.parent_id = "boss"
+    registry.store.upsert_participant(child)
+
+    result = await read_segment(
+        "h-child", store=registry.store, registry=registry, cwd=str(tmp_path)
+    )
+
+    assert result["parent_id"] == "boss"

@@ -766,12 +766,32 @@ async def _recall(daemon, params: dict) -> dict:
         raise BadRequest("paths must be a non-empty list")
     depth = int(params.get("depth", 5))
     caller_cwd = params.get("caller_cwd")
-    return _do_recall(
+    result = _do_recall(
         daemon.store,
         paths=paths,
         depth=depth,
         caller_cwd=caller_cwd,
     )
+    _attach_parent_names(daemon, result)
+    return result
+
+
+def _attach_parent_names(daemon, result: dict) -> None:
+    """Decorate timeline points with the parent's runtime name.
+
+    Names are Registry state and ``recall.py`` takes only a ``Store``, so
+    the id comes out of SQL and the name is attached here. A parent the
+    Registry cannot resolve yields ``None``, not an error.
+    """
+    for entry in result.values():
+        for point in entry.get("timeline", []):
+            parent_id = point.get("parent_id")
+            if parent_id is None:
+                continue
+            try:
+                point["parent_name"] = daemon.registry.get(parent_id).name
+            except Exception:
+                point["parent_name"] = None
 
 
 @method("recall_read")

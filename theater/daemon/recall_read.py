@@ -166,6 +166,7 @@ async def _read_job(
     brief["session_id"] = p.session_id
     brief["cwd"] = p.cwd
     brief["branch"] = p.branch
+    brief["parent_id"] = p.parent_id
 
     harness_name = normalize(p.harness)
     harness = HARNESSES.get(harness_name)

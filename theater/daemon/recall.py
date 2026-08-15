@@ -198,6 +198,8 @@ def _build_timeline(
                 participants.c.session_id,
                 participants.c.cwd,
                 participants.c.branch,
+                participants.c.parent_id,
+                jobs.c.caller_id,
             )
             .select_from(
                 touch.join(jobs, touch.c.job_handle == jobs.c.handle).join(
@@ -264,6 +266,13 @@ def _build_timeline(
                 "resume": resume,
                 "cwd": row.cwd,
                 "branch": row.branch,
+                # Lineage (who spawned the editor, None for a root) and
+                # provenance (who ordered this job — a `send` caller is
+                # often a sibling) are different questions. Bare ids: a
+                # parent can sit outside the caller's repo, so its cwd
+                # and session id stay behind the privacy wall above.
+                "parent_id": row.parent_id,
+                "caller_id": row.caller_id,
                 "outcome": row.outcome,
                 "task": _clip(row.prompt),
                 "result": _clip(row.result),

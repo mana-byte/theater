@@ -34,6 +34,7 @@ def _participant(
     cwd: str = "/tmp/repo",
     branch: str | None = "main",
     session_id: str | None = "ses-123",
+    parent_id: str | None = None,
 ) -> Participant:
     p = Participant(
         id=pid,
@@ -42,6 +43,7 @@ def _participant(
         cwd=cwd,
         branch=branch,
         session_id=session_id,
+        parent_id=parent_id,
     )
     store.upsert_participant(p)
     return p
@@ -56,11 +58,12 @@ def _job(
     state: str = JobState.DONE,
     result: str | None = "done",
     finished_at: float | None = None,
+    caller_id: str = "cli",
 ) -> None:
     store.create_job(
         Job(
             handle=handle,
-            caller_id="cli",
+            caller_id=caller_id,
             target_id=target_id,
             kind="spawn",
             prompt=prompt,
@@ -924,3 +927,112 @@ def test_git_root_returns_none_outside_repo(tmp_path):
 
     d = tempfile.mkdtemp(dir="/tmp")
     assert _git_root(d) is None
+
+
+# ---- lineage on a timeline point -------------------------------------------
+
+
+def test_point_reports_the_parent_of_the_editing_session(store, tmp_path):
+    """A child's edit names the agent that spawned it.
+
+    The question recall answers is "who touched this file"; the follow-up
+    is "on whose orders". ``parent_id`` is the lineage half of that and
+    comes free from the participants join already in the query.
+    """
+    root = _setup_repo(tmp_path)
+    _participant(store, pid="boss", cwd=root)
+    child = _participant(store, pid="kid", cwd=root, parent_id="boss")
+    _job(store, handle="h1", target_id=child.id)
+    _touch(store, job_handle="h1", path="f.py", sha_before="aaa", sha_after="bbb")
+
+    point = recall(store, paths=["f.py"], caller_cwd=root)["f.py"]["timeline"][0]
+    assert point["parent_id"] == "boss"
+
+
+def test_root_authored_point_reports_no_parent(store, tmp_path):
+    """A participant nobody spawned reports ``parent_id`` as None.
+
+    Explicitly None rather than absent: the caller can tell "this was a
+    root" from "this recall build predates lineage".
+    """
+    root = _setup_repo(tmp_path)
+    p = _participant(store, pid="solo", cwd=root)
+    _job(store, handle="h1", target_id=p.id)
+    _touch(store, job_handle="h1", path="f.py", sha_before="aaa", sha_after="bbb")
+
+    point = recall(store, paths=["f.py"], caller_cwd=root)["f.py"]["timeline"][0]
+    assert point["parent_id"] is None
+
+
+def test_caller_id_can_differ_from_parent_id(store, tmp_path):
+    """Who ordered the job is not always who spawned the agent.
+
+    A ``send`` from a sibling produces a job whose caller is not the
+    target's parent. Collapsing the two into one field would report the
+    wrong agent for every mid-session prompt.
+    """
+    root = _setup_repo(tmp_path)
+    child = _participant(store, pid="kid", cwd=root, parent_id="boss")
+    _job(store, handle="h1", target_id=child.id, caller_id="sibling")
+    _touch(store, job_handle="h1", path="f.py", sha_before="aaa", sha_after="bbb")
+
+    point = recall(store, paths=["f.py"], caller_cwd=root)["f.py"]["timeline"][0]
+    assert point["caller_id"] == "sibling"
+    assert point["parent_id"] == "boss"
+
+
+def test_gap_point_carries_no_lineage(store, tmp_path):
+    """A gap belongs to no job, so it has no parent and no caller.
+
+    Gap points are built from a broken hash chain, not from a
+    participant row. Inventing lineage for them would attribute an
+    unclaimed edit to whichever job happens to sit next to it.
+    """
+    root = _setup_repo(tmp_path)
+    p = _participant(store, pid="kid", cwd=root, parent_id="boss")
+    _job(store, handle="old", target_id=p.id, finished_at=1000.0)
+    _touch(store, job_handle="old", path="f.py", sha_before="aaa", sha_after="bbb")
+    _job(store, handle="new", target_id=p.id, finished_at=2000.0)
+    _touch(store, job_handle="new", path="f.py", sha_before="ccc", sha_after="ddd")
+
+    timeline = recall(store, paths=["f.py"], caller_cwd=root)["f.py"]["timeline"]
+    gap = timeline[1]
+    assert gap["gap"] is True
+    assert "parent_id" not in gap
+    assert "caller_id" not in gap
+
+
+# ---- the RPC layer decorates lineage with runtime names --------------------
+
+
+def test_attach_parent_names_resolves_known_parents(registry):
+    """``parent_name`` is attached above recall, where the Registry lives.
+
+    ``recall.py`` takes only a Store; names are Registry state. A parent
+    the Registry cannot resolve degrades to None rather than raising,
+    because the id alone still answers the question.
+    """
+    import types
+
+    from theater.daemon.methods import _attach_parent_names
+
+    boss = registry.register(harness="vibe", pane=None, cwd="/tmp/repo")
+    result = {
+        "f.py": {
+            "timeline": [
+                {"parent_id": boss.id},
+                {"parent_id": "ghost"},
+                {"parent_id": None},
+                {"gap": True},
+            ]
+        }
+    }
+    _attach_parent_names(types.SimpleNamespace(registry=registry), result)
+
+    points = result["f.py"]["timeline"]
+    expected = registry.get(boss.id).name
+    assert expected  # the Registry names lazily; a None here proves nothing
+    assert points[0]["parent_name"] == expected
+    assert points[1]["parent_name"] is None
+    assert "parent_name" not in points[2]
+    assert "parent_name" not in points[3]

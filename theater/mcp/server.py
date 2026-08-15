@@ -309,48 +309,71 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
 
     @mcp.tool()
     async def recall(paths: list[str], depth: int = 5) -> dict:
-        """What happened to these files, and who can tell me more.
+        """Who last changed these files, when, and on whose orders.
 
-        Returns a per-file timeline of every job that touched the path,
-        newest first, with enough on each point to resume the session
-        that made it. The ``session_id`` from a timeline point goes
-        straight into ``spawn_session(resume=<session_id>)`` — these
-        two tools compose.
+        Reach for this before editing a file you did not write in this
+        session, when a change you cannot account for shows up, or when
+        you need to reach the agent behind one. It reads Theater's own
+        record of every job that touched the path, so it answers where
+        ``git log`` cannot: uncommitted edits, and the identity of the
+        agent that made each change.
 
-        Each point carries the harness, the session id, and the segment
-        id. A gap point marks a transition no job claims — call
-        ``recall_read`` with the segment id to learn what happened
-        inside it.
+        One timeline per path, newest first. Each job point carries:
 
-        paths: repo-relative or absolute paths to query.
-        depth:  max points per path timeline, after gaps are
-                interleaved. Default 5.
+        - what: ``task`` and ``result`` (clipped to 300 chars),
+          ``outcome``, and ``sha`` before → after
+        - who: ``harness``, ``session_id``, ``cwd``, ``branch``;
+          ``parent_id``/``parent_name`` is whoever spawned that agent
+          (``None`` for a root), ``caller_id`` whoever ordered that job
+          — for a ``send``, often a sibling rather than the parent
+        - where next: ``segment``, which ``recall_read`` expands
 
-        A path that has never been touched returns an empty timeline,
-        not an error. The result is keyed by path.
+        Beside the timeline: ``current`` (the file's sha right now) and
+        ``dirty`` (differs from HEAD). Compare ``current`` against the
+        newest point's ``sha_after`` to see if anything has moved the
+        file since the last job left it.
+
+        A gap point is a sha transition no job claims — something
+        outside Theater edited the file. ``recall_read`` on its segment
+        asks git what.
+
+        ``session_id`` goes straight into
+        ``spawn_session(resume=<session_id>)``, so you can put the
+        original author back on its own change.
+
+        paths: repo-relative or absolute. Costs the same for 1 path as
+               for 40 — ask about every file you care about at once.
+        depth: points per path, gaps included. Default 5.
+
+        Scoped to your git root: a job whose cwd sits outside it is not
+        returned. Worktree children live under it, so their edits do
+        appear — two worktrees sharing a repo-relative path share one
+        timeline, and the jump between them can read as a gap. A path
+        Theater never watched returns an empty timeline, not an error.
+        Results are keyed by path.
         """
         return await tools.recall(session, paths=paths, depth=depth)
 
     @mcp.tool()
     async def recall_read(segment_id: str) -> dict:
-        """Explain one point of a recall timeline.
+        """Open one point of a recall timeline: the full story behind it.
 
-        Pass the `segment` value from a point `recall` returned.
+        Call this when a point's clipped `task`/`result` is not enough
+        and you want the agent's actual reasoning, or when a gap point
+        needs explaining. Pass the `segment` value from the point.
 
-        For a job segment you get that job's transcript, plus the paths
-        it touched and the shas it moved them between. A transcript that
-        no longer exists on disk is reported as unavailable rather than
-        raised — everything the database still remembers comes back
-        regardless.
+        Job segment: that job's transcript unclipped, plus every path it
+        touched and the shas it moved them between. A transcript no
+        longer on disk comes back as unavailable rather than raising —
+        everything the database still remembers arrives regardless.
 
-        For a gap segment — a sha transition no job claims — you get the
-        commits git can attribute it to. If git can find none, that is
-        reported as `explained: false` with a note, which means the edit
-        was never committed here. It does not mean nothing happened.
+        Gap segment: the commits git can attribute the transition to.
+        `explained: false` means git found none, so the edit was never
+        committed here — not that nothing happened.
 
-        This is the only Theater call that spends a `git log`, so reach
-        for it when a timeline has told you *that* something changed and
-        you need to know *what*.
+        The only Theater call that spends a `git log`, and it answers
+        about one segment: let `recall` narrow first, then spend this on
+        the point that matters.
         """
         return await tools.recall_read(session, segment_id=segment_id)
 
