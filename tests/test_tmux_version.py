@@ -143,6 +143,8 @@ class TestParseVersionTuple:
             ("3.10", (3, 10)),
             ("4", (4,)),
             ("next-3.8", (3, 8)),
+            ("1.2.3", (1, 2, 3)),
+            ("3.7.1", (3, 7, 1)),
         ],
     )
     def test_parses_numeric_components(self, version, expected):
@@ -151,3 +153,25 @@ class TestParseVersionTuple:
     @pytest.mark.parametrize("version", ["master", "garbage", ""])
     def test_returns_none_for_non_numeric(self, version):
         assert client._parse_version_tuple(version) is None
+
+
+class TestTmuxAtLeastBareAndThreeComponent:
+    def test_bare_3_is_at_least_3_0(self, monkeypatch):
+        _stub_version_output(monkeypatch, "tmux 3\n")
+        assert client.tmux_at_least(3, 0)
+
+    def test_bare_3_is_at_least_3(self, monkeypatch):
+        _stub_version_output(monkeypatch, "tmux 3\n")
+        assert client.tmux_at_least(3)
+
+    def test_bare_3_is_not_at_least_3_1(self, monkeypatch):
+        _stub_version_output(monkeypatch, "tmux 3\n")
+        assert not client.tmux_at_least(3, 1)
+
+    def test_three_component_is_at_least(self, monkeypatch):
+        _stub_version_output(monkeypatch, "tmux 1.2.3\n")
+        assert client.tmux_at_least(1, 2)
+
+    def test_three_component_is_not_at_least(self, monkeypatch):
+        _stub_version_output(monkeypatch, "tmux 1.2.3\n")
+        assert not client.tmux_at_least(1, 3)

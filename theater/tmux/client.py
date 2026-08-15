@@ -152,17 +152,19 @@ def tmux_version() -> str | None:
 
 
 def _parse_version_tuple(version: str) -> tuple[int, ...] | None:
-    """Parse leading numeric components: ``"3.7a"`` → ``(3, 7)``.
+    """Parse numeric components: ``"3.7a"`` → ``(3, 7)``, ``"1.2.3"`` → ``(1, 2, 3)``.
 
     Returns ``None`` for non-numeric garbage like ``"master"``. A letter suffix
-    is stripped, so ``"3.7a"`` parses as ``(3, 7)`` — the caller treats the
-    suffix as "≥ the bare version" by comparing tuples. Strings like
-    ``"next-3.8"`` are handled by searching for the first numeric component.
+    is stripped, so ``"3.7a"`` parses as ``(3, 7)``. Strings like ``"next-3.8"``
+    are handled by searching for the first numeric component.
     """
-    m = re.search(r"(\d+)(?:\.(\d+))*", version)
+    # Find the first run of digit-dot-digit groups in the string. A repeated
+    # regex capture group would keep only the last match, so we find the full
+    # numeric span then split on ".".
+    m = re.search(r"\d+(?:\.\d+)*", version)
     if not m:
         return None
-    return tuple(int(g) for g in m.groups() if g is not None)
+    return tuple(int(p) for p in m.group().split("."))
 
 
 def tmux_at_least(major: int, minor: int = 0) -> bool:
@@ -178,7 +180,13 @@ def tmux_at_least(major: int, minor: int = 0) -> bool:
     parsed = _parse_version_tuple(version)
     if parsed is None:
         return False
-    return parsed >= (major, minor)
+    # Pad the shorter tuple with zeros so (3,) >= (3, 0) is True.
+    target: tuple[int, ...] = (major, minor)
+    if len(parsed) < len(target):
+        parsed = parsed + (0,) * (len(target) - len(parsed))
+    elif len(target) < len(parsed):
+        target = target + (0,) * (len(parsed) - len(target))
+    return parsed >= target
 
 
 def _require() -> None:
