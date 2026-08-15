@@ -43,9 +43,7 @@ class FakeDaemon:
         self._server: asyncio.Server | None = None
 
     async def start(self) -> None:
-        self._server = await asyncio.start_unix_server(
-            self._serve, str(paths.socket_path())
-        )
+        self._server = await asyncio.start_unix_server(self._serve, str(paths.socket_path()))
 
     async def stop(self) -> None:
         if self._server is not None:
@@ -104,9 +102,7 @@ def _client() -> DaemonClient:
 # ---- the regression ----------------------------------------------------
 
 
-async def test_slow_reply_does_not_leak_into_the_next_call(
-    daemon_factory, fast_timeout
-):
+async def test_slow_reply_does_not_leak_into_the_next_call(daemon_factory, fast_timeout):
     async def handler(msg):
         if msg["params"].get("slow"):
             await asyncio.sleep(0.5)
@@ -292,9 +288,7 @@ def test_await_gets_its_own_budget():
 # ---- autostart herd ----------------------------------------------------
 
 
-async def test_autostart_skips_the_spawn_when_a_daemon_holds_the_lock(
-    theater_home, monkeypatch
-):
+async def test_autostart_skips_the_spawn_when_a_daemon_holds_the_lock(theater_home, monkeypatch):
     """Eight clients failing to connect must not fork eight daemons.
 
     Only one can win the lock, so the other seven would read the config,
@@ -303,9 +297,7 @@ async def test_autostart_skips_the_spawn_when_a_daemon_holds_the_lock(
     spawn in the first place.
     """
     forked: list[list[str]] = []
-    monkeypatch.setattr(
-        client_mod.subprocess, "Popen", lambda cmd, **kw: forked.append(cmd)
-    )
+    monkeypatch.setattr(client_mod.subprocess, "Popen", lambda cmd, **kw: forked.append(cmd))
 
     held = DaemonLock()
     held.acquire()
@@ -319,9 +311,7 @@ async def test_autostart_skips_the_spawn_when_a_daemon_holds_the_lock(
 async def test_autostart_spawns_when_nothing_holds_the_lock(theater_home, monkeypatch):
     """The suppression must not become a refusal to ever start one."""
     forked: list[list[str]] = []
-    monkeypatch.setattr(
-        client_mod.subprocess, "Popen", lambda cmd, **kw: forked.append(cmd)
-    )
+    monkeypatch.setattr(client_mod.subprocess, "Popen", lambda cmd, **kw: forked.append(cmd))
 
     await DaemonClient()._start_daemon()
     assert len(forked) == 1

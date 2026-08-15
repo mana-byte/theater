@@ -113,9 +113,7 @@ def test_promptless_jobs_are_not_turns(store):
 
 def test_a_forgotten_target_still_counts(store):
     """Under "unknown" rather than vanishing, which would flatter the numbers."""
-    store.create_job(
-        _job(handle="a#1", target_id="gone", error_code="turn_end_unseen")
-    )
+    store.create_job(_job(handle="a#1", target_id="gone", error_code="turn_end_unseen"))
     (row,) = store.turn_outcomes()
     assert row["harness"] == "unknown"
     assert row["rescued"] == 1

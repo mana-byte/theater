@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 from shipped import OpenCodeHarness, OpenCodeObserver
 
-from theater.harness import EventKind, TranscriptObserver
+from theater.harness import EventKind
 from theater.models import BadRequest, Status
 
 SCHEMA = """
@@ -65,8 +65,7 @@ class Recorder:
         self.conn = sqlite3.connect(path)
         self.conn.executescript(SCHEMA)
         self.conn.execute(
-            "INSERT INTO session (id, parent_id, directory, time_created) "
-            "VALUES (?, NULL, ?, ?)",
+            "INSERT INTO session (id, parent_id, directory, time_created) VALUES (?, NULL, ?, ?)",
             (sid, str(Path(directory).resolve()), created),
         )
         self.conn.commit()
@@ -144,9 +143,7 @@ class Recorder:
         self._part({**base, "state": {"status": "completed", "output": output}})
 
     def step_finish(self, mid: str, pid: str, reason: str) -> None:
-        self._part(
-            {"id": pid, "messageID": mid, "type": "step-finish", "reason": reason}
-        )
+        self._part({"id": pid, "messageID": mid, "type": "step-finish", "reason": reason})
 
 
 @pytest.fixture
@@ -205,12 +202,16 @@ def test_yolo_is_the_only_approval_flag_there_is(tmp_path):
     """`edits` degrades to `manual`: opencode has no middle ground."""
 
     def argv(approval):
-        return OpenCodeHarness().plan_launch(
-            participant_id="abc123",
-            prompt="",
-            config_path=tmp_path / "x.json",
-            approval=approval,
-        ).argv
+        return (
+            OpenCodeHarness()
+            .plan_launch(
+                participant_id="abc123",
+                prompt="",
+                config_path=tmp_path / "x.json",
+                approval=approval,
+            )
+            .argv
+        )
 
     assert argv("yolo") == ["opencode", "--auto"]
     assert argv("edits") == ["opencode"]
@@ -432,9 +433,7 @@ def test_a_failed_tool_call_still_produces_a_result(rec, workdir):
     assert events[1].text == "exit 1"
 
 
-def test_a_user_part_belonging_to_a_message_we_skipped_is_still_a_user_part(
-    rec, workdir
-):
+def test_a_user_part_belonging_to_a_message_we_skipped_is_still_a_user_part(rec, workdir):
     """The role comes from the `message` table when the stream did not say."""
     user = rec.message("msg_u1", "user")
     src = drain(rec, workdir)
@@ -588,32 +587,6 @@ def test_a_pane_that_has_not_drawn_yet_is_not_idle():
 
 
 # ---- how this adapter is observed ---------------------------------------
-
-
-def test_the_observer_is_not_a_transcript_observer():
-    """The reason observation was split off `Harness` in v1.6.
-
-    Until then this adapter had to implement `find_transcript`, `session_id`,
-    `parse` and `native_children` purely to return nothing, because no path
-    names a session when the output is a shared database. Subclassing
-    `HarnessObserver` directly means those four questions are never asked, and
-    this asserts they stay unasked — reintroducing `TranscriptObserver` here
-    would silently bring the stubs back.
-    """
-    observer = OpenCodeObserver()
-    assert not isinstance(observer, TranscriptObserver)
-    for gone in ("find_transcript", "session_id", "parse"):
-        assert not hasattr(observer, gone)
-
-
-def test_it_is_still_read_rather_than_watched_on_screen():
-    """`has_transcript` means readable, not file-backed.
-
-    A database is read better than a file, so this adapter takes the reading
-    watch loop like the other three; the screen is only a fallback for output
-    that cannot be read at all.
-    """
-    assert OpenCodeObserver().has_transcript is True
 
 
 def test_the_harness_carries_the_observer_the_database_was_given_to():

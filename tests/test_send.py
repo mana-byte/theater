@@ -94,9 +94,7 @@ async def test_send_allowed_after_job_exceeds_ttl(client, fake_tmux, daemon, mon
     # past the TTL, the job's real created_at falls on the stale side and the
     # busy gate drops it.
     real_now = methods_mod.now()
-    monkeypatch.setattr(
-        methods_mod, "now", lambda: real_now + SEND_CLAIM_TTL + 1
-    )
+    monkeypatch.setattr(methods_mod, "now", lambda: real_now + SEND_CLAIM_TTL + 1)
 
     # The stale job no longer blocks; a new send is accepted.
     job2 = await client.call("send", target=target["id"], prompt="second")
@@ -132,9 +130,7 @@ async def test_send_after_job_finishes_allows_resend(client, fake_tmux, daemon):
     assert len(fake_tmux.sent) == 2
 
 
-async def test_the_job_exists_before_the_prompt_is_typed(
-    client, fake_tmux, daemon, monkeypatch
-):
+async def test_the_job_exists_before_the_prompt_is_typed(client, fake_tmux, daemon, monkeypatch):
     """The reservation is taken first, so a fast reply has something to land on.
 
     An agent can finish its turn before the send RPC has even returned. With
@@ -182,17 +178,13 @@ async def test_a_bare_spawn_leaves_nothing_running(client, fake_tmux, daemon):
     Left running it would block every later send as busy, and eat the first
     turn end the human produces.
     """
-    child = await client.call(
-        "spawn", harness="vibe", prompt="", approval="manual", cwd="/tmp"
-    )
+    child = await client.call("spawn", harness="vibe", prompt="", approval="manual", cwd="/tmp")
     assert daemon.jobs.get(child["handle"]).state == JobState.DONE
     job = await client.call("send", target=child["id"], prompt="now do something")
     assert job["state"] == "running"
 
 
-async def test_a_spawn_that_asked_for_something_is_still_pending(
-    client, fake_tmux, daemon
-):
+async def test_a_spawn_that_asked_for_something_is_still_pending(client, fake_tmux, daemon):
     """The counterpart: a spawn prompt occupies the pane like any other."""
     child = await client.call(
         "spawn", harness="vibe", prompt="do the thing", approval="manual", cwd="/tmp"
@@ -228,9 +220,7 @@ def _patch_screen_reading(monkeypatch, reading: ScreenReading) -> None:
     """
     harness = HARNESSES.get(normalize("vibe"))
     assert harness is not None, "vibe must be registered for these tests"
-    monkeypatch.setattr(
-        harness.observer, "screen_reading", lambda capture: reading
-    )
+    monkeypatch.setattr(harness.observer, "screen_reading", lambda capture: reading)
 
 
 async def test_send_to_a_pane_showing_an_approval_modal_at_high_confidence_is_refused(
@@ -276,9 +266,7 @@ async def test_send_to_a_pane_whose_screen_reads_unknown_is_allowed(
     assert len(fake_tmux.sent) == 1
 
 
-async def test_send_is_allowed_when_the_capture_raises(
-    client, fake_tmux, daemon, monkeypatch
-):
+async def test_send_is_allowed_when_the_capture_raises(client, fake_tmux, daemon, monkeypatch):
     """A tmux error during capture does not turn into an unreachable pane."""
     import theater.daemon.methods as methods_mod
 

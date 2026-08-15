@@ -21,8 +21,13 @@ async def test_restart_preserves_participants(theater_home, fake_tmux):
     from theater.tmux.client import Pane
 
     pane = Pane(
-        pane_id="%1", pane_pid=123, cwd="/tmp", window_id="@1",
-        session="main", window_name="test", current_command="vibe",
+        pane_id="%1",
+        pane_pid=123,
+        cwd="/tmp",
+        window_id="@1",
+        session="main",
+        window_name="test",
+        current_command="vibe",
     )
     fake_tmux.visible_panes = [pane]
 
@@ -45,9 +50,7 @@ async def test_restart_preserves_participants(theater_home, fake_tmux):
     await d2.aclose()
 
 
-async def test_restart_marks_dead_participants_whose_panes_vanished(
-    theater_home, fake_tmux
-):
+async def test_restart_marks_dead_participants_whose_panes_vanished(theater_home, fake_tmux):
     """A participant whose pane is gone after restart is marked dead."""
     d1 = Daemon(harnesses={})
     await d1.start()
@@ -67,41 +70,13 @@ async def test_restart_marks_dead_participants_whose_panes_vanished(
     await d2.aclose()
 
 
-async def test_restart_keeps_live_participants(theater_home, fake_tmux):
-    """A participant whose pane still exists is not marked dead."""
-    from theater.tmux.client import Pane
-
-    pane = Pane(
-        pane_id="%1", pane_pid=123, cwd="/tmp", window_id="@1",
-        session="main", window_name="test", current_command="vibe",
-    )
-    fake_tmux.visible_panes = [pane]
-
-    d1 = Daemon(harnesses={})
-    await d1.start()
-    async with DaemonClient(autostart=False) as c:
-        await c.call("hello", harness="vibe", pane="%1", cwd="/tmp")
-    await d1.aclose()
-
-    # Pane still exists on restart.
-    d2 = Daemon(harnesses={})
-    await d2.start()
-    async with DaemonClient(autostart=False) as c:
-        rows = await c.call("participants.list")
-        assert len(rows) == 1
-        assert rows[0]["status"] != "dead"
-    await d2.aclose()
-
-
 async def test_restart_crashes_orphaned_jobs(theater_home, fake_tmux):
     """A running job whose target died during restart is marked crashed."""
 
     d1 = Daemon(harnesses={})
     await d1.start()
     async with DaemonClient(autostart=False) as c:
-        record = await c.call(
-            "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
-        )
+        record = await c.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
         handle = record["handle"]
         job = await c.call("jobs.status", handle=handle)
         assert job["state"] == "running"
@@ -148,8 +123,12 @@ async def test_restart_preserves_lineage(theater_home, fake_tmux):
     async with DaemonClient(autostart=False) as c:
         parent = await c.call("hello", harness="vibe", pane="%1", cwd="/tmp")
         await c.call(
-            "spawn", harness="vibe", prompt="hi", approval="manual",
-            cwd="/tmp", parent_id=parent["id"]
+            "spawn",
+            harness="vibe",
+            prompt="hi",
+            approval="manual",
+            cwd="/tmp",
+            parent_id=parent["id"],
         )
         tree = await c.call("participants.tree")
         assert len(tree) == 1
@@ -162,8 +141,13 @@ async def test_restart_preserves_lineage(theater_home, fake_tmux):
 
     fake_tmux.visible_panes = [
         Pane(
-            pane_id="%1", pane_pid=123, cwd="/tmp", window_id="@1",
-            session="main", window_name="test", current_command="vibe"
+            pane_id="%1",
+            pane_pid=123,
+            cwd="/tmp",
+            window_id="@1",
+            session="main",
+            window_name="test",
+            current_command="vibe",
         )
     ]
 

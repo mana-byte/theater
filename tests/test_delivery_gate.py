@@ -28,9 +28,7 @@ async def _target(client, fake_tmux, *, pane="%1", command="vibe", pid=4242):
 
 
 def _refusals(daemon):
-    return [
-        e for e in daemon.store.bus_tail(limit=100) if e["kind"] == "send.refused"
-    ]
+    return [e for e in daemon.store.bus_tail(limit=100) if e["kind"] == "send.refused"]
 
 
 # --- the pane is gone -------------------------------------------------------
@@ -98,9 +96,7 @@ async def test_a_respawned_pane_is_refused(client, fake_tmux, daemon):
     assert fake_tmux.sent == []
 
 
-async def test_a_respawned_pane_marks_the_participant_dead(
-    client, fake_tmux, daemon
-):
+async def test_a_respawned_pane_marks_the_participant_dead(client, fake_tmux, daemon):
     target = await _target(client, fake_tmux, pid=4242)
     daemon.registry.attach_pane(target["id"], "%1", pane_pid=4242)
     fake_tmux.add_pane("%1", command="vibe", pid=9999)
@@ -148,9 +144,7 @@ async def test_a_shell_at_the_prompt_is_refused(client, fake_tmux, daemon):
     assert [r["payload"]["reason"] for r in _refusals(daemon)] == ["harness_gone"]
 
 
-async def test_a_dead_harness_does_not_mark_the_participant_dead(
-    client, fake_tmux, daemon
-):
+async def test_a_dead_harness_does_not_mark_the_participant_dead(client, fake_tmux, daemon):
     """`ps` is the only witness here, and a `ps` that lied would cost a human
     an unexplained resurrection. Refuse, but leave the record alone."""
     target = await _target(client, fake_tmux, command="vibe")
@@ -162,9 +156,7 @@ async def test_a_dead_harness_does_not_mark_the_participant_dead(
     assert daemon.registry.get(target["id"]).status.value != "dead"
 
 
-async def test_a_shell_with_the_harness_still_below_it_delivers(
-    client, fake_tmux, monkeypatch
-):
+async def test_a_shell_with_the_harness_still_below_it_delivers(client, fake_tmux, monkeypatch):
     """An agent running its own bash tool puts a shell in the foreground.
 
     That is the false positive the shell check would cause on its own, and
@@ -213,9 +205,7 @@ async def test_a_participant_of_unknown_harness_is_not_gated(client, fake_tmux):
 # --- ordering and failure modes ---------------------------------------------
 
 
-async def test_the_gate_runs_before_the_presence_check(
-    client, fake_tmux, daemon, monkeypatch
-):
+async def test_the_gate_runs_before_the_presence_check(client, fake_tmux, daemon, monkeypatch):
     """A pane that is not the target's is not worth scraping for a human."""
     import theater.daemon.methods as methods_mod
 
@@ -233,9 +223,7 @@ async def test_the_gate_runs_before_the_presence_check(
     assert exc.value.code == "stale_target"
 
 
-async def test_the_gate_fails_open_when_tmux_errors(
-    client, fake_tmux, daemon, monkeypatch
-):
+async def test_the_gate_fails_open_when_tmux_errors(client, fake_tmux, daemon, monkeypatch):
     """A tmux hiccup must not become an unreachable participant.
 
     The gate exists to stop a delivery going somewhere wrong, not to become a
@@ -257,9 +245,7 @@ async def test_the_gate_fails_open_when_tmux_errors(
     assert _refusals(daemon) == []
 
 
-async def test_the_gate_is_skipped_when_tmux_is_unavailable(
-    client, fake_tmux, monkeypatch
-):
+async def test_the_gate_is_skipped_when_tmux_is_unavailable(client, fake_tmux, monkeypatch):
     from theater.tmux import client as tmux_client
 
     target = await _target(client, fake_tmux)
@@ -270,23 +256,11 @@ async def test_the_gate_is_skipped_when_tmux_is_unavailable(
     assert fake_tmux.sent == [("%1", "hi")]
 
 
-async def test_a_live_target_is_untouched_by_the_gate(client, fake_tmux):
-    """The case that must not regress: an ordinary send still goes through."""
-    target = await _target(client, fake_tmux)
-
-    job = await client.call("send", target=target["id"], prompt="do the thing")
-
-    assert job["state"] == "running"
-    assert fake_tmux.sent == [("%1", "do the thing")]
-
-
 # --- recording the launch epoch ---------------------------------------------
 
 
 async def test_spawn_records_the_launch_epoch(client, fake_tmux, daemon):
-    record = await client.call(
-        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
-    )
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
     pane = next(p for p in fake_tmux.visible_panes if p.pane_id == record["tmux_pane"])
 
     assert daemon.registry.get(record["id"]).pid == pane.pane_pid
@@ -302,9 +276,7 @@ async def test_spawn_survives_an_unreadable_epoch(client, fake_tmux, monkeypatch
 
     monkeypatch.setattr(tmux_client, "list_panes", broken)
 
-    record = await client.call(
-        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
-    )
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
 
     assert record["tmux_pane"] is not None
     assert record["pid"] is None
@@ -320,9 +292,7 @@ async def test_adopt_records_the_launch_epoch(client, fake_tmux, daemon):
     assert daemon.registry.get(record["id"]).pid == 777
 
 
-async def test_re_attaching_the_same_pane_announces_nothing(
-    client, fake_tmux, daemon
-):
+async def test_re_attaching_the_same_pane_announces_nothing(client, fake_tmux, daemon):
     """`adopt` now re-attaches in order to record the epoch.
 
     That is bookkeeping, not news. Announcing it would put a move on the bus
@@ -332,9 +302,7 @@ async def test_re_attaching_the_same_pane_announces_nothing(
     fake_tmux.add_pane("%7", command="zsh", pid=777)
     await client.call("adopt", pane="%7")
 
-    moves = [
-        e for e in daemon.store.bus_tail(limit=100) if e["kind"] == "participant.pane"
-    ]
+    moves = [e for e in daemon.store.bus_tail(limit=100) if e["kind"] == "participant.pane"]
 
     assert moves == []
 

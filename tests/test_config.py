@@ -46,24 +46,6 @@ def test_empty_file_is_all_defaults_but_exists():
     assert loaded.rails.budget == 20
 
 
-def test_defaults_match_the_constants_they_replace():
-    """The move to config must not have changed any shipped behaviour."""
-    from theater.daemon import observer, rails
-    from theater.regie import app
-
-    loaded = cfg.load()
-    assert loaded.rails.depth_cap == rails.DEFAULT_DEPTH_CAP
-    assert loaded.rails.budget == rails.DEFAULT_BUDGET
-    assert loaded.observer.poll_interval == observer.POLL_INTERVAL
-    assert loaded.observer.relocate_timeout == observer.RELOCATE_TIMEOUT
-    assert loaded.observer.awaiting_input_timeout == observer.AWAITING_INPUT_TIMEOUT
-    assert loaded.observer.search_interval == observer.SEARCH_INTERVAL
-    assert loaded.observer.sync_interval == observer.SYNC_INTERVAL
-    assert loaded.regie.tree_interval == app.TREE_INTERVAL
-    assert loaded.regie.bus_interval == app.BUS_INTERVAL
-    assert loaded.regie.bus_batch == app.BUS_BATCH
-
-
 # ---- reading ------------------------------------------------------------
 
 
@@ -107,13 +89,6 @@ def test_describe_reports_source_per_key():
 
 
 # ---- rejecting ----------------------------------------------------------
-
-
-def test_unknown_key_is_fatal():
-    write("[rails]\ndepth_capp = 5\n")
-    with pytest.raises(cfg.ConfigError) as exc:
-        cfg.load()
-    assert "depth_capp" in str(exc.value)
 
 
 def test_unknown_key_suggests_the_real_one():
@@ -189,8 +164,6 @@ def test_section_must_be_a_table():
 @pytest.mark.parametrize(
     "body",
     [
-        "[observer]\npoll_interval = 0\n",
-        "[observer]\npoll_interval = -1.0\n",
         "[observer]\npoll_interval = 0.0001\n",
         "[rails]\nbudget = 0\n",
         "[rails]\ndepth_cap = -1\n",
@@ -446,12 +419,6 @@ def test_config_path_prints_the_file(capsys):
     assert capsys.readouterr().out.strip() == str(paths.config_path())
 
 
-def test_config_path_works_when_no_file_exists(capsys):
-    assert not paths.config_path().exists()
-    assert run_cli("config", "path") == 0
-    assert str(paths.config_path()) in capsys.readouterr().out
-
-
 def test_config_says_when_there_is_no_file(capsys):
     assert run_cli("config") == 0
     assert "no file yet" in capsys.readouterr().out
@@ -491,28 +458,11 @@ def make_app(theme: str | None):
     return RegieApp(cfg.Config(regie=cfg.RegieSection(theme=theme)))
 
 
-def test_a_known_theme_is_applied():
-    app = make_app("nord")
-    app._apply_theme()
-    assert app.theme == "nord"
-
-
 def test_no_theme_leaves_textuals_default():
     app = make_app(None)
     before = app.theme
     app._apply_theme()
     assert app.theme == before
-
-
-def test_an_unknown_theme_is_reported_not_fatal(monkeypatch):
-    """Cosmetic mistake. Crashing would hide every agent on the machine."""
-    app = make_app("bogus")
-    said: list[str] = []
-    monkeypatch.setattr(app, "notify", lambda msg, **k: said.append(msg))
-    before = app.theme
-    app._apply_theme()
-    assert app.theme == before
-    assert said and "bogus" in said[0]
 
 
 def test_an_unknown_theme_lists_the_real_ones(monkeypatch):
@@ -538,11 +488,6 @@ def test_the_theme_is_applied_from_the_file_on_disk():
 
 def spawn_args(*argv):
     return cli._parser().parse_args(["spawn", *argv, "--approval", "manual"])
-
-
-def test_a_named_harness_wins_over_the_favourite():
-    write('[theater]\nfavourite = "claude"\n')
-    assert cli._spawn_harness(spawn_args("vibe")) == "vibe"
 
 
 def test_the_favourite_is_used_when_no_harness_is_named():

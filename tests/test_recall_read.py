@@ -67,7 +67,9 @@ def _make_job(
 ) -> str:
     """Create a job row and its target participant. Returns the participant id."""
     p = registry.register(
-        harness=harness, pane=None, cwd=target_cwd or cwd,
+        harness=harness,
+        pane=None,
+        cwd=target_cwd or cwd,
         session_id=session_id,
     )
     store.create_job(
@@ -91,8 +93,15 @@ def _make_job(
     return p.id
 
 
-def _add_touch(store, *, handle: str, path: str, sha_before: str | None,
-               sha_after: str | None, mode: str = "write") -> None:
+def _add_touch(
+    store,
+    *,
+    handle: str,
+    path: str,
+    sha_before: str | None,
+    sha_after: str | None,
+    mode: str = "write",
+) -> None:
     store.conn.execute(
         insert(touch).values(
             job_handle=handle,
@@ -108,9 +117,7 @@ def _init_git(repo: Path) -> None:
     """A real git repo with a configured author, for gap-segment tests."""
     repo.mkdir(parents=True)
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    subprocess.run(
-        ["git", "config", "user.name", "Test"], cwd=repo, check=True
-    )
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
     subprocess.run(
         ["git", "config", "user.email", "test@example.com"],
         cwd=repo,
@@ -121,9 +128,7 @@ def _init_git(repo: Path) -> None:
 def _commit(repo: Path, message: str) -> str:
     """Stage everything and commit. Returns the commit sha."""
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
-    subprocess.run(
-        ["git", "commit", "-q", "-m", message], cwd=repo, check=True
-    )
+    subprocess.run(["git", "commit", "-q", "-m", message], cwd=repo, check=True)
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=repo,
@@ -149,9 +154,7 @@ def _blob_sha(repo: Path, ref: str) -> str:
 # ---- job segments --------------------------------------------------------
 
 
-async def test_job_segment_returns_metadata_and_transcript(
-    registry, tmp_path
-):
+async def test_job_segment_returns_metadata_and_transcript(registry, tmp_path):
     """A job segment returns the job's database metadata and its transcript.
 
     Goes through ``open_source`` so an adapter whose output is a file
@@ -174,12 +177,18 @@ async def test_job_segment_returns_metadata_and_transcript(
     )
 
     _make_job(
-        registry.store, registry, handle="vibe-abc",
-        target_cwd=str(project), session_id=sid,
+        registry.store,
+        registry,
+        handle="vibe-abc",
+        target_cwd=str(project),
+        session_id=sid,
     )
     _add_touch(
-        registry.store, handle="vibe-abc", path="src.py",
-        sha_before="aaa", sha_after="bbb",
+        registry.store,
+        handle="vibe-abc",
+        path="src.py",
+        sha_before="aaa",
+        sha_after="bbb",
     )
 
     result = await read_segment(
@@ -204,9 +213,7 @@ async def test_job_segment_returns_metadata_and_transcript(
     assert "assistant" in roles
 
 
-async def test_job_segment_missing_transcript_still_returns_metadata(
-    registry, tmp_path
-):
+async def test_job_segment_missing_transcript_still_returns_metadata(registry, tmp_path):
     """A job whose transcript no longer exists returns everything the
     database still remembers, with an explicit marker that the
     transcript is unavailable.
@@ -226,16 +233,24 @@ async def test_job_segment_missing_transcript_still_returns_metadata(
     harness_mod.HARNESSES["vibe"] = vibe
 
     _make_job(
-        registry.store, registry, handle="codex-dead",
-        harness="vibe", target_cwd=str(tmp_path / "nowhere"),
+        registry.store,
+        registry,
+        handle="codex-dead",
+        harness="vibe",
+        target_cwd=str(tmp_path / "nowhere"),
     )
     _add_touch(
-        registry.store, handle="codex-dead", path="gone.py",
-        sha_before="ccc", sha_after=None,
+        registry.store,
+        handle="codex-dead",
+        path="gone.py",
+        sha_before="ccc",
+        sha_after=None,
     )
 
     result = await read_segment(
-        "codex-dead", store=registry.store, registry=registry,
+        "codex-dead",
+        store=registry.store,
+        registry=registry,
         cwd=str(tmp_path),
     )
 
@@ -252,9 +267,7 @@ async def test_job_segment_missing_transcript_still_returns_metadata(
     assert "no longer" in result["transcript"]["reason"]
 
 
-async def test_job_segment_with_no_target_returns_metadata_only(
-    registry, tmp_path
-):
+async def test_job_segment_with_no_target_returns_metadata_only(registry, tmp_path):
     """A job whose target_id is None (a CLI spawn with no target) has
     no transcript to read. The metadata is still there."""
     registry.store.create_job(
@@ -307,9 +320,7 @@ async def test_gap_segment_git_can_explain(tmp_path):
     after_blob = _blob_sha(repo, "HEAD:src.py")
 
     segment = f"gap:src.py:{before_blob}..{after_blob}"
-    result = await read_segment(
-        segment, store=None, registry=None, cwd=str(repo)
-    )
+    result = await read_segment(segment, store=None, registry=None, cwd=str(repo))
 
     assert result["kind"] == "gap"
     assert result["path"] == "src.py"
@@ -344,9 +355,7 @@ async def test_gap_segment_git_cannot_explain(tmp_path):
     fake_after = "1" * 40
 
     segment = f"gap:src.py:{fake_before}..{fake_after}"
-    result = await read_segment(
-        segment, store=None, registry=None, cwd=str(repo)
-    )
+    result = await read_segment(segment, store=None, registry=None, cwd=str(repo))
 
     assert result["kind"] == "gap"
     assert result["explained"] is False
@@ -362,9 +371,7 @@ async def test_gap_segment_refuses_path_escape(tmp_path):
     _init_git(repo)
 
     segment = "gap:../../etc/passwd:aaa..bbb"
-    result = await read_segment(
-        segment, store=None, registry=None, cwd=str(repo)
-    )
+    result = await read_segment(segment, store=None, registry=None, cwd=str(repo))
 
     assert result["kind"] == "gap"
     assert result["explained"] is False
@@ -379,9 +386,7 @@ async def test_gap_segment_not_in_a_git_repo(tmp_path):
     not_a_repo.mkdir()
 
     segment = "gap:src.py:aaa..bbb"
-    result = await read_segment(
-        segment, store=None, registry=None, cwd=str(not_a_repo)
-    )
+    result = await read_segment(segment, store=None, registry=None, cwd=str(not_a_repo))
 
     assert result["kind"] == "gap"
     assert result["explained"] is False
@@ -400,9 +405,7 @@ async def test_gap_segment_null_sha_sentinels(tmp_path):
 
     # ``-`` means the file did not exist before (creation).
     segment = f"gap:src.py:-..{blob}"
-    result = await read_segment(
-        segment, store=None, registry=None, cwd=str(repo)
-    )
+    result = await read_segment(segment, store=None, registry=None, cwd=str(repo))
 
     assert result["kind"] == "gap"
     assert result["sha_before"] is None
@@ -412,9 +415,7 @@ async def test_gap_segment_null_sha_sentinels(tmp_path):
 # ---- read-only ----------------------------------------------------------
 
 
-async def test_read_segment_writes_nothing_to_the_database(
-    registry, tmp_path
-):
+async def test_read_segment_writes_nothing_to_the_database(registry, tmp_path):
     """``read_segment`` is read-only with respect to the database. It
     writes nothing — not a log row, not a cache. Asserting the bus row
     count is unchanged before and after proves this."""
@@ -428,29 +429,27 @@ async def test_read_segment_writes_nothing_to_the_database(
     harness_mod.HARNESSES["vibe"] = VibeHarness(root=empty_root)
 
     _make_job(
-        registry.store, registry, handle="ro-test",
+        registry.store,
+        registry,
+        handle="ro-test",
         target_cwd=str(tmp_path / "nowhere"),
     )
 
     # Measure after the job is created, so the bus rows that
     # ``registry.register`` writes do not count against ``read_segment``.
-    before = registry.store.conn.execute(
-        select(func.count()).select_from(bus)
-    ).scalar()
+    before = registry.store.conn.execute(select(func.count()).select_from(bus)).scalar()
 
     # Read a job segment.
-    await read_segment(
-        "ro-test", store=registry.store, registry=registry, cwd=str(tmp_path)
-    )
+    await read_segment("ro-test", store=registry.store, registry=registry, cwd=str(tmp_path))
     # Read a gap segment.
     repo = tmp_path / "repo"
     _init_git(repo)
     await read_segment(
-        "gap:src.py:aaa..bbb", store=registry.store, registry=registry,
+        "gap:src.py:aaa..bbb",
+        store=registry.store,
+        registry=registry,
         cwd=str(repo),
     )
 
-    after = registry.store.conn.execute(
-        select(func.count()).select_from(bus)
-    ).scalar()
+    after = registry.store.conn.execute(select(func.count()).select_from(bus)).scalar()
     assert before == after

@@ -85,6 +85,7 @@ def test_the_newest_transcript_wins_among_several_in_one_directory(root, observe
 def test_a_transcript_older_than_the_participant_is_not_theirs(root, observer):
     """Without this, a respawn in the same repo re-attaches to the dead session."""
     write(root / "-tmp-x" / "aaa.jsonl", [{"cwd": "/tmp/x"}])
+    assert observer.find_transcript(cwd="/tmp/x", after=0) is not None
     assert observer.find_transcript(cwd="/tmp/x", after=time.time() + 3600) is None
 
 
@@ -229,7 +230,9 @@ def test_the_mcp_config_is_bound_with_an_equals_sign(tmp_path):
 
 def test_an_empty_prompt_leaves_claude_waiting_rather_than_running_nothing(tmp_path):
     plan = ClaudeCodeHarness().plan_launch(
-        participant_id="p-abc", prompt="", config_path=tmp_path / "mcp.json",
+        participant_id="p-abc",
+        prompt="",
+        config_path=tmp_path / "mcp.json",
         approval="manual",
     )
     assert plan.argv == ["claude", f"--mcp-config={tmp_path / 'mcp.json'}"]
@@ -237,7 +240,9 @@ def test_an_empty_prompt_leaves_claude_waiting_rather_than_running_nothing(tmp_p
 
 def test_the_config_written_alongside_names_this_participant(tmp_path):
     plan = ClaudeCodeHarness().plan_launch(
-        participant_id="p-abc", prompt="hi", config_path=tmp_path / "mcp.json",
+        participant_id="p-abc",
+        prompt="hi",
+        config_path=tmp_path / "mcp.json",
         approval="manual",
     )
     config = json.loads(next(iter(plan.files.values())))

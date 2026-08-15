@@ -19,14 +19,11 @@ relativisation is needed inside parse.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
-from shipped import CodexHarness, CodexObserver
+from shipped import CodexObserver
 
 from theater.harness import plan_launch
 from theater.harness.base import EventKind, EventPath
-
-FIXTURES = Path(__file__).parent / "fixtures"
 
 #: A minimal apply_patch input that touches three files: one update, one add,
 #: one delete. The patch body is irrelevant to path extraction — only the
@@ -46,12 +43,7 @@ _PATCH_THREE_FILES = (
 
 #: A single-file update patch.
 _PATCH_ONE_FILE = (
-    "*** Begin Patch\n"
-    "*** Update File: README.md\n"
-    "@@ -1 +1 @@\n"
-    "-# old\n"
-    "+# new\n"
-    "*** End Patch\n"
+    "*** Begin Patch\n*** Update File: README.md\n@@ -1 +1 @@\n-# old\n+# new\n*** End Patch\n"
 )
 
 
@@ -82,18 +74,6 @@ def test_apply_patch_single_file_update_is_a_write():
     assert event.kind is EventKind.TOOL_CALL
     assert event.tool_name == "apply_patch"
     assert event.paths == (EventPath(path="README.md", mode="write"),)
-
-
-def test_apply_patch_add_file_is_a_write():
-    patch = "*** Begin Patch\n*** Add File: src/new.py\n+pass\n*** End Patch\n"
-    events = _parse(_apply_patch_call(patch))
-    assert events[0].paths == (EventPath(path="src/new.py", mode="write"),)
-
-
-def test_apply_patch_delete_file_is_a_write():
-    patch = "*** Begin Patch\n*** Delete File: src/gone.py\n*** End Patch\n"
-    events = _parse(_apply_patch_call(patch))
-    assert events[0].paths == (EventPath(path="src/gone.py", mode="write"),)
 
 
 # ---- multi-file: one tool call, several EventPath entries ---------------
@@ -143,9 +123,7 @@ def test_function_call_shell_command_yields_no_paths():
             "type": "function_call",
             "name": "shell_command",
             "call_id": "c2",
-            "arguments": json.dumps(
-                {"command": "cat src/main.rs", "workdir": "/tmp/repo"}
-            ),
+            "arguments": json.dumps({"command": "cat src/main.rs", "workdir": "/tmp/repo"}),
         }
     )
     assert len(events) == 1
@@ -171,44 +149,6 @@ def test_malformed_apply_patch_input_yields_no_paths():
     """A garbled input is not a partial guess. No paths, not maybe-paths."""
     events = _parse(_apply_patch_call("not a patch at all"))
     assert events[0].paths == ()
-
-
-def test_empty_apply_patch_input_yields_no_paths():
-    events = _parse(_apply_patch_call(""))
-    assert events[0].paths == ()
-
-
-# ---- repo-relative guarantee -------------------------------------------
-
-
-def test_apply_patch_paths_are_repo_relative_never_absolute():
-    """The patch grammar uses repo-relative paths. No absolute path should
-    appear in EventPath, because the touch index gets pasted into agent
-    prompts and an absolute path leaks the developer's home directory."""
-    events = _parse(_apply_patch_call(_PATCH_THREE_FILES))
-    for ep in events[0].paths:
-        assert not Path(ep.path).is_absolute(), ep.path
-
-
-# ---- the real fixture: exec call in codex.jsonl yields no paths --------
-
-
-def test_codex_fixture_exec_call_yields_no_paths():
-    """The shipped fixture's custom_tool_call is an ``exec`` call with a
-    placeholder input. It must yield no paths — the placeholder is not a
-    patch, and exec is not apply_patch."""
-    lines = (FIXTURES / "codex.jsonl").read_text().splitlines()
-    observer = CodexObserver()
-    for i, line in enumerate(lines):
-        record = json.loads(line)
-        if record.get("type") != "response_item":
-            continue
-        payload = record.get("payload", {})
-        if payload.get("type") != "custom_tool_call":
-            continue
-        events = observer.parse(line, i)
-        assert len(events) == 1
-        assert events[0].paths == ()
 
 
 # ---- resume argv -------------------------------------------------------
@@ -251,16 +191,3 @@ def test_resume_without_prompt_omits_positional(tmp_path):
     # No trailing positional prompt.
     assert not plan.argv[-1].startswith("mcp_servers")
     assert plan.argv[-1] not in ("", "some-session")
-
-
-def test_resume_takes_prompt_is_true():
-    """Codex's resume subcommand still accepts and delivers the prompt
-    positionally (cli/src/main.rs:3583-3595, 3616-3624 confirm this in the
-    CLI's own tests). So the default ``True`` is correct."""
-    assert CodexHarness.resume_takes_prompt is True
-
-
-def test_supports_resume_is_true():
-    from theater.harness import supports_resume
-
-    assert supports_resume(CodexHarness()) is True

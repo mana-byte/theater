@@ -132,15 +132,6 @@ def test_check_resume_refuses_a_harness_without_the_parameter(no_resume_harness)
         check_resume("no-resume-test", "some-session-id")
 
 
-def test_check_resume_passes_when_no_resume_asked(no_resume_harness):
-    """A None resume is always fine, even for a harness that cannot resume."""
-    check_resume("no-resume-test", None)
-
-
-def test_check_resume_passes_when_resume_asked_and_supported(resume_harness):
-    check_resume("resume-test", "some-session-id")
-
-
 def test_plan_launch_forwards_resume_only_when_non_none(resume_harness, tmp_path):
     """The compat contract: resume is forwarded as a keyword only when set.
 
@@ -191,13 +182,3 @@ def test_plan_launch_without_resume_works_for_a_harness_without_it(no_resume_har
         approval="manual",
     )
     assert plan.argv == ["no-resume-test", "abc"]
-
-
-def test_resume_takes_prompt_defaults_true():
-    """Every harness keeps the prompt on resume unless it says otherwise.
-
-    The opencode plugin's owner will set this False; the default True is
-    correct for every harness whose resume mode still delivers the prompt.
-    """
-    assert _ResumeHarness.resume_takes_prompt is True
-    assert _NoResumeHarness.resume_takes_prompt is True

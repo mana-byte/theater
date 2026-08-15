@@ -107,9 +107,7 @@ async def test_split_window_horizontal(monkeypatch):
 
 async def test_new_window_named(monkeypatch):
     captured = await _capture_argv(monkeypatch)
-    result = await panes.new_window_named(
-        session="0", name="stage", cwd="/tmp", command=["vibe"]
-    )
+    result = await panes.new_window_named(session="0", name="stage", cwd="/tmp", command=["vibe"])
     assert result == "%99"
     argv = captured[0]
     assert argv[0] == "new-window"

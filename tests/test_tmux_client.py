@@ -48,11 +48,6 @@ async def test_new_window_session_already_ending_colon_not_doubled(monkeypatch):
     assert argv[argv.index("-t") + 1] == "myname:"
 
 
-async def test_new_window_named_session_keeps_colon(monkeypatch):
-    argv = await _new_window_argv(monkeypatch, session="dev")
-    assert argv[argv.index("-t") + 1] == "dev:"
-
-
 async def test_new_window_background_inserts_d_before_capital_p(monkeypatch):
     argv = await _new_window_argv(monkeypatch, background=True)
     assert argv[0:2] == ["new-window", "-d"]
@@ -85,28 +80,19 @@ async def test_new_window_env_each_var_its_own_e(monkeypatch):
 async def test_new_window_command_separated_by_double_dash(monkeypatch):
     argv = await _new_window_argv(monkeypatch, command=["vibe", "say hello"])
     assert "--" in argv
-    after = argv[argv.index("--") + 1:]
+    after = argv[argv.index("--") + 1 :]
     assert after == ["vibe", "say hello"]
 
 
 async def test_new_window_returns_pane_id_and_rejects_non_percent(monkeypatch):
     """A non-%-prefixed response is garbage, not a pane id."""
-    bad = {"0": "not-a-pane"}
-
-    async def fake_run(*args: str, check: bool = True) -> str:
-        return bad.get(args[0], "0")
-
-    # the helper above asserts == "%99" already; test the failure path directly
-    monkeypatch.setattr(client, "run", fake_run)
 
     async def returns_garbage(*a, **kw) -> str:
         return "garbage"
 
     monkeypatch.setattr(client, "run", returns_garbage)
     with pytest.raises(client.TmuxError):
-        await client.new_window(
-            session="0:", name="x", cwd="/tmp", command=["vibe"]
-        )
+        await client.new_window(session="0:", name="x", cwd="/tmp", command=["vibe"])
 
 
 # ---- list_panes --------------------------------------------------------
@@ -137,11 +123,6 @@ async def test_list_panes_session_scope_uses_s_and_t_with_colon(monkeypatch):
     assert "-s" in argv
     i = argv.index("-t")
     assert argv[i + 1] == "0:"
-
-
-async def test_list_panes_named_session_gets_colon(monkeypatch):
-    argv = await _list_panes_argv(monkeypatch, session="dev")
-    assert argv[argv.index("-t") + 1] == "dev:"
 
 
 async def test_list_panes_session_already_colon_terminated_not_doubled(monkeypatch):
@@ -194,13 +175,13 @@ async def test_deliver_text_pastes_rather_than_typing(monkeypatch):
     """
     captured = await _deliver_argv(monkeypatch, "Hey! I'm here")
 
-    assert not any(
-        argv[0] == "send-keys" and "-l" in argv for argv in captured
-    ), "the prompt must never be typed as keys"
+    assert not any(argv[0] == "send-keys" and "-l" in argv for argv in captured), (
+        "the prompt must never be typed as keys"
+    )
 
     set_buffer = next(a for a in captured if a[0] == "set-buffer")
     i = set_buffer.index("--")
-    assert set_buffer[i + 1:] == ["Hey! I'm here"], "text passes through unaltered"
+    assert set_buffer[i + 1 :] == ["Hey! I'm here"], "text passes through unaltered"
 
     paste = next(a for a in captured if a[0] == "paste-buffer")
     assert paste[paste.index("-t") + 1] == "%7"

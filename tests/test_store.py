@@ -82,9 +82,7 @@ def test_a_persisted_starting_status_loads_as_idle(store):
 
     # Write the old value directly, bypassing the enum, as an upgrade would.
     store.conn.execute(
-        participants.update()
-        .where(participants.c.id == p.id)
-        .values(status="starting")
+        participants.update().where(participants.c.id == p.id).values(status="starting")
     )
 
     got = store.get_participant(p.id)

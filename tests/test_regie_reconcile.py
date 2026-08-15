@@ -208,9 +208,7 @@ async def test_a_new_participant_does_not_disturb_existing_widgets(daemon, tmux)
         assert len(before) == 2
 
         # A third agent appears.
-        daemon["answers"]["participants.tree"] = [
-            dict(PARENT, children=[dict(CHILD), dict(THIRD)])
-        ]
+        daemon["answers"]["participants.tree"] = [dict(PARENT, children=[dict(CHILD), dict(THIRD)])]
         await app._refresh_tree()
 
         after = list(panel.children)
@@ -233,10 +231,8 @@ async def test_row_order_matches_data_order_after_reconcile(daemon, tmux):
             daemon["answers"]["participants.unmanaged"],
         )
         keys = [key for _, _, key, _, _ in lines]
-        assert [k for k in panel._key_widgets] == keys
-        assert [
-            panel._key_widgets[k] for k in keys
-        ] == list(panel.children)
+        assert list(panel._key_widgets) == keys
+        assert [panel._key_widgets[k] for k in keys] == list(panel.children)
 
 
 async def test_inserted_child_in_the_middle_preserves_order(daemon, tmux):
@@ -246,17 +242,13 @@ async def test_inserted_child_in_the_middle_preserves_order(daemon, tmux):
         panel = _panel(app)
 
         # Start: parent -> child.
-        daemon["answers"]["participants.tree"] = [
-            dict(PARENT, children=[dict(CHILD)])
-        ]
+        daemon["answers"]["participants.tree"] = [dict(PARENT, children=[dict(CHILD)])]
         await app._refresh_tree()
         before = list(panel.children)
         assert len(before) == 2
 
         # Now: parent -> third -> child (third inserted in the middle).
-        daemon["answers"]["participants.tree"] = [
-            dict(PARENT, children=[dict(THIRD), dict(CHILD)])
-        ]
+        daemon["answers"]["participants.tree"] = [dict(PARENT, children=[dict(THIRD), dict(CHILD)])]
         await app._refresh_tree()
         after = list(panel.children)
         assert len(after) == 3
@@ -287,9 +279,7 @@ async def test_empty_tree_and_back(daemon, tmux):
         assert "no participants" in str(panel.children[0].render())
 
         # Back to populated.
-        daemon["answers"]["participants.tree"] = [
-            dict(PARENT, children=[dict(CHILD)])
-        ]
+        daemon["answers"]["participants.tree"] = [dict(PARENT, children=[dict(CHILD)])]
         await app._refresh_tree()
         await pilot.pause()
         assert len(panel.children) == 2

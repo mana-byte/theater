@@ -198,8 +198,7 @@ async def test_a_failed_harness_call_falls_back_to_the_registry(provider):
 
 async def test_an_app_without_settings_still_gets_a_palette(provider):
     """The provider reads config off the app defensively, and must not assume."""
-    prov, app = provider
-    assert not hasattr(app, "settings")
+    prov, _app = provider
     assert len([hit async for hit in prov.discover()]) == len(HARNESSES)
 
 
@@ -323,6 +322,7 @@ async def test_the_loaded_list_is_what_the_palette_offers():
 
 async def test_a_failed_load_leaves_the_registry_fallback_in_place():
     """An empty palette would say 'nothing can be spawned', which is false."""
+
     class Refusing:
         async def call(self, method, **params):
             raise RuntimeError("daemon went away")

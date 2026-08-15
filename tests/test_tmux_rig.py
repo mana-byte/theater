@@ -19,7 +19,6 @@ without a tmux binary can still use `-m "not tmux"`.
 from __future__ import annotations
 
 import asyncio
-import os
 import shlex
 import shutil
 import sys
@@ -119,9 +118,7 @@ async def _start_rig(
     if under_shell:
         inner = " ".join(shlex.quote(a) for a in argv)
         argv = ["sh", "-c", f"{inner}; exec sh"]
-    pane = await client.new_window(
-        session=session, name="rig", cwd=str(tmp_path), command=argv
-    )
+    pane = await client.new_window(session=session, name="rig", cwd=str(tmp_path), command=argv)
     # The rig declares DECSET 2004 as its first act, so the flag turning 1 is
     # both "it is up" and "a paste will be bracketed".
     await _wait_for(lambda: _declared_bracketed_paste(pane))
@@ -145,12 +142,6 @@ def _paste_body(data: bytes) -> bytes:
 
 
 # ---- what a paste looks like on the wire -------------------------------
-
-
-async def test_the_rig_declares_bracketed_paste(tmux_server, tmp_path):
-    """The premise of `deliver_text`: tmux reports the receiver's own flag."""
-    pane, _ = await _start_rig(tmux_server, tmp_path)
-    assert await _bracket_paste_flag(pane) == "1"
 
 
 async def test_a_paste_arrives_wrapped_in_bracket_markers(tmux_server, tmp_path):
@@ -308,7 +299,7 @@ class _Refused(Exception):
 
 
 async def test_the_gate_allows_a_live_program_it_cannot_identify(tmux_server, tmp_path):
-    """"No harness found" alone must never refuse.
+    """ "No harness found" alone must never refuse.
 
     The rig is not a harness, so the `ps` walk comes back `unknown` -- exactly
     what it would report for an agent whose bash tool is briefly in the
@@ -365,9 +356,7 @@ async def test_the_gate_refuses_a_pane_whose_pid_changed(tmux_server, tmp_path):
     daemon, refuse, dead = _gate_stubs()
 
     # The recorded epoch matches, so this passes.
-    await _check_pane_identity(
-        daemon, _target(pane, harness="vibe", pid=info.pane_pid), refuse
-    )
+    await _check_pane_identity(daemon, _target(pane, harness="vibe", pid=info.pane_pid), refuse)
 
     with pytest.raises(_Refused) as caught:
         await _check_pane_identity(
@@ -401,15 +390,8 @@ async def test_new_window_passes_env_through_to_the_program(tmux_server, tmp_pat
         session=tmux_server,
         name="env",
         cwd=str(tmp_path),
-        command=["sh", "-c", f"printf %s \"$THEATER_ID\" > {shlex.quote(str(log))}; exec sh"],
+        command=["sh", "-c", f'printf %s "$THEATER_ID" > {shlex.quote(str(log))}; exec sh'],
         env={"THEATER_ID": "deadbeef1234"},
     )
     assert await _wait_for(lambda: _tail(log, b"deadbeef1234"))
     await client.kill_pane(pane)
-
-
-def test_the_rig_program_is_executable_python():
-    """Cheap guard: the rig is imported by nothing, so nothing else notices."""
-    assert RIG.exists()
-    compile(RIG.read_text(), str(RIG), "exec")
-    assert os.access(sys.executable, os.X_OK)

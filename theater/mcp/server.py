@@ -210,10 +210,9 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
                    expires, jobs still running are returned with state="running"
                    and you should re-await.
 
-        Returns one entry per handle with state ("done", "crashed", "running"),
-        result (the assistant's final response text), and error_code.
-        This blocks your current request only; the daemon and other agents
-        continue running.
+        Returns one entry per handle with state ("done", "crashed", "running")
+        and error_code. This blocks your current request only; the daemon and
+        other agents continue running.
 
         Keep each wait shorter than your own client's tool timeout, which
         Theater does not set and cannot see. When that timeout is the
@@ -221,11 +220,11 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         works on regardless, and what gets you the answer is another
         await, not a longer one.
 
-        "done" means the child's turn ended, not that the work is right,
-        and `result` is its own account of what it did, clipped to 2000
-        characters. read_transcript returns the text in full. Neither is
-        evidence: before you build on a child's answer, or merge its
-        branch, look at what it changed in the repo.
+        "done" means the child's turn ended, not that the work is right. This
+        result does not carry the child's response text: read_transcript
+        returns what it said in full, and the transcript is not evidence
+        either — before you build on a child's answer, or merge its branch,
+        look at what it changed in the repo.
         """
         return await tools.await_sessions(
             session, handles=handles, max_wait=max_wait

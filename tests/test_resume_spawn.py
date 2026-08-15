@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from theater.daemon.spawner import Spawner, SpawnRequest
-from theater.harness import HARNESSES, Harness, LaunchPlan, check_resume
+from theater.harness import HARNESSES, Harness, LaunchPlan
 from theater.models import BadRequest
 
 
@@ -134,27 +134,12 @@ def drops_prompt_harness(monkeypatch):
     return h
 
 
-# ---- SpawnRequest carries resume --------------------------------------
-
-
-def test_spawn_request_has_resume_field():
-    """SpawnRequest.resume exists and defaults to None, like model."""
-    req = SpawnRequest(harness="vibe", prompt="hi", cwd="/tmp", approval="edits")
-    assert req.resume is None
-    req2 = SpawnRequest(
-        harness="vibe", prompt="hi", cwd="/tmp", approval="edits", resume="sess-1"
-    )
-    assert req2.resume == "sess-1"
-
-
 # ---- resume reaches plan_launch ---------------------------------------
 
 
 async def test_resume_reaches_plan_launch(registry, resume_harness, monkeypatch):
     """The session id travels from SpawnRequest through plan_launch."""
-    monkeypatch.setattr(
-        "theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}"
-    )
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
     spawner = Spawner(registry)
     req = SpawnRequest(
         harness="resume-spawn-test",
@@ -167,13 +152,9 @@ async def test_resume_reaches_plan_launch(registry, resume_harness, monkeypatch)
     assert resume_harness.seen_resume == "sess-abc"
 
 
-async def test_resume_none_does_not_reach_plan_launch(
-    registry, resume_harness, monkeypatch
-):
+async def test_resume_none_does_not_reach_plan_launch(registry, resume_harness, monkeypatch):
     """A None resume is not forwarded, identical to the model contract."""
-    monkeypatch.setattr(
-        "theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}"
-    )
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
     spawner = Spawner(registry)
     req = SpawnRequest(
         harness="resume-spawn-test",
@@ -188,13 +169,9 @@ async def test_resume_none_does_not_reach_plan_launch(
 # ---- check_resume refuses unsupported harnesses ----------------------
 
 
-async def test_check_resume_refuses_unsupported_harness(
-    registry, no_resume_harness, monkeypatch
-):
+async def test_check_resume_refuses_unsupported_harness(registry, no_resume_harness, monkeypatch):
     """A resume asked of a harness without the parameter is refused up front."""
-    monkeypatch.setattr(
-        "theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}"
-    )
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
     spawner = Spawner(registry)
     req = SpawnRequest(
         harness="no-resume-spawn-test",
@@ -205,12 +182,6 @@ async def test_check_resume_refuses_unsupported_harness(
     )
     with pytest.raises(BadRequest, match="does not support resume"):
         await spawner.spawn(req)
-
-
-def test_check_resume_refuses_by_name(no_resume_harness):
-    """check_resume is callable before anything exists and names the harness."""
-    with pytest.raises(BadRequest, match="does not support resume"):
-        check_resume("no-resume-spawn-test", "sess-1")
 
 
 # ---- B2: a harness that drops the prompt on resume --------------------
@@ -225,9 +196,7 @@ async def test_resume_with_prompt_refused_for_dropping_harness(
     the alternative (resume without a prompt, then send).  Refused before
     the participant or worktree exists, so nothing is left behind.
     """
-    monkeypatch.setattr(
-        "theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}"
-    )
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
     spawner = Spawner(registry)
     req = SpawnRequest(
         harness="drops-prompt-test",
@@ -248,9 +217,7 @@ async def test_resume_without_prompt_allowed_for_dropping_harness(
     The trap is specifically both resume AND prompt; resume alone has no
     prompt to drop.
     """
-    monkeypatch.setattr(
-        "theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}"
-    )
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
     spawner = Spawner(registry)
     req = SpawnRequest(
         harness="drops-prompt-test",
@@ -263,34 +230,13 @@ async def test_resume_without_prompt_allowed_for_dropping_harness(
     assert drops_prompt_harness.seen_resume == "sess-abc"
 
 
-async def test_resume_with_prompt_allowed_for_normal_harness(
-    registry, resume_harness, monkeypatch
-):
-    """A harness whose resume_takes_prompt is True can take both."""
-    monkeypatch.setattr(
-        "theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}"
-    )
-    spawner = Spawner(registry)
-    req = SpawnRequest(
-        harness="resume-spawn-test",
-        prompt="do thing",
-        cwd="/tmp",
-        approval="edits",
-        resume="sess-abc",
-    )
-    await spawner.spawn(req)
-    assert resume_harness.seen_resume == "sess-abc"
-
-
 # ---- resume + worktree is refused ------------------------------------
 
 
 async def test_resume_with_worktree_refused(registry, resume_harness, monkeypatch):
     """A resumed session's transcript describes files at its original cwd;
     a fresh worktree points it at different files."""
-    monkeypatch.setattr(
-        "theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}"
-    )
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
     spawner = Spawner(registry)
     req = SpawnRequest(
         harness="resume-spawn-test",

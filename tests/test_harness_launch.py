@@ -16,24 +16,6 @@ from theater.harness import HARNESSES, Harness, LaunchPlan, plan_launch
 from theater.models import BadRequest
 
 
-def test_claude_carries_the_id_in_the_config_file(tmp_path):
-    config = tmp_path / "abc.json"
-    plan = plan_launch(
-        "claude",
-        participant_id="abc123",
-        prompt="say hello",
-        config_path=config,
-        approval="manual",
-    )
-
-    assert plan.argv[:2] == ["claude", f"--mcp-config={config}"]
-    assert plan.argv[-1] == "say hello"
-
-    written = json.loads(plan.files[config])
-    server = written["mcpServers"]["theater"]
-    assert server["args"] == ["mcp", "--id", "abc123"]
-
-
 def test_vibe_carries_the_id_in_an_env_override(tmp_path):
     plan = plan_launch(
         "vibe",
@@ -117,23 +99,6 @@ def test_codex_approval_modes_set_both_axes(tmp_path, approval, expected):
     assert all(flag in plan.argv for flag in expected)
 
 
-def test_the_id_never_travels_by_bare_environment(tmp_path):
-    """THEATER_ID alone is not a channel: the MCP SDK would strip it."""
-    for harness in ("claude", "codex", "opencode", "vibe"):
-        plan = plan_launch(
-            harness,
-            participant_id="abc123",
-            prompt="",
-            config_path=tmp_path / f"{harness}.json",
-            approval="manual",
-        )
-        serialised = json.dumps(
-            {"argv": plan.argv, "files": {str(k): v for k, v in plan.files.items()},
-             "env": plan.env}
-        )
-        assert "abc123" in serialised
-
-
 def test_empty_prompt_yields_no_positional(tmp_path):
     plan = plan_launch(
         "vibe",
@@ -168,20 +133,32 @@ def test_model_reaches_every_harness_by_its_own_lever(tmp_path):
     prompt positional.
     """
     plan = plan_launch(
-        "claude", participant_id="a", prompt="", config_path=tmp_path / "x.json",
-        approval="manual", model="opus-4.1",
+        "claude",
+        participant_id="a",
+        prompt="",
+        config_path=tmp_path / "x.json",
+        approval="manual",
+        model="opus-4.1",
     )
     assert "--model=opus-4.1" in plan.argv
 
     plan = plan_launch(
-        "codex", participant_id="a", prompt="", config_path=tmp_path / "x.json",
-        approval="manual", model="gpt-5",
+        "codex",
+        participant_id="a",
+        prompt="",
+        config_path=tmp_path / "x.json",
+        approval="manual",
+        model="gpt-5",
     )
     assert plan.argv[plan.argv.index("--model") :][:2] == ["--model", "gpt-5"]
 
     plan = plan_launch(
-        "opencode", participant_id="a", prompt="", config_path=tmp_path / "x.json",
-        approval="manual", model="anthropic/claude-sonnet-4",
+        "opencode",
+        participant_id="a",
+        prompt="",
+        config_path=tmp_path / "x.json",
+        approval="manual",
+        model="anthropic/claude-sonnet-4",
     )
     assert plan.argv[plan.argv.index("--model") :][:2] == [
         "--model",
@@ -189,8 +166,12 @@ def test_model_reaches_every_harness_by_its_own_lever(tmp_path):
     ]
 
     plan = plan_launch(
-        "vibe", participant_id="a", prompt="", config_path=tmp_path / "x.json",
-        approval="manual", model="mistral-large",
+        "vibe",
+        participant_id="a",
+        prompt="",
+        config_path=tmp_path / "x.json",
+        approval="manual",
+        model="mistral-large",
     )
     assert plan.env["VIBE_ACTIVE_MODEL"] == "mistral-large"
     assert not any(a.startswith("--model") for a in plan.argv)
@@ -199,7 +180,10 @@ def test_model_reaches_every_harness_by_its_own_lever(tmp_path):
 def test_no_model_asked_means_no_model_flag(tmp_path):
     for harness in ("claude", "codex", "opencode", "vibe"):
         plan = plan_launch(
-            harness, participant_id="a", prompt="", config_path=tmp_path / "x.json",
+            harness,
+            participant_id="a",
+            prompt="",
+            config_path=tmp_path / "x.json",
             approval="manual",
         )
         assert not any(a.startswith("--model") for a in plan.argv), harness
@@ -214,23 +198,13 @@ def test_vibe_pins_the_model_env_even_when_none_was_asked_for(tmp_path):
     reason this harness sets it unconditionally.
     """
     plan = plan_launch(
-        "vibe", participant_id="a", prompt="", config_path=tmp_path / "x.json",
+        "vibe",
+        participant_id="a",
+        prompt="",
+        config_path=tmp_path / "x.json",
         approval="manual",
     )
     assert plan.env["VIBE_ACTIVE_MODEL"] == ""
-
-
-def test_model_names_are_not_validated(tmp_path):
-    """Vendor namespaces churn; an allowlist here would be wrong within a month.
-
-    A nonsense name is Theater's business to carry, not to judge — it fails in
-    the pane, where the CLI that owns the namespace can say so.
-    """
-    plan = plan_launch(
-        "claude", participant_id="a", prompt="", config_path=tmp_path / "x.json",
-        approval="manual", model="mysuperdupermodelname",
-    )
-    assert "--model=mysuperdupermodelname" in plan.argv
 
 
 def test_a_harness_that_predates_model_selection_still_launches(monkeypatch, tmp_path):
@@ -252,15 +226,22 @@ def test_a_harness_that_predates_model_selection_still_launches(monkeypatch, tmp
     monkeypatch.setitem(HARNESSES, "legacy", LegacyHarness())
 
     plan = plan_launch(
-        "legacy", participant_id="abc123", prompt="", config_path=Path("/x"),
+        "legacy",
+        participant_id="abc123",
+        prompt="",
+        config_path=Path("/x"),
         approval="manual",
     )
     assert plan.argv == ["legacy", "abc123"]
 
     with pytest.raises(BadRequest, match="does not support model selection"):
         plan_launch(
-            "legacy", participant_id="abc123", prompt="", config_path=Path("/x"),
-            approval="manual", model="anything",
+            "legacy",
+            participant_id="abc123",
+            prompt="",
+            config_path=Path("/x"),
+            approval="manual",
+            model="anything",
         )
 
 

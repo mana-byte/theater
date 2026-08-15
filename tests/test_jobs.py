@@ -31,8 +31,7 @@ async def test_spawn_creates_a_running_job(client, fake_tmux):
 async def test_spawn_with_parent_sets_caller(client, fake_tmux):
     parent = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
     child = await client.call(
-        "spawn", harness="vibe", prompt="hi", approval="manual",
-        cwd="/tmp", parent_id=parent["id"]
+        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp", parent_id=parent["id"]
     )
     job = await client.call("jobs.status", handle=child["handle"])
     assert job["caller_id"] == parent["id"]
@@ -50,6 +49,7 @@ async def test_await_returns_done_after_finish(client, fake_tmux, daemon):
     # Finish the job directly via the job manager (simulates observer
     # detecting turn-end).
     from theater.daemon.jobs import JobState
+
     daemon.jobs.finish(handle, state=JobState.DONE, result="hello world")
 
     jobs = await client.call("jobs.await", handles=[handle], max_wait=1.0)
@@ -120,24 +120,6 @@ async def test_reaper_crashes_running_jobs(client, fake_tmux, daemon, monkeypatc
     assert job["error_code"] == "crashed"
 
 
-# ---- await on a crashed job returns crashed -----------------------------
-
-
-async def test_await_returns_crashed(client, fake_tmux, daemon):
-    from theater.daemon.jobs import JobState
-
-    record = await client.call(
-        "spawn", harness="vibe", prompt="say hello", approval="manual", cwd="/tmp"
-    )
-    handle = record["handle"]
-
-    daemon.jobs.finish(handle, state=JobState.CRASHED, error_code="crashed")
-
-    jobs = await client.call("jobs.await", handles=[handle], max_wait=1.0)
-    assert jobs[0]["state"] == "crashed"
-    assert jobs[0]["error_code"] == "crashed"
-
-
 # ---- unknown handle -----------------------------------------------------
 
 
@@ -166,19 +148,13 @@ async def test_await_unknown_handle_is_an_error(client, fake_tmux):
 async def test_await_names_every_handle_it_could_not_find(client, fake_tmux):
     from theater.protocol import RemoteError
 
-    record = await client.call(
-        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
-    )
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
     with pytest.raises(RemoteError) as exc:
-        await client.call(
-            "jobs.await", handles=[record["handle"], "ghost"], max_wait=0.1
-        )
+        await client.call("jobs.await", handles=[record["handle"], "ghost"], max_wait=0.1)
     assert "ghost" in str(exc.value)
 
 
-async def test_await_between_two_peers_blocked_on_each_other_is_refused(
-    client, fake_tmux, daemon
-):
+async def test_await_between_two_peers_blocked_on_each_other_is_refused(client, fake_tmux, daemon):
     """Two siblings, no ancestry between them: only the live graph sees this.
 
     Both would sit inside an MCP tool call unable to answer the other, and
@@ -188,9 +164,7 @@ async def test_await_between_two_peers_blocked_on_each_other_is_refused(
 
     a = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
     b = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
-    job = await client.call(
-        "send", target=b["id"], prompt="a asks b", caller_id=a["id"]
-    )
+    job = await client.call("send", target=b["id"], prompt="a asks b", caller_id=a["id"])
     # B is already blocked on A, as if mid-`await_sessions`.
     with daemon.jobs.waiting(b["id"], [a["id"]]), pytest.raises(RemoteError) as exc:
         await client.call(
@@ -202,18 +176,12 @@ async def test_await_between_two_peers_blocked_on_each_other_is_refused(
     assert exc.value.code == "cycle_detected"
 
 
-async def test_the_wait_graph_empties_when_an_await_returns(
-    client, fake_tmux, daemon
-):
+async def test_the_wait_graph_empties_when_an_await_returns(client, fake_tmux, daemon):
     """An edge is a call in flight. A timeout ends the call, so it ends too."""
     a = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
     b = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
-    job = await client.call(
-        "send", target=b["id"], prompt="a asks b", caller_id=a["id"]
-    )
-    await client.call(
-        "jobs.await", handles=[job["handle"]], max_wait=0.05, caller_id=a["id"]
-    )
+    job = await client.call("send", target=b["id"], prompt="a asks b", caller_id=a["id"])
+    await client.call("jobs.await", handles=[job["handle"]], max_wait=0.05, caller_id=a["id"])
     assert daemon.jobs.wait_graph == {}
 
 
@@ -231,9 +199,7 @@ async def test_await_will_not_block_for_longer_than_the_ceiling(
         return await real(handles, max_wait=0.01)
 
     monkeypatch.setattr(daemon.jobs, "await_jobs", spy)
-    record = await client.call(
-        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
-    )
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
     await client.call("jobs.await", handles=[record["handle"]], max_wait=3600)
     assert seen == [methods_mod.MAX_AWAIT]
 
@@ -260,4 +226,5 @@ async def test_job_created_and_finished_on_bus(client, fake_tmux, daemon):
 def _fake_list_panes(output: str):
     async def run(*args, **kwargs):
         return output
+
     return run

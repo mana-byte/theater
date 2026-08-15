@@ -25,7 +25,7 @@ def test_no_handles_means_zero(store):
 
 
 def test_max_is_numeric_not_lexicographic(store):
-    """"#9" sorts above "#10" as text; the old ORDER BY handle DESC believed it,
+    """ "#9" sorts above "#10" as text; the old ORDER BY handle DESC believed it,
     reissued handle #10, and died on the unique constraint."""
     for handle in ("aaa#9", "aaa#10"):
         store.create_job(_job(handle))

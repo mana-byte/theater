@@ -91,9 +91,7 @@ async def test_names_a_harness_with_no_entry_at_all(daemon, all_installed):
     assert rows["codex"]["models"] == []
 
 
-async def test_reports_what_the_daemon_holds_not_the_file(
-    daemon, all_installed, theater_home
-):
+async def test_reports_what_the_daemon_holds_not_the_file(daemon, all_installed, theater_home):
     """The reason this is an RPC and not a config read.
 
     The daemon reads its config once at start-up, so a file edited afterwards
@@ -115,9 +113,7 @@ async def test_shipped_adapters_support_model_selection(daemon, all_installed):
     assert all(rows[name]["supported"] for name in SHIPPED)
 
 
-async def test_an_adapter_that_cannot_take_a_model_says_so(
-    daemon, local_dir, all_installed
-):
+async def test_an_adapter_that_cannot_take_a_model_says_so(daemon, local_dir, all_installed):
     """Empty list and "cannot" are different, and need different fixes.
 
     A plugin whose `plan_launch` has no `model` parameter is refused by

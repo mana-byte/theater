@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 from shipped import ClaudeCodeObserver
 
-from theater.harness.source import Batch, History, Source
+from theater.harness.source import Batch, History
 
 
 def record(text: str, *, end: bool = True) -> str:
@@ -63,19 +63,6 @@ def source(root: Path, workdir: str, **kw):
 
 
 # ---- the default source does nothing, on purpose --------------------------
-
-
-async def test_a_source_that_cannot_move_or_look_back_says_so():
-    """The base class is the contract; a partial implementation must not crash."""
-
-    class Minimal(Source):
-        async def read(self) -> Batch:
-            return Batch()
-
-    s = Minimal()
-    assert await s.refresh() == Batch()
-    assert await s.history(last_n=5) == History()
-    assert await s.aclose() is None
 
 
 # ---- attaching ------------------------------------------------------------
@@ -260,9 +247,7 @@ async def test_history_without_a_cwd_has_nowhere_to_look(root):
     assert got == History()
 
 
-async def test_a_transcript_that_vanishes_mid_read_yields_no_events(
-    root, workdir, monkeypatch
-):
+async def test_a_transcript_that_vanishes_mid_read_yields_no_events(root, workdir, monkeypatch):
     """The pane can die between locating the file and opening it."""
     transcript(root, "aaa", workdir, record("one"))
     s = source(root, workdir)

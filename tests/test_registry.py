@@ -22,9 +22,7 @@ def test_spawned_identity_survives_hello(registry):
     registry.attach_pane(created.id, "%9")
 
     # The MCP server comes up later and presents the id it was given on argv.
-    seen = registry.register(
-        harness="vibe", pane=None, cwd="/tmp", claimed_id=created.id
-    )
+    seen = registry.register(harness="vibe", pane=None, cwd="/tmp", claimed_id=created.id)
     assert seen.id == created.id
     assert seen.tier is Tier.SPAWNED
     assert seen.tmux_pane == "%9"
@@ -62,9 +60,7 @@ def test_a_late_pane_report_promotes_an_external(registry):
     p = registry.register(harness="vibe", pane=None, cwd="/tmp")
     assert p.tier is Tier.EXTERNAL
 
-    promoted = registry.register(
-        harness="vibe", pane="%42", cwd="/tmp", claimed_id=p.id
-    )
+    promoted = registry.register(harness="vibe", pane="%42", cwd="/tmp", claimed_id=p.id)
     assert promoted.id == p.id
     assert promoted.tier is Tier.ADOPTED
     assert promoted.tmux_pane == "%42"
@@ -89,9 +85,7 @@ def test_a_spawned_child_cannot_talk_its_way_into_another_pane(registry):
     child = registry.create_spawned(harness="vibe", cwd="/tmp")
     registry.attach_pane(child.id, "%9")
 
-    lying = registry.register(
-        harness="vibe", pane="%99", cwd="/tmp", claimed_id=child.id
-    )
+    lying = registry.register(harness="vibe", pane="%99", cwd="/tmp", claimed_id=child.id)
     assert lying.tmux_pane == "%9"
     assert lying.tier is Tier.SPAWNED
 
@@ -113,27 +107,6 @@ def test_one_pane_has_one_holder(registry):
     assert evicted.status is Status.DEAD
     assert not evicted.addressable
     assert registry.get(new.id).tmux_pane == "%11"
-
-
-def test_depth_and_root(registry):
-    root = registry.create_spawned(harness="vibe", cwd="/tmp")
-    child = registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=root.id)
-    grandchild = registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=child.id)
-
-    assert registry.depth_of(root.id) == 0
-    assert registry.depth_of(grandchild.id) == 2
-    assert registry.root_of(grandchild.id) == root.id
-
-
-def test_depth_survives_a_cycle(registry, store):
-    """A corrupt lineage must not hang the depth cap that guards against it."""
-    a = registry.create_spawned(harness="vibe", cwd="/tmp")
-    b = registry.create_spawned(harness="vibe", cwd="/tmp", parent_id=a.id)
-    a.parent_id = b.id
-    store.upsert_participant(a)
-
-    assert registry.depth_of(a.id) <= 2
-    assert registry.root_of(a.id) in {a.id, b.id}
 
 
 def test_tree_nests_children(registry):

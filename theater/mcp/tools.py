@@ -209,14 +209,19 @@ async def await_sessions(
 
     Returns the current state of each job. A job that is still running when
     the timeout expires is returned with state="running" — re-await if you
-    want to keep waiting. The result text is the assistant's final response
-    from the child's turn.
+    want to keep waiting.
 
     This blocks the current MCP request only; the daemon and every other
     participant continue running.
 
     An unknown handle is rejected rather than quietly omitted, and `max_wait`
     is capped daemon-side; a caller that wants longer awaits again.
+
+    `prompt` and `result` are dropped from the agent-facing shape. The prompt
+    is what the caller already sent, and `result` was only ever a 2000-char
+    clip of the child's own turn; an agent that wants what the child said or
+    did reads the transcript directly, which returns it whole. See
+    `read_transcript`.
     """
     if not session._resolved:
         await session.identify()
@@ -230,7 +235,7 @@ async def await_sessions(
         caller_id=session.participant_id,
     )
     assert isinstance(jobs, list)
-    return jobs
+    return [{k: v for k, v in job.items() if k not in ("prompt", "result")} for job in jobs]
 
 
 async def send_prompt(

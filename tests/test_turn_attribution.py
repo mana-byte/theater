@@ -325,9 +325,7 @@ def test_a_turn_with_no_user_record_answers_as_it_always_did(registry):
     """
     observer, p, jobs = poised(registry)
 
-    observer._apply(
-        p.id, Batch(events=[said("the answer")]), QuietClock(), TurnAccumulator()
-    )
+    observer._apply(p.id, Batch(events=[said("the answer")]), QuietClock(), TurnAccumulator())
 
     assert jobs.get("h1").result == "the answer"
 
@@ -348,6 +346,8 @@ def test_a_promptless_job_answers_as_it_always_did(registry):
     )
 
     assert jobs.get("h1").result == "the answer"
+    # A whitespace-only prompt is also no prompt — the guard is prompt.strip().
+    assert answers_prompt(["anything"], "   ")
 
 
 # ---- what counts as the same prompt ------------------------------------
@@ -399,13 +399,6 @@ def test_two_prompts_sharing_only_a_short_opening_are_not_confused():
     assert not answers_prompt([a], b)
 
 
-def test_no_user_text_and_no_prompt_both_answer_yes():
-    """The two fallbacks, stated as a property rather than a code path."""
-    assert answers_prompt([], "anything")
-    assert answers_prompt(["anything"], None)
-    assert answers_prompt(["anything"], "   ")
-
-
 # ---- against the real captures -----------------------------------------
 
 CAPTURED = {
@@ -417,8 +410,7 @@ CAPTURED = {
 #: What `theater send` was given when the captures were taken, and therefore
 #: what the job row held while the harness was replying to it.
 CAPTURE_PROMPT = (
-    "Reply with exactly this one line and nothing else, "
-    "no tools, no preamble: CAPTURE-{}-OK"
+    "Reply with exactly this one line and nothing else, no tools, no preamble: CAPTURE-{}-OK"
 )
 
 
@@ -439,9 +431,7 @@ def test_each_harness_echoes_the_prompt_it_was_sent(name):
     observer = CAPTURED[name]()
     path = FIXTURES / f"turn_{name}.jsonl"
     events = [
-        e
-        for i, line in enumerate(path.read_text().splitlines())
-        for e in observer.parse(line, i)
+        e for i, line in enumerate(path.read_text().splitlines()) for e in observer.parse(line, i)
     ]
     sent = CAPTURE_PROMPT.format(name.upper())
     users = [e.text for e in events if e.kind is EventKind.USER]

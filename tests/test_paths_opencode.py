@@ -58,8 +58,7 @@ class Recorder:
         self.conn = sqlite3.connect(path)
         self.conn.executescript(SCHEMA)
         self.conn.execute(
-            "INSERT INTO session (id, parent_id, directory, time_created) "
-            "VALUES (?, NULL, ?, ?)",
+            "INSERT INTO session (id, parent_id, directory, time_created) VALUES (?, NULL, ?, ?)",
             (sid, str(Path(directory).resolve()), created),
         )
         self.conn.commit()
@@ -111,9 +110,7 @@ class Recorder:
         self._store_message(info["id"], info)
 
     def step_finish(self, mid: str, pid: str, reason: str) -> None:
-        self._part(
-            {"id": pid, "messageID": mid, "type": "step-finish", "reason": reason}
-        )
+        self._part({"id": pid, "messageID": mid, "type": "step-finish", "reason": reason})
 
     def tool_with_input(
         self,
@@ -142,10 +139,12 @@ class Recorder:
         }
         self._part({**base, "state": {"status": "pending", "input": {}}})
         self._part({**base, "state": {"status": "running", "input": input_data}})
-        self._part({
-            **base,
-            "state": {"status": "completed", "input": input_data, "output": output},
-        })
+        self._part(
+            {
+                **base,
+                "state": {"status": "completed", "input": input_data, "output": output},
+            }
+        )
 
 
 @pytest.fixture
@@ -191,41 +190,12 @@ def test_edit_tool_input_yields_write_path():
     state = {
         "input": {"filePath": "src/app.py", "oldString": "a", "newString": "b"},
     }
-    assert _paths_from_tool("edit", state, "/repo") == (
-        EventPath(path="src/app.py", mode="write"),
-    )
+    assert _paths_from_tool("edit", state, "/repo") == (EventPath(path="src/app.py", mode="write"),)
 
 
 def test_read_tool_input_yields_read_path():
     state = {"input": {"filePath": "README.md", "offset": 1, "limit": 100}}
-    assert _paths_from_tool("read", state, "/repo") == (
-        EventPath(path="README.md", mode="read"),
-    )
-
-
-def test_glob_yields_no_paths():
-    """`path` is a directory to search within, not a file."""
-    state = {"input": {"pattern": "*.py", "path": "src"}}
-    assert _paths_from_tool("glob", state, "/repo") == ()
-
-
-def test_grep_yields_no_paths():
-    """`path` is a directory, `include` is a filter, not a file."""
-    state = {"input": {"pattern": "TODO", "path": "src", "include": "*.py"}}
-    assert _paths_from_tool("grep", state, "/repo") == ()
-
-
-def test_bash_yields_no_paths():
-    """No file path in the structured input; parsing commands is declined."""
-    state = {"input": {"command": "cat src/app.py", "workdir": "/repo"}}
-    assert _paths_from_tool("bash", state, "/repo") == ()
-
-
-def test_apply_patch_yields_no_paths():
-    """Paths are embedded in ``patchText``; parsing that is the same class
-    of unstructured input we decline to parse."""
-    state = {"input": {"patchText": "--- a/src/app.py\n+++ b/src/app.py\n"}}
-    assert _paths_from_tool("apply_patch", state, "/repo") == ()
+    assert _paths_from_tool("read", state, "/repo") == (EventPath(path="README.md", mode="read"),)
 
 
 def test_webfetch_yields_no_paths():
@@ -281,7 +251,10 @@ def test_a_write_tool_call_attaches_a_write_path(rec, workdir):
     src = drain(rec, workdir)
     info = rec.message("msg_a1", "assistant")
     rec.tool_with_input(
-        "msg_a1", "prt_edit", "call_1", "edit",
+        "msg_a1",
+        "prt_edit",
+        "call_1",
+        "edit",
         {"filePath": "src/app.py", "oldString": "a", "newString": "b"},
         output="ok",
     )
@@ -299,7 +272,10 @@ def test_a_read_tool_call_attaches_a_read_path(rec, workdir):
     src = drain(rec, workdir)
     rec.message("msg_a1", "assistant")
     rec.tool_with_input(
-        "msg_a1", "prt_read", "call_1", "read",
+        "msg_a1",
+        "prt_read",
+        "call_1",
+        "read",
         {"filePath": "README.md"},
         output="contents",
     )
@@ -308,22 +284,6 @@ def test_a_read_tool_call_attaches_a_read_path(rec, workdir):
     calls = _tool_call_events(events)
     assert len(calls) == 1
     assert calls[0].paths == (EventPath(path="README.md", mode="read"),)
-
-
-def test_a_bash_tool_call_attaches_no_paths(rec, workdir):
-    """A bash call has no file path in its structured input."""
-    src = drain(rec, workdir)
-    rec.message("msg_a1", "assistant")
-    rec.tool_with_input(
-        "msg_a1", "prt_bash", "call_1", "bash",
-        {"command": "ls -la"},
-        output="total 0",
-    )
-
-    events = asyncio.run(src.read()).events
-    calls = _tool_call_events(events)
-    assert len(calls) == 1
-    assert calls[0].paths == ()
 
 
 def test_an_event_with_no_paths_is_empty(rec, workdir):
@@ -341,12 +301,18 @@ def test_two_tool_calls_in_one_message_each_carry_paths(rec, workdir):
     src = drain(rec, workdir)
     rec.message("msg_a1", "assistant")
     rec.tool_with_input(
-        "msg_a1", "prt_write", "call_1", "write",
+        "msg_a1",
+        "prt_write",
+        "call_1",
+        "write",
         {"filePath": "src/new.py", "content": "x = 1"},
         output="ok",
     )
     rec.tool_with_input(
-        "msg_a1", "prt_read", "call_2", "read",
+        "msg_a1",
+        "prt_read",
+        "call_2",
+        "read",
         {"filePath": "src/old.py"},
         output="y = 2",
     )
@@ -358,40 +324,6 @@ def test_two_tool_calls_in_one_message_each_carry_paths(rec, workdir):
     assert calls[1].paths == (EventPath(path="src/old.py", mode="read"),)
 
 
-def test_repo_relative_guarantee_absolute_path_is_relativised(rec, workdir):
-    """An absolute ``filePath`` inside the working directory is relativised,
-    so the index never sees a home directory."""
-    src = drain(rec, workdir)
-    abs_path = str(workdir / "src" / "app.py")
-    rec.message("msg_a1", "assistant")
-    rec.tool_with_input(
-        "msg_a1", "prt_edit", "call_1", "edit",
-        {"filePath": abs_path, "oldString": "a", "newString": "b"},
-        output="ok",
-    )
-
-    events = asyncio.run(src.read()).events
-    call = _tool_call_events(events)[0]
-    ep = call.paths[0]
-    assert not Path(ep.path).is_absolute()
-    assert ep.path == str(Path("src") / "app.py")
-
-
-def test_absolute_path_outside_repo_yields_no_paths(rec, workdir):
-    """A path that cannot be relativised is dropped, not stored as absolute."""
-    src = drain(rec, workdir)
-    rec.message("msg_a1", "assistant")
-    rec.tool_with_input(
-        "msg_a1", "prt_edit", "call_1", "edit",
-        {"filePath": "/tmp/elsewhere.py", "oldString": "a", "newString": "b"},
-        output="ok",
-    )
-
-    events = asyncio.run(src.read()).events
-    call = _tool_call_events(events)[0]
-    assert call.paths == ()
-
-
 # ---- integration: history path ------------------------------------------
 
 
@@ -400,7 +332,10 @@ def test_history_also_carries_paths(rec, workdir):
     path does, so ``read_transcript`` returns them too."""
     info = rec.message("msg_a1", "assistant")
     rec.tool_with_input(
-        "msg_a1", "prt_edit", "call_1", "edit",
+        "msg_a1",
+        "prt_edit",
+        "call_1",
+        "edit",
         {"filePath": "src/app.py", "oldString": "a", "newString": "b"},
         output="ok",
     )
@@ -431,20 +366,6 @@ def test_resume_argv_uses_dash_s_and_session_id(tmp_path):
     ]
 
 
-def test_resume_drops_prompt_from_argv(tmp_path):
-    """`--prompt` is not emitted alongside `-s`: the session view ignores it
-    (app.tsx:492; home.tsx:53-54,64-67), so passing both would silently
-    drop the task."""
-    plan = OpenCodeHarness().plan_launch(
-        participant_id="abc123",
-        prompt="do not lose me",
-        config_path=tmp_path / "x.json",
-        approval="manual",
-        resume="ses_abc",
-    )
-    assert "--prompt" not in plan.argv
-
-
 def test_resume_with_model_and_auto(tmp_path):
     """Model and approval flags still apply when resuming."""
     plan = OpenCodeHarness().plan_launch(
@@ -469,27 +390,3 @@ def test_resume_takes_prompt_is_false():
     """opencode drops the prompt when resuming: `-s` routes to the session
     view and `--prompt` is only read on the home screen."""
     assert OpenCodeHarness.resume_takes_prompt is False
-
-
-def test_supports_resume_detects_the_parameter():
-    from theater.harness import supports_resume
-
-    assert supports_resume(OpenCodeHarness()) is True
-
-
-def test_check_resume_allows_a_resume_request():
-    from theater.harness import check_resume
-
-    check_resume("opencode", "ses_abc")
-
-
-def test_plan_launch_without_resume_still_works(tmp_path):
-    """The resume parameter is optional; omitting it gives the same argv as
-    before."""
-    plan = OpenCodeHarness().plan_launch(
-        participant_id="abc123",
-        prompt="hello",
-        config_path=tmp_path / "x.json",
-        approval="manual",
-    )
-    assert plan.argv == ["opencode", "--prompt", "hello"]

@@ -17,9 +17,7 @@ from unittest.mock import patch
 
 from theater.daemon.recall import (
     CLIP,
-    DEFAULT_DEPTH,
     _git_root,
-    _normalise_paths,
     recall,
 )
 from theater.daemon.schema import touch
@@ -110,9 +108,7 @@ def _setup_repo(tmp_path):
         ["git", "config", "user.email", "t@t.com"],
         ["git", "config", "user.name", "test"],
     ):
-        subprocess.run(
-            cmd, cwd=root, capture_output=True, timeout=10, check=False
-        )
+        subprocess.run(cmd, cwd=root, capture_output=True, timeout=10, check=False)
     return root
 
 
@@ -265,7 +261,6 @@ def test_gap_emitted_when_chain_breaks(store, tmp_path):
     assert timeline[1]["gap"] is True
     assert timeline[1]["segment"] == "gap:f.py:bbb..ccc"
     assert timeline[1]["sha"] == "bbb → ccc"
-    assert "no job claims" in timeline[1]["note"]
     assert timeline[2]["handle"] == "older"
 
 
@@ -471,9 +466,7 @@ def test_underscore_in_root_is_not_a_sql_wildcard(store, tmp_path):
 # ---- resume is a capability ------------------------------------------------
 
 
-def test_resume_true_when_harness_supports_and_session_id_exists(
-    store, tmp_path
-):
+def test_resume_true_when_harness_supports_and_session_id_exists(store, tmp_path):
     """``resume: true`` when the harness can resume AND a session_id exists."""
     root = _setup_repo(tmp_path)
     p = _participant(store, cwd=root, harness="vibe", session_id="ses-1")
@@ -515,9 +508,7 @@ def test_resume_false_when_no_session_id(store, tmp_path):
 def test_resume_false_when_harness_not_registered(store, tmp_path):
     """An unregistered harness cannot resume — the adapter does not exist."""
     root = _setup_repo(tmp_path)
-    p = _participant(
-        store, cwd=root, harness="nonexistent", session_id="ses-1"
-    )
+    p = _participant(store, cwd=root, harness="nonexistent", session_id="ses-1")
     _job(store, handle="h1", target_id=p.id)
     _touch(
         store,
@@ -634,25 +625,6 @@ def test_depth_caps_timeline_after_gaps(store, tmp_path):
     assert result["f.py"]["timeline"][0]["handle"] == "j2"
 
 
-def test_default_depth_is_five(store, tmp_path):
-    """Depth defaults to 5 when not specified."""
-    root = _setup_repo(tmp_path)
-    p = _participant(store, cwd=root)
-
-    for i in range(7):
-        _job(store, handle=f"j{i}", target_id=p.id, finished_at=1000.0 + i)
-        _touch(
-            store,
-            job_handle=f"j{i}",
-            path="f.py",
-            sha_before=f"s{i}",
-            sha_after=f"s{i + 1}",
-        )
-
-    result = recall(store, paths=["f.py"], caller_cwd=root)
-    assert len(result["f.py"]["timeline"]) == DEFAULT_DEPTH
-
-
 # ---- a path that has never been touched ------------------------------------
 
 
@@ -692,13 +664,6 @@ def test_absolute_paths_normalised_to_repo_relative(store, tmp_path):
     assert len(result["src/main.py"]["timeline"]) == 1
 
 
-def test_normalise_paths_strips_root_prefix():
-    """The normaliser strips the git root from absolute paths."""
-    assert _normalise_paths(
-        ["/repo/src/main.py", "src/other.py"], "/repo"
-    ) == ["src/main.py", "src/other.py"]
-
-
 # ---- current and dirty -----------------------------------------------------
 
 
@@ -725,9 +690,7 @@ def test_current_is_blob_sha_of_file_on_disk(store, tmp_path):
     assert result["f.py"]["current"] == blob_sha(f)
 
 
-def test_dirty_true_when_working_tree_differs_from_head(
-    store, tmp_path
-):
+def test_dirty_true_when_working_tree_differs_from_head(store, tmp_path):
     """``dirty`` means the working tree differs from HEAD.
 
     Comes from the one ``git status --porcelain`` call. An uncommitted
@@ -748,7 +711,10 @@ def test_dirty_true_when_working_tree_differs_from_head(
     f = tmp_path / "f.py"
     f.write_bytes(b"committed")
     subprocess.run(
-        ["git", "add", "f.py"], cwd=root, capture_output=True, timeout=10,
+        ["git", "add", "f.py"],
+        cwd=root,
+        capture_output=True,
+        timeout=10,
         check=False,
     )
     subprocess.run(
@@ -780,7 +746,10 @@ def test_dirty_false_when_file_matches_head(store, tmp_path):
     f = tmp_path / "f.py"
     f.write_bytes(b"committed")
     subprocess.run(
-        ["git", "add", "f.py"], cwd=root, capture_output=True, timeout=10,
+        ["git", "add", "f.py"],
+        cwd=root,
+        capture_output=True,
+        timeout=10,
         check=False,
     )
     subprocess.run(

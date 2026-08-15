@@ -84,8 +84,7 @@ def test_claude_reports_the_message_id_the_split_records_share():
     ends = boundaries(events)
 
     records = [
-        json.loads(line)
-        for line in (FIXTURES / "turn_claude.jsonl").read_text().splitlines()
+        json.loads(line) for line in (FIXTURES / "turn_claude.jsonl").read_text().splitlines()
     ]
     assistant = next(r for r in records if r.get("type") == "assistant")
 
@@ -193,9 +192,7 @@ def test_opencode_names_the_turn_after_the_finished_message(tmp_path, workdir):
     ends = boundaries(events)
 
     rows = json.loads((FIXTURES / "turn_opencode.json").read_text())
-    assistant = next(
-        r for r in rows["message"] if json.loads(r["data"]).get("role") == "assistant"
-    )
+    assistant = next(r for r in rows["message"] if json.loads(r["data"]).get("role") == "assistant")
 
     assert len(ends) == 1
     assert ends[0].turn_id == assistant["id"]
@@ -209,16 +206,12 @@ def poised(registry, *, jobs_wanted=1):
     jobs = JobManager(registry.store)
     p = registry.register(harness="claude", pane="%1", cwd="/tmp")
     for n in range(1, jobs_wanted + 1):
-        jobs.create(
-            handle=f"h{n}", caller_id=f"caller{n}", target_id=p.id, kind="send"
-        )
+        jobs.create(handle=f"h{n}", caller_id=f"caller{n}", target_id=p.id, kind="send")
     return Observer(registry, harnesses={}, jobs=jobs), p, jobs
 
 
 def ended(text: str, turn_id: str | None) -> Event:
-    return Event(
-        kind=EventKind.ASSISTANT, text=text, turn_end=True, turn_id=turn_id
-    )
+    return Event(kind=EventKind.ASSISTANT, text=text, turn_end=True, turn_id=turn_id)
 
 
 def test_one_message_announced_twice_answers_one_caller(registry):
@@ -229,9 +222,7 @@ def test_one_message_announced_twice_answers_one_caller(registry):
     answering a question the agent has not seen.
     """
     observer, p, jobs = poised(registry, jobs_wanted=2)
-    batch = Batch(
-        events=[ended("the reply", "msg_01"), ended("the reply", "msg_01")]
-    )
+    batch = Batch(events=[ended("the reply", "msg_01"), ended("the reply", "msg_01")])
 
     observer._apply(p.id, batch, QuietClock(), TurnAccumulator())
 

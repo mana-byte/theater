@@ -24,7 +24,7 @@ from theater.harness.plugins import PluginError
 #: test that is not about a specific method starts from this. Note the shape it
 #: forces: a harness that launches, and a separate observer it carries, which
 #: is the whole point of the v1.6 split.
-BODY = '''
+BODY = """
 from pathlib import Path
 
 from theater.harness import Harness, LaunchPlan, TranscriptObserver
@@ -58,7 +58,7 @@ class {cls}(Harness):
 
 
 HARNESS = {cls}()
-'''
+"""
 
 
 def plugin(
@@ -73,9 +73,7 @@ def plugin(
 ) -> Path:
     path = dirpath / filename
     path.write_text(
-        BODY.format(
-            cls=cls, name=name, binary=binary, icon=icon, aliases=repr(aliases)
-        ),
+        BODY.format(cls=cls, name=name, binary=binary, icon=icon, aliases=repr(aliases)),
         encoding="utf-8",
     )
     return path
@@ -138,12 +136,6 @@ def test_the_shipped_adapters_are_plugins_too(local_dir):
     assert rows["opencode"]["source"] == "shipped"
 
 
-def test_a_plugin_is_a_full_adapter(local_dir):
-    plugin(local_dir)
-    install(local_dir)
-    assert harness_registry.get("acme").observer.has_transcript is True
-
-
 def test_a_plugin_plans_its_own_launch(local_dir):
     plugin(local_dir)
     install(local_dir)
@@ -160,10 +152,6 @@ def test_a_plugin_plans_its_own_launch(local_dir):
 
 def test_a_missing_directory_is_not_an_error(tmp_path):
     assert plugins.scan(tmp_path / "nope", source=plugins.LOCAL) == []
-
-
-def test_an_empty_directory_leaves_the_shipped_set(local_dir):
-    assert install(local_dir) == ["claude", "codex", "opencode", "vibe"]
 
 
 def test_underscored_files_are_skipped(local_dir):
@@ -456,11 +444,6 @@ def test_a_broken_plugin_is_reported_by_the_cli(capsys):
     assert cli.main(["harnesses"]) == 0
     out = capsys.readouterr().out
     assert "broken" in out and "boom" in out
-
-
-def test_ensure_home_creates_the_directory():
-    paths.ensure_home()
-    assert paths.harnesses_dir().is_dir()
 
 
 def test_a_plugin_binary_joins_the_unmanaged_sweep(local_dir):

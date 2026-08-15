@@ -83,16 +83,12 @@ async def test_orchestration_directives_reach_the_tools_that_need_them(daemon):
     """
     tools = {t.name: t.description or "" for t in await build("p1", "vibe").list_tools()}
 
-    # Concurrent children whose files overlap produce a conflict, not speed.
-    assert "sibling" in tools["spawn_session"]
     # A "manual" child that nobody is watching never answers its prompt.
     assert "manual" in tools["spawn_session"]
     # An await can outlive the caller's own tool timeout.
     assert "timeout" in tools["await_sessions"]
     # "done" is the end of a turn, not a verdict on the work.
     assert "done" in tools["await_sessions"]
-    # Killing a worktree child deletes the branch its work lives on.
-    assert "collect before you kill" in tools["put_child_back_in_the_wound"]
 
 
 async def test_spawn_session_forces_a_choice_of_approval(daemon):

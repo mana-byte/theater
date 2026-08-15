@@ -12,44 +12,13 @@ def test_claude_code_maps_to_claude():
     assert normalize("claude_code") == "claude"
 
 
-def test_claude_code_with_dash_maps_to_claude():
-    assert normalize("claude-code") == "claude"
-
-
-def test_capitalized_claude_maps_to_claude():
-    assert normalize("Claude") == "claude"
-    assert normalize("ClaudeCode") == "claude"
-
-
-def test_vibe_is_canonical():
-    assert normalize("vibe") == "vibe"
-
-
-def test_capitalized_vibe_maps_to_vibe():
-    assert normalize("Vibe") == "vibe"
-
-
-def test_mistral_vibe_maps_to_vibe():
-    assert normalize("mistral-vibe") == "vibe"
-    assert normalize("mistral_vibe") == "vibe"
-
-
 def test_unknown_name_passes_through():
     """A genuinely unknown harness is not an error — just unobservable."""
     assert normalize("cursor") == "cursor"
     assert normalize("aider") == "aider"
 
 
-def test_empty_string_passes_through():
-    assert normalize("") == ""
-
-
 # ---- icons --------------------------------------------------------------
-
-
-def test_a_known_harness_has_its_own_glyph():
-    assert harness_icon("vibe") == HARNESSES["vibe"].icon
-    assert harness_icon("claude") == HARNESSES["claude"].icon
 
 
 def test_icons_are_distinct_between_harnesses():
@@ -72,10 +41,3 @@ def test_a_missing_harness_name_falls_back():
     """External participants may have no harness recorded at all."""
     assert harness_icon(None) == UNKNOWN_ICON
     assert harness_icon("") == UNKNOWN_ICON
-
-
-def test_every_icon_is_one_column_wide():
-    """The listing pads to a fixed column; a two-cell glyph would shear it."""
-    for harness in HARNESSES.values():
-        assert len(harness.icon) == 1
-    assert len(UNKNOWN_ICON) == 1

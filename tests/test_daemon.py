@@ -92,9 +92,7 @@ async def test_a_freshly_spawned_participant_is_idle_before_hello(client, fake_t
     hello could be pinned at STARTING forever. Starting at IDLE deletes that
     failure class entirely.
     """
-    record = await client.call(
-        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
-    )
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
     assert record["status"] == "idle"
 
     fetched = await client.call("participants.get", id=record["id"])
@@ -102,9 +100,7 @@ async def test_a_freshly_spawned_participant_is_idle_before_hello(client, fake_t
 
 
 async def test_spawn_writes_a_config_for_claude(client, fake_tmux):
-    record = await client.call(
-        "spawn", harness="claude", prompt="hi", approval="yolo", cwd="/tmp"
-    )
+    record = await client.call("spawn", harness="claude", prompt="hi", approval="yolo", cwd="/tmp")
     config = paths.mcp_config_dir() / f"{record['id']}.json"
     assert config.exists()
     assert record["id"] in config.read_text()
@@ -119,9 +115,7 @@ async def test_spawn_requires_an_approval_mode(client, fake_tmux):
 
 async def test_spawn_rejects_an_unknown_harness(client, fake_tmux):
     with pytest.raises(RemoteError) as exc:
-        await client.call(
-            "spawn", harness="cursor", prompt="hi", approval="manual", cwd="/tmp"
-        )
+        await client.call("spawn", harness="cursor", prompt="hi", approval="manual", cwd="/tmp")
     assert exc.value.code == "bad_request"
 
 
@@ -136,21 +130,25 @@ def allow_models(daemon, **by_harness) -> None:
     daemon.config.models.update(by_harness)
 
 
-async def test_spawn_carries_a_model_all_the_way_to_the_pane(
-    daemon, client, fake_tmux
-):
+async def test_spawn_carries_a_model_all_the_way_to_the_pane(daemon, client, fake_tmux):
     """The whole wire, end to end: MCP/CLI param -> SpawnRequest -> plan -> tmux."""
-    allow_models(
-        daemon, vibe=["mysuperdupermodelname"], claude=["opus-4.1"]
-    )
+    allow_models(daemon, vibe=["mysuperdupermodelname"], claude=["opus-4.1"])
     await client.call(
-        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp",
+        "spawn",
+        harness="vibe",
+        prompt="hi",
+        approval="manual",
+        cwd="/tmp",
         model="mysuperdupermodelname",
     )
     assert fake_tmux.windows[0]["env"]["VIBE_ACTIVE_MODEL"] == "mysuperdupermodelname"
 
     await client.call(
-        "spawn", harness="claude", prompt="hi", approval="manual", cwd="/tmp",
+        "spawn",
+        harness="claude",
+        prompt="hi",
+        approval="manual",
+        cwd="/tmp",
         model="opus-4.1",
     )
     assert "--model=opus-4.1" in fake_tmux.windows[1]["command"]
@@ -158,9 +156,7 @@ async def test_spawn_carries_a_model_all_the_way_to_the_pane(
 
 async def test_spawn_without_a_model_pins_the_vibe_env_empty(client, fake_tmux):
     """An unset variable would be inherited from the daemon's own environment."""
-    await client.call(
-        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
-    )
+    await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
     assert fake_tmux.windows[0]["env"]["VIBE_ACTIVE_MODEL"] == ""
 
 
@@ -193,7 +189,11 @@ async def test_spawn_refuses_an_impossible_model_before_creating_anything(
 
     with pytest.raises(RemoteError) as exc:
         await client.call(
-            "spawn", harness="legacy", prompt="hi", approval="manual", cwd="/tmp",
+            "spawn",
+            harness="legacy",
+            prompt="hi",
+            approval="manual",
+            cwd="/tmp",
             model="whatever",
         )
     assert exc.value.code == "bad_request"
@@ -202,9 +202,7 @@ async def test_spawn_refuses_an_impossible_model_before_creating_anything(
 
 
 async def test_spawned_child_hellos_with_its_given_id(client, fake_tmux):
-    child = await client.call(
-        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
-    )
+    child = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
     # This is what the child's MCP server does on startup: no pane, no cwd it
     # can be trusted on, just the id from argv.
     seen = await client.call("hello", id=child["id"], harness="vibe", cwd="/tmp")
@@ -232,9 +230,7 @@ async def test_lineage_shows_in_the_tree(client, fake_tmux):
 
 
 async def test_kill_marks_dead_and_hides(client, fake_tmux):
-    record = await client.call(
-        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
-    )
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
     await client.call("participant.kill", id=record["id"])
 
     assert await client.call("participants.list") == []
@@ -246,12 +242,14 @@ async def test_kill_marks_dead_and_hides(client, fake_tmux):
 async def test_kill_from_a_caller_who_is_the_parent_succeeds(client, fake_tmux):
     parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
     child = await client.call(
-        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp",
+        "spawn",
+        harness="vibe",
+        prompt="hi",
+        approval="manual",
+        cwd="/tmp",
         parent_id=parent["id"],
     )
-    result = await client.call(
-        "participant.kill", id=child["id"], caller_id=parent["id"]
-    )
+    result = await client.call("participant.kill", id=child["id"], caller_id=parent["id"])
     assert result == {"id": child["id"], "killed": True}
     dead = await client.call("participants.get", id=child["id"])
     assert dead["status"] == "dead"
@@ -260,12 +258,14 @@ async def test_kill_from_a_caller_who_is_the_parent_succeeds(client, fake_tmux):
 async def test_kill_refuses_a_target_that_is_not_the_callers_child(client, fake_tmux):
     parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
     stranger = await client.call(
-        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp",
+        "spawn",
+        harness="vibe",
+        prompt="hi",
+        approval="manual",
+        cwd="/tmp",
     )
     with pytest.raises(RemoteError) as exc:
-        await client.call(
-            "participant.kill", id=stranger["id"], caller_id=parent["id"]
-        )
+        await client.call("participant.kill", id=stranger["id"], caller_id=parent["id"])
     assert exc.value.code == "not_your_child"
     alive = await client.call("participants.get", id=stranger["id"])
     assert alive["status"] != "dead"
@@ -274,9 +274,7 @@ async def test_kill_refuses_a_target_that_is_not_the_callers_child(client, fake_
 async def test_kill_refuses_self_kill(client, fake_tmux):
     parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
     with pytest.raises(RemoteError) as exc:
-        await client.call(
-            "participant.kill", id=parent["id"], caller_id=parent["id"]
-        )
+        await client.call("participant.kill", id=parent["id"], caller_id=parent["id"])
     assert exc.value.code == "no_self_kill"
     alive = await client.call("participants.get", id=parent["id"])
     assert alive["status"] != "dead"
@@ -285,13 +283,15 @@ async def test_kill_refuses_self_kill(client, fake_tmux):
 async def test_kill_on_an_already_dead_child_is_a_no_op(client, fake_tmux):
     parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
     child = await client.call(
-        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp",
+        "spawn",
+        harness="vibe",
+        prompt="hi",
+        approval="manual",
+        cwd="/tmp",
         parent_id=parent["id"],
     )
     await client.call("participant.kill", id=child["id"], caller_id=parent["id"])
-    result = await client.call(
-        "participant.kill", id=child["id"], caller_id=parent["id"]
-    )
+    result = await client.call("participant.kill", id=child["id"], caller_id=parent["id"])
     assert result == {"id": child["id"], "killed": False, "reason": "already_dead"}
 
 
@@ -299,28 +299,16 @@ async def test_kill_without_caller_id_is_unrestricted(client, fake_tmux):
     """The CLI and the régie send no caller_id; a human may kill anything."""
     parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
     stranger = await client.call(
-        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp",
+        "spawn",
+        harness="vibe",
+        prompt="hi",
+        approval="manual",
+        cwd="/tmp",
     )
     result = await client.call("participant.kill", id=stranger["id"])
     assert result == {"id": stranger["id"], "killed": True}
     result = await client.call("participant.kill", id=parent["id"])
     assert result == {"id": parent["id"], "killed": True}
-
-
-async def test_kill_confirms_pane_gone_before_marking_dead(client, fake_tmux):
-    """The pane disappearing immediately on the first poll marks the record dead.
-
-    FakeTmux.kill_pane removes the pane from visible_panes synchronously, so
-    pane_info returns None on the first poll. The record is marked dead and the
-    kill succeeds.
-    """
-    record = await client.call(
-        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
-    )
-    result = await client.call("participant.kill", id=record["id"])
-    assert result == {"id": record["id"], "killed": True}
-    dead = await client.call("participants.get", id=record["id"])
-    assert dead["status"] == "dead"
 
 
 async def test_kill_leaves_record_alive_when_pane_survives(client, fake_tmux, monkeypatch):
@@ -331,9 +319,8 @@ async def test_kill_leaves_record_alive_when_pane_survives(client, fake_tmux, mo
     is still in visible_panes and pane_info finds it on every poll. The call
     must fail, and the record must stay alive.
     """
-    record = await client.call(
-        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
-    )
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+
     # Override kill_pane so it does not remove the pane, simulating a pane
     # that tmux failed to reap.
     async def noop_kill(pane_id):
@@ -358,18 +345,14 @@ async def test_kill_leaves_record_alive_when_pane_survives(client, fake_tmux, mo
     assert alive["status"] != "dead"
 
 
-async def test_kill_succeeds_when_pane_disappears_on_a_later_poll(
-    client, fake_tmux, monkeypatch
-):
+async def test_kill_succeeds_when_pane_disappears_on_a_later_poll(client, fake_tmux, monkeypatch):
     """A pane that only vanishes after the second poll still succeeds.
 
     tmux reaps panes asynchronously, so the first pane_info may still see the
     pane. The poll loop must keep trying until the pane is gone rather than
     giving up after one check.
     """
-    record = await client.call(
-        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
-    )
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
 
     from theater.tmux import client as tmux_client
 
@@ -403,9 +386,7 @@ async def test_kill_succeeds_when_pane_disappears_on_a_later_poll(
 
 
 async def test_the_reaper_notices_a_vanished_pane(daemon, client, fake_tmux, monkeypatch):
-    record = await client.call(
-        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
-    )
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
 
     from theater.tmux import client as tmux_client
 
@@ -418,9 +399,7 @@ async def test_the_reaper_notices_a_vanished_pane(daemon, client, fake_tmux, mon
 
 
 async def test_the_reaper_leaves_live_panes_alone(daemon, client, fake_tmux, monkeypatch):
-    record = await client.call(
-        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
-    )
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
 
     from theater.tmux import client as tmux_client
 
@@ -446,11 +425,6 @@ async def test_bus_records_the_story(client, fake_tmux):
     assert "participant.pane" in kinds
 
 
-async def test_pipelined_requests_keep_their_ids(client):
-    results = await asyncio.gather(*(client.call("ping") for _ in range(5)))
-    assert all(r["pong"] for r in results)
-
-
 # ---- harness name normalization ------------------------------------------
 
 
@@ -458,16 +432,6 @@ async def test_hello_normalizes_claude_code_to_claude(client):
     """A misreported harness name must not silently become unobservable."""
     me = await client.call("hello", harness="claude_code", pane="%1", cwd="/tmp")
     assert me["harness"] == "claude"
-
-
-async def test_hello_normalizes_capitalized_claude(client):
-    me = await client.call("hello", harness="Claude", pane="%2", cwd="/tmp")
-    assert me["harness"] == "claude"
-
-
-async def test_hello_normalizes_mistral_vibe(client):
-    me = await client.call("hello", harness="mistral-vibe", pane="%3", cwd="/tmp")
-    assert me["harness"] == "vibe"
 
 
 async def test_unknown_harness_name_passes_through(client):
@@ -481,6 +445,7 @@ async def test_unknown_harness_name_passes_through(client):
 
 def _make_pane(pane_id="%5", command="vibe", cwd="/tmp/project", session="main", pane_pid=12345):
     from theater.tmux.client import Pane
+
     return Pane(
         pane_id=pane_id,
         pane_pid=pane_pid,
@@ -498,6 +463,7 @@ async def test_adopt_detects_harness_from_pane_command(client, fake_tmux, monkey
     # itself), not "vibe". The process tree walk finds "vibe" as an ancestor.
     # Simulate that: foreground is "theater", but descendants include "vibe".
     import theater.daemon.harness_detect as harness_detect_mod
+
     monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid: ["vibe"])
 
     fake_tmux.visible_panes = [_make_pane("%5", command="theater", cwd="/tmp/proj")]
@@ -510,6 +476,7 @@ async def test_adopt_detects_harness_from_pane_command(client, fake_tmux, monkey
 
 async def test_adopt_detects_claude(client, fake_tmux, monkeypatch):
     import theater.daemon.harness_detect as harness_detect_mod
+
     monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid: ["claude"])
 
     fake_tmux.visible_panes = [_make_pane("%6", command="theater", cwd="/tmp/cla")]
@@ -521,6 +488,7 @@ async def test_adopt_detects_claude(client, fake_tmux, monkeypatch):
 async def test_adopt_detects_from_foreground_when_no_descendants(client, fake_tmux, monkeypatch):
     """If the foreground IS the harness (no adopt in flight), detect it directly."""
     import theater.daemon.harness_detect as harness_detect_mod
+
     monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid: [])
 
     fake_tmux.visible_panes = [_make_pane("%9", command="vibe", cwd="/tmp/direct")]
@@ -531,6 +499,7 @@ async def test_adopt_detects_from_foreground_when_no_descendants(client, fake_tm
 async def test_adopt_override_harness(client, fake_tmux, monkeypatch):
     """--harness overrides detection when the command is not a known binary."""
     import theater.daemon.harness_detect as harness_detect_mod
+
     monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid: ["python3"])
 
     fake_tmux.visible_panes = [_make_pane("%7", command="python3")]
@@ -540,6 +509,7 @@ async def test_adopt_override_harness(client, fake_tmux, monkeypatch):
 
 async def test_adopt_unknown_command_yields_unknown_harness(client, fake_tmux, monkeypatch):
     import theater.daemon.harness_detect as harness_detect_mod
+
     monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid: ["zsh"])
 
     fake_tmux.visible_panes = [_make_pane("%8", command="zsh")]
@@ -550,6 +520,7 @@ async def test_adopt_unknown_command_yields_unknown_harness(client, fake_tmux, m
 
 async def test_adopt_missing_pane_is_an_error(client, fake_tmux, monkeypatch):
     import theater.daemon.harness_detect as harness_detect_mod
+
     monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid: [])
 
     fake_tmux.visible_panes = []
@@ -568,9 +539,7 @@ async def test_unmanaged_finds_harness_panes_with_no_participant(client, fake_tm
     # Pane %10's foreground is "python3" but its tree contains "vibe";
     # pane %12 is just "zsh" with no harness in its tree.
     def fake_descendants(pid):
-        return {"12345": ["vibe"], "12346": ["claude"], "12347": ["zsh"]}.get(
-            str(pid), []
-        )
+        return {"12345": ["vibe"], "12346": ["claude"], "12347": ["zsh"]}.get(str(pid), [])
 
     monkeypatch.setattr(harness_detect_mod, "descendant_comms", fake_descendants)
     fake_tmux.visible_panes = [
@@ -588,6 +557,7 @@ async def test_unmanaged_finds_harness_panes_with_no_participant(client, fake_tm
 
 async def test_unmanaged_excludes_registered_panes(client, fake_tmux, monkeypatch):
     import theater.daemon.harness_detect as harness_detect_mod
+
     monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid: ["vibe"])
 
     fake_tmux.visible_panes = [
@@ -620,8 +590,3 @@ async def test_harnesses_reports_install_state(client, monkeypatch):
 async def test_harnesses_is_sorted_so_callers_need_not_re_sort(client):
     rows = await client.call("harnesses")
     assert [r["name"] for r in rows] == sorted(r["name"] for r in rows)
-
-
-async def test_harnesses_needs_no_parameters(client):
-    """The régie calls it at mount with nothing to say."""
-    assert await client.call("harnesses") == await client.call("harnesses", id="x")

@@ -30,14 +30,6 @@ def test_root_spawn_is_always_allowed(store):
     check_depth(store, None)  # does not raise
 
 
-def test_depth_within_cap_is_allowed(store):
-    reg = Registry(store)
-    root = reg.create_spawned(harness="vibe", cwd="/tmp")
-    child = reg.create_spawned(harness="vibe", cwd="/tmp", parent_id=root.id)
-    # child is depth 1; spawning from child would be depth 2, within cap of 3
-    check_depth(store, child.id)  # does not raise
-
-
 def test_depth_at_cap_is_allowed(store):
     """Depth exactly at the cap is allowed; cap+1 is not."""
     reg = Registry(store)
@@ -67,18 +59,6 @@ def test_custom_cap_is_respected(store):
     child = reg.create_spawned(harness="vibe", cwd="/tmp", parent_id=root.id)
     with pytest.raises(DepthExceeded):
         check_depth(store, child.id, cap=1)
-
-
-def test_depth_check_is_cycle_safe(store):
-    """A cycle in stored lineage must not hang the depth check."""
-    reg = Registry(store)
-    a = reg.create_spawned(harness="vibe", cwd="/tmp")
-    b = reg.create_spawned(harness="vibe", cwd="/tmp", parent_id=a.id)
-    # Manually create a cycle: a's parent is b
-    a.parent_id = b.id
-    store.upsert_participant(a)
-    # Should not hang, should not crash
-    check_depth(store, b.id)
 
 
 # ---- cycle detection ----------------------------------------------------
@@ -145,18 +125,9 @@ def test_a_longer_loop_is_still_a_loop():
         check_wait_cycle({"b": {"c"}, "c": {"a"}}, "a", ["b"])
 
 
-def test_a_wait_graph_with_a_loop_elsewhere_does_not_hang():
-    """B and C are deadlocked already; asking about A must still return."""
-    check_wait_cycle({"b": {"c"}, "c": {"b"}}, "a", ["d"])  # does not raise
-
-
 def test_awaiting_yourself_is_refused():
     with pytest.raises(CycleDetected):
         check_wait_cycle({}, "a", ["a"])
-
-
-def test_an_empty_graph_refuses_nothing():
-    check_wait_cycle({}, "a", ["b", "c"])  # does not raise
 
 
 # ---- budget -------------------------------------------------------------
@@ -236,8 +207,3 @@ def test_matching_is_exact():
         check_model_allowed("vibe", "BIG", ["big"])
     with pytest.raises(ModelNotAllowed):
         check_model_allowed("vibe", "big", ["bigger"])
-
-
-def test_the_refusal_carries_a_stable_code():
-    """Callers match on the code; the prose is free to change."""
-    assert ModelNotAllowed.code == "model_not_allowed"

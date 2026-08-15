@@ -72,6 +72,7 @@ async def test_teardown_runs_once_even_though_two_paths_call_it(tmux_calls):
 
 async def test_a_failed_unstage_does_not_block_the_mouse_restore(monkeypatch, tmux_calls):
     """A dead pane is a normal way to exit; the option still has to go back."""
+
     async def boom(pane_id, *, target_window=None):
         raise RuntimeError("pane is gone")
 

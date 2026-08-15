@@ -50,11 +50,13 @@ def test_the_drift_check_is_not_vacuous(store):
 
 
 def test_migrations_created_the_alembic_version_table(store):
-    tables = set(store.conn.exec_driver_sql(
-        "SELECT name FROM sqlite_master WHERE type='table'"
-    ).scalars())
+    tables = set(
+        store.conn.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'").scalars()
+    )
     assert "alembic_version" in tables
     assert {"participants", "jobs", "bus", "budgets"} <= tables
+    stamped = store.conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
+    assert stamped == HEAD
 
 
 def test_bus_ids_are_never_reused(store):
@@ -109,22 +111,9 @@ def test_a_legacy_database_is_adopted_not_rebuilt(theater_home):
         assert survivor is not None
         assert survivor.tmux_pane == "%1"
 
-        stamped = store.conn.exec_driver_sql(
-            "SELECT version_num FROM alembic_version"
-        ).scalar()
+        stamped = store.conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
         # The legacy DB is stamped at BASELINE then upgraded to head, so the
         # version is HEAD — not BASELINE, and not just "not BASELINE".
         assert stamped == HEAD
-    finally:
-        store.close()
-
-
-def test_a_fresh_database_is_not_mistaken_for_a_legacy_one(theater_home):
-    store = Store(paths.db_path())
-    try:
-        assert store.conn.exec_driver_sql(
-            "SELECT version_num FROM alembic_version"
-        ).scalar() is not None
-        assert _diff(store) == []
     finally:
         store.close()

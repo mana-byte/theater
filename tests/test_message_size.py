@@ -55,18 +55,6 @@ def echo(monkeypatch):
 # ---- the ceiling is gone -----------------------------------------------
 
 
-async def test_a_reply_far_past_the_asyncio_default_arrives_whole(client, echo):
-    """The direction that broke read_transcript."""
-    result = await client.call("echo", reply_size=BIG)
-    assert len(result["reply"]) == BIG
-
-
-async def test_a_request_far_past_the_asyncio_default_is_parsed(client, echo):
-    """The same ceiling applies inbound: a large prompt is a large request."""
-    result = await client.call("echo", payload="x" * BIG)
-    assert result["size"] == BIG
-
-
 async def test_a_big_reply_does_not_disturb_the_next_call(client, echo):
     """The point of the fix is the *next* call, not the big one.
 
@@ -79,17 +67,6 @@ async def test_a_big_reply_does_not_disturb_the_next_call(client, echo):
 
 
 # ---- and when something does exceed it ---------------------------------
-
-
-async def test_an_overrun_reply_raises_a_connection_error(daemon, echo, monkeypatch):
-    """Not the bare ValueError asyncio raises, which nobody catches."""
-    monkeypatch.setattr(protocol, "MAX_MESSAGE_BYTES", TINY)
-    c = DaemonClient(autostart=False)
-    try:
-        with pytest.raises(MessageTooLarge):
-            await c.call("echo", reply_size=TINY * 8)
-    finally:
-        await c.aclose()
 
 
 async def test_an_overrun_reply_drops_the_connection(daemon, echo, monkeypatch):

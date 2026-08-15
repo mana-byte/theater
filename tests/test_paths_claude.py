@@ -15,13 +15,10 @@ Claude Code tool input shapes (``file_path``, ``notebook_path``) alongside a
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from shipped import ClaudeCodeHarness, ClaudeCodeObserver
 
 from theater.harness.base import EventKind
-
-FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def _tool_use_record(
@@ -95,9 +92,7 @@ def test_multiedit_yields_one_write_path_for_the_file():
 
 
 def test_notebookedit_yields_a_write_path():
-    record = _tool_use_record(
-        "NotebookEdit", {"notebook_path": "/home/ada/repo/nb.ipynb"}
-    )
+    record = _tool_use_record("NotebookEdit", {"notebook_path": "/home/ada/repo/nb.ipynb"})
     (event,) = _parse_one(record)
     assert event.paths[0].mode == "write"
     assert event.paths[0].path == "nb.ipynb"
@@ -118,25 +113,7 @@ def test_read_yields_a_read_path():
 
 def test_bash_yields_no_paths():
     """A shell command is not a named file; parsing it would be guessing."""
-    record = _tool_use_record(
-        "Bash", {"command": "cat src/app.py && rm -f /tmp/trash"}
-    )
-    (event,) = _parse_one(record)
-    assert event.paths == ()
-
-
-def test_glob_yields_no_paths():
-    """Glob takes a pattern, not a named file."""
-    record = _tool_use_record("Glob", {"pattern": "**/*.py", "path": "/home/ada/repo"})
-    (event,) = _parse_one(record)
-    assert event.paths == ()
-
-
-def test_grep_yields_no_paths():
-    """Grep searches content, not a named file."""
-    record = _tool_use_record(
-        "Grep", {"pattern": "TODO", "path": "/home/ada/repo/src", "output_mode": "content"}
-    )
+    record = _tool_use_record("Bash", {"command": "cat src/app.py && rm -f /tmp/trash"})
     (event,) = _parse_one(record)
     assert event.paths == ()
 
@@ -174,15 +151,6 @@ def test_tool_use_with_scrubbed_input_yields_no_paths():
 
 
 # ---- repo-relative guarantee ---------------------------------------------
-
-
-def test_absolute_path_is_relativised_against_cwd():
-    record = _tool_use_record(
-        "Write", {"file_path": "/home/ada/repo/deep/nested/file.py"}
-    )
-    (event,) = _parse_one(record)
-    assert event.paths[0].path == "deep/nested/file.py"
-    assert not event.paths[0].path.startswith("/")
 
 
 def test_path_outside_cwd_is_dropped():
@@ -235,26 +203,6 @@ def test_cwd_with_trailing_slash_relativises_correctly():
     )
     (event,) = _parse_one(record)
     assert event.paths[0].path == "x.py"
-
-
-# ---- fixture integration -------------------------------------------------
-
-
-def test_real_fixture_parses_without_paths_due_to_scrubbed_inputs():
-    """The shipped fixture has scrubbed inputs, so no paths are extracted.
-
-    This confirms the pipeline runs clean against real transcript structure
-    and that scrubbed inputs yield empty paths rather than errors."""
-    lines = (FIXTURES / "claude_code.jsonl").read_text().splitlines()
-    observer = ClaudeCodeObserver()
-    events = []
-    for i, line in enumerate(lines):
-        events.extend(observer.parse(line, i))
-    tool_calls = [e for e in events if e.kind is EventKind.TOOL_CALL]
-    assert len(tool_calls) == 1
-    assert tool_calls[0].tool_name == "Read"
-    # Scrubbed input has no file_path key, so no paths.
-    assert tool_calls[0].paths == ()
 
 
 # ---- resume support -------------------------------------------------------

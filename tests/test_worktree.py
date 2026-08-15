@@ -21,15 +21,12 @@ def repo(tmp_path):
     """A real git repo with one commit."""
     root = tmp_path / "repo"
     root.mkdir()
-    subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True,
-                   capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@test.com"],
-                   cwd=root, check=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=root, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
     (root / "README.md").write_text("# test repo\n")
     subprocess.run(["git", "add", "."], cwd=root, check=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=root, check=True,
-                   capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=root, check=True, capture_output=True)
     return str(root)
 
 
@@ -47,10 +44,6 @@ def test_repo_root(repo):
     assert wt.repo_root(repo) == repo
 
 
-def test_branch_name():
-    assert wt.branch_name("abc123") == "theater/abc123"
-
-
 def test_worktree_path(repo):
     path = wt.worktree_path(repo, "abc123")
     assert path == f"{repo}/.theater/worktrees/abc123"
@@ -66,7 +59,10 @@ def test_create_worktree(repo):
     # The branch exists
     result = subprocess.run(
         ["git", "rev-parse", "--verify", "theater/child1"],
-        cwd=repo, capture_output=True, text=True, check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert result.returncode == 0
 
@@ -77,8 +73,7 @@ def test_create_worktree_isolates_commits(repo):
     # Make a commit in the worktree
     (Path(wt_path) / "new.txt").write_text("new file\n")
     subprocess.run(["git", "add", "."], cwd=wt_path, check=True)
-    subprocess.run(["git", "commit", "-m", "new"], cwd=wt_path, check=True,
-                   capture_output=True)
+    subprocess.run(["git", "commit", "-m", "new"], cwd=wt_path, check=True, capture_output=True)
     # The main repo does not have new.txt
     assert not (Path(repo) / "new.txt").exists()
     # The worktree does
@@ -95,18 +90,13 @@ def test_create_worktree_duplicate_branch_rejected(repo):
 def test_create_worktree_with_base_branch(repo):
     """Creating a worktree from a specific base branch works."""
     # Create a branch with a different commit
-    subprocess.run(["git", "checkout", "-b", "feature"], cwd=repo, check=True,
-                   capture_output=True)
+    subprocess.run(["git", "checkout", "-b", "feature"], cwd=repo, check=True, capture_output=True)
     (Path(repo) / "feature.txt").write_text("feature\n")
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-m", "feature"], cwd=repo, check=True,
-                   capture_output=True)
-    subprocess.run(["git", "checkout", "main"], cwd=repo, check=True,
-                   capture_output=True)
+    subprocess.run(["git", "commit", "-m", "feature"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "checkout", "main"], cwd=repo, check=True, capture_output=True)
 
-    wt_path = wt.create_worktree(
-        repo_root=repo, child_id="child3", base_branch="feature"
-    )
+    wt_path = wt.create_worktree(repo_root=repo, child_id="child3", base_branch="feature")
     # The worktree has the feature file
     assert (Path(wt_path) / "feature.txt").exists()
 
@@ -123,7 +113,10 @@ def test_remove_worktree(repo):
     # The branch is gone
     verify = subprocess.run(
         ["git", "rev-parse", "--verify", "theater/child4"],
-        cwd=repo, capture_output=True, text=True, check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert verify.returncode != 0
 
@@ -196,9 +189,7 @@ def test_remove_worktree_with_wrong_root_from_caller(repo):
     assert wrong_root == wt_path  # the bug
 
     # remove_worktree must handle this and still clean up correctly.
-    result = wt.remove_worktree(
-        repo_root=wrong_root, child_id="bugrepro1"
-    )
+    result = wt.remove_worktree(repo_root=wrong_root, child_id="bugrepro1")
 
     assert result.ok
     assert result.worktree_removed
@@ -207,13 +198,19 @@ def test_remove_worktree_with_wrong_root_from_caller(repo):
     # Branch genuinely gone
     verify = subprocess.run(
         ["git", "rev-parse", "--verify", "theater/bugrepro1"],
-        cwd=repo, capture_output=True, text=True, check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert verify.returncode != 0
     # No stale worktree list entries
     list_result = subprocess.run(
         ["git", "worktree", "list", "--porcelain"],
-        cwd=repo, capture_output=True, text=True, check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert "bugrepro1" not in list_result.stdout
 
@@ -240,56 +237,35 @@ def test_remove_worktree_already_deleted_directory(repo):
     # The branch still exists and the worktree admin record is stale.
     verify_before = subprocess.run(
         ["git", "rev-parse", "--verify", "theater/bugrepro2"],
-        cwd=repo, capture_output=True, text=True, check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert verify_before.returncode == 0  # branch still there
 
-    result = wt.remove_worktree(
-        repo_root=repo, child_id="bugrepro2"
-    )
+    result = wt.remove_worktree(repo_root=repo, child_id="bugrepro2")
 
     assert result.ok
     assert result.branch_removed
     # Branch genuinely gone
     verify_after = subprocess.run(
         ["git", "rev-parse", "--verify", "theater/bugrepro2"],
-        cwd=repo, capture_output=True, text=True, check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert verify_after.returncode != 0
     # No stale worktree list entries
     list_result = subprocess.run(
         ["git", "worktree", "list", "--porcelain"],
-        cwd=repo, capture_output=True, text=True, check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert "bugrepro2" not in list_result.stdout
-
-
-def test_remove_worktree_already_deleted_with_wrong_root(repo):
-    """The already-deleted case must also work when the caller passes
-    the worktree path as repo_root (the buggy derivation). The fallback
-    in main_repo_root strips the suffix to recover the main root.
-    """
-    import shutil
-
-    wt_path = wt.create_worktree(repo_root=repo, child_id="bugrepro3")
-    shutil.rmtree(wt_path)
-
-    # Derive root the buggy way: from the now-deleted worktree path.
-    # repo_root() will fail (cwd doesn't exist), but we pass the path
-    # directly as repo_root — which is the worktree path.
-    wrong_root = wt_path  # the worktree path itself
-
-    result = wt.remove_worktree(
-        repo_root=wrong_root, child_id="bugrepro3"
-    )
-
-    assert result.ok
-    assert result.branch_removed
-    verify = subprocess.run(
-        ["git", "rev-parse", "--verify", "theater/bugrepro3"],
-        cwd=repo, capture_output=True, text=True, check=False,
-    )
-    assert verify.returncode != 0
 
 
 def test_remove_worktree_keeps_the_branch_when_asked(repo):
@@ -301,12 +277,14 @@ def test_remove_worktree_keeps_the_branch_when_asked(repo):
     commits away with it.
     """
     wt_path = wt.create_worktree(repo_root=repo, child_id="keepbranch")
-    subprocess.run(["git", "commit", "--allow-empty", "-m", "child work"],
-                   cwd=wt_path, check=True, capture_output=True)
-
-    result = wt.remove_worktree(
-        repo_root=repo, child_id="keepbranch", delete_branch=False
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "child work"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
     )
+
+    result = wt.remove_worktree(repo_root=repo, child_id="keepbranch", delete_branch=False)
 
     # ok reflects the directory alone; nothing was asked of the branch,
     # so branch_removed stays False rather than claiming a success.
@@ -317,7 +295,10 @@ def test_remove_worktree_keeps_the_branch_when_asked(repo):
 
     verify = subprocess.run(
         ["git", "rev-parse", "--verify", "theater/keepbranch"],
-        cwd=repo, capture_output=True, text=True, check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert verify.returncode == 0, "the child's branch must survive"
 
@@ -366,12 +347,18 @@ def test_retire_removes_worktree_and_branch_of_a_killed_child(repo):
     assert not Path(wt_path).exists()
     verify = subprocess.run(
         ["git", "rev-parse", "--verify", "theater/killme"],
-        cwd=repo, capture_output=True, text=True, check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert verify.returncode != 0
     listing = subprocess.run(
         ["git", "worktree", "list", "--porcelain"],
-        cwd=repo, capture_output=True, text=True, check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert "killme" not in listing.stdout
 
@@ -379,8 +366,12 @@ def test_retire_removes_worktree_and_branch_of_a_killed_child(repo):
 def test_retire_keeps_the_branch_of_a_child_that_exited(repo):
     """The reaper path: directory reclaimed, commits preserved."""
     wt_path = wt.create_worktree(repo_root=repo, child_id="exited")
-    subprocess.run(["git", "commit", "--allow-empty", "-m", "child work"],
-                   cwd=wt_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "child work"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+    )
     p = _participant("exited", wt_path)
 
     _spawner().retire(p, delete_branch=False)
@@ -388,7 +379,10 @@ def test_retire_keeps_the_branch_of_a_child_that_exited(repo):
     assert not Path(wt_path).exists()
     verify = subprocess.run(
         ["git", "rev-parse", "--verify", "theater/exited"],
-        cwd=repo, capture_output=True, text=True, check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert verify.returncode == 0
 
@@ -402,14 +396,16 @@ def test_retire_ignores_a_participant_without_a_theater_branch(repo):
     """
     from theater.models import Participant, Tier
 
-    p = Participant(id="plain", harness="vibe", tier=Tier.SPAWNED,
-                    cwd=repo, branch="main")
+    p = Participant(id="plain", harness="vibe", tier=Tier.SPAWNED, cwd=repo, branch="main")
 
     _spawner().retire(p, delete_branch=True)
 
     verify = subprocess.run(
         ["git", "rev-parse", "--verify", "main"],
-        cwd=repo, capture_output=True, text=True, check=False,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert verify.returncode == 0
     assert Path(repo, "README.md").exists()

@@ -64,11 +64,7 @@ def test_events_with_paths_produce_touch_rows(registry, tmp_path):
     f.write_bytes(b"modified")
     jobs.finish("job-1", state="done", result="done")
 
-    rows = list(
-        registry.store.conn.execute(
-            touch.select().where(touch.c.job_handle == "job-1")
-        )
-    )
+    rows = list(registry.store.conn.execute(touch.select().where(touch.c.job_handle == "job-1")))
     assert len(rows) == 1
     row = rows[0]._mapping
     assert row["job_handle"] == "job-1"

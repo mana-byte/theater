@@ -124,10 +124,7 @@ async def test_list_harnesses_omits_what_is_not_installed(daemon, monkeypatch):
         lambda binary: None if binary == "codex" else f"/usr/bin/{binary}",
     )
 
-    names = {
-        r["name"]
-        for r in _payload(await build("p1", "vibe").call_tool("list_harnesses", {}))
-    }
+    names = {r["name"] for r in _payload(await build("p1", "vibe").call_tool("list_harnesses", {}))}
     assert "codex" not in names
     assert "vibe" in names
 
@@ -140,10 +137,7 @@ async def test_list_harnesses_omits_a_broken_plugin(daemon, local_dir, all_insta
     (local_dir / "broken.py").write_text("raise RuntimeError('boom')\n")
     install(local_dir)
 
-    names = {
-        r["name"]
-        for r in _payload(await build("p1", "vibe").call_tool("list_harnesses", {}))
-    }
+    names = {r["name"] for r in _payload(await build("p1", "vibe").call_tool("list_harnesses", {}))}
     assert "broken" not in names
     assert names >= SHIPPED
 

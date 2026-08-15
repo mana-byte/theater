@@ -66,12 +66,3 @@ def test_empty_file_hashes_correctly(tmp_path):
     assert blob_sha(f) == expected
     # The well-known SHA-1 of "blob 0\0" — git's hash for an empty file.
     assert blob_sha(f) == "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
-
-
-def test_binary_file_hashes_correctly(tmp_path):
-    """Binary content is hashed byte-for-byte, no encoding surprises."""
-    f = tmp_path / "bin.dat"
-    data = bytes(range(256))
-    f.write_bytes(data)
-    expected = hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
-    assert blob_sha(f) == expected

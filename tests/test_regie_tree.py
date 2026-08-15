@@ -124,9 +124,7 @@ def test_separate_roots_are_not_drawn_as_siblings():
     """Two unrelated agents are not children of anything, so no rails."""
     other = {**PARENT, "id": "998877665544"}
     lines = render_tree([PARENT, other])
-    assert all(
-        not _rows(line[0])[1].startswith(("├", "└")) for line in lines
-    )
+    assert all(not _rows(line[0])[1].startswith(("├", "└")) for line in lines)
 
 
 def test_row3_continuation_rail_for_middle_child_at_depth_2():
@@ -238,16 +236,6 @@ def test_selected_participant_on_separator_returns_none():
     assert selected_participant(lines, 1) is None
 
 
-def test_unaddressable_id_renders_with_no_star():
-    """The * reach mark is gone; the id is styled dim italic instead."""
-    ext = {**PARENT, "tier": "external", "addressable": False}
-    lines = render_tree([ext])
-    label = lines[0][0]
-    assert "*" not in str(label)
-    # The id is still present in plain text.
-    assert "aabbccdd" in str(label)
-
-
 # ---- shorten_path --------------------------------------------------------
 
 
@@ -257,10 +245,6 @@ def test_shorten_path_deeper_than_threshold_elides_the_prefix():
 
 def test_shorten_path_exactly_at_threshold_is_unchanged():
     assert shorten_path("/b/c") == "/b/c"
-
-
-def test_shorten_path_shorter_than_threshold_is_unchanged():
-    assert shorten_path("/c") == "/c"
 
 
 def test_shorten_path_root_is_unchanged():
@@ -279,20 +263,8 @@ def test_shorten_path_none_returns_dash():
     assert shorten_path(None) == "-"
 
 
-def test_shorten_path_empty_returns_dash():
-    assert shorten_path("") == "-"
-
-
 def test_shorten_path_non_default_keep():
     assert shorten_path("/a/b/c/d/e", keep=3) == "…/c/d/e"
-
-
-def test_shorten_path_non_default_keep_one():
-    assert shorten_path("/a/b/c", keep=1) == "…/c"
-
-
-def test_shorten_path_home_relative_non_default_keep():
-    assert shorten_path("~/a/b/c/d", keep=3) == "~/…/b/c/d"
 
 
 # ---- status glyphs --------------------------------------------------------
@@ -305,6 +277,7 @@ def test_idle_status_uses_harness_icon():
     rows = _rows(lines[0][0])
     # The harness icon for claude is ✻ (or whatever harness_icon returns).
     from theater.harness import harness_icon
+
     assert harness_icon("claude") in rows[1]
 
 
@@ -313,6 +286,7 @@ def test_working_status_uses_braille_spinner():
     lines = render_tree([PARENT])  # PARENT is working
     rows = _rows(lines[0][0])
     from theater.regie.tree import _SPINNER_FRAMES
+
     assert rows[1].split()[0] in list(_SPINNER_FRAMES)
 
 

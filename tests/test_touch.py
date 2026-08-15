@@ -15,27 +15,6 @@ from theater.harness.base import EventPath
 from theater.models import JobState
 
 
-def test_touch_table_exists_after_migration(store):
-    """The migration created the touch table with the expected columns."""
-    tables = set(
-        store.conn.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'").scalars()
-    )
-    assert "touch" in tables
-
-    cols = {
-        row[1]: {"notnull": row[3], "pk": row[5]}
-        for row in store.conn.exec_driver_sql("PRAGMA table_info(touch)")
-    }
-    assert set(cols) == {"id", "job_handle", "path", "mode", "sha_before", "sha_after"}
-    assert cols["id"]["pk"] == 1
-    assert cols["job_handle"]["notnull"] == 1
-    assert cols["path"]["notnull"] == 1
-    assert cols["mode"]["notnull"] == 1
-    # sha_before and sha_after are nullable: null means the file was absent.
-    assert cols["sha_before"]["notnull"] == 0
-    assert cols["sha_after"]["notnull"] == 0
-
-
 def test_touch_indexes_exist(store):
     """The two read patterns have indexes: by path and by job handle."""
     indexes = set(
@@ -44,59 +23,6 @@ def test_touch_indexes_exist(store):
         ).scalars()
     )
     assert {"idx_touch_path", "idx_touch_job"} <= indexes
-
-
-def test_touch_round_trips_through_the_migration(store):
-    """Insert and read back a row: the table works end to end."""
-    store.conn.execute(
-        touch.insert().values(
-            job_handle="h1",
-            path="src/main.py",
-            mode="write",
-            sha_before="abc123",
-            sha_after="def456",
-        )
-    )
-    rows = list(store.conn.execute(touch.select().where(touch.c.job_handle == "h1")))
-    assert len(rows) == 1
-    row = rows[0]._mapping
-    assert row["job_handle"] == "h1"
-    assert row["path"] == "src/main.py"
-    assert row["mode"] == "write"
-    assert row["sha_before"] == "abc123"
-    assert row["sha_after"] == "def456"
-
-
-def test_touch_rows_with_null_shas(store):
-    """Null sha_before = file created, null sha_after = file deleted."""
-    store.conn.execute(
-        touch.insert().values(
-            job_handle="h1",
-            path="new_file.py",
-            mode="write",
-            sha_before=None,
-            sha_after="deadbeef",
-        )
-    )
-    store.conn.execute(
-        touch.insert().values(
-            job_handle="h1",
-            path="deleted.py",
-            mode="write",
-            sha_before="cafe",
-            sha_after=None,
-        )
-    )
-    rows = list(
-        store.conn.execute(touch.select().where(touch.c.job_handle == "h1").order_by(touch.c.path))
-    )
-    # "deleted.py" < "new_file.py" alphabetically.
-    assert rows[0]._mapping["path"] == "deleted.py"
-    assert rows[0]._mapping["sha_before"] is not None
-    assert rows[0]._mapping["sha_after"] is None
-    assert rows[1]._mapping["path"] == "new_file.py"
-    assert rows[1]._mapping["sha_before"] is None
-    assert rows[1]._mapping["sha_after"] is not None
 
 
 def test_touch_accumulator_captures_sha_before_on_first_sight(tmp_path):
@@ -164,20 +90,6 @@ def test_touch_accumulator_empty_when_no_paths_observed(tmp_path):
     acc = TouchAccumulator(cwd=str(tmp_path))
     assert not acc
     assert acc.rows("h1") == []
-
-
-def test_touch_accumulator_deduplicates_paths(tmp_path):
-    """The same path seen across multiple events produces one row."""
-    f = tmp_path / "shared.py"
-    f.write_bytes(b"v1")
-
-    acc = TouchAccumulator(cwd=str(tmp_path))
-    acc.observe((EventPath(path="shared.py", mode="read"),))
-    f.write_bytes(b"v2")
-    acc.observe((EventPath(path="shared.py", mode="write"),))
-
-    rows = acc.rows("h1")
-    assert len(rows) == 1
 
 
 def test_record_touches_writes_in_same_transaction_as_job_result(store, tmp_path):

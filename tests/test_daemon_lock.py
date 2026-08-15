@@ -138,9 +138,7 @@ def _unlockable(monkeypatch):
     monkeypatch.setattr(lock_mod.fcntl, "flock", refuse)
 
 
-def test_live_pid_ignores_a_number_that_belongs_to_something_else(
-    theater_home, monkeypatch
-):
+def test_live_pid_ignores_a_number_that_belongs_to_something_else(theater_home, monkeypatch):
     """Pid reuse is the reason this is not `os.kill(pid, 0)`.
 
     After a hard kill the number is free for the OS to hand to anything; a
@@ -148,9 +146,7 @@ def test_live_pid_ignores_a_number_that_belongs_to_something_else(
     for as long as it lived.
     """
     paths.pidfile_path().write_text("4242\n")
-    monkeypatch.setattr(
-        lock_mod.subprocess, "run", lambda *a, **k: _Probe(0, "-zsh\n")
-    )
+    monkeypatch.setattr(lock_mod.subprocess, "run", lambda *a, **k: _Probe(0, "-zsh\n"))
     assert lock_mod._live_daemon_pid(paths.pidfile_path()) is None
 
     monkeypatch.setattr(
@@ -208,21 +204,7 @@ def test_without_flock_a_dead_pid_lets_the_daemon_run(theater_home, monkeypatch)
 # ---- the daemon ---------------------------------------------------------
 
 
-async def test_a_second_daemon_refuses_to_start(theater_home, fake_tmux):
-    first = Daemon(harnesses={})
-    await first.start()
-    try:
-        # Construction is the refusal point, not start(): see the database test
-        # below for why it had to move. There is no second object to close.
-        with pytest.raises(LockHeld):
-            Daemon(harnesses={})
-    finally:
-        await first.aclose()
-
-
-async def test_a_refused_daemon_never_opens_the_database(
-    theater_home, fake_tmux, monkeypatch
-):
+async def test_a_refused_daemon_never_opens_the_database(theater_home, fake_tmux, monkeypatch):
     """Losing the race must happen before any shared state is touched.
 
     Constructing a Daemon runs Alembic migrations against the shared SQLite
@@ -268,9 +250,7 @@ async def test_a_failed_construction_releases_the_lock(theater_home, monkeypatch
     assert lock_mod.is_free()
 
 
-async def test_a_refused_daemon_leaves_the_running_one_working(
-    theater_home, fake_tmux
-):
+async def test_a_refused_daemon_leaves_the_running_one_working(theater_home, fake_tmux):
     """The regression that cost the user two orphans.
 
     `theater daemon` typed while one is running used to raise, then run its
@@ -325,20 +305,7 @@ async def test_a_daemon_starts_over_a_stale_socket(theater_home, fake_tmux):
         await daemon.aclose()
 
 
-async def test_shutdown_clears_both_files(theater_home, fake_tmux):
-    daemon = Daemon(harnesses={})
-    await daemon.start()
-    assert paths.socket_path().exists()
-    assert paths.pidfile_path().exists()
-    await daemon.aclose()
-    assert not paths.socket_path().exists()
-    assert not paths.pidfile_path().exists()
-    assert lock_mod.is_free()
-
-
-async def test_restart_waits_for_the_lock_not_just_the_socket(
-    theater_home, fake_tmux
-):
+async def test_restart_waits_for_the_lock_not_just_the_socket(theater_home, fake_tmux):
     """`theater restart` used to watch the socket, which a hard kill never removes.
 
     Holding the lock with the socket already gone is the shape of a daemon

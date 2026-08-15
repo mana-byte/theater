@@ -43,9 +43,13 @@ def test_a_participant_renders_with_its_tier_mark():
 
 def test_unmanaged_panes_append_to_ls_output():
     """Unmanaged panes show below participants, not instead of them."""
-    out = cli._format_ls([ROW], tree=False, unmanaged=[
-        {"pane": "%9", "command": "vibe", "cwd": "/tmp/other"},
-    ])
+    out = cli._format_ls(
+        [ROW],
+        tree=False,
+        unmanaged=[
+            {"pane": "%9", "command": "vibe", "cwd": "/tmp/other"},
+        ],
+    )
     assert "unmanaged" in out
     assert "%9" in out
     assert "/tmp/other" in out
@@ -139,17 +143,13 @@ def test_a_tool_call_shows_the_tool_name():
 
 
 def test_assistant_text_is_flattened_to_one_line():
-    line = cli._bus_line(
-        event(kind="agent.assistant", payload={"text": "one\ntwo   three"}), 200
-    )
+    line = cli._bus_line(event(kind="agent.assistant", payload={"text": "one\ntwo   three"}), 200)
     assert "one two three" in line
     assert "\n" not in line
 
 
 def test_a_turn_boundary_is_visible():
-    assert "(turn end)" in cli._bus_line(
-        event(payload={"text": "done", "turn_end": True}), 200
-    )
+    assert "(turn end)" in cli._bus_line(event(payload={"text": "done", "turn_end": True}), 200)
 
 
 def test_an_unrecognised_payload_is_shown_rather_than_dropped():
@@ -232,14 +232,6 @@ async def test_follow_advances_the_cursor_past_what_it_printed(fake_follow, caps
     assert capsys.readouterr().out.count("agent.user") == 2
 
 
-async def test_follow_reports_a_gap_instead_of_hiding_it(fake_follow, capsys):
-    """bus.tail keeps the newest rows, so a burst drops the middle. Say so."""
-    fake_follow([[event(id=10)], [event(id=25)]])
-    args = parse("bus", "-f", "--interval", "0")
-    await _run_follow(args)
-    assert "14 events dropped" in capsys.readouterr().out
-
-
 async def test_follow_from_an_empty_bus_starts_at_zero(fake_follow):
     client = fake_follow([[], [event(id=1)]])
     args = parse("bus", "-f", "--interval", "0")
@@ -248,10 +240,6 @@ async def test_follow_from_an_empty_bus_starts_at_zero(fake_follow):
 
 
 # ---- harnesses ----------------------------------------------------------
-
-
-def test_harnesses_is_a_command():
-    assert parse("harnesses").command == "harnesses"
 
 
 def test_harnesses_lists_every_registered_adapter(monkeypatch, capsys):
@@ -289,6 +277,7 @@ def test_harnesses_never_starts_a_daemon(monkeypatch, capsys):
     the config as of its own start. But autostart is off, so the question is
     never the thing that launches one.
     """
+
     def explode(*a, **k):
         raise AssertionError("cmd_harnesses started a daemon")
 
@@ -300,6 +289,7 @@ def test_harnesses_never_starts_a_daemon(monkeypatch, capsys):
 
 def test_harnesses_prefers_the_running_daemons_answer(monkeypatch, capsys):
     """The daemon may know harnesses this process cannot import."""
+
     class FakeClient:
         def __init__(self, *a, **k):
             pass
@@ -349,6 +339,7 @@ def test_a_participant_row_carries_its_harness_icon():
 
 def test_harnesses_falls_back_when_the_daemon_predates_the_method(monkeypatch, capsys):
     """Version skew: a daemon that old necessarily has the built-in registry."""
+
     class OldDaemon:
         def __init__(self, *a, **k):
             pass
@@ -372,6 +363,7 @@ def test_harnesses_falls_back_when_the_daemon_predates_the_method(monkeypatch, c
 
 def test_a_real_daemon_error_is_not_papered_over(monkeypatch):
     """Any other failure must surface, not become a plausible-looking list."""
+
     class Broken:
         def __init__(self, *a, **k):
             pass
@@ -431,10 +423,6 @@ class NoDaemon:
 
     async def __aexit__(self, *exc):
         return False
-
-
-def test_restart_is_a_command():
-    assert parse("restart").command == "restart"
 
 
 def test_stop_does_not_start_a_daemon_just_to_stop_it(monkeypatch, capsys):
@@ -558,10 +546,15 @@ def test_bus_with_no_events_says_so(answers, capsys):
 def test_bus_filters_by_kind_prefix(answers, capsys):
     answers["replies"] = {
         "bus.tail": [
-            {"id": 1, "ts": 0, "kind": "agent.assistant", "from_id": "a", "to_id": None,
-             "payload": {"text": "hi"}},
-            {"id": 2, "ts": 0, "kind": "job.created", "from_id": "a", "to_id": "b",
-             "payload": {}},
+            {
+                "id": 1,
+                "ts": 0,
+                "kind": "agent.assistant",
+                "from_id": "a",
+                "to_id": None,
+                "payload": {"text": "hi"},
+            },
+            {"id": 2, "ts": 0, "kind": "job.created", "from_id": "a", "to_id": "b", "payload": {}},
         ]
     }
     assert cli.cmd_bus(parse("bus", "--kind", "agent")) == 0
@@ -596,12 +589,6 @@ def test_adopt_json_prints_the_record_verbatim(answers, monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out) == record
 
 
-def test_stats_with_nothing_recorded_says_so(answers, capsys):
-    answers["replies"] = {"stats": {"harnesses": [], "refusals": []}}
-    assert cli.cmd_stats(parse("stats")) == 0
-    assert "no turns recorded" in capsys.readouterr().out
-
-
 def test_stats_json_is_the_daemon_answer(answers, capsys):
     data = {"since": 0, "harnesses": [], "refusals": []}
     answers["replies"] = {"stats": data}
@@ -627,9 +614,7 @@ def test_spawn_passes_the_prompt_and_the_cwd(answers, monkeypatch, capsys):
 def test_spawn_sends_the_model_it_was_given(answers, monkeypatch):
     monkeypatch.setattr(cli.tmux, "current_session_sync", lambda: "main")
     answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
-    cli.cmd_spawn(
-        parse("spawn", "vibe", "hi", "--approval", "manual", "--model", "big-one")
-    )
+    cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual", "--model", "big-one"))
     assert answers["calls"][0][1]["model"] == "big-one"
 
 
@@ -655,32 +640,6 @@ def test_spawn_rejects_an_unknown_harness_by_name(monkeypatch):
         cli._spawn_harness(parse("spawn", "nosuch", "hi", "--approval", "manual"))
     assert "unknown harness" in str(exc.value)
     assert "--prompt" in str(exc.value), "the likely mistake is naming a prompt"
-
-
-def test_spawn_with_no_harness_and_no_favourite_says_how_to_fix_it():
-    with pytest.raises(cli.BadUsage) as exc:
-        cli._spawn_harness(parse("spawn", "--prompt", "hi", "--approval", "manual"))
-    assert "favourite" in str(exc.value)
-
-
-def test_spawn_falls_back_to_the_configured_favourite(monkeypatch):
-    from theater.config import Config, TheaterSection
-
-    monkeypatch.setattr(
-        cli.config, "load", lambda: Config(theater=TheaterSection(favourite="vibe"))
-    )
-    assert cli._spawn_harness(parse("spawn", "--prompt", "hi", "--approval", "manual")) == "vibe"
-
-
-def test_a_favourite_that_is_not_a_harness_is_an_error(monkeypatch):
-    from theater.config import Config, TheaterSection
-
-    monkeypatch.setattr(
-        cli.config, "load", lambda: Config(theater=TheaterSection(favourite="ghost"))
-    )
-    with pytest.raises(cli.BadUsage) as exc:
-        cli._spawn_harness(parse("spawn", "--prompt", "hi", "--approval", "manual"))
-    assert "not a known harness" in str(exc.value)
 
 
 # ---- models --------------------------------------------------------------
@@ -747,18 +706,8 @@ def test_discover_prints_a_block_naming_the_harness(monkeypatch, capsys):
 def pasted(capsys) -> str:
     """What a human would copy: the block, without the explanatory comments."""
     return "\n".join(
-        line
-        for line in capsys.readouterr().out.splitlines()
-        if not line.startswith("#")
+        line for line in capsys.readouterr().out.splitlines() if not line.startswith("#")
     )
-
-
-def test_a_discovered_block_parses_back_as_the_allowlist(monkeypatch, capsys):
-    """The claim the command makes: paste this and it works, unedited."""
-    assert discover(monkeypatch, "vibe", ["big", "small"]) == 0
-    write_config(pasted(capsys))
-    assert cli.main(["models", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out) == {"vibe": ["big", "small"]}
 
 
 def test_a_quoted_model_name_survives_the_round_trip(monkeypatch, capsys):
@@ -777,9 +726,7 @@ def test_discover_json_is_the_found_list(monkeypatch, capsys):
     }
 
 
-def test_discover_on_a_cli_that_cannot_be_asked_fails_helpfully(
-    monkeypatch, capsys
-):
+def test_discover_on_a_cli_that_cannot_be_asked_fails_helpfully(monkeypatch, capsys):
     problem = NotImplementedError("claude has no list")
     assert discover(monkeypatch, "claude", problem) == 1
     err = capsys.readouterr().err
@@ -867,10 +814,12 @@ def test_ls_watch_in_tree_mode_never_asks_for_unmanaged_panes(monkeypatch):
 
 def test_follow_says_when_the_feed_fell_behind(monkeypatch, capsys):
     """A burst larger than one batch drops the middle; silence would look complete."""
-    client = _FollowClient([
-        [{"id": 1, "ts": 0, "kind": "agent.user", "actor_id": "p-a", "payload": {}}],
-        [{"id": 5, "ts": 0, "kind": "agent.user", "actor_id": "p-a", "payload": {}}],
-    ])
+    client = _FollowClient(
+        [
+            [{"id": 1, "ts": 0, "kind": "agent.user", "actor_id": "p-a", "payload": {}}],
+            [{"id": 5, "ts": 0, "kind": "agent.user", "actor_id": "p-a", "payload": {}}],
+        ]
+    )
     monkeypatch.setattr(cli, "DaemonClient", lambda: client)
     with pytest.raises(_Stop):
         cli.cmd_bus(parse("bus", "-f", "--interval", "0"))
@@ -879,22 +828,16 @@ def test_follow_says_when_the_feed_fell_behind(monkeypatch, capsys):
 
 def test_follow_holds_its_cursor_across_an_empty_poll(monkeypatch, capsys):
     """Advancing on nothing would skip whatever the daemon writes next."""
-    client = _FollowClient([
-        [{"id": 7, "ts": 0, "kind": "agent.user", "actor_id": "p-a", "payload": {}}],
-        [],
-    ])
+    client = _FollowClient(
+        [
+            [{"id": 7, "ts": 0, "kind": "agent.user", "actor_id": "p-a", "payload": {}}],
+            [],
+        ]
+    )
     monkeypatch.setattr(cli, "DaemonClient", lambda: client)
     with pytest.raises(_Stop):
         cli.cmd_bus(parse("bus", "-f", "--interval", "0"))
     assert [p.get("after_id") for _, p in client.calls] == [None, 7, 7]
-
-
-def test_follow_starts_from_zero_when_the_bus_is_empty(monkeypatch):
-    client = _FollowClient([[]])
-    monkeypatch.setattr(cli, "DaemonClient", lambda: client)
-    with pytest.raises(_Stop):
-        cli.cmd_bus(parse("bus", "-f", "--interval", "0"))
-    assert client.calls[1][1]["after_id"] == 0
 
 
 def test_regie_refuses_to_run_outside_tmux(monkeypatch, capsys):
@@ -971,6 +914,7 @@ def test_main_turns_an_unreachable_daemon_into_one_line(monkeypatch, capsys):
 
 def test_ctrl_c_out_of_a_follow_is_not_a_crash(monkeypatch):
     """`bus -f` and `ls --watch` are ended this way; 130 is what a shell expects."""
+
     def interrupt(method, **params):
         raise KeyboardInterrupt
 

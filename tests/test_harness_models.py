@@ -65,9 +65,7 @@ def test_the_base_class_refuses_by_default():
 
 
 def fake_output(monkeypatch, text: str) -> None:
-    monkeypatch.setattr(
-        subprocess, "check_output", lambda *a, **k: text
-    )
+    monkeypatch.setattr(subprocess, "check_output", lambda *a, **k: text)
 
 
 def fake_raise(monkeypatch, exc: Exception) -> None:
@@ -75,14 +73,6 @@ def fake_raise(monkeypatch, exc: Exception) -> None:
         raise exc
 
     monkeypatch.setattr(subprocess, "check_output", boom)
-
-
-def test_opencode_returns_one_model_per_line(monkeypatch):
-    fake_output(monkeypatch, "anthropic/claude-x\nopenai/gpt-y\n")
-    assert get_harness("opencode").discover_models() == [
-        "anthropic/claude-x",
-        "openai/gpt-y",
-    ]
 
 
 def test_opencode_ignores_blank_lines(monkeypatch):
@@ -137,9 +127,7 @@ def test_vibe_returns_both_spellings(monkeypatch, tmp_path):
 
 
 def test_vibe_does_not_repeat_a_name_used_as_its_own_alias(monkeypatch, tmp_path):
-    write_vibe_config(
-        monkeypatch, tmp_path, '[[models]]\nname = "solo"\nalias = "solo"\n'
-    )
+    write_vibe_config(monkeypatch, tmp_path, '[[models]]\nname = "solo"\nalias = "solo"\n')
     assert get_harness("vibe").discover_models() == ["solo"]
 
 
@@ -169,7 +157,5 @@ def test_vibe_with_no_models_table_cannot_be_asked(monkeypatch, tmp_path):
 
 def test_vibe_skips_an_entry_that_names_nothing(monkeypatch, tmp_path):
     """Shape drift degrades to "found nothing", never to a wrong name."""
-    write_vibe_config(
-        monkeypatch, tmp_path, '[[models]]\nprovider = "acme"\n'
-    )
+    write_vibe_config(monkeypatch, tmp_path, '[[models]]\nprovider = "acme"\n')
     assert get_harness("vibe").discover_models() == []

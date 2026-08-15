@@ -66,6 +66,13 @@ def test_as_shipped_it_parses_and_changes_nothing(load):
     plain = cfg.Config()
     for section in cfg._SECTIONS:
         assert getattr(got, section) == getattr(plain, section)
+    # Per-key: a mismatch names the offending setting, not just the section.
+    for section, klass in cfg._SECTIONS.items():
+        for f in fields(klass):
+            dotted = f"{section}.{f.name}"
+            if dotted in NO_DEFAULT:
+                continue
+            assert getattr(getattr(got, section), f.name) == default_of(f), dotted
 
 
 def test_every_setting_is_written_down(load):
@@ -75,8 +82,7 @@ def test_every_setting_is_written_down(load):
         dotted
         for section, klass in cfg._SECTIONS.items()
         for f in fields(klass)
-        if (dotted := f"{section}.{f.name}") not in NO_DEFAULT
-        and full.source(dotted) == "default"
+        if (dotted := f"{section}.{f.name}") not in NO_DEFAULT and full.source(dotted) == "default"
     ]
     assert not missing, f"absent from {EXAMPLE.name}: {', '.join(missing)}"
 
@@ -96,17 +102,6 @@ def test_the_two_unwritable_settings_stay_unwritten(load):
         assert getattr(getattr(full, section), name) is None, dotted
 
 
-def test_every_documented_default_is_the_real_default(load):
-    """The value shown next to each key must be the one the code uses."""
-    full = load(EXAMPLE.read_text())
-    for section, klass in cfg._SECTIONS.items():
-        for f in fields(klass):
-            dotted = f"{section}.{f.name}"
-            if dotted in NO_DEFAULT:
-                continue
-            assert getattr(getattr(full, section), f.name) == default_of(f), dotted
-
-
 def test_the_model_allowlist_ships_empty(load):
     """`[models]` is documented but grants nothing.
 
@@ -119,16 +114,3 @@ def test_the_model_allowlist_ships_empty(load):
     full = load(EXAMPLE.read_text())
     assert full.models == {}
     assert full.models_for("claude") == []
-
-
-def test_it_does_not_still_document_harness_declarations():
-    """The v1.4 removal has to reach the example, not just the loader.
-
-    `[harness.<name>]` tables were how a CLI was taught to Theater before
-    plugins replaced them. The loader now rejects one with a migration message,
-    so an example that still showed the old schema would be handing users a
-    config their daemon refuses to start on.
-    """
-    text = EXAMPLE.read_text()
-    assert "[harness." not in text
-    assert "\n[harness]\n" in text

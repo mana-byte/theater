@@ -180,9 +180,7 @@ class FakeTmux:
             window_name="w",
             current_command=command,
         )
-        self.visible_panes = [
-            p for p in self.visible_panes if p.pane_id != pane_id
-        ] + [pane]
+        self.visible_panes = [p for p in self.visible_panes if p.pane_id != pane_id] + [pane]
         return pane
 
     def remove_pane(self, pane_id):

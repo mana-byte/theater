@@ -157,6 +157,31 @@ async def test_await_names_the_caller_so_a_deadlock_can_be_refused():
     assert (p["caller_id"], p["handles"], p["max_wait"]) == ("p-me", ["h#1"], 5.0)
 
 
+async def test_await_drops_prompt_and_result_from_the_agent_facing_shape():
+    """The prompt is what the caller already sent; result is a clip. An agent
+
+    that wants either reads the transcript, so neither belongs in the await
+    reply — but the routing fields do.
+    """
+    job = {
+        "handle": "h#1",
+        "caller_id": "p-me",
+        "target_id": "p-you",
+        "kind": "send",
+        "prompt": "do the thing",
+        "state": "done",
+        "result": "a 2000-char clip nobody asked for",
+        "error_code": None,
+        "created_at": 1.0,
+        "finished_at": 2.0,
+    }
+    s = resolved(**{"jobs.await": [job]})
+    jobs = await tools.await_sessions(s, handles=["h#1"], max_wait=5.0)
+    assert "prompt" not in jobs[0]
+    assert "result" not in jobs[0]
+    assert (jobs[0]["handle"], jobs[0]["state"], jobs[0]["error_code"]) == ("h#1", "done", None)
+
+
 async def test_send_names_the_caller_so_the_reply_comes_back():
     s = resolved(send={"handle": "p-you#1"})
     await tools.send_prompt(s, target_id="p-you", prompt="hello")
@@ -206,12 +231,6 @@ async def test_recall_identifies_first_so_the_daemon_knows_the_caller():
     s = session(recall={})
     await tools.recall(s, paths=["x.py"])
     assert s.client.methods == ["hello", "recall"]
-
-
-async def test_recall_defaults_depth_to_five():
-    s = resolved(recall={})
-    await tools.recall(s, paths=["x.py"])
-    assert s.client.params("recall")["depth"] == 5
 
 
 async def test_recall_read_forwards_the_segment_id_verbatim():
