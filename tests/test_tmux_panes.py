@@ -7,7 +7,21 @@ silently.
 
 from __future__ import annotations
 
-from theater.tmux import panes
+import pytest
+
+from theater.tmux import client, panes
+
+
+@pytest.fixture(autouse=True)
+def _reset_version_cache():
+    client.reset_version_cache()
+    yield
+    client.reset_version_cache()
+
+
+def _set_version(monkeypatch, version: str | None):
+    """Pre-seed the version cache so break_pane sees the desired tmux version."""
+    client._VERSION_CACHE[0] = version
 
 
 async def _capture_argv(monkeypatch):
@@ -15,6 +29,10 @@ async def _capture_argv(monkeypatch):
 
     async def fake_run(*args: str, check: bool = True) -> str:
         captured.append(list(args))
+        # break-pane -P -F '#{window_id}' returns a window id; everything
+        # else that checks the return expects a pane id.
+        if args and args[0] == "break-pane" and "-P" in args:
+            return "@99"
         return "%99"
 
     monkeypatch.setattr(panes, "run", fake_run)
@@ -22,6 +40,7 @@ async def _capture_argv(monkeypatch):
 
 
 async def test_break_pane_basic(monkeypatch):
+    _set_version(monkeypatch, "3.4")
     captured = await _capture_argv(monkeypatch)
     await panes.break_pane("%5")
     argv = captured[0]
@@ -30,14 +49,97 @@ async def test_break_pane_basic(monkeypatch):
     assert "-s" in argv
     assert argv[argv.index("-s") + 1] == "%5"
     assert "-n" not in argv
+    assert "-P" not in argv
+    assert "-F" not in argv
+    assert len(captured) == 1
 
 
 async def test_break_pane_with_window_name(monkeypatch):
+    _set_version(monkeypatch, "3.4")
     captured = await _capture_argv(monkeypatch)
     await panes.break_pane("%5", target_window="vibe-parked")
     argv = captured[0]
     assert "-n" in argv
     assert argv[argv.index("-n") + 1] == "vibe-parked"
+    assert "-P" not in argv
+    assert "-F" not in argv
+    assert len(captured) == 1
+
+
+async def test_break_pane_37_without_window_name_passes_placeholder_n(monkeypatch):
+    """On tmux exactly 3.7, -n is always passed to avoid the segfault."""
+    _set_version(monkeypatch, "3.7")
+    captured = await _capture_argv(monkeypatch)
+    await panes.break_pane("%5")
+    argv = captured[0]
+    assert argv[0] == "break-pane"
+    assert "-d" in argv
+    assert "-s" in argv
+    assert argv[argv.index("-s") + 1] == "%5"
+    assert "-n" in argv
+    assert argv[argv.index("-n") + 1] == "theater"
+    assert "-P" in argv
+    assert "-F" in argv
+    assert argv[argv.index("-F") + 1] == "#{window_id}"
+    # No rename-window when no target name was requested.
+    assert len(captured) == 1
+
+
+async def test_break_pane_37_with_window_name_issues_rename(monkeypatch):
+    """On 3.7, -n is ignored, so the real name is set via rename-window."""
+    _set_version(monkeypatch, "3.7")
+    captured = await _capture_argv(monkeypatch)
+    await panes.break_pane("%5", target_window="vibe-parked")
+    assert len(captured) == 2
+
+    break_argv = captured[0]
+    assert break_argv[0] == "break-pane"
+    assert "-n" in break_argv
+    assert break_argv[break_argv.index("-n") + 1] == "vibe-parked"
+    assert "-P" in break_argv
+    assert "-F" in break_argv
+
+    rename_argv = captured[1]
+    assert rename_argv[0] == "rename-window"
+    assert rename_argv[rename_argv.index("-t") + 1] == "@99"
+    assert rename_argv[-1] == "vibe-parked"
+
+
+async def test_break_pane_37a_is_not_gated(monkeypatch):
+    """3.7a reverted the bug, so the 3.7 workaround must not fire."""
+    _set_version(monkeypatch, "3.7a")
+    captured = await _capture_argv(monkeypatch)
+    await panes.break_pane("%5")
+    argv = captured[0]
+    assert "-n" not in argv
+    assert "-P" not in argv
+    assert len(captured) == 1
+
+
+async def test_break_pane_37b_is_not_gated(monkeypatch):
+    _set_version(monkeypatch, "3.7b")
+    captured = await _capture_argv(monkeypatch)
+    await panes.break_pane("%5")
+    argv = captured[0]
+    assert "-n" not in argv
+    assert "-P" not in argv
+    assert len(captured) == 1
+
+
+async def test_break_pane_37_with_window_name_argv_matches_non_37_plus_rename(monkeypatch):
+    """The 3.7 break-pane argv should be the non-3.7 argv plus -P -F -n."""
+    _set_version(monkeypatch, "3.7")
+    captured = await _capture_argv(monkeypatch)
+    await panes.break_pane("%5", target_window="vibe-parked")
+    break_argv = captured[0]
+    # The core is still break-pane -d -s %5 -n vibe-parked, same as non-3.7,
+    # but with -P -F #{window_id} added to capture the new window id.
+    assert "break-pane" in break_argv
+    assert "-d" in break_argv
+    assert "-s" in break_argv
+    assert break_argv[break_argv.index("-s") + 1] == "%5"
+    assert "-n" in break_argv
+    assert break_argv[break_argv.index("-n") + 1] == "vibe-parked"
 
 
 async def test_join_pane(monkeypatch):

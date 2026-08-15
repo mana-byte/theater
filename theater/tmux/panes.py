@@ -27,7 +27,7 @@ in tests/test_tmux_panes.py. Behaviour must be verified by the user.
 
 from __future__ import annotations
 
-from theater.tmux.client import TmuxError, run
+from theater.tmux.client import TmuxError, run, tmux_version
 
 
 async def break_pane(pane_id: str, *, target_window: str | None = None) -> None:
@@ -37,10 +37,27 @@ async def break_pane(pane_id: str, *, target_window: str | None = None) -> None:
     after it; otherwise tmux chooses the name. Used to park an agent back into
     its own window when unstaging.
     """
-    args = ["break-pane", "-d", "-s", pane_id]
-    if target_window:
+    # tmux 3.7 segfaults break-pane when -n is absent and ignores -n when
+    # given (NULL-deref); 3.7a reverted it. On exactly 3.7, always pass -n
+    # (a placeholder when the caller gave none), capture the new window id
+    # with -P -F, and issue a follow-up rename-window when a real name was
+    # requested. Gated on the exact string "3.7" — 3.7a and 3.7b are fixed.
+    # See libtmux pane.py:2468-2472 for the upstream analysis.
+    is_37 = tmux_version() == "3.7"
+
+    args: list[str] = ["break-pane", "-d", "-s", pane_id]
+    if is_37:
+        args += ["-P", "-F", "#{window_id}", "-n", target_window or "theater"]
+    elif target_window:
         args += ["-n", target_window]
-    await run(*args)
+
+    result = await run(*args)
+
+    if is_37 and target_window:
+        # 3.7 ignores -n, so the placeholder or requested name did not take.
+        # result is the window id from -P -F; rename it to the real name.
+        window_id = result.strip()
+        await run("rename-window", "-t", window_id, target_window)
 
 
 async def join_pane(pane_id: str, *, target_window: str, horizontal: bool = True) -> None:
