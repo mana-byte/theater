@@ -129,7 +129,7 @@ maps to a `TheaterError` subclass, so a client can branch on `busy` versus
 `human_present` without parsing prose.
 
 The daemon exposes 16 methods (`theater/daemon/methods.py`); the MCP server
-exposes 7 tools to agents (`theater/mcp/server.py`), namespaced `theater_*`.
+exposes 12 tools to agents (`theater/mcp/server.py`), namespaced `theater_*`.
 The two sets are not the same and should not be: `shutdown`, `adopt`, and
 `bus.tail` are operator verbs, not agent verbs.
 

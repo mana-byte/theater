@@ -267,12 +267,14 @@ async def put_child_back_in_the_wound(
 ) -> dict:
     """Kill a child agent that the caller spawned.
 
-    The permission check lives in the daemon, not here: ``participant.kill``
-    refuses unless the target's ``parent_id`` equals ``caller_id``. This
-    body is a thin pass-through that adds ``caller_id``, exactly as
-    ``send_prompt`` does — so the gate covers every caller that identifies
-    itself, including ``theater kill`` from an agent's shell tool, which a
-    body-only check would have missed.
+    The permission check lives in the daemon: ``participant.kill`` refuses
+    unless the target's ``parent_id`` equals ``caller_id`` — but only for
+    callers that send a ``caller_id``, which this tool always does. The CLI
+    and the régie deliberately send none and are treated as the operator,
+    so an agent that shells out to ``theater kill`` bypasses the check
+    entirely. This body is a thin pass-through that adds ``caller_id``,
+    exactly as ``send_prompt`` does — so the gate covers this MCP path,
+    and nothing else.
 
     **Side effect: destroying a worktree child erases uncommitted work.**
     If the child was spawned with ``worktree=True``, killing it removes
