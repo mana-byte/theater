@@ -820,3 +820,72 @@ async def test_kill_addressed_by_name_puts_id_in_explicit_kills(client, fake_tmu
     assert record["id"] not in daemon._explicit_kills
     dead = await client.call("participants.get", id=record["id"])
     assert dead["status"] == "dead"
+    assert dead["name"] is None
+
+
+# ---- live-only names contract ---------------------------------------------
+
+_FIXED_NAME = "Brighella"
+
+
+async def test_former_name_freed_and_successor_can_claim_it(client, fake_tmux):
+    """After death the former name neither resolves nor blocks a successor."""
+    first = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    await client.call("participant.rename", id=first["id"], name=_FIXED_NAME)
+    await client.call("participant.kill", id=first["id"])
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call("participants.get", id=_FIXED_NAME)
+    assert exc.value.code == "not_found"
+
+    successor = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    renamed = await client.call("participant.rename", id=successor["id"], name=_FIXED_NAME)
+    assert renamed["name"] == _FIXED_NAME
+
+    fetched = await client.call("participants.get", id=_FIXED_NAME)
+    assert fetched["id"] == successor["id"]
+    assert fetched["name"] == _FIXED_NAME
+    assert fetched["status"] != "dead"
+
+
+async def test_status_dead_frees_name_and_emits_canonical_death_event(client, fake_tmux):
+    """participant.status DEAD frees the name and emits participant.dead, not participant.status."""
+    record = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    await client.call("participant.rename", id=record["id"], name=_FIXED_NAME)
+    cursor = (await client.call("bus.tail", limit=1))[0]["id"]
+
+    updated = await client.call("participant.status", id=record["id"], status="dead")
+    assert updated["status"] == "dead"
+    assert updated["name"] is None
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call("participants.get", id=_FIXED_NAME)
+    assert exc.value.code == "not_found"
+
+    events = await client.call("bus.tail", after_id=cursor)
+    kinds = [e["kind"] for e in events if e.get("to_id") == record["id"]]
+    assert "participant.dead" in kinds
+    assert "participant.status" not in kinds
+
+
+async def test_list_include_dead_returns_dead_rows_with_name_none(client, fake_tmux):
+    """participants.list(include_dead=True) returns dead rows with name=None."""
+    record = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    await client.call("participant.kill", id=record["id"])
+
+    rows = await client.call("participants.list", include_dead=True)
+    dead = [r for r in rows if r["id"] == record["id"]]
+    assert len(dead) == 1
+    assert dead[0]["status"] == "dead"
+    assert dead[0]["name"] is None
+
+
+async def test_read_transcript_by_dead_name_fails_not_found(client, fake_tmux):
+    """read_transcript with a dead name fails at resolution before source access."""
+    record = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    await client.call("participant.rename", id=record["id"], name=_FIXED_NAME)
+    await client.call("participant.kill", id=record["id"])
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call("read_transcript", id=_FIXED_NAME, last_n=5)
+    assert exc.value.code == "not_found"
