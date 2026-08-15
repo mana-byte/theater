@@ -30,10 +30,8 @@ from textual.content import Content
 from theater.formatting import short_id, tilde
 from theater.harness import harness_icon
 
-#: A stable identity for a row, used by the panel to reconcile widgets
-#: across refreshes rather than rebuilding the whole tree each tick.
-#: The first element namespaces the row kind so a pane id and a
-#: participant id can never collide.
+#: A stable row identity for widget reconciliation. The first element
+#: namespaces the row kind so a pane id and a participant id never collide.
 Key: TypeAlias = tuple[str, str]
 
 #: Braille spinner frames, matching vibe exactly. U+28xx is unambiguously
@@ -105,9 +103,8 @@ def _walk(
         else:
             branch = _LAST_BRANCH if last else _BRANCH
             child_prefix = prefix + (_GAP if last else _RAIL)
-        # The continuation prefix for row 3 is the same rail/gap that
-        # children at this depth would inherit — it is already computed
-        # as child_prefix, including the "" case for roots.
+        # cont_prefix for row 3 is the same rail/gap children at this depth
+        # inherit — already computed as child_prefix, including "" for roots.
         cont_prefix = child_prefix
         key: Key = ("p", node.get("id", ""))
         rows.append((prefix + branch, node, key, cont_prefix))
@@ -284,7 +281,6 @@ def render_tree(
     """
     lines = [_labelled(row, cwd_segments=cwd_segments) for row in _walk(tree)]
     if unmanaged:
-        # Separator line
         lines.append((
             Content.assemble(("── unmanaged ──", "$text dim italic")),
             {},

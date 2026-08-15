@@ -48,14 +48,12 @@ def entries(
     rows: list[tuple[str, str, str]] = []
     for row in _order(describe() if harnesses is None else harnesses, favourite):
         if row.get("error"):
-            # A plugin that would not load. `theater harnesses` says so with
-            # the parse error; an entry here could only offer a spawn that
-            # cannot happen.
+            # A plugin that would not load; an entry here could only offer a
+            # spawn that cannot happen.
             continue
         if not row.get("installed", True):
-            # Listed anyway. Hiding the entry looks like Theater cannot drive
-            # this harness at all, when the truth is narrower and fixable:
-            # the binary is not on PATH on this machine.
+            # Listed, not hidden: hiding it looks like Theater cannot drive
+            # this harness at all, when the truth is the binary is not on PATH.
             help_text = f"{row['binary']} is not on PATH here — this will fail"
         else:
             help_text = f"Start {row['binary']} here, unparented, with no prompt"
@@ -67,13 +65,13 @@ class SpawnCommands(Provider):
     """Offer `Spawn <harness>` for each harness Theater knows how to drive."""
 
     def _hit_command(self, name: str):
-        # partial, not a closure over the loop variable: every hit would
-        # otherwise spawn whichever harness the loop happened to end on.
+        # partial, not a closure over the loop variable: a closure would
+        # spawn whichever harness the loop ended on.
         return partial(self.app.spawn_harness, name)  # type: ignore[attr-defined]
 
     def _favourite(self) -> str | None:
-        # Defensive: Provider is constructed by Textual against whatever app is
-        # running, and the palette must not be the thing that breaks a screen.
+        # Defensive: Textual builds providers against whatever app is running;
+        # the palette must not break a screen.
         settings = getattr(self.app, "settings", None)
         if settings is None:
             return None
@@ -109,9 +107,7 @@ class ViewCommands(Provider):
     """
 
     def _toggle(self):
-        # Defensive for the same reason as SpawnCommands._favourite: Textual
-        # builds providers against whatever app is running, and that is not
-        # always a RegieApp.
+        # Same reason as SpawnCommands._favourite: the app is not always a RegieApp.
         return getattr(self.app, "action_toggle_bus", None)
 
     def _entry(self) -> tuple[str, str]:

@@ -296,29 +296,22 @@ class TreePanel(VerticalScroll):
 
         new_key_set = {key for _, _, key, _, _ in lines}
 
-        # Remove the empty placeholder if it was there.
         if self._EMPTY_KEY in self._key_widgets:
             self._remove_widget(self._key_widgets.pop(self._EMPTY_KEY))
 
-        # Remove gone widgets.
         for key in list(self._key_widgets):
             if key not in new_key_set:
                 self._remove_widget(self._key_widgets.pop(key))
 
-        # Update existing widgets and mount new ones, tracking the desired
-        # order as we go.
-        # TreePanel.app is RegieApp at runtime but Textual's Widget.app is
-        # typed as App[Any]; the ignore matches the same pattern in palette.py.
+        # TreePanel.app is RegieApp at runtime; Widget.app is typed App[Any].
         cwd_segments = self.app.settings.regie.cwd_segments  # type: ignore[attr-defined]
         ordered_widgets: list[Widget] = []
         for i, (label, node, key, prefix, cont_prefix) in enumerate(lines):
             widget = self._reconcile_row(label, node, key, prefix, cont_prefix, cwd_segments, i)
             ordered_widgets.append(widget)
 
-        # Ensure final child order matches the row order. move_child is
-        # synchronous and accepts widget references, so a removed-but-
-        # not-yet-pumped widget still in the list cannot shift the
-        # arithmetic — there is no arithmetic.
+        # move_child is synchronous and takes widget references, so a
+        # pending async removal cannot shift the indexing — there is none.
         for i, widget in enumerate(ordered_widgets):
             if i == 0:
                 continue
@@ -503,10 +496,8 @@ class RegieApp(App):
     cursor: reactive[int] = reactive(0)
     tree_lines: reactive[list[tuple[Content, dict, Key, str, str]]] = reactive([])
     bus_cursor: int = 0
-    #: Whether the bus panel is showing. Seeded from `regie.bus_visible` in
-    #: `__init__` and toggled from the palette rather than a key: it is a
-    #: decision made once a session, not per keystroke. Hiding it also pauses
-    #: the poll — see `_refresh_bus`.
+    #: Whether the bus panel is showing. Toggled from the palette, not a key:
+    #: a once-a-session decision. Hiding it pauses the poll (see _refresh_bus).
     bus_visible: reactive[bool] = reactive(False)
     #: The régie's own pane id (from $TMUX_PANE), discovered at mount.
     my_pane: str | None = None
@@ -516,8 +507,8 @@ class RegieApp(App):
     staged_pane: reactive[str | None] = reactive(None)
     #: The session the régie is running in. tmux options are scoped to it.
     my_session: str | None = None
-    #: The same session by name. The spawner matches against `list-sessions`
-    #: output, which is names, so the `$id` form is no use to it.
+    #: The session by name. The spawner matches list-sessions output, which
+    #: is names, so the `$id` form is no use to it.
     my_session_name: str | None = None
     #: The session-local value of tmux's `mouse` option before we changed it,
     #: or None if the session had no override of its own.
@@ -538,42 +529,35 @@ class RegieApp(App):
         super().__init__()
         self._client: DaemonClient | None = None
         #: The whole config, not just [regie]: the palette needs
-        #: theater.favourite too. Injectable so tests can drive the app
-        #: without writing a config file.
+        #: theater.favourite. Injectable for tests.
         self.settings = settings or Config()
-        #: What the daemon says it can spawn, filled at mount. None until then,
-        #: and after a failed call — the palette reads that as "ask the local
-        #: registry instead", which is right more often than an empty list.
+        #: What the daemon says it can spawn, or None (before mount or on
+        #: failure). The palette reads None as "ask the local registry".
         self.harnesses: list[dict] | None = None
         self.bus_visible = self.settings.regie.bus_visible
 
     def compose(self) -> ComposeResult:
-        # No Header: it spent a whole row restating the app's own class name to
-        # someone who just typed the command that started it. The footer already
-        # carries the keybindings, which is the only thing worth the space.
+        # No Header: it restates the app's class name to someone who just
+        # typed the command that started it. The footer has the keybindings.
         with Vertical(id="sidebar"):
             yield TreePanel(id="tree-panel")
             yield Footer()
             bus = RichLog(id="bus-panel", max_lines=200, wrap=False, markup=True)
-            # The initial state is applied here rather than left to
-            # `watch_bus_visible`: a reactive assigned its own default fires
-            # no watcher, so a config of `false` against a default of `false`
-            # would mount the panel visible and never correct it.
+            # Applied here, not in watch_bus_visible: a reactive assigned
+            # its own default fires no watcher, so false-vs-false would
+            # mount the panel visible and never correct it.
             bus.set_class(not self.bus_visible, "-hidden")
             yield bus
 
     async def on_mount(self) -> None:
         self._client = DaemonClient()
         await self._client.connect()
-        # The sidebar width is applied imperatively rather than in CSS because
-        # App.CSS is a class attribute parsed once and cannot read the config.
-        # The same value is used at the resize_pane call in action_stage; the
-        # two must agree or Textual and tmux disagree about where the sidebar
-        # ends.
+        # Width is imperative, not CSS: App.CSS is parsed once and cannot
+        # read config. The same value is used in action_stage; the two must
+        # agree or Textual and tmux disagree about the sidebar edge.
         self.query_one("#sidebar").styles.width = self.settings.regie.sidebar_width
-        # Discover our own pane and window id. The régie is itself a tmux
-        # pane — staging means joining another pane into this window, so we
-        # need to know which window we are in.
+        # Discover our own pane and window: staging joins another pane
+        # into this window, so we need to know which one we are in.
         my_pane = tmux.current_pane()
         if my_pane:
             self.my_pane = my_pane
@@ -642,9 +626,8 @@ class RegieApp(App):
         self.theme = name
 
     async def on_unmount(self) -> None:
-        # Best effort only. Exits that go through `q` or ctrl-c have already
-        # torn down in action_quit, where awaiting still works; this catches
-        # the paths that never reach it.
+        # Best effort: q / ctrl-c already tore down in action_quit where
+        # awaiting works; this catches paths that never reach it.
         await self._teardown()
         if self._client:
             await self._client.aclose()
@@ -674,8 +657,8 @@ class RegieApp(App):
         self._mouse_set = False
         try:
             if self._mouse_prev is None:
-                # The session had no override before us, so remove ours rather
-                # than pinning it to whatever the global value happened to be.
+                # No prior override: remove ours rather than pinning to the
+                # global value.
                 await tmux.unset_option("mouse", target=self.my_session)
             else:
                 await tmux.set_option(
@@ -709,8 +692,8 @@ class RegieApp(App):
         self._status_set = False
         try:
             if self._status_prev is None:
-                # The session had no override before us, so remove ours rather
-                # than pinning it to whatever the global value happened to be.
+                # No prior override: remove ours rather than pinning to the
+                # global value.
                 await tmux.unset_option("status", target=self.my_session)
             else:
                 await tmux.set_option(
@@ -767,7 +750,6 @@ class RegieApp(App):
         self.tree_lines = render_tree(
             tree, unmanaged, cwd_segments=self.settings.regie.cwd_segments
         )
-        # Clamp cursor
         if self.cursor >= len(self.tree_lines):
             self.cursor = max(0, len(self.tree_lines) - 1)
         self._render_tree()
@@ -776,13 +758,10 @@ class RegieApp(App):
         if not self._client:
             return
         if not self.bus_visible:
-            # Do not consume events nobody can see. A display:none RichLog
-            # accepts writes and keeps none of them, so polling on would
-            # advance the cursor past lines that were never rendered and can
-            # never be asked for again. Leaving the cursor where it is means
-            # showing the panel resumes from the last line actually drawn,
-            # and if the daemon's buffer wrapped while it was hidden the gap
-            # check below says so instead of quietly skipping.
+            # A display:none RichLog accepts writes and keeps none of them.
+            # Polling on would advance the cursor past never-rendered lines.
+            # Leaving it means resuming from the last drawn line, and the gap
+            # check below says so if the daemon's buffer wrapped while hidden.
             return
         try:
             rows = await self._client.call(
@@ -794,19 +773,18 @@ class RegieApp(App):
             return
         if not rows:
             return
-        # bus.tail returns newest N after cursor (DESC), so we need to
-        # reverse for display if there's a gap
+        # bus.tail returns newest N after cursor (DESC); reverse for display
+        # if there's a gap.
         if rows[0]["id"] > self.bus_cursor + 1 and self.bus_cursor > 0:
             missed = rows[0]["id"] - self.bus_cursor - 1
             log = self.query_one("#bus-panel", RichLog)
             log.write(Text(f"... {missed} events dropped", style="dim italic"))
-        # Sort ascending for display
         rows_sorted = sorted(rows, key=lambda r: r["id"])
         log = self.query_one("#bus-panel", RichLog)
-        # Resolved per batch, not cached: the built-in palette can switch the
-        # theme mid-session, and lines written after that should follow it.
-        # Already-written lines keep their old colour, which is the price of a
-        # RichLog and cheaper than re-rendering the panel on every tick.
+        # Resolved per batch: the palette can switch themes mid-session, and
+        # lines written after that should follow it. Already-written lines
+        # keep their old colour — the price of a RichLog, cheaper than
+        # re-rendering on every tick.
         variables = self.theme_variables
         for row in rows_sorted:
             log.write(format_bus_line(row, variables=variables))
@@ -862,8 +840,7 @@ class RegieApp(App):
         try:
             panel = self.query_one("#bus-panel", RichLog)
         except Exception:
-            # Reactives can be assigned before mount and during teardown; a
-            # missing widget in those windows is expected, as in `_panel`.
+            # Missing widget is expected before mount / during teardown (cf. _panel).
             return
         panel.set_class(not visible, "-hidden")
 
@@ -901,7 +878,6 @@ class RegieApp(App):
             self.notify("régie window not discovered — cannot stage", severity="error")
             return
 
-        # Already staged? Unstage first.
         if self.staged_pane and self.staged_pane != pane:
             try:
                 await panes.break_pane(self.staged_pane)
@@ -917,15 +893,12 @@ class RegieApp(App):
                 self.notify(f"unstage failed: {exc}", severity="error")
             return
 
-        # Join the agent's pane into our window.
         try:
             await panes.join_pane(pane, target_window=self.my_window)
             self.staged_pane = pane
-            # Resize the *régie* pane down to sidebar width; tmux
-            # automatically gives the rest to the staged pane. This is
-            # more reliable than resizing the staged pane to a calculated
-            # width, because it does not depend on knowing the window's
-            # actual column count.
+            # Resize the régie pane, not the staged one: tmux gives the rest
+            # to the staged pane, and this avoids knowing the window's
+            # column count.
             if self.my_pane:
                 try:
                     await panes.resize_pane(self.my_pane, width=self.settings.regie.sidebar_width)
@@ -968,21 +941,19 @@ class RegieApp(App):
             await self._client.call(
                 "spawn",
                 harness=harness,
-                # No prompt and no parent: the palette starts a CLI, it does
-                # not delegate work. `manual` adds no approval flags, so what
-                # comes up is the harness's own default behaviour.
+                # No prompt, no parent: the palette starts a CLI, not a
+                # delegation. `manual` adds no approval flags.
                 prompt="",
                 approval="manual",
                 cwd=str(Path.cwd()),
-                # By name, and only ours: a new window belongs in the session
-                # the user is looking at, not in the fallback `theater` one.
+                # By name, and only ours: a new window belongs in the
+                # user's session, not the fallback `theater` one.
                 tmux_session=self.my_session_name,
             )
         except Exception as exc:
             self.notify(f"spawn failed: {exc}", severity="error")
             return
-        # The new agent announces itself by appearing in the tree on the next
-        # refresh, which is why nothing is said about it here.
+        # The new agent appears in the tree on the next refresh.
         await self._refresh_tree()
 
     async def action_focus_stage(self) -> None:
@@ -1002,9 +973,6 @@ class RegieApp(App):
             self.notify(f"focus failed: {exc}", severity="error")
 
     # ---- tree rendering with cursor ------------------------------------
-
-    # (highlighting is now done via Textual CSS classes in apply_cursor,
-    #  not by rewriting Rich Text styles)
 
 
 def run_regie(settings: Config | None = None) -> None:
