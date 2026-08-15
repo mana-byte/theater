@@ -7,10 +7,20 @@ to decide whether to spend a ``recall_read`` explaining it.
 
 The design has three budgets. SQL does everything that can be done in
 SQL: the join, the privacy wall, the gap detection. ``blob_sha`` does
-the hashing without forking git. Exactly three subprocess calls per
-query — ``rev-parse``, ``status``, ``diff`` — cover the live-git
-questions that must not be reimplemented. See ``docs/v2_recall.md``
-Piece 3 for the reasoning.
+the hashing without forking git. Exactly two subprocess calls per
+query — ``rev-parse`` and ``status`` — cover the live-git questions
+that must not be reimplemented. See ``docs/v2_recall.md`` Piece 3.
+
+The doc's third call, ``git diff --name-only <oldest_head>..HEAD`` for
+a committed-change set, is not implemented and cannot be: ``touch``
+records blob hashes, and a blob hash is not commit-ish, so the diff
+exits on its usage message. Nothing is lost. The question that set was
+meant to answer — has this file moved since the last job left it — is
+answered for free by comparing ``current`` against the newest point's
+``sha_after``, which catches committed and uncommitted changes alike
+at the cost of zero forks. Attributing a committed change to its
+commit would need a ``head_commit`` column on ``touch``; that is a
+schema change, not a query change.
 """
 
 from __future__ import annotations
@@ -149,33 +159,6 @@ def _dirty_set(cwd: str) -> set[str]:
     return paths
 
 
-def _committed_change_set(cwd: str, oldest_sha: str) -> set[str]:
-    """``git diff --name-only <oldest_sha>..HEAD`` — one fork, committed changes.
-
-    ``oldest_sha`` is the earliest ``sha_before`` or ``sha_after`` across
-    all paths in the query, so this captures every committed change that
-    could have broken the hash chain for any of them. Without it, a
-    ``git commit`` between two jobs would look like an unattributed gap
-    when it is really just a commit the daemon never observed as a job.
-    """
-    if not oldest_sha:
-        return set()
-    try:
-        result = subprocess.run(
-            ["git", "diff", "--name-only", f"{oldest_sha}..HEAD"],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return set()
-    if result.returncode != 0:
-        return set()
-    return {line for line in result.stdout.splitlines() if line}
-
-
 def _build_timeline(
     store: Store,
     *,
@@ -183,7 +166,6 @@ def _build_timeline(
     git_root: str,
     depth: int,
     dirty_set: set[str],
-    committed_changes: set[str],
 ) -> dict[str, dict]:
     """Query the touch table and build per-path timelines.
 
@@ -228,7 +210,13 @@ def _build_timeline(
                 )
             )
             .where(touch.c.path == path)
-            .where(participants.c.cwd.like(f"{git_root}%"))
+            # startswith(autoescape=True) rather than like(f"{root}%"):
+            # LIKE reads `_` and `%` as wildcards, and both are legal in
+            # a directory name. A root of /Users/x/my_repo would match
+            # /Users/x/myXrepo and hand that repo's rows to this caller.
+            # A privacy wall that widens on a common punctuation mark is
+            # not a wall.
+            .where(participants.c.cwd.startswith(git_root, autoescape=True))
             .order_by(jobs.c.finished_at.desc())
         )
         rows = store.conn.execute(stmt).fetchall()
@@ -301,12 +289,15 @@ def _build_timeline(
             _seen_prev = True
 
         # Current is the file's blob sha right now — not a fork, just
-        # bytes through blob_sha. Dirty means the working tree differs
-        # from HEAD: the union of the dirty set and the committed-change
-        # set, intersected with the paths we were asked about.
+        # bytes through blob_sha. Dirty means only what git status means:
+        # the working tree differs from HEAD. It is deliberately not
+        # "differs from where the last job left it" — that is `current`
+        # against the newest point's sha_after, which the caller can read
+        # off the timeline without us collapsing two different facts into
+        # one flag.
         abs_path = Path(git_root) / path
         current = blob_sha(abs_path)
-        dirty = path in dirty_set or path in committed_changes
+        dirty = path in dirty_set
 
         result[path] = {
             "current": current,
@@ -372,11 +363,12 @@ def recall(
     empty timeline — not an error and not a missing key — because the
     caller asked about it and an answer about it is better than silence.
 
-    Three subprocess calls per query, regardless of how many paths were
+    Two subprocess calls per query, regardless of how many paths were
     asked for: one ``rev-parse`` to find the root, one ``status`` for
-    the dirty set, one ``diff`` for the committed-change set. The naive
-    shape — one fork per path — was measured at 985 ms across 43 files
-    and is forbidden. See ``docs/v2_recall.md`` §"The git budget".
+    the dirty set. The naive shape — one fork per path — was measured
+    at 985 ms across 43 files and is forbidden. See
+    ``docs/v2_recall.md`` §"The git budget", and the module docstring
+    for why the doc's third call is absent.
 
     ``caller_cwd`` is where the caller's git root is found. It defaults
     to the process cwd, which is correct for the MCP tool (an agent's
@@ -388,23 +380,17 @@ def recall(
     cwd = caller_cwd or str(Path.cwd())
     root = _git_root(cwd)
     if root is None:
-        # Not a git repo: no dirty set, no diff, no root to normalise
-        # against. We can still answer "who touched this" if the touch
-        # table has rows, but we cannot filter by repo or compute
-        # current/dirty. Degraded but not broken.
+        # Not a git repo: no dirty set, no root to normalise against. We
+        # can still answer "who touched this" if the touch table has
+        # rows, but we cannot filter by repo or compute current/dirty.
+        # Degraded but not broken.
         root = cwd
 
     repo_paths = _normalise_paths(paths, root)
 
-    # Three forks, total. The dirty set and the committed-change set are
-    # per-repo, not per-path — that is the whole point of the budget.
+    # Two forks, total — `_git_root` above and this one. The dirty set is
+    # per-repo, not per-path, which is the whole point of the budget.
     dirty = _dirty_set(cwd)
-
-    # The oldest sha across all query paths: the earliest sha_before or
-    # sha_after. This is the starting point for the committed-change diff,
-    # so one diff captures everything that could have broken any chain.
-    oldest_sha = _oldest_sha(store, repo_paths, root)
-    committed = _committed_change_set(cwd, oldest_sha)
 
     return _build_timeline(
         store,
@@ -412,48 +398,4 @@ def recall(
         git_root=root,
         depth=depth,
         dirty_set=dirty,
-        committed_changes=committed,
     )
-
-
-def _oldest_sha(store: Store, repo_paths: list[str], git_root: str) -> str:
-    """The earliest sha across all query paths, for the committed-change diff.
-
-    A single ``git diff`` from this sha to HEAD covers every committed
-    change that could have broken any path's hash chain. Without it, a
-    commit between two jobs would look like an unattributed gap when it
-    is really just a commit the daemon never observed as a job. The
-    sha is the ``sha_before`` of the oldest touch row — the content
-    that existed before any job touched the file — so the diff reaches
-    back to the beginning of the observed chain.
-
-    Returns an empty string if no shas exist. The diff call is skipped
-    in that case, which is correct: there is nothing to diff against,
-    and a path with no touch rows has no chain to break.
-    """
-    oldest: str | None = None
-    for path in repo_paths:
-        # The oldest row for this path, ordered by finished_at ascending.
-        # sha_before is what the file looked like before the first job
-        # touched it — that is the starting point for the diff.
-        stmt = (
-            select(touch.c.sha_before, touch.c.sha_after)
-            .select_from(
-                touch.join(jobs, touch.c.job_handle == jobs.c.handle).join(
-                    participants, jobs.c.target_id == participants.c.id
-                )
-            )
-            .where(touch.c.path == path)
-            .where(participants.c.cwd.like(f"{git_root}%"))
-            .order_by(jobs.c.finished_at.asc())
-            .limit(1)
-        )
-        row = store.conn.execute(stmt).first()
-        if row is None:
-            continue
-        candidate = row.sha_before or row.sha_after
-        # Keep the one that sorts first: blob shas are fixed-length
-        # hex, so lexicographic comparison is deterministic.
-        if candidate is not None and (oldest is None or candidate < oldest):
-            oldest = candidate
-    return oldest or ""

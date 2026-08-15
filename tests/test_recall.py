@@ -128,7 +128,9 @@ def test_fork_count_does_not_scale_with_paths(store, tmp_path):
     the caller asks about 1 path or 20. If a refactor reintroduces the
     per-path fork, this test fails.
 
-    The count is 3: one ``rev-parse``, one ``status``, one ``diff``.
+    The count is 2: one ``rev-parse``, one ``status``. The doc's third
+    call, a ``git diff`` for committed changes, is absent on purpose —
+    see the module docstring in ``theater/daemon/recall.py``.
     """
     root = _setup_repo(tmp_path)
 
@@ -179,9 +181,8 @@ def test_fork_count_does_not_scale_with_paths(store, tmp_path):
         f"fork count scaled from {one_path_count} to {twenty_path_count} "
         f"when going from 1 to 20 paths — the per-path fork is back"
     )
-    assert one_path_count == 3, (
-        f"expected exactly 3 forks (rev-parse, status, diff), "
-        f"got {one_path_count}"
+    assert one_path_count == 2, (
+        f"expected exactly 2 forks (rev-parse, status), got {one_path_count}"
     )
 
 
@@ -432,6 +433,39 @@ def test_job_with_null_cwd_is_excluded(store, tmp_path):
     timeline = result["x.py"]["timeline"]
     assert len(timeline) == 1
     assert timeline[0]["handle"] == "h-real"
+
+
+def test_underscore_in_root_is_not_a_sql_wildcard(store, tmp_path):
+    """An underscore is legal in a directory name and a wildcard in LIKE.
+
+    The wall was first written as ``cwd.like(f"{root}%")``, which reads
+    ``_`` as "any single character": a caller in ``my_repo`` would be
+    handed the touch rows of a sibling ``myXrepo``. Nobody would name a
+    directory to exploit that, but underscores in repository names are
+    ordinary, and a wall that widens on ordinary punctuation is not a
+    wall. ``startswith(..., autoescape=True)`` escapes the metacharacters.
+    """
+    mine = tmp_path / "my_repo"
+    mine.mkdir()
+    root = _setup_repo(mine)
+
+    # Never created on disk — it only has to exist as a cwd string in
+    # the participants table for the wall to have something to leak.
+    sibling = str((tmp_path / "myXrepo").resolve())
+    p = _participant(store, pid="p-sibling", cwd=sibling)
+    _job(store, handle="h-sibling", target_id=p.id)
+    _touch(
+        store,
+        job_handle="h-sibling",
+        path="secret.py",
+        sha_before="aaa",
+        sha_after="bbb",
+    )
+
+    result = recall(store, paths=["secret.py"], caller_cwd=root)
+    assert result["secret.py"]["timeline"] == [], (
+        "a sibling repo's touch rows came back through the privacy wall"
+    )
 
 
 # ---- resume is a capability ------------------------------------------------
