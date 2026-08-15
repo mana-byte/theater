@@ -80,35 +80,31 @@ class Daemon:
         config: Config | None = None,
     ):
         paths.ensure_home()
-        #: Held from construction to aclose(). Being the daemon is this lock.
-        #:
-        #: Taken here rather than in start() because constructing a Daemon is
-        #: not a read-only act: it opens the shared SQLite file and runs
-        #: Alembic migrations against it. Acquiring only before the bind left
-        #: a window where two daemons both migrated the same database and only
-        #: then discovered which of them was allowed to exist. The lock has to
-        #: come before the first touch of shared state, not before the socket.
+        #: Held from construction to aclose(). Taken in __init__, not start(),
+        #: because constructing a Daemon opens the shared SQLite file and runs
+        #: migrations. The lock must come before the first touch of shared state,
+        #: not before the socket — otherwise two daemons both migrate the same DB
+        #: and only then discover which is allowed to exist.
         self._lock = DaemonLock()
         self._lock.acquire()
         try:
-            #: Read once, here. There is no reload: see config.py for why, and
-            #: `theater restart` for the remedy. Held on the daemon so request
-            #: handlers can reach the settings without re-reading the file,
-            #: which would let two requests in one process see different values.
+            #: Read once, never reloaded. Held on the daemon so request
+            #: handlers reach the settings without re-reading the file,
+            #: which would let two requests in one process see different
+            #: values.
             self.config = config if config is not None else load_config()
-            # Build the harness registry from the shipped and local plugin
-            # directories before anything reads it. Raises ConfigError on
-            # anything that cannot be honoured, which is deliberately fatal:
-            # the daemon is the process that refuses spawns, so it must not
-            # come up holding a set the user did not ask for.
+            # Build the harness registry before anything reads it. Raises
+            # ConfigError on anything that cannot be honoured, which is
+            # fatal: the daemon refuses spawns, so it must not come up
+            # holding a set the user did not ask for.
             installed = harness_registry.install(self.config)
             logger.info("harnesses: %s", ", ".join(installed) or "none")
             self.store = store or Store(paths.db_path())
             self.registry = Registry(self.store)
             self.spawner = Spawner(self.registry)
             self.jobs = JobManager(self.store)
-            #: `harnesses={}` disables observation entirely, which is what
-            #: tests that only exercise the socket want: the real harnesses
+            #: `harnesses={}` disables observation entirely — tests that
+            #: only exercise the socket use it, since the real harnesses
             #: read the user's own ~/.claude and ~/.vibe.
             observer_cfg = self.config.observer
             self.observer = Observer(
@@ -125,22 +121,20 @@ class Daemon:
             )
             self._server: asyncio.Server | None = None
             self._reaper: asyncio.Task | None = None
-            #: (device, inode) of the socket we bound, so shutdown can tell
-            #: our own socket from one a successor has since put at the path.
+            #: (device, inode) of the bound socket, so shutdown can tell
+            #: ours from a successor's at the same path.
             self._sock_id: tuple[int, int] | None = None
             self._stopping = asyncio.Event()
-            #: One task per open connection. Tracked so shutdown can end them;
-            #: see aclose().
+            #: One task per open connection, so shutdown can end them.
             self._conns: set[asyncio.Task] = set()
-            #: Monotonic counter for send-job handle uniqueness. Initialized
-            #: from the database on start() so a restart does not reuse
-            #: handle numbers that already exist in SQLite.
+            #: Monotonic counter for send-job handle uniqueness.
+            #: Initialized from the database on start() so a restart does
+            #: not reuse handle numbers that already exist in SQLite.
             self._send_seq = 0
         except BaseException:
-            # Construction failing leaves the caller no object to close, so
-            # nothing else would ever drop the fd. Releasing here is what lets
-            # the next attempt in this process get the lock instead of
-            # deadlocking against a Daemon that was never built.
+            # Construction failing leaves no object to close, so nothing
+            # would drop the fd. Releasing here lets the next attempt in
+            # this process get the lock instead of deadlocking.
             self._lock.release()
             raise
 
@@ -170,10 +164,9 @@ class Daemon:
         """Bind the socket. Raises here, in the caller's face, if it cannot."""
         sock = paths.socket_path()
         _check_socket_path(sock)
-        # The lock is already ours — __init__ took it, before opening the
-        # database. Re-acquiring here would not be a no-op: flock is per open
-        # file description, so a second acquire() opens a second fd and the
-        # daemon would deadlock against itself.
+        # The lock is already ours — __init__ took it. Re-acquiring would
+        # deadlock: flock is per open file description, so a second
+        # acquire() opens a second fd against itself.
         try:
             self._clear_stale_socket(sock)
             self._server = await asyncio.start_unix_server(
@@ -214,11 +207,9 @@ class Daemon:
         for p in self.registry.list():
             if p.tmux_pane and p.tmux_pane not in alive_panes and p.status is not Status.DEAD:
                 logger.info("reconcile: %s lost its pane %s", p.id, p.tmux_pane)
-                # Same reasoning as the reaper: the pane is gone but the
-                # worktree is not, and a restart is the other moment we
-                # discover that. Branch kept — we cannot tell from here
-                # whether the child finished or the machine rebooted, and
-                # only one of those two guesses is recoverable.
+                # The pane is gone but the worktree is not. Branch kept —
+                # the child may have finished, and the branch holds whatever
+                # it committed.
                 self.spawner.retire(p, delete_branch=False)
                 self.registry.mark_dead(p.id)
 
@@ -390,9 +381,8 @@ class Daemon:
         for p in tracked:
             if p.tmux_pane not in alive:
                 logger.info("participant %s lost its pane %s", p.id, p.tmux_pane)
-                # The child exited on its own. Prune its worktree
-                # directory but keep the branch: it left because it
-                # finished, and the branch holds whatever it committed.
+                # The child exited; prune its worktree but keep the branch —
+                # it left because it finished, and the branch holds its commits.
                 self.spawner.retire(p, delete_branch=False)
                 self.registry.mark_dead(p.id)
                 running = self.store.running_jobs_for_target(p.id)
@@ -415,9 +405,8 @@ class Daemon:
                     line = await protocol.read_message(reader)
                 except protocol.MessageTooLarge as exc:
                     # Answer rather than hang up: one absurd prompt should not
-                    # cost an agent the rest of its session. id 0 is the
-                    # daemon's "could not read far enough to echo your id",
-                    # and the client accepts it as the reply in flight.
+                    # cost an agent its session. id 0 means "could not read
+                    # far enough to echo your id"; the client accepts it.
                     logger.warning("oversized request: %s", exc)
                     writer.write(protocol.err(0, "too_large", str(exc)))
                     await writer.drain()
@@ -473,11 +462,10 @@ async def run() -> None:
     try:
         await daemon.serve()
     finally:
-        # Bounded, and the socket and lock go regardless. A shutdown that
-        # cannot finish is a bug to fix, but a daemon that dies still holding
-        # the lock is worse than one that exits untidily: nothing on the
-        # machine can become the daemon until someone finds the pid and
-        # SIGKILLs it.
+        # Bounded, and the socket and lock go regardless. A daemon that dies
+        # still holding the lock is worse than one that exits untidily:
+        # nothing on the machine can become the daemon until someone finds
+        # the pid and SIGKILLs it.
         try:
             await asyncio.wait_for(daemon.aclose(), SHUTDOWN_TIMEOUT)
         except TimeoutError:

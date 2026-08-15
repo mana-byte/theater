@@ -43,7 +43,7 @@ from theater.models import (
 from theater.tmux import client as tmux
 from theater.tmux.presence import human_present
 
-if TYPE_CHECKING:  # circular at runtime: server imports this module for its handlers
+if TYPE_CHECKING:
     from theater.daemon.server import Daemon
 
 logger = logging.getLogger(__name__)
@@ -51,24 +51,16 @@ logger = logging.getLogger(__name__)
 Handler = Callable[["Daemon", dict[str, Any]], Awaitable[Any]]
 METHODS: dict[str, Handler] = {}
 
-#: Ceiling on a single `jobs.await`, whatever the caller asks for. An await
-#: holds a daemon connection open and stretches the client's socket timeout to
-#: match, so an agent that asks for an hour ties both up for an hour. Five
-#: minutes is longer than any turn observed in practice, and a caller that
-#: still wants more can simply await again — the job keeps running either way.
+#: Ceiling on a single `jobs.await`. An await holds a connection open and
+#: stretches the client's socket timeout to match. Five minutes is longer
+#: than any turn observed; a caller wanting more can await again.
 MAX_AWAIT = 300.0
 
-#: How long a running send job keeps its exclusive claim on a pane. `send`
-#: types the prompt into the pane and creates a job, but nothing verifies the
-#: prompt reached the agent — a human at the pane can clear the composer (Esc),
-#: and the prompt never enters the transcript. The job stays RUNNING, the
-#: observer never sees a matching turn end, and the rescue timer cannot fire
-#: on a participant that is actively working (every transcript event resets
-#: the quiet clock). Past this TTL the job stops blocking the pane; it is not
-#: finished, and the observer may still answer it, it has only lost its
-#: reservation. Five minutes is long enough that a genuinely queued prompt
-#: has had every chance to be read, and short enough that a lost one does not
-#: wedge the participant for the rest of the session.
+#: How long a running send job keeps its exclusive claim on a pane. Nothing
+#: verifies the prompt reached the agent — a human can clear the composer
+#: before it is read, leaving the job RUNNING with no matching turn end. Past
+#: this TTL the job stops blocking the pane; the observer may still answer
+#: it if a turn end arrives, it has only lost its reservation.
 SEND_CLAIM_TTL = 300.0
 
 
@@ -178,10 +170,9 @@ async def _adopt(daemon, params: dict) -> dict:
         pane=pane,
         cwd=cwd,
     )
-    # Record the launch epoch from the row we already looked up. For an
-    # adopted pane this is the shell tmux forked, not the harness — the
-    # harness is its descendant — so it stays constant when the CLI exits.
-    # That is why the delivery gate cannot rely on the pid alone.
+    # The launch epoch is from the shell tmux forked, not the harness — the
+    # harness is its descendant, so it stays constant when the CLI exits.
+    # The delivery gate cannot rely on the pid alone.
     participant = daemon.registry.attach_pane(
         participant.id, pane, pane_pid=match.pane_pid
     )
@@ -230,43 +221,33 @@ async def _spawn(daemon, params: dict) -> dict:
         model=params.get("model"),
         resume=params.get("resume"),
     )
-    # Safety rails: reject before creating anything.
     rails = daemon.config.rails
     check_depth(daemon.store, req.parent_id, cap=rails.depth_cap)
     check_budget(daemon.store, req.parent_id, limit=rails.budget)
-    # Policy, not capability: `Spawner` asks the adapter whether it can take a
-    # model at all, which it can answer alone. Whether the user permits *this*
-    # model is a question only the config can answer, and the spawner has none.
+    # Policy, not capability: `Spawner` asks the adapter whether it can take
+    # a model; whether the user permits this model is a question only the
+    # config can answer, and the spawner has none.
     check_model_allowed(
         req.harness, req.model, daemon.config.models_for(req.harness)
     )
 
     participant = await daemon.spawner.spawn(req)
-    # Create a job for this spawn so the caller can await the result.
-    handle = participant.id  # the handle is the participant id itself.
+    handle = participant.id
     daemon.jobs.create(
         handle=handle,
         caller_id=params.get("parent_id") or "cli",
         target_id=participant.id,
         kind="spawn",
         prompt=req.prompt or "",
-        # participant.cwd is the directory the child actually runs in: the
-        # spawner sets it to the worktree path when worktree=True (spawner.py:93),
-        # or leaves it as the requested cwd otherwise. Hashing against the
-        # parent repo when the child was in a worktree would resolve paths to
-        # the wrong files.
+        # participant.cwd is the worktree path when worktree=True, or the
+        # requested cwd otherwise. Hashing against the parent repo when the
+        # child was in a worktree would resolve paths to the wrong files.
         cwd=participant.cwd,
     )
     if not req.prompt:
-        # Nothing was asked, so there is nothing to wait for: the job is done
-        # the moment the pane exists. `theater spawn vibe` and the régie
-        # palette both start a bare CLI this way.
-        #
-        # Left running, this job never resolves on its own. It then eats the
-        # first turn end the human produces — which belongs to no caller — and
-        # counts as work in flight, so every `send` to that participant is
-        # refused as busy. Resolving it here keeps both of those honest, and
-        # `await_sessions` on the handle still works: it returns immediately.
+        # A promptless spawn has nothing to wait for: resolving the job here
+        # keeps it from eating the first turn end the human produces, and
+        # from counting as work in flight that would block every `send`.
         daemon.jobs.finish(handle, state=JobState.DONE, result="")
     result = participant.to_dict()
     result["handle"] = handle
@@ -294,11 +275,9 @@ async def _jobs_await(daemon, params: dict) -> list[dict]:
     caller_id = params.get("caller_id")
 
     known = {h: daemon.jobs.get(h) for h in handles}
-    # Cycles are about participants, and a send handle is `<target>#<n>`
-    # rather than a participant id — so resolve through the jobs. A handle
-    # with no job behind it can still name a participant (a spawn handle is
-    # its own participant id), and that is worth checking even though the
-    # await itself is about to be refused.
+    # Cycles are about participants, but a send handle is `<target>#<n>`.
+    # Resolve through jobs; a handle with no job can still name a participant
+    # (a spawn handle is its own participant id).
     targets = []
     for handle, job in known.items():
         if job is not None:
@@ -448,10 +427,8 @@ async def _check_pane_identity(
         )
 
     if target.harness == "unknown":
-        # Nothing to compare against. Adopted participants whose harness could
-        # not be identified are addressable today and work; refusing them on
-        # the strength of a second failed identification would be a
-        # regression, not a fix.
+        # Nothing to compare against. Refusing an adopted participant whose
+        # harness could not be identified would be a regression, not a fix.
         return
 
     found = detect_harness(pane.current_command, pane.pane_pid)
@@ -569,8 +546,7 @@ async def _send(daemon, params: dict) -> dict:
             reason="no_pane",
         )
 
-    # Before asking whether a human is at the pane, establish that the pane
-    # is still the participant's at all.
+    # Pane identity before presence: the pane must still be the participant's.
     await _check_pane_identity(daemon, target, refuse)
 
     if await human_present(target.tmux_pane):
@@ -579,31 +555,17 @@ async def _send(daemon, params: dict) -> dict:
             reason="human_present",
         )
 
-    # A human is not at the pane; check whether the pane itself is waiting on
-    # a human decision. This costs a capture-pane, so it runs after the
-    # cheaper presence check.
+    # Costs a capture-pane, so runs after the cheaper presence check.
     await _check_approval_modal(daemon, target, refuse)
 
-    # Busy is "someone is already waiting on a turn from this participant",
-    # which is any running job that carried a prompt — a spawn prompt occupies
-    # the pane exactly as much as a send does. A promptless job is not evidence
-    # of work; `_spawn` resolves those on the spot, so in practice there are
-    # none, and the filter is here so a stray one cannot wedge a participant.
-    #
-    # Status is deliberately not consulted. It is inferred from a transcript
-    # and has been wrong before; a stuck WORKING would silently make a
-    # participant unreachable, and that failure is worse than a prompt landing
-    # while a human's turn is still running.
-    #
-    # The same argument applies to a stuck job. A running job is an
-    # unverifiable claim that a prompt sits in the pane's queue — `send`
-    # typed it, but nothing confirms the agent received it, and a human at the
-    # pane can clear the composer before it is read. A job that has held its
-    # reservation past `SEND_CLAIM_TTL` is dropped from this check: it is not
-    # finished, and the observer may still answer it if a matching turn end
-    # arrives, but it no longer blocks the pane. This is the exception the
-    # paragraph above already makes for a stuck status, extended to the case
-    # it missed.
+    # Busy is any running job that carried a prompt — a spawn prompt
+    # occupies the pane exactly as a send does. Status is deliberately not
+    # consulted: it is inferred from a transcript and has been wrong
+    # before; a stuck WORKING would silently make a participant
+    # unreachable, which is worse than a prompt landing mid-turn.
+    # A job that has held its reservation past SEND_CLAIM_TTL is dropped
+    # from this check: the observer may still answer it, but it no longer
+    # blocks the pane.
     stale = now() - SEND_CLAIM_TTL
     if [
         j
@@ -615,12 +577,11 @@ async def _send(daemon, params: dict) -> dict:
             reason="busy",
         )
 
-    # Reserve the job before typing, in that order for two reasons. The check
-    # above and this create must not be separated by an await, or two sends
-    # racing through the daemon both read an empty queue and both type into the
-    # pane. And a fast agent can finish its turn before the RPC returns: with
-    # the job created afterwards, the observer would see the turn end with
-    # nothing running and the caller would await a promise already broken.
+    # Reserve before typing: the check above and this create must not be
+    # separated by an await, or two sends racing through the daemon both
+    # read an empty queue and both type into the pane. A fast agent can
+    # finish its turn before the RPC returns, so the job must exist first
+    # or the observer sees the turn end with nothing to answer.
     handle = f"{target_id}#{daemon._next_send_seq()}"
     daemon.jobs.create(
         handle=handle,
@@ -628,16 +589,15 @@ async def _send(daemon, params: dict) -> dict:
         target_id=target_id,
         kind="send",
         prompt=prompt,
-        # The target's cwd, not the caller's: the target is the one whose
-        # tool calls touch files, and its cwd is where those paths resolve.
+        # The target's cwd, not the caller's: the target's tool calls touch
+        # files relative to where it runs.
         cwd=target.cwd,
     )
     try:
         await tmux.deliver_text(target.tmux_pane, prompt)
     except Exception as exc:
         # Nothing was delivered, so nothing will ever answer. Close the job
-        # rather than leave a reservation that blocks the next send until the
-        # rescue timer clears it.
+        # rather than leave a reservation that blocks the next send.
         daemon.jobs.finish(
             handle,
             state=JobState.CRASHED,
@@ -717,9 +677,8 @@ async def _shutdown(daemon, params: dict) -> dict:
     return {"stopping": True}
 
 
-#: Kinds `read_transcript` reports. ERROR is dropped: the caller is an agent
-#: reading what was said, and a harness-level error record is not part of the
-#: conversation.
+#: Kinds `read_transcript` reports. ERROR is dropped: a harness-level error
+#: record is not part of the conversation.
 _READABLE = ("assistant", "user", "tool_call", "tool_result")
 
 
