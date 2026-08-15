@@ -8,6 +8,8 @@ reaper or by calling the job manager, rather than by tailing transcripts.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 # ---- spawn creates a job ------------------------------------------------
@@ -228,3 +230,83 @@ def _fake_list_panes(output: str):
         return output
 
     return run
+
+
+# ---- await returns when ANY job finishes (first-completed semantic) -------
+
+
+async def test_await_returns_when_first_of_two_finishes(daemon, monkeypatch):
+    """Two initially-running jobs: finishing one mid-await returns promptly.
+
+    The other job must remain ``running`` in the returned list. Event
+    coordination drives the finish — the short ``wait_for`` is only a
+    deadlock bound.
+    """
+    from theater.daemon.jobs import JobState
+
+    jm = daemon.jobs
+
+    jm.create(handle="h1", caller_id="cli", target_id="t1", kind="spawn")
+    jm.create(handle="h2", caller_id="cli", target_id="t2", kind="spawn")
+
+    # Patch asyncio.wait so the finisher runs only once await_jobs is
+    # actually blocked inside the real wait.
+    real_wait = asyncio.wait
+    started = asyncio.Event()
+
+    async def gate_wait(fs, **kw):
+        started.set()
+        return await real_wait(fs, **kw)
+
+    monkeypatch.setattr(asyncio, "wait", gate_wait)
+
+    async def finish_after_signal():
+        await started.wait()
+        jm.finish("h1", state=JobState.DONE, result="done h1")
+
+    finisher = asyncio.create_task(finish_after_signal())
+    try:
+        jobs = await asyncio.wait_for(
+            jm.await_jobs(["h1", "h2"], max_wait=5.0),
+            timeout=3.0,
+        )
+    finally:
+        if not finisher.done():
+            finisher.cancel()
+            await asyncio.gather(finisher, return_exceptions=True)
+
+    by_handle = {j.handle: j for j in jobs}
+    assert len(jobs) == 2
+    assert by_handle["h1"].state == "done"
+    assert by_handle["h2"].state == "running"
+
+
+async def test_await_returns_immediately_when_one_already_terminal(daemon, monkeypatch):
+    """One terminal + one running at entry: return without waiting at all.
+
+    ``asyncio.wait`` must not be called; the test fails if it is.
+    """
+    from theater.daemon.jobs import JobState
+
+    jm = daemon.jobs
+
+    jm.create(handle="h1", caller_id="cli", target_id="t1", kind="spawn")
+    jm.create(handle="h2", caller_id="cli", target_id="t2", kind="spawn")
+
+    jm.finish("h1", state=JobState.DONE, result="already done")
+
+    called = False
+
+    def fail_wait(*args, **kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(asyncio, "wait", fail_wait)
+
+    jobs = await jm.await_jobs(["h1", "h2"], max_wait=5.0)
+
+    by_handle = {j.handle: j for j in jobs}
+    assert len(jobs) == 2
+    assert by_handle["h1"].state == "done"
+    assert by_handle["h2"].state == "running"
+    assert not called

@@ -29,6 +29,10 @@ on them with a timeout. The observer calls `JobManager.finish` when it detects
 turn-end, which sets the event. The caller wakes up, reads the result, and
 returns it as the MCP tool response.
 
+With multiple handles, `await_jobs` returns as soon as ANY requested job
+becomes terminal (FIRST_COMPLETED), not when all do; already-terminal jobs
+at entry cause an immediate return.
+
 The touch accumulator
 ---------------------
 `recall` records which files each job touched, keyed by content hash so a
@@ -349,22 +353,31 @@ class JobManager:
         finally:
             self._waits.pop(token, None)
 
-    async def await_jobs(
-        self, handles: list[str], max_wait: float = DEFAULT_MAX_WAIT
-    ) -> list[Job]:
-        """Wait for jobs to finish, up to max_wait seconds.
+    async def await_jobs(self, handles: list[str], max_wait: float = DEFAULT_MAX_WAIT) -> list[Job]:
+        """Wait until ANY of the requested jobs becomes terminal, or timeout.
 
-        Returns the current state of each job. Jobs that are still running
-        when the timeout expires are returned with state=running — the caller
-        decides whether to re-await.
+        Returns the current state of every requested handle, in input order.
+        If any requested job is already terminal at call entry, returns
+        immediately. Otherwise, waits until the first requested job finishes
+        (or ``max_wait`` expires), then returns all current states. Jobs that
+        are still running when the timeout expires are returned with
+        state=running — the caller decides whether to re-await.
+
+        Unknown handles are silently skipped here; the RPC layer rejects them
+        with ``bad_request`` before calling this method, so callers that go
+        through the socket never see a silent drop.
         """
-        events = []
+        # Partition into already-terminal (return immediately) vs. running
+        # (need to wait). An already-terminal job at entry means we return
+        # right away without waiting at all.
+        events: list[asyncio.Event] = []
         for h in handles:
             job = self.store.get_job(h)
             if job is None:
                 continue
             if job.state != JobState.RUNNING:
-                continue
+                # At least one requested job is already terminal — return now.
+                return [j for j in (self.store.get_job(h) for h in handles) if j is not None]
             event = self._events.get(h)
             if event is None:
                 # Lost the event (daemon restart). The job is running, so a
@@ -375,11 +388,17 @@ class JobManager:
             events.append(event)
 
         if events:
-            _done, pending = await asyncio.wait(
-                [asyncio.create_task(e.wait()) for e in events],
-                timeout=max_wait,
-            )
-            for task in pending:
-                task.cancel()
+            tasks = [asyncio.create_task(e.wait()) for e in events]
+            try:
+                await asyncio.wait(
+                    tasks,
+                    timeout=max_wait,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
         return [j for j in (self.store.get_job(h) for h in handles) if j is not None]
