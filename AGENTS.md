@@ -17,7 +17,7 @@ processes:
   forwards, never touches SQLite or tmux directly.
 - **régie** — a Textual TUI; also just a client, holds no state the daemon lacks.
 
-Python 3.12+, ~9,200 lines, 56 test files. `theater` is the CLI entry point
+Python 3.12+, ~16,100 lines, 63 test files. `theater` is the CLI entry point
 (`theater.cli:main`).
 
 ## The one constraint
@@ -76,6 +76,7 @@ theater/
 │   ├── registry.py   tier assignment, pane eviction, lineage
 │   ├── store.py      SQLite over SQLAlchemy Core — synchronous ON PURPOSE
 │   ├── jobs.py       JobManager, one asyncio.Event per handle
+│   ├── gc.py         retention sweep: bus, jobs+touch, dead participants
 │   ├── rails.py      depth / cycle / budget guards
 │   ├── spawner.py / worktree.py    LaunchPlan → tmux window; git worktree per child
 │   ├── recall.py / recall_read.py  path-touch history + segment reader (v2)
@@ -136,6 +137,20 @@ theater/
 - **Schema edits go through Alembic.** A bare `CREATE TABLE IF NOT EXISTS` change
   is a silent no-op against existing databases (the v1.2 hazard). Regenerate a
   revision and run `alembic check`.
+- **Rows are deletable, handles are not.** The send-sequence counter lives in the
+  `meta` table because it used to be re-seeded from `MAX(jobs)`; once the GC can
+  delete old jobs, that regresses the counter and re-mints handles pruned jobs
+  already used. Anything else derived from `MAX(some table)` at start-up is the
+  same bug waiting to happen — persist it.
+- **The GC sweeps jobs on `finished_at`, never `created_at`,** so a running job
+  (`finished_at IS NULL`) can never be deleted out from under a caller that is
+  awaiting it. **And every sweep is batched** — the store is synchronous on the
+  event loop, so one unbatched `DELETE` of 30k rows freezes every status poll
+  and every await while it runs.
+- **`VACUUM` is never background.** Only `theater gc --vacuum`, because it locks
+  the whole file. Plain deletion does not shrink the file, and every path that
+  reports a sweep has to say so — a user who deletes 94% of the database and
+  sees the same file size reports GC as broken.
 
 ## When adding a harness
 
