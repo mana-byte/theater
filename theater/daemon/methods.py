@@ -151,12 +151,14 @@ async def _kill(daemon, params: dict) -> dict:
     # land CRASHED. It is dropped in the finally so a failed kill leaks nothing.
     daemon._explicit_kills.add(pid)
     try:
-        await daemon.spawner.kill(pid)
-        # Only once the kill succeeded: `spawner.kill` raises when the pane
-        # survives, and that path deliberately leaves the record alive, so
-        # its jobs are still genuinely running and must not be finished.
+        participant = await daemon.spawner.kill_pane(pid)
+        # Finish jobs before teardown: job completion hashes files in the
+        # worktree, and teardown deletes the directory. The pane is gone by
+        # here — kill_pane raises if it survives, so this path is reached
+        # only after the pane is confirmed dead.
         for job in daemon.store.running_jobs_for_target(pid):
             daemon.jobs.finish(job.handle, state=JobState.KILLED, error_code="killed")
+        daemon.spawner.teardown(participant)
     finally:
         daemon._explicit_kills.discard(pid)
 

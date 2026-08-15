@@ -187,7 +187,15 @@ class Spawner:
     KILL_POLL_ATTEMPTS = 5
     KILL_POLL_INTERVAL = 0.25
 
-    async def kill(self, participant_id: str) -> None:
+    async def kill_pane(self, participant_id: str) -> Participant:
+        """Kill the tmux pane and confirm it is gone, nothing more.
+
+        Job completion has to observe the worktree while it still exists —
+        :meth:`teardown` removes the directory — so the caller finishes the
+        participant's jobs between this method and ``teardown``. Raising on a
+        surviving pane here keeps the record alive, because its jobs are still
+        genuinely running and must not be finished.
+        """
         p = self.registry.get(participant_id)
         if p.tmux_pane:
             await tmux.kill_pane(p.tmux_pane)
@@ -205,9 +213,19 @@ class Spawner:
                     f"pane {p.tmux_pane} of {participant_id!r} survived "
                     f"kill-pane; record left alive to avoid a ghost"
                 )
+        return p
+
+    def teardown(self, p: Participant) -> None:
+        """Terminal teardown after the pane is confirmed gone.
+
+        Reclaims the worktree directory and marks the record dead. The caller
+        finishes the participant's jobs before this runs, because job
+        completion hashes files in the worktree and ``retire`` deletes the
+        directory.
+        """
         # An explicit kill discards the child's work, branch included.
         self.retire(p, delete_branch=True)
-        self.registry.mark_dead(participant_id)
+        self.registry.mark_dead(p.id)
 
     def retire(self, p: Participant, *, delete_branch: bool) -> None:
         """Reclaim the git worktree of a participant that is going away.

@@ -438,6 +438,51 @@ async def test_kill_wakes_the_awaiter_immediately(client, fake_tmux):
     assert jobs[0]["state"] == "killed"
 
 
+async def test_kill_finishes_jobs_before_removing_worktree(daemon, client, fake_tmux, monkeypatch):
+    """Jobs must finish before the worktree directory is deleted.
+
+    Job completion hashes files in the worktree to record ``sha_after``; if
+    the worktree is removed first, every path reads as gone and every touch
+    row records a spurious deletion. This spy records the order of
+    ``JobManager.finish`` and ``Spawner.retire`` and asserts finish came first.
+    """
+    from theater.daemon import spawner as spawner_mod
+
+    parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
+    child = await client.call(
+        "spawn",
+        harness="vibe",
+        prompt="do some work",
+        approval="manual",
+        cwd="/tmp",
+        parent_id=parent["id"],
+    )
+    handle = child["handle"]
+
+    order: list[str] = []
+
+    original_finish = daemon.jobs.finish
+
+    def spy_finish(*args, **kwargs):
+        order.append("finish")
+        return original_finish(*args, **kwargs)
+
+    original_retire = spawner_mod.Spawner.retire
+
+    def spy_retire(self, p, *, delete_branch):
+        order.append("retire")
+        return original_retire(self, p, delete_branch=delete_branch)
+
+    monkeypatch.setattr(daemon.jobs, "finish", spy_finish)
+    monkeypatch.setattr(spawner_mod.Spawner, "retire", spy_retire)
+
+    await client.call("participant.kill", id=child["id"], caller_id=parent["id"])
+
+    job = await client.call("jobs.status", handle=handle)
+    assert job["state"] == "killed"
+    assert order.index("finish") < order.index("retire")
+
+
 async def test_a_child_that_loses_its_pane_without_explicit_kill_crashes(
     client, fake_tmux, daemon, monkeypatch
 ):
