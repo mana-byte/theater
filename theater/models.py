@@ -45,9 +45,13 @@ class Participant:
     status: Status = Status.IDLE
     last_activity: float = field(default_factory=now)
     created_at: float = field(default_factory=now)
-    # Runtime-only: populated by the Registry, never persisted. Must not be
-    # added to schema.py, store.upsert_participant, or from_row — the name
-    # is regenerated when the daemon restarts.
+    # Live-only: populated by the Registry for participants that are alive,
+    # None for dead ones. Never persisted — the name is regenerated when the
+    # daemon restarts, and a dead participant's name is released so a later
+    # participant can recycle it. The id is the stable identity for as long
+    # as the row is retained (dead rows are eventually deleted by retention
+    # GC); use it, not the name, for any targeting that spans time or has
+    # destructive consequences, because a recycled name can identify a successor.
     name: str | None = None
 
     @property
