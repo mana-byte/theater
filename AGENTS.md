@@ -109,8 +109,11 @@ theater/
 
 ## Invariants — do not break these
 
-- **The daemon is the sole writer** of SQLite and the only process that runs tmux
-  commands. MCP servers and the régie forward RPCs; keep it that way.
+- **The daemon is the sole writer** of SQLite. Only the daemon may create,
+  destroy, respawn, or inject input into participant panes; other processes may
+  query tmux, and the régie may change presentation — session-local options,
+  focus, size, or window placement — only while preserving each participant's
+  pane ID and occupant. MCP servers and the régie forward RPCs; keep it that way.
 - **`Participant.addressable` is physical, not a permission.** No pane, no
   `send-keys`. Never treat `EXTERNAL` as merely "unprivileged".
 - **Human-presence uses copy mode (`pane_in_mode`) only** (`tmux/presence.py`).

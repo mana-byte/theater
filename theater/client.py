@@ -95,8 +95,9 @@ class DaemonClient:
         Racy by construction: the daemon can take the lock between our check
         and our fork. That costs one wasted process and is caught downstream.
         """
-        # Local import: theater.daemon pulls in the whole server stack, and
-        # this module is imported by every MCP server, which never runs one.
+        # Local import: the MCP server never runs a daemon, so the daemon
+        # package stays off its import path; the import is local to keep it
+        # that way.
         from theater.daemon import lock
 
         if not lock.is_free():
