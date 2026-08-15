@@ -28,6 +28,18 @@ Implementation: `await_jobs` creates an asyncio.Event per job, then waits
 on them with a timeout. The observer calls `job_finished` when it detects
 turn-end, which sets the event. The caller wakes up, reads the result, and
 returns it as the MCP tool response.
+
+The touch accumulator
+---------------------
+`recall` records which files each job touched, keyed by content hash so a
+later query can detect drift. A path is hashed when it is first seen during
+the job (that is `sha_before`), and every path is hashed again at job end
+(that is `sha_after`). So something must accumulate per-job paths across
+events, and that something is `TouchAccumulator`, living here on the
+`JobManager`. The observer feeds it by calling `observe_paths` for each
+event that carries `Event.paths`; at job end, `finish` writes the
+accumulated rows in the same transaction as the job result, so a job whose
+result committed but whose touches did not is impossible.
 """
 
 from __future__ import annotations
@@ -36,8 +48,16 @@ import asyncio
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass, field
+from pathlib import Path
 
+from sqlalchemy import insert, update
+
+from theater.daemon.blob import blob_sha
+from theater.daemon.schema import jobs as jobs_table
+from theater.daemon.schema import touch as touch_table
 from theater.daemon.store import Store
+from theater.harness.base import EventPath
 from theater.models import Job, JobKind, JobState, now
 
 logger = logging.getLogger("theater.jobs")
@@ -45,11 +65,95 @@ logger = logging.getLogger("theater.jobs")
 #: Re-exported for callers that think of these as job vocabulary rather than
 #: domain models. They live in theater.models so the store can build a Job
 #: without importing this module.
-__all__ = ["Job", "JobKind", "JobManager", "JobState"]
+__all__ = [
+    "Job",
+    "JobKind",
+    "JobManager",
+    "JobState",
+    "TouchAccumulator",
+]
 
 
 #: How long to wait for a job to finish if the caller does not specify.
 DEFAULT_MAX_WAIT = 150.0
+
+
+@dataclass
+class TouchAccumulator:
+    """Per-job set of file paths, with ``sha_before`` captured on first sight.
+
+    A path is hashed exactly once — the first time the job sees it — and that
+    hash is ``sha_before``. At job end, every path is hashed again for
+    ``sha_after``. The pair is what makes drift detection work: same before
+    and after means the file was touched but not changed, different means it
+    was modified, and a null end means it was deleted.
+
+    Lives on the ``JobManager``, one per running job, created in ``create``
+    and consumed in ``finish``. The observer feeds it by calling
+    ``observe_paths`` with the ``Event.paths`` it extracts from each event;
+    until the plugins fill those in (Wave 2), the accumulator legitimately
+    collects nothing and ``finish`` writes no touch rows.
+    """
+
+    #: The working directory the job runs in. Paths in EventPath are
+    #: repo-relative; this is how they resolve to a real file for hashing.
+    cwd: str
+    #: path -> sha_before, captured the first time the path is seen. A path
+    #: seen again does not re-hash: the before state is the state at first
+    #: sight, not at last sight, and re-hashing would overwrite it with a
+    #: mid-job hash that says nothing about what the job started from.
+    _before: dict[str, str | None] = field(default_factory=dict)
+    #: All paths seen, in first-seen order. Preserved so the touch rows have
+    #: a stable, deterministic order — not because the query cares, but
+    #: because a non-deterministic row order makes test assertions flaky and
+    #: debugging harder.
+    _paths: list[str] = field(default_factory=list)
+    #: mode per path, last write wins. A path that is read then written
+    #: records "write"; a path that is written then read records "read".
+    #: The design calls for the last mode observed, not the union, because
+    #: recall answers "what happened to this file" and the final action is
+    #: the one that left the file in the state the next job sees.
+    _mode: dict[str, str] = field(default_factory=dict)
+
+    def observe(self, paths: tuple[EventPath, ...]) -> None:
+        """Record paths from one event. Hashes new paths immediately."""
+        for ep in paths:
+            if ep.path not in self._before:
+                self._paths.append(ep.path)
+                self._before[ep.path] = blob_sha(Path(self.cwd) / ep.path)
+            self._mode[ep.path] = ep.mode
+
+    def rows(self, job_handle: str) -> list[dict]:
+        """The touch rows for this job, with ``sha_after`` computed now.
+
+        Called at job end. Every path is hashed again, including ones whose
+        ``sha_before`` was None (the file was created during the job): if the
+        file still exists, ``sha_after`` is its hash; if it was deleted
+        during the job, ``sha_after`` is None.
+        """
+        result = []
+        for path in self._paths:
+            sha_after = blob_sha(Path(self.cwd) / path)
+            result.append(
+                {
+                    "job_handle": job_handle,
+                    "path": path,
+                    "mode": self._mode[path],
+                    "sha_before": self._before[path],
+                    "sha_after": sha_after,
+                }
+            )
+        return result
+
+    def __bool__(self) -> bool:
+        """Whether any paths have been observed.
+
+        Checked by ``JobManager.finish`` to decide whether to open a
+        transaction for touches or take the plain finish path. A false
+        accumulator means no touch rows to write, so the job result goes
+        through the store's autocommit path as before.
+        """
+        return bool(self._paths)
 
 
 class JobManager:
@@ -68,6 +172,12 @@ class JobManager:
         #: concurrent awaits from the same caller can be torn down
         #: independently. Read as a graph by `wait_graph`.
         self._waits: dict[object, tuple[str, frozenset[str]]] = {}
+        #: Per-job path accumulators. Created in `create`, consumed and
+        #: dropped in `finish`. The cwd comes from the job's target
+        #: participant; a job whose target is None (a CLI spawn with no
+        #: target) gets no accumulator, which is correct — there is no
+        #: working directory to resolve paths against.
+        self._accumulators: dict[str, TouchAccumulator] = {}
 
     def create(
         self,
@@ -77,6 +187,7 @@ class JobManager:
         target_id: str | None,
         kind: str,
         prompt: str | None = None,
+        cwd: str | None = None,
     ) -> Job:
         job = Job(
             handle=handle,
@@ -92,6 +203,8 @@ class JobManager:
         )
         self.store.create_job(job)
         self._events[handle] = asyncio.Event()
+        if cwd is not None:
+            self._accumulators[handle] = TouchAccumulator(cwd=cwd)
         self.store.bus_append(
             "job.created",
             from_id=caller_id,
@@ -99,6 +212,18 @@ class JobManager:
             payload={"handle": handle, "kind": str(kind)},
         )
         return job
+
+    def observe_paths(self, handle: str, paths: tuple[EventPath, ...]) -> None:
+        """Feed ``Event.paths`` into the accumulator for this job.
+
+        Called by the observer for each event that carries paths. A job with
+        no accumulator (no cwd, or already finished) is a no-op: there is
+        nothing to resolve paths against, and a job whose finish already
+        committed has had its accumulator consumed.
+        """
+        acc = self._accumulators.get(handle)
+        if acc is not None and paths:
+            acc.observe(paths)
 
     def get(self, handle: str) -> Job | None:
         return self.store.get_job(handle)
@@ -121,14 +246,32 @@ class JobManager:
             event = self._events.pop(handle, None)
             if event:
                 event.set()
+            self._accumulators.pop(handle, None)
             return job
-        self.store.finish_job(
-            handle,
-            state=str(state),
-            result=result,
-            error_code=error_code,
-            finished_at=now(),
-        )
+
+        acc = self._accumulators.pop(handle, None)
+        if acc:
+            # Write the job result and its touches in one transaction, so a
+            # job whose result committed but whose touches did not is
+            # impossible. The store's long-lived connection is autocommit, so
+            # we open an explicit transaction here to bind the two writes.
+            self._finish_with_touches(
+                handle,
+                state=str(state),
+                result=result,
+                error_code=error_code,
+                finished_at=now(),
+                touches=acc.rows(handle),
+            )
+        else:
+            self.store.finish_job(
+                handle,
+                state=str(state),
+                result=result,
+                error_code=error_code,
+                finished_at=now(),
+            )
+
         # Wake anyone waiting, then drop the event: the job is terminal, so
         # `await_jobs` will short-circuit on its state from here on and never
         # look for it again. Keeping it would grow the dict for the life of
@@ -148,6 +291,42 @@ class JobManager:
         )
         logger.info("job %s finished: %s", handle, state)
         return self.store.get_job(handle)
+
+    def _finish_with_touches(
+        self,
+        handle: str,
+        *,
+        state: str,
+        result: str | None,
+        error_code: str | None,
+        finished_at: float | None,
+        touches: list[dict],
+    ) -> None:
+        """Write the job result and its touch rows in one transaction.
+
+        Uses a fresh connection from the store's engine rather than the
+        store's long-lived autocommit connection, because SQLAlchemy 2.0
+        does not allow ``conn.begin()`` on a connection that is already in
+        an autobegun transaction (which an AUTOCOMMIT connection always is
+        after its first use). The engine's ``connect`` event listener
+        re-applies WAL and foreign-key pragmas to every fresh connection,
+        so the transactional write sees the same settings as the autocommit
+        path. The alternative — changing the store's connection model —
+        would affect every other caller, which is out of scope.
+        """
+        with self.store.engine.begin() as conn:
+            conn.execute(
+                update(jobs_table)
+                .where(jobs_table.c.handle == handle)
+                .values(
+                    state=state,
+                    result=result,
+                    error_code=error_code,
+                    finished_at=finished_at,
+                )
+            )
+            if touches:
+                conn.execute(insert(touch_table), touches)
 
     def list_for_caller(self, caller_id: str) -> list[Job]:
         return self.store.list_jobs_for_caller(caller_id)

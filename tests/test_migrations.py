@@ -16,7 +16,7 @@ from sqlalchemy import Column, MetaData, Table, Text
 
 from theater import paths
 from theater.daemon.schema import metadata
-from theater.daemon.store import BASELINE, Store
+from theater.daemon.store import HEAD, Store
 
 
 def _diff(store: Store) -> list:
@@ -112,7 +112,9 @@ def test_a_legacy_database_is_adopted_not_rebuilt(theater_home):
         stamped = store.conn.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar()
-        assert stamped == BASELINE
+        # The legacy DB is stamped at BASELINE then upgraded to head, so the
+        # version is HEAD — not BASELINE, and not just "not BASELINE".
+        assert stamped == HEAD
     finally:
         store.close()
 
