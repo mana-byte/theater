@@ -385,16 +385,19 @@ class Daemon:
         alive = set(out.split())
         for p in tracked:
             if p.tmux_pane not in alive:
+                # An explicit kill owns this participant's whole teardown —
+                # including deleting the branch, which this path must not do.
+                # `spawner.kill` removes the pane before it marks the record
+                # dead, so the reaper can see a pane-less live participant
+                # mid-kill; skipping it here keeps the two paths from both
+                # retiring it and from racing over the job's final state.
+                if p.id in self._explicit_kills:
+                    continue
                 logger.info("participant %s lost its pane %s", p.id, p.tmux_pane)
                 # The child exited; prune its worktree but keep the branch —
                 # it left because it finished, and the branch holds its commits.
                 self.spawner.retire(p, delete_branch=False)
                 self.registry.mark_dead(p.id)
-                # An explicit kill in flight owns the terminal write: the
-                # job must land KILLED, not CRASHED, so the reaper leaves
-                # those jobs alone for the kill path to finish.
-                if p.id in self._explicit_kills:
-                    continue
                 running = self.store.running_jobs_for_target(p.id)
                 for job in running:
                     self.jobs.finish(

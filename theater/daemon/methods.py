@@ -144,27 +144,22 @@ async def _kill(daemon, params: dict) -> dict:
         if target.status is Status.DEAD:
             return {"id": pid, "killed": False, "reason": "already_dead"}
 
-    # Mark this participant as being explicitly killed so a racing reaper
-    # tick does not write CRASHED first and permanently defeat the KILLED
-    # state the kill path assigns below. JobManager.finish is
-    # first-terminal-write-wins, so whichever writer arrives first owns the
-    # final state. Removed in the finally so the set does not leak.
+    # `finish` is first-terminal-write-wins, so whoever writes first owns the
+    # state. The marker tells the reaper to leave this participant's jobs to
+    # us, and it has to stay set until the KILLED writes are done — not just
+    # until the pane is gone — or a reaper tick between the two could still
+    # land CRASHED. It is dropped in the finally so a failed kill leaks nothing.
     daemon._explicit_kills.add(pid)
     try:
         await daemon.spawner.kill(pid)
+        # Only once the kill succeeded: `spawner.kill` raises when the pane
+        # survives, and that path deliberately leaves the record alive, so
+        # its jobs are still genuinely running and must not be finished.
+        for job in daemon.store.running_jobs_for_target(pid):
+            daemon.jobs.finish(job.handle, state=JobState.KILLED, error_code="killed")
     finally:
         daemon._explicit_kills.discard(pid)
 
-    # spawner.kill succeeded: the pane is gone and the record is dead.
-    # Finish every still-running job targeting this participant with
-    # KILLED so the parent's await_sessions wakes. Done after spawner.kill
-    # because spawner.kill can raise TheaterError when the pane survives
-    # kill-pane, and in that case the record is deliberately left alive
-    # and the jobs must NOT be finished.
-    for job in daemon.store.running_jobs_for_target(pid):
-        daemon.jobs.finish(
-            job.handle, state=JobState.KILLED, error_code="killed"
-        )
     return {"id": pid, "killed": True}
 
 
