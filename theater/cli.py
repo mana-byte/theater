@@ -93,9 +93,8 @@ def _add_name_parser(sub) -> None:
         "id",
         help=(
             "Participant id or name. Names are live-only and recyclable; a "
-            "dead participant has no name. Already-dead is a no-op only by "
-            "id. Use the id for destructive targeting — a recycled name can "
-            "point at a successor."
+            "dead participant has no name. Use the id for destructive "
+            "targeting — a recycled name can point at a successor."
         ),
     )
 
