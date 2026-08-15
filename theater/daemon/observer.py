@@ -554,6 +554,16 @@ class Observer:
         if batch.attached is not None:
             self._on_attach(pid, batch.attached)
 
+        # Resolved lazily: the job handle for this participant, looked up at
+        # most once per _apply call, and only when at least one event in the
+        # batch carries paths. Most batches carry none — the plugins fill
+        # Event.paths only for tool calls that touch files — so this defers
+        # the database query to the minority of batches where it can pay off.
+        # A per-event lookup would run oldest_running_job_for_target on the
+        # hot path of every poll of every watched participant, which is a
+        # query per event on a batch that routinely holds dozens.
+        job_handle: str | None = None
+
         last = None
         for event in batch.events:
             self.store.bus_append(
@@ -572,6 +582,12 @@ class Observer:
                 },
             )
             last = event
+            if event.paths:
+                if self.jobs is not None and job_handle is None:
+                    job = self.store.oldest_running_job_for_target(pid)
+                    job_handle = job.handle if job is not None else ""
+                if job_handle:
+                    self.jobs.observe_paths(job_handle, event.paths)
             if event.kind is EventKind.ASSISTANT and event.text:
                 clock.last_text = event.text
                 turns.say(event.text)

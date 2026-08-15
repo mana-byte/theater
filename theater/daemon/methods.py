@@ -228,6 +228,7 @@ async def _spawn(daemon, params: dict) -> dict:
         worktree=bool(params.get("worktree", False)),
         base_branch=params.get("base_branch"),
         model=params.get("model"),
+        resume=params.get("resume"),
     )
     # Safety rails: reject before creating anything.
     rails = daemon.config.rails
@@ -249,6 +250,12 @@ async def _spawn(daemon, params: dict) -> dict:
         target_id=participant.id,
         kind="spawn",
         prompt=req.prompt or "",
+        # participant.cwd is the directory the child actually runs in: the
+        # spawner sets it to the worktree path when worktree=True (spawner.py:93),
+        # or leaves it as the requested cwd otherwise. Hashing against the
+        # parent repo when the child was in a worktree would resolve paths to
+        # the wrong files.
+        cwd=participant.cwd,
     )
     if not req.prompt:
         # Nothing was asked, so there is nothing to wait for: the job is done
@@ -621,6 +628,9 @@ async def _send(daemon, params: dict) -> dict:
         target_id=target_id,
         kind="send",
         prompt=prompt,
+        # The target's cwd, not the caller's: the target is the one whose
+        # tool calls touch files, and its cwd is where those paths resolve.
+        cwd=target.cwd,
     )
     try:
         await tmux.deliver_text(target.tmux_pane, prompt)

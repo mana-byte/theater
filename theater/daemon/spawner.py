@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from theater import paths
 from theater.daemon import worktree as worktree_mod
 from theater.daemon.registry import Registry
-from theater.harness import check_model, plan_launch
+from theater.harness import check_model, check_resume, plan_launch
 from theater.harness import get as get_harness
 from theater.models import BadRequest, Participant, TheaterError
 from theater.tmux import client as tmux
@@ -51,6 +51,10 @@ class SpawnRequest:
     #: here and never validated: see `harness.plan_launch`. None means the
     #: harness picks, which is what every spawn did before this existed.
     model: str | None = None
+    #: Session id to resume, when the harness supports it. Opaque here and
+    #: validated only by `harness.check_resume`, which refuses a harness
+    #: whose `plan_launch` has no `resume` parameter. None means start cold.
+    resume: str | None = None
 
 
 class Spawner:
@@ -65,6 +69,31 @@ class Spawner:
         # refusal after step 1 leaves a participant — and possibly a worktree —
         # behind for something we could have known up front.
         check_model(req.harness, req.model)
+        check_resume(req.harness, req.resume)
+        # A harness that accepts resume but silently drops the prompt (opencode:
+        # `-s` routes to the session view, `--prompt` is only read on the home
+        # screen) must not be handed both. Delivering the prompt by typing into
+        # the pane after the session is up would be the useful behaviour, but
+        # the spawner has no readiness detection — the observer's screen-tail
+        # marker checks live in a different module with different timing — so an
+        # injection here would race the TUI's startup and sometimes land before
+        # it is ready. A racy injection that intermittently drops the task is
+        # worse than a loud refusal, because it fails silently rather than
+        # loudly. Refused here, before anything is created, for the same reason
+        # as the checks above.
+        if req.resume and req.prompt and not harness.resume_takes_prompt:
+            raise BadRequest(
+                f"harness {req.harness!r} cannot resume a session with a prompt; "
+                f"resume it without one and use send to deliver the task"
+            )
+        # A resumed session's transcript describes files at its original cwd;
+        # a fresh worktree points it at different files, so the transcript's
+        # path references would resolve to the wrong content.
+        if req.resume and req.worktree:
+            raise BadRequest(
+                "cannot resume into a worktree: the session's transcript "
+                "describes files that are not the worktree's files"
+            )
 
         participant = self.registry.create_spawned(
             harness=req.harness, cwd=req.cwd, parent_id=req.parent_id
@@ -111,6 +140,7 @@ class Spawner:
             config_path=config_path,
             approval=req.approval,
             model=req.model,
+            resume=req.resume,
         )
 
         paths.ensure_home()
