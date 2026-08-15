@@ -17,13 +17,18 @@ from theater.tmux import client
 
 @pytest.fixture(autouse=True)
 def _reset_cache():
-    client.reset_version_cache()
+    # Pin None (tmux-absent) so no test falls through to a real `tmux -V`.
+    # Tests that need a specific version stub subprocess.run or override the
+    # cache directly. See test_tmux_client.py for the same rationale.
+    client._VERSION_CACHE[0] = None
     yield
     client.reset_version_cache()
 
 
 def _stub_version_output(monkeypatch, stdout: str, returncode: int = 0):
     """Make subprocess.run return the given stdout for `tmux -V`."""
+    # Reset to unprobed so tmux_version() actually calls the stubbed run.
+    client.reset_version_cache()
     proc = MagicMock()
     proc.stdout = stdout
     proc.returncode = returncode
@@ -67,6 +72,7 @@ class TestTmuxVersion:
 
         monkeypatch.setattr(client, "available", lambda: True)
         monkeypatch.setattr(subprocess, "run", boom)
+        client.reset_version_cache()
         assert client.tmux_version() is None
 
     def test_caches_after_first_call(self, monkeypatch):
@@ -83,12 +89,16 @@ class TestTmuxVersion:
 
         monkeypatch.setattr(client, "available", lambda: True)
         monkeypatch.setattr(subprocess, "run", fake_run)
+        client.reset_version_cache()
 
         assert client.tmux_version() == "3.4"
         assert client.tmux_version() == "3.4"
         assert call_count == 1
 
     def test_cache_distinguishes_unprobed_from_none(self, monkeypatch):
+        # Explicitly reset to unprobed — the autouse fixture pins None, but
+        # this test checks the sentinel before probing.
+        client.reset_version_cache()
         # Before probing, the cache sentinel is not None.
         assert client._VERSION_CACHE[0] is client._UNPROBED
         monkeypatch.setattr(client, "available", lambda: False)

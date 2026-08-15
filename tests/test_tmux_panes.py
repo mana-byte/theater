@@ -14,7 +14,13 @@ from theater.tmux import client, panes
 
 @pytest.fixture(autouse=True)
 def _reset_version_cache():
-    client.reset_version_cache()
+    # Pin None (tmux-absent, the conservative no-flag path) rather than reset
+    # to unprobed. If we left it unprobed, every test that does not explicitly
+    # set a version would invoke the real `tmux -V` and take whatever version
+    # the host has — the suite would behave differently on 3.4 vs 3.7. Tests
+    # that need a specific version override this pin via _set_version as they
+    # already do.
+    client._VERSION_CACHE[0] = None
     yield
     client.reset_version_cache()
 
