@@ -426,7 +426,7 @@ state, not until all of them do. If any handle is already terminal when the
 call arrives, it returns immediately. The reply carries one current-state entry
 per requested handle, so the caller processes the terminal entries and re-awaits
 the still-running ones. This lets a caller fan out and react to the first
-finisher without waiting on the slowest.
+handle to become terminal without waiting on the slowest.
 
 Job states are `running`, `done`, `crashed`, `killed`. `timeout` is
 deliberately **not** a state: it is what `await` returns when the caller stops
