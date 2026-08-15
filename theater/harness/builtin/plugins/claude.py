@@ -50,6 +50,7 @@ from theater.harness.base import (
     SERVER_NAME,
     Event,
     EventKind,
+    EventPath,
     Harness,
     LaunchPlan,
     NativeChild,
@@ -117,6 +118,31 @@ _CWD_PROBE_RECORDS = 20
 _CWD_PROBE_BYTES = 256 * 1024
 
 
+#: Tools that write a file, keyed by the input parameter that carries the path.
+#: Each entry maps the tool name to the key whose value is the file path the
+#: tool operates on. MultiEdit batches several edits to one file but names it
+#: once, so it yields a single EventPath — the alternative, enumerating every
+#: edit's path, would produce duplicates for the same file in the same event.
+#:
+#: The input shapes are not visible in the scrubbed fixture (every tool_use has
+#: ``"input": {"scrubbed": true}``); the parameter names are grounded in the
+#: Claude Code tool schema as referenced in the CHANGELOG (line 67 names
+#: ``file_path``; line 550 names ``Write(path)``, ``NotebookEdit(path)``).
+_WRITE_TOOLS: dict[str, str] = {
+    "Write": "file_path",
+    "Edit": "file_path",
+    "MultiEdit": "file_path",
+    "NotebookEdit": "notebook_path",
+}
+
+#: Tools that read a file. Read and NotebookEdit-read both name the file
+#: explicitly in a structured parameter. Grep and Glob take a path but it is
+#: a directory or pattern, not a named file — see the note on _PATH_TOOLS.
+_READ_TOOLS: dict[str, str] = {
+    "Read": "file_path",
+}
+
+
 def _epoch(value) -> float | None:
     """Claude Code writes ISO-8601 with a Z suffix."""
     if not isinstance(value, str) or not value:
@@ -125,6 +151,37 @@ def _epoch(value) -> float | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return None
+
+
+def _relativise(path: str, cwd: str | None) -> str | None:
+    """Make a path repo-relative, or return None if it cannot be done safely.
+
+    Claude Code records absolute paths (e.g. ``/Users/ada/repo/src/app.py``)
+    alongside a ``cwd`` field on every record. The recall index is pasted into
+    agent prompts, so an absolute path that leaks ``/Users/<name>`` is a privacy
+    breach, not a formatting issue.
+
+    A relative path is returned as-is. An absolute path is stripped of the cwd
+    prefix; if the cwd is not a prefix of the path (the file lives outside the
+    repo), the path is dropped — emitting it relative would be a lie, and
+    emitting it absolute is the breach. When cwd itself is None the path is
+    dropped too, for the same reason.
+    """
+    if not path:
+        return None
+    if not path.startswith("/"):
+        return path
+    if cwd is None:
+        return None
+    # os.path.relpath would walk up with ``..`` for paths outside the cwd, which
+    # is a valid relative path but not one that names a file inside the repo.
+    # A path outside the working directory is not recall's business.
+    c = cwd.rstrip("/") + "/"
+    if not (path == cwd or path.startswith(c)):
+        return None
+    if path == cwd:
+        return "."
+    return path[len(c):]
 
 
 class ClaudeCodeHarness(Harness):
@@ -152,6 +209,7 @@ class ClaudeCodeHarness(Harness):
         config_path: Path,
         approval: str,
         model: str | None = None,
+        resume: str | None = None,
     ) -> LaunchPlan:
         if approval not in APPROVALS:
             raise BadRequest(
@@ -176,6 +234,14 @@ class ClaudeCodeHarness(Harness):
             # space-separated value sits next to the prompt positional, and
             # binding tightly is the habit that keeps this argv unambiguous.
             argv.append(f"--model={model}")
+        if resume:
+            # `--resume <session-id>` resumes a specific session by id or
+            # name. Documented in the Claude Code CHANGELOG (line 2522:
+            # "claude --resume <session-id>"; line 2526: "--resume <id>";
+            # line 2587: "claude -p --resume <name>"). Interactive mode
+            # reattaches to the session and still accepts a prompt positional,
+            # which `resume_takes_prompt = True` (the Harness default) asserts.
+            argv.append(f"--resume={resume}")
         if approval == "yolo":
             argv.append("--dangerously-skip-permissions")
         elif approval == "edits":
@@ -309,6 +375,8 @@ class ClaudeCodeObserver(TranscriptObserver):
         # id; it is per API call, so it groups the same way for this purpose.
         tid = message.get("id") or record.get("requestId")
         tid = tid if isinstance(tid, str) and tid else None
+        cwd = record.get("cwd")
+        cwd = cwd if isinstance(cwd, str) and cwd else None
         out: list[Event] = []
         for block in message.get("content") or []:
             if not isinstance(block, dict):
@@ -332,6 +400,11 @@ class ClaudeCodeObserver(TranscriptObserver):
                         ts=ts,
                         turn_id=tid,
                         raw_index=index,
+                        paths=self._tool_paths(
+                            block.get("name"),
+                            block.get("input"),
+                            cwd,
+                        ),
                     )
                 )
             # `thinking` is deliberately dropped: it is the agent's private
@@ -350,6 +423,7 @@ class ClaudeCodeObserver(TranscriptObserver):
                     turn_end=True,
                     turn_id=tid,
                     raw_index=last.raw_index,
+                    paths=last.paths,
                 )
             else:
                 out.append(
@@ -362,6 +436,37 @@ class ClaudeCodeObserver(TranscriptObserver):
                     )
                 )
         return out
+
+    def _tool_paths(
+        self, name: str | None, tool_input: object, cwd: str | None
+    ) -> tuple[EventPath, ...]:
+        """Extract file paths from a tool_use block's structured input.
+
+        Only tools whose input carries a named file path in a structured field
+        yield EventPath entries — never paths parsed out of shell commands or
+        prose. Bash, Glob, Grep, Task and similar tools take no single named
+        file, so they yield nothing: a wrong path is worse than a missing one.
+
+        Paths are relativised against the record's own ``cwd`` field, which
+        every Claude Code record carries. An absolute path is made relative to
+        that cwd; a path that is already relative is kept as-is. If the cwd is
+        absent (rare, seen on the first permission-mode record), the path is
+        dropped rather than emitting an absolute path that would leak a home
+        directory into the recall index.
+        """
+        if not isinstance(tool_input, dict):
+            return ()
+        key = _WRITE_TOOLS.get(name or "") or _READ_TOOLS.get(name or "")
+        if key is None:
+            return ()
+        raw = tool_input.get(key)
+        if not isinstance(raw, str) or not raw:
+            return ()
+        mode = "write" if name in _WRITE_TOOLS else "read"
+        rel = _relativise(raw, cwd)
+        if rel is None:
+            return ()
+        return (EventPath(path=rel, mode=mode),)
 
     def _user(
         self, message: dict, ts: float | None, index: int, *, clip_text: bool = True
