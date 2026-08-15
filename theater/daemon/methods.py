@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 
 from sqlalchemy import func, select
 
-from theater import protocol
+from theater import paths, protocol
 from theater.daemon.harness_detect import detect_harness, is_shell
 from theater.daemon.rails import (
     check_budget,
@@ -716,6 +716,72 @@ async def _models(daemon, params: dict) -> list[dict]:
             }
         )
     return rows
+
+
+@method("gc")
+async def _gc(daemon, params: dict) -> dict:
+    """Run a garbage-collection sweep on demand and report what it did.
+
+    The automatic ``_gc_loop`` runs ``sweep`` every ``retention.interval``
+    seconds; this method is for a user who wants it *now*, or who wants to
+    reclaim disk space with ``--vacuum``.
+
+    Deleting rows does not shrink the database file — measured, deleting 94%
+    of the bus table left the file the same size (it grew, because of the
+    WAL). Only ``VACUUM`` reclaims space, by rewriting the whole file under
+    an exclusive lock. So the response carries before/after byte sizes so the
+    caller can report what was actually reclaimed, and a ``vacuum_ran`` flag.
+
+    Response keys::
+
+        {
+            "bus": int,              # rows deleted from the bus table
+            "jobs": int,             # finished jobs deleted
+            "touch": int,            # touch rows deleted (with their jobs)
+            "participants": int,     # dead participants deleted
+            "running_marked": int,   # stale running jobs marked crashed
+            "coverage": {            # retention floors *after* the sweep
+                "jobs_from": float | None,
+                "bus_from": float | None,
+            },
+            "db_bytes_before": int,   # file size before the sweep
+            "db_bytes_after": int,   # file size after everything
+            "vacuum_ran": bool,       # whether VACUUM was called
+        }
+    """
+    from theater.daemon.gc import sweep, vacuum
+
+    # Run the sweep even when retention.enabled is false: that setting governs
+    # the automatic loop, not an explicit user command. Refusing would surprise
+    # a user who typed `theater gc` expecting it to do something.
+    db_path = paths.db_path()
+    db_bytes_before = db_path.stat().st_size if db_path.exists() else 0
+
+    result = await sweep(
+        daemon.store,
+        daemon.config.retention,
+        live_handles=frozenset(daemon.jobs._events),
+    )
+
+    vacuum_ran = bool(params.get("vacuum", False))
+    if vacuum_ran:
+        # Vacuum after the sweep: vacuuming before would rewrite the file
+        # including rows about to be deleted.
+        vacuum(daemon.store)
+
+    db_bytes_after = db_path.stat().st_size if db_path.exists() else 0
+
+    return {
+        "bus": result.bus,
+        "jobs": result.jobs,
+        "touch": result.touch,
+        "participants": result.participants,
+        "running_marked": result.running_marked,
+        "coverage": _retention_floor(daemon),
+        "db_bytes_before": db_bytes_before,
+        "db_bytes_after": db_bytes_after,
+        "vacuum_ran": vacuum_ran,
+    }
 
 
 @method("shutdown")

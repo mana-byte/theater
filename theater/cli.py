@@ -93,6 +93,22 @@ def _add_name_parser(sub) -> None:
     name.add_argument("new_name", help="The new name.")
 
 
+def _add_gc_parser(sub) -> None:
+    """Register `theater gc`, extracted for the same reason as `models` and
+    `name`: ``_parser`` sits at the statement cap the linter enforces.
+    """
+    gc = sub.add_parser("gc", help="Sweep old data from the database now.")
+    gc.add_argument(
+        "--vacuum",
+        action="store_true",
+        help=(
+            "Rewrite the entire database file to reclaim disk space. "
+            "Takes an exclusive lock for the duration — the daemon blocks."
+        ),
+    )
+    gc.add_argument("--json", action="store_true")
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="theater",
@@ -214,6 +230,7 @@ def _parser() -> argparse.ArgumentParser:
 
     _add_models_parser(sub)
     _add_name_parser(sub)
+    _add_gc_parser(sub)
 
     stats = sub.add_parser(
         "stats", help="How turns have been ending, per harness."
@@ -637,6 +654,68 @@ def cmd_stats(args) -> int:
     return 0
 
 
+def _format_bytes(n: int) -> str:
+    """A human-readable byte count, because raw bytes are unreadable on a CLI."""
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(size) < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+def cmd_gc(args) -> int:
+    """Run a garbage-collection sweep now and report what was removed.
+
+    Deleting rows does not shrink the database file — only ``--vacuum``
+    does, by rewriting it under an exclusive lock. Without saying that, a
+    user who runs ``theater gc`` and checks ``ls -l theater.db`` will report
+    GC as broken.
+    """
+    data = call_sync("gc", vacuum=args.vacuum)
+    assert isinstance(data, dict)
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return 0
+
+    bus = data.get("bus", 0)
+    jobs = data.get("jobs", 0)
+    touch = data.get("touch", 0)
+    participants = data.get("participants", 0)
+    running_marked = data.get("running_marked", 0)
+    total = bus + jobs + touch + participants + running_marked
+
+    if total == 0:
+        print("nothing to collect — database is already within retention")
+    else:
+        print(f"collected: {bus} bus, {jobs} jobs, {touch} touch, "
+              f"{participants} participants, {running_marked} stale running marked")
+
+    coverage = data.get("coverage") or {}
+    print()
+    print(f"coverage: jobs from {_format_floor(coverage.get('jobs_from'))}")
+    print(f"          bus from {_format_floor(coverage.get('bus_from'))}")
+
+    before = data.get("db_bytes_before", 0)
+    after = data.get("db_bytes_after", 0)
+    print(f"\ndatabase: {_format_bytes(before)} -> {_format_bytes(after)}")
+
+    vacuum_ran = data.get("vacuum_ran", False)
+    if vacuum_ran:
+        reclaimed = before - after
+        if reclaimed > 0:
+            print(f"vacuum reclaimed {_format_bytes(reclaimed)}")
+        else:
+            print("vacuum ran — file size unchanged (nothing to reclaim)")
+    elif total > 0:
+        # The single most important line in this command: without it, a user
+        # who deleted 94% of the database and saw the file not shrink will
+        # report GC as broken.
+        print("file size unchanged — deleting rows does not shrink the file; "
+              "use `theater gc --vacuum` to reclaim space")
+    return 0
+
+
 def cmd_config(args) -> int:
     """Show the resolved settings, each tagged with where it came from.
 
@@ -900,6 +979,7 @@ _COMMANDS = {
     "adopt": cmd_adopt,
     "harnesses": cmd_harnesses,
     "stats": cmd_stats,
+    "gc": cmd_gc,
     "config": cmd_config,
     "models": cmd_models,
     "regie": cmd_regie,
