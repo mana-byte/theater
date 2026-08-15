@@ -29,6 +29,21 @@ on them with a timeout. The observer calls `JobManager.finish` when it detects
 turn-end, which sets the event. The caller wakes up, reads the result, and
 returns it as the MCP tool response.
 
+The multi-handle semantic
+-------------------------
+When multiple known handles are awaited, `await_jobs` returns as soon as ANY
+requested job becomes terminal — not when all of them do. This lets a fan-out
+caller react to the first result without blocking on the slowest sibling.
+If any requested job is already terminal at call entry, the method returns
+immediately. The returned list always contains the current state of every
+requested handle (including still-running jobs), in input order. Timeout
+behavior is unchanged: on timeout, every job's current state is returned,
+running jobs still running.
+
+Unknown handles are silently skipped at this layer — the RPC handler
+(``jobs.await``) rejects them with ``bad_request`` before reaching here, so
+``await_jobs`` only ever sees handles that exist.
+
 The touch accumulator
 ---------------------
 `recall` records which files each job touched, keyed by content hash so a
@@ -47,7 +62,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -349,22 +364,31 @@ class JobManager:
         finally:
             self._waits.pop(token, None)
 
-    async def await_jobs(
-        self, handles: list[str], max_wait: float = DEFAULT_MAX_WAIT
-    ) -> list[Job]:
-        """Wait for jobs to finish, up to max_wait seconds.
+    async def await_jobs(self, handles: list[str], max_wait: float = DEFAULT_MAX_WAIT) -> list[Job]:
+        """Wait until ANY of the requested jobs becomes terminal, or timeout.
 
-        Returns the current state of each job. Jobs that are still running
-        when the timeout expires are returned with state=running — the caller
-        decides whether to re-await.
+        Returns the current state of every requested handle, in input order.
+        If any requested job is already terminal at call entry, returns
+        immediately. Otherwise, waits until the first requested job finishes
+        (or ``max_wait`` expires), then returns all current states. Jobs that
+        are still running when the timeout expires are returned with
+        state=running — the caller decides whether to re-await.
+
+        Unknown handles are silently skipped here; the RPC layer rejects them
+        with ``bad_request`` before calling this method, so callers that go
+        through the socket never see a silent drop.
         """
-        events = []
+        # Partition into already-terminal (return immediately) vs. running
+        # (need to wait). An already-terminal job at entry means we return
+        # right away without waiting at all.
+        events: list[asyncio.Event] = []
         for h in handles:
             job = self.store.get_job(h)
             if job is None:
                 continue
             if job.state != JobState.RUNNING:
-                continue
+                # At least one requested job is already terminal — return now.
+                return [j for j in (self.store.get_job(h) for h in handles) if j is not None]
             event = self._events.get(h)
             if event is None:
                 # Lost the event (daemon restart). The job is running, so a
@@ -375,11 +399,21 @@ class JobManager:
             events.append(event)
 
         if events:
-            _done, pending = await asyncio.wait(
-                [asyncio.create_task(e.wait()) for e in events],
-                timeout=max_wait,
-            )
-            for task in pending:
-                task.cancel()
+            tasks = [asyncio.create_task(e.wait()) for e in events]
+            try:
+                await asyncio.wait(
+                    tasks,
+                    timeout=max_wait,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                for task in tasks:
+                    task.cancel()
+                # Await cancelled tasks so they don't leak as "Task was
+                # destroyed but it is pending" warnings. Cancelled tasks
+                # raise CancelledError on await; suppress them all.
+                for task in tasks:
+                    with suppress(asyncio.CancelledError):
+                        await task
 
         return [j for j in (self.store.get_job(h) for h in handles) if j is not None]

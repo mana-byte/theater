@@ -8,6 +8,8 @@ reaper or by calling the job manager, rather than by tailing transcripts.
 
 from __future__ import annotations
 
+import contextlib
+
 import pytest
 
 # ---- spawn creates a job ------------------------------------------------
@@ -228,3 +230,146 @@ def _fake_list_panes(output: str):
         return output
 
     return run
+
+
+# ---- await returns when ANY job finishes (first-completed semantic) -------
+
+
+async def test_await_returns_when_first_of_two_finishes(daemon):
+    """Two initially-running jobs: finishing one mid-await must return promptly.
+
+    The other job must remain ``running`` in the returned list. This proves
+    the FIRST_COMPLETED semantic: we do not block on the slowest sibling.
+    """
+    import asyncio
+
+    from theater.daemon.jobs import JobState
+
+    jm = daemon.jobs
+
+    # Two running jobs, no observer — finish is called manually.
+    jm.create(handle="h1", caller_id="cli", target_id="t1", kind="spawn")
+    jm.create(handle="h2", caller_id="cli", target_id="t2", kind="spawn")
+
+    async def finish_after(delay: float, handle: str) -> None:
+        await asyncio.sleep(delay)
+        jm.finish(handle, state=JobState.DONE, result=f"done {handle}")
+
+    # Start awaiting; concurrently finish h1 after a short delay.
+    # If await waited for ALL jobs, it would block for the full max_wait
+    # (5s here) because h2 never finishes.
+    task_finish = asyncio.create_task(finish_after(0.1, "h1"))
+    try:
+        jobs = await asyncio.wait_for(
+            jm.await_jobs(["h1", "h2"], max_wait=5.0),
+            timeout=2.0,
+        )
+    finally:
+        if not task_finish.done():
+            task_finish.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task_finish
+
+    by_handle = {j.handle: j for j in jobs}
+    assert len(jobs) == 2
+    # Input order preserved
+    assert [j.handle for j in jobs] == ["h1", "h2"]
+    assert by_handle["h1"].state == "done"
+    # The sibling was never finished — still running.
+    assert by_handle["h2"].state == "running"
+
+
+async def test_await_returns_immediately_when_one_already_terminal(daemon):
+    """One terminal + one running at call entry: return without waiting.
+
+    ``max_wait`` is large enough that if we blocked we'd notice; the point
+    is that we must NOT block at all.
+    """
+    import time
+
+    from theater.daemon.jobs import JobState
+
+    jm = daemon.jobs
+
+    jm.create(handle="h1", caller_id="cli", target_id="t1", kind="spawn")
+    jm.create(handle="h2", caller_id="cli", target_id="t2", kind="spawn")
+
+    # Finish h1 before awaiting — it is terminal at entry.
+    jm.finish("h1", state=JobState.DONE, result="already done")
+
+    start = time.monotonic()
+    jobs = await jm.await_jobs(["h1", "h2"], max_wait=5.0)
+    elapsed = time.monotonic() - start
+
+    by_handle = {j.handle: j for j in jobs}
+    assert len(jobs) == 2
+    assert [j.handle for j in jobs] == ["h1", "h2"]
+    assert by_handle["h1"].state == "done"
+    assert by_handle["h2"].state == "running"
+    # Returned near-instantly, not after max_wait.
+    assert elapsed < 1.0
+
+
+async def test_await_first_completed_still_returns_all_handles_in_order(daemon):
+    """Three jobs, finish the middle one: all three returned, input order."""
+    import asyncio
+
+    from theater.daemon.jobs import JobState
+
+    jm = daemon.jobs
+    jm.create(handle="a", caller_id="cli", target_id="t1", kind="spawn")
+    jm.create(handle="b", caller_id="cli", target_id="t2", kind="spawn")
+    jm.create(handle="c", caller_id="cli", target_id="t3", kind="spawn")
+
+    async def finish_b():
+        await asyncio.sleep(0.05)
+        jm.finish("b", state=JobState.DONE, result="b done")
+
+    t = asyncio.create_task(finish_b())
+    try:
+        jobs = await asyncio.wait_for(
+            jm.await_jobs(["a", "b", "c"], max_wait=5.0),
+            timeout=2.0,
+        )
+    finally:
+        if not t.done():
+            t.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await t
+
+    assert [j.handle for j in jobs] == ["a", "b", "c"]
+    states = {j.handle: j.state for j in jobs}
+    assert states["a"] == "running"
+    assert states["b"] == "done"
+    assert states["c"] == "running"
+
+
+async def test_await_single_running_job_timeout_still_works(daemon):
+    """The single-job case still times out and returns running."""
+    from theater.daemon.jobs import JobState
+
+    jm = daemon.jobs
+    jm.create(handle="solo", caller_id="cli", target_id="t1", kind="spawn")
+
+    jobs = await jm.await_jobs(["solo"], max_wait=0.05)
+    assert len(jobs) == 1
+    assert jobs[0].handle == "solo"
+    assert jobs[0].state == JobState.RUNNING
+
+
+async def test_await_unknown_handle_silently_skipped(daemon):
+    """await_jobs itself does not raise on unknown handles — the RPC layer does.
+
+    A None entry in the result list is filtered out, so an unknown handle
+    among known ones simply does not appear.
+    """
+    from theater.daemon.jobs import JobState
+
+    jm = daemon.jobs
+    jm.create(handle="known", caller_id="cli", target_id="t1", kind="spawn")
+    jm.finish("known", state=JobState.DONE, result="done")
+
+    jobs = await jm.await_jobs(["known", "ghost"], max_wait=0.05)
+    assert len(jobs) == 1
+    assert jobs[0].handle == "known"
+    assert jobs[0].state == "done"
