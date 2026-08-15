@@ -45,6 +45,10 @@ class Participant:
     status: Status = Status.IDLE
     last_activity: float = field(default_factory=now)
     created_at: float = field(default_factory=now)
+    # Runtime-only: populated by the Registry, never persisted. Must not be
+    # added to schema.py, store.upsert_participant, or from_row — the name
+    # is regenerated when the daemon restarts.
+    name: str | None = None
 
     @property
     def addressable(self) -> bool:
@@ -235,3 +239,15 @@ class NoSelfKill(TheaterError):
     """
 
     code = "no_self_kill"
+
+
+class NameTaken(TheaterError):
+    """A rename was attempted to a name another participant already holds.
+
+    Distinct from ``BadRequest`` (the name is malformed) and ``NotFound``
+    (the target does not exist): the name is valid and the target is real,
+    but it belongs to someone else. The caller should pick a different name
+    or rename the holder first.
+    """
+
+    code = "name_taken"

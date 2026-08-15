@@ -55,6 +55,15 @@ def clip_harness(harness: str | None, width: int = 11) -> str:
     return (harness or "-")[:width]
 
 
+def clip_name(name: str | None, width: int = 12) -> str:
+    """A participant's name may be up to 24 chars; the column is narrower.
+
+    Same clipping discipline as ``clip_harness``: one long name must not
+    shear every column after it.
+    """
+    return (name or "-")[:width]
+
+
 def event_stamp(ts: float | None) -> str:
     return time.strftime("%H:%M:%S", time.localtime(ts or 0))
 

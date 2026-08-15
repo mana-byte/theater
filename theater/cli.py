@@ -26,6 +26,7 @@ from theater.client import DaemonClient, call_sync
 from theater.formatting import (
     TIER_LEGEND,
     clip_harness,
+    clip_name,
     event_stamp,
     event_summary,
     event_who,
@@ -77,6 +78,19 @@ def _add_models_parser(sub) -> None:
         ),
     )
     models.add_argument("--json", action="store_true")
+
+
+def _add_name_parser(sub) -> None:
+    """Register `theater name` and `theater kill`, extracted for the same
+    reason as `models`: ``_parser`` sits at the statement cap the linter
+    enforces.
+    """
+    kill = sub.add_parser("kill", help="Kill a participant's pane.")
+    kill.add_argument("id", help="Participant id or name.")
+
+    name = sub.add_parser("name", help="Rename a participant.")
+    name.add_argument("target", help="Participant id or current name.")
+    name.add_argument("new_name", help="The new name.")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -169,9 +183,6 @@ def _parser() -> argparse.ArgumentParser:
     bus.add_argument("--json", action="store_true", help="One JSON object per line.")
     bus.add_argument("--interval", type=float, default=0.4, help="Seconds per poll.")
 
-    kill = sub.add_parser("kill", help="Kill a participant's pane.")
-    kill.add_argument("id")
-
     adopt = sub.add_parser(
         "adopt",
         help="Adopt the pane you are running in as a Theater participant.",
@@ -202,6 +213,7 @@ def _parser() -> argparse.ArgumentParser:
     conf.add_argument("--json", action="store_true")
 
     _add_models_parser(sub)
+    _add_name_parser(sub)
 
     stats = sub.add_parser(
         "stats", help="How turns have been ending, per harness."
@@ -262,6 +274,7 @@ def _row_line(p: dict, indent: int = 0) -> str:
     pad = "  " * indent
     return (
         f"{p['id']:<14}{tier_mark(p['tier'])}{reach_mark(p['addressable'])} "
+        f"{clip_name(p.get('name')):<12} "
         f"{harness_icon(p.get('harness'))} "
         f"{clip_harness(p.get('harness')):<11} "
         f"{p['status']:<15} {p.get('tmux_pane') or '-':<6} {pad}{tilde(p.get('cwd'))}"
@@ -272,7 +285,10 @@ def _format_ls(rows: list[dict], *, tree: bool, unmanaged: list[dict] | None = N
     if not rows and not unmanaged:
         return "no participants"
     body = flatten_tree(rows, _row_line) if tree else [_row_line(r) for r in rows]
-    header = f"{'ID':<14}{'T':<2}   {'HARNESS':<11} {'STATUS':<15} {'PANE':<6} DIRECTORY"
+    header = (
+        f"{'ID':<14}{'T':<2} {'NAME':<12}   "
+        f"{'HARNESS':<11} {'STATUS':<15} {'PANE':<6} DIRECTORY"
+    )
     lines = [header, *body]
     if unmanaged:
         lines.append("")
@@ -282,7 +298,7 @@ def _format_ls(rows: list[dict], *, tree: bool, unmanaged: list[dict] | None = N
             pane = u.get("pane") or "-"
             icon = harness_icon(u.get("harness") or u.get("command"))
             lines.append(
-                f"  {'-':<12}{'?':<2} {icon} {cmd:<11} "
+                f"  {'-':<12}{'?':<2} {'-':<12} {icon} {cmd:<11} "
                 f"{'-':<15} {pane:<6} {tilde(u.get('cwd'))}"
             )
     lines.extend(["", TIER_LEGEND])
@@ -443,6 +459,13 @@ def cmd_bus(args) -> int:
 def cmd_kill(args) -> int:
     call_sync("participant.kill", id=args.id)
     print(f"killed {args.id}")
+    return 0
+
+
+def cmd_name(args) -> int:
+    record = call_sync("participant.rename", id=args.target, name=args.new_name)
+    assert isinstance(record, dict)
+    print(f"renamed {args.target} -> {record.get('name')}")
     return 0
 
 
@@ -835,6 +858,7 @@ _COMMANDS = {
     "bus": cmd_bus,
     "spawn": cmd_spawn,
     "kill": cmd_kill,
+    "name": cmd_name,
     "adopt": cmd_adopt,
     "harnesses": cmd_harnesses,
     "stats": cmd_stats,

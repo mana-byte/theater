@@ -17,6 +17,7 @@ from theater.protocol import RemoteError
 
 ROW = {
     "id": "p-abc123",
+    "name": "Arlequin",
     "tier": "spawned",
     "addressable": True,
     "harness": "vibe",
@@ -93,6 +94,25 @@ def test_an_empty_registry_says_so_rather_than_printing_a_bare_header():
 def test_the_legend_explains_the_marks():
     out = cli._format_ls([ROW], tree=False)
     assert "S spawned" in out and "not addressable" in out
+
+
+def test_the_name_column_appears_in_the_header_and_row():
+    out = cli._format_ls([ROW], tree=False)
+    lines = out.splitlines()
+    assert "NAME" in lines[0]
+    assert "Arlequin" in lines[1]
+
+
+def test_an_unmanaged_row_shows_a_dash_in_the_name_cell():
+    out = cli._format_ls(
+        [ROW],
+        tree=False,
+        unmanaged=[{"pane": "%9", "command": "vibe", "cwd": "/tmp/other"}],
+    )
+    lines = out.splitlines()
+    name_col = lines[0].index("NAME")
+    unmanaged_line = next(ln for ln in lines if "%9" in ln)
+    assert unmanaged_line[name_col] == "-"
 
 
 def test_watch_and_json_cannot_be_combined():
@@ -535,6 +555,15 @@ def test_kill_names_what_it_killed(answers, capsys):
     assert cli.cmd_kill(parse("kill", "p-abc123")) == 0
     assert answers["calls"] == [("participant.kill", {"id": "p-abc123"})]
     assert "killed p-abc123" in capsys.readouterr().out
+
+
+def test_name_command_calls_rename_and_prints_the_result(answers, capsys):
+    answers["replies"] = {"participant.rename": {**ROW, "name": "Pierrot"}}
+    assert cli.cmd_name(parse("name", "Arlequin", "Pierrot")) == 0
+    assert answers["calls"] == [
+        ("participant.rename", {"id": "Arlequin", "name": "Pierrot"})
+    ]
+    assert "Pierrot" in capsys.readouterr().out
 
 
 def test_bus_with_no_events_says_so(answers, capsys):

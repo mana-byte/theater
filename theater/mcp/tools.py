@@ -60,6 +60,7 @@ def _summarise(p: dict) -> dict:
     """
     return {
         "id": p["id"],
+        "name": p["name"],
         "harness": p["harness"],
         "tier": p["tier"],
         "status": p["status"],

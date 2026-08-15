@@ -778,3 +778,45 @@ async def test_harnesses_reports_install_state(client, monkeypatch):
 async def test_harnesses_is_sorted_so_callers_need_not_re_sort(client):
     rows = await client.call("harnesses")
     assert [r["name"] for r in rows] == sorted(r["name"] for r in rows)
+
+
+# ---- runtime names --------------------------------------------------------
+
+
+async def test_rename_over_rpc(client, fake_tmux):
+    record = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    assert record["name"] is not None
+
+    renamed = await client.call("participant.rename", id=record["id"], name="Truffaldino")
+    assert renamed["name"] == "Truffaldino"
+
+    fetched = await client.call("participants.get", id=record["id"])
+    assert fetched["name"] == "Truffaldino"
+
+
+async def test_rename_rejects_taken_name_over_rpc(client, fake_tmux):
+    a = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    b = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    with pytest.raises(RemoteError) as exc:
+        await client.call("participant.rename", id=b["id"], name=a["name"])
+    assert exc.value.code == "name_taken"
+
+
+async def test_send_addressed_by_name_reaches_the_right_target(client, fake_tmux):
+    target = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    job = await client.call("send", target=target["name"], prompt="hello by name")
+    assert job["state"] == "running"
+    assert job["target_id"] == target["id"]
+    assert len(fake_tmux.sent) == 1
+    assert fake_tmux.sent[0] == ("%1", "hello by name")
+
+
+async def test_kill_addressed_by_name_puts_id_in_explicit_kills(client, fake_tmux, daemon):
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+    name = record["name"]
+
+    await client.call("participant.kill", id=name)
+
+    assert record["id"] not in daemon._explicit_kills
+    dead = await client.call("participants.get", id=record["id"])
+    assert dead["status"] == "dead"
