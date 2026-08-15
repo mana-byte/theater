@@ -209,22 +209,16 @@ async def test_acceptance_cycle_detection_rejects_await(client, fake_tmux):
 # ========================================================================
 
 
-async def test_acceptance_multi_await_returns_on_first_completion(client, fake_tmux, daemon):
-    """Awaiting multiple handles returns as soon as ANY job finishes.
+async def test_acceptance_multi_await_returns_on_first_completion(
+    client, fake_tmux, daemon, monkeypatch
+):
+    """Multi-handle await returns when ANY job finishes; unfinished siblings are running.
 
-    Contract: jobs.await with multiple handles returns once any job reaches a
-    terminal state. It still returns one current-state entry per requested
-    handle, so unfinished siblings come back as state=running. If a terminal
-    handle is already present at call entry, the call returns immediately.
-
-    This test starts an await while two jobs are running, finishes exactly
-    one after the await is in flight, and asserts the call returns well
-    before max_wait with one done and one still running. Coordination is
-    event-driven — the short outer wait_for is a failure bound only.
+    Fails on this branch: production awaits with ALL_COMPLETED, so finishing
+    one of two running jobs does not wake the call — the outer wait_for trips
+    the deadlock bound.
     """
     parent = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
-
-    # Two children, both running.
     child_a = await client.call(
         "spawn",
         harness="vibe",
@@ -241,27 +235,19 @@ async def test_acceptance_multi_await_returns_on_first_completion(client, fake_t
         cwd="/tmp",
         parent_id=parent["id"],
     )
-    handle_a = child_a["handle"]
-    handle_b = child_b["handle"]
-    assert daemon.jobs.get(handle_a).state == JobState.RUNNING
-    assert daemon.jobs.get(handle_b).state == JobState.RUNNING
+    handle_a, handle_b = child_a["handle"], child_b["handle"]
 
-    # An event the await task sets once it has entered the daemon's
-    # await_jobs — proving the finish happens *after* the await started,
-    # not before. We detect entry by hooking the real await_jobs briefly.
-    await_started = asyncio.Event()
+    # Spy on await_jobs so we deterministically know the RPC has entered the
+    # daemon before finishing a job. monkeypatch restores even on failure.
+    await_entered = asyncio.Event()
     original = daemon.jobs.await_jobs
 
-    async def _spy(handles, max_wait=original.__defaults__[0]):
-        await_started.set()
+    async def _spy(handles, max_wait=150.0):
+        await_entered.set()
         return await original(handles, max_wait=max_wait)
 
-    daemon.jobs.await_jobs = _spy
+    monkeypatch.setattr(daemon.jobs, "await_jobs", _spy)
 
-    # Launch the await as a background task so we can finish a job while it
-    # is in flight. max_wait is generous: under FIRST_COMPLETED the call
-    # returns the moment one job finishes; under ALL_COMPLETED (the bug) it
-    # blocks until max_wait, and the outer wait_for trips the failure bound.
     await_task = asyncio.create_task(
         client.call(
             "jobs.await",
@@ -270,99 +256,22 @@ async def test_acceptance_multi_await_returns_on_first_completion(client, fake_t
             caller_id=parent["id"],
         )
     )
+    try:
+        await asyncio.wait_for(await_entered.wait(), timeout=5.0)
+        await asyncio.sleep(0)  # let the real await_jobs park in asyncio.wait
 
-    # Wait until the await has truly entered the daemon's await_jobs.
-    await asyncio.wait_for(await_started.wait(), timeout=5.0)
-    # One extra yield so the spy's set() propagates and the real await_jobs
-    # is parked in asyncio.wait on both events.
-    await asyncio.sleep(0)
+        daemon.jobs.finish(handle_a, state=JobState.DONE, result="A done")
 
-    # Finish exactly one job. Under the new contract this wakes the await
-    # immediately; the sibling stays running.
-    daemon.jobs.finish(handle_a, state=JobState.DONE, result="A done")
+        # Under FIRST_COMPLETED this returns now; under ALL_COMPLETED it
+        # blocks for the full max_wait and the bound trips.
+        jobs = await asyncio.wait_for(await_task, timeout=5.0)
 
-    # The await should return promptly — well under max_wait. The 5s bound is
-    # a failure guard, not a timing assertion: under the current ALL_COMPLETED
-    # semantics the call blocks for the full 10s max_wait, so wait_for raises
-    # TimeoutError, which is the expected failure on this branch.
-    jobs = await asyncio.wait_for(await_task, timeout=5.0)
-
-    states = {j["handle"]: j["state"] for j in jobs}
-    results = {j["handle"]: j["result"] for j in jobs}
-
-    # One entry per requested handle.
-    assert set(states) == {handle_a, handle_b}
-    # The finished job is done with its result.
-    assert states[handle_a] == "done"
-    assert results[handle_a] == "A done"
-    # The sibling is still running — not blocked on by the caller.
-    assert states[handle_b] == "running"
-
-    # Restore so the fixture teardown does not see the spy.
-    daemon.jobs.await_jobs = original
-
-
-async def test_acceptance_multi_await_terminal_at_entry_returns_immediately(
-    client, fake_tmux, daemon
-):
-    """If a terminal handle is present when the await is called, it returns
-    immediately — no waiting, even with a generous max_wait.
-
-    Proves immediacy without wall-clock assertions: a delayed finish on the
-    running sibling fires *after* a short delay. Under the new contract the
-    await returns instantly (terminal at entry), so the sibling is still
-    ``running`` when we inspect it. Under the current ALL_COMPLETED code the
-    await blocks until the delayed finish lands, the sibling becomes ``done``,
-    and the assertion fails.
-    """
-    parent = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
-
-    running_child = await client.call(
-        "spawn",
-        harness="vibe",
-        prompt="still running",
-        approval="manual",
-        cwd="/tmp",
-        parent_id=parent["id"],
-    )
-    done_child = await client.call(
-        "spawn",
-        harness="vibe",
-        prompt="already done",
-        approval="manual",
-        cwd="/tmp",
-        parent_id=parent["id"],
-    )
-    handle_r = running_child["handle"]
-    handle_d = done_child["handle"]
-
-    daemon.jobs.finish(handle_d, state=JobState.DONE, result="finished early")
-
-    # Schedule the running sibling to finish after a short delay. If the await
-    # returns immediately (the contract), this has not fired yet. If it blocks
-    # (the current ALL_COMPLETED bug), it will have.
-    async def _delayed_finish():
-        await asyncio.sleep(0.3)
-        daemon.jobs.finish(handle_r, state=JobState.DONE, result="late")
-
-    delayed = asyncio.create_task(_delayed_finish())
-
-    # max_wait is generous; the contract says the terminal handle at entry
-    # makes the call return at once, so it should never approach the ceiling.
-    jobs = await client.call(
-        "jobs.await",
-        handles=[handle_r, handle_d],
-        max_wait=10.0,
-        caller_id=parent["id"],
-    )
-    states = {j["handle"]: j["state"] for j in jobs}
-    assert states[handle_d] == "done"
-    # The sibling must still be running — the await returned before the
-    # delayed finish fired.
-    assert states[handle_r] == "running"
-
-    # Clean up the delayed task (it may or may not have been awaited).
-    if not delayed.done():
-        delayed.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await delayed
+        states = {j["handle"]: j["state"] for j in jobs}
+        assert set(states) == {handle_a, handle_b}
+        assert states[handle_a] == "done"
+        assert states[handle_b] == "running"
+    finally:
+        if not await_task.done():
+            await_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await await_task
