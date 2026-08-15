@@ -83,6 +83,7 @@ import sqlite3
 import subprocess
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 from theater.harness.base import (
     APPROVALS,
@@ -312,7 +313,7 @@ def _paths_from_tool(name: str, state: dict, cwd: str | None) -> tuple[EventPath
     rel = _relativise(raw, cwd)
     if rel is None:
         return ()
-    mode = "write" if name in _WRITE_TOOLS else "read"
+    mode: Literal["read", "write"] = "write" if name in _WRITE_TOOLS else "read"
     return (EventPath(path=rel, mode=mode),)
 
 

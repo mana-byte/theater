@@ -480,7 +480,8 @@ class CodexObserver(TranscriptObserver):
                 # not prose or a shell command — extracting paths from them is
                 # reading a structured field. Other custom tools (exec, wait)
                 # take freeform strings whose contents are code — those yield nothing.
-                paths = _apply_patch_paths(payload.get("input"))
+                raw_input = payload.get("input")
+                paths = _apply_patch_paths(raw_input if isinstance(raw_input, str) else "")
             return [
                 Event(
                     kind=EventKind.TOOL_CALL,

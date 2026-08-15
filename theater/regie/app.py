@@ -27,6 +27,7 @@ async daemon calls; the app runs them as background workers.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from pathlib import Path
 from typing import ClassVar
@@ -412,10 +413,8 @@ class TreePanel(VerticalScroll):
         key = self._lines_data[cursor][2]
         widget = self._key_widgets.get(key)
         if widget is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self.scroll_to_widget(widget)
-            except Exception:
-                pass
 
 
 class RegieApp(App):

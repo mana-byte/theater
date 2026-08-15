@@ -23,8 +23,6 @@ resolved natively by Textual against the active theme.
 
 from __future__ import annotations
 
-from typing import TypeAlias
-
 from textual.content import Content
 
 from theater.formatting import short_id, tilde
@@ -32,7 +30,7 @@ from theater.harness import harness_icon
 
 #: A stable row identity for widget reconciliation. The first element
 #: namespaces the row kind so a pane id and a participant id never collide.
-Key: TypeAlias = tuple[str, str]
+type Key = tuple[str, str]
 
 #: Braille spinner frames, matching vibe exactly. U+28xx is unambiguously
 #: narrow in every terminal, unlike the harness icons.
