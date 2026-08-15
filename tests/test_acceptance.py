@@ -19,6 +19,9 @@ tmux is stubbed, but everything above that boundary is real.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+
 import pytest
 
 from theater.daemon.jobs import JobState
@@ -199,3 +202,76 @@ async def test_acceptance_cycle_detection_rejects_await(client, fake_tmux):
 # ========================================================================
 # 7. Bus records the full story
 # ========================================================================
+
+
+# ========================================================================
+# 8. Multi-handle await returns on FIRST completion
+# ========================================================================
+
+
+async def test_acceptance_multi_await_returns_on_first_completion(
+    client, fake_tmux, daemon, monkeypatch
+):
+    """Multi-handle await returns when ANY job finishes; unfinished siblings are running.
+
+    Fails on this branch: production awaits with ALL_COMPLETED, so finishing
+    one of two running jobs does not wake the call — the outer wait_for trips
+    the deadlock bound.
+    """
+    parent = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    child_a = await client.call(
+        "spawn",
+        harness="vibe",
+        prompt="task A",
+        approval="manual",
+        cwd="/tmp",
+        parent_id=parent["id"],
+    )
+    child_b = await client.call(
+        "spawn",
+        harness="vibe",
+        prompt="task B",
+        approval="manual",
+        cwd="/tmp",
+        parent_id=parent["id"],
+    )
+    handle_a, handle_b = child_a["handle"], child_b["handle"]
+
+    # Spy on await_jobs so we deterministically know the RPC has entered the
+    # daemon before finishing a job. monkeypatch restores even on failure.
+    await_entered = asyncio.Event()
+    original = daemon.jobs.await_jobs
+
+    async def _spy(handles, max_wait=150.0):
+        await_entered.set()
+        return await original(handles, max_wait=max_wait)
+
+    monkeypatch.setattr(daemon.jobs, "await_jobs", _spy)
+
+    await_task = asyncio.create_task(
+        client.call(
+            "jobs.await",
+            handles=[handle_a, handle_b],
+            max_wait=10.0,
+            caller_id=parent["id"],
+        )
+    )
+    try:
+        await asyncio.wait_for(await_entered.wait(), timeout=5.0)
+        await asyncio.sleep(0)  # let the real await_jobs park in asyncio.wait
+
+        daemon.jobs.finish(handle_a, state=JobState.DONE, result="A done")
+
+        # Under FIRST_COMPLETED this returns now; under ALL_COMPLETED it
+        # blocks for the full max_wait and the bound trips.
+        jobs = await asyncio.wait_for(await_task, timeout=5.0)
+
+        states = {j["handle"]: j["state"] for j in jobs}
+        assert set(states) == {handle_a, handle_b}
+        assert states[handle_a] == "done"
+        assert states[handle_b] == "running"
+    finally:
+        if not await_task.done():
+            await_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await await_task
