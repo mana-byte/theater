@@ -34,7 +34,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from theater.daemon.schema import bus, jobs, participants
+from theater.daemon.schema import bus, jobs, meta, participants
 from theater.models import Job, Participant, Status, now
 
 MIGRATIONS = Path(__file__).parent / "migrations"
@@ -45,7 +45,7 @@ BASELINE = "0001"
 #: The latest revision. A legacy database is stamped at BASELINE and then
 #: upgraded to this; a fresh database lands here directly. Tests assert
 #: against this rather than hardcoding a revision string.
-HEAD = "0002"
+HEAD = "0003"
 
 
 def _set_pragmas(dbapi_connection, _record) -> None:
@@ -286,6 +286,33 @@ class Store:
             if seq.isdigit():
                 best = max(best, int(seq))
         return best
+
+    # ---- meta -----------------------------------------------------------
+
+    def get_meta(self, key: str) -> str | None:
+        row = self.conn.execute(select(meta.c.value).where(meta.c.key == key)).first()
+        return row[0] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        stmt = sqlite_insert(meta).values(key=key, value=value)
+        self.conn.execute(
+            stmt.on_conflict_do_update(
+                index_elements=[meta.c.key],
+                set_={"value": value},
+            )
+        )
+
+    def get_send_seq(self) -> int:
+        raw = self.get_meta("send_seq")
+        if raw is None:
+            return 0
+        try:
+            return int(raw)
+        except ValueError:
+            return 0
+
+    def set_send_seq(self, value: int) -> None:
+        self.set_meta("send_seq", str(value))
 
     # ---- metrics --------------------------------------------------------
 

@@ -248,7 +248,7 @@ theater bus --json              # one JSON object per line
 How turns have been ending, per harness:
 
 ```sh
-theater stats                   # all of history
+theater stats                   # all retained history
 theater stats --window 24       # only turns started in the last 24 hours
 theater stats --json
 ```
@@ -270,6 +270,41 @@ jobs.
 Sends refused before delivery — a human at the pane, a target already busy, a
 target with no pane — are counted underneath. They leave no job behind, so they
 are recorded as `send.refused` on the bus.
+
+Underneath both is a coverage line naming the oldest row each half of the table
+was computed from:
+
+```
+coverage: jobs from 2026-06-16 09:12
+          bus from 2026-08-08 09:12
+```
+
+Retention is finite, so "all of history" is never true and the two halves are
+retained for different spans — the turn counts and the refused counts do not
+reach back equally far. Asking for a `--window` that starts before a floor is
+not an error; the answer simply begins where the data does, and says so.
+
+### `theater gc`
+
+Sweep old rows out of the database now, rather than waiting for the hourly loop:
+
+```sh
+theater gc                      # sweep bus, jobs, touch and dead participants
+theater gc --vacuum             # sweep, then rewrite the file to reclaim space
+theater gc --json
+```
+
+The daemon does this on its own — the settings are under `[retention]` and it is
+on by default. This command exists for the moment you want the space back now.
+
+Deleting rows does not shrink the file. SQLite keeps the freed pages and reuses
+them, so `theater gc` alone reports the same size before and after, and says so
+rather than letting you conclude it did nothing. `--vacuum` rewrites the whole
+file under an exclusive lock — the daemon blocks for the duration — and is the
+only thing that returns space to the filesystem. On a 31.5 MB database that had
+just been swept, it gave back 22.9 MB. It is never run in the background for
+that reason: an hourly lock over a growing file is a worse problem than a large
+file.
 
 ### `theater regie`
 
@@ -354,6 +389,15 @@ sync_interval          = 1.0
 relocate_timeout       = 5.0
 awaiting_input_timeout = 10.0
 rescue_timeout         = 60.0
+
+[retention]               # how long the database keeps things; on by default
+enabled            = true
+interval           = 3600.0   # seconds between sweeps
+batch              = 5000     # rows per DELETE, so a sweep never blocks the loop
+bus_days           = 7        # bus events; `send.refused` is exempt
+jobs_days          = 60       # finished jobs and their touch rows — recall's reach
+refused_cap        = 10000    # `send.refused` rows kept, oldest dropped first
+stale_running_days = 7        # when a job orphaned by a daemon crash is closed
 
 [harness]
 disabled = []             # plugin names to leave out of the registry

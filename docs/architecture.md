@@ -145,6 +145,8 @@ every other process reaches it over the unix socket.
 | `participants` | the registry: id, harness, tier, pane, cwd, branch, parent, status |
 | `jobs` | one row per unit of delegated work, keyed by handle |
 | `bus` | append-only activity feed |
+| `touch` | which paths each job changed, and the shas it moved them between |
+| `meta` | small key/value durable state — currently the send-sequence counter |
 | `budgets` | per-tree accounting — created, not yet used |
 
 The store is **synchronous on purpose**. Every call is a local SQLite
@@ -182,6 +184,49 @@ revision rather than rebuilt: legacy files have exactly one possible shape,
 stamping is therefore truthful, and it keeps the live pane-to-participant
 mapping across the upgrade instead of making the daemon forget every running
 pane.
+
+### Retention (v2.1)
+
+Four of those tables grow with use and none of them shrank. Measured on a real
+machine over 4.26 days: `bus` was **94.2%** of a 32 MB file, growing 7.1 MB/day.
+Jobs were 3.4%, participants 0.16%, touch 0.06%. The bus is the fire; everything
+else is rounding. So retention is age-based and on by default (`[retention]`,
+swept hourly by `_gc_loop`), because a database that is only bounded for users
+who found the setting is not bounded.
+
+The spans differ because the value of a row does. Bus events are a feed the
+régie reads forward through a cursor, and nothing reads a week-old one — 7 days.
+Finished jobs and their `touch` rows are what `recall` reaches back through —
+60 days, past which the code has moved, the branches are merged and the harness
+transcript is usually gone from disk anyway. `send.refused` is exempt from the
+age sweep and capped by count instead: it is the only record that a send was
+refused, and at ~3/day the cap is a century of headroom.
+
+Three things make it safe:
+
+- **Jobs are filtered on `finished_at`, never `created_at`.** A running job has
+  `finished_at = NULL`, and `NULL < x` is never true in SQL, so no sweep can
+  delete a job a caller is still awaiting.
+- **The send-sequence counter lives in `meta`.** It used to be re-seeded from
+  `MAX(jobs)` at every start; once old jobs can be deleted that regresses the
+  counter and re-mints handles the pruned jobs already used, silently corrupting
+  recall. Persisting it is the prerequisite that made job deletion shippable.
+- **Deletes are batched** (`batch = 5000`). The store is synchronous on the
+  event loop — see above, and this is where that stops being free. One
+  unbatched `DELETE` of 32,217 rows blocks every status poll and every await
+  for its duration; batched, the worst measured stall was 35 ms.
+
+Dead participants are deleted only when nothing references them — no job as
+target or caller, no surviving participant as parent. That gate means they
+become collectable as a consequence of the job sweep rather than on a timer of
+their own, and it is why `recall` never joins to a row that is gone.
+
+`VACUUM` is not run in the background at any interval. It rewrites the whole
+file under an exclusive lock, and an hourly lock over a growing file is a worse
+problem than a large file; it is `theater gc --vacuum`, on purpose and by hand.
+Ordinary deletion leaves the file the same size — SQLite reuses the freed pages
+— so both the CLI and this paragraph say so, because the alternative is a user
+concluding GC is broken.
 
 The bus is an activity feed, not an archive. Event text is clipped at
 `MAX_TEXT = 2000` chars, because a single tool result is routinely 25 KB and
@@ -526,6 +571,7 @@ theater/
 │   ├── registry.py 233   tier assignment, pane eviction, lineage
 │   ├── store.py 276      SQLite over SQLAlchemy Core, synchronous on purpose
 │   ├── jobs.py 181       JobManager, asyncio.Event per handle
+│   ├── gc.py 357         the retention sweep: bus, jobs+touch, participants
 │   ├── worktree.py 158   git worktree per child, branch theater/<child-id>
 │   ├── spawner.py 145    LaunchPlan → tmux window
 │   ├── rails.py 144      depth / cycle / budget
