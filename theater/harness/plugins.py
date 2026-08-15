@@ -40,15 +40,12 @@ from theater.harness.observation import HarnessObserver
 
 logger = logging.getLogger("theater.harness.plugins")
 
-#: Synthetic module names are prefixed so a plugin can never take the import
-#: slot of a real module — see the loading note in the module docstring. The
-#: source is part of the name too, so a local `vibe.py` overriding the shipped
-#: one does not evict the module the shipped instance came from.
+#: Prefixed so a plugin can never take the import slot of a real module. The
+#: source is in the name too, so a local override does not evict the shipped one.
 MODULE_PREFIX = "theater_harness_plugin_"
 
-#: Where a plugin came from. Reported by `theater harnesses`, because "why is
-#: this harness behaving unexpectedly" is usually answered by "not the file you
-#: think".
+#: Where a plugin came from. "Why is this harness behaving unexpectedly" is
+#: usually answered by "not the file you think".
 SHIPPED = "shipped"
 LOCAL = "local"
 
@@ -125,10 +122,9 @@ def _load_one(path: Path, source: str) -> Harness:
         raise PluginError(f"{path}: not loadable as a Python module")
 
     module = importlib.util.module_from_spec(spec)
-    # Registered before execution, not after: dataclasses and
-    # `typing.get_type_hints` resolve annotations by looking the module up in
-    # sys.modules, and a plugin that uses either would fail on its own import
-    # line with an error naming neither.
+    # Registered before execution: dataclasses and `typing.get_type_hints`
+    # resolve annotations via sys.modules, and a plugin using either would fail
+    # on its own import line otherwise.
     sys.modules[module_name] = module
     try:
         spec.loader.exec_module(module)

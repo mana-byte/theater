@@ -127,15 +127,10 @@ class HarnessObserver(ABC):
     without going near the user's real home directory.
     """
 
-    #: Whether this harness can be observed by *reading* rather than by looking
-    #: at the rendered screen. True means `open_source` returns something that
-    #: reports real turns. False means there is nothing to read at all and the
-    #: reducer falls back to `capture-pane`, ending a turn when the prompt comes
-    #: back — a much weaker signal, and the only reason it exists is that some
-    #: CLIs keep no history anywhere.
-    #:
-    #: Not a preference. It is a statement about what this adapter can do, and
-    #: it selects which watch loop the reducer runs.
+    #: True means `open_source` reports real turns. False means there is nothing
+    #: to read and the reducer falls back to `capture-pane`, ending a turn when
+    #: the prompt comes back — a much weaker signal. Not a preference: it
+    #: selects which watch loop the reducer runs.
     has_transcript: bool = True
 
     def open_source(
