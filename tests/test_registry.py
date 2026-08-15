@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from theater.daemon.registry import Registry
 from theater.models import BadRequest, NameTaken, NotFound, Status, Tier
 
 
@@ -236,26 +237,17 @@ def test_rename_by_current_name(registry):
 
 
 def test_mark_dead_releases_name_for_reuse(registry):
-    """A dead participant's name is freed so a new participant can take it."""
-    from theater import names as names_mod
-
+    """A dead participant's name is freed so a successor can take it."""
     a = registry.register(harness="vibe", pane="%1", cwd="/tmp")
-    old_name = a.name
+    fixed = "Truffaldino"
+    registry.rename(a.id, fixed)
     registry.mark_dead(a.id)
-
-    # The dead participant no longer holds its name in _names.
     assert a.id not in registry._names
 
-    # Create enough new participants to force a collision with the old name.
-    # With the name released, one of the new participants will pick it up
-    # rather than skipping it as "taken".
-    created = []
-    for _ in range(len(names_mod.MASKS) + 5):
-        p = registry.register(harness="vibe", pane=None, cwd="/tmp")
-        created.append(p)
-        if p.name == old_name:
-            break
-    assert any(p.name == old_name for p in created)
+    successor = registry.register(harness="vibe", pane="%2", cwd="/tmp")
+    registry.rename(successor.id, fixed)
+
+    assert registry.resolve(fixed).id == successor.id
 
 
 def test_dead_participant_returned_by_id_has_name_none(registry):
@@ -306,13 +298,12 @@ def test_set_status_dead_emits_canonical_dead_event(registry):
 def test_mark_dead_on_already_dead_cleans_stale_entry(registry):
     """Calling mark_dead on an already-dead participant purges stale names."""
     p = registry.register(harness="vibe", pane="%1", cwd="/tmp")
-    # Simulate a stale mapping left behind by a direct store write.
     registry._names[p.id] = p.name
     registry.store.set_status(p.id, Status.DEAD)
-    assert p.id in registry._names  # stale entry exists
+    assert p.id in registry._names
 
     registry.mark_dead(p.id)
-    assert p.id not in registry._names  # cleaned
+    assert p.id not in registry._names
 
 
 def test_mark_dead_on_missing_participant_cleans_stale_entry(registry):
@@ -324,15 +315,12 @@ def test_mark_dead_on_missing_participant_cleans_stale_entry(registry):
 
 
 def test_direct_store_dead_self_heals_on_read(registry):
-    """A participant killed via Store.set_status (bypassing the registry)
-    gets its stale name entry purged on the next _named call."""
+    """A participant killed via Store.set_status gets its stale name purged on read."""
     p = registry.register(harness="vibe", pane="%1", cwd="/tmp")
     assert p.id in registry._names
 
-    # Kill it directly through the store, bypassing the registry.
     registry.store.set_status(p.id, Status.DEAD)
 
-    # _named self-heals: the stale mapping is purged, name is None.
     fetched = registry.get(p.id)
     assert fetched.name is None
     assert p.id not in registry._names
@@ -347,45 +335,41 @@ def test_rename_dead_participant_by_id_raises_bad_request(registry):
 
 
 def test_revival_lazy_naming(registry):
-    """A participant revived (set back to non-DEAD status) gets a fresh name
-    on the next read via lazy naming."""
+    """A participant revived via registry.set_status gets a fresh name on read."""
     p = registry.register(harness="vibe", pane="%1", cwd="/tmp")
     registry.mark_dead(p.id)
     assert registry.get(p.id).name is None
 
-    # Revive through the store.
-    registry.store.set_status(p.id, Status.IDLE)
+    registry.set_status(p.id, Status.IDLE)
     revived = registry.get(p.id)
     assert revived.name is not None
     assert revived.id in registry._names
 
 
-def test_fresh_registry_with_many_dead_rows_not_exhausting_masks(registry):
-    """A fresh Registry over a store with 100+ historical dead rows can still
-    assign bare mask names to new participants, proving dead names are released."""
+def test_fresh_registry_with_many_dead_rows_not_exhausting_masks(registry, store):
+    """A fresh Registry over a store with 100+ historical dead rows does not
+    name dead rows on startup materialization and can still assign bare masks."""
     from theater import names as names_mod
 
-    # Populate the store with 120 dead participants, bypassing the registry's
-    # _named so we control exactly what is in _names (nothing).
     for i in range(120):
         p = registry.register(harness="vibe", pane=f"%{i + 1}", cwd="/tmp")
         registry.mark_dead(p.id)
 
-    # All dead participants should have no entries in _names.
-    assert len(registry._names) == 0
+    fresh = Registry(store)
+    everyone = fresh.list(include_dead=True)
+    assert len(everyone) >= 120
+    assert all(x.name is None for x in everyone if x.status is Status.DEAD)
+    assert len(fresh._names) == 0
 
-    # A new live participant gets a bare mask, not a suffixed fallback.
-    live = registry.register(harness="vibe", pane="%200", cwd="/tmp")
+    live = fresh.register(harness="vibe", pane="%200", cwd="/tmp")
     assert live.name in names_mod.MASKS
 
 
 def test_resolve_dead_by_id_preserves_id_before_name(registry):
-    """resolve() with a dead participant's id returns the dead row (name=None),
-    not some live participant whose name happens to match."""
+    """resolve() with a dead participant's id returns the dead row (name=None)."""
     p = registry.register(harness="vibe", pane="%1", cwd="/tmp")
     registry.mark_dead(p.id)
 
-    # Resolving by the dead participant's id returns the dead row.
     result = registry.resolve(p.id)
     assert result.id == p.id
     assert result.status is Status.DEAD
@@ -397,12 +381,9 @@ def test_resolve_cleans_stale_dead_name_mapping(registry):
     p = registry.register(harness="vibe", pane="%1", cwd="/tmp")
     old_name = p.name
 
-    # Kill via store, leaving a stale entry in _names.
     registry.store.set_status(p.id, Status.DEAD)
-    # Re-inject the stale mapping.
     registry._names[p.id] = old_name
 
-    # resolve by the old name should purge it and raise NotFound.
     with pytest.raises(NotFound):
         registry.resolve(old_name)
     assert p.id not in registry._names

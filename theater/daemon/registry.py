@@ -286,7 +286,8 @@ class Registry:
         if p.status is Status.DEAD:
             raise BadRequest(
                 f"cannot rename participant {pid!r}: it is dead; "
-                f"dead participants have no runtime name to change"
+                f"dead participants have no runtime name to change. "
+                f"Use the participant id {pid!r} for historical access."
             )
 
         if new_name == self._names.get(p.id, ""):
