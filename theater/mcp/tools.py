@@ -227,7 +227,6 @@ async def await_sessions(
         await session.identify()
     # Identify the caller so the daemon can refuse an await that would
     # deadlock — waiting on a participant that is, right now, waiting on you.
-    # Without this the rail could only ever see awaits made from the CLI.
     jobs = await session.client.call(
         "jobs.await",
         handles=handles,

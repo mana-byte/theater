@@ -20,9 +20,8 @@ from rich.text import Text
 
 from theater.formatting import event_stamp, event_summary, event_who
 
-#: Event kind -> theme slot. Six hues is all a Textual theme guarantees, so
-#: kinds that share a meaning share a colour: everything about a participant's
-#: lifecycle is `accent`, and anything that went wrong is `error`.
+#: Event kind -> theme slot. A Textual theme guarantees six hues, so kinds
+#: that share a meaning share a colour: lifecycle is `accent`, errors are `error`.
 _BUS_KIND_ROLES = {
     "agent.user": "success",
     "agent.assistant": "primary",
@@ -36,8 +35,8 @@ _BUS_KIND_ROLES = {
     "participant.dead": "error",
 }
 
-#: What each slot means with no theme to ask — the palette this module shipped
-#: with. Used by tests and by any caller that has no running app.
+#: Fallback colours for when no theme is available. Used by tests and by
+#: callers with no running app.
 _FALLBACK = {
     "success": "green",
     "primary": "cyan",
@@ -63,9 +62,8 @@ def kind_style(kind: str, variables: Mapping[str, str] | None = None) -> str:
         return "default"
     if variables is None:
         return _FALLBACK[role]
-    # A theme that omits the slot is not a crash — themes become user-supplied
-    # once plugins land, and a missing variable is worth one dull line rather
-    # than a dead panel.
+    # A missing slot is not a crash — themes will be user-supplied, and a
+    # missing variable is worth one dull line rather than a dead panel.
     return variables.get(role) or _FALLBACK[role]
 
 

@@ -120,11 +120,10 @@ def main_repo_root(
         if common_dir:
             git_dir = Path(common_dir)
             # common_dir is <main-repo>/.git; its parent is the main root.
-            # Resolve symlinks so the path matches what callers expect.
             return str(git_dir.parent.resolve())
 
     # Fallback: the directory is gone, so git can't help. Strip the
-    # worktree suffix that create_worktree appends to the repo root.
+    # worktree suffix that create_worktree appends.
     if child_id is not None:
         suffix = f"/{WORKTREE_DIR}/{child_id}"
         if path.endswith(suffix):
@@ -164,7 +163,6 @@ def create_worktree(
     branch = branch_name(child_id)
     wt_path = worktree_path(repo_root, child_id)
 
-    # Check if the branch already exists.
     check = subprocess.run(
         ["git", "rev-parse", "--verify", branch],
         cwd=repo_root,
@@ -176,7 +174,6 @@ def create_worktree(
     if check.returncode == 0:
         raise BadRequest(f"branch {branch!r} already exists")
 
-    # Create the worktree with a new branch.
     args = ["git", "worktree", "add", "-b", branch, wt_path]
     if base_branch:
         args.append(base_branch)
@@ -239,25 +236,17 @@ def remove_worktree(
     branch = branch_name(child_id)
     result = WorktreeRemoveResult()
 
-    # The caller may have derived repo_root from inside the worktree
-    # (via repo_root(child_cwd)), which for a worktree child returns the
-    # worktree's own top level — not the main repo root. Re-derive the
-    # true main root so git worktree commands target the shared admin
-    # directory. Pass child_id so the fallback can strip the suffix.
+    # Re-derive the main root so git worktree commands target the
+    # shared admin directory. Pass child_id for the fallback.
     real_root = main_repo_root(repo_root, child_id=child_id) or repo_root
     wt_path = worktree_path(real_root, child_id)
 
     # --- Remove the worktree directory -----------------------------------
     #
-    # git worktree remove can fail in two ways we care about:
-    #   1. The directory was already deleted (manually, or by a prior
-    #      remove attempt). git says "not a working tree" or similar.
-    #      In that case we prune the stale admin record and continue to
-    #      branch deletion below.
-    #   2. A genuine git error (corrupt metadata, permissions). In that
-    #      case pruning won't help, but we still try branch deletion —
-    #      a dangling branch is better than a dangling branch *and* a
-    #      dangling worktree.
+    # git worktree remove can fail if the directory was already deleted,
+    # in which case we prune the stale admin record and continue to
+    # branch deletion. A genuine git error (corrupt metadata) means
+    # pruning won't help, but we still try branch deletion.
     wt_result = subprocess.run(
         ["git", "worktree", "remove", "--force", wt_path],
         cwd=real_root,
@@ -269,9 +258,8 @@ def remove_worktree(
     worktree_removed = wt_result.returncode == 0
 
     if not worktree_removed:
-        # The worktree directory may already be gone. Prune stale admin
-        # records so the branch is not "checked out" in a dead worktree
-        # (git refuses to delete a branch used by a worktree).
+        # The directory may already be gone. Prune stale admin records
+        # so the branch is not "checked out" in a dead worktree.
         stderr = wt_result.stderr.strip()
         logger.warning(
             "git worktree remove failed for %s: %s", child_id, stderr
@@ -284,8 +272,6 @@ def remove_worktree(
             text=True,
             timeout=10,
         )
-        # After pruning, if the directory doesn't exist on disk, the
-        # worktree is effectively removed.
         worktree_removed = not Path(wt_path).exists()
         if not worktree_removed:
             result.errors.append(
@@ -299,10 +285,9 @@ def remove_worktree(
 
     # --- Delete the branch -----------------------------------------------
     #
-    # Order matters: git refuses to delete a branch that a worktree
-    # still has checked out. We only reach here after the worktree was
-    # removed (or pruned). If the branch was already gone, treat that as
-    # success — the desired end state is "no branch".
+    # git refuses to delete a branch a worktree still has checked out,
+    # so this comes after worktree removal. If the branch is already
+    # gone, that is the desired end state.
     branch_removed = False
     if delete_branch:
         br_result = subprocess.run(
@@ -318,8 +303,7 @@ def remove_worktree(
         if not branch_removed:
             stderr = br_result.stderr.strip()
             # git branch -D returns nonzero if the branch doesn't exist.
-            # Verify: if rev-parse can't find it, it's already gone — that's
-            # the desired end state, so treat it as success.
+            # If rev-parse can't find it, it's already gone — success.
             verify = subprocess.run(
                 ["git", "rev-parse", "--verify", branch],
                 cwd=real_root,
@@ -347,10 +331,7 @@ def remove_worktree(
     )
 
     if result.ok:
-        # Say which of the two things actually happened. The old
-        # unconditional "removed worktree (branch ...)" line was the
-        # reason this bug survived so long in the logs: it claimed a
-        # branch deletion that had never once succeeded.
+        # Say which of the two things actually happened.
         logger.info(
             "removed worktree for %s (%s)",
             child_id,

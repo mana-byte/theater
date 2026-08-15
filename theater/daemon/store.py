@@ -44,8 +44,7 @@ BASELINE = "0001"
 
 #: The latest revision. A legacy database is stamped at BASELINE and then
 #: upgraded to this; a fresh database lands here directly. Tests assert
-#: against this rather than hardcoding a revision string, so adding a new
-#: revision does not silently weaken the assertion to "not BASELINE".
+#: against this rather than hardcoding a revision string.
 HEAD = "0002"
 
 
@@ -84,11 +83,9 @@ class Store:
             self._upgrade(conn)
             conn.commit()
 
-        # One long-lived autocommit connection, which is what
-        # `sqlite3.connect(isolation_level=None)` gave us before: callers never
-        # commit, and a write is visible to the next read immediately. The
-        # daemon owns this file alone, so there is no second writer to serialise
-        # against.
+        # One long-lived autocommit connection: callers never commit,
+        # and a write is visible to the next read immediately. The
+        # daemon owns this file alone, so there is no second writer.
         self.conn = self.engine.connect().execution_options(
             isolation_level="AUTOCOMMIT"
         )
@@ -382,7 +379,7 @@ class Store:
             )
         )
         pk = result.inserted_primary_key
-        assert pk is not None  # a single-row INSERT always yields one
+        assert pk is not None
         return pk[0]
 
     def bus_tail(self, limit: int = 100, *, after_id: int = 0) -> list[dict]:

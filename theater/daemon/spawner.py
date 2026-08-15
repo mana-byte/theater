@@ -65,22 +65,16 @@ class Spawner:
         harness = get_harness(req.harness)
         if shutil.which(harness.binary) is None:
             raise BadRequest(f"{harness.binary!r} is not on PATH")
-        # Before step 1, with the PATH check, because both are refusals and a
-        # refusal after step 1 leaves a participant — and possibly a worktree —
-        # behind for something we could have known up front.
+        # Refusals before step 1: a refusal after it leaves a participant
+        # — and possibly a worktree — behind.
         check_model(req.harness, req.model)
         check_resume(req.harness, req.resume)
-        # A harness that accepts resume but silently drops the prompt (opencode:
-        # `-s` routes to the session view, `--prompt` is only read on the home
-        # screen) must not be handed both. Delivering the prompt by typing into
-        # the pane after the session is up would be the useful behaviour, but
-        # the spawner has no readiness detection — the observer's screen-tail
-        # marker checks live in a different module with different timing — so an
-        # injection here would race the TUI's startup and sometimes land before
-        # it is ready. A racy injection that intermittently drops the task is
-        # worse than a loud refusal, because it fails silently rather than
-        # loudly. Refused here, before anything is created, for the same reason
-        # as the checks above.
+        # A harness that accepts resume but silently drops the prompt
+        # (opencode: `-s` routes to session view, `--prompt` is only read
+        # on the home screen) must not be handed both. The spawner has no
+        # readiness detection, so injecting the prompt after startup would
+        # race the TUI and sometimes drop it. A loud refusal is better than
+        # a racy injection that fails silently.
         if req.resume and req.prompt and not harness.resume_takes_prompt:
             raise BadRequest(
                 f"harness {req.harness!r} cannot resume a session with a prompt; "
@@ -99,8 +93,8 @@ class Spawner:
             harness=req.harness, cwd=req.cwd, parent_id=req.parent_id
         )
 
-        # Create a worktree if requested. The child runs in the worktree,
-        # not the parent's repo — isolated index and HEAD.
+        # The child runs in the worktree, not the parent's repo — isolated
+        # index and HEAD.
         child_cwd = req.cwd
         if req.worktree:
             root = worktree_mod.repo_root(req.cwd)
@@ -118,7 +112,6 @@ class Spawner:
             except Exception:
                 self.registry.mark_dead(participant.id)
                 raise
-            # Store the worktree path and branch on the participant.
             participant.cwd = child_cwd
             participant.branch = worktree_mod.branch_name(participant.id)
             self.registry.store.upsert_participant(participant)
@@ -164,12 +157,11 @@ class Spawner:
             self.registry.mark_dead(participant.id)
             raise
 
-        # The launch epoch, read straight back out of tmux rather than
-        # inferred. Best-effort on purpose: the window exists and the harness
-        # is already starting, so failing the spawn over a bookkeeping lookup
-        # would throw away a working agent. A missing epoch costs one delivery
-        # check, and `pane_info` returning None means the pane died inside
-        # these few milliseconds — which the pane-alive check catches anyway.
+        # Best-effort: the window exists and the harness is starting, so
+        # failing the spawn over a bookkeeping lookup would throw away a
+        # working agent. A missing epoch costs one delivery check; a None
+        # pane_info means the pane died in these milliseconds — caught by
+        # the pane-alive check anyway.
         try:
             info = await tmux.pane_info(pane)
         except Exception:
@@ -186,18 +178,12 @@ class Spawner:
                 return requested
         return await tmux.ensure_session(FALLBACK_SESSION, cwd=cwd)
 
-    #: How many times `kill` polls `pane_info` to confirm the pane is gone,
-    #: and how long it waits between attempts. tmux reaps a pane asynchronously
-    #: rather than before `kill-pane` returns, so a single check immediately
-    #: after the call is a race that the pane is about to disappear — it has
-    #: been told to die but may not have done so yet. A few short polls over
-    #: roughly a second is long enough for tmux to finish reaping in every case
-    #: observed, and short enough that a caller blocking on the kill is not
-    #: held for a perceptible time. If the pane is still there after all
-    #: attempts, the record is left alive and the call fails loudly: marking
-    #: the record dead while the pane lives produces the exact ghost row the
-    #: `participants.unmanaged` sweep rediscovers, and that is the failure
-    #: this polling exists to prevent.
+    #: How many times `kill` polls `pane_info` to confirm the pane is gone.
+    #: tmux reaps asynchronously after `kill-pane` returns, so one immediate
+    #: check races the pane's death. If the pane survives all attempts, the
+    #: record is left alive and the call fails loudly: marking a live pane
+    #: dead produces a ghost row the `participants.unmanaged` sweep
+    #: rediscovers.
     KILL_POLL_ATTEMPTS = 5
     KILL_POLL_INTERVAL = 0.25
 
@@ -205,13 +191,10 @@ class Spawner:
         p = self.registry.get(participant_id)
         if p.tmux_pane:
             await tmux.kill_pane(p.tmux_pane)
-            # Confirm the pane is really gone before marking the record dead.
-            # `kill_pane` is a fire-and-forget call with check=False, so it
-            # cannot report whether tmux honoured it. A pane that survives
-            # the kill and is marked dead anyway becomes a ghost: the
-            # unmanaged sweep sees a known harness running in a pane with no
-            # live record, and draws it back in the régie as a row the UI
-            # cannot kill.
+            # Confirm the pane is gone before marking the record dead.
+            # `kill_pane` is fire-and-forget (check=False); a pane that
+            # survives and is marked dead becomes a ghost the unmanaged
+            # sweep draws back as a row the UI cannot kill.
             for _ in range(self.KILL_POLL_ATTEMPTS):
                 info = await tmux.pane_info(p.tmux_pane)
                 if info is None:
@@ -252,14 +235,11 @@ class Spawner:
         if not (p.branch and p.branch.startswith(worktree_mod.BRANCH_PREFIX)):
             return
 
-        # main_repo_root, not repo_root: the child's cwd *is* its
-        # worktree, and `git rev-parse --show-toplevel` from in there
-        # answers with the worktree itself. Feeding that back as the
-        # repo root is what produced the doubled
-        # `<worktree>/.theater/worktrees/<id>` path that git rejected on
-        # every removal this daemon has ever attempted. child_id lets it
-        # fall back to stripping the suffix when the directory is
-        # already gone and git cannot answer at all.
+        # main_repo_root, not repo_root: the child's cwd *is* its worktree,
+        # so `git rev-parse --show-toplevel` from there answers the worktree
+        # itself. Feeding that back as repo root produces a doubled
+        # `.theater/worktrees/<id>` path git rejects. child_id lets it fall
+        # back to stripping the suffix when the directory is already gone.
         root = worktree_mod.main_repo_root(p.cwd or "", child_id=p.id)
         if root is None:
             logger.warning(

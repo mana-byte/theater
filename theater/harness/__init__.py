@@ -65,26 +65,22 @@ from theater.models import BadRequest
 logger = logging.getLogger("theater.harness")
 
 #: The live registry. Mutated in place by `install`, never rebound: other
-#: modules hold a reference to this exact dict (`from theater.harness import
-#: HARNESSES`), and rebinding would leave every one of them reading a stale
-#: registry with no symptom but a missing harness.
+#: modules hold a reference to this exact dict, and rebinding would leave them
+#: reading a stale registry with no symptom but a missing harness.
 HARNESSES: dict[str, Harness] = {}
 
 #: Aliases a misreporting agent might send at registration, mapped to the
-#: canonical name. Without this, an agent that says `claude_code` registers
-#: happily and is then unobservable forever, because the observer looks up
-#: `HARNESSES[name]` and misses. Every alias is declared by the plugin that
-#: owns it — see `Harness.aliases`.
+#: canonical name. Without this, an agent that says `claude_code` registers and
+#: is then unobservable forever — the observer looks up `HARNESSES[name]` and
+#: misses.
 _ALIASES: dict[str, str] = {}
 
-#: name -> the plugin file it came from. Kept for the collision messages and
-#: for the SOURCE column of `theater harnesses`: "why is this harness behaving
-#: strangely" is usually answered by naming the file it was loaded from.
+#: name -> the plugin file it came from. Kept for collision messages and the
+#: SOURCE column of `theater harnesses`.
 _PLUGINS: dict[str, Plugin] = {}
 
-#: Local plugins that would not load. Not an exception — see `install` — but
-#: not silent either: they are listed by `theater harnesses` as broken, since a
-#: plugin the user believes they installed and cannot find is the failure this
+#: Local plugins that would not load. Listed by `theater harnesses` as broken —
+#: a plugin the user believes they installed and cannot find is the failure this
 #: release exists to remove.
 _BROKEN: list[Plugin] = []
 
@@ -115,9 +111,8 @@ def install(
 
     Returns the registered names, sorted.
     """
-    # Matched against the file stem before the import and the harness name
-    # after it: a plugin too broken to say what it is called still has to be
-    # switchable off, and that is exactly when the user needs it to be.
+    # Matched against the file stem before import and the harness name after: a
+    # plugin too broken to say what it is called still has to be switchable off.
     disabled = set(config.harness.disabled)
 
     HARNESSES.clear()
@@ -301,8 +296,8 @@ def plan_launch(
     )
 
 
-#: Shown for a participant whose harness has no adapter — an unmanaged pane,
-#: or an agent that registered under a name we do not recognise.
+#: Shown for a participant whose harness has no adapter — an unmanaged pane
+#: or an unrecognised name.
 UNKNOWN_ICON = "?"
 
 

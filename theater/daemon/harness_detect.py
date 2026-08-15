@@ -80,9 +80,8 @@ def descendant_comms(root_pid: int) -> list[str]:
         )
     except (OSError, subprocess.SubprocessError):
         return []
-    # Build ppid -> [(pid, comm)] map.
     pid_children: dict[int, list[tuple[int, str]]] = {}
-    for line in out.strip().splitlines()[1:]:  # skip header
+    for line in out.strip().splitlines()[1:]:
         parts = line.split(None, 2)
         if len(parts) < 3:
             continue
@@ -93,7 +92,6 @@ def descendant_comms(root_pid: int) -> list[str]:
             continue
         comm = parts[2]
         pid_children.setdefault(ppid, []).append((pid, comm))
-    # BFS from root_pid, collecting comm names.
     result: list[str] = []
     queue = [root_pid]
     while queue:

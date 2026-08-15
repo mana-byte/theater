@@ -27,17 +27,8 @@ PROTOCOL_VERSION = 1
 
 #: Longest single message either end will read, in bytes.
 #:
-#: asyncio's own default is 64 KiB, which is roughly ten assistant turns:
-#: ``read_transcript`` returns whole sessions on purpose, ``bus.tail`` returns
-#: whatever depth it was asked for, and a prompt may carry a pasted file. All
-#: three cross 64 KiB routinely, and the failure was not a clean error -- see
-#: read_message -- so this was the "Theater sometimes answers and sometimes
-#: errors" that agents kept reporting.
-#:
-#: A limit is still wanted rather than none at all: it caps how much a peer
-#: that never sends a newline can make the other end buffer. 64 MiB is a
-#: thousandfold headroom over anything observed, and small enough that a
-#: handful of connections cannot exhaust a laptop.
+#: 64 MiB is a thousandfold headroom over anything observed. A limit is still
+#: wanted: it caps how much a peer that never sends a newline can buffer.
 MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 
 
@@ -101,7 +92,6 @@ async def drain_message(reader: asyncio.StreamReader) -> None:
             except asyncio.IncompleteReadError:
                 return
         else:
-            # The newline arrived: the stream is back on a message boundary.
             return
 
 

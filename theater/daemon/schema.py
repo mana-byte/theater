@@ -66,10 +66,10 @@ bus = Table(
     Column("to_id", Text),
     Column("kind", Text, nullable=False),
     Column("payload", Text),
-    # AUTOINCREMENT rather than a bare rowid: `bus_tail(after_id=...)` uses the
-    # id as a read cursor, and plain rowids are reused once the highest row is
-    # deleted. Nothing prunes the bus today, but the day something does, a
-    # reused id would make a reader skip events it has never seen.
+    # AUTOINCREMENT, not bare rowid: `bus_tail(after_id=...)` uses the id
+    # as a read cursor, and plain rowids are reused once the highest row
+    # is deleted. A reused id would make a reader skip events it has
+    # never seen.
     sqlite_autoincrement=True,
 )
 
@@ -91,17 +91,16 @@ touch = Table(
     Column("job_handle", Text, nullable=False),
     Column("path", Text, nullable=False),
     Column("mode", Text, nullable=False),
-    # Null means the file was absent at that point: a null sha_before is a
-    # file the job created, a null sha_after is a file the job deleted. The
-    # pair is what makes drift detection work — same before and after means
-    # the file was touched but not changed, different means it was modified.
+    # Null sha = file absent at that point: null before is a creation,
+    # null after is a deletion. Same before and after means touched but
+    # not changed — the pair is what makes drift detection work.
     Column("sha_before", Text),
     Column("sha_after", Text),
     sqlite_autoincrement=True,
 )
 
-# Two read patterns: "all rows for this path, newest first" (recall_search by
-# path) and "all rows for this job handle" (recall_read of a segment). The
-# path index serves the first; the job-handle index serves the second.
+# Two read patterns: "all rows for this path, newest first" and "all rows
+# for this job handle" — the path index serves the first, the job-handle
+# index serves the second.
 Index("idx_touch_path", touch.c.path)
 Index("idx_touch_job", touch.c.job_handle)

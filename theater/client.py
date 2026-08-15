@@ -42,12 +42,9 @@ from theater.tmux import client as tmux
 START_TIMEOUT = 8.0
 
 #: How long to wait for a reply before declaring the connection unusable.
-#: Derived from the tmux ceiling rather than picked: the slowest handlers are
-#: the ones that shell out to tmux (``send`` runs up to three invocations --
-#: presence check, literal keys, Enter), so a client that gave up first would
-#: abandon a read that the daemon was still going to answer. Deriving it keeps
-#: the two numbers linked; a flat constant drifted to 5s and caused exactly
-#: that. A per-method table was rejected -- it rots as methods are added.
+#: Derived from the tmux ceiling: the slowest handlers shell out to tmux
+#: (``send`` runs up to three invocations), so a client that gave up first
+#: would abandon a read the daemon was still going to answer.
 CALL_TIMEOUT = 4 * tmux.RUN_TIMEOUT
 
 

@@ -75,9 +75,8 @@ def attach_point(path: Path) -> tuple[int, int, int, str | None]:
         data = b"".join(tail)
         head, sep, _rest = data.rpartition(b"\n")
         if sep:
-            # head is everything before the last newline; the last complete
-            # line is the portion after the second-to-last newline (or the
-            # whole head if there is only one line).
+            # head is everything before the last newline; the last complete line
+            # is the portion after the second-to-last newline (or all of head).
             _prefix, _sep2, last_bytes = head.rpartition(b"\n")
             last_line = last_bytes.decode("utf-8", errors="replace")
     return size, lines, mtime, last_line
@@ -214,7 +213,7 @@ class TranscriptSource(Source):
         self._observer = observer
         self._cwd = cwd
         #: Updated when an attach reveals the harness's own session id, so a
-        #: later re-attach can use the sharper key the first one lacked.
+        #: later re-attach can use the sharper key.
         self._session_id = session_id
         self._after = after
         self.path: Path | None = None
@@ -229,8 +228,7 @@ class TranscriptSource(Source):
         try:
             return self._drain()
         except FileNotFoundError:
-            # The transcript was deleted or rotated out from under us. Drop
-            # back to searching rather than letting the watcher die.
+            # Transcript deleted or rotated; drop back to searching.
             self._detach()
             return Batch(waiting=True)
 
@@ -277,8 +275,7 @@ class TranscriptSource(Source):
                     if line:
                         events.extend(self._observer.parse(line, index, clip_text=False))
         except OSError:
-            # A transcript that vanished mid-read is the same non-event here as
-            # it is in the poll path: report what there is, which is nothing.
+            # A transcript that vanished mid-read is the same non-event here.
             return []
         return events
 
@@ -338,8 +335,7 @@ class TranscriptSource(Source):
         size = st.st_size
         # Size alone cannot tell "nothing happened" from "rewritten to the same
         # length", and guessing wrong is not a missed event but a corrupt one:
-        # the offset would land mid-record and every later parse would be
-        # garbage. So a file that changed without growing is treated as rotated.
+        # the offset lands mid-record and every later parse is garbage.
         if size < offset or (size == offset and st.st_mtime_ns != mtime):
             logger.info("transcript %s was rewritten; re-reading from the top", path)
             offset = index = 0
@@ -353,9 +349,8 @@ class TranscriptSource(Source):
             mtime = os.fstat(fh.fileno()).st_mtime_ns
         head, sep, _tail = data.rpartition(b"\n")
         if not sep:
-            # A record is still being written. Leave the offset alone and read
-            # the whole thing again next tick; partial JSON is not parseable
-            # and buffering it here would duplicate what the file already does.
+            # A record is still being written. Partial JSON is not parseable, and
+            # buffering it here would duplicate what the file already does.
             self.mtime = mtime
             return Batch()
         offset += len(head) + 1

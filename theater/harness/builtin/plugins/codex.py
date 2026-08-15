@@ -89,43 +89,38 @@ from theater.harness.observation import (
 )
 from theater.models import BadRequest
 
-#: The composer prompt. A single glyph (U+203A), not the ASCII ">" that Claude
-#: Code uses.
+#: The composer prompt. A single glyph (U+203A), not the ASCII ">" that
+#: Claude Code uses.
 PROMPT = "\u203a"
 
 #: Present in the status bar for as long as a turn is running. Codex keeps a
-#: persistent footer under the composer, so unlike the other two harnesses the
-#: bottom line is never the prompt and `last_screen_line` cannot be used.
+#: persistent footer under the composer, so the bottom line is never the
+#: prompt and `last_screen_line` cannot be used.
 WORKING_MARKER = "esc to interrupt"
 
 #: Rendered by the approval overlay, the MCP elicitation prompt, and the auth
 #: prompt — all three are awaiting-input screens. NOT `to confirm`: the
 #: `/approvals` settings popup renders `to confirm or … to go back`, and
-#: keying on `to confirm` would wrongly classify that settings popup as an
-#: approval modal. The substring is deliberately loose for keymap-independence
-#: (the labels are `&'static str`; only the key glyph varies), and that
-#: looseness is safe ONLY because of TWO guards together: (1) the match is
-#: scoped to the tail window via `_in_screen_tail`, and (2) the match is an
-#: `endswith` test, not a containment test. Neither alone is enough — the
-#: tail window unavoidably contains agent output (three of five lines in a
-#: real codex idle pane are prose), and prose can contain the phrase
-#: mid-line. The footer is a whole line that ends with the marker; prose
-#: virtually never does. Both guards are required; do not drop either.
+#: keying on `to confirm` would classify that popup as an approval modal. The
+#: substring is loose for keymap-independence (only the key glyph varies), and
+#: safe only because of TWO guards together: (1) scoped to the tail window via
+#: `_in_screen_tail`, and (2) an `endswith` test, not containment. The tail
+#: window unavoidably contains agent output (three of five lines in a real
+#: codex idle pane are prose), and prose can contain the phrase mid-line. The
+#: footer is a whole line that ends with the marker; prose virtually never
+#: does. Both guards are required; do not drop either.
 APPROVAL_MARKER = "to cancel"
 
 #: The first-launch trust dialog. The full sentence is longer, but the
-#: paragraph has a 2-column inset and wraps mid-sentence on panes narrower
-#: than ~46 columns, so only the first few words are a reliable marker.
-#: Unlike APPROVAL_MARKER this is a whole-capture match, not tail-scoped:
-#: the trust paragraph is body text above the selection rows, not footer
-#: chrome, so tail-scoping would miss it. The residual risk is acceptable
-#: because the trust dialog only appears at startup, when there is no agent
-#: output on the pane at all.
+#: paragraph wraps mid-sentence on panes narrower than ~46 columns, so only
+#: the first few words are reliable. A whole-capture match, not tail-scoped:
+#: the trust paragraph is body text above the selection rows, so tail-scoping
+#: would miss it. Safe because the trust dialog only appears at startup, when
+#: there is no agent output on the pane.
 TRUST_MARKER = "Do you trust the contents"
 
-#: How far up from the bottom to look for the composer. The footer is one line,
-#: but a multi-line composer or a notice above it can push the prompt further
-#: up; beyond this the pane is showing something else entirely.
+#: How far up from the bottom to look for the composer. The footer is one
+#: line, but a multi-line composer or notice can push the prompt further up.
 _SCREEN_TAIL_LINES = 5
 
 #: `session_meta` is the first record and carries `cwd`, so a candidate is
@@ -141,8 +136,7 @@ _STEM = re.compile(r"^rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-(.+)$")
 #: apply_patch hunks are delimited by these markers, one per line. The paths
 #: that follow them are repo-relative — codex's own parser
 #: (apply-patch/src/parser.rs:39-41) treats them as relative to the session
-#: cwd, so no relativisation is needed here. A fourth marker, "*** End Patch",
-#: is the terminator and carries no path.
+#: cwd, so no relativisation is needed. `*** End Patch` is the terminator.
 _PATCH_FILE_RE = re.compile(
     r"^\*\*\* (?:Update|Add|Delete) File: (.+)$", re.MULTILINE
 )
@@ -229,17 +223,15 @@ def _turn_id(payload: dict) -> str | None:
 class CodexHarness(Harness):
     name = "codex"
     binary = "codex"
-    #: A filled ring. Deliberately not another asterisk-family glyph: `✻` is
-    #: taken by Claude Code and the near-neighbours (`✳ ❋ ✺`) are hard to tell
-    #: apart at one column.
+    #: A filled ring. Not another asterisk-family glyph: `✻` is taken by Claude
+    #: Code and the near-neighbours (`✳ ❋ ✺`) are hard to tell apart.
     icon = "\u25c9"
-    #: What an agent might call itself at registration. A spelling that does not
-    #: normalize is observed as nothing at all, so these are not cosmetic.
+    #: A spelling that does not normalize is observed as nothing at all, so
+    #: these are not cosmetic.
     aliases = ("codex-cli", "codex_cli", "openai-codex", "Codex")
 
     def __init__(self, root: Path | None = None):
-        #: `root` locates the transcript, which is the observer's
-        #: business alone; nothing about launching depends on it.
+        #: The observer's business alone; nothing about launching depends on it.
         self.observer = CodexObserver(root=root)
 
     # ---- launching ------------------------------------------------------
@@ -261,12 +253,10 @@ class CodexHarness(Harness):
         command = json.dumps(theater_binary())
         args = json.dumps(["mcp", "--id", participant_id])
         # `codex resume <SESSION_ID>` is a subcommand (cli/src/main.rs:181-182,
-        # 315-339), not a flag. It shares the same `-c` config overrides and
-        # approval flags as the base command via the `SessionTuiCli` wrapper
-        # (cli/src/main.rs:403), a newtype over TuiCli that only teaches the
-        # prompt positional to conflict with `--last`. We never pass `--last`,
-        # so the prompt still lands and the only structural difference is the
-        # `resume` subcommand token and the session id positional.
+        # 315-339), not a flag. It shares the same `-c` overrides and approval
+        # flags via the `SessionTuiCli` wrapper (main.rs:403), a newtype over
+        # TuiCli whose only structural difference is the `resume` token and
+        # session id positional.
         argv = [
             "codex",
         ]
@@ -288,8 +278,6 @@ class CodexHarness(Harness):
         else:
             argv += ["-a", "untrusted", "-s", "read-only"]
         if prompt:
-            # Positional, and it auto-submits: the session comes up already
-            # working, with no keystroke injection.
             argv.append(prompt)
         return LaunchPlan(argv=argv)
 
@@ -464,8 +452,7 @@ class CodexObserver(TranscriptObserver):
                     raw_index=index,
                 )
             ]
-        # token_count, task_started, patch_apply_end, thread_settings_applied:
-        # progress accounting, not conversation.
+        # token_count, task_started, patch_apply_end, thread_settings_applied.
         return []
     def _mcp_result(self, result) -> str:
         """Unwrap the Rust-style `{"Ok"|"Err": …}` an MCP call comes back as."""
@@ -489,12 +476,10 @@ class CodexObserver(TranscriptObserver):
             name = payload.get("name")
             paths: tuple[EventPath, ...] = ()
             if name == "apply_patch":
-                # apply_patch is a freeform custom tool whose input is the raw
-                # patch text. The patch markers are a structured grammar
-                # (parser.rs:39-41), not prose or a shell command string, so
-                # extracting paths from them is reading a structured field.
-                # Other custom tools (exec, wait) take freeform strings whose
-                # contents are code or commands — those yield nothing.
+                # The patch markers are a structured grammar (parser.rs:39-41),
+                # not prose or a shell command — extracting paths from them is
+                # reading a structured field. Other custom tools (exec, wait)
+                # take freeform strings whose contents are code — those yield nothing.
                 paths = _apply_patch_paths(payload.get("input"))
             return [
                 Event(
@@ -579,7 +564,7 @@ class CodexObserver(TranscriptObserver):
         )
 
 
-#: What the loader looks for. An instance, not the class: see
-#: docs/harness-plugins.md. Shipped adapters meet the same contract as anything
-#: dropped in $THEATER_HOME/harnesses, which is the point of shipping them here.
+#: What the loader looks for. An instance, not the class (see
+#: docs/harness-plugins.md). Shipped adapters meet the same contract as
+#: anything in $THEATER_HOME/harnesses.
 HARNESS = CodexHarness()

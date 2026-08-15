@@ -65,20 +65,9 @@ if TYPE_CHECKING:
 SERVER_NAME = "theater"
 
 #: How long a harness should let a single theater MCP call run before giving up.
-#:
-#: `jobs.await` blocks on purpose, for up to `daemon.methods.MAX_AWAIT` (300s).
 #: A harness whose own per-tool timeout is shorter kills the call on the wire
-#: while the daemon is still waiting, so the agent sees a transport error
-#: instead of a result and — worse — learns that awaiting does not work and
-#: falls back to polling. Vibe's default is 60s, which is what made every
-#: await look like it timed out regardless of the `max_wait` asked for.
-#:
-#: The value is MAX_AWAIT plus the same slack theater's own client adds around
-#: a blocking call (`client.py`: `max_wait + CALL_TIMEOUT`, CALL_TIMEOUT being
-#: 4 x the tmux run timeout, so 40s). A full-length await therefore returns its
-#: result rather than racing the deadline. It is duplicated rather than
-#: imported because daemon imports harness and not the other way around;
-#: keep it in step with `daemon.methods.MAX_AWAIT` if that ceiling moves.
+#: while the daemon is still waiting, so the agent sees a transport error and
+#: falls back to polling. Keep in step with `daemon.methods.MAX_AWAIT`.
 MCP_TOOL_TIMEOUT = 340.0
 
 
@@ -102,15 +91,12 @@ def theater_binary() -> str:
         return str(candidate)
     return "theater"
 
-#: Approval modes accepted by `spawn`. There is no default anywhere: the caller
-#: must choose, because the choice is the whole safety story for a child that
-#: nobody is watching.
+#: No default anywhere: the caller must choose, because the choice is the whole
+#: safety story for a child that nobody is watching.
 APPROVALS = ("manual", "edits", "yolo")
 
-#: Events go on the bus, and the bus is an activity feed, not an archive. A
-#: single tool result is routinely 25 KB; keeping it whole would put megabytes
-#: of file contents into SQLite for something the TUI renders as one line. The
-#: transcript on disk remains the full record.
+#: The bus is an activity feed, not an archive. A single tool result is
+#: routinely 25 KB; the transcript on disk remains the full record.
 MAX_TEXT = 2000
 
 
@@ -167,12 +153,10 @@ class EventPath:
     """
 
     #: ALWAYS repo-relative, never absolute. An absolute path leaks the
-    #: developer's home directory into a SQLite index that gets pasted into
-    #: agent prompts, which is a privacy breach, not a formatting issue.
+    #: developer's home directory into a SQLite index that reaches agent prompts.
     path: str
-    #: Whether the file was read or written. A single tool call that reads a
-    #: file and writes it back produces two EventPaths with the same path
-    #: and different modes, which is the honest record of what happened.
+    #: Whether the file was read or written. A read-then-write produces two
+    #: EventPaths with the same path — the honest record.
     mode: Literal["read", "write"]
 
 
@@ -183,40 +167,24 @@ class Event:
     kind: EventKind
     text: str = ""
     tool_name: str | None = None
-    #: Wall clock from the transcript, when the harness records one. Vibe does
-    #: not write timestamps at all, so this is None there and the observer
-    #: stamps its own observation time instead. Do not paper over the
-    #: difference: a stamped-on-read time is not when the event happened.
+    #: Wall clock from the transcript. Vibe writes none, so the observer stamps
+    #: its own observation time instead — do not paper over the difference.
     ts: float | None = None
-    #: True when the agent stopped and is waiting for a human. Computed during
-    #: parse() because it is a property of the raw record — stop_reason for
-    #: Claude Code, absence of tool_calls for Vibe — and hoisting it into a
-    #: separate is_turn_end(event) would force Event to carry those harness
-    #: specifics just to answer the question later.
+    #: True when the agent stopped and is waiting. Computed during parse()
+    #: because it is a property of the raw record — hoisting it into a separate
+    #: is_turn_end(event) would force Event to carry harness specifics.
     turn_end: bool = False
-    #: The harness's own name for the turn this event belongs to, when it
-    #: publishes one. Three of the four shipped adapters do: Codex stamps
-    #: `payload.turn_id` on both ends of a turn, Claude shares `message.id`
-    #: across the records one message is split into, OpenCode keys a turn on
-    #: the assistant message id. Vibe publishes nothing, so it stays None.
-    #:
-    #: Read by the observer to answer a turn once when the harness announces
-    #: the same boundary twice — Claude does, by construction. None means "no
-    #: claim", never "a different turn": two boundaries with no id are always
-    #: two turns. That is the safe direction. A dedup that misses answers the
-    #: waiting job with the right text and drops the second boundary on the
-    #: floor; a dedup that fires wrongly swallows a real reply and leaves the
-    #: caller waiting for the rescue timer.
+    #: The harness's own name for the turn, when it publishes one. None means
+    #: "no claim", never "a different turn": two boundaries with no id are always
+    #: two turns. A dedup that misses answers with the right text; one that fires
+    #: wrongly swallows a real reply and leaves the caller waiting for rescue.
     turn_id: str | None = None
     #: Index of the source record in the transcript. Several events can share
     #: one index: a Vibe assistant turn with three tool calls is four events.
     raw_index: int = 0
-    #: The files this single event touched, as the harness reported them. Each
-    #: entry is one path and one mode; the observer accumulates them across
-    #: events into the per-job set that becomes `touch` rows. Defaulted so the
-    #: four shipped plugins keep working unchanged until their owners fill them
-    #: in — an empty tuple means "the harness reported no paths for this
-    #: event", which is the honest answer until the plugin is updated.
+    #: Files this event touched. The observer accumulates them across events into
+    #: the per-job set that becomes `touch` rows. An empty tuple is the honest
+    #: answer until the plugin is updated to report paths.
     paths: tuple[EventPath, ...] = ()
 
 
@@ -250,38 +218,21 @@ class Harness(ABC):
     name: str
     #: Executable to look for on PATH.
     binary: str
-    #: One character shown before the harness name in listings.
-    #:
-    #: A single glyph, not an image: terminal image protocols do not survive
-    #: tmux, so a "logo" here can only ever be a character. Kept to width 1 so
-    #: no listing has to reflow when a harness is added, and chosen from
-    #: symbols a default font is likely to have rather than a Nerd Font
-    #: private-use codepoint, which would render as a blank box for anyone who
-    #: has not installed one.
+    #: A single glyph: terminal image protocols do not survive tmux. Kept to
+    #: width 1 so no listing reflows, and from symbols a default font has rather
+    #: than a Nerd Font private-use codepoint, which renders as a blank box.
     icon: str = "·"
-    #: Other spellings that should resolve to `name` at registration. An agent
-    #: reports its own harness string, and one that does not normalize is
-    #: observed as nothing at all — so a plugin needs the same escape valve the
-    #: built-ins and config declarations have.
+    #: Other spellings that resolve to `name` at registration. An agent that
+    #: reports a name that does not normalize is observed as nothing at all.
     aliases: tuple[str, ...] = ()
-    #: How to watch this harness. Set in `__init__`, because an observer is
-    #: usually constructed with the paths that locate the harness's output and
-    #: those are exactly what tests inject.
-    #:
-    #: An annotation rather than an abstract property: it is an instance
-    #: attribute, and forcing four lines of property ceremony into every plugin
-    #: to satisfy the ABC buys nothing that the loader's check does not already
-    #: buy. `plugins._check_observer` rejects a plugin that omits it, which is
-    #: the same place `name`, `binary` and `icon` are checked.
+    #: Set in `__init__`, because an observer is constructed with the paths that
+    #: locate the harness's output — exactly what tests inject. An annotation
+    #: rather than an abstract property: `plugins._check_observer` rejects a
+    #: plugin that omits it.
     observer: HarnessObserver
-    #: Whether a resumed session can still be handed a prompt on the command
-    #: line. A class attribute and not signature introspection because a
-    #: signature cannot express "accepts a resume flag but silently drops the
-    #: prompt" — which is exactly opencode's behaviour: `-s` routes to the
-    #: session view, and `--prompt` is only read on the home screen, so the
-    #: task would vanish with no error. The opencode plugin's owner sets this
-    #: False; the default True is correct for every harness whose resume mode
-    #: still delivers the prompt.
+    #: A class attribute, not signature introspection: a signature cannot express
+    #: "accepts resume but silently drops the prompt" — opencode's `-s` routes to
+    #: the session view, and `--prompt` is only read on the home screen.
     resume_takes_prompt: bool = True
 
     # ---- launching ------------------------------------------------------
