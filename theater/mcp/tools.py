@@ -213,9 +213,15 @@ async def await_sessions(
 ) -> list[dict]:
     """Wait for spawned child sessions to finish, up to max_wait seconds.
 
-    Returns the current state of each job. A job that is still running when
-    the timeout expires is returned with state="running" — re-await if you
-    want to keep waiting.
+    Blocks until ANY of the requested handles reaches a terminal state
+    ("done", "crashed", "killed") or max_wait expires, whichever comes first.
+    If any handle is already terminal when the call arrives, returns
+    immediately — it does not wait for all handles.
+
+    Returns one entry per requested handle with its current state. Entries
+    that have reached a terminal state are ready to process; the rest come
+    back with state="running" and can be re-awaited in a subsequent call to
+    keep waiting for them.
 
     This blocks the current MCP request only; the daemon and every other
     participant continue running.
@@ -319,9 +325,9 @@ async def read_transcript(
 ) -> dict:
     """Read the transcript of a participant, returning full unclipped text.
 
-    The job result from spawn/send is clipped to 2000 chars. This method
-    returns the full assistant responses from the transcript on disk,
-    so a caller that needs the complete text can get it.
+    The agent-facing await_sessions reply drops prompt and result text.
+    This method returns the full assistant responses from the transcript on
+    disk, so a caller that needs the complete text can get it.
 
     ``target_id`` may be a participant id or a name. Names work only
     while the participant is live; a dead participant's name is null

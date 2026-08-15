@@ -489,10 +489,10 @@ An empty `models` is the default and is not a dead end: spawn without `model` an
 Delivers a prompt to an already-running addressable agent mid-session. Returns a handle for `await_sessions`. Fails with `human_present` if a human is at the target pane, or `busy` if the target is already handling a send.
 
 ### `await_sessions`
-Blocks until the given handles complete (or `max_wait` seconds elapse). Returns state (`done` | `crashed` | `running`), the agent's final response text (clipped to 2000 chars), and an error code if applicable.
+Blocks until ANY of the given handles reaches a terminal state, or `max_wait` seconds elapse — it does not wait for all handles. If any handle is already terminal, returns immediately. Returns one entry per requested handle with state (`done` | `crashed` | `killed` | `running`) and an error code if applicable. Process the terminal entries; re-await the still-running ones to keep waiting for them. The agent-facing reply drops prompt and result text — use `read_transcript` for the full content.
 
 ### `read_transcript`
-Reads the full unclipped transcript of a participant from disk. Use this when the clipped result from `await_sessions` or `send` isn't enough.
+Reads the full unclipped transcript of a participant from disk. The agent-facing `await_sessions` reply drops prompt and result text; use this when you need the full content of what a child said or did.
 
 ```
 target_id:  participant id to read
@@ -515,11 +515,16 @@ Makes the calling agent addressable by registering its tmux pane. Only needed if
 security = spawn_session("claude", "audit auth.py for vulnerabilities", approval="edits")
 perf     = spawn_session("vibe",   "profile the hot path in api.py",   approval="edits")
 
-# 2. Wait for both
-results = await_sessions([security["id"], perf["id"]], max_wait=120)
+# 2. Await — returns when ANY handle becomes terminal (or max_wait expires)
+pending  = [security["id"], perf["id"]]
+completed = []
+while pending:
+    batch = await_sessions(pending, max_wait=120)
+    completed += [r for r in batch if r["state"] != "running"]
+    pending    = [r["handle"] for r in batch if r["state"] == "running"]
 
-# 3. Read full transcripts if needed
-for r in results:
+# 3. Read full transcripts for every handle that became terminal
+for r in completed:
     if r["state"] == "done":
         full = read_transcript(r["handle"].split("#")[0], last_n=10)
 ```
