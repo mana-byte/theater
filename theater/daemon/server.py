@@ -455,6 +455,11 @@ class Daemon:
                 await asyncio.wait_for(
                     self._stopping.wait(), timeout=retention.interval
                 )
+            # The wait returns either on the interval or on shutdown. Starting
+            # a sweep in the second case only earns a cancellation partway
+            # through it — check before, not after.
+            if self._stopping.is_set():
+                return
             try:
                 result = await sweep(
                     self.store,
