@@ -234,14 +234,6 @@ class Store:
             )
         )
 
-    def list_jobs_for_caller(self, caller_id: str) -> list[Job]:
-        rows = self.conn.execute(
-            select(jobs)
-            .where(jobs.c.caller_id == caller_id)
-            .order_by(jobs.c.created_at.desc())
-        ).fetchall()
-        return [Job.from_row(r._mapping) for r in rows]
-
     def running_jobs_for_target(self, target_id: str) -> list[Job]:
         rows = self.conn.execute(
             select(jobs)

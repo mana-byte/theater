@@ -86,7 +86,7 @@ theater/
 │   ├── observation.py  HarnessObserver — how to WATCH one
 │   ├── source.py     the observer's replaceable "get the text" seam
 │   └── builtin/plugins/  claude.py · codex.py · opencode.py · vibe.py
-├── mcp/              server.py (7 agent tools) · tools.py
+├── mcp/              server.py (12 agent tools) · tools.py
 ├── tmux/            client.py · panes.py · presence.py
 └── regie/           app.py · tree.py · palette.py · bus_view.py
 ```

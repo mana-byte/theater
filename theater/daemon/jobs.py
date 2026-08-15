@@ -318,9 +318,6 @@ class JobManager:
             if touches:
                 conn.execute(insert(touch_table), touches)
 
-    def list_for_caller(self, caller_id: str) -> list[Job]:
-        return self.store.list_jobs_for_caller(caller_id)
-
     @property
     def wait_graph(self) -> dict[str, set[str]]:
         """Who is blocked on whom, right now. Rebuilt per call, never cached.

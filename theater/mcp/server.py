@@ -268,11 +268,13 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         ask again on a later turn. An approval to spawn is not an approval
         to kill, and neither is a general instruction to tidy up.
 
-        Only a direct child of yours can be killed: the daemon enforces
-        that the target's parent_id equals your own participant id. This
-        check covers every caller that identifies itself — including
-        `theater kill` from an agent's shell tool — because it lives in
-        the daemon, not in this tool body.
+        Only a direct child of yours can be killed via this MCP tool: the
+        daemon checks that the target's parent_id equals your own
+        participant id, which this tool always sends. But the check only
+        applies to callers that identify themselves. The CLI and the régie
+        deliberately send no caller_id and are treated as the operator, so
+        an agent that shells out to `theater kill` bypasses the check
+        entirely — the parent-child gate does not protect you there.
 
         target_id: the participant id of the child to kill.
 
