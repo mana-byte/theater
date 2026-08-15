@@ -349,7 +349,15 @@ async def deliver_text(pane_id: str, text: str, *, enter: bool = True) -> None:
     buffer = f"theater-{pane_id.lstrip('%')}"
     await run("set-buffer", "-b", buffer, "--", text)
     try:
-        await run("paste-buffer", "-b", buffer, "-t", pane_id, "-p", "-d")
+        # tmux 3.7+ passes pasted content through vis(3) escaping by default;
+        # -S restores the raw bytes. The evidence is moderate — libtmux cites
+        # no upstream commit and their test string contains nothing vis(3)
+        # would alter — but -S is a no-op if they are wrong and a fix if they
+        # are right. See libtmux pane.py paste_buffer no_vis parameter.
+        paste_args = ["paste-buffer", "-b", buffer, "-t", pane_id, "-p", "-d"]
+        if tmux_at_least(3, 7):
+            paste_args.append("-S")
+        await run(*paste_args)
     finally:
         # -d already deletes it on success; this is for the failure path.
         await run("delete-buffer", "-b", buffer, check=False)

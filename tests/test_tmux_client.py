@@ -12,6 +12,13 @@ import pytest
 
 from theater.tmux import client
 
+
+@pytest.fixture(autouse=True)
+def _reset_version_cache():
+    client.reset_version_cache()
+    yield
+    client.reset_version_cache()
+
 # ---- new_window --------------------------------------------------------
 
 
@@ -223,6 +230,44 @@ async def test_deliver_text_sends_enter_as_a_key(monkeypatch):
 async def test_deliver_text_without_enter_does_not_submit(monkeypatch):
     captured = await _deliver_argv(monkeypatch, "hello", enter=False)
     assert not any(a[0] == "send-keys" for a in captured)
+
+
+async def test_deliver_text_adds_s_on_tmux_37_plus(monkeypatch):
+    """tmux 3.7+ escapes pasted content via vis(3) by default; -S restores raw."""
+    client._VERSION_CACHE[0] = "3.7"
+    captured = await _deliver_argv(monkeypatch, "hello")
+    paste = next(a for a in captured if a[0] == "paste-buffer")
+    assert "-S" in paste
+
+
+async def test_deliver_text_adds_s_on_tmux_37a(monkeypatch):
+    client._VERSION_CACHE[0] = "3.7a"
+    captured = await _deliver_argv(monkeypatch, "hello")
+    paste = next(a for a in captured if a[0] == "paste-buffer")
+    assert "-S" in paste
+
+
+async def test_deliver_text_adds_s_on_tmux_38(monkeypatch):
+    client._VERSION_CACHE[0] = "3.8"
+    captured = await _deliver_argv(monkeypatch, "hello")
+    paste = next(a for a in captured if a[0] == "paste-buffer")
+    assert "-S" in paste
+
+
+async def test_deliver_text_omits_s_below_tmux_37(monkeypatch):
+    """Below 3.7, the paste-buffer argv must be unchanged."""
+    client._VERSION_CACHE[0] = "3.4"
+    captured = await _deliver_argv(monkeypatch, "hello")
+    paste = next(a for a in captured if a[0] == "paste-buffer")
+    assert "-S" not in paste
+    assert paste == ["paste-buffer", "-b", "theater-7", "-t", "%7", "-p", "-d"]
+
+
+async def test_deliver_text_omits_s_when_tmux_absent(monkeypatch):
+    client._VERSION_CACHE[0] = None
+    captured = await _deliver_argv(monkeypatch, "hello")
+    paste = next(a for a in captured if a[0] == "paste-buffer")
+    assert "-S" not in paste
 
 
 # ---- display_message ---------------------------------------------------
