@@ -109,6 +109,37 @@ class ObserverSection:
 
 
 @dataclass(frozen=True, slots=True)
+class RetentionSection:
+    #: Bus events are the fire: 94% of the file, 7.1 MB/day. Nothing reads a
+    #: week-old bus event — the régie's cursor is forward-only.
+    bus_days: int = field(default=7, metadata={"min": 1})
+    #: Two months. Recall over a job older than that is nearly worthless: the
+    #: code has moved, branches are merged or deleted, and the harness
+    #: transcript is usually gone from disk already. Jobs are 3.4% of the
+    #: file, so this is generous on purpose.
+    jobs_days: int = field(default=60, metadata={"min": 1})
+    #: `send.refused` is the only record of a refused send — `_refuse_send`
+    #: writes no job row — so it is exempt from the age TTL and capped by row
+    #: count instead. Observed ~3/day; this is a century of headroom, existing
+    #: to bound growth rather than because it is expected to bind.
+    refused_cap: int = field(default=10000, metadata={"min": 1})
+    #: Abandoned running jobs (daemon killed mid-turn) have finished_at = NULL
+    #: forever and become immortal. 7 days is orders of magnitude longer than
+    #: the observer's 60 s rescue timeout, so it can only ever catch jobs from
+    #: a previous daemon lifetime. See gc.py MF1.
+    stale_running_days: int = field(default=7, metadata={"min": 1})
+    #: Rows per DELETE statement so no single sweep blocks the event loop.
+    #: Measured: 32,217 rows in 96 ms.
+    batch: int = field(default=5000, metadata={"min": 1})
+    #: Seconds between sweeps. The whole point: the database is bounded without
+    #: the user having to configure anything.
+    interval: float = field(default=3600.0, metadata={"min": MIN_INTERVAL})
+    #: Default ON. The whole point is that the database is bounded without the
+    #: user having to configure anything.
+    enabled: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class HarnessSection:
     #: A denylist, not an allowlist, so an adapter added in a later release
     #: appears without editing this file. A disabled harness is absent, not
@@ -147,6 +178,7 @@ _SECTIONS: dict[str, type] = {
     "theater": TheaterSection,
     "rails": RailsSection,
     "observer": ObserverSection,
+    "retention": RetentionSection,
     "harness": HarnessSection,
     "regie": RegieSection,
 }
@@ -168,6 +200,7 @@ class Config:
     theater: TheaterSection = field(default_factory=TheaterSection)
     rails: RailsSection = field(default_factory=RailsSection)
     observer: ObserverSection = field(default_factory=ObserverSection)
+    retention: RetentionSection = field(default_factory=RetentionSection)
     harness: HarnessSection = field(default_factory=HarnessSection)
     regie: RegieSection = field(default_factory=RegieSection)
     #: Harness name -> models `spawn --model` may name. An allowlist: an absent
