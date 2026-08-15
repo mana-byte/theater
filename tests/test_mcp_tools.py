@@ -12,6 +12,7 @@ from theater.mcp import tools
 
 RECORD = {
     "id": "p-me",
+    "name": "Arlequin",
     "harness": "vibe",
     "tier": "spawned",
     "status": "idle",
@@ -85,6 +86,7 @@ async def test_whoami_answers_who_where_and_reachable():
     got = await tools.whoami(resolved())
     assert got == {
         "id": "p-me",
+        "name": "Arlequin",
         "harness": "vibe",
         "tier": "spawned",
         "status": "idle",
@@ -94,6 +96,7 @@ async def test_whoami_answers_who_where_and_reachable():
         "addressable": True,
     }
     assert "pid" not in got, "process detail is noise to another agent"
+    assert got["name"] == "Arlequin"
 
 
 async def test_list_participants_marks_which_row_is_the_caller():

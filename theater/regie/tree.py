@@ -9,7 +9,7 @@ renders as three-row leaves.
 The leaf is three rows of Content in one widget (spec §v1.9):
 
     row 1: <incoming rail>, dim — blank for a root
-    row 2: <rails><status glyph> <harness name> <short id>
+    row 2: <rails><status glyph> <harness name> <name or short id>
     row 3: <continuation rails><shortened cwd>, dim
 
 Row 2 carries the branch prefix (``├── `` / ``└── ``); row 3 carries the
@@ -195,7 +195,9 @@ def node_label(
     ``Content.append`` returns a new object rather than mutating in place.
     """
     glyph, glyph_style = _status_glyph(node, frame)
-    sid = short_id(node.get("id"))
+    # Unmanaged panes stuff a tmux pane id into "id" and have no name,
+    # so the slot falls back to the short id rather than showing nothing.
+    sid = node.get("name") or short_id(node.get("id"))
     id_style = _id_style(node)
     cwd = shorten_path(tilde(node.get("cwd")), keep=cwd_segments)
     harness = node.get("harness", "?")

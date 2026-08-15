@@ -12,6 +12,7 @@ from theater.regie.tree import render_tree, selected_participant, shorten_path
 
 PARENT = {
     "id": "aabbccddeeff",
+    "name": "Arlequin",
     "tier": "spawned",
     "harness": "vibe",
     "status": "working",
@@ -63,7 +64,7 @@ def test_single_participant_renders_harness_and_id():
     assert len(rows) == 3
     assert rows[0] == ""  # blank leading row
     assert "vibe" in rows[1]
-    assert "aabbccdd" in rows[1]  # short id
+    assert "Arlequin" in rows[1]  # name, not short id
     assert "/tmp/proj" in rows[2]
 
 
@@ -218,6 +219,14 @@ def test_unmanaged_uses_command_as_harness():
     lines = render_tree([], unmanaged=[UNMANAGED])
     assert len(lines) == 2  # separator + pane
     assert "vibe" in str(lines[1][0])
+
+
+def test_unmanaged_node_falls_back_to_pane_id_when_there_is_no_name():
+    """Unmanaged panes are not participants; they have no name, so the
+    slot shows the short id (which is the pane id) rather than nothing."""
+    lines = render_tree([], unmanaged=[UNMANAGED])
+    rows = _rows(lines[1][0])
+    assert UNMANAGED["pane"] in rows[1]
 
 
 def test_selected_participant_returns_the_node():

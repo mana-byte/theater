@@ -223,8 +223,8 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         send-keys. The target must be addressable (Spawned or Adopted).
         The returned handle can be passed to await_sessions.
 
-        target_id: the participant id of the agent to send to. Use
-                   list_participants to find addressable peers.
+        target_id: the participant id or its name. Names come from
+                   list_participants.
         prompt:    the text to type into the target's pane.
 
         Fails with `human_present` if a human is detected at the target
@@ -244,7 +244,8 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         `last_n` events (user, assistant, tool_call, tool_result) with
         complete, unclipped text.
 
-        target_id: the participant id to read.
+        target_id: the participant id or its name. Names come from
+                   list_participants.
         last_n:    number of events to return, newest. Default 5. Set to
                    0 for all events in the current transcript.
 
@@ -276,7 +277,8 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         an agent that shells out to `theater kill` bypasses the check
         entirely — the parent-child gate does not protect you there.
 
-        target_id: the participant id of the child to kill.
+        target_id: the participant id or name of the child to kill.
+                   Names come from list_participants.
 
         Refuses with `no_self_kill` if the target is you. Refuses with
         `not_your_child` if the target exists but is not your child
