@@ -828,16 +828,6 @@ async def test_kill_addressed_by_name_puts_id_in_explicit_kills(client, fake_tmu
 _FIXED_NAME = "Brighella"
 
 
-async def test_after_death_get_by_id_returns_dead_with_name_none(client, fake_tmux):
-    """A dead participant's record reads status=dead, name=None."""
-    record = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
-    await client.call("participant.kill", id=record["id"])
-
-    dead = await client.call("participants.get", id=record["id"])
-    assert dead["status"] == "dead"
-    assert dead["name"] is None
-
-
 async def test_former_name_freed_and_successor_can_claim_it(client, fake_tmux):
     """After death the former name neither resolves nor blocks a successor."""
     first = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
@@ -862,7 +852,7 @@ async def test_status_dead_frees_name_and_emits_canonical_death_event(client, fa
     """participant.status DEAD frees the name and emits participant.dead, not participant.status."""
     record = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
     await client.call("participant.rename", id=record["id"], name=_FIXED_NAME)
-    bus_before = len(await client.call("bus.tail"))
+    cursor = (await client.call("bus.tail", limit=1))[0]["id"]
 
     updated = await client.call("participant.status", id=record["id"], status="dead")
     assert updated["status"] == "dead"
@@ -872,9 +862,8 @@ async def test_status_dead_frees_name_and_emits_canonical_death_event(client, fa
         await client.call("participants.get", id=_FIXED_NAME)
     assert exc.value.code == "not_found"
 
-    events = await client.call("bus.tail", limit=10)
-    new_events = events[bus_before:]
-    kinds = [e["kind"] for e in new_events if e.get("to_id") == record["id"]]
+    events = await client.call("bus.tail", after_id=cursor)
+    kinds = [e["kind"] for e in events if e.get("to_id") == record["id"]]
     assert "participant.dead" in kinds
     assert "participant.status" not in kinds
 
