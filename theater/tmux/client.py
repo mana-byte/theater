@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -91,6 +92,86 @@ def inside_tmux() -> bool:
 def current_pane() -> str | None:
     """The pane of the *calling* process, if it is itself inside tmux."""
     return os.environ.get("TMUX_PANE")
+
+
+# ---- version probe ---------------------------------------------------------
+#
+# A running tmux server cannot change version underneath us, so the result is
+# cached after the first probe. This is called on every `deliver_text`, which is
+# a hot path — the blocking `tmux -V` subprocess is acceptable only because it
+# runs once.
+_UNPROBED = object()
+_VERSION_CACHE: list[str | object | None] = [_UNPROBED]
+
+
+def reset_version_cache() -> None:
+    """Clear the cached tmux version so tests can control the probe."""
+    _VERSION_CACHE[0] = _UNPROBED
+
+
+def tmux_version() -> str | None:
+    """The raw tmux version string, e.g. ``"3.7"``, ``"3.7a"``, ``"3.4"``.
+
+    Returns ``None`` if tmux is absent or the output is unparseable. Never
+    raises. The leading ``tmux `` prefix from ``tmux -V`` is stripped.
+    """
+    cached = _VERSION_CACHE[0]
+    if cached is not _UNPROBED:
+        return cached  # type: ignore[return-value]
+    if not available():
+        _VERSION_CACHE[0] = None
+        return None
+    try:
+        proc = subprocess.run(
+            ["tmux", "-V"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="backslashreplace",
+            timeout=RUN_TIMEOUT,
+            check=False,
+        )
+    except Exception:
+        _VERSION_CACHE[0] = None
+        return None
+    out = proc.stdout.strip()
+    # `tmux -V` prints "tmux 3.4" or "tmux 3.7a"; strip the leading "tmux ".
+    if not out.startswith("tmux "):
+        _VERSION_CACHE[0] = None
+        return None
+    version = out[len("tmux ") :]
+    _VERSION_CACHE[0] = version
+    return version
+
+
+def _parse_version_tuple(version: str) -> tuple[int, ...] | None:
+    """Parse leading numeric components: ``"3.7a"`` → ``(3, 7)``.
+
+    Returns ``None`` for non-numeric garbage like ``"master"``. A letter suffix
+    is stripped, so ``"3.7a"`` parses as ``(3, 7)`` — the caller treats the
+    suffix as "≥ the bare version" by comparing tuples. Strings like
+    ``"next-3.8"`` are handled by searching for the first numeric component.
+    """
+    m = re.search(r"(\d+)(?:\.(\d+))*", version)
+    if not m:
+        return None
+    return tuple(int(g) for g in m.groups() if g is not None)
+
+
+def tmux_at_least(major: int, minor: int = 0) -> bool:
+    """True if the running tmux is at least ``major.minor``.
+
+    ``"3.7a"`` counts as ≥ 3.7 because the letter suffix denotes a patch
+    release on top of the bare version. Returns ``False`` if tmux is absent or
+    the version is unparseable.
+    """
+    version = tmux_version()
+    if version is None:
+        return False
+    parsed = _parse_version_tuple(version)
+    if parsed is None:
+        return False
+    return parsed >= (major, minor)
 
 
 def _require() -> None:
