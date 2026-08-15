@@ -181,8 +181,16 @@ def _require() -> None:
 
 def run_sync(*args: str, check: bool = True) -> str:
     _require()
+    # text=True decodes using locale.getpreferredencoding(False), which under
+    # LANG=C misdecodes any non-ASCII pane path. Pin UTF-8 explicitly.
     proc = subprocess.run(
-        ["tmux", *args], capture_output=True, text=True, timeout=RUN_TIMEOUT, check=False
+        ["tmux", *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="backslashreplace",
+        timeout=RUN_TIMEOUT,
+        check=False,
     )
     if check and proc.returncode != 0:
         raise TmuxError(f"tmux {' '.join(args)} failed: {proc.stderr.strip()}")
@@ -203,8 +211,11 @@ async def run(*args: str, check: bool = True) -> str:
         proc.kill()
         raise TmuxError(f"tmux {' '.join(args)} timed out") from None
     if check and proc.returncode != 0:
-        raise TmuxError(f"tmux {' '.join(args)} failed: {err.decode().strip()}")
-    return out.decode().rstrip("\n")
+        # errors="backslashreplace" so a pane emitting invalid UTF-8 in its
+        # stderr does not raise UnicodeDecodeError here.
+        msg = err.decode("utf-8", "backslashreplace").strip()
+        raise TmuxError(f"tmux {' '.join(args)} failed: {msg}")
+    return out.decode("utf-8", "backslashreplace").rstrip("\n")
 
 
 # ---- queries -----------------------------------------------------------
