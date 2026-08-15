@@ -64,113 +64,56 @@ from theater.harness.observation import (
 )
 from theater.models import BadRequest
 
-#: Screen lines that mean "waiting for you". Vibe's prompt is `❯` (U+276F);
-#: the variants cover trailing space and the boxed form. Anything after the
-#: prompt is someone typing, which is presence, not idleness — so these must
-#: stay exact matches.
+#: Vibe's idle prompt is `❯` (U+276F). Anything after the prompt is someone
+#: typing — presence, not idleness — so these stay exact matches.
 IDLE_PROMPTS = ("❯", "❯ ", "> ❯")
 
-#: Prompt forms recognised in a tail scan by `screen_reading`. A superset of
-#: `IDLE_PROMPTS` because a real capture can render the prompt as bare `>`
-#: (ASCII), which the exact `IDLE_PROMPTS` tuple used by `is_idle_screen` does
-#: not include. Seen in `tests/fixtures/screens/vibe_idle.txt`.
+#: A superset of `IDLE_PROMPTS`: a real capture can render the prompt as bare
+#: `>` (ASCII), which the exact tuple above does not include.
 _SCREEN_IDLE_PROMPTS = (*IDLE_PROMPTS, ">")
 
-#: Drawn by the CLI at the bottom of every permission box, regardless of which
-#: tool or question the box is about. Chosen over the question text
-#: (`Permission for the`) because `Esc reject` is frame furniture — the CLI's
-#: own navigation hint — and cannot appear in the agent's echoed output.
-#: Present in `tests/fixtures/screens/vibe_approval.txt`.
-#:
-#: Vibe renders its working spinner (`Esc/Ctrl+C to interrupt`) *and* the
-#: permission box simultaneously, so approval must be tested before the working
-#: marker or every approval dialog is misclassified as `working`.
-#:
-#: Case matters: vibe's picker footers render `Esc Cancel`, `Esc Close`,
-#: `Esc Back`, `Esc exit`, and `Esc cancel` (lowercase) — all user-initiated
-#: menus that must NOT be classified as approval. Only the lowercase `reject`
-#: is the permission box.
+#: Footer of every permission box, regardless of tool or question. Chosen over
+#: the question text because `Esc reject` is frame furniture — the CLI's own
+#: navigation hint — and cannot appear in echoed output. Case matters: vibe's
+#: picker footers render `Esc Cancel`, `Esc Close`, `Esc Back`, `Esc exit`,
+#: and `Esc cancel` — all user menus that must NOT be classified as approval.
 APPROVAL_MARKER = "Esc reject"
 
-#: Drawn in the spinner line while a turn is in flight. Vibe has two spellings
-#: of the spinner hint (`loading.py:170-177`):
-#:   plain:   `(9m45s Esc/Ctrl+C to interrupt)`
-#:   queued:  `(1m23s Esc to interrupt · Ctrl+C to cancel last queued message)`
-#: The substring `to interrupt` matches both spellings, but it is also
-#: ordinary English prose that an agent can echo in its own output, so it
-#: cannot be used alone.
-#:
-#: `WORKING_MARKER_KEY` is the other token that identifies the spinner line.
-#: Both spellings put `Esc` and `to interrupt` on the SAME line, and ordinary
-#: prose containing "to interrupt" — e.g. "I added a signal handler to
-#: interrupt the loop" — does not also contain `Esc` on that line.
-#:
-#: The safety of the loose substring rests on TWO things together: the tail
-#: window (`_SPINNER_TAIL_LINES`) and the `Esc` co-occurrence requirement.
-#: Neither alone is enough, because the tail window unavoidably contains the
-#: agent's closing lines of output — the spinner renders directly above the
-#: composer, and the agent's closing sentences render directly above the
-#: spinner. Do not separate any of the three: the substring, the key, and the
-#: tail window.
-#:
-#: Codex's working arm uses an endswith anchor on its spinner line, but that
-#: does NOT work here: the plain hint ends with `)` and the queued hint ends
-#: with `message)`, so anchoring on the end of the line would break both. The
-#: two-token co-occurrence test is the right discriminator for vibe.
+#: Substring in the spinner line while a turn is in flight. Vibe has two
+#: spellings (`loading.py:170-177`): plain `(9m45s Esc/Ctrl+C to interrupt)`
+#: and queued `(1m23s Esc to interrupt · ...)`. The substring `to interrupt`
+#: matches both, but is also ordinary English prose an agent can echo. Safety
+#: rests on three things together: the substring, `WORKING_MARKER_KEY` (`Esc`)
+#: co-occurring on the same tail line, and the `_SPINNER_TAIL_LINES` window.
+#: Do not separate any of the three — none alone is enough.
 WORKING_MARKER = "to interrupt"
 
-#: The second token that must co-occur with `WORKING_MARKER` on the same tail
-#: line. See `WORKING_MARKER` for why both are required.
+#: Second token that must co-occur with `WORKING_MARKER` on the same tail line.
 WORKING_MARKER_KEY = "Esc"
 
-#: Rendered by the workspace-trust dialog (`trust_folder_dialog.py:95-97`),
-#: which runs at startup when vibe detects config files in an untrusted folder
-#: (`startup.py:127-147`). The warning paragraph starts with this fragment on
-#: its own rendered line, so it survives Textual's line wrapping. Chosen over
-#: the title (`Trust this folder?` / `Trust folder or repository?`) because the
-#: title varies by context, and over the button labels (`Don't trust` etc.)
-#: because the warning is unique to this dialog — a button label like
-#: `Don't trust` could in principle appear in echoed output, whereas
-#: `Malicious configs can modify` is prose that only this screen renders.
-#: Unlike `WORKING_MARKER`, this stays a whole-capture match: the trust dialog
-#: only appears at startup when there is no agent output on the pane, and the
-#: marker is body text in the middle of the dialog, not footer chrome, so
-#: tail-scoping would break it.
+#: Workspace-trust dialog body text (`trust_folder_dialog.py:95-97`), rendered
+#: on its own line so it survives wrapping. Chosen over the title (varies by
+#: context) and button labels (could appear in echoed output). Whole-capture
+#: match, not tail-scoped: the trust dialog only appears at startup with no
+#: agent output on the pane.
 TRUST_MARKER = "Malicious configs can modify"
 
-#: How far up from the bottom to look for the prompt. A real capture has a
-#: separator and a cwd/token footer below the prompt, so the prompt is not
-#: the last non-blank line and `is_idle_screen` — which checks only the last
-#: line — does not fire on a real screen.
+#: A real capture has a separator and cwd/token footer below the prompt, so
+#: `is_idle_screen` (last line only) does not fire on a real screen.
 _SCREEN_TAIL_LINES = 6
 
-#: How far up from the bottom to scan for the working spinner. Measured in
-#: both `vibe_working.txt` and `vibe_working_queued.txt` the spinner sits 6
-#: lines above the bottom of the capture (separator, composer prompt, blank,
-#: blank, separator, cwd/token footer). The queued hint is longer and may wrap
-#: on a narrow terminal, adding a line or two, so 8 leaves a 2-line margin
-#: without reaching into the agent's output area.
+#: The spinner sits 6 lines above the bottom; the queued hint is longer and
+#: may wrap on a narrow terminal, so 8 leaves a 2-line margin.
 _SPINNER_TAIL_LINES = 8
 
-#: How many session directories to inspect when searching by working directory.
-#: They are scanned newest first and a live session is always near the top, so
-#: this bounds the cost of a home directory with thousands of old sessions.
+#: Directories scanned newest first; a live session is near the top, so this
+#: bounds the cost of a home directory with thousands of old sessions.
 _SCAN_LIMIT = 200
 
 #: Vibe tool names that modify a file, mapped to the argument key that carries
-#: the path. The path is always under the tool's ``file_path`` argument; see
-#: ``read_file.py:54``, ``write_file.py:30``, ``edit.py:35`` in the vibe source.
-#:
-#: ``write_file`` creates (errors if the file exists), ``edit`` patches in
-#: place, and ``read_file`` reads. All three accept relative paths but the LLM
-#: is instructed to use absolute paths, so relativisation is the rule not the
-#: exception.
-#:
-#: ``grep`` is deliberately excluded: its ``path`` argument is a search root
-#: (a file or directory), not a file being read, and the default ``.`` is a
-#: directory. Emitting a directory as a ``read`` path would put a false claim
-#: in the index. ``bash`` is excluded too: parsing paths out of a shell command
-#: string would mean guessing at quoting, and a wrong path is worse than none.
+#: the path (`write_file.py:30`, `edit.py:35`). `grep` is excluded: its `path`
+#: is a search root, not a file. `bash` is excluded: parsing a shell command
+#: string means guessing at quoting, and a wrong path is worse than none.
 _WRITE_TOOLS: dict[str, str] = {
     "write_file": "file_path",
     "edit": "file_path",
@@ -263,9 +206,8 @@ class VibeHarness(Harness):
     aliases = ("Vibe", "mistral-vibe", "mistral_vibe")
 
     def __init__(self, root: Path | None = None):
-        #: `root` is only the observer's business — nothing about launching vibe
-        #: depends on where it writes — so it is passed straight through rather
-        #: than stored here as well.
+        #: `root` is the observer's business alone — nothing about launching
+        #: vibe depends on where it writes.
         self.observer = VibeObserver(root=root)
 
     # ---- launching ------------------------------------------------------
@@ -290,8 +232,8 @@ class VibeHarness(Harness):
                 "transport": "stdio",
                 "command": theater_binary(),
                 "args": ["mcp", "--id", participant_id],
-                # Without this vibe applies its own 60s default and cuts off
-                # `await_sessions` long before the daemon's 300s ceiling.
+                # Vibe's own 60s default would cut off `await_sessions` before
+                # the daemon's 300s ceiling.
                 "tool_timeout_sec": MCP_TOOL_TIMEOUT,
             }
         ]
@@ -300,27 +242,19 @@ class VibeHarness(Harness):
             argv.append("--yolo")
         elif approval == "edits":
             argv += ["--agent", "accept-edits"]
-        # --resume <SESSION_ID> appends to the same messages.jsonl and keeps
-        # the same session id (vibe/app_server/_runtime.py:256-269, which
-        # creates a replacement AgentLoop with the same session_id and
-        # session_dir). The positional prompt is still honoured on resume
-        # (vibe/cli/cli.py:258-264 passes initial_prompt to StartupOptions
-        # regardless of whether --resume was given), so resume_takes_prompt
-        # stays True.
+        # --resume appends to the same messages.jsonl and keeps the same session
+        # id (`_runtime.py:256-269`). The positional prompt is still honoured
+        # on resume, so `resume_takes_prompt` stays True.
         if resume is not None:
             argv += ["--resume", resume]
         if prompt:
             argv.append(prompt)
         env = {"VIBE_MCP_SERVERS": json.dumps(servers)}
-        # The only shipped harness with no `--model` flag: the same VIBE_*
-        # override mechanism that carries the MCP server carries the model.
-        #
-        # It is set unconditionally, empty when no model was asked for, because
-        # an environment variable is inherited and a flag is not. A vibe agent
-        # spawned with a model would otherwise pass it down to every descendant
-        # that did not name one, and the child would come up on a model nobody
-        # chose — a bug that is invisible until the bill arrives. Empty means
-        # "use the configured default", which is what an unset variable means.
+        # No `--model` flag: the same VIBE_* override carries the model. Set
+        # unconditionally, empty when no model was asked for. Empty means "use
+        # the configured default" — same as an unset variable. A non-empty
+        # value would be inherited by descendants that did not name one,
+        # putting a child on a model nobody chose.
         env["VIBE_ACTIVE_MODEL"] = model or ""
         return LaunchPlan(argv=argv, env=env)
 
@@ -383,17 +317,10 @@ class VibeObserver(TranscriptObserver):
     def __init__(self, root: Path | None = None):
         #: Injectable so tests never touch the real ~/.vibe.
         self.root = root or Path.home() / ".vibe" / "logs" / "session"
-        #: The working directory of the session whose transcript was found.
-        #: ``parse`` needs it to relativise the absolute paths that vibe's
-        #: tool arguments carry, and ``parse`` receives no cwd of its own.
-        #: Set in ``find_transcript`` because that is the one call that
-        #: receives the participant's cwd and precedes every ``parse`` call
-        #: for the same transcript. The observer is shared across
-        #: participants, so a cross-participant race is possible in theory;
-        #: in practice the daemon's watcher calls ``find_transcript`` once
-        #: at source creation and ``parse`` in the same watcher's event
-        #: loop, so the window is negligible. A path that cannot be
-        #: relativised is dropped rather than emitted as an absolute.
+        #: Set in `find_transcript` (the one call that receives the
+        #: participant's cwd) so `parse` can relativise the absolute paths
+        #: vibe's tool arguments carry. A path that cannot be relativised is
+        #: dropped rather than emitted as an absolute.
         self._cwd: str | None = None
 
     def find_transcript(
@@ -516,15 +443,9 @@ class VibeObserver(TranscriptObserver):
             )
         if calls:
             return out
-        # No tool calls: the agent has finished its turn. Content can still be
-        # None on a degenerate record, so guarantee the boundary event exists.
-        #
-        # No turn_id: the records carry no id of any kind, not even a message
-        # id, so there is nothing honest to put there. Leaving it None means
-        # the observer treats every Vibe boundary as its own turn — correct
-        # here, because Vibe writes one record per boundary and never repeats
-        # one. Synthesising an id from the index would be a lie the moment a
-        # record is re-read after a relocate.
+        # No tool calls: the agent has finished its turn. No turn_id: the
+        # records carry no id of any kind, so synthesising one from the index
+        # would be a lie the moment a record is re-read after a relocate.
         if out:
             last = out[-1]
             out[-1] = Event(

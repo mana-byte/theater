@@ -70,37 +70,26 @@ from theater.models import BadRequest
 #: someone typing, which is presence, not idleness — so these stay exact.
 IDLE_PROMPTS = (">", "> ")
 
-#: Drawn by the CLI as the footer of every approval dialog, regardless of what
-#: the question asks. Chosen over the question text (`Do you want to`) because
-#: that phrasing can appear in an agent's own echoed output and would
-#: false-positive. Present in `tests/fixtures/screens/claude_approval.txt`.
+#: Footer of every approval dialog, regardless of the question. Chosen over
+#: the question text (`Do you want to`) because that can appear in echoed
+#: output. `Esc to cancel` is frame furniture, not agent text.
 APPROVAL_MARKER = "Esc to cancel"
 
-#: The workspace-trust onboarding dialog's primary option label. Unique to
-#: that dialog and rendered on its own line (24 chars, so it does not wrap on
-#: any realistic pane width). Unlike the header-ish strings `Accessing
-#: workspace:` or `Quick safety check`, it cannot collide with the two
-#: neighbour trust dialogs (`Trust this directory?` — the remote-control
-#: add-server confirmation, and `Trust gateway <host>` — cloud-gateway TLS
-#: pinning), which use different option labels entirely. The marker is an
-#: option label, not body text, so it will not appear in echoed agent output.
+#: Workspace-trust onboarding dialog's primary option label. Unique to that
+#: dialog and rendered on its own line. Cannot collide with the two neighbour
+#: trust dialogs (`Trust this directory?` — remote-control add-server, and
+#: `Trust gateway <host>` — cloud-gateway TLS pinning), which use different
+#: labels. An option label, not body text, so it will not appear in echoed output.
 TRUST_MARKER = "Yes, I trust this folder"
 
-#: The middle segment of the status footer while a turn is in flight. The
-#: footer keeps its shape and swaps this segment for `IDLE_FOOTER` when the
-#: turn ends, so the two are mutually exclusive. Present in
-#: `tests/fixtures/screens/claude_working.txt`.
+#: Status footer segment while a turn is in flight. The footer swaps this for
+#: `IDLE_FOOTER` when the turn ends, so the two are mutually exclusive.
 WORKING_MARKER = "esc to interrupt"
 
-#: The middle segment of the status footer while waiting for input. Used by
-#: `screen_reading` because a real capture has this footer below the prompt,
-#: so the prompt is not the last non-blank line and `is_idle_screen` — which
-#: checks only the last line — does not fire.
-#:
-#: Deliberately not the permission-mode indicator (`manual mode on`) that sits
-#: to its left: that is drawn while idle *and* while working, so it cannot
-#: tell them apart, and its text changes with the approval mode the agent was
-#: spawned under. Present in `tests/fixtures/screens/claude_idle.txt`.
+#: Status footer segment while waiting for input. A real capture has this
+#: footer below the prompt, so `is_idle_screen` (last line only) does not fire.
+#: Not the `manual mode on` indicator to its left: that is drawn while idle
+#: *and* working, and its text changes with the approval mode.
 IDLE_FOOTER = "? for shortcuts"
 
 #: How far up from the bottom to look for the prompt and footer. A real
@@ -118,16 +107,10 @@ _CWD_PROBE_RECORDS = 20
 _CWD_PROBE_BYTES = 256 * 1024
 
 
-#: Tools that write a file, keyed by the input parameter that carries the path.
-#: Each entry maps the tool name to the key whose value is the file path the
-#: tool operates on. MultiEdit batches several edits to one file but names it
-#: once, so it yields a single EventPath — the alternative, enumerating every
-#: edit's path, would produce duplicates for the same file in the same event.
-#:
-#: The input shapes are not visible in the scrubbed fixture (every tool_use has
-#: ``"input": {"scrubbed": true}``); the parameter names are grounded in the
-#: Claude Code tool schema as referenced in the CHANGELOG (line 67 names
-#: ``file_path``; line 550 names ``Write(path)``, ``NotebookEdit(path)``).
+#: Tools that write a file, keyed by the input parameter carrying the path.
+#: MultiEdit batches several edits to one file but names it once, so it yields
+#: a single EventPath. Parameter names are grounded in the Claude Code tool
+#: schema (`file_path` for Write/Edit, `notebook_path` for NotebookEdit).
 _WRITE_TOOLS: dict[str, str] = {
     "Write": "file_path",
     "Edit": "file_path",
@@ -135,9 +118,8 @@ _WRITE_TOOLS: dict[str, str] = {
     "NotebookEdit": "notebook_path",
 }
 
-#: Tools that read a file. Read and NotebookEdit-read both name the file
-#: explicitly in a structured parameter. Grep and Glob take a path but it is
-#: a directory or pattern, not a named file — see the note on _PATH_TOOLS.
+#: Tools that read a file. Grep and Glob take a directory or pattern, not a
+#: named file, so they are excluded — a wrong path is worse than a missing one.
 _READ_TOOLS: dict[str, str] = {
     "Read": "file_path",
 }
@@ -223,11 +205,9 @@ class ClaudeCodeHarness(Harness):
                 }
             }
         }
-        # `--mcp-config` is variadic in Claude Code 2.x (<configs...>,
-        # space-separated). The space-separated form greedily consumes the
-        # prompt positional as a second config path, so claude exits with
-        # "MCP config file not found: <cwd>/<prompt>" and the pane dies before
-        # the observer ever attaches. The `=` form binds the value tightly.
+        # `=` form: `--mcp-config` is variadic and space-separated in Claude
+        # Code 2.x, so the space form greedily consumes the prompt positional
+        # as a second config path and claude exits before the observer attaches.
         argv = ["claude", f"--mcp-config={config_path}"]
         if model:
             # `=` form for the same reason as --mcp-config above: a
@@ -235,12 +215,9 @@ class ClaudeCodeHarness(Harness):
             # binding tightly is the habit that keeps this argv unambiguous.
             argv.append(f"--model={model}")
         if resume:
-            # `--resume <session-id>` resumes a specific session by id or
-            # name. Documented in the Claude Code CHANGELOG (line 2522:
-            # "claude --resume <session-id>"; line 2526: "--resume <id>";
-            # line 2587: "claude -p --resume <name>"). Interactive mode
-            # reattaches to the session and still accepts a prompt positional,
-            # which `resume_takes_prompt = True` (the Harness default) asserts.
+            # `--resume <session-id>` resumes a specific session by id or name
+            # (CHANGELOG line 2522). Interactive mode reattaches and still
+            # accepts a prompt positional, so `resume_takes_prompt = True` holds.
             argv.append(f"--resume={resume}")
         if approval == "yolo":
             argv.append("--dangerously-skip-permissions")
@@ -367,12 +344,10 @@ class ClaudeCodeObserver(TranscriptObserver):
 
         stop = message.get("stop_reason")
         turn_end = stop is not None and stop != "tool_use"
-        # `message.id` is shared by every record one message was split into,
-        # which is exactly the set of records that can repeat a boundary. The
-        # record's own `uuid` is not: it differs per record, so using it would
-        # name each duplicate a separate turn and defeat the dedup. requestId
-        # is the fallback for the handful of records written without a message
-        # id; it is per API call, so it groups the same way for this purpose.
+        # `message.id` is shared by every record one message was split into —
+        # exactly the set that can repeat a boundary. The record's `uuid`
+        # differs per record and would name each duplicate a separate turn.
+        # `requestId` is the fallback for records written without a message id.
         tid = message.get("id") or record.get("requestId")
         tid = tid if isinstance(tid, str) and tid else None
         cwd = record.get("cwd")
