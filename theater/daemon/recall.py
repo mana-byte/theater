@@ -147,11 +147,9 @@ def _dirty_set(cwd: str) -> set[str]:
     for line in result.stdout.splitlines():
         if not line:
             continue
-        # --porcelain output: "XY path" where XY is two status chars
-        # followed by a space. Do NOT strip the line first: the
-        # leading char is part of the status field and may be a space,
-        # so stripping would shift the path by one byte.
-        # Renames show "XY  old -> new"; we take the new path.
+        # --porcelain: "XY path", XY = two status chars then a space.
+        # Do NOT strip — the leading char may itself be a space.
+        # Renames show "XY  old -> new"; take the new path.
         path = line[3:]
         if " -> " in path:
             path = path.split(" -> ", 1)[1]
@@ -183,11 +181,8 @@ def _build_timeline(
     result: dict[str, dict] = {}
 
     for path in repo_paths:
-        # Join touch -> jobs -> participants. The privacy wall is the
-        # cwd prefix match: only participants in the caller's repo
-        # contribute. A left join on participants would include rows
-        # we cannot attribute; an inner join excludes them, which is
-        # the correct failure mode.
+        # Inner join on participants: rows we cannot attribute to a repo
+        # are excluded, which is the correct failure mode.
         stmt = (
             select(
                 touch.c.job_handle,
@@ -210,41 +205,24 @@ def _build_timeline(
                 )
             )
             .where(touch.c.path == path)
-            # startswith(autoescape=True) rather than like(f"{root}%"):
-            # LIKE reads `_` and `%` as wildcards, and both are legal in
-            # a directory name. A root of /Users/x/my_repo would match
-            # /Users/x/myXrepo and hand that repo's rows to this caller.
-            # A privacy wall that widens on a common punctuation mark is
-            # not a wall.
+            # startswith(autoescape=True), not like(f"{root}%"): LIKE
+            # treats `_` and `%` as wildcards, both legal in a directory
+            # name — a privacy wall that widens on punctuation is no wall.
             .where(participants.c.cwd.startswith(git_root, autoescape=True))
             .order_by(jobs.c.finished_at.desc())
         )
         rows = store.conn.execute(stmt).fetchall()
 
-        # Reads are a count, not timeline points. A read has
-        # sha_before == sha_after, and rendering them as points buries
-        # the writes. One integer per path keeps the signal without
-        # the noise. See docs/v2_recall.md §"Reads are a count".
+        # Reads (sha_before == sha_after) are a count, not timeline
+        # points — rendering them as points buries the writes.
         writes = [r for r in rows if r.sha_before != r.sha_after]
         reads = len(rows) - len(writes)
 
-        # Build the interleaved timeline: job points and gap points,
-        # newest first, capped at depth. Rows are ordered descending
-        # by finished_at, so the first row is the newest write.
-        #
-        # Gap detection: in descending order, each row is older than
-        # the one above it. A gap exists when this row's sha_after
-        # does not match the sha_before of the row above (newer). In
-        # time order, that means: this job left the file at sha_after,
-        # the newer job found it at sha_before, and a mismatch means
-        # something changed it in between that no job claims.
-        #
-        # We track ``prev_before`` (the sha_before of the row above)
-        # and ``_seen_prev`` (whether there is a row above at all).
-        # The latter is needed because ``prev_before`` can be None
-        # legitimately (the newer job created the file), and a simple
-        # ``prev_before is not None`` guard would suppress a real gap
-        # at a creation boundary.
+        # Gap detection in descending order: a gap exists when this
+        # row's sha_after does not match the sha_before of the row
+        # above (newer). ``_seen_prev`` is needed because
+        # ``prev_before`` can be None legitimately (a creation), and
+        # a ``is not None`` guard would suppress a real gap there.
         timeline: list[dict] = []
         prev_before: str | None = None
         _seen_prev = False
@@ -288,13 +266,11 @@ def _build_timeline(
             prev_before = row.sha_before
             _seen_prev = True
 
-        # Current is the file's blob sha right now — not a fork, just
-        # bytes through blob_sha. Dirty means only what git status means:
-        # the working tree differs from HEAD. It is deliberately not
-        # "differs from where the last job left it" — that is `current`
-        # against the newest point's sha_after, which the caller can read
-        # off the timeline without us collapsing two different facts into
-        # one flag.
+        # ``dirty`` means the working tree differs from HEAD, not
+        # "differs from where the last job left it" — that is
+        # ``current`` against the newest point's sha_after, which the
+        # caller reads off the timeline without us collapsing two
+        # facts into one flag.
         abs_path = Path(git_root) / path
         current = blob_sha(abs_path)
         dirty = path in dirty_set
@@ -380,16 +356,12 @@ def recall(
     cwd = caller_cwd or str(Path.cwd())
     root = _git_root(cwd)
     if root is None:
-        # Not a git repo: no dirty set, no root to normalise against. We
-        # can still answer "who touched this" if the touch table has
-        # rows, but we cannot filter by repo or compute current/dirty.
+        # Not a git repo: no dirty set, no root to normalise against.
         # Degraded but not broken.
         root = cwd
 
     repo_paths = _normalise_paths(paths, root)
 
-    # Two forks, total — `_git_root` above and this one. The dirty set is
-    # per-repo, not per-path, which is the whole point of the budget.
     dirty = _dirty_set(cwd)
 
     return _build_timeline(

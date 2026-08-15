@@ -107,7 +107,6 @@ async def _read_job(
         raise BadRequest(f"no job {handle!r}")
     j = row._mapping
 
-    # Touch rows: the paths this job touched and their sha transitions.
     touch_rows = store.conn.execute(
         select(
             touch.c.path,
@@ -142,8 +141,8 @@ async def _read_job(
         "transcript": None,
     }
 
-    # The participant that ran the job. A job whose target was None (a
-    # CLI spawn with no target) has no transcript to read.
+    # A job whose target was None (a CLI spawn with no target) has no
+    # transcript to read.
     target_id = j["target_id"]
     if target_id is None:
         brief["transcript"] = {
@@ -155,9 +154,8 @@ async def _read_job(
     try:
         p = registry.get(target_id)
     except Exception:
-        # The participant was forgotten. The job still happened, and
-        # everything in the jobs table is still true; only the
-        # transcript is unavailable.
+        # The participant was forgotten — the job still happened; only
+        # the transcript is unavailable.
         brief["transcript"] = {
             "available": False,
             "reason": f"participant {target_id} is no longer registered",
@@ -172,18 +170,15 @@ async def _read_job(
     harness_name = normalize(p.harness)
     harness = HARNESSES.get(harness_name)
     if harness is None:
-        # The harness adapter is not loaded (disabled, uninstalled, or
-        # a third-party plugin that was removed). We still have the job
-        # metadata; the transcript is simply unreadable.
+        # Harness adapter not loaded — the job metadata survives; only
+        # the transcript is unreadable.
         brief["transcript"] = {
             "available": False,
             "reason": f"harness {p.harness!r} is not known",
         }
         return brief
 
-    # Open a short-lived source separate from the watcher's, read the
-    # full history, and close it in a finally. Same pattern as
-    # ``_read_transcript`` (methods.py:747-753).
+    # Open a short-lived source separate from the watcher's; close in finally.
     source = harness.observer.open_source(
         cwd=p.cwd, session_id=p.session_id, after=None
     )
@@ -200,10 +195,8 @@ async def _read_job(
         await source.aclose()
 
     if history.location is None:
-        # The source located nothing — the transcript file was deleted,
-        # or the opencode database has no session row. This is the
-        # missing-transcript path from the design (docs/v2_recall.md
-        # line 538): 3 of 147 recorded paths are gone from disk.
+        # The source located nothing — transcript file deleted, or the
+        # opencode database has no session row.
         brief["transcript"] = {
             "available": False,
             "reason": "transcript no longer exists on disk",
@@ -241,9 +234,8 @@ def _read_gap(segment_id: str, *, cwd: str) -> dict:
     call is spent deliberately, by a caller who has looked at a gap and
     decided they want to know.
     """
-    # Parse ``gap:<path>:<before>..<after>``. The path may itself contain
-    # colons (unlikely on macOS, legal on Linux), so split from the right:
-    # the last colon separates the path from the sha pair.
+    # Parse ``gap:<path>:<before>..<after>``. Split from the right: the
+    # path may contain colons (legal on Linux).
     body = segment_id[len("gap:") :]
     colon = body.rfind(":")
     if colon < 0:
@@ -256,14 +248,12 @@ def _read_gap(segment_id: str, *, cwd: str) -> dict:
     before_raw = sha_part[:dotdot]
     after_raw = sha_part[dotdot + 2 :]
 
-    # ``-`` is the literal sentinel for a null sha (a file that did not
-    # exist at that point). Convert to None for the git queries.
+    # ``-`` is the sentinel for a null sha — convert to None.
     before = None if before_raw == "-" else before_raw
     after = None if after_raw == "-" else after_raw
 
-    # The git root is a hard privacy wall. Never read or report anything
-    # outside the caller's repository. ``..`` in a path is an attack, not
-    # a typo.
+    # The git root is a hard privacy wall — never read outside the
+    # caller's repo. ``..`` in a path is an attack, not a typo.
     root = _git_root(cwd)
     if root is None:
         return {
@@ -277,9 +267,8 @@ def _read_gap(segment_id: str, *, cwd: str) -> dict:
             "note": "cwd is not inside a git repository",
         }
 
-    # Refuse a path that escapes the root. os.path.realpath resolves
-    # ``..`` so the containment check is against the real filesystem
-    # layout, not a lexical one that could be fooled by symlinks.
+    # Refuse a path that escapes the root. ``realpath`` resolves ``..``
+    # so the check is against the real filesystem, not a lexical one.
     resolved = _resolve_within_root(raw_path, root)
     if resolved is None:
         return {
@@ -343,8 +332,6 @@ def _git_root(cwd: str) -> str | None:
     common_dir = result.stdout.strip()
     if not common_dir:
         return None
-    # ``--git-common-dir`` returns ``<root>/.git``; the parent is the
-    # repo root.
     return str(Path(common_dir).parent)
 
 
@@ -356,10 +343,9 @@ def _resolve_within_root(path: str, root: str) -> str | None:
     symlink that points outside the repo is caught.
     """
     root_path = Path(root).resolve()
-    # Reject any path containing ``..`` at the lexical level, before
-    # resolution. This is stricter than necessary (a ``..`` that stays
-    # within root is harmless) but the cost of a false reject is low
-    # and the cost of a false accept is a privacy breach.
+    # Reject ``..`` lexically, before resolution. Stricter than needed
+    # but the cost of a false reject is low and a false accept is a
+    # privacy breach.
     if ".." in path.split("/"):
         return None
     candidate = (root_path / path).resolve()
@@ -394,9 +380,7 @@ def _git_log_for_transition(
     fmt = "%H%x1f%an%x1f%ad%x1f%s"
     shas = [s for s in (before, after) if s is not None]
     if not shas:
-        # Both shas are null — a transition from nothing to nothing,
-        # which is not a real gap. Return nothing rather than spending a
-        # ``git log`` on a question that has no answer.
+        # Both shas null — not a real gap; no point forking git.
         return []
 
     commits: list[dict] = []
