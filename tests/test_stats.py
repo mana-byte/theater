@@ -14,8 +14,12 @@ tmux, no time passing.
 
 from __future__ import annotations
 
-import pytest
+from types import SimpleNamespace
 
+import pytest
+from sqlalchemy import insert
+
+from theater.daemon.schema import bus
 from theater.models import Job, JobState, Participant, Tier, now
 from theater.protocol import RemoteError
 
@@ -129,6 +133,39 @@ def test_the_window_cuts_on_when_the_turn_was_asked(store):
     assert store.turn_outcomes(since=now() - 3600)[0]["turns"] == 1
 
 
+# ---- retention floor ----------------------------------------------------
+
+
+def _bus_row(store, ts: float) -> None:
+    """Insert a bus row at a specific timestamp, bypassing bus_append's now()."""
+    store.conn.execute(insert(bus).values(ts=ts, kind="send.refused", payload="{}"))
+
+
+def _floor(store):
+    """Call _retention_floor with a stand-in daemon that carries only .store."""
+    from theater.daemon.methods import _retention_floor
+
+    return _retention_floor(SimpleNamespace(store=store))
+
+
+def test_retention_floor_on_an_empty_database(store):
+    assert _floor(store) == {"jobs_from": None, "bus_from": None}
+
+
+def test_retention_floor_returns_independent_minima(store):
+    """Jobs and bus are backed by different tables — one floor value would be wrong."""
+    vibe = _participant(store, "vibe")
+    job_ts = now() - 7200
+    bus_ts = now() - 3600
+    _turn(store, vibe, handle="a#1", created_at=job_ts)
+    _bus_row(store, bus_ts)
+
+    floor = _floor(store)
+    assert floor == {"jobs_from": job_ts, "bus_from": bus_ts}
+    # The two are genuinely independent, not sharing one value.
+    assert floor["jobs_from"] != floor["bus_from"]
+
+
 # ---- refusals -----------------------------------------------------------
 
 
@@ -206,6 +243,18 @@ async def test_stats_window_is_in_hours(client, daemon, fake_tmux):
     assert (await client.call("stats", window=3))["harnesses"][0]["turns"] == 2
 
 
+async def test_stats_response_carries_coverage_and_all_prior_keys(client, daemon, fake_tmux):
+    vibe = _participant(daemon.store, "vibe")
+    _turn(daemon.store, vibe, handle="a#1")
+
+    data = await client.call("stats")
+    # The new key, with the contract sub-keys.
+    assert "coverage" in data
+    assert set(data["coverage"]) == {"jobs_from", "bus_from"}
+    # Every key that was there before is still there.
+    assert {"since", "harnesses", "refusals"} <= set(data)
+
+
 # ---- rendering ----------------------------------------------------------
 
 
@@ -229,6 +278,16 @@ def _row(**over) -> dict:
     return {**base, **over}
 
 
+def _payload(**over) -> dict:
+    base = {
+        "since": None,
+        "coverage": {"jobs_from": None, "bus_from": None},
+        "harnesses": [],
+        "refusals": {},
+    }
+    return {**base, **over}
+
+
 def test_the_rate_is_against_finished_turns(monkeypatch, capsys):
     """A turn still running is not yet evidence either way.
 
@@ -239,12 +298,12 @@ def test_the_rate_is_against_finished_turns(monkeypatch, capsys):
     out = _render(
         monkeypatch,
         capsys,
-        {
-            "harnesses": [
+        _payload(
+            harnesses=[
                 _row(turns=12, clean=1, rescued=1, running=10),
             ],
-            "refusals": {},
-        },
+            refusals={},
+        ),
     )
     assert "50%" in out
 
@@ -254,21 +313,71 @@ def test_a_harness_with_nothing_finished_has_no_rate(monkeypatch, capsys):
     out = _render(
         monkeypatch,
         capsys,
-        {"harnesses": [_row(turns=3, running=3)], "refusals": {}},
+        _payload(harnesses=[_row(turns=3, running=3)], refusals={}),
     )
     assert "0%" not in out
-    assert out.rstrip().endswith("-")
+    # The rate column shows a dash, not 0% — but coverage lines now follow
+    # the table, so find the dash in the data row, not at the end of output.
+    data_lines = [ln for ln in out.splitlines() if "vibe" in ln]
+    assert data_lines
+    assert data_lines[-1].rstrip().endswith("-")
 
 
 def test_refusals_are_listed_when_there_are_any(monkeypatch, capsys):
     out = _render(
         monkeypatch,
         capsys,
-        {"harnesses": [_row(turns=1, clean=1)], "refusals": {"human_present": 3}},
+        _payload(
+            harnesses=[_row(turns=1, clean=1)],
+            refusals={"human_present": 3},
+        ),
     )
     assert "human_present 3" in out
 
 
 def test_an_empty_database_says_so(monkeypatch, capsys):
-    out = _render(monkeypatch, capsys, {"harnesses": [], "refusals": {}})
+    out = _render(monkeypatch, capsys, _payload())
     assert "no turns recorded yet" in out
+
+
+def test_coverage_renders_without_printing_none(monkeypatch, capsys):
+    """An empty table must say 'no data', not the literal string None."""
+    out = _render(monkeypatch, capsys, _payload())
+    assert "None" not in out
+    assert "no data" in out
+
+
+def test_coverage_shows_floors_when_data_is_present(monkeypatch, capsys):
+    out = _render(
+        monkeypatch,
+        capsys,
+        _payload(
+            coverage={
+                "jobs_from": 1_000_000_000.0,
+                "bus_from": 2_000_000_000.0,
+            },
+            harnesses=[_row(turns=1, clean=1)],
+        ),
+    )
+    assert "jobs from" in out
+    assert "bus from" in out
+    # Human-readable dates, not raw epoch floats.
+    assert "1000000000" not in out
+
+
+def test_coverage_flags_when_window_reaches_past_the_data(monkeypatch, capsys):
+    """The user asked for a window older than the data — that is the lie to surface."""
+    out = _render(
+        monkeypatch,
+        capsys,
+        _payload(
+            coverage={
+                "jobs_from": 1_000_000_000.0,
+                "bus_from": None,
+            },
+            harnesses=[_row(turns=1, clean=1)],
+        ),
+        "--window",
+        "999999",
+    )
+    assert "starts later than the window" in out

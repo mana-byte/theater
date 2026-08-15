@@ -223,7 +223,10 @@ def _parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         metavar="HOURS",
-        help="Only turns started in the last N hours. Default: all of history.",
+        help=(
+            "Only turns started in the last N hours. Default: all retained "
+            "history — retention is finite, so older rows may be gone."
+        ),
     )
     stats.add_argument("--json", action="store_true")
 
@@ -554,6 +557,39 @@ def cmd_harnesses(args) -> int:
     return 0
 
 
+def _format_floor(ts: float | None) -> str:
+    """Render a retention-floor timestamp, or say plainly that there is none."""
+    if ts is None:
+        return "no data"
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+
+
+def _print_coverage(data: dict, args) -> None:
+    """Show how far back the data actually goes.
+
+    RESCUED exists to surface silent degradation, so the window it was counted
+    over cannot itself be silent: "0 rescued" over a week of retained history
+    means something different from "0 rescued" over all time. Jobs and bus
+    events sit in different tables under different retention, so each gets its
+    own floor.
+    """
+    coverage = data.get("coverage") or {}
+    jobs_from = coverage.get("jobs_from")
+    bus_from = coverage.get("bus_from")
+
+    print()
+    print(f"coverage: jobs from {_format_floor(jobs_from)}")
+    print(f"          bus from {_format_floor(bus_from)}")
+
+    if args.window is None:
+        return
+    requested = time.time() - float(args.window) * 3600.0
+    asked = time.strftime("%Y-%m-%d %H:%M", time.localtime(requested))
+    for label, floor in (("jobs", jobs_from), ("bus", bus_from)):
+        if floor is not None and requested < floor:
+            print(f"          asked back to {asked} — {label} data starts later than the window")
+
+
 def cmd_stats(args) -> int:
     """How turns have been ending, per harness.
 
@@ -575,6 +611,7 @@ def cmd_stats(args) -> int:
     rows = data.get("harnesses") or []
     if not rows:
         print("no turns recorded yet")
+        _print_coverage(data, args)
         return 0
 
     print(
@@ -596,6 +633,7 @@ def cmd_stats(args) -> int:
     if refusals:
         listed = ", ".join(f"{k} {v}" for k, v in sorted(refusals.items()))
         print(f"\nrefused before delivery: {listed}")
+    _print_coverage(data, args)
     return 0
 
 

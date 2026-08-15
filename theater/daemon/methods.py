@@ -15,6 +15,8 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, NoReturn
 
+from sqlalchemy import func, select
+
 from theater import protocol
 from theater.daemon.harness_detect import detect_harness, is_shell
 from theater.daemon.rails import (
@@ -24,6 +26,7 @@ from theater.daemon.rails import (
     check_model_allowed,
     check_wait_cycle,
 )
+from theater.daemon.schema import bus, jobs
 from theater.daemon.spawner import SpawnRequest
 from theater.harness import HARNESSES, describe, normalize, supports_model
 from theater.harness.observation import ScreenConfidence, ScreenKind
@@ -341,6 +344,23 @@ async def _bus_tail(daemon, params: dict) -> list[dict]:
     )
 
 
+def _retention_floor(daemon) -> dict:
+    """The oldest data actually present, per source.
+
+    Returns {"jobs_from": float | None, "bus_from": float | None} — the
+    earliest timestamp each table still holds, or None when the table is
+    empty. Two floors rather than one because the two are backed by
+    different tables under different retention: jobs outlive bus events by
+    a wide margin, so a single number would misdescribe one of them.
+
+    This is what stats can honestly speak about, as distinct from what the
+    caller asked for.
+    """
+    jobs_floor = daemon.store.conn.execute(select(func.min(jobs.c.created_at))).scalar()
+    bus_floor = daemon.store.conn.execute(select(func.min(bus.c.ts))).scalar()
+    return {"jobs_from": jobs_floor, "bus_from": bus_floor}
+
+
 @method("stats")
 async def _stats(daemon, params: dict) -> dict:
     """How turns have been ending, per harness.
@@ -358,6 +378,7 @@ async def _stats(daemon, params: dict) -> dict:
     since = None if window in (None, "") else now() - float(window) * 3600.0
     return {
         "since": since,
+        "coverage": _retention_floor(daemon),
         "harnesses": daemon.store.turn_outcomes(since=since),
         "refusals": daemon.store.refusal_counts(since=since),
     }
