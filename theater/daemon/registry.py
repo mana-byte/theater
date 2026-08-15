@@ -354,6 +354,13 @@ class Registry:
 
     def set_status(self, pid: str, status: Status) -> None:
         if status is Status.DEAD:
+            # Validate existence before delegating so set_status(missing, DEAD)
+            # raises NotFound just like every other status — mark_dead itself is
+            # intentionally idempotent (stale-map cleanup / no-op for missing),
+            # so the check belongs here, not there.  A bare store.get_participant
+            # rather than self.get avoids naming a dead row just to reject it.
+            if self.store.get_participant(pid) is None:
+                raise NotFound(f"no participant {pid!r}")
             self.mark_dead(pid)
             return
         self.get(pid)

@@ -295,6 +295,12 @@ def test_set_status_dead_emits_canonical_dead_event(registry):
     assert p.id not in registry._names
 
 
+def test_set_status_dead_on_missing_raises_not_found(registry):
+    """set_status(missing, DEAD) raises NotFound, preserving prior validation."""
+    with pytest.raises(NotFound):
+        registry.set_status("missing", Status.DEAD)
+
+
 def test_mark_dead_on_already_dead_cleans_stale_entry(registry):
     """Calling mark_dead on an already-dead participant purges stale names."""
     p = registry.register(harness="vibe", pane="%1", cwd="/tmp")
