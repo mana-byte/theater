@@ -41,6 +41,7 @@ import json
 import os
 import tomllib
 from pathlib import Path
+from typing import Literal
 
 from theater.harness.base import (
     APPROVALS,
@@ -141,7 +142,7 @@ def _extract_paths(
     key = _WRITE_TOOLS.get(tool_name) or _READ_TOOLS.get(tool_name)
     if key is None:
         return ()
-    mode = "write" if tool_name in _WRITE_TOOLS else "read"
+    mode: Literal["read", "write"] = "write" if tool_name in _WRITE_TOOLS else "read"
     try:
         parsed = json.loads(arguments)
     except (ValueError, TypeError):

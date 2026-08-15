@@ -44,6 +44,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from theater.harness.base import (
     APPROVALS,
@@ -437,7 +438,7 @@ class ClaudeCodeObserver(TranscriptObserver):
         raw = tool_input.get(key)
         if not isinstance(raw, str) or not raw:
             return ()
-        mode = "write" if name in _WRITE_TOOLS else "read"
+        mode: Literal["read", "write"] = "write" if name in _WRITE_TOOLS else "read"
         rel = _relativise(raw, cwd)
         if rel is None:
             return ()
