@@ -27,8 +27,11 @@ PROTOCOL_VERSION = 1
 
 #: Longest single message either end will read, in bytes.
 #:
-#: 64 MiB is a thousandfold headroom over anything observed. A limit is still
-#: wanted: it caps how much a peer that never sends a newline can buffer.
+#: asyncio's 64 KiB default is far too small — whole transcripts, deep bus
+#: tails and a prompt carrying a pasted file all cross it routinely, and the
+#: overrun is not a clean error (see `read_message`). 64 MiB is a thousandfold
+#: headroom and still a limit: it caps what a peer that never sends a newline
+#: can make the other end buffer.
 MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 
 

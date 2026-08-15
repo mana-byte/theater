@@ -65,9 +65,11 @@ if TYPE_CHECKING:
 SERVER_NAME = "theater"
 
 #: How long a harness should let a single theater MCP call run before giving up.
-#: A harness whose own per-tool timeout is shorter kills the call on the wire
-#: while the daemon is still waiting, so the agent sees a transport error and
-#: falls back to polling. Keep in step with `daemon.methods.MAX_AWAIT`.
+#: A shorter per-tool timeout kills the call on the wire while the daemon is
+#: still waiting, so the agent sees a transport error and falls back to polling.
+#: 340 = `daemon.methods.MAX_AWAIT` (300s) + the 40s slack theater's own client
+#: adds around a blocking call. Duplicated rather than imported — daemon imports
+#: harness, not the reverse — so move this if that ceiling moves.
 MCP_TOOL_TIMEOUT = 340.0
 
 
