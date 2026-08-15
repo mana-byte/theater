@@ -212,3 +212,23 @@ async def test_recall_defaults_depth_to_five():
     s = resolved(recall={})
     await tools.recall(s, paths=["x.py"])
     assert s.client.params("recall")["depth"] == 5
+
+
+async def test_recall_read_forwards_the_segment_id_verbatim():
+    """The segment id is a contract between recall and recall_read.
+
+    A gap id is ``gap:<path>:<before>..<after>``, so it carries colons
+    and dots that any normalising on the way through would corrupt.
+    """
+    seg = "gap:theater/daemon/store.py:2a0ff31..e91c4d2"
+    s = resolved(recall_read={"kind": "gap"})
+    await tools.recall_read(s, segment_id=seg)
+    p = s.client.params("recall_read")
+    assert p["segment_id"] == seg
+    assert p["caller_cwd"]  # the git root for the privacy wall
+
+
+async def test_recall_read_identifies_first():
+    s = session(recall_read={})
+    await tools.recall_read(s, segment_id="codex-a41f")
+    assert s.client.methods == ["hello", "recall_read"]

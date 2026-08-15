@@ -335,3 +335,27 @@ async def recall(
     )
     assert isinstance(result, dict)
     return result
+
+
+async def recall_read(session: Session, *, segment_id: str) -> dict:
+    """Explain one point of a `recall` timeline.
+
+    Takes the ``segment`` id off a timeline point. A job segment comes
+    back with the job's transcript; a gap segment comes back with the
+    commits git can find for that blob transition, or an explicit
+    ``explained: false`` when it can find none — which is a different
+    answer from an empty list.
+
+    Separate from `recall` because it is the only call in the feature
+    that spends a ``git log``, and because it answers about one segment
+    rather than about paths.
+    """
+    if not session._resolved:
+        await session.identify()
+    result = await session.client.call(
+        "recall_read",
+        segment_id=segment_id,
+        caller_cwd=str(Path.cwd()),
+    )
+    assert isinstance(result, dict)
+    return result

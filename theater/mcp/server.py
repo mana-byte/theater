@@ -343,6 +343,29 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         """
         return await tools.recall(session, paths=paths, depth=depth)
 
+    @mcp.tool()
+    async def recall_read(segment_id: str) -> dict:
+        """Explain one point of a recall timeline.
+
+        Pass the `segment` value from a point `recall` returned.
+
+        For a job segment you get that job's transcript, plus the paths
+        it touched and the shas it moved them between. A transcript that
+        no longer exists on disk is reported as unavailable rather than
+        raised — everything the database still remembers comes back
+        regardless.
+
+        For a gap segment — a sha transition no job claims — you get the
+        commits git can attribute it to. If git can find none, that is
+        reported as `explained: false` with a note, which means the edit
+        was never committed here. It does not mean nothing happened.
+
+        This is the only Theater call that spends a `git log`, so reach
+        for it when a timeline has told you *that* something changed and
+        you need to know *what*.
+        """
+        return await tools.recall_read(session, segment_id=segment_id)
+
     return mcp
 
 

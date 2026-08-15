@@ -773,7 +773,7 @@ async def _recall(daemon, params: dict) -> dict:
     A join over ``touch``, ``jobs`` and ``participants``, ordered by
     ``finished_at`` descending per path. Gap detection is pure SQL: a
     row whose ``sha_before`` does not match the previous row's
-    ``sha_after`` marks a transition no job claims. Three subprocess
+    ``sha_after`` marks a transition no job claims. Two subprocess
     calls per query regardless of path count — see
     ``theater.daemon.recall`` for the budget.
     """
@@ -789,4 +789,27 @@ async def _recall(daemon, params: dict) -> dict:
         paths=paths,
         depth=depth,
         caller_cwd=caller_cwd,
+    )
+
+
+@method("recall_read")
+async def _recall_read(daemon, params: dict) -> dict:
+    """Explain one point of a recall timeline.
+
+    A job segment reads its transcript back through the same
+    ``open_source`` route as ``_read_transcript`` above, so a harness
+    whose transcript is a database answers as well as one writing a
+    file. A gap segment is the only place in the feature that forks
+    ``git log``, which is why it is a separate call: the caller has
+    looked at a gap and decided the fork is worth it.
+    """
+    from theater.daemon.recall_read import read_segment
+
+    segment_id = _require(params, "segment_id")
+    caller_cwd = params.get("caller_cwd") or "."
+    return await read_segment(
+        segment_id,
+        store=daemon.store,
+        registry=daemon.registry,
+        cwd=caller_cwd,
     )
