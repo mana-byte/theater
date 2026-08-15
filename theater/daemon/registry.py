@@ -36,10 +36,9 @@ class Registry:
     def __init__(self, store: Store):
         self.store = store
         # participant id -> runtime name.  Never persisted: a daemon restart
-        # regenerates every name from scratch.  Entries are never recycled —
-        # a dead participant keeps its name for the daemon's lifetime, so a
-        # name that appears in a user's scrollback can never later point at a
-        # different agent.
+        # regenerates every name from scratch.  Only live (non-DEAD)
+        # participants appear here — mark_dead removes the entry so the name
+        # can be reused, and a dead participant answering by id gets name=None.
         self._names: dict[str, str] = {}
 
     # ---- naming --------------------------------------------------------
@@ -50,7 +49,17 @@ class Registry:
         Lazy assignment means a daemon that restarts while agents are alive
         still names every participant on first read, rather than leaving
         pre-existing participants nameless.
+
+        DEAD participants never get a name — they are nameless on read and
+        their names are released on death so the pool is not exhausted by
+        corpses.  A stale mapping left behind by a store-level status change
+        is self-healed here: if the row is DEAD but a name entry lingers, it
+        is purged on sight.
         """
+        if p.status is Status.DEAD:
+            self._names.pop(p.id, None)
+            p.name = None
+            return p
         if p.id not in self._names:
             self._names[p.id] = names.pick(self._names.values())
         p.name = self._names[p.id]
@@ -266,8 +275,19 @@ class Registry:
         name, so a caller can rename by either.  The name is validated for
         format and uniqueness; renaming to the name the participant already
         holds is a no-op success, not an error.
+
+        Renaming a dead participant is refused: a dead participant has no
+        runtime name (it was released on death), so there is nothing to
+        change and accepting the call would re-enter an id into _names that
+        mark_dead just removed.
         """
         p = self.resolve(pid)
+
+        if p.status is Status.DEAD:
+            raise BadRequest(
+                f"cannot rename participant {pid!r}: it is dead; "
+                f"dead participants have no runtime name to change"
+            )
 
         if new_name == self._names.get(p.id, ""):
             return p
@@ -299,24 +319,42 @@ class Registry:
         """Find a participant by id or by name (case-insensitive).
 
         Names only get looked up after ids miss, so a short word can never be
-        confused with a 12-char id.  Materializes names for every participant
-        first, because a participant nobody has read yet has no entry in the
-        name map.
+        confused with a 12-char id.  Materializes names for every live
+        participant first, because a participant nobody has read yet has no
+        entry in the name map.
+
+        A dead row found by exact id is returned (with name=None) rather than
+        falling through to a name search — the id is unambiguous, and a name
+        that happens to match the token must never shadow a real id.  A
+        stale name entry pointing at a dead or missing participant is cleaned
+        on sight rather than followed.
         """
-        # Ensure every participant has a name before searching by name.
+        # Ensure every live participant has a name before searching by name.
         self.list()
 
+        # Id-first: an exact id match always wins, even for a dead row.
         p = self.store.get_participant(token)
         if p is not None:
             return self._named(p)
 
-        for pid, name in self._names.items():
-            if name.casefold() == token.casefold():
-                return self._named(self.get(pid))
+        # Name search: follow only live participants.  A stale mapping
+        # (left behind by a store-level status change the registry did not
+        # see) is purged on sight rather than followed into a dead row.
+        for pid, name in list(self._names.items()):
+            if name.casefold() != token.casefold():
+                continue
+            owner = self.store.get_participant(pid)
+            if owner is None or owner.status is Status.DEAD:
+                self._names.pop(pid, None)
+                continue
+            return self._named(owner)
 
         raise NotFound(f"no participant {token!r}")
 
     def set_status(self, pid: str, status: Status) -> None:
+        if status is Status.DEAD:
+            self.mark_dead(pid)
+            return
         self.get(pid)
         self.store.set_status(pid, status)
         self.store.bus_append("participant.status", to_id=pid, payload={"status": str(status)})
@@ -324,8 +362,13 @@ class Registry:
     def mark_dead(self, pid: str) -> None:
         p = self.store.get_participant(pid)
         if p is None or p.status is Status.DEAD:
+            # Already dead or gone: still purge any stale name entry so the
+            # mask can be reused.  This covers a row killed directly via
+            # Store.set_status that left a dangling mapping behind.
+            self._names.pop(pid, None)
             return
         self.store.set_status(pid, Status.DEAD)
+        self._names.pop(pid, None)
         self.store.bus_append("participant.dead", to_id=pid)
 
     def touch(self, pid: str) -> None:
