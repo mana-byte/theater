@@ -93,6 +93,7 @@ def theater_binary() -> str:
         return str(candidate)
     return "theater"
 
+
 #: No default anywhere: the caller must choose, because the choice is the whole
 #: safety story for a child that nobody is watching.
 APPROVALS = ("manual", "edits", "yolo")
@@ -167,7 +168,11 @@ class Event:
     """One thing that happened inside an agent, stripped of harness dialect."""
 
     kind: EventKind
+    #: Text suitable for the bus: clipped to ``MAX_TEXT`` by live parsers.
     text: str = ""
+    #: The same text before clipping, when the adapter has textual content.
+    #: ``None`` means "no separate raw text"; callers fall back to ``text``.
+    raw_text: str | None = None
     tool_name: str | None = None
     #: Wall clock from the transcript. Vibe writes none, so the observer stamps
     #: its own observation time instead — do not paper over the difference.

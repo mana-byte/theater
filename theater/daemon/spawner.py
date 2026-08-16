@@ -55,6 +55,9 @@ class SpawnRequest:
     #: validated only by `harness.check_resume`, which refuses a harness
     #: whose `plan_launch` has no `resume` parameter. None means start cold.
     resume: str | None = None
+    #: Raw serialized JSON response-format hint. Prompt construction lives in
+    #: daemon methods; the spawner only enforces launch-time capability traps.
+    response_format: str | None = None
 
 
 class Spawner:
@@ -80,6 +83,11 @@ class Spawner:
                 f"harness {req.harness!r} cannot resume a session with a prompt; "
                 f"resume it without one and use send to deliver the task"
             )
+        if req.resume and req.response_format and not harness.resume_takes_prompt:
+            raise BadRequest(
+                f"harness {req.harness!r} cannot resume a session with response_format; "
+                f"resume it without one and use send to deliver the task"
+            )
         # A resumed session's transcript describes files at its original cwd;
         # a fresh worktree points it at different files, so the transcript's
         # path references would resolve to the wrong content.
@@ -100,9 +108,7 @@ class Spawner:
             root = worktree_mod.repo_root(req.cwd)
             if root is None:
                 self.registry.mark_dead(participant.id)
-                raise BadRequest(
-                    f"cannot create worktree: {req.cwd!r} is not in a git repo"
-                )
+                raise BadRequest(f"cannot create worktree: {req.cwd!r} is not in a git repo")
             try:
                 child_cwd = worktree_mod.create_worktree(
                     repo_root=root,

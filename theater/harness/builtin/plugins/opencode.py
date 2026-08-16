@@ -184,10 +184,7 @@ def _in_screen_tail(capture: str, marker: str) -> bool:
     tail window nor the co-occurrence test alone is enough; both are required.
     """
     lines = [line for line in capture.splitlines() if line.strip()]
-    return any(
-        marker in line and FOOTER_MARKER in line
-        for line in lines[-_SCREEN_TAIL_LINES:]
-    )
+    return any(marker in line and FOOTER_MARKER in line for line in lines[-_SCREEN_TAIL_LINES:])
 
 
 def data_dir() -> Path:
@@ -352,9 +349,7 @@ class OpenCodeHarness(Harness):
         resume: str | None = None,
     ) -> LaunchPlan:
         if approval not in APPROVALS:
-            raise BadRequest(
-                f"approval must be one of {', '.join(APPROVALS)}, got {approval!r}"
-            )
+            raise BadRequest(f"approval must be one of {', '.join(APPROVALS)}, got {approval!r}")
         config = {
             "$schema": "https://opencode.ai/config.json",
             "mcp": {
@@ -447,9 +442,7 @@ class OpenCodeObserver(HarnessObserver):
         session_id: str | None = None,
         after: float | None = None,
     ) -> Source:
-        return OpenCodeSource(
-            self.db, cwd=cwd, session_id=session_id, after=after
-        )
+        return OpenCodeSource(self.db, cwd=cwd, session_id=session_id, after=after)
 
     def is_idle_screen(self, capture: str) -> bool:
         """Decided by the absence of the working markers from the footer.
@@ -502,25 +495,13 @@ class OpenCodeObserver(HarnessObserver):
         (``theater/daemon/methods.py:527-537``).
         """
         if any(_in_screen_tail(capture, m) for m in WORKING_MARKERS):
-            return ScreenReading(
-                kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH
-            )
-        prompt_chrome = FOOTER_MARKER in capture or any(
-            m in capture for m in WORKING_MARKERS
-        )
-        if not prompt_chrome and (
-            APPROVAL_MARKER in capture or QUESTION_MARKER in capture
-        ):
-            return ScreenReading(
-                kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH
-            )
+            return ScreenReading(kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH)
+        prompt_chrome = FOOTER_MARKER in capture or any(m in capture for m in WORKING_MARKERS)
+        if not prompt_chrome and (APPROVAL_MARKER in capture or QUESTION_MARKER in capture):
+            return ScreenReading(kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH)
         if self.is_idle_screen(capture):
-            return ScreenReading(
-                kind=ScreenKind.PROMPT, confidence=ScreenConfidence.HIGH
-            )
-        return ScreenReading(
-            kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW
-        )
+            return ScreenReading(kind=ScreenKind.PROMPT, confidence=ScreenConfidence.HIGH)
+        return ScreenReading(kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW)
 
 
 class OpenCodeSource(Source):
@@ -642,16 +623,14 @@ class OpenCodeSource(Source):
                 return History()
             parts: dict[str, list[dict]] = {}
             rows = conn.execute(
-                "SELECT message_id, data FROM part WHERE session_id = ? "
-                "ORDER BY time_created, id",
+                "SELECT message_id, data FROM part WHERE session_id = ? ORDER BY time_created, id",
                 (sid,),
             )
             for mid, raw in rows:
                 parts.setdefault(mid, []).append(_loads(raw))
             events: list[Event] = []
             rows = conn.execute(
-                "SELECT id, data FROM message WHERE session_id = ? "
-                "ORDER BY time_created, id",
+                "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created, id",
                 (sid,),
             )
             for mid, raw in rows:
@@ -669,11 +648,11 @@ class OpenCodeSource(Source):
         """One stored message, as events. Text unclipped: this is history."""
         time = _table(info.get("time"))
         ts = _seconds(time.get("completed")) or _seconds(time.get("created"))
-        text = "".join(
-            p.get("text") or "" for p in parts if p.get("type") == "text"
-        )
+        text = "".join(p.get("text") or "" for p in parts if p.get("type") == "text")
         if info.get("role") != "assistant":
-            return [Event(kind=EventKind.USER, text=whole(text), ts=ts)] if text else []
+            return (
+                [Event(kind=EventKind.USER, text=whole(text), raw_text=text, ts=ts)] if text else []
+            )
 
         out: list[Event] = []
         for part in parts:
@@ -691,10 +670,12 @@ class OpenCodeSource(Source):
                 )
             )
             if state.get("status") in ("completed", "error"):
+                raw = _tool_output(state)
                 out.append(
                     Event(
                         kind=EventKind.TOOL_RESULT,
-                        text=whole(_tool_output(state)),
+                        text=whole(raw),
+                        raw_text=raw,
                         tool_name=name,
                         ts=ts,
                     )
@@ -706,6 +687,7 @@ class OpenCodeSource(Source):
                 Event(
                     kind=EventKind.ASSISTANT,
                     text=whole(text),
+                    raw_text=text,
                     ts=ts,
                     turn_end=turn_end,
                     turn_id=info.get("id") or None,
@@ -769,9 +751,7 @@ class OpenCodeSource(Source):
         self._finished.clear()
         self._said.clear()
         return Batch(
-            attached=Attachment(
-                location=f"opencode://{sid}", session_id=sid, skipped=row[1]
-            ),
+            attached=Attachment(location=f"opencode://{sid}", session_id=sid, skipped=row[1]),
             status=self._status(conn, sid),
         )
 
@@ -785,8 +765,7 @@ class OpenCodeSource(Source):
         with no prompt looking busy until something else moved it.
         """
         row = conn.execute(
-            "SELECT data FROM message WHERE session_id = ? "
-            "ORDER BY time_created DESC LIMIT 1",
+            "SELECT data FROM message WHERE session_id = ? ORDER BY time_created DESC LIMIT 1",
             (sid,),
         ).fetchone()
         if row is None:
@@ -827,9 +806,7 @@ class OpenCodeSource(Source):
         # session.created / session.updated: progress, not conversation.
         return []
 
-    def _on_part(
-        self, conn: sqlite3.Connection, payload: dict, seq: int
-    ) -> list[Event]:
+    def _on_part(self, conn: sqlite3.Connection, payload: dict, seq: int) -> list[Event]:
         part = payload.get("part")
         if not isinstance(part, dict):
             return []
@@ -858,6 +835,7 @@ class OpenCodeSource(Source):
                 Event(
                     kind=EventKind.USER,
                     text=clip(text),
+                    raw_text=text,
                     ts=ts,
                     raw_index=seq,
                 )
@@ -892,10 +870,12 @@ class OpenCodeSource(Source):
             )
         done = ("completed", "error")
         if status in done and seen not in done:
+            raw = _tool_output(state)
             out.append(
                 Event(
                     kind=EventKind.TOOL_RESULT,
-                    text=clip(_tool_output(state)),
+                    text=clip(raw),
+                    raw_text=raw,
                     tool_name=name,
                     ts=ts,
                     raw_index=seq,
@@ -933,6 +913,7 @@ class OpenCodeSource(Source):
             Event(
                 kind=EventKind.ASSISTANT,
                 text=clip(text),
+                raw_text=text,
                 ts=ts,
                 turn_end=turn_end,
                 # The assistant message id. Every part of the reply references

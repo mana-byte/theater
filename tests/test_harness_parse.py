@@ -443,6 +443,54 @@ def test_the_same_branches_clip_by_default(observer, record):
     assert all(len(e.text) <= MAX_TEXT + 40 for e in events)
 
 
+RAW_TEXT_CASES = [
+    (
+        ClaudeCodeObserver(),
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": LONG}]}},
+    ),
+    (
+        CodexObserver(),
+        {
+            "type": "event_msg",
+            "payload": {"type": "task_complete", "last_agent_message": LONG},
+        },
+    ),
+    (VibeObserver(), {"role": "assistant", "content": LONG}),
+]
+
+
+@pytest.mark.parametrize("observer,record", RAW_TEXT_CASES)
+def test_builtin_parsers_preserve_raw_text_before_clipping(observer, record):
+    events = observer.parse(json.dumps(record), 0)
+    event = next(e for e in events if e.raw_text == LONG)
+    assert event.text != LONG
+    assert event.text.endswith(f"(+{MAX_TEXT * 2} chars)")
+
+
+def test_opencode_source_preserves_raw_text_before_clipping(tmp_path):
+    from theater.harness.builtin.plugins.opencode import OpenCodeSource
+
+    src = OpenCodeSource(tmp_path / "opencode-stable.db", cwd=str(tmp_path))
+    src._roles["msg_a1"] = "assistant"
+    src._text["msg_a1"] = {"prt_1": LONG}
+
+    events = src._on_message(
+        {
+            "info": {
+                "id": "msg_a1",
+                "role": "assistant",
+                "finish": "stop",
+                "time": {"created": 1000, "completed": 2000},
+            }
+        },
+        0,
+    )
+
+    assert events[0].text != LONG
+    assert events[0].text.endswith(f"(+{MAX_TEXT * 2} chars)")
+    assert events[0].raw_text == LONG
+
+
 # ---- idle screens ------------------------------------------------------
 
 

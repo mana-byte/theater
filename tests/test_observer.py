@@ -363,7 +363,15 @@ class ScreenObserver(HarnessObserver):
         return self.idle
 
 
-def poised(registry, *, pane="%1", idle=True, capture="$ "):
+def poised(
+    registry,
+    *,
+    pane="%1",
+    idle=True,
+    capture="$ ",
+    prompt: str | None = None,
+    response_format: str | None = None,
+):
     """A participant with one running job, and an observer poised to rescue it.
 
     `capture=None` stands for a pane that could not be read at all.
@@ -372,7 +380,14 @@ def poised(registry, *, pane="%1", idle=True, capture="$ "):
 
     jobs = JobManager(registry.store)
     p = registry.register(harness="vibe", pane=pane, cwd="/tmp")
-    jobs.create(handle="h1", caller_id="caller", target_id=p.id, kind="send")
+    jobs.create(
+        handle="h1",
+        caller_id="caller",
+        target_id=p.id,
+        kind="send",
+        prompt=prompt,
+        response_format=response_format,
+    )
     observer = Observer(registry, harnesses={}, jobs=jobs)
 
     async def capture_pane(_pane):
@@ -430,6 +445,49 @@ async def test_a_turn_end_that_was_actually_read_carries_no_error_code(registry)
     assert job.error_code is None
 
 
+@pytest.mark.asyncio
+async def test_structured_rescue_is_unavailable(registry):
+    observer, screen, cursor, p, jobs = poised(registry, response_format="json")
+    cursor.last_text = '{"answer": 42}'
+    await observer._rescue_jobs(p.id, screen, cursor)
+    job = jobs.get("h1")
+    assert str(job.state) == "done"
+    assert job.result == '{"answer": 42}'
+    assert job.error_code == "turn_end_unseen"
+    assert job.structured_result is None
+    assert job.structured_status == "unavailable"
+
+
+def test_structured_screen_result_is_unavailable(registry):
+    observer, _screen, _cursor, p, jobs = poised(registry, response_format="json")
+    observer._end_turn_from_screen(p.id, '{"answer": 42}\n$ ')
+    job = jobs.get("h1")
+    assert str(job.state) == "done"
+    assert job.result == '{"answer": 42}'
+    assert job.structured_result is None
+    assert job.structured_status == "unavailable"
+
+
+def test_structured_error_boundary_is_unavailable(registry):
+    observer, _screen, clock, p, jobs = poised(registry, response_format="json")
+    batch = Batch(
+        events=[
+            Event(
+                kind=EventKind.ERROR,
+                text="null",
+                raw_text="null",
+                turn_end=True,
+            )
+        ]
+    )
+    observer._apply(p.id, batch, clock, TurnAccumulator())
+    job = jobs.get("h1")
+    assert str(job.state) == "done"
+    assert job.result == "null"
+    assert job.structured_result is None
+    assert job.structured_status == "unavailable"
+
+
 # ---- turn boundaries inside a batch ------------------------------------
 #
 # One poll drains everything written since the last one, so a batch is not a
@@ -450,6 +508,31 @@ def test_a_turn_end_mid_batch_still_answers(registry):
     job = jobs.get("h1")
     assert str(job.state) == "done"
     assert job.result == "the answer"
+
+
+def test_multi_block_raw_assistant_text_becomes_structured_result(registry):
+    observer, _screen, clock, p, jobs = poised(registry, response_format="json")
+    batch = Batch(
+        events=[
+            Event(
+                kind=EventKind.ASSISTANT,
+                text='{"answer":',
+                raw_text='{"answer":',
+            ),
+            Event(
+                kind=EventKind.ASSISTANT,
+                text='"clipped"}',
+                raw_text='"raw"}',
+            ),
+            Event(kind=EventKind.ASSISTANT, turn_end=True),
+        ]
+    )
+    observer._apply(p.id, batch, clock, TurnAccumulator())
+    job = jobs.get("h1")
+    assert str(job.state) == "done"
+    assert job.result == '{"answer":\n\n"clipped"}'
+    assert job.structured_result == '{"answer":\n\n"raw"}'
+    assert job.structured_status == "parsed"
 
 
 def test_two_turns_in_one_batch_answer_two_jobs_in_order(registry):
@@ -477,6 +560,28 @@ def test_one_turn_answers_only_the_caller_that_waited_longest(registry):
     observer._apply(p.id, Batch(events=[said("for h1", turn_end=True)]), clock, TurnAccumulator())
     assert jobs.get("h1").result == "for h1"
     assert str(jobs.get("h2").state) == "running"
+
+
+def test_structured_undelivered_job_is_unavailable(registry):
+    observer, _screen, clock, p, jobs = poised(
+        registry,
+        prompt="the injected prompt",
+        response_format="json",
+    )
+    batch = Batch(
+        events=[
+            spoke("someone else's prompt"),
+            said('{"answer": 1}', turn_end=True),
+            spoke("another outside prompt"),
+            said('{"answer": 2}', turn_end=True),
+        ]
+    )
+    observer._apply(p.id, batch, clock, TurnAccumulator())
+    job = jobs.get("h1")
+    assert str(job.state) == "crashed"
+    assert job.error_code == "prompt_never_seen"
+    assert job.structured_result is None
+    assert job.structured_status == "unavailable"
 
 
 @pytest.mark.asyncio

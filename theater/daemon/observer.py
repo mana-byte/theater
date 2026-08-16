@@ -160,6 +160,7 @@ UNMATCHED_CAP = 256
 #: as a `send` whose `deliver_text` raised. Distinct from `RESCUE_CODE`
 #: (salvages text, stays DONE) so a caller can tell the two apart.
 UNDELIVERED_CODE = "prompt_never_seen"
+_RAW_RESULT_UNSET = object()
 
 
 def answers_prompt(heard: Sequence[str], prompt: str | None) -> bool:
@@ -200,6 +201,8 @@ class Turn:
 
     #: Assistant text, blank-line joined in arrival order.
     said: str
+    #: Assistant text before parser clipping, blank-line joined in arrival order.
+    raw_said: str = ""
     #: User text that arrived during the turn, in arrival order. Normally the
     #: one prompt that opened it; empty when we attached mid-turn.
     heard: tuple[str, ...] = ()
@@ -223,6 +226,8 @@ class TurnAccumulator:
 
     #: Assistant text seen since the last boundary, in arrival order.
     _blocks: list[str] = field(default_factory=list)
+    #: Assistant text before clipping, in arrival order.
+    _raw_blocks: list[str] = field(default_factory=list)
     #: User text seen since the last boundary. Kept for attribution — how a
     #: turn says whose it is — not for display.
     _heard: list[str] = field(default_factory=list)
@@ -231,9 +236,10 @@ class TurnAccumulator:
     _answered: deque[str] = field(default_factory=deque)
     _seen: set[str] = field(default_factory=set)
 
-    def say(self, text: str) -> None:
-        if text:
+    def say(self, text: str, raw_text: str | None = None) -> None:
+        if text or raw_text:
             self._blocks.append(text)
+            self._raw_blocks.append(raw_text if raw_text is not None else text)
 
     def hear(self, text: str) -> None:
         if text:
@@ -241,8 +247,13 @@ class TurnAccumulator:
 
     def take(self) -> Turn:
         """The finished turn, and forget it. Text blank-line joined, as written."""
-        turn = Turn("\n\n".join(self._blocks), tuple(self._heard))
+        turn = Turn(
+            "\n\n".join(self._blocks),
+            "\n\n".join(self._raw_blocks),
+            tuple(self._heard),
+        )
         self._blocks.clear()
+        self._raw_blocks.clear()
         self._heard.clear()
         return turn
 
@@ -495,13 +506,9 @@ class Observer:
         if p is None:
             return None
         after = p.created_at if p.tier is Tier.SPAWNED else None
-        return observer.open_source(
-            cwd=p.cwd, session_id=p.session_id, after=after
-        )
+        return observer.open_source(cwd=p.cwd, session_id=p.session_id, after=after)
 
-    def _apply(
-        self, pid: str, batch: Batch, clock: QuietClock, turns: TurnAccumulator
-    ) -> bool:
+    def _apply(self, pid: str, batch: Batch, clock: QuietClock, turns: TurnAccumulator) -> bool:
         """Put a batch on the bus and move the participant's status.
 
         Returns whether anything happened, which is what the quiet timers read.
@@ -562,7 +569,7 @@ class Observer:
                     self.jobs.observe_paths(job_handle, event.paths)
             if event.kind is EventKind.ASSISTANT and event.text:
                 clock.last_text = event.text
-                turns.say(event.text)
+                turns.say(event.text, raw_text=event.raw_text)
             if event.kind is EventKind.USER and event.text:
                 turns.hear(event.text)
             if event.turn_end:
@@ -574,7 +581,13 @@ class Observer:
                     # The boundary's own text wins where it has any. Codex
                     # repeats the whole reply on `task_complete` after a
                     # preamble has already gone by; joining would duplicate.
-                    self._answer_turn(pid, event.text or turn.said, turn.heard)
+                    result_text, raw_result = self._turn_result(event, turn)
+                    self._answer_turn(
+                        pid,
+                        result_text,
+                        turn.heard,
+                        raw_result=raw_result,
+                    )
                     turns.mark_handled(event.turn_id)
                 # Past this turn end, delivered text is not a candidate answer
                 # to whatever comes next — rescue returning it would look like
@@ -587,6 +600,13 @@ class Observer:
             self._settle(pid, status_after(last))
 
         return batch.progressed or bool(batch.events) or batch.attached is not None
+
+    def _turn_result(self, event, turn: Turn) -> tuple[str, str | object | None]:
+        if not (event.text or event.raw_text):
+            return turn.said, turn.raw_said
+        if event.kind is EventKind.ERROR:
+            return event.text, None
+        return event.text, event.raw_text if event.raw_text is not None else event.text
 
     async def _watch_screen(self, pid: str, harness_name: str) -> None:
         """Derive status from the rendered screen, for a parser-less harness.
@@ -618,9 +638,7 @@ class Observer:
                     return
                 capture = await self._capture(p.tmux_pane) if p.tmux_pane else None
                 if capture is not None:
-                    idle_streak = (
-                        idle_streak + 1 if observer.is_idle_screen(capture) else 0
-                    )
+                    idle_streak = idle_streak + 1 if observer.is_idle_screen(capture) else 0
                     if idle_streak >= IDLE_CONFIRMATIONS:
                         if not ended:
                             ended = True
@@ -656,7 +674,7 @@ class Observer:
                 "source": "screen",
             },
         )
-        self._answer_turn(pid, text)
+        self._answer_turn(pid, text, raw_result=None)
 
     async def _capture(self, pane: str) -> str | None:
         """The pane's rendered text, or None if it could not be read."""
@@ -707,9 +725,7 @@ class Observer:
             await self._rescue_jobs(pid, observer, clock)
             clock.rescue_since = now  # throttle
 
-    async def _screen_only(
-        self, pid: str, observer: HarnessObserver, clock: QuietClock
-    ) -> None:
+    async def _screen_only(self, pid: str, observer: HarnessObserver, clock: QuietClock) -> None:
         """The screen arm of `_on_quiet`, for a source that has not attached.
 
         One arm of the three, not all of them, and that is the whole point of
@@ -755,7 +771,8 @@ class Observer:
         if event is not None:
             self._settle(pid, status_after(event))
             if event.turn_end:
-                self._answer_turn(pid, event.text)
+                result_text, raw_result = self._turn_result(event, Turn(""))
+                self._answer_turn(pid, result_text, raw_result=raw_result)
 
     def _settle(self, pid: str, desired: Status) -> None:
         p = self.store.get_participant(pid)
@@ -805,9 +822,7 @@ class Observer:
             self._settle(pid, Status.IDLE)
         # UNKNOWN: the screen said nothing the reducer can act on.
 
-    async def _rescue_jobs(
-        self, pid: str, observer: HarnessObserver, clock: QuietClock
-    ) -> None:
+    async def _rescue_jobs(self, pid: str, observer: HarnessObserver, clock: QuietClock) -> None:
         """Finish a job whose turn end was never read, so the caller unblocks.
 
         A missed turn-end record is not hypothetical: a harness can abort a
@@ -848,10 +863,20 @@ class Observer:
             pid,
             self.rescue,
         )
-        self._release_jobs(pid, clock.last_text, error_code=RESCUE_CODE)
+        self._release_jobs(
+            pid,
+            clock.last_text,
+            error_code=RESCUE_CODE,
+            raw_result=None,
+        )
 
     def _answer_turn(
-        self, pid: str, result_text: str, heard: Sequence[str] = ()
+        self,
+        pid: str,
+        result_text: str,
+        heard: Sequence[str] = (),
+        *,
+        raw_result: str | object | None = _RAW_RESULT_UNSET,
     ) -> None:
         """One turn ended: hand its text to the one job that was waiting for it.
 
@@ -913,21 +938,29 @@ class Observer:
                 )
                 return
             logger.warning(
-                "%s saw %d turns at %s answer someone else; "
-                "its prompt never reached the queue",
+                "%s saw %d turns at %s answer someone else; its prompt never reached the queue",
                 job.handle,
                 missed,
                 pid,
             )
             self._finish(
-                job.handle, "", error_code=UNDELIVERED_CODE, state=JobState.CRASHED
+                job.handle,
+                "",
+                error_code=UNDELIVERED_CODE,
+                state=JobState.CRASHED,
+                raw_result=None,
             )
             return
         self._unmatched.pop(job.handle, None)
-        self._finish(job.handle, result_text)
+        self._finish(job.handle, result_text, raw_result=raw_result)
 
     def _release_jobs(
-        self, pid: str, result_text: str, *, error_code: str | None = None
+        self,
+        pid: str,
+        result_text: str,
+        *,
+        error_code: str | None = None,
+        raw_result: str | object | None = _RAW_RESULT_UNSET,
     ) -> None:
         """Finish *every* running job for this participant. Rescue only.
 
@@ -941,7 +974,12 @@ class Observer:
         if self.jobs is None:
             return
         for job in self.store.running_jobs_for_target(pid):
-            self._finish(job.handle, result_text, error_code=error_code)
+            self._finish(
+                job.handle,
+                result_text,
+                error_code=error_code,
+                raw_result=raw_result,
+            )
 
     def _finish(
         self,
@@ -950,6 +988,7 @@ class Observer:
         *,
         error_code: str | None = None,
         state: JobState = JobState.DONE,
+        raw_result: str | object | None = _RAW_RESULT_UNSET,
     ) -> None:
         """Resolve one job. The result is already clipped by the parser.
 
@@ -972,9 +1011,18 @@ class Observer:
         """
         assert self.jobs is not None
         self._unmatched.pop(handle, None)
-        self.jobs.finish(
-            handle,
-            state=state,
-            result=result_text or "",
-            error_code=error_code,
-        )
+        if raw_result is _RAW_RESULT_UNSET:
+            self.jobs.finish(
+                handle,
+                state=state,
+                result=result_text or "",
+                error_code=error_code,
+            )
+        else:
+            self.jobs.finish(
+                handle,
+                state=state,
+                result=result_text or "",
+                error_code=error_code,
+                raw_result=raw_result,
+            )

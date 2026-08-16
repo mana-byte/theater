@@ -49,6 +49,7 @@ result committed but whose touches did not is impossible.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -79,6 +80,9 @@ __all__ = [
 
 #: How long to wait for a job to finish if the caller does not specify.
 DEFAULT_MAX_WAIT = 150.0
+STRUCTURED_PARSED = "parsed"
+STRUCTURED_UNAVAILABLE = "unavailable"
+_RAW_UNSET = object()
 
 
 @dataclass
@@ -185,6 +189,7 @@ class JobManager:
         kind: str,
         prompt: str | None = None,
         cwd: str | None = None,
+        response_format: str | None = None,
     ) -> Job:
         job = Job(
             handle=handle,
@@ -197,6 +202,7 @@ class JobManager:
             error_code=None,
             created_at=now(),
             finished_at=None,
+            response_format=response_format,
         )
         self.store.create_job(job)
         self._events[handle] = asyncio.Event()
@@ -232,6 +238,7 @@ class JobManager:
         state: JobState,
         result: str | None = None,
         error_code: str | None = None,
+        raw_result: str | object | None = _RAW_UNSET,
     ) -> Job | None:
         job = self.store.get_job(handle)
         if job is None:
@@ -246,6 +253,14 @@ class JobManager:
             return job
 
         acc = self._accumulators.pop(handle, None)
+        finished_at = now()
+        structured_result, structured_status = self._structured_values(
+            job,
+            state=state,
+            result=result,
+            error_code=error_code,
+            raw_result=raw_result,
+        )
         if acc:
             # Write job result and touches in one transaction so a result
             # without its touches is impossible. The store's connection is
@@ -255,7 +270,10 @@ class JobManager:
                 state=str(state),
                 result=result,
                 error_code=error_code,
-                finished_at=now(),
+                finished_at=finished_at,
+                response_format=job.response_format,
+                structured_result=structured_result,
+                structured_status=structured_status,
                 touches=acc.rows(handle),
             )
         else:
@@ -264,7 +282,10 @@ class JobManager:
                 state=str(state),
                 result=result,
                 error_code=error_code,
-                finished_at=now(),
+                finished_at=finished_at,
+                response_format=job.response_format,
+                structured_result=structured_result,
+                structured_status=structured_status,
             )
 
         # Wake anyone waiting, then drop the event: the job is terminal, so
@@ -286,6 +307,33 @@ class JobManager:
         logger.info("job %s finished: %s", handle, state)
         return self.store.get_job(handle)
 
+    def _structured_values(
+        self,
+        job: Job,
+        *,
+        state: JobState,
+        result: str | None,
+        error_code: str | None,
+        raw_result: str | object | None,
+    ) -> tuple[str | None, str | None]:
+        if job.response_format is None:
+            return None, None
+        if str(state) != str(JobState.DONE) or error_code is not None:
+            return None, STRUCTURED_UNAVAILABLE
+        if raw_result is _RAW_UNSET:
+            candidate = result or ""
+        elif raw_result is None:
+            return None, STRUCTURED_UNAVAILABLE
+        else:
+            if not isinstance(raw_result, str):
+                return None, STRUCTURED_UNAVAILABLE
+            candidate = raw_result
+        try:
+            json.loads(candidate)
+        except ValueError:
+            return None, STRUCTURED_UNAVAILABLE
+        return candidate, STRUCTURED_PARSED
+
     def _finish_with_touches(
         self,
         handle: str,
@@ -294,6 +342,9 @@ class JobManager:
         result: str | None,
         error_code: str | None,
         finished_at: float | None,
+        response_format: str | None,
+        structured_result: str | None,
+        structured_status: str | None,
         touches: list[dict],
     ) -> None:
         """Write the job result and its touch rows in one transaction.
@@ -317,6 +368,9 @@ class JobManager:
                     result=result,
                     error_code=error_code,
                     finished_at=finished_at,
+                    response_format=response_format,
+                    structured_result=structured_result,
+                    structured_status=structured_status,
                 )
             )
             if touches:

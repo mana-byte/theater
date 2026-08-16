@@ -164,7 +164,7 @@ def _relativise(path: str, cwd: str | None) -> str | None:
         return None
     if path == cwd:
         return "."
-    return path[len(c):]
+    return path[len(c) :]
 
 
 class ClaudeCodeHarness(Harness):
@@ -195,9 +195,7 @@ class ClaudeCodeHarness(Harness):
         resume: str | None = None,
     ) -> LaunchPlan:
         if approval not in APPROVALS:
-            raise BadRequest(
-                f"approval must be one of {', '.join(APPROVALS)}, got {approval!r}"
-            )
+            raise BadRequest(f"approval must be one of {', '.join(APPROVALS)}, got {approval!r}")
         config = {
             "mcpServers": {
                 SERVER_NAME: {
@@ -329,6 +327,7 @@ class ClaudeCodeObserver(TranscriptObserver):
                 Event(
                     kind=EventKind.ERROR,
                     text=clipper(clip_text)(text),
+                    raw_text=text,
                     ts=ts,
                     raw_index=index,
                     # An API error ends the attempt; the agent is waiting again.
@@ -338,8 +337,13 @@ class ClaudeCodeObserver(TranscriptObserver):
         return []
 
     def _assistant(
-        self, record: dict, message: dict, ts: float | None, index: int,
-        *, clip_text: bool = True,
+        self,
+        record: dict,
+        message: dict,
+        ts: float | None,
+        index: int,
+        *,
+        clip_text: bool = True,
     ) -> list[Event]:
         _clip = clipper(clip_text)
 
@@ -359,10 +363,12 @@ class ClaudeCodeObserver(TranscriptObserver):
                 continue
             btype = block.get("type")
             if btype == "text":
+                raw = block.get("text") if isinstance(block.get("text"), str) else ""
                 out.append(
                     Event(
                         kind=EventKind.ASSISTANT,
-                        text=_clip(block.get("text")),
+                        text=_clip(raw),
+                        raw_text=raw,
                         ts=ts,
                         turn_id=tid,
                         raw_index=index,
@@ -394,6 +400,7 @@ class ClaudeCodeObserver(TranscriptObserver):
                 out[-1] = Event(
                     kind=last.kind,
                     text=last.text,
+                    raw_text=last.raw_text,
                     tool_name=last.tool_name,
                     ts=last.ts,
                     turn_end=True,
@@ -455,6 +462,7 @@ class ClaudeCodeObserver(TranscriptObserver):
                 Event(
                     kind=EventKind.USER,
                     text=_clip(content),
+                    raw_text=content,
                     ts=ts,
                     raw_index=index,
                 )
@@ -465,21 +473,24 @@ class ClaudeCodeObserver(TranscriptObserver):
                 continue
             if block.get("type") == "tool_result":
                 body = block.get("content")
+                raw = body if isinstance(body, str) else json.dumps(body, default=str)
                 out.append(
                     Event(
                         kind=EventKind.TOOL_RESULT,
-                        text=_clip(
-                            body if isinstance(body, str) else json.dumps(body, default=str)
-                        ),
+                        text=_clip(raw),
+                        raw_text=raw,
                         ts=ts,
                         raw_index=index,
                     )
                 )
             elif block.get("type") == "text":
+                text = block.get("text")
+                raw = text if isinstance(text, str) else ""
                 out.append(
                     Event(
                         kind=EventKind.USER,
-                        text=_clip(block.get("text")),
+                        text=_clip(raw),
+                        raw_text=raw,
                         ts=ts,
                         raw_index=index,
                     )
@@ -552,26 +563,16 @@ class ClaudeCodeObserver(TranscriptObserver):
         screen.
         """
         if TRUST_MARKER in capture:
-            return ScreenReading(
-                kind=ScreenKind.TRUST, confidence=ScreenConfidence.HIGH
-            )
+            return ScreenReading(kind=ScreenKind.TRUST, confidence=ScreenConfidence.HIGH)
         if APPROVAL_MARKER in capture:
-            return ScreenReading(
-                kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH
-            )
+            return ScreenReading(kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH)
         lines = [line for line in capture.splitlines() if line.strip()]
         tail = lines[-_SCREEN_TAIL_LINES:]
         if any(WORKING_MARKER in line for line in tail):
-            return ScreenReading(
-                kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH
-            )
+            return ScreenReading(kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH)
         if any(IDLE_FOOTER in line for line in tail):
-            return ScreenReading(
-                kind=ScreenKind.PROMPT, confidence=ScreenConfidence.HIGH
-            )
-        return ScreenReading(
-            kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW
-        )
+            return ScreenReading(kind=ScreenKind.PROMPT, confidence=ScreenConfidence.HIGH)
+        return ScreenReading(kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW)
 
 
 #: What the loader looks for. An instance, not the class: see

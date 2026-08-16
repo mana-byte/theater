@@ -230,6 +230,24 @@ async def test_resume_without_prompt_allowed_for_dropping_harness(
     assert drops_prompt_harness.seen_resume == "sess-abc"
 
 
+async def test_resume_with_response_format_refused_before_side_effects(
+    registry, drops_prompt_harness, monkeypatch
+):
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="drops-prompt-test",
+        prompt="",
+        cwd="/tmp",
+        approval="edits",
+        resume="sess-abc",
+        response_format='{"type":"json_schema"}',
+    )
+    with pytest.raises(BadRequest, match="cannot resume a session with response_format"):
+        await spawner.spawn(req)
+    assert registry.list(include_dead=True) == []
+
+
 # ---- resume + worktree is refused ------------------------------------
 
 

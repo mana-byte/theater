@@ -137,9 +137,7 @@ _STEM = re.compile(r"^rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-(.+)$")
 #: that follow them are repo-relative — codex's own parser
 #: (apply-patch/src/parser.rs:39-41) treats them as relative to the session
 #: cwd, so no relativisation is needed. `*** End Patch` is the terminator.
-_PATCH_FILE_RE = re.compile(
-    r"^\*\*\* (?:Update|Add|Delete) File: (.+)$", re.MULTILINE
-)
+_PATCH_FILE_RE = re.compile(r"^\*\*\* (?:Update|Add|Delete) File: (.+)$", re.MULTILINE)
 
 
 def _apply_patch_paths(text: str) -> tuple[EventPath, ...]:
@@ -158,8 +156,7 @@ def _apply_patch_paths(text: str) -> tuple[EventPath, ...]:
     if not isinstance(text, str):
         return ()
     return tuple(
-        EventPath(path=match.strip(), mode="write")
-        for match in _PATCH_FILE_RE.findall(text)
+        EventPath(path=match.strip(), mode="write") for match in _PATCH_FILE_RE.findall(text)
     )
 
 
@@ -247,9 +244,7 @@ class CodexHarness(Harness):
         resume: str | None = None,
     ) -> LaunchPlan:
         if approval not in APPROVALS:
-            raise BadRequest(
-                f"approval must be one of {', '.join(APPROVALS)}, got {approval!r}"
-            )
+            raise BadRequest(f"approval must be one of {', '.join(APPROVALS)}, got {approval!r}")
         command = json.dumps(theater_binary())
         args = json.dumps(["mcp", "--id", participant_id])
         # `codex resume <SESSION_ID>` is a subcommand (cli/src/main.rs:181-182,
@@ -381,10 +376,12 @@ class CodexObserver(TranscriptObserver):
         ptype = payload.get("type")
 
         if ptype == "user_message":
+            raw = payload.get("message") if isinstance(payload.get("message"), str) else ""
             return [
                 Event(
                     kind=EventKind.USER,
-                    text=_clip(payload.get("message")),
+                    text=_clip(raw),
+                    raw_text=raw,
                     ts=ts,
                     raw_index=index,
                 )
@@ -394,19 +391,27 @@ class CodexObserver(TranscriptObserver):
                 # Repeated verbatim by the task_complete that follows it.
                 # Emitting both would double every reply on the bus.
                 return []
+            raw = payload.get("message") if isinstance(payload.get("message"), str) else ""
             return [
                 Event(
                     kind=EventKind.ASSISTANT,
-                    text=_clip(payload.get("message")),
+                    text=_clip(raw),
+                    raw_text=raw,
                     ts=ts,
                     raw_index=index,
                 )
             ]
         if ptype == "task_complete":
+            raw = (
+                payload.get("last_agent_message")
+                if isinstance(payload.get("last_agent_message"), str)
+                else ""
+            )
             return [
                 Event(
                     kind=EventKind.ASSISTANT,
-                    text=_clip(payload.get("last_agent_message")),
+                    text=_clip(raw),
+                    raw_text=raw,
                     ts=ts,
                     turn_end=True,
                     turn_id=_turn_id(payload),
@@ -414,10 +419,12 @@ class CodexObserver(TranscriptObserver):
                 )
             ]
         if ptype == "turn_aborted":
+            raw = f"turn aborted: {payload.get('reason') or 'unknown'}"
             return [
                 Event(
                     kind=EventKind.ERROR,
-                    text=f"turn aborted: {payload.get('reason') or 'unknown'}",
+                    text=raw,
+                    raw_text=raw,
                     ts=ts,
                     turn_end=True,
                     turn_id=_turn_id(payload),
@@ -430,9 +437,7 @@ class CodexObserver(TranscriptObserver):
             invocation = payload.get("invocation")
             invocation = invocation if isinstance(invocation, dict) else {}
             tool_name = ".".join(
-                str(part)
-                for part in (invocation.get("server"), invocation.get("tool"))
-                if part
+                str(part) for part in (invocation.get("server"), invocation.get("tool")) if part
             )
             if ptype == "mcp_tool_call_begin":
                 return [
@@ -443,10 +448,12 @@ class CodexObserver(TranscriptObserver):
                         raw_index=index,
                     )
                 ]
+            raw = self._mcp_result(payload.get("result"))
             return [
                 Event(
                     kind=EventKind.TOOL_RESULT,
-                    text=_clip(self._mcp_result(payload.get("result"))),
+                    text=_clip(raw),
+                    raw_text=raw,
                     tool_name=tool_name or None,
                     ts=ts,
                     raw_index=index,
@@ -454,6 +461,7 @@ class CodexObserver(TranscriptObserver):
             ]
         # token_count, task_started, patch_apply_end, thread_settings_applied.
         return []
+
     def _mcp_result(self, result) -> str:
         """Unwrap the Rust-style `{"Ok"|"Err": …}` an MCP call comes back as."""
         if not isinstance(result, dict):
@@ -466,9 +474,7 @@ class CodexObserver(TranscriptObserver):
             return err if isinstance(err, str) else json.dumps(err, default=str)
         return json.dumps(result, default=str)
 
-    def _item(
-        self, payload: dict, ts: float | None, index: int, *, clip_text: bool
-    ) -> list[Event]:
+    def _item(self, payload: dict, ts: float | None, index: int, *, clip_text: bool) -> list[Event]:
         _clip = clipper(clip_text)
         ptype = payload.get("type")
 
@@ -494,10 +500,12 @@ class CodexObserver(TranscriptObserver):
         if ptype in ("custom_tool_call_output", "function_call_output"):
             # No tool name: the record carries only `call_id`, and resolving it
             # would mean holding state across lines, which parse() does not do.
+            raw = _flatten(payload.get("output"))
             return [
                 Event(
                     kind=EventKind.TOOL_RESULT,
-                    text=_clip(_flatten(payload.get("output"))),
+                    text=_clip(raw),
+                    raw_text=raw,
                     ts=ts,
                     raw_index=index,
                 )
@@ -545,24 +553,14 @@ class CodexObserver(TranscriptObserver):
         as PROMPT and the send gate would inject into a live approval.
         """
         if TRUST_MARKER in capture:
-            return ScreenReading(
-                kind=ScreenKind.TRUST, confidence=ScreenConfidence.HIGH
-            )
+            return ScreenReading(kind=ScreenKind.TRUST, confidence=ScreenConfidence.HIGH)
         if _in_screen_tail(capture, APPROVAL_MARKER):
-            return ScreenReading(
-                kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH
-            )
+            return ScreenReading(kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH)
         if WORKING_MARKER in capture:
-            return ScreenReading(
-                kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH
-            )
+            return ScreenReading(kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH)
         if self.is_idle_screen(capture):
-            return ScreenReading(
-                kind=ScreenKind.PROMPT, confidence=ScreenConfidence.HIGH
-            )
-        return ScreenReading(
-            kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW
-        )
+            return ScreenReading(kind=ScreenKind.PROMPT, confidence=ScreenConfidence.HIGH)
+        return ScreenReading(kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW)
 
 
 #: What the loader looks for. An instance, not the class (see

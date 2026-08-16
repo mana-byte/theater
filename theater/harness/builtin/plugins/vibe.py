@@ -191,9 +191,7 @@ def _in_screen_tail(capture: str, markers: tuple[str, ...], limit: int) -> bool:
     is what distinguishes the spinner from prose.
     """
     lines = capture.splitlines()
-    return any(
-        all(m in line for m in markers) for line in lines[-limit:] if line
-    )
+    return any(all(m in line for m in markers) for line in lines[-limit:] if line)
 
 
 class VibeHarness(Harness):
@@ -224,9 +222,7 @@ class VibeHarness(Harness):
         resume: str | None = None,
     ) -> LaunchPlan:
         if approval not in APPROVALS:
-            raise BadRequest(
-                f"approval must be one of {', '.join(APPROVALS)}, got {approval!r}"
-            )
+            raise BadRequest(f"approval must be one of {', '.join(APPROVALS)}, got {approval!r}")
         servers = [
             {
                 "name": SERVER_NAME,
@@ -401,18 +397,22 @@ class VibeObserver(TranscriptObserver):
 
         role = record.get("role")
         if role == "user":
+            raw = record.get("content") if isinstance(record.get("content"), str) else ""
             return [
                 Event(
                     kind=EventKind.USER,
-                    text=_clip(record.get("content")),
+                    text=_clip(raw),
+                    raw_text=raw,
                     raw_index=index,
                 )
             ]
         if role == "tool":
+            raw = record.get("content") if isinstance(record.get("content"), str) else ""
             return [
                 Event(
                     kind=EventKind.TOOL_RESULT,
-                    text=_clip(record.get("content")),
+                    text=_clip(raw),
+                    raw_text=raw,
                     tool_name=record.get("name"),
                     raw_index=index,
                 )
@@ -424,8 +424,14 @@ class VibeObserver(TranscriptObserver):
         out: list[Event] = []
         content = record.get("content")
         if content:
+            raw = content if isinstance(content, str) else ""
             out.append(
-                Event(kind=EventKind.ASSISTANT, text=_clip(content), raw_index=index)
+                Event(
+                    kind=EventKind.ASSISTANT,
+                    text=_clip(raw),
+                    raw_text=raw,
+                    raw_index=index,
+                )
             )
         for call in calls:
             if not isinstance(call, dict):
@@ -452,6 +458,7 @@ class VibeObserver(TranscriptObserver):
             out[-1] = Event(
                 kind=last.kind,
                 text=last.text,
+                raw_text=last.raw_text,
                 tool_name=last.tool_name,
                 ts=last.ts,
                 turn_end=True,
@@ -459,9 +466,7 @@ class VibeObserver(TranscriptObserver):
                 paths=last.paths,
             )
         else:
-            out.append(
-                Event(kind=EventKind.ASSISTANT, turn_end=True, raw_index=index)
-            )
+            out.append(Event(kind=EventKind.ASSISTANT, turn_end=True, raw_index=index))
         return out
 
     def native_children(self, transcript: Path) -> list[NativeChild]:
@@ -517,27 +522,15 @@ class VibeObserver(TranscriptObserver):
         it, so `is_idle_screen` does not fire on a real screen.
         """
         if TRUST_MARKER in capture:
-            return ScreenReading(
-                kind=ScreenKind.TRUST, confidence=ScreenConfidence.HIGH
-            )
+            return ScreenReading(kind=ScreenKind.TRUST, confidence=ScreenConfidence.HIGH)
         if APPROVAL_MARKER in capture:
-            return ScreenReading(
-                kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH
-            )
-        if _in_screen_tail(
-            capture, (WORKING_MARKER, WORKING_MARKER_KEY), _SPINNER_TAIL_LINES
-        ):
-            return ScreenReading(
-                kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH
-            )
+            return ScreenReading(kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH)
+        if _in_screen_tail(capture, (WORKING_MARKER, WORKING_MARKER_KEY), _SPINNER_TAIL_LINES):
+            return ScreenReading(kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH)
         lines = [line.strip() for line in capture.splitlines() if line.strip()]
         if any(line in _SCREEN_IDLE_PROMPTS for line in lines[-_SCREEN_TAIL_LINES:]):
-            return ScreenReading(
-                kind=ScreenKind.PROMPT, confidence=ScreenConfidence.HIGH
-            )
-        return ScreenReading(
-            kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW
-        )
+            return ScreenReading(kind=ScreenKind.PROMPT, confidence=ScreenConfidence.HIGH)
+        return ScreenReading(kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW)
 
 
 #: What the loader looks for. An instance, not the class: see
