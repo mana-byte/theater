@@ -604,9 +604,7 @@ def test_kill_names_what_it_killed(answers, capsys):
 def test_name_command_calls_rename_and_prints_the_result(answers, capsys):
     answers["replies"] = {"participant.rename": {**ROW, "name": "Pierrot"}}
     assert cli.cmd_name(parse("name", "Arlequin", "Pierrot")) == 0
-    assert answers["calls"] == [
-        ("participant.rename", {"id": "Arlequin", "name": "Pierrot"})
-    ]
+    assert answers["calls"] == [("participant.rename", {"id": "Arlequin", "name": "Pierrot"})]
     assert "Pierrot" in capsys.readouterr().out
 
 
@@ -713,6 +711,30 @@ def test_spawn_rejects_an_unknown_harness_by_name(monkeypatch):
         cli._spawn_harness(parse("spawn", "nosuch", "hi", "--approval", "manual"))
     assert "unknown harness" in str(exc.value)
     assert "--prompt" in str(exc.value), "the likely mistake is naming a prompt"
+
+
+def test_spawn_bare_worktree_flag_sends_true(answers, monkeypatch):
+    """Bare --worktree sends True (unique isolated worktree)."""
+    monkeypatch.setattr(cli.tmux, "current_session_sync", lambda: "main")
+    answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
+    cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual", "--worktree"))
+    assert answers["calls"][0][1]["worktree"] is True
+
+
+def test_spawn_worktree_with_name_sends_string(answers, monkeypatch):
+    """--worktree NAME sends the string (named shared worktree)."""
+    monkeypatch.setattr(cli.tmux, "current_session_sync", lambda: "main")
+    answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
+    cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual", "--worktree", "shared"))
+    assert answers["calls"][0][1]["worktree"] == "shared"
+
+
+def test_spawn_without_worktree_sends_false(answers, monkeypatch):
+    """Omitting --worktree sends False."""
+    monkeypatch.setattr(cli.tmux, "current_session_sync", lambda: "main")
+    answers["replies"] = {"spawn": {"id": "p-new", "harness": "vibe", "tmux_pane": "%4"}}
+    cli.cmd_spawn(parse("spawn", "vibe", "hi", "--approval", "manual"))
+    assert answers["calls"][0][1]["worktree"] is False
 
 
 # ---- models --------------------------------------------------------------

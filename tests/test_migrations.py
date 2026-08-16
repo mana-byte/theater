@@ -54,7 +54,15 @@ def test_migrations_created_the_alembic_version_table(store):
         store.conn.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'").scalars()
     )
     assert "alembic_version" in tables
-    assert {"participants", "jobs", "bus", "budgets", "tree_kv", "checkpoints"} <= tables
+    assert {
+        "participants",
+        "jobs",
+        "bus",
+        "budgets",
+        "tree_kv",
+        "checkpoints",
+        "named_worktrees",
+    } <= tables
     stamped = store.conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
     assert stamped == HEAD
 

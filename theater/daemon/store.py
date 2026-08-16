@@ -34,7 +34,15 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from theater.daemon.schema import bus, checkpoints, jobs, meta, participants, tree_kv
+from theater.daemon.schema import (
+    bus,
+    checkpoints,
+    jobs,
+    meta,
+    named_worktrees,
+    participants,
+    tree_kv,
+)
 from theater.models import Job, Participant, Status, now
 
 MIGRATIONS = Path(__file__).parent / "migrations"
@@ -45,7 +53,7 @@ BASELINE = "0001"
 #: The latest revision. A legacy database is stamped at BASELINE and then
 #: upgraded to this; a fresh database lands here directly. Tests assert
 #: against this rather than hardcoding a revision string.
-HEAD = "0006"
+HEAD = "0007"
 
 
 def _set_pragmas(dbapi_connection, _record) -> None:
@@ -429,6 +437,65 @@ class Store:
             .limit(limit)
         ).fetchall()
         return [dict(r._mapping) for r in rows]
+
+    # ---- named worktrees ------------------------------------------------
+
+    def get_named_worktree(self, *, repo_root: str, name: str) -> dict | None:
+        row = self.conn.execute(
+            select(named_worktrees)
+            .where(named_worktrees.c.repo_root == repo_root)
+            .where(named_worktrees.c.name == name)
+        ).first()
+        return dict(row._mapping) if row else None
+
+    def upsert_named_worktree(
+        self,
+        *,
+        repo_root: str,
+        name: str,
+        branch: str,
+        path: str,
+        base_branch: str | None,
+    ) -> None:
+        stmt = sqlite_insert(named_worktrees).values(
+            repo_root=repo_root,
+            name=name,
+            branch=branch,
+            path=path,
+            base_branch=base_branch,
+            created_at=now(),
+        )
+        self.conn.execute(
+            stmt.on_conflict_do_update(
+                index_elements=[named_worktrees.c.repo_root, named_worktrees.c.name],
+                set_={
+                    "branch": branch,
+                    "path": path,
+                    "base_branch": base_branch,
+                },
+            )
+        )
+
+    def delete_named_worktree(self, *, repo_root: str, name: str) -> None:
+        self.conn.execute(
+            named_worktrees.delete()
+            .where(named_worktrees.c.repo_root == repo_root)
+            .where(named_worktrees.c.name == name)
+        )
+
+    def named_worktree_by_path(self, path: str) -> dict | None:
+        row = self.conn.execute(
+            select(named_worktrees).where(named_worktrees.c.path == path)
+        ).first()
+        return dict(row._mapping) if row else None
+
+    def live_participants_in_cwd(self, cwd: str) -> list[Participant]:
+        rows = self.conn.execute(
+            select(participants)
+            .where(participants.c.cwd == cwd)
+            .where(participants.c.status != str(Status.DEAD))
+        ).fetchall()
+        return [Participant.from_row(r._mapping) for r in rows]
 
     # ---- metrics --------------------------------------------------------
 

@@ -100,6 +100,27 @@ def _require(params: dict, key: str) -> Any:
     return params[key]
 
 
+def _validate_worktree_param(value: Any) -> str | bool | None:
+    """Normalise and validate the ``worktree`` RPC parameter.
+
+    Accepts ``True``, ``False``, ``None``, or a non-empty string. Rejects
+    integers, lists, dicts, and empty strings so that truthiness never
+    turns an unexpected type into a unique worktree.
+    """
+    if value is None or value is False:
+        return False
+    if value is True:
+        return True
+    if isinstance(value, str):
+        if not value.strip():
+            raise BadRequest(
+                "worktree name must be a non-empty string; an empty string is "
+                "not a valid named-worktree name"
+            )
+        return value
+    raise BadRequest(f"worktree parameter must be bool, str, or None; got {type(value).__name__}")
+
+
 def _string_param(params: dict, key: str, *, method_name: str, allow_empty: bool = False) -> str:
     if key not in params or params[key] is None:
         raise BadRequest(f"{method_name} requires string parameter {key!r}")
@@ -344,7 +365,7 @@ async def _spawn(daemon, params: dict) -> dict:
         tmux_session=params.get("tmux_session"),
         window_name=params.get("window_name"),
         background=params.get("background", True),
-        worktree=bool(params.get("worktree", False)),
+        worktree=_validate_worktree_param(params.get("worktree", False)),
         base_branch=params.get("base_branch"),
         model=params.get("model"),
         resume=params.get("resume"),

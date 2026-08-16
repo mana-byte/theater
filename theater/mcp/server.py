@@ -86,6 +86,24 @@ worktree: if True, create a git worktree for the child with its own
           one files no sibling touches, and put whatever they share —
           a function signature, a schema — in both prompts, unchanged,
           so the branches still compose when they come back.
+          If a non-empty string, create or join a named shared linked
+          worktree. Multiple live children spawned with the same name
+          in the same canonical main repository run in the same
+          directory and on the same branch. This is an expert-mode
+          collaboration primitive, not filesystem or Git isolation:
+          the index and HEAD are shared, concurrent git add/commit
+          operations can interfere, and the KV store does not make
+          file claims atomic or enforce ownership. The branch name
+          theater/named/<name> is in the result. base_branch applies
+          only when the named worktree is first created; a later join
+          may omit it or repeat the exact same value, and a conflicting
+          value is refused. On the
+          last live participant's teardown the directory is removed but
+          the shared branch is always retained — other participants may
+          have completed work on it. After the last teardown the branch
+          remains, and the name cannot be recreated until the retained
+          branch is integrated as appropriate and deleted by the user.
+          Cannot be combined with resume.
 base_branch: the branch to base the worktree on. Defaults to current HEAD.
 resume:    a session id, from `recall`, to resume instead of starting cold.
            The harness must support it (call list_harnesses; a harness that
@@ -193,7 +211,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         prompt: str | None = None,
         response_format: dict | None = None,
         cwd: str | None = None,
-        worktree: bool = False,
+        worktree: str | bool | None = False,
         base_branch: str | None = None,
         model: str | None = None,
         resume: str | None = None,
@@ -418,13 +436,22 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         error — killing a dead thing is not a failure.
 
         **Side effect: destroying a worktree child erases uncommitted
-        work.** If the child was spawned with worktree=True, killing
-        it removes the git worktree and deletes its branch. Commits
-        already made on the branch are lost with the branch; uncommitted
-        changes in the worktree are lost irreversibly. There is no
-        confirmation prompt and no undo anywhere below this tool — the
-        user's yes is the only thing standing between a call and lost
-        work, which is why it has to be asked for every time.
+        work.** If the child was spawned with worktree=True (a unique
+        isolated worktree), killing it removes the git worktree and
+        deletes its branch. Commits already made on the branch are
+        lost with the branch; uncommitted changes in the worktree are
+        lost irreversibly. There is no confirmation prompt and no undo
+        anywhere below this tool — the user's yes is the only thing
+        standing between a call and lost work, which is why it has to
+        be asked for every time.
+
+        If the child was spawned with worktree="<name>" (a named shared
+        linked worktree), the directory is removed on the last live
+        participant's teardown but the shared branch is always retained
+        — other participants may already have completed work on it.
+        After the last teardown the branch remains, and the name cannot
+        be recreated until the retained branch is integrated as appropriate
+        and deleted by the user.
 
         So collect before you kill. Merge the branch, or record the
         commits somewhere outside the worktree, and only then ask. A

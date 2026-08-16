@@ -147,7 +147,7 @@ async def spawn_session(
     response_format: dict | None = None,
     approval: str,
     cwd: str | None = None,
-    worktree: bool = False,
+    worktree: str | bool | None = False,
     base_branch: str | None = None,
     model: str | None = None,
     resume: str | None = None,
@@ -160,6 +160,15 @@ async def spawn_session(
     If `worktree` is True, a git worktree is created for the child so it has
     its own isolated index and HEAD. The branch name `theater/<child-id>` is
     reported in the result so the parent can merge it explicitly.
+
+    If `worktree` is a non-empty string, a named shared linked worktree is
+    created or joined. Multiple live children spawned with the same name in
+    the same canonical main repository run in the same directory and on the
+    same branch. This is an expert-mode collaboration primitive, not
+    filesystem or Git isolation: the index and HEAD are shared, concurrent
+    ``git add``/``commit`` operations can interfere, and the KV store does
+    not make file claims atomic or enforce ownership. The branch name
+    `theater/named/<name>` is reported in the result.
 
     `model` is passed to the harness unchanged, but not unchecked: it must be
     one the config lists for that harness, and the harness must be able to
@@ -405,12 +414,22 @@ async def put_child_back_in_the_wound(session: Session, *, target_id: str) -> di
     identify a successor.
 
     **Side effect: destroying a worktree child erases uncommitted work.**
-    If the child was spawned with ``worktree=True``, killing it removes
-    the git worktree and deletes its branch. Commits already made on the
-    branch are lost with the branch; uncommitted changes in the worktree
-    are lost irreversibly. This is the daemon's behaviour, not a choice
-    this tool makes, but it is the one fact the caller must know before
-    calling — there is no confirmation prompt, and no undo.
+    If the child was spawned with ``worktree=True`` (a unique isolated
+    worktree), killing it removes the git worktree and deletes its
+    branch. Commits already made on the branch are lost with the branch;
+    uncommitted changes in the worktree are lost irreversibly.
+
+    If the child was spawned with ``worktree="<name>"`` (a named shared
+    linked worktree), the directory is removed on the last live
+    participant's teardown but the **shared branch is always retained** —
+    other participants may already have completed work on it. After the
+    last teardown the branch remains, and the name cannot be recreated
+    until the retained branch is integrated as appropriate and deleted by
+    the user.
+
+    This is the daemon's behaviour, not a choice this tool makes, but it
+    is the one fact the caller must know before calling — there is no
+    confirmation prompt, and no undo.
     """
     if not session._resolved:
         await session.identify()

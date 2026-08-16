@@ -172,3 +172,21 @@ Index(
     checkpoints.c.participant_id,
     checkpoints.c.name,
 )
+
+# Named shared worktrees: multiple live children can share one linked
+# worktree (same directory, same branch, same index/HEAD). The key is
+# (repo_root, name) so the same name in two repositories does not collide.
+# Only Theater-created named worktrees appear here — a join reuses a row
+# the daemon recognises, never an arbitrary pre-existing branch or directory.
+named_worktrees = Table(
+    "named_worktrees",
+    metadata,
+    Column("repo_root", Text, primary_key=True),
+    Column("name", Text, primary_key=True),
+    Column("branch", Text, nullable=False),
+    Column("path", Text, nullable=False),
+    Column("base_branch", Text),
+    Column("created_at", REAL, nullable=False),
+)
+
+Index("idx_named_worktrees_path", named_worktrees.c.path)

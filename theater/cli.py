@@ -187,8 +187,18 @@ def _parser() -> argparse.ArgumentParser:
     )
     spawn.add_argument(
         "--worktree",
-        action="store_true",
-        help="Create a git worktree for the child with isolated index and HEAD.",
+        nargs="?",
+        const=True,
+        default=False,
+        type=str,
+        help=(
+            "Create a git worktree for the child. Bare --worktree creates an "
+            "isolated worktree (unique index and HEAD). --worktree NAME creates "
+            "or joins a named shared linked worktree — multiple children with "
+            "the same name share one directory and branch. Expert mode: the "
+            "index and HEAD are shared, concurrent git add/commit operations "
+            "can interfere, and Theater does not enforce file ownership."
+        ),
     )
     spawn.add_argument(
         "--base-branch",
