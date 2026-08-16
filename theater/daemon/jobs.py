@@ -330,7 +330,7 @@ class JobManager:
             candidate = raw_result
         try:
             json.loads(candidate)
-        except ValueError:
+        except (ValueError, RecursionError):
             return None, STRUCTURED_UNAVAILABLE
         return candidate, STRUCTURED_PARSED
 

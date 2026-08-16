@@ -21,6 +21,7 @@ from theater.daemon.observer import (
     RESCUE_TIMEOUT,
     Observer,
     QuietClock,
+    Turn,
     TurnAccumulator,
 )
 from theater.harness.base import Event, EventKind
@@ -498,6 +499,13 @@ def test_structured_error_boundary_is_unavailable(registry):
 
 def spoke(text: str) -> Event:
     return Event(kind=EventKind.USER, text=text, turn_end=False)
+
+
+def test_turn_positional_constructor_keeps_heard_position():
+    turn = Turn("answer", ("prompt",))
+    assert turn.said == "answer"
+    assert turn.heard == ("prompt",)
+    assert turn.raw_said == ""
 
 
 def test_a_turn_end_mid_batch_still_answers(registry):

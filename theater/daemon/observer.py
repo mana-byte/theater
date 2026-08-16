@@ -201,11 +201,11 @@ class Turn:
 
     #: Assistant text, blank-line joined in arrival order.
     said: str
-    #: Assistant text before parser clipping, blank-line joined in arrival order.
-    raw_said: str = ""
     #: User text that arrived during the turn, in arrival order. Normally the
     #: one prompt that opened it; empty when we attached mid-turn.
     heard: tuple[str, ...] = ()
+    #: Assistant text before parser clipping, blank-line joined in arrival order.
+    raw_said: str = ""
 
 
 @dataclass
@@ -248,9 +248,9 @@ class TurnAccumulator:
     def take(self) -> Turn:
         """The finished turn, and forget it. Text blank-line joined, as written."""
         turn = Turn(
-            "\n\n".join(self._blocks),
-            "\n\n".join(self._raw_blocks),
-            tuple(self._heard),
+            said="\n\n".join(self._blocks),
+            heard=tuple(self._heard),
+            raw_said="\n\n".join(self._raw_blocks),
         )
         self._blocks.clear()
         self._raw_blocks.clear()

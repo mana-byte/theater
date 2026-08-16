@@ -374,6 +374,36 @@ def test_structured_json_invalid_fenced_or_trailing_prose_is_unavailable(store, 
     assert job.structured_status == "unavailable"
 
 
+def test_structured_json_recursion_error_is_unavailable(store, monkeypatch):
+    import theater.daemon.jobs as jobs_mod
+    from theater.daemon.jobs import JobManager, JobState
+
+    def too_deep(_raw):
+        raise RecursionError("too deeply nested")
+
+    monkeypatch.setattr(jobs_mod.json, "loads", too_deep)
+    jm = JobManager(store)
+    jm.create(
+        handle="bad-recursion",
+        caller_id="cli",
+        target_id="target",
+        kind="send",
+        response_format="json",
+    )
+
+    jm.finish(
+        "bad-recursion",
+        state=JobState.DONE,
+        result="[[...]]",
+        raw_result="[[...]]",
+    )
+
+    job = jm.get("bad-recursion")
+    assert job is not None
+    assert job.structured_result is None
+    assert job.structured_status == "unavailable"
+
+
 def test_structured_json_null_is_a_parsed_raw_result(store):
     from theater.daemon.jobs import JobManager, JobState
 

@@ -170,9 +170,6 @@ class Event:
     kind: EventKind
     #: Text suitable for the bus: clipped to ``MAX_TEXT`` by live parsers.
     text: str = ""
-    #: The same text before clipping, when the adapter has textual content.
-    #: ``None`` means "no separate raw text"; callers fall back to ``text``.
-    raw_text: str | None = None
     tool_name: str | None = None
     #: Wall clock from the transcript. Vibe writes none, so the observer stamps
     #: its own observation time instead — do not paper over the difference.
@@ -193,6 +190,9 @@ class Event:
     #: the per-job set that becomes `touch` rows. An empty tuple is the honest
     #: answer until the plugin is updated to report paths.
     paths: tuple[EventPath, ...] = ()
+    #: The same text before clipping, when the adapter has textual content.
+    #: ``None`` means "no separate raw text"; callers fall back to ``text``.
+    raw_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
