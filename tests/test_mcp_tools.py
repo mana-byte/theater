@@ -151,6 +151,38 @@ async def test_spawn_accepts_no_prompt():
     assert s.client.params("spawn")["prompt"] is None
 
 
+async def test_spawn_forwards_response_format_unchanged():
+    """MCP forwards the schema hint to the daemon; it does not serialize it."""
+    response_format = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+    }
+    s = resolved()
+    await tools.spawn_session(
+        s,
+        harness="vibe",
+        prompt="answer in JSON",
+        response_format=response_format,
+        approval="manual",
+    )
+    assert s.client.params("spawn")["response_format"] is response_format
+
+
+async def test_spawn_forwards_empty_response_format():
+    """An empty schema object is still an explicit response_format."""
+    response_format = {}
+    s = resolved()
+    await tools.spawn_session(
+        s,
+        harness="vibe",
+        prompt="answer in JSON",
+        response_format=response_format,
+        approval="manual",
+    )
+    assert s.client.params("spawn")["response_format"] is response_format
+
+
 async def test_spawn_defaults_the_cwd_to_this_process():
     s = resolved()
     await tools.spawn_session(s, harness="vibe", prompt="hi", approval="manual")
@@ -186,8 +218,11 @@ async def test_await_drops_prompt_and_result_from_the_agent_facing_shape():
         "target_id": "p-you",
         "kind": "send",
         "prompt": "do the thing",
+        "response_format": {"type": "object"},
         "state": "done",
         "result": "a 2000-char clip nobody asked for",
+        "structured_result": '{"answer": 42}',
+        "structured_status": "parsed",
         "error_code": None,
         "created_at": 1.0,
         "finished_at": 2.0,
@@ -197,6 +232,9 @@ async def test_await_drops_prompt_and_result_from_the_agent_facing_shape():
     assert "prompt" not in jobs[0]
     assert "result" not in jobs[0]
     assert (jobs[0]["handle"], jobs[0]["state"], jobs[0]["error_code"]) == ("h#1", "done", None)
+    assert jobs[0]["response_format"] == {"type": "object"}
+    assert jobs[0]["structured_result"] == '{"answer": 42}'
+    assert jobs[0]["structured_status"] == "parsed"
 
 
 async def test_send_names_the_caller_so_the_reply_comes_back():
@@ -206,10 +244,85 @@ async def test_send_names_the_caller_so_the_reply_comes_back():
     assert (p["target"], p["prompt"], p["caller_id"]) == ("p-you", "hello", "p-me")
 
 
+async def test_send_forwards_response_format_unchanged():
+    response_format = {
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}},
+    }
+    s = resolved(send={"handle": "p-you#1"})
+    await tools.send_prompt(
+        s,
+        target_id="p-you",
+        prompt="hello",
+        response_format=response_format,
+    )
+    assert s.client.params("send")["response_format"] is response_format
+
+
+async def test_send_forwards_empty_response_format():
+    response_format = {}
+    s = resolved(send={"handle": "p-you#1"})
+    await tools.send_prompt(
+        s,
+        target_id="p-you",
+        prompt="hello",
+        response_format=response_format,
+    )
+    assert s.client.params("send")["response_format"] is response_format
+
+
 async def test_send_identifies_first_or_the_reply_has_nowhere_to_go():
     s = session(send={"handle": "p-you#1"})
     await tools.send_prompt(s, target_id="p-you", prompt="hello")
     assert s.client.methods == ["hello", "send"]
+
+
+async def test_store_put_identifies_and_forwards_exact_rpc_arguments():
+    s = session(**{"store.put": {"stored": True}})
+    got = await tools.store_put(s, namespace="plan", key="owner", value="p-you")
+    assert got == {"stored": True}
+    assert s.client.methods == ["hello", "store.put"]
+    assert s.client.params("store.put") == {
+        "namespace": "plan",
+        "key": "owner",
+        "value": "p-you",
+        "caller_id": "p-me",
+    }
+
+
+async def test_store_get_identifies_and_forwards_exact_rpc_arguments():
+    s = session(**{"store.get": {"value": "p-you"}})
+    got = await tools.store_get(s, namespace="plan", key="owner")
+    assert got == {"value": "p-you"}
+    assert s.client.methods == ["hello", "store.get"]
+    assert s.client.params("store.get") == {
+        "namespace": "plan",
+        "key": "owner",
+        "caller_id": "p-me",
+    }
+
+
+async def test_checkpoint_identifies_and_forwards_exact_rpc_arguments():
+    s = session(**{"checkpoint.create": {"checkpoint_id": 7, "jobs": []}})
+    got = await tools.checkpoint(s, name="before merge", notes="watch p-you")
+    assert got == {"checkpoint_id": 7, "jobs": []}
+    assert s.client.methods == ["hello", "checkpoint.create"]
+    assert s.client.params("checkpoint.create") == {
+        "name": "before merge",
+        "notes": "watch p-you",
+        "caller_id": "p-me",
+    }
+
+
+async def test_recovery_read_identifies_and_forwards_exact_rpc_arguments():
+    s = session(**{"checkpoint.read": {"checkpoint_id": 7, "recorded": [], "live": []}})
+    got = await tools.recovery_read(s, checkpoint_id=7)
+    assert got == {"checkpoint_id": 7, "recorded": [], "live": []}
+    assert s.client.methods == ["hello", "checkpoint.read"]
+    assert s.client.params("checkpoint.read") == {
+        "checkpoint_id": 7,
+        "caller_id": "p-me",
+    }
 
 
 async def test_read_transcript_asks_for_the_number_of_events_requested():
