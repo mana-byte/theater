@@ -470,7 +470,7 @@ prompt:      task delivered on the child's command line; optional for a plain CL
 approval:    "manual" | "edits" | "yolo"
 cwd:         working directory (defaults to caller's cwd)
 worktree:    true for an isolated git worktree; a string for a named shared linked worktree; false/omitted for none
-base_branch: branch to base the worktree on (applies when the worktree is first created)
+base_branch: branch to base the worktree on; for a named worktree, set at first creation
 model:       model the child runs on; omit for the CLI's own default
 ```
 

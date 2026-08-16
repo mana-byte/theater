@@ -424,7 +424,8 @@ async def put_child_back_in_the_wound(session: Session, *, target_id: str) -> di
     participant's teardown but the **shared branch is always retained** —
     other participants may already have completed work on it. After the
     last teardown the branch remains, and the name cannot be recreated
-    until the retained branch is merged or deleted by the user.
+    until the retained branch is integrated as appropriate and deleted by
+    the user.
 
     This is the daemon's behaviour, not a choice this tool makes, but it
     is the one fact the caller must know before calling — there is no

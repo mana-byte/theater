@@ -96,13 +96,14 @@ worktree: if True, create a git worktree for the child with its own
           file claims atomic or enforce ownership. The branch name
           theater/named/<name> is in the result. base_branch applies
           only when the named worktree is first created; a later join
-          with a different or explicit base_branch is refused. On the
+          may omit it or repeat the exact same value, and a conflicting
+          value is refused. On the
           last live participant's teardown the directory is removed but
           the shared branch is always retained — other participants may
           have completed work on it. After the last teardown the branch
           remains, and the name cannot be recreated until the retained
-          branch is merged or deleted by the user. Cannot be combined
-          with resume.
+          branch is integrated as appropriate and deleted by the user.
+          Cannot be combined with resume.
 base_branch: the branch to base the worktree on. Defaults to current HEAD.
 resume:    a session id, from `recall`, to resume instead of starting cold.
            The harness must support it (call list_harnesses; a harness that
@@ -449,8 +450,8 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         participant's teardown but the shared branch is always retained
         — other participants may already have completed work on it.
         After the last teardown the branch remains, and the name cannot
-        be recreated until the retained branch is merged or deleted by
-        the user.
+        be recreated until the retained branch is integrated as appropriate
+        and deleted by the user.
 
         So collect before you kill. Merge the branch, or record the
         commits somewhere outside the worktree, and only then ask. A

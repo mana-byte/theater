@@ -432,18 +432,6 @@ def remove_worktree(
 # ---- named shared worktrees ---------------------------------------------
 
 
-@dataclass(frozen=True, slots=True)
-class NamedWorktreeRecord:
-    """A named shared worktree persisted in the ``named_worktrees`` table."""
-
-    repo_root: str
-    name: str
-    branch: str
-    path: str
-    base_branch: str | None
-    created_at: float
-
-
 def create_named_worktree(
     *,
     repo_root: str,
@@ -516,6 +504,7 @@ def verify_named_worktree(
     """Verify that a persisted named-worktree row is still intact before joining.
 
     Checks that:
+    - the persisted path and branch equal Theater's deterministic values
     - the expected path exists as a directory
     - it is a linked worktree of the canonical main repository
     - the expected branch is checked out there
@@ -524,6 +513,20 @@ def verify_named_worktree(
     stale or mismatched. Never launches a child into a missing or hijacked
     directory.
     """
+    safe_path = named_worktree_path(repo_root, name)
+    if Path(expected_path) != Path(safe_path):
+        raise BadRequest(
+            f"named worktree {name!r} has persisted path {expected_path!r}, "
+            f"expected Theater-managed path {safe_path!r}; cannot join"
+        )
+
+    safe_branch = named_branch_name(name)
+    if expected_branch != safe_branch:
+        raise BadRequest(
+            f"named worktree {name!r} has persisted branch {expected_branch!r}, "
+            f"expected Theater-managed branch {safe_branch!r}; cannot join"
+        )
+
     if not Path(expected_path).is_dir():
         raise BadRequest(
             f"named worktree {name!r} path {expected_path!r} does not exist; "

@@ -355,12 +355,20 @@ class Spawner:
         if not (p.branch and p.branch.startswith(worktree_mod.BRANCH_PREFIX)):
             return
 
-        # main_repo_root, not repo_root: the child's cwd *is* its worktree,
-        # so `git rev-parse --show-toplevel` from there answers the worktree
-        # itself. Feeding that back as repo root produces a doubled
-        # `.theater/worktrees/<id>` path git rejects. child_id lets it fall
-        # back to stripping the suffix when the directory is already gone.
-        root = worktree_mod.main_repo_root(p.cwd or "", child_id=p.id)
+        # Named worktrees are shared — check whether other live participants
+        # are still using the same cwd before touching the directory.
+        named = None
+        if self.registry is not None and self.registry.store is not None:
+            named = self.registry.store.named_worktree_by_path(p.cwd or "")
+
+        # A vanished named-worktree directory cannot answer git rev-parse,
+        # but its daemon-owned row still carries the canonical repository.
+        # Unique worktrees retain the child-id suffix fallback.
+        root = (
+            named["repo_root"]
+            if named is not None
+            else worktree_mod.main_repo_root(p.cwd or "", child_id=p.id)
+        )
         if root is None:
             logger.warning(
                 "cannot retire worktree for %s: no repo root from cwd %r",
@@ -369,14 +377,6 @@ class Spawner:
             )
             return
 
-        # Named worktrees are shared — check whether other live participants
-        # are still using the same cwd before touching the directory.
-        # The store may be unavailable (tests that pass registry=None for
-        # the pure-worktree retire path), in which case we fall through to
-        # the standard remove_worktree path.
-        named = None
-        if self.registry is not None and self.registry.store is not None:
-            named = self.registry.store.named_worktree_by_path(p.cwd or "")
         if named is not None:
             live = self.registry.store.live_participants_in_cwd(p.cwd or "")
             others = [x for x in live if x.id != p.id]

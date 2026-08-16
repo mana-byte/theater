@@ -856,6 +856,61 @@ def test_named_worktree_join_refused_wrong_branch(repo, store):
         s.close()
 
 
+def test_named_worktree_join_refused_unexpected_persisted_path(repo, store):
+    from theater.daemon.store import Store
+
+    db_path = Path(repo) / ".theater" / "test.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    s = Store(db_path)
+    try:
+        registry = type("R", (), {"store": s})()
+        spawner = Spawner(registry=registry)
+
+        spawner._spawn_named_worktree(root=repo, name="expected", base_branch=None)
+        other_path, other_branch = spawner._spawn_named_worktree(
+            root=repo, name="other", base_branch=None
+        )
+        s.upsert_named_worktree(
+            repo_root=repo,
+            name="expected",
+            branch=other_branch,
+            path=other_path,
+            base_branch=None,
+        )
+
+        with pytest.raises(BadRequest, match="expected Theater-managed path"):
+            spawner._spawn_named_worktree(root=repo, name="expected", base_branch=None)
+    finally:
+        s.close()
+
+
+def test_named_worktree_join_refused_unexpected_persisted_branch(repo, store):
+    from theater.daemon.store import Store
+
+    db_path = Path(repo) / ".theater" / "test.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    s = Store(db_path)
+    try:
+        registry = type("R", (), {"store": s})()
+        spawner = Spawner(registry=registry)
+
+        path, _branch = spawner._spawn_named_worktree(
+            root=repo, name="expected-branch", base_branch=None
+        )
+        s.upsert_named_worktree(
+            repo_root=repo,
+            name="expected-branch",
+            branch="other-branch",
+            path=path,
+            base_branch=None,
+        )
+
+        with pytest.raises(BadRequest, match="expected Theater-managed branch"):
+            spawner._spawn_named_worktree(root=repo, name="expected-branch", base_branch=None)
+    finally:
+        s.close()
+
+
 # ---- Fix 4: named branch survives kill ---------------------------------
 
 
@@ -935,6 +990,39 @@ def test_named_worktree_name_not_recreatable_after_teardown(repo, store):
         # because create_named_worktree checks if the branch already exists
         with pytest.raises(BadRequest, match="already exists"):
             spawner._spawn_named_worktree(root=repo, name="retained", base_branch=None)
+    finally:
+        s.close()
+
+
+def test_named_worktree_retire_recovers_when_directory_already_missing(repo, store):
+    from theater.daemon.store import Store
+
+    db_path = Path(repo) / ".theater" / "test.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    s = Store(db_path)
+    try:
+        registry = type("R", (), {"store": s})()
+        spawner = Spawner(registry=registry)
+
+        path, _branch = spawner._spawn_named_worktree(
+            root=repo, name="missing-at-retire", base_branch=None
+        )
+        participant = _named_participant("only", path, "missing-at-retire")
+        s.upsert_participant(participant)
+
+        import shutil
+
+        shutil.rmtree(path)
+        spawner.retire(participant, delete_branch=True)
+
+        assert s.get_named_worktree(repo_root=repo, name="missing-at-retire") is None
+        verify = subprocess.run(
+            ["git", "rev-parse", "--verify", "theater/named/missing-at-retire"],
+            cwd=repo,
+            capture_output=True,
+            check=False,
+        )
+        assert verify.returncode == 0
     finally:
         s.close()
 
