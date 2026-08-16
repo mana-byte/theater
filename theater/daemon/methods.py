@@ -145,9 +145,7 @@ async def _kill(daemon, params: dict) -> dict:
 
     if caller_id != "cli":
         if target.id == caller_id:
-            raise NoSelfKill(
-                f"refusing to kill {pid!r}: that is you, not your child"
-            )
+            raise NoSelfKill(f"refusing to kill {pid!r}: that is you, not your child")
         if target.parent_id != caller_id:
             raise NotYourChild(
                 f"refusing to kill {pid!r}: its parent is "
@@ -189,8 +187,8 @@ async def _adopt(daemon, params: dict) -> dict:
     match = next((p for p in panes if p.pane_id == pane), None)
     if match is None:
         raise BadRequest(f"pane {pane!r} not found in tmux")
-    harness = normalize(override) if override else detect_harness(
-        match.current_command, match.pane_pid
+    harness = (
+        normalize(override) if override else detect_harness(match.current_command, match.pane_pid)
     )
     if cwd is None:
         cwd = match.cwd
@@ -202,9 +200,7 @@ async def _adopt(daemon, params: dict) -> dict:
     # The launch epoch is from the shell tmux forked, not the harness — the
     # harness is its descendant, so it stays constant when the CLI exits.
     # The delivery gate cannot rely on the pid alone.
-    participant = daemon.registry.attach_pane(
-        participant.id, pane, pane_pid=match.pane_pid
-    )
+    participant = daemon.registry.attach_pane(participant.id, pane, pane_pid=match.pane_pid)
     return participant.to_dict()
 
 
@@ -245,7 +241,7 @@ async def _spawn(daemon, params: dict) -> dict:
         tmux_session=params.get("tmux_session"),
         window_name=params.get("window_name"),
         background=params.get("background", True),
-        worktree=bool(params.get("worktree", False)),
+        worktree=params.get("worktree", False),
         base_branch=params.get("base_branch"),
         model=params.get("model"),
         resume=params.get("resume"),
@@ -256,9 +252,7 @@ async def _spawn(daemon, params: dict) -> dict:
     # Policy, not capability: `Spawner` asks the adapter whether it can take
     # a model; whether the user permits this model is a question only the
     # config can answer, and the spawner has none.
-    check_model_allowed(
-        req.harness, req.model, daemon.config.models_for(req.harness)
-    )
+    check_model_allowed(req.harness, req.model, daemon.config.models_for(req.harness))
 
     participant = await daemon.spawner.spawn(req)
     handle = participant.id
@@ -409,9 +403,7 @@ def _refuse_send(
     raise exc
 
 
-async def _check_pane_identity(
-    daemon, target, refuse: Callable[..., NoReturn]
-) -> None:
+async def _check_pane_identity(daemon, target, refuse: Callable[..., NoReturn]) -> None:
     """Refuse to type into a pane that is no longer this participant's.
 
     The failure this exists for is the only irreversible one Theater has. A
@@ -457,9 +449,7 @@ async def _check_pane_identity(
     if pane is None:
         daemon.registry.mark_dead(target.id)
         refuse(
-            StaleTarget(
-                f"pane {target.tmux_pane} of {target.id!r} no longer exists"
-            ),
+            StaleTarget(f"pane {target.tmux_pane} of {target.id!r} no longer exists"),
             reason="pane_gone",
         )
 
@@ -499,9 +489,7 @@ async def _check_pane_identity(
         )
 
 
-async def _check_approval_modal(
-    daemon, target, refuse: Callable[..., NoReturn]
-) -> None:
+async def _check_approval_modal(daemon, target, refuse: Callable[..., NoReturn]) -> None:
     """Refuse to type into a pane showing an approval or trust modal.
 
     At an approval prompt, Enter is a button press, so an injected prompt can
@@ -542,9 +530,7 @@ async def _check_approval_modal(
         return
 
     try:
-        capture = await tmux.run(
-            "capture-pane", "-p", "-t", target.tmux_pane, check=False
-        )
+        capture = await tmux.run("capture-pane", "-p", "-t", target.tmux_pane, check=False)
     except Exception as exc:  # pragma: no cover - tmux failing mid-send
         logger.warning("approval-modal capture failed for %s: %s", target.id, exc)
         return
@@ -576,15 +562,11 @@ async def _send(daemon, params: dict) -> dict:
     prompt = _require(params, "prompt")
     caller_id = params.get("caller_id") or "cli"
 
-    refuse = functools.partial(
-        _refuse_send, daemon, caller_id=caller_id, target_id=target_id
-    )
+    refuse = functools.partial(_refuse_send, daemon, caller_id=caller_id, target_id=target_id)
 
     if not target.addressable:
         refuse(
-            NotAddressable(
-                f"participant {target_id!r} is not addressable (tier={target.tier})"
-            ),
+            NotAddressable(f"participant {target_id!r} is not addressable (tier={target.tier})"),
             reason="not_addressable",
         )
     if not target.tmux_pane:
@@ -813,9 +795,7 @@ async def _read_transcript(daemon, params: dict) -> dict:
     if harness is None:
         raise BadRequest(f"cannot read transcript: harness {p.harness!r} is not known")
 
-    source = harness.observer.open_source(
-        cwd=p.cwd, session_id=p.session_id, after=None
-    )
+    source = harness.observer.open_source(cwd=p.cwd, session_id=p.session_id, after=None)
     try:
         history = await source.history(last_n=last_n)
     finally:

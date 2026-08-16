@@ -136,7 +136,7 @@ An adapter maps these onto whatever its CLI actually offers, and may have to
 round down: `opencode` has one flag, `--auto`, so `edits` there behaves as
 `manual` rather than silently granting more than was asked for.
 
-`--worktree` creates an isolated git worktree for the child so parallel agents don't conflict on the index.
+`--worktree` creates an isolated git worktree for the child so parallel agents don't conflict on the index. `--worktree <name>` creates or joins a named shared linked worktree — multiple children spawned with the same name share the same directory and branch. This is an expert-mode collaboration primitive: the index and HEAD are shared, concurrent `git add`/`commit` operations can interfere, and Theater does not enforce file ownership.
 
 `--model` picks the model the child runs on, overriding whatever that CLI would
 have chosen for itself:
@@ -469,8 +469,8 @@ harness:     "claude" | "codex" | "opencode" | "vibe"
 prompt:      task delivered on the child's command line; optional for a plain CLI
 approval:    "manual" | "edits" | "yolo"
 cwd:         working directory (defaults to caller's cwd)
-worktree:    create an isolated git worktree (bool)
-base_branch: branch to base the worktree on
+worktree:    true for an isolated git worktree; a string for a named shared linked worktree; false/omitted for none
+base_branch: branch to base the worktree on (applies when the worktree is first created)
 model:       model the child runs on; omit for the CLI's own default
 ```
 

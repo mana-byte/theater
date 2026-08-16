@@ -250,6 +250,22 @@ async def test_resume_with_worktree_refused(registry, resume_harness, monkeypatc
         await spawner.spawn(req)
 
 
+async def test_resume_with_named_worktree_refused(registry, resume_harness, monkeypatch):
+    """A named worktree is also refused with resume, for the same reason."""
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="resume-spawn-test",
+        prompt="do thing",
+        cwd="/tmp",
+        approval="edits",
+        resume="sess-abc",
+        worktree="shared-name",
+    )
+    with pytest.raises(BadRequest, match="cannot resume into a worktree"):
+        await spawner.spawn(req)
+
+
 # ---- MCP server surface: resume in the schema -------------------------
 
 

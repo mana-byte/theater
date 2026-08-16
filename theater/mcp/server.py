@@ -80,6 +80,18 @@ worktree: if True, create a git worktree for the child with its own
           one files no sibling touches, and put whatever they share —
           a function signature, a schema — in both prompts, unchanged,
           so the branches still compose when they come back.
+          If a non-empty string, create or join a named shared linked
+          worktree. Multiple live children spawned with the same name
+          in the same canonical main repository run in the same
+          directory and on the same branch. This is an expert-mode
+          collaboration primitive, not filesystem or Git isolation:
+          the index and HEAD are shared, concurrent git add/commit
+          operations can interfere, and the KV store does not make
+          file claims atomic or enforce ownership. The branch name
+          theater/named/<name> is in the result. base_branch applies
+          only when the named worktree is first created; a later join
+          with a conflicting base_branch is refused. Cannot be combined
+          with resume.
 base_branch: the branch to base the worktree on. Defaults to current HEAD.
 resume:    a session id, from `recall`, to resume instead of starting cold.
            The harness must support it (call list_harnesses; a harness that
@@ -179,15 +191,25 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
 
     @mcp.tool(description=_spawn_description())
     async def spawn_session(
-        harness: str, approval: str, prompt: str | None = None,
+        harness: str,
+        approval: str,
+        prompt: str | None = None,
         cwd: str | None = None,
-        worktree: bool = False, base_branch: str | None = None,
+        worktree: str | bool | None = False,
+        base_branch: str | None = None,
         model: str | None = None,
         resume: str | None = None,
     ) -> dict:
         return await tools.spawn_session(
-            session, harness=harness, prompt=prompt, approval=approval, cwd=cwd,
-            worktree=worktree, base_branch=base_branch, model=model, resume=resume,
+            session,
+            harness=harness,
+            prompt=prompt,
+            approval=approval,
+            cwd=cwd,
+            worktree=worktree,
+            base_branch=base_branch,
+            model=model,
+            resume=resume,
         )
 
     @mcp.tool()
@@ -202,9 +224,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         return await tools.register_pane(session, pane=pane)
 
     @mcp.tool()
-    async def await_sessions(
-        handles: list[str], max_wait: float = 150.0
-    ) -> list[dict]:
+    async def await_sessions(handles: list[str], max_wait: float = 150.0) -> list[dict]:
         """Wait for spawned child sessions to finish.
 
         Blocks until ANY of the requested handles reaches a terminal state
@@ -234,9 +254,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         either — before you build on a child's answer, or merge its branch,
         look at what it changed in the repo.
         """
-        return await tools.await_sessions(
-            session, handles=handles, max_wait=max_wait
-        )
+        return await tools.await_sessions(session, handles=handles, max_wait=max_wait)
 
     @mcp.tool()
     async def send(target_id: str, prompt: str) -> dict:
@@ -259,9 +277,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         pane — never inject into a session a human is using. Fails with
         `busy` if the target is already processing a send prompt.
         """
-        return await tools.send_prompt(
-            session, target_id=target_id, prompt=prompt
-        )
+        return await tools.send_prompt(session, target_id=target_id, prompt=prompt)
 
     @mcp.tool()
     async def read_transcript(target_id: str, last_n: int = 5) -> dict:
@@ -285,9 +301,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         Returns {"id": ..., "events": [...], "path": ...}. Each event
         has "role", "text" (full), "tool_name", and "turn_end".
         """
-        return await tools.read_transcript(
-            session, target_id=target_id, last_n=last_n
-        )
+        return await tools.read_transcript(session, target_id=target_id, last_n=last_n)
 
     @mcp.tool()
     async def put_child_back_in_the_wound(target_id: str) -> dict:
@@ -341,9 +355,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         branch that this call deletes; the natural order — it says it
         is done, so tidy it away — is the order that loses the work.
         """
-        return await tools.put_child_back_in_the_wound(
-            session, target_id=target_id
-        )
+        return await tools.put_child_back_in_the_wound(session, target_id=target_id)
 
     @mcp.tool()
     async def recall(paths: list[str], depth: int = 5) -> dict:

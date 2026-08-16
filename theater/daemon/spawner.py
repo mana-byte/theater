@@ -44,7 +44,9 @@ class SpawnRequest:
     window_name: str | None = None
     background: bool = True
     #: If True, create a git worktree for the child and run it there.
-    worktree: bool = False
+    #: If a non-empty string, create or join a named shared linked worktree.
+    #: None or False means run in the requested cwd without a worktree.
+    worktree: str | bool | None = False
     #: Base branch for the worktree. Defaults to current HEAD.
     base_branch: str | None = None
     #: Model for the child, in whatever spelling its harness expects. Opaque
@@ -88,32 +90,37 @@ class Spawner:
                 "cannot resume into a worktree: the session's transcript "
                 "describes files that are not the worktree's files"
             )
-
         participant = self.registry.create_spawned(
             harness=req.harness, cwd=req.cwd, parent_id=req.parent_id
         )
 
         # The child runs in the worktree, not the parent's repo — isolated
-        # index and HEAD.
+        # index and HEAD (for a True worktree) or a shared named worktree
+        # (for a string worktree).
         child_cwd = req.cwd
         if req.worktree:
             root = worktree_mod.repo_root(req.cwd)
             if root is None:
                 self.registry.mark_dead(participant.id)
-                raise BadRequest(
-                    f"cannot create worktree: {req.cwd!r} is not in a git repo"
-                )
+                raise BadRequest(f"cannot create worktree: {req.cwd!r} is not in a git repo")
             try:
-                child_cwd = worktree_mod.create_worktree(
-                    repo_root=root,
-                    child_id=participant.id,
-                    base_branch=req.base_branch,
-                )
+                if isinstance(req.worktree, str):
+                    child_cwd, participant.branch = self._spawn_named_worktree(
+                        root=root,
+                        name=req.worktree,
+                        base_branch=req.base_branch,
+                    )
+                else:
+                    child_cwd = worktree_mod.create_worktree(
+                        repo_root=root,
+                        child_id=participant.id,
+                        base_branch=req.base_branch,
+                    )
+                    participant.branch = worktree_mod.branch_name(participant.id)
             except Exception:
                 self.registry.mark_dead(participant.id)
                 raise
             participant.cwd = child_cwd
-            participant.branch = worktree_mod.branch_name(participant.id)
             self.registry.store.upsert_participant(participant)
             self.registry.store.bus_append(
                 "participant.worktree",
@@ -122,6 +129,8 @@ class Spawner:
                     "path": child_cwd,
                     "branch": participant.branch,
                     "root": root,
+                    "named": isinstance(req.worktree, str),
+                    "name": req.worktree if isinstance(req.worktree, str) else None,
                 },
             )
 
@@ -177,6 +186,52 @@ class Spawner:
             if requested in existing:
                 return requested
         return await tmux.ensure_session(FALLBACK_SESSION, cwd=cwd)
+
+    def _spawn_named_worktree(
+        self, *, root: str, name: str, base_branch: str | None
+    ) -> tuple[str, str]:
+        """Create or join a named shared worktree.
+
+        On first spawn for a name, creates the worktree and persists its
+        identity in the ``named_worktrees`` table. On a later spawn with
+        the same name and canonical main repo, joins the existing
+        directory and branch — no new worktree is created, and
+        ``base_branch`` must match (or be absent) what was used at
+        creation time.
+
+        Returns ``(path, branch)``.
+        """
+        store = self.registry.store
+        existing = store.get_named_worktree(repo_root=root, name=name)
+
+        if existing is not None:
+            # Join: the worktree must still be one Theater recognises.
+            # A conflicting base_branch is refused — the first spawn set
+            # the base, and a later join silently accepting a different
+            # one would be a surprise.
+            if (
+                base_branch is not None
+                and existing["base_branch"] is not None
+                and base_branch != existing["base_branch"]
+            ):
+                raise BadRequest(
+                    f"named worktree {name!r} was created with "
+                    f"base_branch={existing['base_branch']!r}; "
+                    f"cannot join with base_branch={base_branch!r}"
+                )
+            return existing["path"], existing["branch"]
+
+        path, branch = worktree_mod.create_named_worktree(
+            repo_root=root, name=name, base_branch=base_branch
+        )
+        store.upsert_named_worktree(
+            repo_root=root,
+            name=name,
+            branch=branch,
+            path=path,
+            base_branch=base_branch,
+        )
+        return path, branch
 
     #: How many times `kill` polls `pane_info` to confirm the pane is gone.
     #: tmux reaps asynchronously after `kill-pane` returns, so one immediate
@@ -245,6 +300,15 @@ class Spawner:
         child finishing, so the branch stays and only the directory is
         pruned.
 
+        For a **named** worktree, the directory and branch are shared
+        across all children spawned with the same name in the same repo.
+        Teardown must never remove a shared directory or branch while
+        another live participant is using it. When other participants are
+        still live in the same cwd, this method does nothing — the
+        shared worktree outlives any one child, and only the last child
+        out reclaims it. The ``named_worktrees`` row is deleted only when
+        the directory is actually removed.
+
         Failure is logged, never raised. The caller is in the middle of
         retiring a participant, and refusing to mark it dead because git
         could not delete a directory would trade a leaked worktree for a
@@ -267,9 +331,41 @@ class Spawner:
             )
             return
 
-        result = worktree_mod.remove_worktree(
-            repo_root=root, child_id=p.id, delete_branch=delete_branch
-        )
+        # Named worktrees are shared — check whether other live participants
+        # are still using the same cwd before touching the directory.
+        # The store may be unavailable (tests that pass registry=None for
+        # the pure-worktree retire path), in which case we fall through to
+        # the standard remove_worktree path.
+        named = None
+        if self.registry is not None and self.registry.store is not None:
+            named = self.registry.store.named_worktree_by_path(p.cwd or "")
+        if named is not None:
+            live = self.registry.store.live_participants_in_cwd(p.cwd or "")
+            others = [x for x in live if x.id != p.id]
+            if others:
+                logger.info(
+                    "not removing named worktree %r for %s: %d other live "
+                    "participant(s) still share cwd %s",
+                    named["name"],
+                    p.id,
+                    len(others),
+                    p.cwd,
+                )
+                return
+            result = worktree_mod.remove_named_worktree(
+                repo_root=root,
+                name=named["name"],
+                delete_branch=delete_branch,
+            )
+            if result.ok:
+                self.registry.store.delete_named_worktree(
+                    repo_root=named["repo_root"], name=named["name"]
+                )
+        else:
+            result = worktree_mod.remove_worktree(
+                repo_root=root, child_id=p.id, delete_branch=delete_branch
+            )
+
         if not result.ok:
             logger.warning(
                 "worktree cleanup incomplete for %s "

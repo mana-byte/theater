@@ -18,11 +18,21 @@ name in its result. The parent decides. Auto-merge would mean the
 daemon silently making integration decisions on unreviewed code; handing
 back a branch name keeps the merge an explicit act that shows up on the
 bus.
+
+A *named* worktree (``worktree="my-name"``) is an explicit expert-mode
+collaboration primitive, not filesystem or Git isolation. Multiple live
+children spawned with the same name in the same canonical main repository
+share one directory and one branch — and therefore one index and one HEAD.
+Concurrent ``git add``/``commit`` operations can interfere, and the KV
+store does not make file claims atomic or enforce ownership. The named
+worktree's identity is persisted in the ``named_worktrees`` table so a
+daemon restart can recognise it and a later join can find it.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,8 +44,25 @@ logger = logging.getLogger("theater.worktree")
 #: Branch prefix for all Theater-managed worktrees.
 BRANCH_PREFIX = "theater/"
 
+#: Branch prefix for named shared worktrees.
+NAMED_BRANCH_PREFIX = "theater/named/"
+
 #: Where worktrees live relative to the repo root.
 WORKTREE_DIR = ".theater/worktrees"
+
+#: Where named worktrees live relative to the repo root.
+NAMED_WORKTREE_DIR = ".theater/worktrees/named"
+
+#: A git ref-name component (after ``refs/heads/``) must start with an
+#: alphanumeric and may contain alphanumerics, ``-``, ``_``, ``.``, and ``/``.
+#: We additionally reject ``/`` to keep the name a single path component.
+_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+#: Names that look like CLI options would be dangerous in paths and refs.
+_OPTION_LIKE = re.compile(r"^-")
+
+#: Reserved names that must not be used as worktree names.
+_RESERVED_NAMES = frozenset({"head", "master", "main", "."})
 
 
 def branch_name(child_id: str) -> str:
@@ -43,9 +70,50 @@ def branch_name(child_id: str) -> str:
     return f"{BRANCH_PREFIX}{child_id}"
 
 
+def named_branch_name(name: str) -> str:
+    """The git branch name for a named shared worktree."""
+    return f"{NAMED_BRANCH_PREFIX}{name}"
+
+
 def worktree_path(repo_root: str, child_id: str) -> str:
     """The filesystem path where a child's worktree lives."""
     return str(Path(repo_root) / WORKTREE_DIR / child_id)
+
+
+def named_worktree_path(repo_root: str, name: str) -> str:
+    """The filesystem path where a named shared worktree lives."""
+    return str(Path(repo_root) / NAMED_WORKTREE_DIR / name)
+
+
+def validate_name(name: str) -> None:
+    """Validate a named-worktree name before using it in a path or ref.
+
+    Rejects empty strings, traversal (``..``, ``/``), option-like names
+    (``-foo``), and names that are not valid single-component git refs.
+    Raises :class:`BadRequest` with an actionable message.
+    """
+    if not name or not name.strip():
+        raise BadRequest("worktree name must be a non-empty string")
+    if _OPTION_LIKE.match(name):
+        raise BadRequest(
+            f"worktree name {name!r} must not start with '-' (looks like a CLI option)"
+        )
+    if "/" in name:
+        raise BadRequest(
+            f"worktree name {name!r} must not contain '/' (use a single path component)"
+        )
+    if name in ("..", "."):
+        raise BadRequest(f"worktree name {name!r} is a reserved path component")
+    if not _NAME_RE.match(name):
+        raise BadRequest(
+            f"worktree name {name!r} is not a valid git ref component: "
+            f"must start with an alphanumeric and may contain only "
+            f"alphanumerics, '-', '_', and '.'"
+        )
+    if name.lower() in _RESERVED_NAMES:
+        raise BadRequest(f"worktree name {name!r} is reserved")
+    if len(name) > 100:
+        raise BadRequest(f"worktree name {name!r} is too long (max 100 characters)")
 
 
 def is_git_repo(path: str) -> bool:
@@ -87,9 +155,7 @@ def repo_root(path: str) -> str | None:
         return result.stdout.strip() if result.returncode == 0 else None
 
 
-def main_repo_root(
-    path: str, child_id: str | None = None
-) -> str | None:
+def main_repo_root(path: str, child_id: str | None = None) -> str | None:
     """The main repo root for any path inside the repo or a linked worktree.
 
     ``git rev-parse --path-format=absolute --git-common-dir`` returns
@@ -148,9 +214,7 @@ class WorktreeRemoveResult:
     errors: list[str] = field(default_factory=list)
 
 
-def create_worktree(
-    *, repo_root: str, child_id: str, base_branch: str | None = None
-) -> str:
+def create_worktree(*, repo_root: str, child_id: str, base_branch: str | None = None) -> str:
     """Create a git worktree for a child, returning the path.
 
     Creates a new branch `theater/<child-id>` from the current HEAD (or
@@ -261,9 +325,7 @@ def remove_worktree(
         # The directory may already be gone. Prune stale admin records
         # so the branch is not "checked out" in a dead worktree.
         stderr = wt_result.stderr.strip()
-        logger.warning(
-            "git worktree remove failed for %s: %s", child_id, stderr
-        )
+        logger.warning("git worktree remove failed for %s: %s", child_id, stderr)
         prune_result = subprocess.run(
             ["git", "worktree", "prune", "--verbose"],
             cwd=real_root,
@@ -341,6 +403,191 @@ def remove_worktree(
         logger.error(
             "failed to remove worktree for %s (branch %s): %s",
             child_id,
+            branch,
+            "; ".join(result.errors),
+        )
+
+    return result
+
+
+# ---- named shared worktrees ---------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class NamedWorktreeRecord:
+    """A named shared worktree persisted in the ``named_worktrees`` table."""
+
+    repo_root: str
+    name: str
+    branch: str
+    path: str
+    base_branch: str | None
+    created_at: float
+
+
+def create_named_worktree(
+    *,
+    repo_root: str,
+    name: str,
+    base_branch: str | None = None,
+) -> tuple[str, str]:
+    """Create a named shared linked worktree, returning ``(path, branch)``.
+
+    Creates a branch ``theater/named/<name>`` from ``base_branch`` (or
+    current HEAD) and checks it out in
+    ``<repo>/.theater/worktrees/named/<name>``. Multiple children spawned
+    with the same name join this same directory and branch.
+
+    Raises :class:`BadRequest` if the path is not a git repo, the branch
+    already exists, or the worktree already exists.
+    """
+    validate_name(name)
+    branch = named_branch_name(name)
+    wt_path = named_worktree_path(repo_root, name)
+
+    check = subprocess.run(
+        ["git", "rev-parse", "--verify", branch],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    if check.returncode == 0:
+        raise BadRequest(
+            f"branch {branch!r} already exists; a named worktree "
+            f"with name {name!r} was created by another spawn or a prior run"
+        )
+
+    if Path(wt_path).exists():
+        raise BadRequest(
+            f"worktree path {wt_path!r} already exists but the branch "
+            f"{branch!r} does not; clean up the directory or pick a different name"
+        )
+
+    args = ["git", "worktree", "add", "-b", branch, wt_path]
+    if base_branch:
+        args.append(base_branch)
+
+    result = subprocess.run(
+        args,
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise BadRequest(
+            f"git worktree add failed for named worktree {name!r}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+
+    logger.info("created named worktree %r at %s (branch %s)", name, wt_path, branch)
+    return wt_path, branch
+
+
+def remove_named_worktree(
+    *,
+    repo_root: str,
+    name: str,
+    delete_branch: bool = True,
+) -> WorktreeRemoveResult:
+    """Remove a named shared worktree and optionally its branch.
+
+    Like :func:`remove_worktree` but for named worktrees. The caller must
+    ensure no other live participant is still using the shared directory —
+    this function does not check membership, because membership is a
+    daemon-level question (``Store.live_participants_in_cwd``).
+    """
+    branch = named_branch_name(name)
+    result = WorktreeRemoveResult()
+
+    real_root = main_repo_root(repo_root) or repo_root
+    wt_path = named_worktree_path(real_root, name)
+
+    wt_result = subprocess.run(
+        ["git", "worktree", "remove", "--force", wt_path],
+        cwd=real_root,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    worktree_removed = wt_result.returncode == 0
+
+    if not worktree_removed:
+        stderr = wt_result.stderr.strip()
+        logger.warning("git worktree remove failed for named worktree %s: %s", name, stderr)
+        prune_result = subprocess.run(
+            ["git", "worktree", "prune", "--verbose"],
+            cwd=real_root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        worktree_removed = not Path(wt_path).exists()
+        if not worktree_removed:
+            result.errors.append(
+                f"worktree remove: {stderr}"
+                + (
+                    f" (prune stderr: {prune_result.stderr.strip()})"
+                    if prune_result.stderr.strip()
+                    else ""
+                )
+            )
+
+    branch_removed = False
+    if delete_branch:
+        br_result = subprocess.run(
+            ["git", "branch", "-D", branch],
+            cwd=real_root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        branch_removed = br_result.returncode == 0
+
+        if not branch_removed:
+            stderr = br_result.stderr.strip()
+            verify = subprocess.run(
+                ["git", "rev-parse", "--verify", branch],
+                cwd=real_root,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if verify.returncode != 0:
+                branch_removed = True
+            else:
+                result.errors.append(f"branch delete: {stderr}")
+                logger.warning(
+                    "git branch -D failed for named worktree %s (branch %s): %s",
+                    name,
+                    branch,
+                    stderr,
+                )
+
+    result = WorktreeRemoveResult(
+        ok=worktree_removed and (branch_removed or not delete_branch),
+        worktree_removed=worktree_removed,
+        branch_removed=branch_removed,
+        errors=result.errors,
+    )
+
+    if result.ok:
+        logger.info(
+            "removed named worktree %s (%s)",
+            name,
+            f"branch {branch} deleted" if delete_branch else f"branch {branch} kept",
+        )
+    else:
+        logger.error(
+            "failed to remove named worktree %s (branch %s): %s",
+            name,
             branch,
             "; ".join(result.errors),
         )

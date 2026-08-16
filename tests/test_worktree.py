@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from theater.daemon import worktree as wt
+from theater.daemon.spawner import Spawner
 from theater.models import BadRequest
 
 
@@ -409,3 +410,299 @@ def test_retire_ignores_a_participant_without_a_theater_branch(repo):
     )
     assert verify.returncode == 0
     assert Path(repo, "README.md").exists()
+
+
+# ---- named worktree name validation -----------------------------------
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "",
+        "   ",
+        "-foo",
+        "foo/bar",
+        "..",
+        ".",
+        "foo/../bar",
+        "main",
+        "HEAD",
+        "a" * 101,
+    ],
+)
+def test_validate_name_rejects_bad_names(name):
+    with pytest.raises(BadRequest):
+        wt.validate_name(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["my-team", "feature_x", "bugfix-2", "shared.thing", "alpha"],
+)
+def test_validate_name_accepts_good_names(name):
+    wt.validate_name(name)
+
+
+# ---- named worktree creation and removal -------------------------------
+
+
+def test_named_worktree_path(repo):
+    path = wt.named_worktree_path(repo, "shared")
+    assert path == f"{repo}/.theater/worktrees/named/shared"
+
+
+def test_named_branch_name():
+    assert wt.named_branch_name("shared") == "theater/named/shared"
+
+
+def test_create_named_worktree(repo):
+    """Creating a named worktree gives an isolated directory."""
+    wt_path, branch = wt.create_named_worktree(repo_root=repo, name="feature-a")
+    assert Path(wt_path).exists()
+    assert Path(wt_path, ".git").exists()
+    assert (Path(wt_path) / "README.md").exists()
+    assert branch == "theater/named/feature-a"
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "theater/named/feature-a"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+
+
+def test_create_named_worktree_with_base_branch(repo):
+    """Creating a named worktree from a specific base branch works."""
+    subprocess.run(["git", "checkout", "-b", "feature"], cwd=repo, check=True, capture_output=True)
+    (Path(repo) / "feature.txt").write_text("feature\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "feature"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "checkout", "main"], cwd=repo, check=True, capture_output=True)
+
+    wt_path, branch = wt.create_named_worktree(repo_root=repo, name="child3", base_branch="feature")
+    assert (Path(wt_path) / "feature.txt").exists()
+    assert branch == "theater/named/child3"
+
+
+def test_create_named_worktree_duplicate_rejected(repo):
+    """Creating a named worktree with an existing branch name is rejected."""
+    wt.create_named_worktree(repo_root=repo, name="dup")
+    with pytest.raises(BadRequest):
+        wt.create_named_worktree(repo_root=repo, name="dup")
+
+
+def test_remove_named_worktree(repo):
+    """Removing a named worktree deletes the directory and branch."""
+    wt_path, _ = wt.create_named_worktree(repo_root=repo, name="removeme")
+    assert Path(wt_path).exists()
+
+    result = wt.remove_named_worktree(repo_root=repo, name="removeme")
+
+    assert result.ok
+    assert not Path(wt_path).exists()
+    verify = subprocess.run(
+        ["git", "rev-parse", "--verify", "theater/named/removeme"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert verify.returncode != 0
+
+
+def test_remove_named_worktree_keeps_branch_when_asked(repo):
+    """delete_branch=False prunes the directory and leaves the branch."""
+    wt_path, _ = wt.create_named_worktree(repo_root=repo, name="keepbranch-named")
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "shared work"],
+        cwd=wt_path,
+        check=True,
+        capture_output=True,
+    )
+
+    result = wt.remove_named_worktree(repo_root=repo, name="keepbranch-named", delete_branch=False)
+
+    assert result.ok
+    assert result.worktree_removed
+    assert not result.branch_removed
+    assert not Path(wt_path).exists()
+    verify = subprocess.run(
+        ["git", "rev-parse", "--verify", "theater/named/keepbranch-named"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert verify.returncode == 0, "the named worktree's branch must survive"
+
+
+# ---- named worktree spawner create-or-join ----------------------------
+
+
+def _named_participant(child_id: str, cwd: str, name: str):
+    from theater.models import Participant, Tier
+
+    return Participant(
+        id=child_id,
+        harness="vibe",
+        tier=Tier.SPAWNED,
+        cwd=cwd,
+        branch=wt.named_branch_name(name),
+    )
+
+
+def test_named_worktree_spawner_creates_and_joins(repo, store):
+    """Two spawns with the same name share the same directory and branch."""
+    from theater.daemon.store import Store
+
+    # We need a Store to test the persistence layer. Use the repo's
+    # .theater dir for the db.
+    db_path = Path(repo) / ".theater" / "test.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    s = Store(db_path)
+    try:
+        registry = type("R", (), {"store": s})()
+        spawner = Spawner(registry=registry)
+
+        path1, branch1 = spawner._spawn_named_worktree(root=repo, name="shared", base_branch=None)
+        # The named_worktrees row should exist
+        row = s.get_named_worktree(repo_root=repo, name="shared")
+        assert row is not None
+        assert row["path"] == path1
+        assert row["branch"] == branch1
+
+        # Second spawn with same name joins
+        path2, branch2 = spawner._spawn_named_worktree(root=repo, name="shared", base_branch=None)
+        assert path2 == path1
+        assert branch2 == branch1
+
+        assert Path(path1).exists()
+    finally:
+        s.close()
+
+
+def test_named_worktree_spawner_refuses_conflicting_base_branch(repo, store):
+    """A later join with a conflicting base_branch is refused."""
+    from theater.daemon.store import Store
+
+    db_path = Path(repo) / ".theater" / "test.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    s = Store(db_path)
+    try:
+        registry = type("R", (), {"store": s})()
+        spawner = Spawner(registry=registry)
+
+        spawner._spawn_named_worktree(root=repo, name="conflict", base_branch="main")
+        with pytest.raises(BadRequest, match="base_branch"):
+            spawner._spawn_named_worktree(root=repo, name="conflict", base_branch="feature")
+    finally:
+        s.close()
+
+
+def test_named_worktree_retire_does_not_remove_when_others_live(repo, store):
+    """Retiring one participant in a shared named worktree must not remove
+    the directory or branch while another live participant is still using it."""
+    from theater.daemon.store import Store
+
+    db_path = Path(repo) / ".theater" / "test.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    s = Store(db_path)
+    try:
+        registry = type("R", (), {"store": s})()
+        spawner = Spawner(registry=registry)
+
+        path, _branch = spawner._spawn_named_worktree(
+            root=repo, name="shared-retire", base_branch=None
+        )
+
+        p1 = _named_participant("child-a", path, "shared-retire")
+        p2 = _named_participant("child-b", path, "shared-retire")
+        s.upsert_participant(p1)
+        s.upsert_participant(p2)
+
+        # Retire p1 — p2 is still live in the same cwd
+        spawner.retire(p1, delete_branch=True)
+
+        # The directory and branch must still exist
+        assert Path(path).exists()
+        verify = subprocess.run(
+            ["git", "rev-parse", "--verify", "theater/named/shared-retire"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert verify.returncode == 0
+
+        # The named_worktrees row must still exist
+        row = s.get_named_worktree(repo_root=repo, name="shared-retire")
+        assert row is not None
+    finally:
+        s.close()
+
+
+def test_named_worktree_retire_removes_when_last_participant(repo, store):
+    """Retiring the last live participant in a named worktree removes it."""
+    from theater.daemon.store import Store
+
+    db_path = Path(repo) / ".theater" / "test.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    s = Store(db_path)
+    try:
+        registry = type("R", (), {"store": s})()
+        spawner = Spawner(registry=registry)
+
+        path, _branch = spawner._spawn_named_worktree(root=repo, name="last-one", base_branch=None)
+
+        p1 = _named_participant("only-child", path, "last-one")
+        s.upsert_participant(p1)
+
+        spawner.retire(p1, delete_branch=True)
+
+        assert not Path(path).exists()
+        verify = subprocess.run(
+            ["git", "rev-parse", "--verify", "theater/named/last-one"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert verify.returncode != 0
+
+        # The named_worktrees row should be gone
+        row = s.get_named_worktree(repo_root=repo, name="last-one")
+        assert row is None
+    finally:
+        s.close()
+
+
+def test_named_worktree_persists_across_restart(repo, store):
+    """A daemon restart recognises a named worktree from the table."""
+    from theater.daemon.store import Store
+
+    db_path = Path(repo) / ".theater" / "test.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    s = Store(db_path)
+    try:
+        registry = type("R", (), {"store": s})()
+        spawner = Spawner(registry=registry)
+
+        path, branch = spawner._spawn_named_worktree(root=repo, name="survivor", base_branch=None)
+    finally:
+        s.close()
+
+    # Simulate a restart: new Store on the same db
+    s2 = Store(db_path)
+    try:
+        registry2 = type("R", (), {"store": s2})()
+        spawner2 = Spawner(registry=registry2)
+
+        # Join should find the existing named worktree
+        path2, branch2 = spawner2._spawn_named_worktree(
+            root=repo, name="survivor", base_branch=None
+        )
+        assert path2 == path
+        assert branch2 == branch
+    finally:
+        s2.close()

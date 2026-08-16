@@ -594,7 +594,7 @@ theater/
 │   ├── store.py 276      SQLite over SQLAlchemy Core, synchronous on purpose
 │   ├── jobs.py 181       JobManager, asyncio.Event per handle
 │   ├── gc.py 357         the retention sweep: bus, jobs+touch, participants
-│   ├── worktree.py 158   git worktree per child, branch theater/<child-id>
+│   ├── worktree.py        git worktree per child (theater/<id>), named shared worktrees (theater/named/<name>)
 │   ├── spawner.py 145    LaunchPlan → tmux window
 │   ├── rails.py 144      depth / cycle / budget
 │   ├── harness_detect.py 85

@@ -146,7 +146,7 @@ async def spawn_session(
     prompt: str | None = None,
     approval: str,
     cwd: str | None = None,
-    worktree: bool = False,
+    worktree: str | bool | None = False,
     base_branch: str | None = None,
     model: str | None = None,
     resume: str | None = None,
@@ -159,6 +159,15 @@ async def spawn_session(
     If `worktree` is True, a git worktree is created for the child so it has
     its own isolated index and HEAD. The branch name `theater/<child-id>` is
     reported in the result so the parent can merge it explicitly.
+
+    If `worktree` is a non-empty string, a named shared linked worktree is
+    created or joined. Multiple live children spawned with the same name in
+    the same canonical main repository run in the same directory and on the
+    same branch. This is an expert-mode collaboration primitive, not
+    filesystem or Git isolation: the index and HEAD are shared, concurrent
+    ``git add``/``commit`` operations can interfere, and the KV store does
+    not make file claims atomic or enforce ownership. The branch name
+    `theater/named/<name>` is reported in the result.
 
     `model` is passed to the harness unchanged, but not unchecked: it must be
     one the config lists for that harness, and the harness must be able to
@@ -257,9 +266,7 @@ async def await_sessions(
     return [{k: v for k, v in job.items() if k not in ("prompt", "result")} for job in jobs]
 
 
-async def send_prompt(
-    session: Session, *, target_id: str, prompt: str
-) -> dict:
+async def send_prompt(session: Session, *, target_id: str, prompt: str) -> dict:
     """Send a prompt to an already-running agent via tmux send-keys.
 
     The prompt is typed directly into the target's pane. The target must
@@ -288,9 +295,7 @@ async def send_prompt(
     return record
 
 
-async def put_child_back_in_the_wound(
-    session: Session, *, target_id: str
-) -> dict:
+async def put_child_back_in_the_wound(session: Session, *, target_id: str) -> dict:
     """Kill a child agent that the caller spawned.
 
     The permission check lives in the daemon: ``participant.kill`` refuses
@@ -328,9 +333,7 @@ async def put_child_back_in_the_wound(
     return result
 
 
-async def read_transcript(
-    session: Session, *, target_id: str, last_n: int = 5
-) -> dict:
+async def read_transcript(session: Session, *, target_id: str, last_n: int = 5) -> dict:
     """Read the transcript of a participant, returning full unclipped text.
 
     The agent-facing await_sessions reply drops prompt and result text.
@@ -350,16 +353,12 @@ async def read_transcript(
     """
     if not session._resolved:
         await session.identify()
-    record = await session.client.call(
-        "read_transcript", id=target_id, last_n=last_n
-    )
+    record = await session.client.call("read_transcript", id=target_id, last_n=last_n)
     assert isinstance(record, dict)
     return record
 
 
-async def recall(
-    session: Session, *, paths: list[str], depth: int = 5
-) -> dict[str, dict]:
+async def recall(session: Session, *, paths: list[str], depth: int = 5) -> dict[str, dict]:
     """Per-file timelines of what Theater watched happen.
 
     Returns one timeline per path, keyed by the repo-relative path.
