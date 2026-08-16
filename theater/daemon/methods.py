@@ -11,6 +11,7 @@ handlers just wire parameters to calls.
 from __future__ import annotations
 
 import functools
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, NoReturn
@@ -18,6 +19,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 from sqlalchemy import func, select
 
 from theater import paths, protocol
+from theater.daemon import lineage, worktree
 from theater.daemon.harness_detect import detect_harness, is_shell
 from theater.daemon.rails import (
     check_budget,
@@ -66,6 +68,23 @@ MAX_AWAIT = 300.0
 #: it if a turn end arrives, it has only lost its reservation.
 SEND_CLAIM_TTL = 300.0
 
+_JSON_REPLY_INSTRUCTION = (
+    "Return your final answer as a single bare JSON value (no code fences, no prose) "
+    "matching this schema hint: {schema}"
+)
+
+_CHECKPOINT_JOB_KEYS = (
+    "handle",
+    "target_id",
+    "kind",
+    "prompt",
+    "state",
+    "result",
+    "error_code",
+    "created_at",
+    "finished_at",
+)
+
 
 def method(name: str) -> Callable[[Handler], Handler]:
     def register(fn: Handler) -> Handler:
@@ -79,6 +98,86 @@ def _require(params: dict, key: str) -> Any:
     if key not in params or params[key] in (None, ""):
         raise BadRequest(f"missing required parameter {key!r}")
     return params[key]
+
+
+def _string_param(params: dict, key: str, *, method_name: str, allow_empty: bool = False) -> str:
+    if key not in params or params[key] is None:
+        raise BadRequest(f"{method_name} requires string parameter {key!r}")
+    value = params[key]
+    if not isinstance(value, str):
+        raise BadRequest(f"{method_name} parameter {key!r} must be a string")
+    if not allow_empty and value == "":
+        raise BadRequest(f"{method_name} parameter {key!r} must be a non-empty string")
+    return value
+
+
+def _optional_string_param(params: dict, key: str, *, method_name: str) -> str | None:
+    value = params.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise BadRequest(f"{method_name} parameter {key!r} must be a string or null")
+    return value
+
+
+def _serialized_response_format(params: dict) -> str | None:
+    raw = params.get("response_format")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise BadRequest(
+            "response_format must be a JSON object or null; pass a schema hint "
+            "object such as {'type': 'object'}"
+        )
+    return json.dumps(raw, sort_keys=True, separators=(",", ":"))
+
+
+def _prompt_with_response_format(prompt: str, response_format: str | None) -> str:
+    if response_format is None:
+        return prompt
+    return f"{_JSON_REPLY_INSTRUCTION.format(schema=response_format)}\n\n{prompt}"
+
+
+def _reject_response_format_resume(
+    harness_name: Any, resume: Any, response_format: str | None
+) -> None:
+    if response_format is None or not resume or not isinstance(harness_name, str):
+        return
+    harness = HARNESSES.get(normalize(harness_name))
+    if harness is not None and not harness.resume_takes_prompt:
+        raise BadRequest(
+            f"harness {harness_name!r} cannot resume a session with response_format; "
+            f"resume it without one and use send to deliver the task"
+        )
+
+
+def _caller_participant(daemon, params: dict, *, method_name: str):
+    caller_id = _string_param(params, "caller_id", method_name=method_name)
+    caller = daemon.store.get_participant(caller_id)
+    if caller is None:
+        raise BadRequest(f"{method_name} requires caller_id to name an existing participant")
+    return caller
+
+
+def _repo_scope_for_store(caller) -> str:
+    if not caller.cwd:
+        raise BadRequest("store cannot be used outside a git repository: caller has no cwd")
+    repo_root = worktree.main_repo_root(caller.cwd, child_id=caller.id)
+    if repo_root is None:
+        raise BadRequest(
+            "store cannot be used outside a git repository: caller cwd is not in a git repo"
+        )
+    return repo_root
+
+
+def _checkpoint_jobs(daemon, participant_id: str) -> list[dict]:
+    stmt = (
+        select(*(jobs.c[key] for key in _CHECKPOINT_JOB_KEYS))
+        .where(jobs.c.caller_id == participant_id)
+        .order_by(jobs.c.created_at.asc(), jobs.c.handle.asc())
+    )
+    rows = daemon.store.conn.execute(stmt).fetchall()
+    return [{key: row._mapping[key] for key in _CHECKPOINT_JOB_KEYS} for row in rows]
 
 
 @method("ping")
@@ -145,9 +244,7 @@ async def _kill(daemon, params: dict) -> dict:
 
     if caller_id != "cli":
         if target.id == caller_id:
-            raise NoSelfKill(
-                f"refusing to kill {pid!r}: that is you, not your child"
-            )
+            raise NoSelfKill(f"refusing to kill {pid!r}: that is you, not your child")
         if target.parent_id != caller_id:
             raise NotYourChild(
                 f"refusing to kill {pid!r}: its parent is "
@@ -189,8 +286,8 @@ async def _adopt(daemon, params: dict) -> dict:
     match = next((p for p in panes if p.pane_id == pane), None)
     if match is None:
         raise BadRequest(f"pane {pane!r} not found in tmux")
-    harness = normalize(override) if override else detect_harness(
-        match.current_command, match.pane_pid
+    harness = (
+        normalize(override) if override else detect_harness(match.current_command, match.pane_pid)
     )
     if cwd is None:
         cwd = match.cwd
@@ -202,9 +299,7 @@ async def _adopt(daemon, params: dict) -> dict:
     # The launch epoch is from the shell tmux forked, not the harness — the
     # harness is its descendant, so it stays constant when the CLI exits.
     # The delivery gate cannot rely on the pid alone.
-    participant = daemon.registry.attach_pane(
-        participant.id, pane, pane_pid=match.pane_pid
-    )
+    participant = daemon.registry.attach_pane(participant.id, pane, pane_pid=match.pane_pid)
     return participant.to_dict()
 
 
@@ -236,9 +331,13 @@ async def _unmanaged(daemon, params: dict) -> list[dict]:
 
 @method("spawn")
 async def _spawn(daemon, params: dict) -> dict:
+    response_format = _serialized_response_format(params)
+    harness_name = _require(params, "harness")
+    _reject_response_format_resume(harness_name, params.get("resume"), response_format)
+    prompt = _prompt_with_response_format(params.get("prompt") or "", response_format)
     req = SpawnRequest(
-        harness=_require(params, "harness"),
-        prompt=params.get("prompt") or "",
+        harness=harness_name,
+        prompt=prompt,
         cwd=_require(params, "cwd"),
         approval=_require(params, "approval"),
         parent_id=params.get("parent_id"),
@@ -249,6 +348,7 @@ async def _spawn(daemon, params: dict) -> dict:
         base_branch=params.get("base_branch"),
         model=params.get("model"),
         resume=params.get("resume"),
+        response_format=response_format,
     )
     rails = daemon.config.rails
     check_depth(daemon.store, req.parent_id, cap=rails.depth_cap)
@@ -256,9 +356,7 @@ async def _spawn(daemon, params: dict) -> dict:
     # Policy, not capability: `Spawner` asks the adapter whether it can take
     # a model; whether the user permits this model is a question only the
     # config can answer, and the spawner has none.
-    check_model_allowed(
-        req.harness, req.model, daemon.config.models_for(req.harness)
-    )
+    check_model_allowed(req.harness, req.model, daemon.config.models_for(req.harness))
 
     participant = await daemon.spawner.spawn(req)
     handle = participant.id
@@ -272,6 +370,7 @@ async def _spawn(daemon, params: dict) -> dict:
         # requested cwd otherwise. Hashing against the parent repo when the
         # child was in a worktree would resolve paths to the wrong files.
         cwd=participant.cwd,
+        response_format=response_format,
     )
     if not req.prompt:
         # A promptless spawn has nothing to wait for: resolving the job here
@@ -335,6 +434,84 @@ async def _jobs_status(daemon, params: dict) -> dict:
     if job is None:
         raise BadRequest(f"no job {handle!r}")
     return job.to_dict()
+
+
+@method("store.put")
+async def _store_put(daemon, params: dict) -> dict:
+    caller = _caller_participant(daemon, params, method_name="store.put")
+    namespace = _string_param(params, "namespace", method_name="store.put")
+    key = _string_param(params, "key", method_name="store.put")
+    value = _string_param(params, "value", method_name="store.put", allow_empty=True)
+    daemon.store.put_kv(
+        tree_root_id=lineage.root_of(daemon.store, caller.id),
+        repo_root=_repo_scope_for_store(caller),
+        namespace=namespace,
+        key=key,
+        value=value,
+        updated_by=caller.id,
+    )
+    return {"stored": True}
+
+
+@method("store.get")
+async def _store_get(daemon, params: dict) -> dict:
+    caller = _caller_participant(daemon, params, method_name="store.get")
+    namespace = _string_param(params, "namespace", method_name="store.get")
+    key = _string_param(params, "key", method_name="store.get")
+    value = daemon.store.get_kv(
+        tree_root_id=lineage.root_of(daemon.store, caller.id),
+        repo_root=_repo_scope_for_store(caller),
+        namespace=namespace,
+        key=key,
+    )
+    return {"value": value}
+
+
+@method("checkpoint.create")
+async def _checkpoint_create(daemon, params: dict) -> dict:
+    caller = _caller_participant(daemon, params, method_name="checkpoint.create")
+    name = _string_param(params, "name", method_name="checkpoint.create")
+    notes = _optional_string_param(params, "notes", method_name="checkpoint.create")
+    snapshot = _checkpoint_jobs(daemon, caller.id)
+    checkpoint_id = daemon.store.create_checkpoint(
+        participant_id=caller.id,
+        name=name,
+        notes=notes,
+        jobs_snapshot=json.dumps(snapshot, sort_keys=True, separators=(",", ":")),
+    )
+    return {"checkpoint_id": checkpoint_id, "jobs": snapshot}
+
+
+def _checkpoint_id(params: dict) -> int:
+    raw = _require(params, "checkpoint_id")
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise BadRequest("checkpoint_id must be an integer")
+    if raw < 1:
+        raise BadRequest("checkpoint_id must be a positive integer")
+    return raw
+
+
+@method("checkpoint.read")
+async def _checkpoint_read(daemon, params: dict) -> dict:
+    checkpoint_id = _checkpoint_id(params)
+    row = daemon.store.get_checkpoint(checkpoint_id)
+    if row is None:
+        raise BadRequest(f"no checkpoint {checkpoint_id!r}")
+    recorded = json.loads(row["jobs_snapshot"] or "[]")
+    live = _checkpoint_jobs(daemon, row["participant_id"])
+    live_handles = {job["handle"] for job in live}
+    return {
+        "checkpoint": {
+            "id": row["id"],
+            "participant_id": row["participant_id"],
+            "name": row["name"],
+            "notes": row["notes"],
+            "created_at": row["created_at"],
+        },
+        "recorded_jobs": recorded,
+        "live_jobs": live,
+        "pruned_handles": [job["handle"] for job in recorded if job["handle"] not in live_handles],
+    }
 
 
 @method("bus.tail")
@@ -409,9 +586,7 @@ def _refuse_send(
     raise exc
 
 
-async def _check_pane_identity(
-    daemon, target, refuse: Callable[..., NoReturn]
-) -> None:
+async def _check_pane_identity(daemon, target, refuse: Callable[..., NoReturn]) -> None:
     """Refuse to type into a pane that is no longer this participant's.
 
     The failure this exists for is the only irreversible one Theater has. A
@@ -457,9 +632,7 @@ async def _check_pane_identity(
     if pane is None:
         daemon.registry.mark_dead(target.id)
         refuse(
-            StaleTarget(
-                f"pane {target.tmux_pane} of {target.id!r} no longer exists"
-            ),
+            StaleTarget(f"pane {target.tmux_pane} of {target.id!r} no longer exists"),
             reason="pane_gone",
         )
 
@@ -499,9 +672,7 @@ async def _check_pane_identity(
         )
 
 
-async def _check_approval_modal(
-    daemon, target, refuse: Callable[..., NoReturn]
-) -> None:
+async def _check_approval_modal(daemon, target, refuse: Callable[..., NoReturn]) -> None:
     """Refuse to type into a pane showing an approval or trust modal.
 
     At an approval prompt, Enter is a button press, so an injected prompt can
@@ -542,9 +713,7 @@ async def _check_approval_modal(
         return
 
     try:
-        capture = await tmux.run(
-            "capture-pane", "-p", "-t", target.tmux_pane, check=False
-        )
+        capture = await tmux.run("capture-pane", "-p", "-t", target.tmux_pane, check=False)
     except Exception as exc:  # pragma: no cover - tmux failing mid-send
         logger.warning("approval-modal capture failed for %s: %s", target.id, exc)
         return
@@ -573,18 +742,15 @@ async def _send(daemon, params: dict) -> dict:
     """Send a prompt to an already-running agent by pasting into its pane."""
     target = daemon.registry.resolve(_require(params, "target"))
     target_id = target.id
-    prompt = _require(params, "prompt")
+    response_format = _serialized_response_format(params)
+    prompt = _prompt_with_response_format(_require(params, "prompt"), response_format)
     caller_id = params.get("caller_id") or "cli"
 
-    refuse = functools.partial(
-        _refuse_send, daemon, caller_id=caller_id, target_id=target_id
-    )
+    refuse = functools.partial(_refuse_send, daemon, caller_id=caller_id, target_id=target_id)
 
     if not target.addressable:
         refuse(
-            NotAddressable(
-                f"participant {target_id!r} is not addressable (tier={target.tier})"
-            ),
+            NotAddressable(f"participant {target_id!r} is not addressable (tier={target.tier})"),
             reason="not_addressable",
         )
     if not target.tmux_pane:
@@ -639,6 +805,7 @@ async def _send(daemon, params: dict) -> dict:
         # The target's cwd, not the caller's: the target's tool calls touch
         # files relative to where it runs.
         cwd=target.cwd,
+        response_format=response_format,
     )
     try:
         await tmux.deliver_text(target.tmux_pane, prompt)
@@ -740,6 +907,8 @@ async def _gc(daemon, params: dict) -> dict:
             "touch": int,            # touch rows deleted (with their jobs)
             "participants": int,     # dead participants deleted
             "running_marked": int,   # stale running jobs marked crashed
+            "tree_kv": int,          # tree-scoped store rows deleted
+            "checkpoints": int,      # checkpoint rows deleted
             "coverage": {            # retention floors *after* the sweep
                 "jobs_from": float | None,
                 "bus_from": float | None,
@@ -777,6 +946,8 @@ async def _gc(daemon, params: dict) -> dict:
         "touch": result.touch,
         "participants": result.participants,
         "running_marked": result.running_marked,
+        "tree_kv": result.tree_kv,
+        "checkpoints": result.checkpoints,
         "coverage": _retention_floor(daemon),
         "db_bytes_before": db_bytes_before,
         "db_bytes_after": db_bytes_after,
@@ -813,9 +984,7 @@ async def _read_transcript(daemon, params: dict) -> dict:
     if harness is None:
         raise BadRequest(f"cannot read transcript: harness {p.harness!r} is not known")
 
-    source = harness.observer.open_source(
-        cwd=p.cwd, session_id=p.session_id, after=None
-    )
+    source = harness.observer.open_source(cwd=p.cwd, session_id=p.session_id, after=None)
     try:
         history = await source.history(last_n=last_n)
     finally:

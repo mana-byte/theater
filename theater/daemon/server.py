@@ -238,9 +238,7 @@ class Daemon:
             if p.status is Status.DEAD:
                 running = self.store.running_jobs_for_target(p.id)
                 for job in running:
-                    self.jobs.finish(
-                        job.handle, state=JobState.CRASHED, error_code="crashed"
-                    )
+                    self.jobs.finish(job.handle, state=JobState.CRASHED, error_code="crashed")
 
         for p in self.registry.list():
             if p.status is not Status.DEAD:
@@ -421,9 +419,7 @@ class Daemon:
                 self.registry.mark_dead(p.id)
                 running = self.store.running_jobs_for_target(p.id)
                 for job in running:
-                    self.jobs.finish(
-                        job.handle, state=JobState.CRASHED, error_code="crashed"
-                    )
+                    self.jobs.finish(job.handle, state=JobState.CRASHED, error_code="crashed")
 
     # ---- garbage collection --------------------------------------------
 
@@ -452,9 +448,7 @@ class Daemon:
         retention = self.config.retention
         while not self._stopping.is_set():
             with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(
-                    self._stopping.wait(), timeout=retention.interval
-                )
+                await asyncio.wait_for(self._stopping.wait(), timeout=retention.interval)
             # The wait returns either on the interval or on shutdown. Starting
             # a sweep in the second case only earns a cancellation partway
             # through it — check before, not after.
@@ -466,25 +460,33 @@ class Daemon:
                     retention,
                     live_handles=frozenset(self.jobs._events),
                 )
-                if (result.bus or result.jobs or result.touch
-                        or result.participants or result.running_marked):
+                if (
+                    result.bus
+                    or result.jobs
+                    or result.touch
+                    or result.participants
+                    or result.running_marked
+                    or result.tree_kv
+                    or result.checkpoints
+                ):
                     logger.info(
                         "gc sweep: %d bus, %d jobs, %d touch, "
-                        "%d participants, %d running marked",
+                        "%d participants, %d running marked, "
+                        "%d tree kv, %d checkpoints",
                         result.bus,
                         result.jobs,
                         result.touch,
                         result.participants,
                         result.running_marked,
+                        result.tree_kv,
+                        result.checkpoints,
                     )
             except Exception:
                 logger.exception("gc sweep failed")
 
     # ---- connection handling -------------------------------------------
 
-    async def _handle(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = asyncio.current_task()
         if task is not None:
             self._conns.add(task)

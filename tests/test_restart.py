@@ -12,8 +12,19 @@ These tests simulate a restart by:
 
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+
 from theater.client import DaemonClient
+from theater.daemon.jobs import JobState
 from theater.daemon.server import Daemon
+
+
+def _repo(tmp_path: Path, name: str) -> Path:
+    path = tmp_path / name
+    path.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    return path
 
 
 async def test_restart_preserves_participants(theater_home, fake_tmux):
@@ -160,3 +171,91 @@ async def test_restart_preserves_lineage(theater_home, fake_tmux):
         # Child pane is gone (not in visible_panes), so it's dead and
         # excluded from the default tree. But the parent is still there.
     await d2.aclose()
+
+
+async def test_restart_preserves_response_format_jobs(theater_home, fake_tmux):
+    d1 = Daemon(harnesses={})
+    await d1.start()
+    async with DaemonClient(autostart=False) as c:
+        record = await c.call(
+            "spawn",
+            harness="vibe",
+            prompt="hi",
+            approval="manual",
+            cwd="/tmp",
+            response_format={"type": "object"},
+        )
+        handle = record["handle"]
+        before = await c.call("jobs.status", handle=handle)
+    await d1.aclose()
+
+    d2 = Daemon(harnesses={})
+    await d2.start()
+    async with DaemonClient(autostart=False) as c:
+        after = await c.call("jobs.status", handle=handle)
+    await d2.aclose()
+
+    assert before["response_format"] == '{"type":"object"}'
+    assert after["response_format"] == before["response_format"]
+    assert after["prompt"] == before["prompt"]
+
+
+async def test_restart_preserves_tree_store(theater_home, fake_tmux, tmp_path):
+    repo = _repo(tmp_path, "repo")
+    d1 = Daemon(harnesses={})
+    await d1.start()
+    async with DaemonClient(autostart=False) as c:
+        caller = await c.call("hello", id="root", harness="vibe", cwd=str(repo))
+        await c.call(
+            "store.put",
+            caller_id=caller["id"],
+            namespace="handoff",
+            key="summary",
+            value="survives",
+        )
+    await d1.aclose()
+
+    d2 = Daemon(harnesses={})
+    await d2.start()
+    async with DaemonClient(autostart=False) as c:
+        got = await c.call(
+            "store.get",
+            caller_id=caller["id"],
+            namespace="handoff",
+            key="summary",
+        )
+    await d2.aclose()
+
+    assert got == {"value": "survives"}
+
+
+async def test_restart_preserves_checkpoints(theater_home, fake_tmux):
+    d1 = Daemon(harnesses={})
+    await d1.start()
+    async with DaemonClient(autostart=False) as c:
+        caller = await c.call("hello", id="caller", harness="vibe", cwd="/tmp")
+        d1.jobs.create(
+            handle="caller#1",
+            caller_id=caller["id"],
+            target_id=None,
+            kind="send",
+            prompt="remember this",
+        )
+        created = await c.call(
+            "checkpoint.create",
+            caller_id=caller["id"],
+            name="before restart",
+        )
+        d1.jobs.finish("caller#1", state=JobState.DONE, result="done")
+    await d1.aclose()
+
+    d2 = Daemon(harnesses={})
+    await d2.start()
+    async with DaemonClient(autostart=False) as c:
+        read = await c.call("checkpoint.read", checkpoint_id=created["checkpoint_id"])
+    await d2.aclose()
+
+    assert read["checkpoint"]["name"] == "before restart"
+    assert [job["handle"] for job in read["recorded_jobs"]] == ["caller#1"]
+    assert read["recorded_jobs"][0]["state"] == "running"
+    assert read["live_jobs"][0]["state"] == "done"
