@@ -169,6 +169,7 @@ def drain(rec, workdir):
     """Attach before anything happened, then read the whole session live."""
     src = source_for(rec, workdir)
     asyncio.run(src.read())
+    src.commit_attachment()
     return src
 
 
@@ -364,6 +365,11 @@ def test_resume_argv_uses_dash_s_and_session_id(tmp_path):
         "-s",
         "ses_ffb42302cffeaasiFBDGgLmkRf",
     ]
+    receipt = tmp_path / "x.opencode-session"
+    assert json.loads(plan.files[receipt]) == {
+        "participant_id": "abc123",
+        "session_id": "ses_ffb42302cffeaasiFBDGgLmkRf",
+    }
 
 
 def test_resume_with_model_and_auto(tmp_path):

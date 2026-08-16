@@ -31,8 +31,10 @@ from pathlib import Path
 
 from sqlalchemy import select
 
+from theater.daemon.observer import history_correlation_is_ambiguous
 from theater.daemon.schema import jobs, touch
 from theater.harness import HARNESSES, normalize
+from theater.harness.observation import open_participant_source
 from theater.models import BadRequest
 
 logger = logging.getLogger("theater.recall.read")
@@ -178,7 +180,15 @@ async def _read_job(
         return brief
 
     # Open a short-lived source separate from the watcher's; close in finally.
-    source = harness.observer.open_source(cwd=p.cwd, session_id=p.session_id, after=None)
+    source = open_participant_source(
+        harness.observer,
+        participant_id=p.id,
+        cwd=p.cwd,
+        session_id=p.session_id,
+        after=None,
+        session_exact=p.session_correlation == "exact",
+        known_location=p.transcript_location,
+    )
     try:
         history = await source.history(last_n=0)
     except Exception:
@@ -190,6 +200,25 @@ async def _read_job(
         return brief
     finally:
         await source.aclose()
+
+    if history.error_code is not None:
+        brief["transcript"] = {
+            "available": False,
+            "reason": history.error or history.error_code,
+            "error_code": history.error_code,
+        }
+        return brief
+
+    if history_correlation_is_ambiguous(registry, p.id, history):
+        brief["transcript"] = {
+            "available": False,
+            "reason": (
+                "session is known only from cwd/time and another retained participant "
+                "of the same harness shares that transcript root and cwd"
+            ),
+            "error_code": "transcript_correlation_ambiguous",
+        }
+        return brief
 
     if history.location is None:
         # The source located nothing — transcript file deleted, or the

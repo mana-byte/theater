@@ -44,6 +44,7 @@ import tomllib
 from pathlib import Path
 from typing import Literal
 
+from theater import paths
 from theater.harness.base import (
     APPROVALS,
     MCP_TOOL_TIMEOUT,
@@ -113,6 +114,11 @@ _SPINNER_TAIL_LINES = 8
 #: Directories scanned newest first; a live session is near the top, so this
 #: bounds the cost of a home directory with thousands of old sessions.
 _SCAN_LIMIT = 200
+
+#: Written before Vibe starts. Its presence tells a restarted daemon that this
+#: participant's save directory is process-isolated and therefore safe to scan
+#: by cwd across Vibe's session rotations.
+ISOLATION_MARKER = ".theater-vibe-source"
 
 #: Vibe tool names that modify a file, mapped to the argument key that carries
 #: the path (`write_file.py:30`, `edit.py:35`). `grep` is excluded: its `path`
@@ -207,10 +213,10 @@ class VibeHarness(Harness):
     #: normalize is observed as nothing at all, so these are not cosmetic.
     aliases = ("Vibe", "mistral-vibe", "mistral_vibe")
 
-    def __init__(self, root: Path | None = None):
+    def __init__(self, root: Path | None = None, correlation_root: Path | None = None):
         #: `root` is the observer's business alone — nothing about launching
         #: vibe depends on where it writes.
-        self.observer = VibeObserver(root=root)
+        self.observer: VibeObserver = VibeObserver(root=root, correlation_root=correlation_root)
 
     # ---- launching ------------------------------------------------------
 
@@ -223,6 +229,7 @@ class VibeHarness(Harness):
         approval: str,
         model: str | None = None,
         resume: str | None = None,
+        isolate_transcript: bool = False,
     ) -> LaunchPlan:
         if approval not in APPROVALS:
             raise BadRequest(f"approval must be one of {', '.join(APPROVALS)}, got {approval!r}")
@@ -256,7 +263,26 @@ class VibeHarness(Harness):
         # value would be inherited by descendants that did not name one,
         # putting a child on a model nobody chose.
         env["VIBE_ACTIVE_MODEL"] = model or ""
-        return LaunchPlan(argv=argv, env=env)
+        files: dict[Path, str] = {}
+        transcript_domain = self.observer.root.resolve()
+        if resume is None and isolate_transcript:
+            # Vibe's environment layer uses ``__`` for nested fields. Every
+            # session and compaction produced by this process now lands below
+            # one participant-owned root, so no cwd guess can reach a sibling.
+            # The daemon requests this only when another live Vibe already has
+            # the same cwd; the common one-Vibe-per-cwd case keeps Vibe's
+            # normal global save directory and /resume picker.
+            save_dir = self.observer.participant_root(participant_id)
+            env["VIBE_SESSION_LOGGING__SAVE_DIR"] = str(save_dir)
+            files[save_dir / ISOLATION_MARKER] = participant_id + "\n"
+            transcript_domain = save_dir.resolve()
+        return LaunchPlan(
+            argv=argv,
+            env=env,
+            files=files,
+            session_id=resume,
+            transcript_domain=str(transcript_domain),
+        )
 
     def discover_models(self) -> list[str]:
         """Read `[[models]]` out of vibe's own config.
@@ -308,20 +334,95 @@ class VibeHarness(Harness):
 class VibeObserver(TranscriptObserver):
     """Read `~/.vibe/logs/session/*/messages.jsonl`.
 
-    Vibe is the harness that rotates: a new session directory appears on some
-    turns, so the transcript this observer is reading can stop growing while the
-    agent is very much alive. `TranscriptSource.refresh` handles it by searching
-    on cwd alone; see the note there.
+    Later same-cwd Theater launches write below a participant-specific root;
+    the first keeps Vibe's machine-global history. Both relocate by cwd when
+    Vibe rotates during compaction. The reducer permits a heuristic relocation
+    only when no live same-cwd source searches the same root.
     """
 
-    def __init__(self, root: Path | None = None):
+    def __init__(
+        self,
+        root: Path | None = None,
+        correlation_root: Path | None = None,
+        *,
+        isolated: bool = False,
+    ):
         #: Injectable so tests never touch the real ~/.vibe.
         self.root = root or Path.home() / ".vibe" / "logs" / "session"
+        self.correlation_root = correlation_root
+        self.isolated = isolated
+        self.relocate_by_cwd = True
         #: Set in `find_transcript` (the one call that receives the
         #: participant's cwd) so `parse` can relativise the absolute paths
         #: vibe's tool arguments carry. A path that cannot be relativised is
         #: dropped rather than emitted as an absolute.
         self._cwd: str | None = None
+
+    def participant_root(self, participant_id: str) -> Path:
+        base = self.correlation_root or paths.home() / "observations" / "vibe"
+        return base / participant_id
+
+    def open_source(
+        self,
+        *,
+        cwd: str | None,
+        session_id: str | None = None,
+        after: float | None = None,
+        session_exact: bool = False,
+        known_location: str | None = None,
+    ):
+        """Give every source its own parser state, including its cwd."""
+        from theater.harness.source import TranscriptSource
+
+        reader = VibeObserver(
+            root=self.root,
+            correlation_root=self.correlation_root,
+            isolated=self.isolated,
+        )
+        return TranscriptSource(
+            reader,
+            cwd=cwd,
+            session_id=session_id,
+            after=after,
+            allow_refresh=True,
+            exact_attachments=reader.isolated,
+            exact_session=session_exact,
+            collision_domain=str(reader.root.resolve()),
+            known_location=known_location,
+        )
+
+    def open_source_for(
+        self,
+        *,
+        participant_id: str,
+        cwd: str | None,
+        session_id: str | None = None,
+        after: float | None = None,
+        session_exact: bool = False,
+        known_location: str | None = None,
+    ):
+        participant_root = self.participant_root(participant_id)
+        marker = participant_root / ISOLATION_MARKER
+        if marker.exists():
+            reader = VibeObserver(
+                root=participant_root,
+                correlation_root=self.correlation_root,
+                isolated=True,
+            )
+            return reader.open_source(
+                cwd=cwd,
+                session_id=session_id,
+                after=after,
+                session_exact=session_exact,
+                known_location=known_location,
+            )
+        return self.open_source(
+            cwd=cwd,
+            session_id=session_id,
+            after=after,
+            session_exact=session_exact,
+            known_location=known_location,
+        )
 
     def find_transcript(
         self,
@@ -347,7 +448,7 @@ class VibeObserver(TranscriptObserver):
         # When session_id is None — the window after spawn before the observer
         # discovers it — two siblings in the same cwd both match, and returning
         # the newest for either participant is a mis-attribution. The
-        # observer's binding check (`_on_attach`) is the cross-cutting guarantee
+        # observer's binding check (`_accept_attachment`) is the cross-cutting guarantee
         # that refuses the second binding; this method returns the newest match
         # so rotation (vibe opens a new session directory every turn) still
         # works, and logs the ambiguity so it is not silent.
@@ -362,10 +463,10 @@ class VibeObserver(TranscriptObserver):
             matches.append(d / "messages.jsonl")
         if not matches:
             return None
-        if len(matches) > 1:
+        if len(matches) > 1 and not self.isolated:
             logger.warning(
                 "vibe find_transcript: %d session directories match cwd %s; "
-                "returning the newest — the observer will refuse a collision",
+                "returning a heuristic candidate for the reducer to validate",
                 len(matches),
                 cwd,
             )

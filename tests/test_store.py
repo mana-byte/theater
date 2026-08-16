@@ -15,7 +15,13 @@ def test_roundtrip(store):
 
 
 def test_upsert_is_idempotent(store):
-    p = Participant(harness="vibe")
+    p = Participant(
+        harness="vibe",
+        session_id="native-session",
+        session_correlation="heuristic",
+        transcript_domain="/tmp/vibe-root",
+        transcript_location="/tmp/vibe-root/session/messages.jsonl",
+    )
     store.upsert_participant(p)
     p.harness = "claude"
     store.upsert_participant(p)
@@ -59,12 +65,23 @@ def test_reopening_does_not_wipe_state(store, theater_home):
     from theater import paths
     from theater.daemon.store import Store
 
-    p = Participant(harness="vibe")
+    p = Participant(
+        harness="vibe",
+        session_id="native-session",
+        session_correlation="heuristic",
+        transcript_domain="/tmp/vibe-root",
+        transcript_location="/tmp/vibe-root/session/messages.jsonl",
+    )
     store.upsert_participant(p)
     store.close()
 
     again = Store(paths.db_path())
-    assert again.get_participant(p.id) is not None
+    restored = again.get_participant(p.id)
+    assert restored is not None
+    assert restored.session_id == "native-session"
+    assert restored.session_correlation == "heuristic"
+    assert restored.transcript_domain == "/tmp/vibe-root"
+    assert restored.transcript_location == "/tmp/vibe-root/session/messages.jsonl"
     again.close()
 
 

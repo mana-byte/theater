@@ -14,23 +14,34 @@ Three fixes are tested here:
    (``after = p.created_at`` for SPAWNED, ``None`` for adopted/external).
 2. ``find_transcript`` logs an ambiguity when multiple session directories
    match the same cwd, so the collision is not silent.
-3. The observer's ``_on_attach`` refuses to bind a transcript already bound
-   to a different live participant, and detaches the source so it searches
-   again.
+3. The observer's ``_accept_attachment`` refuses to bind a transcript already
+   bound to a different live participant, and discards the staged candidate
+   without changing the source's accepted cursor.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from shipped import VibeHarness, VibeObserver
 
-from theater.daemon.observer import Observer
+from theater.daemon import methods as methods_mod
+from theater.daemon import observer as observer_mod
+from theater.daemon.jobs import JobManager
+from theater.daemon.observer import (
+    Observer,
+    QuietClock,
+    TurnAccumulator,
+    history_correlation_is_ambiguous,
+)
 from theater.daemon.registry import Registry
-from theater.models import Tier
+from theater.harness.source import Attachment, Batch, History, Source
+from theater.models import BadRequest, Tier
 
 
 def _make_session(root: Path, short: str, cwd: str, *, text: str = "hello") -> Path:
@@ -227,9 +238,8 @@ async def test_two_siblings_same_cwd_do_not_share_transcript(
 ):
     """The original collision: two siblings in one cwd, both session_id None.
 
-    The first participant binds its transcript. The second participant's
-    source tries to bind the same file and is refused — the observer logs
-    the collision and detaches the source so it searches again.
+    Neither participant may win a timing lottery. With no exact receipt, both
+    cwd/time candidates are contested and fail closed.
     """
     from tests.test_observer import until
 
@@ -239,22 +249,414 @@ async def test_two_siblings_same_cwd_do_not_share_transcript(
     collision_registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
     collision_registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
 
-    # Wait for at least one transcript event.
+    # Wait until both watchers have opened their sources and attempted
+    # discovery; no transcript event should be emitted from a contested guess.
     assert await until(
-        lambda: any(
-            r["kind"] == "agent.transcript" for r in collision_registry.store.bus_tail(limit=500)
-        ),
+        lambda: len(collision_observer._sources) == 2,
         timeout=3.0,
     )
+    await asyncio.sleep(0.05)
 
-    # At most one participant should have a transcript binding.
-    bound = collision_observer._bound_transcripts
-    owners = set(bound.values())
-    # No two participants share the same path.
-    assert len(owners) <= len(bound), "a transcript path is bound to two participants"
+    assert not collision_observer._bound_transcripts
+    assert not any(
+        row["kind"] == "agent.transcript" for row in collision_registry.store.bus_tail(limit=500)
+    )
 
-    # The first to attach wins; the second is refused.
-    assert len(bound) <= 1, "both participants bound a transcript — collision not prevented"
+
+async def test_initial_ambiguity_releases_the_await_as_an_explicit_crash(
+    collision_registry, vibe_tree, monkeypatch
+):
+    first = collision_registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
+    collision_registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
+    jobs = JobManager(collision_registry.store)
+    jobs.create(handle="ambiguous", caller_id="caller", target_id=first.id, kind="send")
+    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 0.0)
+    observer = Observer(collision_registry, harnesses={}, jobs=jobs)
+    source = VibeObserver(root=vibe_tree["root"]).open_source(cwd=first.cwd)
+
+    batch = await source.read()
+    assert not observer._accept_attachment(first.id, source, batch)
+
+    job = jobs.get("ambiguous")
+    assert job.state == "crashed"
+    assert job.error_code == "transcript_correlation_ambiguous"
+
+
+async def test_exact_claim_revokes_an_earlier_heuristic_binding(collision_registry, vibe_tree):
+    """A late process proof must repair, not merely diagnose, an early guess."""
+    adapter = VibeObserver(root=vibe_tree["root"])
+    observer = Observer(collision_registry, harnesses={})
+
+    guessed = collision_registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
+    guessed_source = adapter.open_source(cwd=guessed.cwd)
+    observer._sources[guessed.id] = guessed_source
+    guessed_batch = await guessed_source.read()
+    assert guessed_batch.attached.correlation == "heuristic"
+    assert observer._accept_attachment(guessed.id, guessed_source, guessed_batch)
+
+    exact = collision_registry.register(
+        harness="vibe",
+        pane=None,
+        cwd=str(vibe_tree["project"]),
+        session_id="aa5d2d32-1111-2222-3333",
+    )
+    exact.session_correlation = "exact"
+    collision_registry.store.upsert_participant(exact)
+    exact_source = adapter.open_source(
+        cwd=exact.cwd,
+        session_id=exact.session_id,
+        session_exact=True,
+    )
+    observer._sources[exact.id] = exact_source
+    exact_batch = await exact_source.read()
+    assert exact_batch.attached.correlation == "exact"
+    assert exact_batch.attached.location == guessed_batch.attached.location
+
+    assert observer._accept_attachment(exact.id, exact_source, exact_batch)
+    assert guessed_source.path is None
+    repaired = collision_registry.get(guessed.id)
+    assert repaired.session_id is None
+    assert repaired.session_correlation is None
+    assert repaired.transcript_location is None
+    assert observer._bound_transcripts[exact_batch.attached.location] == exact.id
+
+
+async def test_read_transcript_refuses_a_fulgenzio_style_heuristic_swap(
+    collision_registry, vibe_tree, monkeypatch
+):
+    """A stored guessed id cannot make read_transcript serve its sibling."""
+    harness = VibeHarness(root=vibe_tree["root"])
+    monkeypatch.setitem(methods_mod.HARNESSES, "vibe", harness)
+    domain = str(vibe_tree["root"].resolve())
+
+    fulgenzio = collision_registry.register(
+        harness="vibe",
+        pane=None,
+        cwd=str(vibe_tree["project"]),
+        # This is Senterello's id, persisted by the old buggy watcher.
+        session_id="aa5d2d32-1111-2222-3333",
+    )
+    fulgenzio.session_correlation = "heuristic"
+    fulgenzio.transcript_domain = domain
+    collision_registry.store.upsert_participant(fulgenzio)
+    senterello = collision_registry.register(
+        harness="vibe",
+        pane=None,
+        cwd=str(vibe_tree["project"]),
+        session_id="aa5d2d32-1111-2222-3333",
+    )
+    senterello.session_correlation = "exact"
+    senterello.transcript_domain = domain
+    collision_registry.store.upsert_participant(senterello)
+
+    daemon = SimpleNamespace(
+        registry=collision_registry,
+        observer=Observer(collision_registry, {"vibe": harness}),
+    )
+    with pytest.raises(BadRequest, match="transcript_correlation_ambiguous"):
+        await methods_mod.METHODS["read_transcript"](daemon, {"id": fulgenzio.id, "last_n": 0})
+
+
+async def test_isolated_same_cwd_sibling_does_not_freeze_global_vibe_rotation(
+    collision_registry, vibe_tree, tmp_path
+):
+    """Collision domains preserve the first Vibe process's rotation liveness."""
+    adapter = VibeObserver(root=vibe_tree["root"])
+    observer = Observer(collision_registry, harnesses={})
+    global_domain = str(vibe_tree["root"].resolve())
+
+    incumbent = collision_registry.register(
+        harness="vibe",
+        pane=None,
+        cwd=str(vibe_tree["project"]),
+        session_id="a00bff57-1111-2222-3333",
+    )
+    incumbent.transcript_domain = global_domain
+    collision_registry.store.upsert_participant(incumbent)
+    source = adapter.open_source(
+        cwd=incumbent.cwd,
+        session_id=incumbent.session_id,
+        session_exact=True,
+    )
+    observer._sources[incumbent.id] = source
+    initial = await source.read()
+    assert observer._accept_attachment(incumbent.id, source, initial)
+
+    isolated = collision_registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
+    isolated.transcript_domain = str((tmp_path / "private-vibe").resolve())
+    collision_registry.store.upsert_participant(isolated)
+
+    rotated = _make_session(vibe_tree["root"], "zzzzzzzz", str(vibe_tree["project"]))
+    candidate = await source.refresh()
+    assert candidate.attached is not None
+    assert candidate.attached.correlation == "heuristic"
+    assert observer._accept_attachment(incumbent.id, source, candidate)
+    assert source.path == rotated
+
+
+def test_distinct_persisted_locations_survive_dead_row_retention(collision_registry, vibe_tree):
+    domain = str(vibe_tree["root"].resolve())
+    current = collision_registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
+    current.transcript_domain = domain
+    current.transcript_location = str(vibe_tree["transcript_a"])
+    collision_registry.store.upsert_participant(current)
+    predecessor = collision_registry.register(
+        harness="vibe", pane=None, cwd=str(vibe_tree["project"])
+    )
+    predecessor.transcript_domain = domain
+    predecessor.transcript_location = str(vibe_tree["transcript_b"])
+    collision_registry.store.upsert_participant(predecessor)
+    collision_registry.mark_dead(predecessor.id)
+
+    history = History(
+        location=current.transcript_location,
+        correlation="heuristic",
+        collision_domain=domain,
+        pinned=True,
+    )
+    assert not history_correlation_is_ambiguous(collision_registry, current.id, history)
+
+
+async def test_read_transcript_reports_a_missing_pin_instead_of_ambiguity(
+    collision_registry, vibe_tree, tmp_path, monkeypatch
+):
+    harness = VibeHarness(root=vibe_tree["root"])
+    monkeypatch.setitem(methods_mod.HARNESSES, "vibe", harness)
+    participant = collision_registry.register(
+        harness="vibe", pane=None, cwd=str(vibe_tree["project"])
+    )
+    participant.transcript_location = str(tmp_path / "gone" / "messages.jsonl")
+    participant.transcript_domain = str(vibe_tree["root"].resolve())
+    collision_registry.store.upsert_participant(participant)
+    daemon = SimpleNamespace(
+        registry=collision_registry,
+        observer=Observer(collision_registry, {"vibe": harness}),
+    )
+
+    with pytest.raises(BadRequest, match="no longer exists"):
+        await methods_mod.METHODS["read_transcript"](daemon, {"id": participant.id, "last_n": 0})
+
+
+def test_duplicate_persisted_location_remains_ambiguous(collision_registry, vibe_tree):
+    domain = str(vibe_tree["root"].resolve())
+    location = str(vibe_tree["transcript_b"])
+    first = collision_registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
+    first.transcript_domain = domain
+    first.transcript_location = location
+    collision_registry.store.upsert_participant(first)
+    second = collision_registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
+    second.transcript_domain = domain
+    second.transcript_location = location
+    collision_registry.store.upsert_participant(second)
+
+    history = History(
+        location=location,
+        correlation="heuristic",
+        collision_domain=domain,
+        pinned=True,
+    )
+    assert history_correlation_is_ambiguous(collision_registry, first.id, history)
+
+
+def test_pre_location_epoch_null_is_an_explicit_upgrade_allowance(collision_registry, vibe_tree):
+    epoch = float(collision_registry.store.get_meta("transcript_location_epoch"))
+    domain = str(vibe_tree["root"].resolve())
+    current = collision_registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
+    current.transcript_domain = domain
+    current.transcript_location = str(vibe_tree["transcript_a"])
+    collision_registry.store.upsert_participant(current)
+    legacy = collision_registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
+    collision_registry.mark_dead(legacy.id)
+    legacy = collision_registry.get(legacy.id)
+    legacy.transcript_domain = None
+    legacy.transcript_location = None
+    legacy.last_activity = epoch - 1
+    collision_registry.store.upsert_participant(legacy)
+
+    history = History(
+        location=current.transcript_location,
+        correlation="heuristic",
+        collision_domain=domain,
+        pinned=True,
+    )
+    assert not history_correlation_is_ambiguous(collision_registry, current.id, history)
+
+    live_unknown = collision_registry.register(
+        harness="vibe", pane=None, cwd=str(vibe_tree["project"])
+    )
+    live_unknown.last_activity = epoch - 1
+    collision_registry.store.upsert_participant(live_unknown)
+    assert history_correlation_is_ambiguous(collision_registry, current.id, history)
+
+
+async def test_rejected_rotation_keeps_events_and_awaits_session_local(
+    collision_registry, vibe_tree
+):
+    """A sibling's newer transcript must never replace an accepted cursor.
+
+    This is the complete regression for the two reported symptoms. Both Vibe
+    participants know their exact sessions initially. A's cwd-only refresh
+    then finds B's newer file and is refused. B's next turn must not flap A's
+    status or appear on A's bus; A's own old file must still be readable, and
+    its turn end must wake an await already blocked on A's job.
+    """
+    observer_adapter = VibeObserver(root=vibe_tree["root"])
+    p_a = collision_registry.register(
+        harness="vibe",
+        pane=None,
+        cwd=str(vibe_tree["project"]),
+        session_id="a00bff57-1111-2222-3333",
+    )
+    p_b = collision_registry.register(
+        harness="vibe",
+        pane=None,
+        cwd=str(vibe_tree["project"]),
+        session_id="aa5d2d32-1111-2222-3333",
+    )
+    jobs = JobManager(collision_registry.store)
+    observer = Observer(collision_registry, harnesses={}, jobs=jobs)
+    source_a = observer_adapter.open_source(
+        cwd=p_a.cwd,
+        session_id=p_a.session_id,
+        after=None,
+        session_exact=True,
+    )
+    source_b = observer_adapter.open_source(
+        cwd=p_b.cwd,
+        session_id=p_b.session_id,
+        after=None,
+        session_exact=True,
+    )
+    turns_a = TurnAccumulator()
+
+    batch_a = await source_a.read()
+    batch_b = await source_b.read()
+    assert observer._accept_attachment(p_a.id, source_a, batch_a)
+    assert observer._accept_attachment(p_b.id, source_b, batch_b)
+    observer._apply(p_a.id, batch_a, QuietClock(), turns_a)
+    observer._apply(p_b.id, batch_b, QuietClock(), TurnAccumulator())
+    assert len(observer._bound_transcripts) == 2
+
+    # Cwd-only relocation finds B, but B already owns it. Rejection must be a
+    # no-op on A's accepted path rather than the old eager switch-and-detach.
+    candidate = await source_a.refresh()
+    assert candidate.attached is not None
+    assert candidate.attached.location == str(vibe_tree["transcript_b"])
+    assert not observer._accept_attachment(p_a.id, source_a, candidate)
+    assert source_a.path == vibe_tree["transcript_a"]
+    assert not any(key[0] == p_a.id for key in observer._source_errors)
+
+    # Rejection throttles only the relocate arm. The same discoverable foreign
+    # candidate must not be re-read on every 250ms poll forever.
+    relocate_clock = QuietClock()
+    relocate_clock.quiet_since = time.monotonic() - observer.relocate - 1
+    await observer._on_quiet(p_a.id, observer_adapter, source_a, relocate_clock, TurnAccumulator())
+    assert relocate_clock.quiet_for(time.monotonic()) < 0.1
+
+    before = collision_registry.store.bus_tail(limit=500)[-1]["id"]
+    with vibe_tree["transcript_b"].open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"role": "user", "content": "foreign prompt"}) + "\n")
+        fh.write(json.dumps({"role": "assistant", "content": "foreign answer"}) + "\n")
+
+    # A remains on its own quiet transcript. Only B can publish B's append.
+    assert not (await source_a.read()).events
+    foreign = await source_b.read()
+    observer._apply(p_b.id, foreign, QuietClock(), TurnAccumulator())
+    rows = collision_registry.store.bus_tail(limit=500, after_id=before)
+    agent_rows = [r for r in rows if r["kind"].startswith("agent.")]
+    assert agent_rows
+    assert {r["from_id"] for r in agent_rows} == {p_b.id}
+    assert collision_registry.get(p_a.id).status.value == "idle"
+
+    jobs.create(handle="await-a", caller_id="caller", target_id=p_a.id, kind="send")
+    waiting = asyncio.create_task(jobs.await_jobs(["await-a"], max_wait=1.0))
+    await asyncio.sleep(0)
+    assert not waiting.done(), "the regression must exercise an already-blocked await"
+    with vibe_tree["transcript_a"].open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"role": "assistant", "content": "A is done"}) + "\n")
+
+    own = await source_a.read()
+    observer._apply(p_a.id, own, QuietClock(), turns_a)
+    result = await asyncio.wait_for(waiting, timeout=0.2)
+    assert result[0].state == "done"
+    assert result[0].result == "A is done"
+
+
+async def test_accepted_rotation_commits_and_releases_the_old_binding(
+    collision_registry, vibe_tree
+):
+    """A genuinely unowned rotation atomically replaces the old binding."""
+    adapter = VibeObserver(root=vibe_tree["root"])
+    p = collision_registry.register(
+        harness="vibe",
+        pane=None,
+        cwd=str(vibe_tree["project"]),
+        session_id="a00bff57-1111-2222-3333",
+    )
+    observer = Observer(collision_registry, harnesses={})
+    source = adapter.open_source(cwd=p.cwd, session_id=p.session_id, after=None)
+    initial = await source.read()
+    assert observer._accept_attachment(p.id, source, initial)
+    old = str(vibe_tree["transcript_a"])
+    assert observer._bound_transcripts[old] == p.id
+
+    newest = _make_session(vibe_tree["root"], "zzzzzzzz", str(vibe_tree["project"]))
+    candidate = await source.refresh()
+    assert candidate.attached is not None
+    assert source.path == vibe_tree["transcript_a"]
+    assert observer._accept_attachment(p.id, source, candidate)
+
+    assert source.path == newest
+    assert old not in observer._bound_transcripts
+    assert observer._bound_transcripts[str(newest)] == p.id
+
+
+class IncompleteAttachmentSource(Source):
+    async def read(self) -> Batch:
+        return Batch(attached=Attachment("somewhere"))
+
+
+async def test_attachment_source_without_handshake_fails_loudly(collision_registry):
+    """A third-party source cannot silently reintroduce eager attachment."""
+    p = collision_registry.register(harness="vibe", pane=None, cwd="/tmp")
+    observer = Observer(collision_registry, harnesses={})
+    source = IncompleteAttachmentSource()
+    batch = await source.read()
+
+    with pytest.raises(NotImplementedError, match="commit_attachment"):
+        observer._accept_attachment(p.id, source, batch)
+
+
+async def test_attachment_check_failure_discards_the_candidate(
+    collision_registry, vibe_tree, monkeypatch
+):
+    """A transient store failure must not leave every later read wedged."""
+    adapter = VibeObserver(root=vibe_tree["root"])
+    p = collision_registry.register(
+        harness="vibe",
+        pane=None,
+        cwd=str(vibe_tree["project"]),
+        session_id="a00bff57-1111-2222-3333",
+    )
+    observer = Observer(collision_registry, harnesses={})
+    source = adapter.open_source(cwd=p.cwd, session_id=p.session_id, after=None)
+    batch = await source.read()
+    assert batch.attached is not None
+    observer._bound_transcripts[batch.attached.location] = "other"
+
+    original = collision_registry.store.get_participant
+
+    def fail_once(_pid):
+        raise OSError("transient store failure")
+
+    monkeypatch.setattr(collision_registry.store, "get_participant", fail_once)
+    with pytest.raises(OSError, match="transient"):
+        observer._accept_attachment(p.id, source, batch)
+    monkeypatch.setattr(collision_registry.store, "get_participant", original)
+
+    retry = await source.read()
+    assert retry.attached is not None
+    source.discard_attachment()
 
 
 async def test_observer_releases_binding_on_watcher_end(

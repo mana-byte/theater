@@ -32,7 +32,11 @@ from theater.daemon.rails import (
 from theater.daemon.schema import bus, jobs
 from theater.daemon.spawner import SpawnRequest
 from theater.harness import HARNESSES, describe, normalize, supports_model
-from theater.harness.observation import ScreenConfidence, ScreenKind
+from theater.harness.observation import (
+    ScreenConfidence,
+    ScreenKind,
+    open_participant_source,
+)
 from theater.models import (
     AwaitingDecision,
     BadRequest,
@@ -92,6 +96,19 @@ _JSON_REPLY_INSTRUCTION = (
     "Return your final answer as a single bare JSON value (no code fences, no prose) "
     "matching this schema hint: {schema}"
 )
+
+_JOB_ERROR_MESSAGES = {
+    "transcript_correlation_failed": (
+        "Theater could not correlate this participant with its transcript. "
+        "The agent may still be alive and working; do not retry the task, and inspect "
+        "its pane before deciding what to do."
+    ),
+    "transcript_correlation_ambiguous": (
+        "Theater found transcript output that is not uniquely attributable to this "
+        "participant. The agent may still be alive and working; do not retry the task, "
+        "and inspect its pane before deciding what to do."
+    ),
+}
 
 _CHECKPOINT_JOB_KEYS = (
     "handle",
@@ -501,7 +518,14 @@ async def _jobs_await(daemon, params: dict) -> list[dict]:
             )
     finally:
         _close_await(daemon, caller_id, announced, await_token)
-    return [j.to_dict() for j in jobs]
+    rows = []
+    for job in jobs:
+        row = job.to_dict()
+        message = _JOB_ERROR_MESSAGES.get(job.error_code or "")
+        if message is not None:
+            row["error"] = message
+        rows.append(row)
+    return rows
 
 
 async def _await_announced(
@@ -1149,11 +1173,32 @@ async def _read_transcript(daemon, params: dict) -> dict:
     # predates Theater's first sight of it. Preserving that distinction exactly
     # — do not apply a floor to adopted or external participants.
     after = p.created_at if p.tier is Tier.SPAWNED else None
-    source = harness.observer.open_source(cwd=p.cwd, session_id=p.session_id, after=after)
+    source = open_participant_source(
+        harness.observer,
+        participant_id=p.id,
+        cwd=p.cwd,
+        session_id=p.session_id,
+        after=after,
+        session_exact=p.session_correlation == "exact",
+        known_location=p.transcript_location,
+    )
     try:
         history = await source.history(last_n=last_n)
     finally:
         await source.aclose()
+
+    if history.error_code is not None:
+        raise BadRequest(
+            f"cannot read transcript: {history.error or history.error_code} ({history.error_code})"
+        )
+    if daemon.observer.history_is_ambiguous(pid, history):
+        raise BadRequest(
+            "cannot read transcript: its session is known only from cwd/time and another "
+            "live participant of the same harness shares that transcript root and cwd "
+            "(transcript_correlation_ambiguous)"
+        )
+    if history.location is None:
+        raise BadRequest("cannot read transcript: transcript no longer exists on disk")
 
     events = [
         {

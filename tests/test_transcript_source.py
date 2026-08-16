@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 from shipped import ClaudeCodeObserver
 
-from theater.harness.source import Batch, History
+from theater.harness.source import Batch, History, TranscriptSource
 
 
 def record(text: str, *, end: bool = True) -> str:
@@ -59,7 +59,18 @@ def transcript(root: Path, name: str, cwd: str, *lines: str) -> Path:
 
 
 def source(root: Path, workdir: str, **kw):
-    return ClaudeCodeObserver(root=root).open_source(cwd=workdir, **kw)
+    # These generic source tests exercise the relocation protocol explicitly.
+    # Shipped observers opt into cwd relocation only where their format needs
+    # it (Vibe); using Claude's locator here keeps the fixture compact.
+    return TranscriptSource(ClaudeCodeObserver(root=root), cwd=workdir, allow_refresh=True, **kw)
+
+
+async def attach(s):
+    """Stage and accept the initial attachment, as the observer does."""
+    batch = await s.read()
+    assert batch.attached is not None
+    s.commit_attachment()
+    return batch
 
 
 # ---- the default source does nothing, on purpose --------------------------
@@ -81,6 +92,8 @@ async def test_attaching_reports_where_it_landed(root, workdir):
     batch = await s.read()
     assert batch.attached is not None
     assert batch.attached.location == str(root / "-work" / "aaa.jsonl")
+    assert s.path is None, "a candidate must not mutate live state before acceptance"
+    s.commit_attachment()
     assert s.path is not None
 
 
@@ -88,14 +101,14 @@ async def test_attaching_lands_at_the_end_so_history_is_not_replayed(root, workd
     """Re-emitting what the agent said before we arrived would fake a live turn."""
     transcript(root, "aaa", workdir, record("old"))
     s = source(root, workdir)
-    await s.read()
+    await attach(s)
     assert (await s.read()).events == ()
 
 
 async def test_records_written_after_the_attach_are_read(root, workdir):
     path = transcript(root, "aaa", workdir, record("old"))
     s = source(root, workdir)
-    await s.read()
+    await attach(s)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(record("new") + "\n")
     assert [e.text for e in (await s.read()).events] == ["new"]
@@ -108,7 +121,7 @@ async def test_a_deleted_transcript_sends_the_source_back_to_searching(root, wor
     """Letting the read raise would kill the watcher and freeze the participant."""
     path = transcript(root, "aaa", workdir, record("hello"))
     s = source(root, workdir)
-    await s.read()
+    await attach(s)
     path.unlink()
 
     batch = await s.read()
@@ -121,7 +134,7 @@ async def test_a_deleted_transcript_sends_the_source_back_to_searching(root, wor
 async def test_after_losing_the_file_a_replacement_is_picked_up(root, workdir):
     path = transcript(root, "aaa", workdir, record("hello"))
     s = source(root, workdir)
-    await s.read()
+    await attach(s)
     path.unlink()
     await s.read()
     transcript(root, "bbb", workdir, record("second life"))
@@ -145,7 +158,7 @@ async def test_refresh_onto_the_same_file_is_an_empty_batch(root, workdir):
     """The observer reads that emptiness as 'still idle' and keeps its clocks."""
     transcript(root, "aaa", workdir, record("hello"))
     s = source(root, workdir)
-    await s.read()
+    await attach(s)
     before = s.offset
 
     assert await s.refresh() == Batch()
@@ -156,7 +169,7 @@ async def test_refresh_moves_onto_a_newer_transcript(root, workdir):
     """vibe opens a new session directory every turn; staying put means going deaf."""
     old = transcript(root, "aaa", workdir, record("first turn"))
     s = source(root, workdir)
-    await s.read()
+    await attach(s)
 
     new = transcript(root, "bbb", workdir, record("second turn"))
     import os
@@ -167,20 +180,22 @@ async def test_refresh_moves_onto_a_newer_transcript(root, workdir):
     batch = await s.refresh()
 
     assert batch.attached is not None
+    assert s.path == old, "rotation is only a candidate until the observer accepts it"
+    s.commit_attachment()
     assert s.path == new
 
 
 async def test_refresh_ignores_the_session_id_it_was_opened_with(root, workdir):
-    """Known sharp edge: two agents in one directory can steal each other's file.
+    """A cwd-only refresh is staged so the observer can refuse a sibling's file.
 
     `refresh` searches by cwd alone — the stored id pins `find_transcript` to a
     file that never grows again, which is the bug this behaviour exists to fix.
-    The cost is that any newer transcript in the same directory wins, whoever
-    wrote it. Nothing here prevents that; the test says so out loud.
+    The source itself cannot know ownership, so it reports the candidate but
+    keeps reading its accepted file until the observer decides.
     """
     mine = transcript(root, "mine", workdir, record("mine"))
     s = source(root, workdir, session_id="mine")
-    await s.read()
+    await attach(s)
     assert s.path == mine
 
     theirs = transcript(root, "theirs", workdir, record("theirs"))
@@ -189,9 +204,13 @@ async def test_refresh_ignores_the_session_id_it_was_opened_with(root, workdir):
     os.utime(mine, (1000, 1000))
     os.utime(theirs, (2000, 2000))
 
-    await s.refresh()
+    batch = await s.refresh()
 
-    assert s.path == theirs
+    assert batch.attached is not None
+    assert batch.attached.location == str(theirs)
+    assert s.path == mine
+    s.discard_attachment()
+    assert s.path == mine
 
 
 # ---- history --------------------------------------------------------------
@@ -217,6 +236,29 @@ async def test_history_with_no_limit_returns_everything(root, workdir):
     assert len(got.events) == 2
 
 
+async def test_history_prefers_a_persisted_pin_over_a_newer_cwd_match(root, workdir):
+    mine = transcript(root, "aaa", workdir, record("mine"))
+    transcript(root, "zzz", workdir, record("sibling"))
+
+    got = await source(root, workdir, known_location=str(mine)).history(last_n=0)
+
+    assert got.location == str(mine)
+    assert [event.text for event in got.events] == ["mine"]
+    assert got.correlation == "heuristic"
+    assert got.pinned is True
+
+
+async def test_a_missing_persisted_pin_never_falls_back_to_a_sibling(root, workdir):
+    transcript(root, "zzz", workdir, record("sibling"))
+    missing = root / "-work" / "gone.jsonl"
+
+    got = await source(root, workdir, known_location=str(missing)).history(last_n=0)
+
+    assert got.location is None
+    assert got.events == ()
+    assert got.pinned is True
+
+
 async def test_history_leaves_the_text_unclipped(root, workdir):
     """The whole point of `read_transcript`: the job result is clipped, this is not."""
     long = "x" * 5000
@@ -228,7 +270,7 @@ async def test_history_leaves_the_text_unclipped(root, workdir):
 async def test_history_does_not_move_the_poll_cursor(root, workdir):
     path = transcript(root, "aaa", workdir, record("one"))
     s = source(root, workdir)
-    await s.read()
+    await attach(s)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(record("two") + "\n")
 

@@ -18,6 +18,7 @@ import asyncio
 import logging
 import shutil
 from dataclasses import dataclass
+from pathlib import Path
 
 from theater import paths
 from theater.daemon import worktree as worktree_mod
@@ -145,7 +146,7 @@ class Spawner:
                 },
             )
 
-        config_path = paths.mcp_config_dir() / f"{participant.id}.json"
+        config_path = paths.mcp_config_path(participant.id)
         plan = plan_launch(
             req.harness,
             participant_id=participant.id,
@@ -154,7 +155,10 @@ class Spawner:
             approval=req.approval,
             model=req.model,
             resume=req.resume,
+            isolate_transcript=self._has_live_cwd_sibling(participant),
         )
+
+        self._record_launch_identity(participant, plan)
 
         paths.ensure_home()
         for path, contents in plan.files.items():
@@ -189,6 +193,37 @@ class Spawner:
         return self.registry.attach_pane(
             participant.id, pane, pane_pid=info.pane_pid if info else None
         )
+
+    def _record_launch_identity(self, participant: Participant, plan) -> None:
+        """Persist exact launch facts before the process can write output."""
+        if plan.session_id is None and plan.transcript_domain is None:
+            return
+        if plan.session_id is not None:
+            participant.session_id = plan.session_id
+            participant.session_correlation = "exact"
+        participant.transcript_domain = plan.transcript_domain
+        self.registry.store.upsert_participant(participant)
+
+    def _has_live_cwd_sibling(self, participant: Participant) -> bool:
+        """Whether heuristic transcript discovery would share a collision key.
+
+        Called after worktree selection, because the child runs and writes its
+        transcript from that final cwd. Spawn setup is synchronous until the
+        first tmux await, so concurrent daemon requests cannot both observe
+        themselves as the first same-cwd participant.
+        """
+        if participant.cwd is None:
+            return False
+        cwd = Path(participant.cwd).resolve()
+        for other in self.registry.list():
+            if (
+                other.id != participant.id
+                and other.harness == participant.harness
+                and other.cwd is not None
+                and Path(other.cwd).resolve() == cwd
+            ):
+                return True
+        return False
 
     async def _resolve_session(self, requested: str | None, cwd: str) -> str:
         """Adopt the caller's session when there is one; never nest a server."""

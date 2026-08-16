@@ -25,6 +25,7 @@ import inspect
 import logging
 import shutil
 from pathlib import Path
+from typing import Any
 
 from theater import paths
 from theater.config import Config, ConfigError
@@ -265,10 +266,15 @@ def plan_launch(
     approval: str,
     model: str | None = None,
     resume: str | None = None,
+    isolate_transcript: bool = False,
 ) -> LaunchPlan:
     """The one funnel every spawn goes through, and so the one compat seam.
 
     `model` and `resume` are each forwarded only when the caller named one.
+    `isolate_transcript` is a daemon-computed launch hint and is forwarded only
+    to adapters whose signature explicitly accepts it. That keeps older and
+    third-party adapters compatible without making isolation a generic harness
+    requirement.
     That is what keeps a third-party adapter written against the older
     signature working: it is never called with a keyword it does not accept,
     and the only launches it cannot serve are the ones that ask for something
@@ -280,11 +286,13 @@ def plan_launch(
     found = get(harness)
     check_model(harness, model)
     check_resume(harness, resume)
-    extra: dict[str, str] = {}
+    extra: dict[str, Any] = {}
     if model is not None:
         extra["model"] = model
     if resume is not None:
         extra["resume"] = resume
+    if "isolate_transcript" in inspect.signature(found.plan_launch).parameters:
+        extra["isolate_transcript"] = isolate_transcript
     return found.plan_launch(
         participant_id=participant_id,
         prompt=prompt,

@@ -40,6 +40,18 @@ class Participant:
     cwd: str | None = None
     branch: str | None = None
     session_id: str | None = None
+    #: Provenance of ``session_id``: exact launch/receipt evidence or a
+    #: heuristic cwd/time discovery. Persisted so a daemon restart cannot
+    #: launder an old guess into an exact claim merely because the id matches
+    #: the same foreign transcript again.
+    session_correlation: str | None = None
+    #: Resolved namespace searched by heuristic transcript discovery. Distinct
+    #: domains cannot contain the same transcript even when harness and cwd are
+    #: equal (the normal Vibe root versus a participant-isolated save dir).
+    transcript_domain: str | None = None
+    #: Last location accepted by the central attachment policy. Unlike
+    #: ``session_correlation``, this is a pin, not proof of process identity.
+    transcript_location: str | None = None
     parent_id: str | None = None
     pid: int | None = None
     status: Status = Status.IDLE
@@ -65,6 +77,10 @@ class Participant:
 
     def to_dict(self) -> dict:
         d = asdict(self)
+        # Internal provenance used by the observer; not part of protocol v1.
+        d.pop("session_correlation", None)
+        d.pop("transcript_domain", None)
+        d.pop("transcript_location", None)
         d["tier"] = str(self.tier)
         d["status"] = str(self.status)
         d["addressable"] = self.addressable
@@ -85,6 +101,9 @@ class Participant:
             cwd=row["cwd"],
             branch=row["branch"],
             session_id=row["session_id"],
+            session_correlation=row["session_correlation"],
+            transcript_domain=row["transcript_domain"],
+            transcript_location=row["transcript_location"],
             parent_id=row["parent_id"],
             pid=row["pid"],
             status=status,

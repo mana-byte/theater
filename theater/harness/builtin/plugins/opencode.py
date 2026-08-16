@@ -81,10 +81,12 @@ import logging
 import os
 import sqlite3
 import subprocess
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Literal
 
+from theater import paths
 from theater.harness.base import (
     APPROVALS,
     SERVER_NAME,
@@ -163,6 +165,66 @@ STEP_FINISH = "tool-calls"
 #: Events read per poll. A session that ran while the daemon was down could
 #: have thousands queued; reading them in one gulp would block the observer.
 DRAIN_LIMIT = 500
+
+#: Extra files beside the per-participant OpenCode config. The plugin is also
+#: the capability marker: an older live process has neither file, so its source
+#: keeps the pre-receipt discovery behaviour after a Theater upgrade/restart.
+CORRELATION_PLUGIN_SUFFIX = ".opencode.mjs"
+CORRELATION_RECEIPT_SUFFIX = ".opencode-session"
+CORRELATION_READY_TIMEOUT = 30.0
+
+
+def _plugin_path(config_path: Path) -> Path:
+    return config_path.with_suffix(CORRELATION_PLUGIN_SUFFIX)
+
+
+def _receipt_path(config_path: Path) -> Path:
+    return config_path.with_suffix(CORRELATION_RECEIPT_SUFFIX)
+
+
+def _correlation_plugin(participant_id: str, receipt_path: Path) -> str:
+    """A process-local OpenCode hook that publishes its exact root session.
+
+    OpenCode's database is machine-global, so cwd and creation time cannot say
+    which of two concurrent processes created a row. The plugin runs inside one
+    process and sees that process's ``session.created`` event. It writes a tiny
+    receipt beside Theater's generated config; the observer remains the reader
+    and the daemon remains the only writer of Theater's SQLite state.
+    """
+    participant = json.dumps(participant_id)
+    receipt = json.dumps(str(receipt_path))
+    return f"""import {{ rename, writeFile }} from "node:fs/promises"
+
+const participantID = {participant}
+const receipt = {receipt}
+
+async function publish(body) {{
+  const pending = `${{receipt}}.${{process.pid}}.tmp`
+  await writeFile(pending, JSON.stringify(body) + "\\n", "utf8")
+  await rename(pending, receipt)
+}}
+
+export const TheaterSessionReceipt = async () => {{
+  try {{
+    await publish({{ participant_id: participantID, ready: true }})
+  }} catch (error) {{
+    console.error("theater session receipt failed to initialize", error)
+  }}
+  return {{
+    event: async ({{ event }}) => {{
+      if (event.type !== "session.created" || event.properties.info.parentID) return
+      try {{
+        await publish({{
+          participant_id: participantID,
+          session_id: event.properties.info.id,
+        }})
+      }} catch (error) {{
+        console.error("theater session receipt failed to publish", error)
+      }}
+    }},
+  }}
+}}
+"""
 
 
 def _in_screen_tail(capture: str, marker: str) -> bool:
@@ -332,9 +394,9 @@ class OpenCodeHarness(Harness):
     #: cannot express "accepts it and drops your prompt".
     resume_takes_prompt: bool = False
 
-    def __init__(self, db: Path | None = None):
+    def __init__(self, db: Path | None = None, correlation_dir: Path | None = None):
         #: The observer's business alone; nothing about launching depends on it.
-        self.observer = OpenCodeObserver(db=db)
+        self.observer = OpenCodeObserver(db=db, correlation_dir=correlation_dir)
 
     # ---- launching ------------------------------------------------------
 
@@ -360,6 +422,14 @@ class OpenCodeHarness(Harness):
                 }
             },
         }
+        plugin_path = _plugin_path(config_path)
+        receipt_path = _receipt_path(config_path)
+        # OpenCode keeps all processes' sessions in one machine-global SQLite
+        # database. This per-process hook supplies the correlation fact the
+        # database itself does not contain. Plugin specs from separate config
+        # sources are merged/deduplicated by OpenCode, so this does not replace
+        # plugins in the user's own config.
+        config["plugin"] = [plugin_path.resolve().as_uri()]
         argv = ["opencode"]
         if model:
             # opencode wants `provider/model`, not a bare model name. Passed
@@ -375,10 +445,21 @@ class OpenCodeHarness(Harness):
             argv += ["-s", resume]
         elif prompt:
             argv += ["--prompt", prompt]
+        files = {
+            config_path: json.dumps(config, indent=2),
+            plugin_path: _correlation_plugin(participant_id, receipt_path),
+        }
+        # Resuming does not create a session, so there is no creation event for
+        # the hook to observe. The requested id is already an exact receipt.
+        if resume is not None:
+            files[receipt_path] = (
+                json.dumps({"participant_id": participant_id, "session_id": resume}) + "\n"
+            )
         return LaunchPlan(
             argv=argv,
             env={"OPENCODE_CONFIG": str(config_path)},
-            files={config_path: json.dumps(config, indent=2)},
+            files=files,
+            session_id=resume,
         )
 
     def discover_models(self) -> list[str]:
@@ -431,9 +512,11 @@ class OpenCodeObserver(HarnessObserver):
     lineage hook on `Source`.
     """
 
-    def __init__(self, db: Path | None = None):
+    def __init__(self, db: Path | None = None, correlation_dir: Path | None = None):
         #: Injectable so tests never touch the real database.
         self.db = db or data_dir() / DB_NAME
+        #: Where launch plans put their plugin marker and session receipt.
+        self.correlation_dir = correlation_dir
 
     def open_source(
         self,
@@ -443,6 +526,41 @@ class OpenCodeObserver(HarnessObserver):
         after: float | None = None,
     ) -> Source:
         return OpenCodeSource(self.db, cwd=cwd, session_id=session_id, after=after)
+
+    def open_source_for(
+        self,
+        *,
+        participant_id: str,
+        cwd: str | None,
+        session_id: str | None = None,
+        after: float | None = None,
+        session_exact: bool = False,
+        known_location: str | None = None,
+    ) -> Source:
+        """Use an exact process receipt when this participant launched with one.
+
+        The generated plugin file is the capability marker. Participants that
+        were already running when Theater gained receipts have no marker and
+        retain the cwd/time fallback; newly launched processes fail closed and
+        wait for their own receipt instead of claiming a sibling's session.
+        """
+        config_path = (
+            self.correlation_dir / f"{participant_id}.json"
+            if self.correlation_dir is not None
+            else paths.mcp_config_path(participant_id)
+        )
+        plugin_path = _plugin_path(config_path)
+        receipt_path = _receipt_path(config_path) if plugin_path.exists() else None
+        return OpenCodeSource(
+            self.db,
+            cwd=cwd,
+            session_id=session_id,
+            after=after,
+            participant_id=participant_id,
+            receipt=receipt_path,
+            session_exact=session_exact,
+            known_location=known_location,
+        )
 
     def is_idle_screen(self, capture: str) -> bool:
         """Decided by the absence of the working markers from the footer.
@@ -525,15 +643,26 @@ class OpenCodeSource(Source):
         cwd: str | None,
         session_id: str | None = None,
         after: float | None = None,
+        participant_id: str | None = None,
+        receipt: Path | None = None,
+        session_exact: bool = False,
+        known_location: str | None = None,
     ) -> None:
         self._db = db
         self._cwd = cwd
-        #: Set at attach, so a later re-open can use the sharper key.
+        #: Set after an accepted attach, so a later re-open can use the sharper key.
         self._session_id = session_id
+        self._session_exact = session_exact
+        self._known_location = known_location
         self._after = after
+        self._participant_id = participant_id
+        self._receipt = receipt
+        self._receipt_started = time.monotonic()
         self._conn: sqlite3.Connection | None = None
         self._session: str | None = None
         self._cursor = -1
+        self._pending: tuple[str, int] | None = None
+        self._located_exact = False
         #: message id -> role. Filled from the event stream and, for a message
         #: whose creation we skipped at attach, from the `message` table.
         self._roles: dict[str, str] = {}
@@ -559,6 +688,41 @@ class OpenCodeSource(Source):
     async def refresh(self) -> Batch:
         return await asyncio.to_thread(self._refresh)
 
+    def commit_attachment(self) -> None:
+        """Adopt the session after the observer accepts its binding."""
+        if self._pending is None:
+            raise RuntimeError("no opencode attachment is pending")
+        self._session, self._cursor = self._pending
+        self._session_id = self._session
+        self._known_location = f"opencode://{self._session}"
+        self._pending = None
+        self._roles.clear()
+        self._text.clear()
+        self._tools.clear()
+        self._stamp.clear()
+        self._finished.clear()
+        self._said.clear()
+
+    def discard_attachment(self) -> None:
+        """Reject a session candidate without disturbing the accepted one."""
+        if self._pending is None:
+            raise RuntimeError("no opencode attachment is pending")
+        self._pending = None
+
+    def revoke_attachment(self) -> None:
+        """Forget a heuristic session superseded by a process-local receipt."""
+        self._pending = None
+        self._session = None
+        self._session_id = None
+        self._known_location = None
+        self._cursor = -1
+        self._roles.clear()
+        self._text.clear()
+        self._tools.clear()
+        self._stamp.clear()
+        self._finished.clear()
+        self._said.clear()
+
     async def history(self, *, last_n: int) -> History:
         return await asyncio.to_thread(self._history, last_n)
 
@@ -573,13 +737,16 @@ class OpenCodeSource(Source):
     # ---- synchronous bodies ---------------------------------------------
 
     def _read(self) -> Batch:
+        self._require_decision()
         conn = self._open()
         if conn is None:
             return Batch(waiting=True)
         try:
             if self._session is None:
                 found = self._locate(conn, pinned=True)
-                return self._attach(conn, found) if found else Batch(waiting=True)
+                if found:
+                    return self._attach(conn, found)
+                return self._correlation_problem(conn) or Batch(waiting=True)
             return self._drain(conn)
         except sqlite3.Error:
             # Opened read-only under a live writer; a lock or transient error
@@ -588,12 +755,17 @@ class OpenCodeSource(Source):
             return Batch()
 
     def _refresh(self) -> Batch:
-        """Move to the newest session for this directory if there is one.
+        """Propose the newest session for this directory if there is one.
 
         The pinned session id is ignored, for the reason `TranscriptSource`
         ignores it: a human can start a fresh session inside the same pane, and
         the id we stored names one that will never grow again.
         """
+        self._require_decision()
+        if self._receipt is None:
+            # A machine-global cwd scan can only find "newer", not "mine".
+            # Legacy sources retain their accepted session instead.
+            return Batch()
         conn = self._open()
         if conn is None:
             return Batch()
@@ -617,10 +789,19 @@ class OpenCodeSource(Source):
         conn = self._open()
         if conn is None:
             return History()
+        pinned_sid = None
+        if self._known_location and self._known_location.startswith("opencode://"):
+            pinned_sid = self._known_location.removeprefix("opencode://") or None
+        pinned = self._session is None and pinned_sid is not None
         try:
-            sid = self._session or self._locate(conn, pinned=True)
+            sid = self._session or pinned_sid or self._locate(conn, pinned=True)
             if sid is None:
-                return History()
+                problem = self._correlation_problem(conn)
+                return (
+                    History(error_code=problem.error_code, error=problem.error)
+                    if problem is not None
+                    else History()
+                )
             parts: dict[str, list[dict]] = {}
             rows = conn.execute(
                 "SELECT message_id, data FROM part WHERE session_id = ? ORDER BY time_created, id",
@@ -642,7 +823,12 @@ class OpenCodeSource(Source):
             events = events[-last_n:]
         # Stored rows carry no sequence number, so position stands in for one.
         events = [replace(e, raw_index=i) for i, e in enumerate(events)]
-        return History(location=f"opencode://{sid}", events=events)
+        return History(
+            location=f"opencode://{sid}",
+            events=events,
+            correlation=("exact" if self._session_exact or self._located_exact else "heuristic"),
+            pinned=pinned,
+        )
 
     def _replay(self, info: dict, parts: list[dict]) -> list[Event]:
         """One stored message, as events. Text unclipped: this is history."""
@@ -712,11 +898,26 @@ class OpenCodeSource(Source):
         return self._conn
 
     def _locate(self, conn: sqlite3.Connection, *, pinned: bool) -> str | None:
+        # A receipt is an exact process-local claim and therefore outranks a
+        # stored session id that may have come from the old ambiguous fallback.
+        # Do not fall through while waiting: that would reintroduce the race
+        # during the few milliseconds between session creation and receipt.
+        if self._receipt is not None:
+            sid = self._read_receipt()
+            if sid is None:
+                return None
+            row = conn.execute(
+                "SELECT id FROM session WHERE id = ? AND parent_id IS NULL",
+                (sid,),
+            ).fetchone()
+            self._located_exact = row is not None
+            return row[0] if row is not None else None
         if pinned and self._session_id:
             row = conn.execute(
                 "SELECT id FROM session WHERE id = ?", (self._session_id,)
             ).fetchone()
             if row is not None:
+                self._located_exact = self._session_exact
                 return row[0]
         if not self._cwd:
             return None
@@ -726,18 +927,15 @@ class OpenCodeSource(Source):
         if self._after is not None:
             sql += " AND time_created >= ?"
             args.append(int(self._after * 1000))
-        # Check for multiple matches so an ambiguity is logged, not silent:
-        # two siblings in the same cwd both match, and returning the newest
-        # for either participant is a mis-attribution. The observer's binding
-        # check (`_on_attach`) is the cross-cutting guarantee that refuses the
-        # second binding; this method still returns the newest match so
-        # rotation (the same agent writing a new session) works.
+        self._located_exact = False
+        # Legacy discovery is a candidate, not an ownership claim. The reducer
+        # rejects it when a same-cwd competitor makes it ambiguous.
         count_sql = sql.replace("SELECT id", "SELECT COUNT(*)")
         count = conn.execute(count_sql, args).fetchone()
         if count is not None and count[0] > 1:
             logger.warning(
                 "opencode _locate: %d sessions match cwd %s; "
-                "returning the newest — the observer will refuse a collision",
+                "returning a heuristic candidate for the reducer to validate",
                 count[0],
                 self._cwd,
             )
@@ -745,8 +943,55 @@ class OpenCodeSource(Source):
         row = conn.execute(sql, args).fetchone()
         return row[0] if row is not None else None
 
+    def _read_receipt(self) -> str | None:
+        """Read and validate the process-local participant/session receipt."""
+        if self._receipt is None or self._participant_id is None:
+            return None
+        try:
+            found = json.loads(self._receipt.read_text())
+        except (FileNotFoundError, OSError, ValueError):
+            return None
+        if not isinstance(found, dict) or found.get("participant_id") != self._participant_id:
+            return None
+        sid = found.get("session_id")
+        return sid if isinstance(sid, str) and sid else None
+
+    def _correlation_problem(self, conn: sqlite3.Connection) -> Batch | None:
+        """Make a missing exact channel visible after a bounded startup."""
+        if self._receipt is None or self._participant_id is None:
+            return None
+        if time.monotonic() - self._receipt_started < CORRELATION_READY_TIMEOUT:
+            return None
+        try:
+            found = json.loads(self._receipt.read_text())
+        except (FileNotFoundError, OSError, ValueError):
+            found = None
+        if not isinstance(found, dict) or found.get("participant_id") != self._participant_id:
+            return Batch(
+                waiting=True,
+                error_code="transcript_correlation_failed",
+                error="OpenCode's Theater correlation plugin did not initialize",
+            )
+        # A ready marker may legitimately wait forever in a promptless pane.
+        # Once a matching root session exists, the same process should already
+        # have published its exact id through session.created.
+        if not self._cwd:
+            return None
+        sql = "SELECT 1 FROM session WHERE directory = ? AND parent_id IS NULL"
+        args: list = [str(Path(self._cwd).resolve())]
+        if self._after is not None:
+            sql += " AND time_created >= ?"
+            args.append(int(self._after * 1000))
+        if conn.execute(sql + " LIMIT 1", args).fetchone() is None:
+            return None
+        return Batch(
+            waiting=True,
+            error_code="transcript_correlation_failed",
+            error="OpenCode created a session but its exact Theater receipt is missing",
+        )
+
     def _attach(self, conn: sqlite3.Connection, sid: str) -> Batch:
-        """Point the cursor at the end of a session's events.
+        """Stage a cursor at the end of a session's events.
 
         History is skipped rather than replayed, as everywhere else. Status is
         reported explicitly here — it is the one moment the source knows
@@ -757,18 +1002,21 @@ class OpenCodeSource(Source):
             "SELECT COALESCE(MAX(seq), -1), COUNT(*) FROM event WHERE aggregate_id = ?",
             (sid,),
         ).fetchone()
-        self._session = self._session_id = sid
-        self._cursor = row[0]
-        self._roles.clear()
-        self._text.clear()
-        self._tools.clear()
-        self._stamp.clear()
-        self._finished.clear()
-        self._said.clear()
+        status = self._status(conn, sid)
+        self._pending = (sid, row[0])
         return Batch(
-            attached=Attachment(location=f"opencode://{sid}", session_id=sid, skipped=row[1]),
-            status=self._status(conn, sid),
+            attached=Attachment(
+                location=f"opencode://{sid}",
+                session_id=sid,
+                skipped=row[1],
+                correlation="exact" if self._located_exact else "heuristic",
+            ),
+            status=status,
         )
+
+    def _require_decision(self) -> None:
+        if self._pending is not None:
+            raise RuntimeError("attachment must be committed or discarded before reading again")
 
     def _status(self, conn: sqlite3.Connection, sid: str) -> Status:
         """Idle or working, from the newest message.

@@ -213,6 +213,40 @@ async def test_job_segment_returns_metadata_and_transcript(registry, tmp_path):
     assert "assistant" in roles
 
 
+async def test_job_segment_refuses_a_contested_heuristic_transcript(registry, tmp_path):
+    """Recall must not bypass read_transcript's Fulgenzio/Senterello guard."""
+    root, project, sid, transcript = _vibe_session(tmp_path)
+    from theater import harness as harness_mod
+
+    harness_mod.HARNESSES["vibe"] = VibeHarness(root=root)
+    _append(transcript, {"role": "assistant", "content": "belongs to the sibling"})
+    target_id = _make_job(
+        registry.store,
+        registry,
+        handle="ambiguous-vibe",
+        target_cwd=str(project),
+        session_id=sid,
+    )
+    domain = str(root.resolve())
+    target = registry.get(target_id)
+    target.session_correlation = "heuristic"
+    target.transcript_domain = domain
+    registry.store.upsert_participant(target)
+    sibling = registry.register(harness="vibe", pane=None, cwd=str(project))
+    sibling.transcript_domain = domain
+    registry.store.upsert_participant(sibling)
+
+    result = await read_segment(
+        "ambiguous-vibe",
+        store=registry.store,
+        registry=registry,
+        cwd=str(tmp_path),
+    )
+
+    assert result["transcript"]["available"] is False
+    assert result["transcript"]["error_code"] == "transcript_correlation_ambiguous"
+
+
 async def test_job_segment_missing_transcript_still_returns_metadata(registry, tmp_path):
     """A job whose transcript no longer exists returns everything the
     database still remembers, with an explicit marker that the

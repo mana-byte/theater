@@ -11,11 +11,15 @@ import asyncio
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from shipped import VibeHarness
 from sqlalchemy import update
 
+from theater.daemon import methods as methods_mod
+from theater.daemon import observer as observer_mod
+from theater.daemon.jobs import JobManager
 from theater.daemon.observer import (
     AWAITING_INPUT_TIMEOUT,
     RELOCATE_TIMEOUT,
@@ -33,8 +37,8 @@ from theater.harness.observation import (
     ScreenKind,
     ScreenReading,
 )
-from theater.harness.source import Batch, Source
-from theater.models import Status, now
+from theater.harness.source import Attachment, Batch, Source
+from theater.models import JobState, Status, now
 
 USER = {"role": "user", "content": "do the thing"}
 WORKING = {
@@ -1005,6 +1009,17 @@ async def test_the_source_is_closed_when_the_watcher_stops(registry):
     assert harness.observer.source.closed
 
 
+async def test_an_incomplete_attachment_source_retires_instead_of_spinning(registry):
+    """A broken plugin logs once and stops; retrying cannot add its handshake."""
+    harness = SourceHarness(Batch(attached=Attachment("scripted://session")))
+    observer = Observer(registry, {"scripted": harness})
+    p = registry.register(harness="scripted", pane=None, cwd="/tmp")
+
+    await asyncio.wait_for(observer._watch(p.id, "scripted"), timeout=0.2)
+
+    assert harness.observer.source.closed
+
+
 def test_consumed_input_counts_as_activity_even_with_no_events(registry):
     """Bookkeeping records move the file without parsing to anything.
 
@@ -1026,3 +1041,84 @@ def test_events_count_as_activity_even_if_the_source_forgets_to_say_so(registry)
     batch = Batch(events=[said("hello", turn_end=False)])
     assert observer._apply(p.id, batch, clock, TurnAccumulator()) is True
     assert clock.last_text == "hello"
+
+
+def test_correlation_failure_grace_starts_at_the_error_and_at_each_job(registry, monkeypatch):
+    p = registry.register(harness="scripted", pane=None, cwd="/tmp")
+    manager = JobManager(registry.store)
+    old = manager.create(handle="old", caller_id="caller", target_id=p.id, kind="send")
+    new = manager.create(handle="new", caller_id="caller", target_id=p.id, kind="send")
+    registry.store.conn.execute(
+        update(jobs_table).where(jobs_table.c.handle == old.handle).values(created_at=0.0)
+    )
+    registry.store.conn.execute(
+        update(jobs_table).where(jobs_table.c.handle == new.handle).values(created_at=130.0)
+    )
+    clock = [100.0]
+    monkeypatch.setattr(observer_mod, "wall_now", lambda: clock[0])
+    observer = Observer(registry, harnesses={}, jobs=manager)
+    failed = Batch(
+        waiting=True,
+        error_code="transcript_correlation_failed",
+        error="receipt missing",
+    )
+
+    observer._update_source_error(p.id, failed)
+    clock[0] = 129.0
+    observer._update_source_error(p.id, failed)
+    assert manager.get("old").state == JobState.RUNNING
+
+    clock[0] = 131.0
+    observer._update_source_error(p.id, failed)
+    assert manager.get("old").state == JobState.CRASHED
+    assert manager.get("new").state == JobState.RUNNING
+
+    clock[0] = 161.0
+    observer._update_source_error(p.id, failed)
+    assert manager.get("new").state == JobState.CRASHED
+
+
+def test_a_clean_source_batch_resets_correlation_failure_grace(registry, monkeypatch):
+    p = registry.register(harness="scripted", pane=None, cwd="/tmp")
+    manager = JobManager(registry.store)
+    job = manager.create(handle="job", caller_id="caller", target_id=p.id, kind="send")
+    registry.store.conn.execute(
+        update(jobs_table).where(jobs_table.c.handle == job.handle).values(created_at=0.0)
+    )
+    clock = [100.0]
+    monkeypatch.setattr(observer_mod, "wall_now", lambda: clock[0])
+    observer = Observer(registry, harnesses={}, jobs=manager)
+    failed = Batch(waiting=True, error_code="transcript_correlation_failed")
+
+    observer._update_source_error(p.id, failed)
+    clock[0] = 125.0
+    observer._update_source_error(p.id, Batch(waiting=True))
+    observer._update_source_error(p.id, failed)
+    clock[0] = 140.0
+    observer._update_source_error(p.id, failed)
+
+    assert manager.get("job").state == JobState.RUNNING
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    ["transcript_correlation_failed", "transcript_correlation_ambiguous"],
+)
+async def test_await_surfaces_the_actionable_correlation_failure_message(registry, error_code):
+    p = registry.register(harness="scripted", pane=None, cwd="/tmp")
+    manager = JobManager(registry.store)
+    manager.create(handle="job", caller_id="caller", target_id=p.id, kind="send")
+    manager.finish(
+        "job",
+        state=JobState.CRASHED,
+        error_code=error_code,
+    )
+
+    rows = await methods_mod.METHODS["jobs.await"](
+        SimpleNamespace(jobs=manager, store=registry.store),
+        {"handles": ["job"], "max_wait": 0},
+    )
+
+    assert rows[0]["error_code"] == error_code
+    assert "may still be alive" in rows[0]["error"]
+    assert "do not retry" in rows[0]["error"]

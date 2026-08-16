@@ -43,11 +43,12 @@ from `open_source`; `opencode.py` is the worked example.
 
 from __future__ import annotations
 
+import inspect
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from theater.harness.base import Event, NativeChild
 
@@ -158,6 +159,26 @@ class HarnessObserver(ABC):
             f"{self.has_transcript!r} but does not implement open_source"
         )
 
+    def open_source_for(
+        self,
+        *,
+        participant_id: str,
+        cwd: str | None,
+        session_id: str | None = None,
+        after: float | None = None,
+        session_exact: bool = False,
+        known_location: str | None = None,
+    ) -> Source:
+        """Open a source with the Theater participant identity available.
+
+        Most transcript formats do not record Theater's id, so the default
+        deliberately forwards to :meth:`open_source` and costs existing
+        third-party observers nothing. A harness with a process-local
+        correlation channel can override this method without pushing that
+        concern into the reducer or changing the long-standing plugin method.
+        """
+        return self.open_source(cwd=cwd, session_id=session_id, after=after)
+
     @abstractmethod
     def is_idle_screen(self, capture: str) -> bool:
         """Does the rendered screen show a bare prompt (waiting for input)?
@@ -233,6 +254,41 @@ class HarnessObserver(ABC):
         return []
 
 
+def open_participant_source(
+    observer: HarnessObserver,
+    *,
+    participant_id: str,
+    cwd: str | None,
+    session_id: str | None = None,
+    after: float | None = None,
+    session_exact: bool = False,
+    known_location: str | None = None,
+) -> Source:
+    """Compatibility dispatch for the optional participant-aware hook.
+
+    Local harness plugins have historically been accepted by structural
+    validation and need not inherit :class:`HarnessObserver`. Such an observer
+    has no inherited ``open_source_for`` method, so fall back to its established
+    ``open_source`` call shape. An observer that needs exact correlation opts in
+    by defining the new hook.
+    """
+    factory = getattr(observer, "open_source_for", None)
+    if callable(factory):
+        extra: dict[str, Any] = {}
+        if "session_exact" in inspect.signature(factory).parameters:
+            extra["session_exact"] = session_exact
+        if "known_location" in inspect.signature(factory).parameters:
+            extra["known_location"] = known_location
+        return factory(
+            participant_id=participant_id,
+            cwd=cwd,
+            session_id=session_id,
+            after=after,
+            **extra,
+        )
+    return observer.open_source(cwd=cwd, session_id=session_id, after=after)
+
+
 class TranscriptObserver(HarnessObserver):
     """The default: tail an append-only transcript the harness already writes.
 
@@ -241,6 +297,11 @@ class TranscriptObserver(HarnessObserver):
     offsets, torn lines, rotation, attaching at EOF) is `TranscriptSource`, and
     a plugin never sees it.
     """
+
+    #: Cwd-only relocation is unsafe in a machine-global transcript root: a
+    #: newer file may belong to a sibling. A participant-isolated observer may
+    #: opt in because every candidate under its root has the same owner.
+    relocate_by_cwd: bool = False
 
     def open_source(
         self,
@@ -251,7 +312,36 @@ class TranscriptObserver(HarnessObserver):
     ) -> Source:
         from theater.harness.source import TranscriptSource
 
-        return TranscriptSource(self, cwd=cwd, session_id=session_id, after=after)
+        return TranscriptSource(
+            self,
+            cwd=cwd,
+            session_id=session_id,
+            after=after,
+            allow_refresh=self.relocate_by_cwd,
+        )
+
+    def open_source_for(
+        self,
+        *,
+        participant_id: str,
+        cwd: str | None,
+        session_id: str | None = None,
+        after: float | None = None,
+        session_exact: bool = False,
+        known_location: str | None = None,
+    ) -> Source:
+        """Preserve persisted session-id provenance in the source claim."""
+        from theater.harness.source import TranscriptSource
+
+        return TranscriptSource(
+            self,
+            cwd=cwd,
+            session_id=session_id,
+            after=after,
+            allow_refresh=self.relocate_by_cwd,
+            exact_session=session_exact,
+            known_location=known_location,
+        )
 
     @abstractmethod
     def find_transcript(

@@ -65,6 +65,7 @@ def test_migrations_created_the_alembic_version_table(store):
     } <= tables
     stamped = store.conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
     assert stamped == HEAD
+    assert float(store.get_meta("transcript_location_epoch")) > 0
 
 
 def test_bus_ids_are_never_reused(store):

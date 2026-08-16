@@ -151,6 +151,7 @@ def replay_opencode_capture(db: Path, directory: str) -> list[Event]:
 
         source = OpenCodeObserver(db=db).open_source(cwd=directory)
         asyncio.run(source.read())  # attach at the end of an empty log
+        source.commit_attachment()
 
         for table in ("message", "part", "event"):
             # The captured `event.id` is opencode's own `evt_…` string and the

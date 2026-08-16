@@ -277,7 +277,7 @@ class CodexHarness(Harness):
             argv += ["-a", "untrusted", "-s", "read-only"]
         if prompt:
             argv.append(prompt)
-        return LaunchPlan(argv=argv)
+        return LaunchPlan(argv=argv, session_id=resume)
 
 
 class CodexObserver(TranscriptObserver):
@@ -326,7 +326,7 @@ class CodexObserver(TranscriptObserver):
         # Collect all matches so an ambiguity is logged, not silent: two
         # siblings in the same cwd both match, and returning the newest for
         # either participant is a mis-attribution. The observer's binding
-        # check (`_on_attach`) is the cross-cutting guarantee that refuses the
+        # check (`_accept_attachment`) is the cross-cutting guarantee that refuses the
         # second binding; this method still returns the newest match so
         # rotation (the same agent writing a new transcript) works.
         matches: list[Path] = []

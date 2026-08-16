@@ -53,7 +53,7 @@ BASELINE = "0001"
 #: The latest revision. A legacy database is stamped at BASELINE and then
 #: upgraded to this; a fresh database lands here directly. Tests assert
 #: against this rather than hardcoding a revision string.
-HEAD = "0007"
+HEAD = "0008"
 
 
 def _set_pragmas(dbapi_connection, _record) -> None:
@@ -144,6 +144,9 @@ class Store:
             "cwd": p.cwd,
             "branch": p.branch,
             "session_id": p.session_id,
+            "session_correlation": p.session_correlation,
+            "transcript_domain": p.transcript_domain,
+            "transcript_location": p.transcript_location,
             "parent_id": p.parent_id,
             "pid": p.pid,
             "status": str(p.status),

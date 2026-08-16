@@ -67,6 +67,7 @@ import time
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from theater.config import ObserverSection
 from theater.daemon.registry import Registry
@@ -79,7 +80,8 @@ from theater.harness import (
     clip,
     status_after,
 )
-from theater.harness.source import Attachment, Batch, Source
+from theater.harness.observation import open_participant_source
+from theater.harness.source import Attachment, Batch, History, Source, SourceContractError
 from theater.models import JobState, Status, Tier
 from theater.models import now as wall_now
 
@@ -161,6 +163,8 @@ UNMATCHED_CAP = 256
 #: as a `send` whose `deliver_text` raised. Distinct from `RESCUE_CODE`
 #: (salvages text, stays DONE) so a caller can tell the two apart.
 UNDELIVERED_CODE = "prompt_never_seen"
+OBSERVATION_FAILURE_GRACE = 30.0
+CORRELATION_AMBIGUOUS_CODE = "transcript_correlation_ambiguous"
 _RAW_RESULT_UNSET = object()
 
 
@@ -190,6 +194,61 @@ def answers_prompt(heard: Sequence[str], prompt: str | None) -> bool:
         return True
     needle = " ".join(prompt.split())[:_PROMPT_MATCH]
     return any(needle in " ".join(text.split()) for text in heard)
+
+
+def history_correlation_is_ambiguous(registry: Registry, pid: str, history: History) -> bool:
+    """Whether a history read could belong to another retained participant.
+
+    History is not a live control decision: dead rows matter too, because their
+    transcript files remain on disk. A reducer-accepted pin prevents rescanning
+    but does not become exact evidence: duplicate pins and post-epoch missing
+    pins still refuse. Pre-epoch NULLs are an explicit compatibility allowance
+    for installations where Theater had not begun recording locations yet.
+    """
+    if history.correlation != "heuristic":
+        return False
+    if history.location is None:
+        # Nothing can be misattributed when no content was found. Callers
+        # report the sharper "transcript missing" diagnostic themselves.
+        return False
+    participant = registry.store.get_participant(pid)
+    if participant is None or not participant.cwd:
+        return False
+    cwd = Path(participant.cwd).resolve()
+    domain = history.collision_domain or participant.transcript_domain
+    raw_epoch = registry.store.get_meta("transcript_location_epoch")
+    try:
+        location_epoch = float(raw_epoch) if raw_epoch is not None else None
+    except ValueError:
+        location_epoch = None
+    for other in registry.list(include_dead=True):
+        if (
+            other.id == pid
+            or other.harness != participant.harness
+            or not other.cwd
+            or Path(other.cwd).resolve() != cwd
+        ):
+            continue
+        if (
+            domain is not None
+            and other.transcript_domain is not None
+            and domain != other.transcript_domain
+        ):
+            continue
+        if other.transcript_location is not None:
+            if history.location is not None and other.transcript_location != history.location:
+                continue
+            return True
+        if (
+            other.status is Status.DEAD
+            and location_epoch is not None
+            and other.last_activity < location_epoch
+        ):
+            # This row predates location collection. Permitting it is a bounded
+            # upgrade-policy choice, not evidence that it owned no transcript.
+            continue
+        return True
+    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -375,13 +434,21 @@ class Observer:
         #: Per-job count of consecutive turn ends that did not match the
         #: waiting prompt.
         self._unmatched: dict[str, int] = {}
+        #: First wall-clock occurrence of each still-persistent source failure.
+        #: A clean batch clears it. Grace is measured from this point and from
+        #: each affected job's own creation, whichever is later.
+        self._source_errors: dict[tuple[str, str], float] = {}
         #: Transcript path -> participant id, for the live-binding guarantee.
         #: A transcript already bound to one live participant is not silently
         #: rebound to another: two same-cwd siblings can otherwise collapse onto
         #: one file, and the observer attributes one child's turns, status and
-        #: bus events to its sibling. Checked in `_on_attach`; cleaned up in the
+        #: bus events to its sibling. Checked in `_accept_attachment`; cleaned up in the
         #: `_watch` finally block.
         self._bound_transcripts: dict[str, str] = {}
+        self._binding_correlation: dict[str, str] = {}
+        self._binding_sessions: dict[str, str | None] = {}
+        self._sources: dict[str, Source] = {}
+        self._reset_watch_state: set[str] = set()
         self._supervisor: asyncio.Task | None = None
         self._stopping = asyncio.Event()
 
@@ -467,14 +534,21 @@ class Observer:
         source = self._open_source(pid, observer)
         if source is None:
             return
+        self._sources[pid] = source
         clock = QuietClock()
         turns = TurnAccumulator()
 
         try:
             while not self._stopping.is_set():
                 try:
+                    if pid in self._reset_watch_state:
+                        self._reset_watch_state.discard(pid)
+                        clock = QuietClock()
+                        turns = TurnAccumulator()
                     batch = await source.read()
+                    self._validate_batch(source, batch)
                     if batch.waiting:
+                        self._update_source_error(pid, batch)
                         # Nothing to read from yet. Silence from an unattached
                         # source says nothing about the agent — but the screen
                         # does, and the pane has existed since the spawn. Claude
@@ -484,25 +558,33 @@ class Observer:
                         await self._screen_only(pid, observer, clock)
                         await self._sleep(self.search)
                         continue
+                    self._report_source_error(pid, batch)
+                    if not self._accept_attachment(pid, source, batch):
+                        # An initial candidate has nowhere accepted to keep
+                        # watching, so stay on the slower discovery backoff.
+                        await self._sleep(self.search)
+                        continue
+                    self._clear_source_error_on_progress(pid, batch)
                     if self._apply(pid, batch, clock, turns):
                         clock.stir()
                         self._unblock(pid)
-                    elif batch.attached is not None:
-                        # Attachment was refused (collision with a live
-                        # participant). Detach the source so the next read
-                        # searches again — the session id may have been
-                        # discovered by then, making the lookup exact.
-                        source.detach()
-                        await self._sleep(self.search)
-                        continue
                     else:
                         await self._on_quiet(pid, observer, source, clock, turns)
                 except asyncio.CancelledError:
                     raise
+                except SourceContractError:
+                    # Retrying cannot repair an adapter that does not implement
+                    # the attachment protocol. Stop this watcher instead of
+                    # logging the same traceback at poll cadence forever.
+                    logger.exception("source contract failed for %s; retiring watcher", pid)
+                    return
                 except Exception:
                     logger.exception("observing %s failed", pid)
                 await self._sleep(self.poll)
         finally:
+            self._clear_source_errors(pid)
+            self._reset_watch_state.discard(pid)
+            self._sources.pop(pid, None)
             self._release_transcript(pid)
             try:
                 await source.aclose()
@@ -523,7 +605,29 @@ class Observer:
         if p is None:
             return None
         after = p.created_at if p.tier is Tier.SPAWNED else None
-        return observer.open_source(cwd=p.cwd, session_id=p.session_id, after=after)
+        source = open_participant_source(
+            observer,
+            participant_id=p.id,
+            cwd=p.cwd,
+            session_id=p.session_id,
+            after=after,
+            session_exact=p.session_correlation == "exact",
+            known_location=p.transcript_location,
+        )
+        if source.collision_domain is not None and p.transcript_domain != source.collision_domain:
+            p.transcript_domain = source.collision_domain
+            self.store.upsert_participant(p)
+        return source
+
+    @staticmethod
+    def _validate_batch(source: Source, batch: Batch) -> None:
+        """Reject contradictory source facts without stranding a candidate."""
+        if not (batch.waiting and batch.attached is not None):
+            return
+        source.discard_attachment()
+        raise SourceContractError(
+            f"{type(source).__name__} returned a batch that is both waiting and attached"
+        )
 
     def _apply(self, pid: str, batch: Batch, clock: QuietClock, turns: TurnAccumulator) -> bool:
         """Put a batch on the bus and move the participant's status.
@@ -551,12 +655,6 @@ class Observer:
         across two of them, and text accumulated in one must still be there
         when the boundary arrives in the next.
         """
-        if batch.attached is not None and not self._on_attach(pid, batch.attached):
-            # Attachment refused: the transcript is already bound to a
-            # different live participant. Return False so the watcher
-            # detaches the source and goes back to searching.
-            return False
-
         # Resolved lazily: the job handle is looked up at most once per
         # _apply call, and only when at least one event carries paths. Most
         # batches carry none, so this defers the database query to the
@@ -620,6 +718,61 @@ class Observer:
             self._settle(pid, status_after(last))
 
         return batch.progressed or bool(batch.events) or batch.attached is not None
+
+    def _handle_source_error(self, pid: str, batch: Batch) -> None:
+        """Report broken exact correlation and bound affected awaits.
+
+        The source keeps polling, so a late receipt can recover. An old job is
+        crashed explicitly rather than waiting forever or falling back to a
+        same-cwd transcript that may belong to another process.
+        """
+        assert batch.error_code is not None
+        key = (pid, batch.error_code)
+        for stale in [item for item in self._source_errors if item[0] == pid and item != key]:
+            self._source_errors.pop(stale, None)
+        failed_at = self._source_errors.get(key)
+        if failed_at is None:
+            failed_at = wall_now()
+            self._source_errors[key] = failed_at
+            logger.error("observation failed for %s: %s", pid, batch.error or batch.error_code)
+            self.store.bus_append(
+                "agent.observation_error",
+                to_id=pid,
+                payload={"code": batch.error_code, "message": batch.error or ""},
+            )
+        if self.jobs is None:
+            return
+        now = wall_now()
+        for job in self.store.running_jobs_for_target(pid):
+            # A source that failed long ago must not instantly crash a prompt
+            # just created against a still-live pane. Give both the channel and
+            # the individual job a full chance to recover.
+            if now - max(failed_at, job.created_at) >= OBSERVATION_FAILURE_GRACE:
+                self._finish(
+                    job.handle,
+                    "",
+                    error_code=batch.error_code,
+                    state=JobState.CRASHED,
+                    raw_result=None,
+                )
+
+    def _update_source_error(self, pid: str, batch: Batch) -> None:
+        if batch.error_code is None:
+            self._clear_source_errors(pid)
+            return
+        self._handle_source_error(pid, batch)
+
+    def _report_source_error(self, pid: str, batch: Batch) -> None:
+        if batch.error_code is not None:
+            self._handle_source_error(pid, batch)
+
+    def _clear_source_error_on_progress(self, pid: str, batch: Batch) -> None:
+        if batch.error_code is None:
+            self._clear_source_errors(pid)
+
+    def _clear_source_errors(self, pid: str) -> None:
+        for key in [item for item in self._source_errors if item[0] == pid]:
+            self._source_errors.pop(key, None)
 
     def _turn_result(self, event, turn: Turn) -> tuple[str, str | object | None]:
         if not (event.text or event.raw_text):
@@ -733,9 +886,18 @@ class Observer:
         # a directory scan.
         if clock.quiet_for(now) > self.relocate:
             batch = await source.refresh()
-            if self._apply(pid, batch, clock, turns):
+            # A refused rotation leaves the accepted source untouched. Keep
+            # running the other quiet arms and return to the normal poll
+            # cadence; this is not an unattached discovery search.
+            accepted = self._accept_attachment(pid, source, batch)
+            if accepted and self._apply(pid, batch, clock, turns):
                 clock.stir()
                 return
+            # The relocate arm has its own throttle, just like screen and
+            # rescue. In particular, a rejected candidate remains discoverable
+            # on every scan; without this, staging it safely would re-read the
+            # foreign transcript on every poll for the rest of its lifetime.
+            clock.quiet_since = now
 
         if clock.screen_quiet_for(now) > self.awaiting:
             await self._check_idle_screen(pid, observer)
@@ -774,39 +936,181 @@ class Observer:
             await self._check_idle_screen(pid, observer)
             clock.screen_quiet_since = now  # throttle
 
-    def _on_attach(self, pid: str, attached: Attachment) -> bool:
-        """A source started reading somewhere. Say so, and settle the status.
+    def _accept_attachment(self, pid: str, source: Source, batch: Batch) -> bool:
+        """Accept or reject a staged source attachment in one central place.
 
-        Returns whether the attachment was accepted. A transcript already
-        bound to a different live participant is refused rather than silently
-        rebound: two same-cwd siblings can otherwise collapse onto one file,
-        and the observer attributes one child's turns, status transitions and
-        bus events to its sibling. The per-harness `find_transcript` is the
-        replaceable seam (job 1); this guarantee is above it because it must
-        hold for every adapter, not just the ones that got discovery right.
+        The source has not changed its live cursor yet. Collision refusal can
+        therefore discard the candidate without losing the participant's own
+        accepted transcript — the guarantee that prevents a sibling's later
+        writes from leaking into this watcher. This guarantee sits above the
+        replaceable per-harness discovery seam because every source needs it.
+
+        A failure before commit/discard also discards the candidate. Otherwise
+        one transient store error would leave `_pending` set and every later
+        read would fail before the source could recover.
         """
-        owner = self._bound_transcripts.get(attached.location)
-        if owner is not None and owner != pid:
-            holder = self.store.get_participant(owner)
-            if holder is not None and holder.status is not Status.DEAD:
+        attached = batch.attached
+        if attached is None:
+            return True
+        decided = False
+        try:
+            if attached.correlation == "heuristic" and self._has_cwd_competitor(
+                pid, attached.collision_domain
+            ):
+                participant = self.store.get_participant(pid)
                 logger.warning(
-                    "transcript %s is already bound to %s; refusing to bind it "
-                    "to %s — two same-cwd participants would share one file",
+                    "refusing heuristic transcript %s for %s: another live %s "
+                    "participant shares its cwd",
                     attached.location,
-                    owner,
                     pid,
+                    participant.harness if participant is not None else "unknown",
                 )
+                source.discard_attachment()
+                decided = True
+                self._handle_attachment_ambiguity(pid, attached)
                 return False
+            owner = self._bound_transcripts.get(attached.location)
+            if owner is not None and owner != pid:
+                holder = self.store.get_participant(owner)
+                if holder is not None and holder.status is not Status.DEAD:
+                    prior = self._binding_correlation.get(attached.location, "exact")
+                    if attached.correlation == "exact" and prior == "heuristic":
+                        self._revoke_binding(attached.location, owner)
+                    else:
+                        logger.warning(
+                            "transcript %s is already bound to %s (%s); refusing "
+                            "to bind it to %s (%s)",
+                            attached.location,
+                            owner,
+                            prior,
+                            pid,
+                            attached.correlation,
+                        )
+                        source.discard_attachment()
+                        decided = True
+                        self._handle_attachment_ambiguity(pid, attached)
+                        return False
+            source.commit_attachment()
+            decided = True
+        except Exception:
+            if not decided:
+                # Preserve the original failure if cleanup itself is broken.
+                with contextlib.suppress(Exception):
+                    source.discard_attachment()
+            raise
+        self._on_attach(pid, attached)
+        self._clear_source_errors(pid)
+        return True
+
+    def _handle_attachment_ambiguity(self, pid: str, attached: Attachment) -> None:
+        # A refused rotation leaves an already accepted source intact; that is
+        # a safe, still-working observation channel, not a reason to crash its
+        # job. Only an initially unbound participant is unable to make progress.
+        if pid in self._bound_transcripts.values():
+            return
+        self._handle_source_error(
+            pid,
+            Batch(
+                error_code=CORRELATION_AMBIGUOUS_CODE,
+                error=(
+                    f"transcript candidate {attached.location!r} is not uniquely attributable "
+                    "to this participant"
+                ),
+            ),
+        )
+
+    def _revoke_binding(self, location: str, owner: str) -> None:
+        """Let exact process evidence displace an earlier cwd guess."""
+        source = self._sources.get(owner)
+        if source is None:
+            raise SourceContractError(
+                f"cannot revoke heuristic binding {location!r}: owner source is unavailable"
+            )
+        source.revoke_attachment()
+        self._reset_watch_state.add(owner)
+        participant = self.store.get_participant(owner)
+        bound_session = self._binding_sessions.get(location)
+        if participant is not None:
+            if participant.session_id == bound_session:
+                participant.session_id = None
+                participant.session_correlation = None
+            # The location itself was revoked regardless of whether a later
+            # rotation changed the participant's recorded session id.
+            participant.transcript_location = None
+            self.store.upsert_participant(participant)
+        self._bound_transcripts.pop(location, None)
+        self._binding_correlation.pop(location, None)
+        self._binding_sessions.pop(location, None)
+        self.store.bus_append(
+            "agent.observation_error",
+            to_id=owner,
+            payload={
+                "code": "transcript_binding_revoked",
+                "message": "an exact process claim displaced this heuristic transcript binding",
+            },
+        )
+        logger.warning(
+            "exact transcript claim revoked heuristic binding %s from %s", location, owner
+        )
+
+    def _has_cwd_competitor(self, pid: str, collision_domain: str | None) -> bool:
+        participant = self.store.get_participant(pid)
+        if participant is None or not participant.cwd:
+            return False
+        cwd = Path(participant.cwd).resolve()
+        for other in self.registry.list():
+            if (
+                other.id == pid
+                or other.status is Status.DEAD
+                or other.harness != participant.harness
+                or not other.cwd
+                or Path(other.cwd).resolve() != cwd
+            ):
+                continue
+            other_domain = other.transcript_domain
+            if other_domain is None:
+                other_source = self._sources.get(other.id)
+                other_domain = other_source.collision_domain if other_source is not None else None
+            # Distinct declared roots cannot contain the same transcript. An
+            # unavailable/undeclared domain stays conservative and competes.
+            if (
+                collision_domain is not None
+                and other_domain is not None
+                and collision_domain != other_domain
+            ):
+                continue
+            return True
+        return False
+
+    def history_is_ambiguous(self, pid: str, history: History) -> bool:
+        """Whether a short-lived history read is only a contested cwd guess."""
+        return history_correlation_is_ambiguous(self.registry, pid, history)
+
+    def _on_attach(self, pid: str, attached: Attachment) -> None:
+        """Record the effects of an attachment already accepted and committed."""
         # Release any previous binding this participant held, so a rotation
         # (vibe opens a new session directory every turn) frees the old path
         # before claiming the new one.
         self._release_transcript(pid)
         self._bound_transcripts[attached.location] = pid
+        self._binding_correlation[attached.location] = attached.correlation
+        self._binding_sessions[attached.location] = attached.session_id
         p = self.store.get_participant(pid)
         session_id = attached.session_id
-        if p is not None and session_id and p.session_id != session_id:
-            p.session_id = session_id
-            self.store.upsert_participant(p)
+        if p is not None:
+            changed = False
+            if p.transcript_location != attached.location:
+                p.transcript_location = attached.location
+                changed = True
+            if session_id and p.session_id != session_id:
+                p.session_id = session_id
+                p.session_correlation = attached.correlation
+                changed = True
+            elif session_id and p.session_correlation != attached.correlation:
+                p.session_correlation = attached.correlation
+                changed = True
+            if changed:
+                self.store.upsert_participant(p)
         self.store.bus_append(
             "agent.transcript",
             to_id=pid,
@@ -827,7 +1131,6 @@ class Observer:
             if event.turn_end:
                 result_text, raw_result = self._turn_result(event, Turn(""))
                 self._answer_turn(pid, result_text, raw_result=raw_result)
-        return True
 
     def _release_transcript(self, pid: str) -> None:
         """Drop a participant's claim on its transcript, if it still holds it.
@@ -839,6 +1142,8 @@ class Observer:
         to_drop = [path for path, owner in self._bound_transcripts.items() if owner == pid]
         for path in to_drop:
             del self._bound_transcripts[path]
+            self._binding_correlation.pop(path, None)
+            self._binding_sessions.pop(path, None)
 
     def _settle(self, pid: str, desired: Status) -> None:
         p = self.store.get_participant(pid)

@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -211,6 +212,12 @@ class ClaudeCodeHarness(Harness):
         # Code 2.x, so the space form greedily consumes the prompt positional
         # as a second config path and claude exits before the observer attaches.
         argv = ["claude", f"--mcp-config={config_path}"]
+        # Claude accepts a caller-selected UUID for a cold session. Choosing it
+        # before the pane exists removes the same-cwd creation race entirely:
+        # the registry and transcript filename share an exact id from startup.
+        native_session_id = resume or str(uuid.uuid4())
+        if resume is None:
+            argv.append(f"--session-id={native_session_id}")
         if model:
             # `=` form for the same reason as --mcp-config above: a
             # space-separated value sits next to the prompt positional, and
@@ -230,6 +237,7 @@ class ClaudeCodeHarness(Harness):
         return LaunchPlan(
             argv=argv,
             files={config_path: json.dumps(config, indent=2) + "\n"},
+            session_id=native_session_id,
         )
 
 
@@ -278,7 +286,7 @@ class ClaudeCodeObserver(TranscriptObserver):
         # Collect all matches so an ambiguity is logged, not silent: two
         # siblings in the same cwd both match, and returning the newest for
         # either participant is a mis-attribution. The observer's binding
-        # check (`_on_attach`) is the cross-cutting guarantee that refuses the
+        # check (`_accept_attachment`) is the cross-cutting guarantee that refuses the
         # second binding; this method still returns the newest match so
         # rotation (the same agent writing a new transcript) works.
         matches: list[Path] = []

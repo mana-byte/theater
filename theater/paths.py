@@ -37,6 +37,16 @@ def mcp_config_dir() -> Path:
     return home() / "mcp"
 
 
+def mcp_config_path(participant_id: str) -> Path:
+    """The generated MCP config for one participant."""
+    return mcp_config_dir() / f"{participant_id}.json"
+
+
+def observation_dir(harness: str, participant_id: str) -> Path:
+    """Process-correlation state owned by one launched harness instance."""
+    return home() / "observations" / harness / participant_id
+
+
 def config_path() -> Path:
     """User settings. Read by Theater, never written by it — see config.py."""
     return home() / "config.toml"
@@ -56,5 +66,6 @@ def ensure_home() -> Path:
     root = home()
     root.mkdir(parents=True, exist_ok=True)
     mcp_config_dir().mkdir(parents=True, exist_ok=True)
+    (root / "observations").mkdir(parents=True, exist_ok=True)
     harnesses_dir().mkdir(parents=True, exist_ok=True)
     return root

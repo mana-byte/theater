@@ -164,6 +164,32 @@ def source_for(rec, workdir, **kwargs):
     return OpenCodeObserver(db=rec.path).open_source(cwd=str(workdir), **kwargs)
 
 
+def attach(src):
+    """Stage and accept the initial attachment, as the observer does."""
+    batch = asyncio.run(src.read())
+    assert batch.attached is not None
+    src.commit_attachment()
+    return batch
+
+
+def receipt_source(rec, workdir, tmp_path, *, participant_id="participant"):
+    """Attach a source whose process-local plugin receipt owns ``ses_one``."""
+    correlation = tmp_path / "correlation"
+    correlation.mkdir()
+    (correlation / f"{participant_id}.opencode.mjs").write_text("// marker\n")
+    receipt = correlation / f"{participant_id}.opencode-session"
+    receipt.write_text(
+        json.dumps({"participant_id": participant_id, "session_id": "ses_one"}) + "\n"
+    )
+    src = OpenCodeObserver(db=rec.path, correlation_dir=correlation).open_source_for(
+        participant_id=participant_id,
+        cwd=str(workdir),
+        after=0.0,
+    )
+    attach(src)
+    return src, receipt
+
+
 def a_turn_with_a_tool(rec) -> None:
     """The canonical trace: ask, call a tool, then answer in a second step."""
     user = rec.message("msg_u1", "user")
@@ -193,9 +219,19 @@ def test_the_id_travels_in_a_merged_config_file(tmp_path):
 
     assert plan.argv == ["opencode", "--prompt", "say hello"]
     assert plan.env == {"OPENCODE_CONFIG": str(config)}
-    server = json.loads(plan.files[config])["mcp"]["theater"]
+    document = json.loads(plan.files[config])
+    server = document["mcp"]["theater"]
     assert server["command"][-3:] == ["mcp", "--id", "abc123"]
     assert server["enabled"] is True
+    plugin = tmp_path / "abc.opencode.mjs"
+    receipt = tmp_path / "abc.opencode-session"
+    assert document["plugin"] == [plugin.resolve().as_uri()]
+    assert plugin in plan.files
+    assert "session.created" in plan.files[plugin]
+    assert "event.properties.info.parentID" in plan.files[plugin]
+    assert "abc123" in plan.files[plugin]
+    assert str(receipt) in plan.files[plugin]
+    assert receipt not in plan.files
 
 
 def test_yolo_is_the_only_approval_flag_there_is(tmp_path):
@@ -253,6 +289,7 @@ def test_attaching_skips_history_and_reports_where_it_started(rec, workdir):
     assert batch.attached.location == "opencode://ses_one"
     assert batch.attached.skipped == rec.seq + 1
     assert not batch.events
+    src.commit_attachment()
     # Nothing new after an attach that skipped everything.
     assert not asyncio.run(src.read()).events
 
@@ -296,13 +333,73 @@ def test_a_session_older_than_the_participant_is_not_ours(rec, workdir):
     assert asyncio.run(source_for(rec, workdir, after=0.5).read()).attached is not None
 
 
+def test_process_receipts_disambiguate_concurrent_sessions_in_the_same_cwd(rec, workdir, tmp_path):
+    """The Pasquina/Harpagon regression.
+
+    Both participants' time/cwd searches match both rows, and the plain fallback
+    would return ``ses_two`` for each. Their process-local receipts must produce
+    the exact one-to-one binding instead, even if a stale registry id says the
+    opposite session.
+    """
+    rec.conn.execute(
+        "INSERT INTO session (id, parent_id, directory, time_created) "
+        "VALUES ('ses_two', NULL, ?, 2000)",
+        (str(workdir.resolve()),),
+    )
+    rec.conn.commit()
+    correlation = tmp_path / "mcp"
+    correlation.mkdir()
+    for pid, sid in (("participant_a", "ses_one"), ("participant_b", "ses_two")):
+        (correlation / f"{pid}.opencode.mjs").write_text("// capability marker\n")
+        (correlation / f"{pid}.opencode-session").write_text(
+            json.dumps({"participant_id": pid, "session_id": sid}) + "\n"
+        )
+
+    observer = OpenCodeObserver(db=rec.path, correlation_dir=correlation)
+    source_a = observer.open_source_for(
+        participant_id="participant_a",
+        cwd=str(workdir),
+        # Simulate the pre-fix daemon restarting with the wrong stored binding.
+        session_id="ses_two",
+        after=0.0,
+    )
+    source_b = observer.open_source_for(
+        participant_id="participant_b",
+        cwd=str(workdir),
+        session_id="ses_one",
+        after=0.0,
+    )
+
+    assert asyncio.run(source_a.read()).attached.session_id == "ses_one"
+    assert asyncio.run(source_b.read()).attached.session_id == "ses_two"
+
+
+def test_a_receipt_capable_process_waits_for_its_receipt(rec, workdir, tmp_path):
+    """Never fall back during the creation-event/receipt race window."""
+    correlation = tmp_path / "mcp"
+    correlation.mkdir()
+    (correlation / "participant.opencode.mjs").write_text("// capability marker\n")
+    observer = OpenCodeObserver(db=rec.path, correlation_dir=correlation)
+
+    batch = asyncio.run(
+        observer.open_source_for(
+            participant_id="participant",
+            cwd=str(workdir),
+            after=0.0,
+        ).read()
+    )
+
+    assert batch.waiting is True
+    assert batch.attached is None
+
+
 # ---- reading ------------------------------------------------------------
 
 
 def drain(rec, workdir):
     """Attach before anything happened, then read the whole session live."""
     src = source_for(rec, workdir)
-    asyncio.run(src.read())
+    attach(src)
     return src
 
 
@@ -471,19 +568,50 @@ def test_a_reply_is_stamped_with_when_it_ended(rec, workdir):
 # ---- relocating ---------------------------------------------------------
 
 
-def test_a_new_session_in_the_same_directory_is_picked_up(rec, workdir):
-    """A human can start a fresh session in the pane; the old one never grows."""
-    src = drain(rec, workdir)
+def test_a_new_session_in_the_same_process_is_picked_up(rec, workdir, tmp_path):
+    """A receipt update proves a fresh session still belongs to this process."""
+    src, receipt = receipt_source(rec, workdir, tmp_path)
     rec.conn.execute(
         "INSERT INTO session (id, parent_id, directory, time_created) "
         "VALUES ('ses_two', NULL, ?, 9999)",
         (str(workdir.resolve()),),
     )
     rec.conn.commit()
+    receipt.write_text(
+        json.dumps({"participant_id": "participant", "session_id": "ses_two"}) + "\n"
+    )
 
     batch = asyncio.run(src.refresh())
 
     assert batch.attached.session_id == "ses_two"
+    assert src._session == "ses_one", "the candidate must wait for observer acceptance"
+    src.commit_attachment()
+    assert src._session == "ses_two"
+
+
+def test_rejected_new_session_keeps_reading_the_accepted_session(rec, workdir, tmp_path):
+    """OpenCode shares one DB, so rejection must preserve its session cursor."""
+    src, receipt = receipt_source(rec, workdir, tmp_path)
+    rec.conn.execute(
+        "INSERT INTO session (id, parent_id, directory, time_created) "
+        "VALUES ('ses_foreign', NULL, ?, 9999)",
+        (str(workdir.resolve()),),
+    )
+    rec.conn.commit()
+    receipt.write_text(
+        json.dumps({"participant_id": "participant", "session_id": "ses_foreign"}) + "\n"
+    )
+
+    candidate = asyncio.run(src.refresh())
+    assert candidate.attached.session_id == "ses_foreign"
+    assert src._session == "ses_one"
+    src.discard_attachment()
+
+    user = rec.message("msg_u_after_reject", "user")
+    rec.user_text(user["id"], "prt_after_reject", "still mine")
+    events = asyncio.run(src.read()).events
+
+    assert [(event.kind, event.text) for event in events] == [(EventKind.USER, "still mine")]
 
 
 def test_refreshing_onto_the_same_session_reports_nothing(rec, workdir):

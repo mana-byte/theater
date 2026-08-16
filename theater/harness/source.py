@@ -39,7 +39,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from theater.harness.base import Event
 from theater.models import Status
@@ -48,6 +48,10 @@ if TYPE_CHECKING:
     from theater.harness.observation import TranscriptObserver
 
 logger = logging.getLogger("theater.harness.source")
+
+
+class SourceContractError(NotImplementedError):
+    """A source returned a batch it cannot complete the protocol for."""
 
 
 def attach_point(path: Path) -> tuple[int, int, int, str | None]:
@@ -84,7 +88,13 @@ def attach_point(path: Path) -> tuple[int, int, int, str | None]:
 
 @dataclass(frozen=True, slots=True)
 class Attachment:
-    """Where a source started reading, reported once each time it (re)attaches.
+    """A candidate input location, reported whenever a source finds one.
+
+    Finding is not adopting. The source stages the candidate without changing
+    its live cursor; the observer checks ownership and calls
+    ``commit_attachment`` or ``discard_attachment`` before the next read. This
+    handshake is what keeps one participant's rejected rotation from silently
+    switching onto a sibling's transcript.
 
     `location` is whatever names the input to a human reading the bus: a file
     path today, a session id or a URL for a source that has no file. It is
@@ -104,6 +114,15 @@ class Attachment:
     session_id: str | None = None
     skipped: int = 0
     last_event: Event | None = None
+    #: ``exact`` means the native session id or a process-isolated root proved
+    #: ownership. ``heuristic`` means cwd/time only; the reducer refuses it
+    #: while a same-harness same-cwd competitor is alive.
+    correlation: Literal["exact", "heuristic"] = "heuristic"
+    #: Two heuristic candidates can collide only when their sources search the
+    #: same namespace. Vibe uses the resolved save-directory root here: a
+    #: global source cannot see a participant-isolated sibling and therefore
+    #: must not be blocked by it.
+    collision_domain: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +141,14 @@ class History:
 
     location: str | None = None
     events: Sequence[Event] = ()
+    error_code: str | None = None
+    error: str | None = None
+    correlation: Literal["exact", "heuristic"] = "heuristic"
+    collision_domain: str | None = None
+    #: The location came from a prior reducer-accepted attachment rather than
+    #: a fresh cwd scan. A pin prevents drift but does not upgrade heuristic
+    #: ownership into exact process evidence.
+    pinned: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,9 +167,11 @@ class Batch:
     `progressed` is not punished for it.
 
     `waiting` means there is nothing to read *from* yet — no transcript on disk,
-    no session row in the database. The observer backs off on its search
-    interval rather than its poll interval and runs no quiet timers, because
-    silence from a source that has not attached is not evidence about the agent.
+    no session row in the database. It is mutually exclusive with `attached`:
+    finding a candidate means there is something to read from. The observer
+    backs off on its search interval rather than its poll interval and runs no
+    quiet timers, because silence from a source that has not attached is not
+    evidence about the agent.
     """
 
     events: Sequence[Event] = ()
@@ -150,6 +179,11 @@ class Batch:
     status: Status | None = None
     attached: Attachment | None = None
     waiting: bool = False
+    #: A persistent observation-channel failure. The reducer reports it and
+    #: releases old enough jobs as crashed, while continuing to retry so a
+    #: late correlation receipt can recover the watcher.
+    error_code: str | None = None
+    error: str | None = None
 
 
 class Source(ABC):
@@ -161,6 +195,11 @@ class Source(ABC):
     which is the whole reason this is an object and not another method on
     `Harness`.
     """
+
+    #: Namespace searched by heuristic discovery. ``None`` is the conservative
+    #: default: same-harness/same-cwd sources with no sharper declaration are
+    #: treated as competitors.
+    collision_domain: str | None = None
 
     @abstractmethod
     async def read(self) -> Batch:
@@ -176,6 +215,31 @@ class Source(ABC):
         check.
         """
         return Batch()
+
+    def commit_attachment(self) -> None:
+        """Adopt the attachment most recently returned by ``read``/``refresh``.
+
+        Sources must stage a candidate rather than changing their live cursor
+        before the observer has checked that another participant does not own
+        it. A source that can return ``Batch(attached=...)`` must implement both
+        halves of this handshake. Failing loudly here is safer than silently
+        accepting an attachment whose cursor may already point at a sibling's
+        transcript.
+        """
+        raise SourceContractError(
+            f"{type(self).__name__} returned an attachment without implementing commit_attachment()"
+        )
+
+    def discard_attachment(self) -> None:
+        """Forget the staged attachment without changing the live cursor."""
+        raise SourceContractError(
+            f"{type(self).__name__} returned an attachment without implementing "
+            "discard_attachment()"
+        )
+
+    def revoke_attachment(self) -> None:
+        """Drop an accepted heuristic attachment superseded by exact evidence."""
+        raise SourceContractError(f"{type(self).__name__} cannot revoke an accepted attachment")
 
     async def history(self, *, last_n: int) -> History:
         """The session so far, with text unclipped. Newest `last_n` events.
@@ -194,18 +258,6 @@ class Source(ABC):
         """Release anything held open. Called once, when the watcher stops."""
         return
 
-    def detach(self) -> None:
-        """Drop the current input location and go back to searching.
-
-        Called by the observer when a transcript path it just attached to is
-        already bound to a different live participant — the collision is
-        detected after the source has committed to the path, so the source
-        needs to forget it. The default is a no-op: a source whose location
-        cannot change (a database with a fixed session id) has nowhere else
-        to go, and detaching it would lose the cursor for nothing.
-        """
-        return
-
 
 class TranscriptSource(Source):
     """Tail an append-only transcript file. What `TranscriptObserver` returns.
@@ -221,19 +273,31 @@ class TranscriptSource(Source):
         cwd: str | None,
         session_id: str | None = None,
         after: float | None = None,
+        allow_refresh: bool = False,
+        exact_attachments: bool = False,
+        exact_session: bool = False,
+        collision_domain: str | None = None,
+        known_location: str | None = None,
     ) -> None:
         self._observer = observer
         self._cwd = cwd
-        #: Updated when an attach reveals the harness's own session id, so a
+        #: Updated when an accepted attach reveals the harness's own session id, so a
         #: later re-attach can use the sharper key.
         self._session_id = session_id
         self._after = after
+        self._allow_refresh = allow_refresh
+        self._exact_attachments = exact_attachments
+        self._exact_session = exact_session
+        self.collision_domain = collision_domain
+        self._known_location = Path(known_location) if known_location else None
         self.path: Path | None = None
         self.offset = 0
         self.index = 0
         self.mtime = 0
+        self._pending: tuple[Path, int, int, int, str | None] | None = None
 
     async def read(self) -> Batch:
+        self._require_decision()
         if self.path is None:
             attached = await self._attach()
             return Batch(attached=attached) if attached else Batch(waiting=True)
@@ -241,26 +305,58 @@ class TranscriptSource(Source):
             return self._drain()
         except FileNotFoundError:
             # Transcript deleted or rotated; drop back to searching.
+            self._known_location = None
             self._detach()
             return Batch(waiting=True)
 
     async def refresh(self) -> Batch:
-        """Move to the newest transcript if the harness started a new one.
+        """Propose the newest transcript if the harness started a new one.
 
         Located by cwd alone, ignoring the session id: vibe opens a new session
         directory every turn, and the id we stored pins `find_transcript` to
         the first one, which never grows again.
 
         The same path back means the agent is idle rather than rotated, and
-        returns an empty batch so the observer's timers keep counting — the
-        relocate check must not reset the clock the screen check reads.
+        returns an empty batch so the screen and rescue timers keep counting.
+        The relocate arm may throttle its own clock, but must not reset either
+        of the other clocks.
         """
+        self._require_decision()
+        if not self._allow_refresh:
+            return Batch()
         path = await self._locate(session_id=None)
         if path is None or path == self.path:
             return Batch()
         logger.info("transcript rotated: %s -> %s", self.path, path)
         attached = await self._attach(path)
         return Batch(attached=attached) if attached else Batch()
+
+    def commit_attachment(self) -> None:
+        """Make the observer-accepted candidate the live transcript."""
+        if self._pending is None:
+            raise RuntimeError("no transcript attachment is pending")
+        path, offset, index, mtime, session_id = self._pending
+        self.path, self.offset, self.index, self.mtime = path, offset, index, mtime
+        if session_id:
+            self._session_id = session_id
+        self._known_location = path
+        self._pending = None
+
+    def discard_attachment(self) -> None:
+        """Reject a candidate while continuing to watch the accepted file."""
+        if self._pending is None:
+            raise RuntimeError("no transcript attachment is pending")
+        self._pending = None
+
+    def revoke_attachment(self) -> None:
+        """Return to discovery after an exact claimant proves this was wrong."""
+        self._pending = None
+        self._detach()
+        # The id came from the revoked file. Retaining it would make discovery
+        # select the same foreign transcript again instead of returning to the
+        # participant's own cwd/time evidence.
+        self._session_id = None
+        self._known_location = None
 
     async def history(self, *, last_n: int) -> History:
         """Re-read the whole transcript with the text left unclipped.
@@ -269,13 +365,33 @@ class TranscriptSource(Source):
         a source that has never polled — which is the normal case, since the
         caller opens one just for this.
         """
-        path = self.path or await self._locate(session_id=self._session_id)
+        pinned = self._known_location is not None
+        path = self.path or self._known_location
         if path is None:
-            return History()
+            path = await self._locate(session_id=self._session_id)
+        if path is None:
+            return History(pinned=pinned)
+        if pinned and not path.exists():
+            # Never replace an admitted historical location with a cwd guess.
+            return History(pinned=True)
         events = await asyncio.to_thread(self._read_all, path)
+        found_session = self._observer.session_id(path)
         return History(
             location=str(path),
             events=events[-last_n:] if last_n > 0 else events,
+            correlation=(
+                "exact"
+                if self._exact_attachments
+                or (
+                    self._exact_session
+                    and self._session_id is not None
+                    and found_session is not None
+                    and found_session == self._session_id
+                )
+                else "heuristic"
+            ),
+            collision_domain=self.collision_domain,
+            pinned=pinned,
         )
 
     def _read_all(self, path: Path) -> list[Event]:
@@ -293,22 +409,14 @@ class TranscriptSource(Source):
 
     # ---- internals ------------------------------------------------------
 
-    def detach(self) -> None:
-        """Drop the current file and go back to searching.
-
-        Called by the observer when the path this source just attached to is
-        already bound to a different live participant. The source forgets its
-        path, offset, index, and the session id it may have just read from the
-        wrong file — without clearing the latter, the next search would use the
-        wrong session id to find the wrong file again, and the collision would
-        repeat forever.
-        """
-        self._detach()
-        self._session_id = None
-
     def _detach(self) -> None:
+        """Forget an accepted file that vanished; collision rejection is staged."""
         self.path = None
         self.offset = self.index = self.mtime = 0
+
+    def _require_decision(self) -> None:
+        if self._pending is not None:
+            raise RuntimeError("attachment must be committed or discarded before reading again")
 
     async def _locate(self, *, session_id: str | None) -> Path | None:
         if not self._cwd:
@@ -321,28 +429,41 @@ class TranscriptSource(Source):
         )
 
     async def _attach(self, path: Path | None = None) -> Attachment | None:
-        """Point at the end of a transcript. None if there is not one yet.
+        """Stage the end of a transcript. None if there is not one yet.
 
-        Pass `path` to adopt a known file (a rotation); omit it to go looking.
+        Pass `path` to propose a known file (a rotation); omit it to go looking.
         """
         if path is None:
-            path = await self._locate(session_id=self._session_id)
+            path = self._known_location
+            if path is not None and not path.exists():
+                path = None
+            if path is None:
+                path = await self._locate(session_id=self._session_id)
             if path is None:
                 return None
         size, lines, mtime, last_line = await asyncio.to_thread(attach_point, path)
-        self.path, self.offset, self.index, self.mtime = path, size, lines, mtime
         session_id = self._observer.session_id(path)
-        if session_id:
-            self._session_id = session_id
         last_event: Event | None = None
         if last_line is not None:
             parsed = self._observer.parse(last_line, lines - 1)
             last_event = parsed[-1] if parsed else None
+        self._pending = (path, size, lines, mtime, session_id)
         return Attachment(
             location=str(path),
             session_id=session_id,
             skipped=lines,
             last_event=last_event,
+            correlation=(
+                "exact"
+                if self._exact_attachments
+                or (
+                    self._exact_session
+                    and self._session_id is not None
+                    and session_id == self._session_id
+                )
+                else "heuristic"
+            ),
+            collision_domain=self.collision_domain,
         )
 
     def _drain(self) -> Batch:

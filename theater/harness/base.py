@@ -218,6 +218,13 @@ class LaunchPlan:
     env: dict[str, str] = field(default_factory=dict)
     #: Files to write before the window is created, path -> contents.
     files: dict[Path, str] = field(default_factory=dict)
+    #: Exact native session id known before launch. Persisted before tmux starts
+    #: so an observer never has to guess from cwd during the creation race.
+    session_id: str | None = None
+    #: Resolved namespace searched by heuristic transcript discovery, when a
+    #: harness has more than one. Persisted before launch so collision policy
+    #: does not depend on watcher scheduling.
+    transcript_domain: str | None = None
 
 
 class Harness(ABC):
