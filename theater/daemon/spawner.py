@@ -99,7 +99,10 @@ class Spawner:
                 "describes files that are not the worktree's files"
             )
         participant = self.registry.create_spawned(
-            harness=req.harness, cwd=req.cwd, parent_id=req.parent_id
+            harness=req.harness,
+            cwd=req.cwd,
+            parent_id=req.parent_id,
+            has_prompt=bool(req.prompt),
         )
 
         # The child runs in the worktree, not the parent's repo — isolated

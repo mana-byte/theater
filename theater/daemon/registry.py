@@ -116,12 +116,20 @@ class Registry:
         cwd: str,
         parent_id: str | None = None,
         pid: str | None = None,
+        has_prompt: bool | None = None,
     ) -> Participant:
         """Reserve an id before the pane exists.
 
         Order matters: the id has to be minted first because it is baked into
         the MCP server argv that the pane will be launched with. The pane id is
         filled in by `attach_pane` once tmux reports it.
+
+        `has_prompt` says whether the spawn carried a task, which is what tells
+        the régie a new child is worth animating. It defaults to None — "nobody
+        said" — rather than False, because False is an answer: a future caller
+        that forgot the argument would assert the spawn was promptless instead
+        of admitting it did not know. The one caller that does know (`Spawner`)
+        passes it explicitly.
         """
         p = Participant(
             id=pid or new_id(),
@@ -136,13 +144,16 @@ class Registry:
             "participant.created",
             to_id=p.id,
             from_id=parent_id,
-            payload={"tier": str(p.tier), "harness": harness, "cwd": cwd},
+            payload={
+                "tier": str(p.tier),
+                "harness": harness,
+                "cwd": cwd,
+                "has_prompt": has_prompt,
+            },
         )
         return self._named(p)
 
-    def attach_pane(
-        self, pid: str, pane: str, *, pane_pid: int | None = None
-    ) -> Participant:
+    def attach_pane(self, pid: str, pane: str, *, pane_pid: int | None = None) -> Participant:
         """Record where a participant lives, and which process was there.
 
         `pane_pid` is the launch epoch: tmux's `#{pane_pid}`, the process the

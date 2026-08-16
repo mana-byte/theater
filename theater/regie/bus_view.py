@@ -28,6 +28,8 @@ _BUS_KIND_ROLES = {
     "agent.tool_call": "warning",
     "agent.tool_result": "secondary-lighten-2",
     "agent.error": "error",
+    "job.await.start": "secondary-lighten-2",
+    "job.await.end": "secondary-lighten-2",
     "participant.created": "accent",
     "participant.hello": "accent",
     "participant.pane": "accent",

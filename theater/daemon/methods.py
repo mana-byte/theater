@@ -10,6 +10,7 @@ handlers just wire parameters to calls.
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import json
 import logging
@@ -37,6 +38,7 @@ from theater.models import (
     BadRequest,
     Busy,
     HumanPresent,
+    Job,
     JobState,
     NoSelfKill,
     NotAddressable,
@@ -44,6 +46,7 @@ from theater.models import (
     StaleTarget,
     Status,
     Tier,
+    new_id,
     now,
 )
 from theater.tmux import client as tmux
@@ -61,6 +64,22 @@ METHODS: dict[str, Handler] = {}
 #: stretches the client's socket timeout to match. Five minutes is longer
 #: than any turn observed; a caller wanting more can await again.
 MAX_AWAIT = 300.0
+
+#: How long an await must stay blocked before it is announced on the bus.
+#:
+#: `job.await.start` exists so the régie can draw the line between an agent and
+#: whatever it is stuck on. An agent polling `await_sessions(handles,
+#: max_wait=0.1)` in a loop is not stuck on anything, yet announcing at call
+#: entry writes two rows per handle per call — six handles polled ten times a
+#: second is 120 rows/second of churn. That is not merely noise: `bus_tail`
+#: returns the *newest* rows up to its limit and silently drops the rest, so the
+#: churn can push some *other* await's `job.await.end` out of the régie's next
+#: read and leave that animation running forever. Waiting this long first makes
+#: the row mean "this agent is really waiting" rather than "this agent called
+#: await". A quarter second is longer than any await that was never going to
+#: block, and short enough that a real wait is on screen before anyone looks.
+#: Read at call time, so a test can patch it rather than sleep.
+AWAIT_ANNOUNCE_AFTER = 0.25
 
 #: How long a running send job keeps its exclusive claim on a pane. Nothing
 #: verifies the prompt reached the agent — a human can clear the composer
@@ -417,6 +436,15 @@ async def _jobs_await(daemon, params: dict) -> list[dict]:
     The rails run before that complaint. A caller aiming at the wrong end of
     a loop should be told so, whether or not the thing it named turned out to
     be awaitable; "you would deadlock" is the more useful of the two answers.
+
+    Both also run before anything is written to the bus: a call that is refused
+    never happened, and must leave no trace for the régie to animate.
+
+    The emission rule, in one place: one `job.await.start` per awaited job that
+    names a target, written only once a call from a known caller has been
+    blocked for `AWAIT_ANNOUNCE_AFTER` — and exactly one `job.await.end` for
+    each start that reached the bus, whether the await returned, timed out, or
+    raised. No start, no end.
     """
     handles = params.get("handles") or []
     if not handles:
@@ -443,9 +471,119 @@ async def _jobs_await(daemon, params: dict) -> list[dict]:
     if missing:
         raise BadRequest(f"no such job(s): {', '.join(sorted(missing))}")
 
-    with daemon.jobs.waiting(caller_id, targets):
-        jobs = await daemon.jobs.await_jobs(handles, max_wait=max_wait)
+    # An await is worth announcing only if it can really block: `await_jobs`
+    # returns at entry the moment any requested job is already terminal, so
+    # "every known job is RUNNING" is the whole test. It is also why the edge
+    # list does not re-check state — when it is built, nothing is terminal.
+    known_jobs = [job for job in known.values() if job is not None]
+    will_block = max_wait > 0 and all(job.state == JobState.RUNNING for job in known_jobs)
+    await_edges: list[tuple[str, str]] = []
+    if caller_id and will_block:
+        await_edges = [
+            (handle, job.target_id)
+            for handle, job in known.items()
+            if job is not None and job.target_id
+        ]
+
+    await_token = new_id()
+    #: Edges whose `job.await.start` reached the bus, and so must be closed.
+    announced: list[tuple[str, str]] = []
+    try:
+        with daemon.jobs.waiting(caller_id, targets):
+            jobs = await _await_announced(
+                daemon,
+                handles=handles,
+                max_wait=max_wait,
+                caller_id=caller_id,
+                edges=await_edges,
+                token=await_token,
+                announced=announced,
+            )
+    finally:
+        _close_await(daemon, caller_id, announced, await_token)
     return [j.to_dict() for j in jobs]
+
+
+async def _await_announced(
+    daemon,
+    *,
+    handles: list[str],
+    max_wait: float,
+    caller_id: str | None,
+    edges: list[tuple[str, str]],
+    token: str,
+    announced: list[tuple[str, str]],
+) -> list[Job]:
+    """Wait for the jobs, announcing the wait only if it lasts long enough.
+
+    The wait runs as a task raced against the announce delay rather than being
+    preceded by a sleep: an await that is answered in 5ms must still return in
+    5ms. What the caller gets back is whatever `await_jobs` returned; what the
+    bus gets is a start row per edge, and only once the call has really been
+    blocked. `announced` comes from the caller because closing those rows is
+    the caller's `finally` — this function can exit by exception too.
+    """
+    waiter = asyncio.create_task(daemon.jobs.await_jobs(handles, max_wait=max_wait))
+    try:
+        if edges:
+            finished, _ = await asyncio.wait({waiter}, timeout=AWAIT_ANNOUNCE_AFTER)
+            if not finished:
+                _open_await(daemon, caller_id, edges, token, announced)
+        return await waiter
+    finally:
+        # A cancelled RPC (the client hung up) must not leave the wait running.
+        if not waiter.done():
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+
+
+def _open_await(
+    daemon,
+    caller_id: str | None,
+    edges: list[tuple[str, str]],
+    token: str,
+    announced: list[tuple[str, str]],
+) -> None:
+    """Announce a blocked await, recording every row that reached the bus.
+
+    `announced` is appended to *after* the insert returns, never before: a row
+    whose insert raised does not exist, and closing a start nobody saw would be
+    a phantom. The caller closes exactly what this list holds, so a disk error
+    halfway through a multi-handle await leaves no start without its end.
+    """
+    for handle, target_id in edges:
+        daemon.store.bus_append(
+            "job.await.start",
+            from_id=caller_id,
+            to_id=target_id,
+            payload={"handle": handle, "token": token},
+        )
+        announced.append((handle, target_id))
+
+
+def _close_await(
+    daemon,
+    caller_id: str | None,
+    announced: list[tuple[str, str]],
+    token: str,
+) -> None:
+    """Close every start row that was written, however the await ended.
+
+    Best effort per row, because this runs in a `finally`: an exception raised
+    here would replace the one already on its way out to the caller, and one
+    unwritable row must not stop the others from closing. A start with no end
+    is an animation the régie never stops drawing.
+    """
+    for handle, target_id in announced:
+        try:
+            daemon.store.bus_append(
+                "job.await.end",
+                from_id=caller_id,
+                to_id=target_id,
+                payload={"handle": handle, "token": token},
+            )
+        except Exception:
+            logger.exception("could not close await %s on %s", token, handle)
 
 
 @method("jobs.status")

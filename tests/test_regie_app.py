@@ -60,6 +60,35 @@ SEND_ROW = {
     "payload": {"handle": "h1", "prompt": "do the thing"},
 }
 
+SPAWN_ROW = {
+    "id": 1,
+    "ts": 1723000000,
+    "kind": "participant.created",
+    "from_id": PARENT["id"],
+    "to_id": CHILD["id"],
+    "payload": {
+        "tier": "spawned",
+        "harness": CHILD["harness"],
+        "cwd": CHILD["cwd"],
+        "has_prompt": True,
+    },
+}
+
+AWAIT_START_ROW = {
+    "id": 1,
+    "ts": 1723000000,
+    "kind": "job.await.start",
+    "from_id": PARENT["id"],
+    "to_id": CHILD["id"],
+    "payload": {"handle": CHILD["id"], "token": "await-token"},
+}
+
+AWAIT_END_ROW = {
+    **AWAIT_START_ROW,
+    "id": 2,
+    "kind": "job.await.end",
+}
+
 
 class FakeClient:
     """A DaemonClient that answers from a dict and remembers what was asked."""
@@ -172,6 +201,20 @@ def make_app(**regie) -> tuple[RegieApp, list[tuple[str, str]]]:
 
 def _styles(widget) -> list[str]:
     return [span.style for span in widget.render().spans]
+
+
+def _overlay_styles(widget) -> list[str]:
+    styles = []
+    for glyph in (widget._overlay or {}).values():
+        styles.append(glyph[1] if isinstance(glyph, tuple) else glyph)
+    return styles
+
+
+def _overlay_glyphs(widget) -> list[str]:
+    glyphs = []
+    for glyph in (widget._overlay or {}).values():
+        glyphs.append(glyph[0] if isinstance(glyph, tuple) else glyph)
+    return glyphs
 
 
 # ---- mount ---------------------------------------------------------------
@@ -529,7 +572,7 @@ async def test_a_hidden_bus_does_not_consume_the_events_it_cannot_show(daemon, t
         assert log.lines
 
 
-# ---- send animation ------------------------------------------------------
+# ---- tree-route animation ------------------------------------------------
 
 
 async def test_a_send_animates_while_the_bus_panel_is_hidden(daemon, tmux):
@@ -543,7 +586,7 @@ async def test_a_send_animates_while_the_bus_panel_is_hidden(daemon, tmux):
     async with app.run_test():
         daemon["answers"]["bus.tail"] = [SEND_ROW]
         await app._refresh_anim()
-        assert len(app._send_anims) == 1
+        assert len(app._route_anims) == 1
         assert app.anim_cursor == 1
         assert app.bus_cursor == 0
         assert not app.query_one("#bus-panel", app_mod.RichLog).lines
@@ -559,12 +602,12 @@ async def test_the_first_poll_only_takes_the_cursor(daemon, tmux):
     app, _ = make_app()
     async with app.run_test():
         # The mount poll primed the cursor and animated nothing.
-        assert app._send_anims == []
+        assert app._route_anims == []
         assert app.anim_cursor == 1
         # A row arriving after that does animate.
         daemon["answers"]["bus.tail"] = [dict(SEND_ROW, id=2)]
         await app._refresh_anim()
-        assert len(app._send_anims) == 1
+        assert len(app._route_anims) == 1
 
 
 async def test_only_sends_animate(daemon, tmux):
@@ -573,7 +616,7 @@ async def test_only_sends_animate(daemon, tmux):
     async with app.run_test():
         daemon["answers"]["bus.tail"] = [BUS_ROW]
         await app._refresh_anim()
-        assert app._send_anims == []
+        assert app._route_anims == []
         assert app.anim_cursor == 1
 
 
@@ -581,11 +624,11 @@ async def test_a_send_with_no_visible_sender_or_target_is_dropped(daemon, tmux):
     """A CLI send, an external agent, a row that has died — all just skipped."""
     app, _ = make_app()
     async with app.run_test():
-        app.start_send_anim(None, CHILD["id"])
-        app.start_send_anim("cli", CHILD["id"])
-        app.start_send_anim(PARENT["id"], "ffffffffffff")
-        app.start_send_anim(PARENT["id"], PARENT["id"])
-        assert app._send_anims == []
+        app.start_route_anim(None, CHILD["id"])
+        app.start_route_anim("cli", CHILD["id"])
+        app.start_route_anim(PARENT["id"], "ffffffffffff")
+        app.start_route_anim(PARENT["id"], PARENT["id"])
+        assert app._route_anims == []
         assert app._anim_timer is None
 
 
@@ -596,15 +639,219 @@ async def test_the_trace_starts_on_the_sender_and_reaches_the_target(daemon, tmu
         sender = panel._key_widgets[("p", PARENT["id"])]
         target = panel._key_widgets[("p", CHILD["id"])]
 
-        app.start_send_anim(PARENT["id"], CHILD["id"])
-        app._tick_send_anims()
+        app.start_route_anim(PARENT["id"], CHILD["id"])
+        app._tick_route_anims()
         assert SEND_STYLE in _styles(sender)
 
         path = send_path(app.tree_lines, PARENT["id"], CHILD["id"])
         assert path is not None
         for _ in range(len(path) - 1):
-            app._tick_send_anims()
+            app._tick_route_anims()
         assert SEND_STYLE in _styles(target)
+
+
+async def test_a_spawn_animates_from_parent_to_new_child(daemon, tmux):
+    """participant.created refreshes the tree so the new child can receive a trace."""
+    daemon["answers"]["participants.tree"] = [dict(PARENT, children=[])]
+    app, _ = make_app()
+    async with app.run_test():
+        assert len(app.tree_lines) == 1
+
+        daemon["answers"]["participants.tree"] = [dict(PARENT, children=[dict(CHILD)])]
+        daemon["answers"]["bus.tail"] = [SPAWN_ROW]
+        await app._refresh_anim()
+
+        assert len(app.tree_lines) == 2
+        assert len(app._route_anims) == 1
+        app._tick_route_anims()
+        panel = app.query_one("#tree-panel", app_mod.TreePanel)
+        parent_widget = panel._key_widgets[("p", PARENT["id"])]
+        assert SEND_STYLE in _styles(parent_widget)
+
+
+async def test_a_promptless_spawn_does_not_animate(daemon, tmux):
+    """A bare child pane should appear on the next normal tree refresh, without a trace."""
+    daemon["answers"]["participants.tree"] = [dict(PARENT, children=[])]
+    app, _ = make_app()
+    async with app.run_test():
+        row = {**SPAWN_ROW, "payload": {**SPAWN_ROW["payload"], "has_prompt": False}}
+        daemon["answers"]["participants.tree"] = [dict(PARENT, children=[dict(CHILD)])]
+        daemon["answers"]["bus.tail"] = [row]
+        await app._refresh_anim()
+
+        assert len(app.tree_lines) == 1
+        assert app._route_anims == []
+        assert app.anim_cursor == 1
+
+
+async def test_an_await_pulses_grey_between_caller_and_target(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test():
+        panel = app.query_one("#tree-panel", app_mod.TreePanel)
+        sender = panel._key_widgets[("p", PARENT["id"])]
+        target = panel._key_widgets[("p", CHILD["id"])]
+
+        daemon["answers"]["bus.tail"] = [AWAIT_START_ROW]
+        await app._refresh_anim()
+        assert len(app._await_anims) == 1
+
+        app._tick_route_anims()
+        # The caller is the parent here: the line departs along its own branch
+        # — the only way across to the column its child's rail hangs in — then
+        # drops to the child and reaches for its name.
+        assert set(_overlay_glyphs(sender)) == set("┕━")
+        assert set(_overlay_glyphs(target)) == set("┃┗━")
+        assert (1, len(app.tree_lines[1][3])) not in target._overlay
+        assert app_mod._await_route_style(0, 0) in _overlay_styles(sender)
+        assert app_mod._await_route_style(0, 6) in _overlay_styles(target)
+        # No bold: it would promote the grey into the bright palette and make
+        # the await line brighter than the working agents it runs between.
+        assert not any("bold" in style for style in _overlay_styles(target))
+        assert any(style.startswith("#") for style in _overlay_styles(target))
+        assert app._anim_timer is not None
+
+        daemon["answers"]["bus.tail"] = [AWAIT_END_ROW]
+        await app._refresh_anim()
+        assert app._await_anims == {}
+        assert app._anim_timer is None
+        assert sender._overlay is None
+        assert target._overlay is None
+
+
+async def test_a_child_awaiting_its_parent_draws_the_dashes_on_the_parent(daemon, tmux):
+    """The other direction of the same edge, and the only source of ``┕``.
+
+    The route arrives along the parent's own branch from the right, so no
+    extension is added and the last cell drawn is the corner itself.
+    """
+    app, _ = make_app()
+    async with app.run_test():
+        panel = app.query_one("#tree-panel", app_mod.TreePanel)
+        parent_widget = panel._key_widgets[("p", PARENT["id"])]
+
+        app.start_await_anim("token", "handle", CHILD["id"], PARENT["id"])
+        app._tick_route_anims()
+
+        assert set(_overlay_glyphs(parent_widget)) == set("┕━")
+        assert str(parent_widget.render()).split("\n")[1].startswith("┕━━ ")
+
+
+async def test_the_await_line_reads_as_one_line_from_caller_to_awaited(daemon, tmux):
+    """The whole point, read off the screen rather than off the coordinates.
+
+    A parent awaiting its child: the parent's own branch turns heavy, the rail
+    between them drops, and the child's branch reaches for its name. One
+    unbroken line — bar the cwd row, where the parent's text occupies the
+    column the child's rail would continue in and the line is dashed.
+    """
+    app, _ = make_app()
+    async with app.run_test():
+        panel = app.query_one("#tree-panel", app_mod.TreePanel)
+        sender = panel._key_widgets[("p", PARENT["id"])]
+        target = panel._key_widgets[("p", CHILD["id"])]
+        plain = [str(sender.render()).split("\n"), str(target.render()).split("\n")]
+
+        app.start_await_anim("token", "handle", PARENT["id"], CHILD["id"])
+        app._tick_route_anims()
+        drawn = [str(sender.render()).split("\n"), str(target.render()).split("\n")]
+
+        assert drawn[0][1].startswith("┕━━ ")  # the caller departs along its own branch
+        assert drawn[1][0].startswith("    ┃")  # the rail down to the child
+        assert drawn[1][1].startswith("    ┗━━ ")  # into the awaited child
+        # Only the rails moved: everything from the status glyph rightwards,
+        # and the cwd rows, are the characters the tree drew.
+        assert drawn[0][1][4:] == plain[0][1][4:]
+        assert drawn[0][2] == plain[0][2]
+        assert drawn[1][1][8:] == plain[1][1][8:]
+        assert drawn[1][2] == plain[1][2]
+
+
+async def test_an_await_whose_end_row_never_comes_reaps_itself(daemon, tmux):
+    """A missed `job.await.end` must not leave a pulse running for the session.
+
+    `bus.tail` returns only the newest rows after the cursor, so the end row
+    can be dropped outright — and the daemon can die mid-await. Either way the
+    pulse has to expire on its own.
+    """
+    app, _ = make_app()
+    async with app.run_test():
+        panel = app.query_one("#tree-panel", app_mod.TreePanel)
+        target = panel._key_widgets[("p", CHILD["id"])]
+
+        daemon["answers"]["bus.tail"] = [AWAIT_START_ROW]
+        await app._refresh_anim()
+        app._tick_route_anims()
+        assert len(app._await_anims) == 1
+        assert target._overlay is not None
+
+        anim = next(iter(app._await_anims.values()))
+        anim.started -= app_mod.AWAIT_ANIM_TTL + 1
+
+        app._tick_route_anims()
+        assert app._await_anims == {}
+        assert app._anim_timer is None
+        assert target._overlay is None
+
+
+async def test_an_expired_await_does_not_keep_a_slot_from_a_live_one(daemon, tmux):
+    """The cap counts live pulses; a stale one is reaped before it turns one away."""
+    app, _ = make_app()
+    async with app.run_test():
+        for index in range(app_mod.MAX_AWAIT_ANIMS):
+            app.start_await_anim(f"token-{index}", "handle", PARENT["id"], CHILD["id"])
+        assert len(app._await_anims) == app_mod.MAX_AWAIT_ANIMS
+
+        app.start_await_anim("one-too-many", "handle", PARENT["id"], CHILD["id"])
+        assert len(app._await_anims) == app_mod.MAX_AWAIT_ANIMS
+
+        for anim in app._await_anims.values():
+            anim.started -= app_mod.AWAIT_ANIM_TTL + 1
+        app.start_await_anim("after-the-reaping", "handle", PARENT["id"], CHILD["id"])
+        assert len(app._await_anims) == 1
+
+
+async def test_a_batch_of_rows_refreshes_the_tree_once(daemon, tmux):
+    """One daemon round-trip per batch, not one per row.
+
+    A burst of spawns used to pay for the same answer several times over, in
+    sequence, on the frame that could least afford it.
+    """
+    app, _ = make_app()
+    async with app.run_test():
+        before = len(daemon["client"].asked("participants.tree"))
+        daemon["answers"]["bus.tail"] = [
+            dict(SPAWN_ROW, id=10),
+            dict(AWAIT_START_ROW, id=11),
+            dict(SPAWN_ROW, id=12),
+        ]
+        await app._refresh_anim()
+        assert len(daemon["client"].asked("participants.tree")) == before + 1
+
+
+async def test_the_await_route_is_found_once_per_tree_revision(daemon, tmux):
+    """Ten frames a second over a tree that changes once a second: cache it."""
+    app, _ = make_app()
+    async with app.run_test():
+        calls: list[tuple] = []
+        real = app_mod.await_highlight_cells
+
+        def counted(lines, from_id, to_id):
+            calls.append((from_id, to_id))
+            return real(lines, from_id, to_id)
+
+        app_mod.await_highlight_cells = counted  # type: ignore[assignment]
+        try:
+            app.start_await_anim("token", "handle", PARENT["id"], CHILD["id"])
+            app._tick_route_anims()
+            app._tick_route_anims()
+            app._tick_route_anims()
+            assert len(calls) == 1
+
+            await app._refresh_tree()  # the tree moved; the route may have too
+            app._tick_route_anims()
+            assert len(calls) == 2
+        finally:
+            app_mod.await_highlight_cells = real  # type: ignore[assignment]
 
 
 async def test_cross_root_trace_walks_every_cell_to_the_other_roots_child(daemon, tmux):
@@ -624,9 +871,9 @@ async def test_cross_root_trace_walks_every_cell_to_the_other_roots_child(daemon
         assert path is not None
         assert len(path) > 13
 
-        app.start_send_anim(PARENT["id"], CHILD["id"])
+        app.start_route_anim(PARENT["id"], CHILD["id"])
         for expected in path:
-            app._tick_send_anims()
+            app._tick_route_anims()
             leaf_index, row_in_leaf = app_mod.cell_leaf(expected)
             key = app.tree_lines[leaf_index][2]
             widget = panel._key_widgets[key]
@@ -640,15 +887,15 @@ async def test_the_animation_timer_runs_only_while_something_is_in_flight(daemon
     app, _ = make_app()
     async with app.run_test():
         assert app._anim_timer is None
-        app.start_send_anim(PARENT["id"], CHILD["id"])
+        app.start_route_anim(PARENT["id"], CHILD["id"])
         assert app._anim_timer is not None
 
         path = send_path(app.tree_lines, PARENT["id"], CHILD["id"])
         assert path is not None
         for _ in range(len(path) + 1):
-            app._tick_send_anims()
+            app._tick_route_anims()
 
-        assert app._send_anims == []
+        assert app._route_anims == []
         assert app._anim_timer is None
         panel = app.query_one("#tree-panel", app_mod.TreePanel)
         assert panel._overlaid == set()
@@ -660,31 +907,31 @@ async def test_two_sends_animate_at_once(daemon, tmux):
     """Concurrent rather than queued: a trace shown late lies about when it landed."""
     app, _ = make_app()
     async with app.run_test():
-        app.start_send_anim(PARENT["id"], CHILD["id"])
-        app.start_send_anim(CHILD["id"], PARENT["id"])
-        assert len(app._send_anims) == 2
-        app._tick_send_anims()
-        assert len(app._send_anims) == 2
+        app.start_route_anim(PARENT["id"], CHILD["id"])
+        app.start_route_anim(CHILD["id"], PARENT["id"])
+        assert len(app._route_anims) == 2
+        app._tick_route_anims()
+        assert len(app._route_anims) == 2
 
 
 async def test_a_flood_of_sends_is_capped(daemon, tmux):
     app, _ = make_app()
     async with app.run_test():
-        for _ in range(app_mod.MAX_SEND_ANIMS + 5):
-            app.start_send_anim(PARENT["id"], CHILD["id"])
-        assert len(app._send_anims) == app_mod.MAX_SEND_ANIMS
+        for _ in range(app_mod.MAX_TRACE_ANIMS + 5):
+            app.start_route_anim(PARENT["id"], CHILD["id"])
+        assert len(app._route_anims) == app_mod.MAX_TRACE_ANIMS
 
 
 async def test_a_trace_whose_participant_vanishes_is_dropped_cleanly(daemon, tmux):
     """The tree refreshes every second; an animation must survive losing an end."""
     app, _ = make_app()
     async with app.run_test():
-        app.start_send_anim(PARENT["id"], CHILD["id"])
-        app._tick_send_anims()
+        app.start_route_anim(PARENT["id"], CHILD["id"])
+        app._tick_route_anims()
         daemon["answers"]["participants.tree"] = [dict(PARENT, children=[])]
         await app._refresh_tree()
-        app._tick_send_anims()
-        assert app._send_anims == []
+        app._tick_route_anims()
+        assert app._route_anims == []
         assert app._anim_timer is None
 
 
@@ -693,7 +940,7 @@ async def test_a_daemon_that_will_not_answer_leaves_the_animation_alone(daemon, 
     async with app.run_test():
         daemon["broken"] = {"bus.tail"}
         await app._refresh_anim()
-        assert app._send_anims == []
+        assert app._route_anims == []
     assert notes == []
 
 

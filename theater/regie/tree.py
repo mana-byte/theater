@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Mapping
+from typing import NamedTuple
 
 from textual.content import Content
 
@@ -41,6 +42,17 @@ type Cell = tuple[int, int]
 
 #: A cell within one three-row leaf, used for local overlays.
 type LeafCell = tuple[int, int]
+
+#: One step from a cell to the next, as ``(row delta, column delta)``.
+type Direction = tuple[int, int]
+
+UP: Direction = (-1, 0)
+DOWN: Direction = (1, 0)
+LEFT: Direction = (0, -1)
+RIGHT: Direction = (0, 1)
+
+#: An overlay glyph may use the default send style, or carry its own style.
+type OverlayGlyph = str | tuple[str, str]
 
 #: Rows drawn per participant leaf. The rail grid indexes in these, so the
 #: constant lives beside the renderer that produces them rather than in the app.
@@ -260,7 +272,14 @@ def _rail_above(prefix: str) -> str:
     return prefix[: -len(_BRANCH)] + _RAIL
 
 
-def _overlay_row(parts: list, overlay: Mapping[int, str]) -> list:
+def _overlay_piece(glyph: OverlayGlyph) -> tuple[str, str]:
+    """Return the glyph and style for one overlay cell."""
+    if isinstance(glyph, tuple):
+        return glyph
+    return glyph, SEND_STYLE
+
+
+def _overlay_row(parts: list, overlay: Mapping[int, OverlayGlyph]) -> list:
     """Replace single characters of an assembled row by column.
 
     *parts* is a ``Content.assemble`` argument list — plain strings and
@@ -287,7 +306,7 @@ def _overlay_row(parts: list, overlay: Mapping[int, str]) -> list:
             if hit > cursor:
                 chunk = text[cursor - start : hit - start]
                 out.append((chunk, style) if style else chunk)
-            out.append((overlay[hit], SEND_STYLE))
+            out.append(_overlay_piece(overlay[hit]))
             cursor = hit + 1
         if cursor < col:
             chunk = text[cursor - start :]
@@ -295,7 +314,7 @@ def _overlay_row(parts: list, overlay: Mapping[int, str]) -> list:
     for hit in sorted(c for c in overlay if c >= col):
         if hit > col:
             out.append(" " * (hit - col))
-        out.append((overlay[hit], SEND_STYLE))
+        out.append(_overlay_piece(overlay[hit]))
         col = hit + 1
     return out
 
@@ -308,7 +327,7 @@ def node_label(
     cwd_segments: int = 2,
     frame: int = 0,
     is_first_root: bool = False,
-    overlay: Mapping[LeafCell, str] | None = None,
+    overlay: Mapping[LeafCell, OverlayGlyph] | None = None,
 ) -> Content:
     """Three rows of Content for one participant leaf.
 
@@ -592,6 +611,158 @@ def send_path(
     if start is None or goal is None:
         return None
     return _route(_rail_cells(leaves), start, goal)
+
+
+def await_path(
+    lines: list[tuple[Content, dict, Key, str, str]], from_id: str | None, to_id: str | None
+) -> list[Cell] | None:
+    """The route an await highlight takes, anchored on branch rails.
+
+    Sends travel status-glyph to status-glyph because the packet stands for a
+    prompt entering an agent. Awaits are a relationship between two leaves, so
+    they begin and end on the leaves' own branch glyphs. That keeps the pulse
+    on normal tree lines instead of touching status glyphs.
+    """
+    if not from_id or not to_id or from_id == to_id:
+        return None
+    leaves = _rail_leaves(lines)
+    anchors = {pid: (LEAF_ROWS * i + 1, 4 * depth) for i, pid, _, _, depth in leaves if pid}
+    start = anchors.get(from_id)
+    goal = anchors.get(to_id)
+    if start is None or goal is None:
+        return None
+    return _route(_rail_cells(leaves), start, goal)
+
+
+def tree_glyph_at(lines: list[tuple[Content, dict, Key, str, str]], cell: Cell) -> str | None:
+    """The normal tree glyph already drawn at *cell*, or None for non-rail cells.
+
+    Route pathfinding includes a few invisible stepping-stone cells: branch
+    spacer columns, the status-glyph anchors, and a gap where a child rail
+    resumes below a parent's cwd row. Those are useful for a travelling send
+    packet, but a persistent await highlight should tint only the rails the
+    tree already draws.
+    """
+    leaf_index, row_in_leaf = cell_leaf(cell)
+    if not 0 <= leaf_index < len(lines):
+        return None
+    _, _node, key, prefix, cont_prefix = lines[leaf_index]
+    if key[0] != "p":
+        return None
+    col = cell[1]
+    if col < 0:
+        return None
+    if row_in_leaf == 0:
+        if leaf_index == 0 and is_root_prefix(prefix):
+            return None
+        text = _rail_above(prefix)
+    elif row_in_leaf == 1:
+        text = prefix
+    else:
+        text = cont_prefix
+    if col >= len(text):
+        return None
+    glyph = text[col]
+    return glyph if glyph in "│├└─" else None
+
+
+class AwaitCell(NamedTuple):
+    """One visible rail cell an await highlight passes through.
+
+    *glyph* is the light glyph the tree already draws there, and *directions*
+    the steps the route actually takes at that cell. The two together — not
+    the glyph alone — decide how much of the glyph may go heavy: a route
+    passing vertically through a ``├`` uses two of its three arms, and
+    lighting the third would draw the passed-by sibling into a wait it has no
+    part in.
+
+    Every arm the route uses is lit, on every row, including the horizontal
+    run of a branch the route only crosses. A leaf's ``── `` is the sole path
+    from its own corner to the column its children's rail hangs in, so
+    suppressing it breaks the line in two and the pulse appears to start in
+    mid-air below the caller. Continuity is worth more than reserving the
+    ``━━`` shape for the awaited leaf alone.
+
+    *offset* is the cell's index along the route, so the grey pulse advances
+    one screen column per step. Enumerating the visible cells instead would
+    make the pulse jump: the route crosses invisible spacers, and two cells
+    three columns apart would then pulse as if they were neighbours.
+    """
+
+    cell: Cell
+    glyph: str
+    directions: frozenset[Direction]
+    offset: int
+
+
+def _await_route(path: list[Cell]) -> list[Cell]:
+    """*path*, extended along both leaves' own ``── `` toward their names.
+
+    The route runs branch glyph to branch glyph, because that is where the
+    rails end — but an await is a statement about two leaves, so the line has
+    to reach both of them rather than stop one glyph short of each. The
+    trailing space of ``── `` is included for direction only: it is not a
+    rail, so :func:`tree_glyph_at` drops it, and its presence keeps the
+    outermost drawn dash pointing at the leaf instead of tapering.
+
+    Both ends are extended, so ``a`` awaiting ``b`` and ``b`` awaiting ``a``
+    draw one picture rather than two. An edge is the same edge whichever side
+    asked for it, and who waits on whom is told by the bus line; reserving
+    the dashes for the awaited end instead drew a descendant's own corner as
+    a bare ``┖`` where an ancestor's was a full ``┕━━``, which reads as two
+    different relationships.
+
+    An end is left alone when the route already runs along its branch: those
+    cells are on the path already, with the directions to prove it.
+    """
+    if len(path) < 2:
+        return path
+    # Only the dashes and the space after them: each end's branch glyph is
+    # already the first or last cell of the path.
+    steps = range(1, len(_BRANCH))
+    row, col = path[0]
+    if path[1] != (row, col + 1):
+        path = [*((row, col + step) for step in reversed(steps)), *path]
+    row, col = path[-1]
+    if path[-2] != (row, col + 1):
+        path = [*path, *((row, col + step) for step in steps)]
+    return path
+
+
+def await_highlight_cells(
+    lines: list[tuple[Content, dict, Key, str, str]], from_id: str | None, to_id: str | None
+) -> list[AwaitCell] | None:
+    """Visible tree cells to tint for an await route, with how it crosses them.
+
+    The pathfinder may cross invisible spacer cells to keep the route
+    contiguous, but the visual must only tint tree glyphs that are actually on
+    that route. In particular, do not tint neighbouring ancestry rails just
+    because they share a rendered row with the branch: those rails can belong
+    to a sibling or to the virtual super-root rather than to the awaited child.
+
+    Direction is carried per cell rather than reduced away, because a cell is
+    not a decision: the same ``├`` is a straight-through rail for one await
+    and a corner into a leaf for another, and only the caller knows which
+    heavy glyph that makes.
+    """
+    path = await_path(lines, from_id, to_id)
+    if path is None:
+        return None
+
+    route = _await_route(path)
+    cells: list[AwaitCell] = []
+    for index, cell in enumerate(route):
+        glyph = tree_glyph_at(lines, cell)
+        if glyph is None:
+            continue
+        row, col = cell
+        directions = {
+            (route[step][0] - row, route[step][1] - col)
+            for step in (index - 1, index + 1)
+            if 0 <= step < len(route)
+        }
+        cells.append(AwaitCell(cell, glyph, frozenset(directions), index))
+    return cells
 
 
 def cell_leaf(cell: Cell) -> tuple[int, int]:
