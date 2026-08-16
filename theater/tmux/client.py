@@ -251,9 +251,7 @@ async def list_panes(session: str | None = None) -> list[Pane]:
 
 
 async def pane_exists(pane_id: str) -> bool:
-    out = await run(
-        "list-panes", "-a", "-F", "#{pane_id}", check=False
-    )
+    out = await run("list-panes", "-a", "-F", "#{pane_id}", check=False)
     return pane_id in out.split()
 
 

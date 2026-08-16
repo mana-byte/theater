@@ -216,9 +216,7 @@ def _build_timeline(
             .where(
                 or_(
                     participants.c.cwd == git_root,
-                    participants.c.cwd.startswith(
-                        git_root.rstrip("/") + "/", autoescape=True
-                    ),
+                    participants.c.cwd.startswith(git_root.rstrip("/") + "/", autoescape=True),
                 )
             )
             .order_by(jobs.c.finished_at.desc())
@@ -240,25 +238,21 @@ def _build_timeline(
         _seen_prev = False
         for row in writes:
             if _seen_prev and row.sha_after != prev_before:
-                timeline.append({
-                    "gap": True,
-                    "segment": _segment_id_for_gap(
-                        path, row.sha_after, prev_before
-                    ),
-                    "sha": f"{_sha_or_dash(row.sha_after)} → "
-                           f"{_sha_or_dash(prev_before)}",
-                    "note": "no job claims this transition",
-                })
+                timeline.append(
+                    {
+                        "gap": True,
+                        "segment": _segment_id_for_gap(path, row.sha_after, prev_before),
+                        "sha": f"{_sha_or_dash(row.sha_after)} → {_sha_or_dash(prev_before)}",
+                        "note": "no job claims this transition",
+                    }
+                )
                 if len(timeline) >= depth:
                     break
 
-            resume, resume_note = _resume_info(
-                row.harness, row.session_id
-            )
+            resume, resume_note = _resume_info(row.harness, row.session_id)
             point: dict = {
                 "segment": row.job_handle,
-                "sha": f"{_sha_or_dash(row.sha_before)} → "
-                       f"{_sha_or_dash(row.sha_after)}",
+                "sha": f"{_sha_or_dash(row.sha_before)} → {_sha_or_dash(row.sha_after)}",
                 "when": _format_ts(row.finished_at),
                 "handle": row.job_handle,
                 "harness": row.harness,
@@ -315,11 +309,8 @@ def _format_ts(finished_at: float | None) -> str | None:
     if finished_at is None:
         return None
 
-    return (
-        datetime.datetime.fromtimestamp(
-            finished_at, tz=datetime.UTC
-        )
-        .strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.datetime.fromtimestamp(finished_at, tz=datetime.UTC).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
     )
 
 
@@ -336,9 +327,9 @@ def _normalise_paths(paths: list[str], git_root: str) -> list[str]:
     out = []
     for p in paths:
         if p.startswith(root):
-            out.append(p[len(root):])
+            out.append(p[len(root) :])
         elif p.startswith(git_root + "/"):
-            out.append(p[len(git_root) + 1:])
+            out.append(p[len(git_root) + 1 :])
         else:
             out.append(p)
     return out

@@ -77,9 +77,7 @@ async def join_pane(pane_id: str, *, target_window: str, horizontal: bool = True
     await run(*args)
 
 
-async def resize_pane(
-    pane_id: str, *, width: int | None = None, height: int | None = None
-) -> None:
+async def resize_pane(pane_id: str, *, width: int | None = None, height: int | None = None) -> None:
     """Resize a pane to exact dimensions.
 
     Used after staging so the agent renders for the stage's width, not whatever

@@ -100,9 +100,7 @@ async def _read_job(
     history must not move the watcher's cursor — and is always closed in
     a ``finally``.
     """
-    row = store.conn.execute(
-        select(jobs).where(jobs.c.handle == handle)
-    ).first()
+    row = store.conn.execute(select(jobs).where(jobs.c.handle == handle)).first()
     if row is None:
         raise BadRequest(f"no job {handle!r}")
     j = row._mapping
@@ -180,9 +178,7 @@ async def _read_job(
         return brief
 
     # Open a short-lived source separate from the watcher's; close in finally.
-    source = harness.observer.open_source(
-        cwd=p.cwd, session_id=p.session_id, after=None
-    )
+    source = harness.observer.open_source(cwd=p.cwd, session_id=p.session_id, after=None)
     try:
         history = await source.history(last_n=0)
     except Exception:
@@ -287,10 +283,7 @@ def _read_gap(segment_id: str, *, cwd: str) -> dict:
     explained = len(commits) > 0
     note: str | None = None
     if not explained:
-        note = (
-            "no commit in this repository's history contains "
-            "that transition"
-        )
+        note = "no commit in this repository's history contains that transition"
     elif len(commits) >= _MAX_GAP_COMMITS:
         note = (
             f"output bounded at {_MAX_GAP_COMMITS} commits; the "

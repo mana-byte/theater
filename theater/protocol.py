@@ -66,9 +66,7 @@ async def read_message(reader: asyncio.StreamReader) -> bytes:
     except asyncio.IncompleteReadError as exc:
         return exc.partial
     except asyncio.LimitOverrunError as exc:
-        raise MessageTooLarge(
-            f"message exceeds {MAX_MESSAGE_BYTES} bytes: {exc}"
-        ) from exc
+        raise MessageTooLarge(f"message exceeds {MAX_MESSAGE_BYTES} bytes: {exc}") from exc
 
 
 async def drain_message(reader: asyncio.StreamReader) -> None:

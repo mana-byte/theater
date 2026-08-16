@@ -40,9 +40,7 @@ async def human_present(pane_id: str) -> bool:
     so a false negative is safe.
     """
     try:
-        in_mode = await run(
-            "display-message", "-p", "-t", pane_id, "#{pane_in_mode}"
-        )
+        in_mode = await run("display-message", "-p", "-t", pane_id, "#{pane_in_mode}")
     except Exception:
         # If we can't query the pane, assume no human — queue rather
         # than block forever.

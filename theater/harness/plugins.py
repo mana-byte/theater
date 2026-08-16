@@ -81,9 +81,7 @@ class Plugin:
     error: str | None = None
 
 
-def scan(
-    directory: Path, *, source: str, skip: Iterable[str] = ()
-) -> list[Plugin]:
+def scan(directory: Path, *, source: str, skip: Iterable[str] = ()) -> list[Plugin]:
     """Every plugin in `directory`, in filename order. Never raises.
 
     A missing directory is not an error: the common case is a user who has
@@ -104,14 +102,10 @@ def scan(
         try:
             harness = _load_one(path, source)
         except PluginError as exc:
-            found.append(
-                Plugin(path=path, source=source, name=path.stem, error=str(exc))
-            )
+            found.append(Plugin(path=path, source=source, name=path.stem, error=str(exc)))
             continue
         logger.info("loaded %s harness plugin %r from %s", source, harness.name, path)
-        found.append(
-            Plugin(path=path, source=source, name=harness.name, harness=harness)
-        )
+        found.append(Plugin(path=path, source=source, name=harness.name, harness=harness))
     return found
 
 

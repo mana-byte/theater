@@ -183,13 +183,11 @@ def _claim_alias(alias: str, owner: str, claimant: str) -> None:
     target = _ALIASES.get(alias)
     if target is not None and target != owner:
         raise ConfigError(
-            f"{claimant} claims alias {alias!r}, which already resolves to "
-            f"{target!r}"
+            f"{claimant} claims alias {alias!r}, which already resolves to {target!r}"
         )
     if alias in HARNESSES and alias != owner:
         raise ConfigError(
-            f"{claimant} claims alias {alias!r}, which is the name of another "
-            "harness"
+            f"{claimant} claims alias {alias!r}, which is the name of another harness"
         )
     _ALIASES[alias] = owner
 

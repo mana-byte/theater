@@ -49,6 +49,13 @@ dev = [
 # column saves.
 line-length = 100
 
+# The formatter reaches into Python blocks fenced in Markdown, and the examples
+# in README.md and docs/ align their assignments into columns on purpose — the
+# alignment is what shows the reader which two calls differ. Reflowing them to
+# one-space-around-`=` is a loss in a hand-written teaching example, so prose is
+# the author's and only source is machine-formatted.
+extend-exclude = ["*.md"]
+
 [tool.ruff.lint]
 select = [
     "F", "E9",      # the gate that already existed

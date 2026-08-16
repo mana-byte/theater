@@ -24,6 +24,7 @@ def _reset_version_cache():
     yield
     client.reset_version_cache()
 
+
 # ---- new_window --------------------------------------------------------
 
 

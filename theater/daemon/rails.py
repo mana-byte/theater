@@ -131,9 +131,7 @@ def check_depth(
         return  # parent vanished; the spawner will fail anyway
     depth = lineage.depth_of(store, parent_id)
     if depth + 1 > cap:
-        raise DepthExceeded(
-            f"spawn would be at depth {depth + 1}, cap is {cap}"
-        )
+        raise DepthExceeded(f"spawn would be at depth {depth + 1}, cap is {cap}")
 
 
 def check_cycle(
@@ -160,15 +158,12 @@ def check_cycle(
         return
     for target_id in target_ids:
         if target_id == caller_id:
-            raise CycleDetected(
-                f"participant {caller_id} cannot await itself"
-            )
+            raise CycleDetected(f"participant {caller_id} cannot await itself")
         # Walk the caller's ancestry. If the target appears as an ancestor
         # of the caller, awaiting it would close a cycle.
         if target_id in set(lineage.ancestor_ids(store, caller_id)):
             raise CycleDetected(
-                f"await would close a cycle: {target_id} is an ancestor "
-                f"of {caller_id}"
+                f"await would close a cycle: {target_id} is an ancestor of {caller_id}"
             )
 
 
@@ -207,8 +202,7 @@ def check_wait_cycle(
             seen.add(node)
             if node == caller_id:
                 raise CycleDetected(
-                    f"await would deadlock: {target_id} is already waiting "
-                    f"on {caller_id}"
+                    f"await would deadlock: {target_id} is already waiting on {caller_id}"
                 )
             frontier.extend(graph.get(node, ()))
 
@@ -231,6 +225,5 @@ def check_budget(
     count = len(lineage.subtree_ids(store, root_id))
     if count >= limit:
         raise BudgetExceeded(
-            f"tree rooted at {root_id} has {count} participants, "
-            f"budget is {limit}"
+            f"tree rooted at {root_id} has {count} participants, budget is {limit}"
         )

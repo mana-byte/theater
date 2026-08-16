@@ -175,9 +175,7 @@ class DaemonLock:
             if live is not None:
                 os.close(fd)
                 raise LockHeld(live) from exc
-            logger.warning(
-                "cannot lock %s (%s); singleton enforcement is off", self.path, exc
-            )
+            logger.warning("cannot lock %s (%s); singleton enforcement is off", self.path, exc)
             self.enforced = False
         self._fd = fd
         os.ftruncate(fd, 0)

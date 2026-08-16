@@ -193,9 +193,7 @@ class DaemonClient:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise TimeoutError(f"no reply to request {req_id} within {timeout}s")
-            line = await asyncio.wait_for(
-                protocol.read_message(self._reader), timeout=remaining
-            )
+            line = await asyncio.wait_for(protocol.read_message(self._reader), timeout=remaining)
             if not line:
                 raise ConnectionError("daemon closed the connection")
             try:
@@ -212,9 +210,7 @@ class DaemonClient:
                 return msg
             if isinstance(got, int) and got < req_id:
                 continue
-            raise ConnectionError(
-                f"daemon replied to request {got!r} while {req_id} was in flight"
-            )
+            raise ConnectionError(f"daemon replied to request {got!r} while {req_id} was in flight")
 
     def _discard(self) -> None:
         """Forget the connection without waiting for the close to complete."""
