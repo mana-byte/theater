@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 from shipped import VibeHarness
+from sqlalchemy import update
 
 from theater.daemon.observer import (
     AWAITING_INPUT_TIMEOUT,
@@ -24,6 +25,7 @@ from theater.daemon.observer import (
     Turn,
     TurnAccumulator,
 )
+from theater.daemon.schema import jobs as jobs_table
 from theater.harness.base import Event, EventKind
 from theater.harness.observation import (
     HarnessObserver,
@@ -32,7 +34,7 @@ from theater.harness.observation import (
     ScreenReading,
 )
 from theater.harness.source import Batch, Source
-from theater.models import Status
+from theater.models import Status, now
 
 USER = {"role": "user", "content": "do the thing"}
 WORKING = {
@@ -398,6 +400,90 @@ def poised(
     cursor = QuietClock()
     cursor.last_text = "the last thing it said"
     return observer, ScreenObserver(idle), cursor, p, jobs
+
+
+def expire_rescue_clock(clock: QuietClock, observer: Observer) -> None:
+    clock.rescue_since = time.monotonic() - observer.rescue - 1
+
+
+def age_job(registry, handle: str, age: float) -> None:
+    registry.store.conn.execute(
+        update(jobs_table).where(jobs_table.c.handle == handle).values(created_at=now() - age)
+    )
+
+
+class QuietSource(Source):
+    async def read(self) -> Batch:
+        return Batch()
+
+
+@pytest.mark.asyncio
+async def test_rescue_waits_for_the_job_itself_to_age(registry):
+    """A long-idle pane must not hand its old quiet time to a fresh job."""
+    observer, screen, clock, p, jobs = poised(registry)
+    observer.rescue = 60.0
+    expire_rescue_clock(clock, observer)
+
+    await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
+    job = jobs.get("h1")
+    assert str(job.state) == "running"
+    assert job.error_code is None
+
+    age_job(registry, "h1", observer.rescue + 1)
+    await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
+    job = jobs.get("h1")
+    assert str(job.state) == "done"
+    assert job.error_code == "turn_end_unseen"
+
+
+@pytest.mark.asyncio
+async def test_rescue_gate_uses_the_oldest_running_job(registry):
+    """A fresh queued job must not keep an older wedged caller waiting."""
+    observer, screen, clock, p, jobs = poised(registry)
+    observer.rescue = 60.0
+    age_job(registry, "h1", observer.rescue + 1)
+    jobs.create(handle="h2", caller_id="other", target_id=p.id, kind="send")
+    expire_rescue_clock(clock, observer)
+
+    await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
+    assert str(jobs.get("h1").state) == "done"
+    assert str(jobs.get("h2").state) == "done"
+
+
+@pytest.mark.asyncio
+async def test_rescue_gate_tolerates_no_running_jobs(registry):
+    observer, screen, clock, p, jobs = poised(registry)
+    observer._answer_turn(p.id, "done already")
+    expire_rescue_clock(clock, observer)
+    expired_since = clock.rescue_since
+
+    await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
+    assert jobs.get("h1").result == "done already"
+    assert clock.rescue_since is not None
+    assert expired_since is not None
+    assert clock.rescue_since > expired_since
+
+
+@pytest.mark.asyncio
+async def test_rescue_attempts_are_still_throttled(registry):
+    observer, screen, clock, p, jobs = poised(registry, idle=False)
+    observer.rescue = 60.0
+    age_job(registry, "h1", observer.rescue + 1)
+    captures = 0
+
+    async def capture_pane(_pane):
+        nonlocal captures
+        captures += 1
+        return "$ "
+
+    observer._capture = capture_pane
+    expire_rescue_clock(clock, observer)
+
+    await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
+    await observer._on_quiet(p.id, screen, QuietSource(), clock, TurnAccumulator())
+
+    assert captures == 1
+    assert str(jobs.get("h1").state) == "running"
 
 
 @pytest.mark.asyncio
