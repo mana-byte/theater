@@ -81,6 +81,7 @@ from theater.harness import (
 )
 from theater.harness.source import Attachment, Batch, Source
 from theater.models import JobState, Status, Tier
+from theater.models import now as wall_now
 
 logger = logging.getLogger("theater.observer")
 
@@ -741,8 +742,16 @@ class Observer:
             clock.screen_quiet_since = now  # throttle
 
         if clock.rescue_quiet_for(now) > self.rescue:
-            await self._rescue_jobs(pid, observer, clock)
-            clock.rescue_since = now  # throttle
+            oldest = None
+            if self.jobs is not None:
+                oldest = self.store.oldest_running_job_for_target(pid)
+            # The pane's quiet clock can predate a just-created job; the job
+            # itself must have had a full rescue window to finish normally.
+            if oldest is None:
+                clock.rescue_since = now  # throttle
+            elif wall_now() - oldest.created_at > self.rescue:
+                await self._rescue_jobs(pid, observer, clock)
+                clock.rescue_since = now  # throttle
 
     async def _screen_only(self, pid: str, observer: HarnessObserver, clock: QuietClock) -> None:
         """The screen arm of `_on_quiet`, for a source that has not attached.
