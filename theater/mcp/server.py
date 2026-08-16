@@ -319,6 +319,16 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         outside a git repository. There is no prefix listing in this MCP
         surface.
 
+        Use it for small coordination facts: file claims, sibling handoff
+        notes, shared design decisions, or "child X owns slice Y" breadcrumbs.
+        Choose naturally unique keys such as repo paths, child ids, or task
+        ids so two agents do not silently overwrite each other.
+
+        Do not use it for mutual exclusion, queues, durable memory, project
+        state, or source-of-truth records. A stored value is only a note for
+        related live agents; commits, transcripts, checkpoints, and repo
+        inspection are still the evidence.
+
         namespace: coordination bucket chosen by the agents sharing it.
         key:       exact key inside that namespace.
         value:     exact string to store.
@@ -341,6 +351,11 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         outside a git repository. There is no prefix listing in this MCP
         surface.
 
+        Reach for it when a sibling may already have recorded a file claim,
+        handoff note, shared assumption, or work-slice ownership. Treat a
+        missing value as "no note was found", not as proof that nobody is
+        working there; Theater does not provide atomic claims or listing here.
+
         namespace: coordination bucket chosen by the agents sharing it.
         key:       exact key inside that namespace.
         """
@@ -354,6 +369,15 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         bookkeeping. It records every job delegated by this participant up to
         now and returns {"checkpoint_id": int, "jobs": [...]}. Use it before
         a risky orchestration turn or handoff when you want a recovery marker.
+
+        It snapshots job records only: handles, targets, prompts, states,
+        results, errors, and times. It does not snapshot repo files, tmux panes,
+        transcripts, child memory, worktrees, or any filesystem state.
+
+        Good moments to create one: before spawning or awaiting a batch of
+        children, before context compaction or handoff to another agent, before
+        a merge/recovery step, or before leaving long-running delegations
+        unattended.
 
         name:  short label for the checkpoint.
         notes: optional free-form notes for the later reader.
@@ -369,6 +393,13 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         explicit agent-created checkpoint, including jobs that finished,
         moved, disappeared from retention, or now have different structured
         results.
+
+        Useful after an interrupted await, daemon/client restart, context
+        handoff, or any point where you need to reconstruct which delegated jobs
+        still need transcript reading, repo inspection, another await, or
+        cleanup. A pruned handle means the job record aged out or disappeared;
+        it is not proof that the underlying work was irrelevant or safely
+        collected.
 
         checkpoint_id: the id returned by checkpoint.
         """
