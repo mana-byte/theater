@@ -23,6 +23,9 @@ resolved natively by Textual against the active theme.
 
 from __future__ import annotations
 
+from collections import deque
+from collections.abc import Mapping
+
 from textual.content import Content
 
 from theater.formatting import short_id, tilde
@@ -32,9 +35,38 @@ from theater.harness import harness_icon
 #: namespaces the row kind so a pane id and a participant id never collide.
 type Key = tuple[str, str]
 
+#: A cell of the rail grid: ``(row, column)``, where *row* counts rendered
+#: rows across the whole tree — leaf *i* owns rows ``3i``, ``3i+1``, ``3i+2``.
+type Cell = tuple[int, int]
+
+#: A cell within one three-row leaf, used for local overlays.
+type LeafCell = tuple[int, int]
+
+#: Rows drawn per participant leaf. The rail grid indexes in these, so the
+#: constant lives beside the renderer that produces them rather than in the app.
+LEAF_ROWS = 3
+
+#: A bright style for the heavy line glyph under a send travelling the rails.
+SEND_STYLE = "$accent bold"
+
 #: Braille spinner frames, matching vibe exactly. U+28xx is unambiguously
 #: narrow in every terminal, unlike the harness icons.
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+#: Ten grayscale frames so the working harness pulse stays in lockstep with
+#: the ten-frame spinner: bright, dimmer, then back up without a jump.
+_WORKING_HARNESS_STYLES = (
+    "#FFFFFF",
+    "#EFEFEF",
+    "#DFDFDF",
+    "#CFCFCF",
+    "#BFBFBF",
+    "#AFAFAF",
+    "#BFBFBF",
+    "#CFCFCF",
+    "#DFDFDF",
+    "#EFEFEF",
+)
 
 #: Box-drawing pieces for the lineage rails. Plain indentation could not say
 #: whether the agent two lines down is a sibling or a nephew; the rails can.
@@ -78,34 +110,53 @@ def shorten_path(path: str | None, keep: int = 2) -> str:
     return f"{prefix}…/{tail}"
 
 
+def is_root_prefix(prefix: str) -> bool:
+    """Whether *prefix* is a bare branch, i.e. a root branching off the super-root."""
+    return prefix in (_BRANCH, _LAST_BRANCH)
+
+
 def _walk(
-    nodes: list[dict], prefix: str = "", depth: int = 0
-) -> list[tuple[str, dict, Key, str]]:
+    nodes: list[dict], prefix: str = "", depth: int = 0, *, is_first_root: bool = False
+) -> list[tuple[str, dict, Key, str, bool]]:
     """Depth-first walk that pairs each node with its drawn ancestry.
 
-    Roots get no branch of their own: they are separate agents, not siblings
-    under some invisible parent, and a rail hanging off nothing reads as a
-    missing row. Children get a branch, and the rail continues past them only
-    while their parent still has siblings below.
+    Roots are drawn as siblings under an invisible super-root: they get a
+    branch (``├── `` / ``└── ``) like any other child, so the whole forest
+    is visually connected by rails. The super-root itself is never rendered
+    — it exists only to give roots a parent to branch off. A root's prefix
+    is a bare branch (no ancestry to its left), so the app can detect roots
+    by checking whether the prefix is exactly ``_BRANCH`` or ``_LAST_BRANCH``.
 
-    Each row is ``(prefix, node, key, cont_prefix)`` where *prefix* is the
-    branch rail for row 2 and *cont_prefix* is the continuation rail for row 3
-    (the rail or gap that follows the branch at this depth).
+    The very first root gets a blank row 1 (no rail above it): there is
+    nothing visible to connect it to, and a rail hanging off the top of the
+    panel reads as a missing row. Later roots keep the rail because the
+    virtual parent connects them to the root above.
+
+    Each row is ``(prefix, node, key, cont_prefix, is_first_root)`` where
+    *prefix* is the branch rail for row 2 and *cont_prefix* is the
+    continuation rail for row 3 (the rail or gap that follows the branch
+    at this depth). *is_first_root* is consumed by :func:`node_label` to
+    blank row 1 for the first root; it is not part of the app-facing
+    5-tuple.
     """
-    rows: list[tuple[str, dict, Key, str]] = []
+    rows: list[tuple[str, dict, Key, str, bool]] = []
     last_index = len(nodes) - 1
     for i, node in enumerate(nodes):
         last = i == last_index
         if depth == 0:
-            branch, child_prefix = "", ""
+            # Roots branch off the invisible super-root.
+            branch = _LAST_BRANCH if last else _BRANCH
+            child_prefix = _GAP if last else _RAIL
+            first_root = is_first_root and i == 0
         else:
             branch = _LAST_BRANCH if last else _BRANCH
             child_prefix = prefix + (_GAP if last else _RAIL)
+            first_root = False
         # cont_prefix for row 3 is the same rail/gap children at this depth
-        # inherit — already computed as child_prefix, including "" for roots.
+        # inherit — already computed as child_prefix.
         cont_prefix = child_prefix
         key: Key = ("p", node.get("id", ""))
-        rows.append((prefix + branch, node, key, cont_prefix))
+        rows.append((prefix + branch, node, key, cont_prefix, first_root))
         rows += _walk(node.get("children") or [], child_prefix, depth + 1)
     return rows
 
@@ -113,6 +164,45 @@ def _walk(
 def spinner_frame(frame: int) -> str:
     """The braille character at *frame*, wrapping at 10."""
     return _SPINNER_FRAMES[frame % len(_SPINNER_FRAMES)]
+
+
+def working_harness_style(frame: int, offset: int = 0) -> str:
+    """The grayscale style for a working harness character at *offset*."""
+    return _WORKING_HARNESS_STYLES[(offset - frame) % len(_WORKING_HARNESS_STYLES)]
+
+
+def _append_working_harness_text(
+    parts: list,
+    text: str,
+    *,
+    frame: int,
+    offset: int,
+) -> None:
+    """Append *text* one styled character at a time."""
+    for char in text:
+        if char.isspace():
+            parts.append(char)
+            continue
+        parts.append((char, working_harness_style(frame, offset)))
+        offset += 1
+
+
+def _append_working_harness_parts(
+    parts: list,
+    harness: str,
+    sid: str,
+    *,
+    frame: int,
+    id_style: str = "",
+) -> None:
+    """Append the working harness as a pulse, and the name normally."""
+    parts.append(" ")
+    _append_working_harness_text(parts, harness, frame=frame, offset=0)
+    parts.append("  ")
+    if id_style:
+        parts.append((sid, id_style))
+    else:
+        parts.append(sid)
 
 
 def _status_glyph(node: dict, frame: int = 0) -> tuple[str, str]:
@@ -155,9 +245,11 @@ def _rail_above(prefix: str) -> str:
     1 is a rail like everyone else's. Only row 3 turns on last-ness, because
     row 3 is where the line either continues past this node or stops.
 
-    A root gets nothing. It has no branch, so there is no line above it to
-    continue, and a rail hanging off nothing reads as a sibling that failed
-    to render.
+    Roots now branch off an invisible super-root, so they have branch
+    prefixes and this function computes a rail for them. The first root's
+    rail is suppressed in :func:`node_label` via the *is_first_root* flag,
+    because nothing visible sits above it and a dangling rail reads as a
+    missing row.
 
     The ancestry to the left is copied through unchanged, gaps and all; only
     this node's own branch column is replaced. Every rail piece is the same
@@ -168,6 +260,46 @@ def _rail_above(prefix: str) -> str:
     return prefix[: -len(_BRANCH)] + _RAIL
 
 
+def _overlay_row(parts: list, overlay: Mapping[int, str]) -> list:
+    """Replace single characters of an assembled row by column.
+
+    *parts* is a ``Content.assemble`` argument list — plain strings and
+    ``(text, style)`` pairs — and *overlay* maps a column to the one
+    character that should be drawn there instead. The part carrying the
+    column is split around it so neighbouring text keeps its own style. A
+    column past the end of a row is padded to: the trace sometimes crosses a
+    spacer cell, and a packet that disappears there reads as a skip.
+    """
+    if not overlay:
+        return parts
+    out: list = []
+    col = 0
+    for part in parts:
+        text = part if isinstance(part, str) else part[0]
+        style = "" if isinstance(part, str) else part[1]
+        start, col = col, col + len(text)
+        hits = sorted(c for c in overlay if start <= c < col)
+        if not hits:
+            out.append(part)
+            continue
+        cursor = start
+        for hit in hits:
+            if hit > cursor:
+                chunk = text[cursor - start : hit - start]
+                out.append((chunk, style) if style else chunk)
+            out.append((overlay[hit], SEND_STYLE))
+            cursor = hit + 1
+        if cursor < col:
+            chunk = text[cursor - start :]
+            out.append((chunk, style) if style else chunk)
+    for hit in sorted(c for c in overlay if c >= col):
+        if hit > col:
+            out.append(" " * (hit - col))
+        out.append((overlay[hit], SEND_STYLE))
+        col = hit + 1
+    return out
+
+
 def node_label(
     node: dict,
     prefix: str = "",
@@ -175,16 +307,25 @@ def node_label(
     cont_prefix: str = "",
     cwd_segments: int = 2,
     frame: int = 0,
+    is_first_root: bool = False,
+    overlay: Mapping[LeafCell, str] | None = None,
 ) -> Content:
     """Three rows of Content for one participant leaf.
+
+    *overlay* maps ``(row_within_the_leaf, column)`` cells to the heavy line
+    glyph drawn there — the send animation's travelling trace. It defaults to
+    None, so every existing call site renders exactly as before.
 
     Row 1 is the spacing row — leading rather than trailing, so the first
     leaf gets breathing room under the panel border for free, and the row
     cannot be landed on by a cursor or miscounted by a test. For a child it
     is not empty: it carries the rail arriving from the parent (see
     :func:`_rail_above`), because a blank row there would break the vertical
-    line in the gap between every pair of siblings. A root's row 1 stays
-    blank.
+    line in the gap between every pair of siblings. The first root's row 1
+    is also blank: it branches off an invisible super-root, but nothing
+    visible sits above it, so the rail is suppressed to avoid a dangling
+    line at the top of the panel. Later roots keep the rail because the
+    virtual parent connects them to the root above.
 
     Row 2 carries the *branch* prefix (``├── `` / ``└── ``); row 3 carries
     the *continuation* prefix (``cont_prefix``), which is the rail or gap
@@ -201,12 +342,15 @@ def node_label(
     id_style = _id_style(node)
     cwd = shorten_path(tilde(node.get("cwd")), keep=cwd_segments)
     harness = node.get("harness", "?")
+    harness_pulse = node.get("status") == "working"
 
-    # Row 1: the rail leading down into this node's branch, blank for a root.
+    # Row 1: the rail leading down into this node's branch. Suppressed for
+    # the first root — the invisible super-root has nothing above it.
     row1_parts: list = []
-    lead = _rail_above(prefix)
-    if lead:
-        row1_parts.append((lead, "$text dim"))
+    if not is_first_root:
+        lead = _rail_above(prefix)
+        if lead:
+            row1_parts.append((lead, "$text dim"))
 
     # Row 2: rails, glyph, harness name, short id. The id is split out so
     # the dim-italic reach mark applies to the id portion only.
@@ -214,10 +358,13 @@ def node_label(
     if prefix:
         row2_parts.append((prefix, "$text dim"))
     row2_parts.append((glyph, glyph_style))
-    row2_parts.append(f" {harness}  ")
-    if id_style:
+    if harness_pulse:
+        _append_working_harness_parts(row2_parts, harness, sid, frame=frame, id_style=id_style)
+    elif id_style:
+        row2_parts.append(f" {harness}  ")
         row2_parts.append((sid, id_style))
     else:
+        row2_parts.append(f" {harness}  ")
         row2_parts.append(sid)
 
     # Row 3: continuation rails (not the branch prefix), shortened cwd, dim.
@@ -225,6 +372,11 @@ def node_label(
     if cont_prefix:
         row3_parts.append((cont_prefix, "$text dim"))
     row3_parts.append((cwd, "$text dim"))
+
+    if overlay:
+        row1_parts = _overlay_row(row1_parts, {c: g for (r, c), g in overlay.items() if r == 0})
+        row2_parts = _overlay_row(row2_parts, {c: g for (r, c), g in overlay.items() if r == 1})
+        row3_parts = _overlay_row(row3_parts, {c: g for (r, c), g in overlay.items() if r == 2})
 
     return Content.assemble(
         *row1_parts,
@@ -236,11 +388,18 @@ def node_label(
 
 
 def _labelled(
-    row: tuple[str, dict, Key, str], *, cwd_segments: int = 2, frame: int = 0
+    row: tuple[str, dict, Key, str, bool], *, cwd_segments: int = 2, frame: int = 0
 ) -> tuple[Content, dict, Key, str, str]:
-    prefix, node, key, cont_prefix = row
+    prefix, node, key, cont_prefix, is_first_root = row
     return (
-        node_label(node, prefix, cont_prefix=cont_prefix, cwd_segments=cwd_segments, frame=frame),
+        node_label(
+            node,
+            prefix,
+            cont_prefix=cont_prefix,
+            cwd_segments=cwd_segments,
+            frame=frame,
+            is_first_root=is_first_root,
+        ),
         node,
         key,
         prefix,
@@ -266,11 +425,12 @@ def render_tree(
     for participants, ``("u", pane)`` for unmanaged panes, and
     ``("sep", "unmanaged")`` for the separator. Existing ``[0]`` (label) and
     ``[1]`` (node) indexing is unaffected. The fourth element is the rail
-    prefix (``""`` for roots, the separator, and unmanaged panes), carried
-    explicitly so the panel can pass it to ``AgentLeaf`` for re-rendering on
-    spinner ticks without re-walking the tree. The fifth element is the
-    continuation prefix used for row 3 (the cwd row), which is the rail or
-    gap that follows the branch rather than a repeat of the branch itself.
+    prefix — a bare branch (``├── `` / ``└── ``) for roots, ``""`` for the
+    separator and unmanaged panes — carried explicitly so the panel can pass
+    it to ``AgentLeaf`` for re-rendering on spinner ticks without re-walking
+    the tree. The fifth element is the continuation prefix used for row 3
+    (the cwd row), which is the rail or gap that follows the branch rather
+    than a repeat of the branch itself.
 
     *cwd_segments* is forwarded to :func:`shorten_path` and defaults to the
     ``[regie] cwd_segments`` value. It is read from config so the tree does
@@ -279,15 +439,17 @@ def render_tree(
     Returns a flat list so the Textual panel can map selection back to the
     data without walking the widget's own tree.
     """
-    lines = [_labelled(row, cwd_segments=cwd_segments) for row in _walk(tree)]
+    lines = [_labelled(row, cwd_segments=cwd_segments) for row in _walk(tree, is_first_root=True)]
     if unmanaged:
-        lines.append((
-            Content.assemble(("── unmanaged ──", "$text dim italic")),
-            {},
-            ("sep", "unmanaged"),
-            "",
-            "",
-        ))
+        lines.append(
+            (
+                Content.assemble(("── unmanaged ──", "$text dim italic")),
+                {},
+                ("sep", "unmanaged"),
+                "",
+                "",
+            )
+        )
         for u in unmanaged:
             fake_node = {
                 "id": u.get("pane", "????????"),
@@ -300,9 +462,7 @@ def render_tree(
                 "children": [],
             }
             key: Key = ("u", u.get("pane", ""))
-            lines.append(
-                (node_label(fake_node, cwd_segments=cwd_segments), fake_node, key, "", "")
-            )
+            lines.append((node_label(fake_node, cwd_segments=cwd_segments), fake_node, key, "", ""))
     return lines
 
 
@@ -315,3 +475,125 @@ def selected_participant(
         if node and node.get("id"):
             return node
     return None
+
+
+# ---- the rail grid --------------------------------------------------------
+#
+# A send is drawn as a heavy line glyph travelling the rails the tree already draws, so
+# the route has to be the *visible* one — down a rail, along a branch, never
+# diagonally across empty space. The rails are already fully described by the
+# prefixes `_walk` computed, so the grid is derived from those strings rather
+# than from anything on screen: every rail piece is four columns wide, so
+# depth *d* owns columns ``4d..4d+3`` and its vertical line sits at ``4d``.
+
+
+def _rail_leaves(
+    lines: list[tuple[Content, dict, Key, str, str]],
+) -> list[tuple[int, str, str, str, int]]:
+    """The leading run of participant rows, with their depth.
+
+    Stops at the first row that is not a participant with a branch prefix.
+    The separator and the unmanaged panes below it have no rails and are one
+    row tall rather than three, so they are not part of the grid — and since
+    :func:`render_tree` appends them after the whole walk, stopping at the
+    first one leaves exactly the rows the grid can describe.
+    """
+    out: list[tuple[int, str, str, str, int]] = []
+    for i, (_, node, key, prefix, cont_prefix) in enumerate(lines):
+        if key[0] != "p" or not prefix.endswith((_BRANCH, _LAST_BRANCH)):
+            break
+        out.append((i, str(node.get("id", "")), prefix, cont_prefix, len(prefix) // 4 - 1))
+    return out
+
+
+def _rail_cells(leaves: list[tuple[int, str, str, str, int]]) -> set[Cell]:
+    """Every cell a send trace may stand on, in whole-tree row coordinates.
+
+    Per leaf: the ancestry rails (a ``│`` in the prefix) on rows 1 and 2, the
+    rail arriving into its own branch on row 1, its whole branch run from the
+    branch glyph across ``── `` to the status glyph on row 2, and the
+    continuation rails on row 3.
+
+    One cell has to be added that no prefix mentions. A parent's row 3 is
+    exactly as wide as its own depth, so the column its children's rail
+    occupies falls past the end of it — the line is interrupted there by the
+    cwd text. That gap is bridged, and a heavy line glyph is drawn there for
+    the one frame the trace is passing, because the alternative is a trace
+    that jumps a row.
+    """
+    cells: set[Cell] = set()
+    prev: tuple[int, int] | None = None
+    for i, _pid, prefix, cont_prefix, depth in leaves:
+        top, mid, bot = LEAF_ROWS * i, LEAF_ROWS * i + 1, LEAF_ROWS * i + 2
+        own = 4 * depth
+        for col, char in enumerate(prefix[:own]):
+            if char == _RAIL[0]:
+                cells.add((mid, col))
+                if i:
+                    cells.add((top, col))
+        # The first leaf's row 1 is blank — nothing visible sits above it.
+        if i:
+            cells.add((top, own))
+        cells.update((mid, col) for col in range(own, own + 5))
+        for col, char in enumerate(cont_prefix):
+            if char == _RAIL[0]:
+                cells.add((bot, col))
+        if prev is not None and prev[0] == depth - 1:
+            cells.add((prev[1], own))
+        prev = (depth, bot)
+    return cells
+
+
+def _route(cells: set[Cell], start: Cell, goal: Cell) -> list[Cell] | None:
+    """A shortest 4-connected route through *cells*, or None if unreachable.
+
+    Breadth-first rather than anything cleverer: the rails are one cell wide
+    and barely branch, so the grid is tiny and the shortest route through it
+    *is* the route up through the common ancestor.
+    """
+    if start not in cells or goal not in cells:
+        return None
+    came: dict[Cell, Cell | None] = {start: None}
+    queue = deque([start])
+    while queue:
+        cur = queue.popleft()
+        if cur == goal:
+            path: list[Cell] = []
+            step: Cell | None = cur
+            while step is not None:
+                path.append(step)
+                step = came[step]
+            return list(reversed(path))
+        row, col = cur
+        for nxt in ((row - 1, col), (row + 1, col), (row, col - 1), (row, col + 1)):
+            if nxt in cells and nxt not in came:
+                came[nxt] = cur
+                queue.append(nxt)
+    return None
+
+
+def send_path(
+    lines: list[tuple[Content, dict, Key, str, str]], from_id: str | None, to_id: str | None
+) -> list[Cell] | None:
+    """The route a send takes across the drawn tree, or None if it has none.
+
+    Both ends must be participants currently on screen: a send from the CLI,
+    from an external agent, or from a row that has since left the tree has
+    nowhere to start, and returning None is how the caller drops it. The
+    route runs anchor to anchor, where a leaf's anchor is its status glyph —
+    the first cell after its branch.
+    """
+    if not from_id or not to_id or from_id == to_id:
+        return None
+    leaves = _rail_leaves(lines)
+    anchors = {pid: (LEAF_ROWS * i + 1, 4 * (depth + 1)) for i, pid, _, _, depth in leaves if pid}
+    start = anchors.get(from_id)
+    goal = anchors.get(to_id)
+    if start is None or goal is None:
+        return None
+    return _route(_rail_cells(leaves), start, goal)
+
+
+def cell_leaf(cell: Cell) -> tuple[int, int]:
+    """Split a grid row into ``(leaf index, row within that leaf)``."""
+    return divmod(cell[0], LEAF_ROWS)

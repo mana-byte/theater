@@ -17,7 +17,7 @@ import pytest
 from theater.config import Config, RegieSection
 from theater.regie import app as app_mod
 from theater.regie.app import AgentLeaf, RegieApp
-from theater.regie.tree import render_tree
+from theater.regie.tree import SEND_STYLE, render_tree
 
 PARENT = {
     "id": "aaaaaaaaaaaa",
@@ -156,6 +156,10 @@ def make_app(**regie) -> RegieApp:
 
 def _panel(app: RegieApp) -> app_mod.TreePanel:
     return app.query_one("#tree-panel", app_mod.TreePanel)
+
+
+def _styles(widget) -> list[str]:
+    return [span.style for span in widget.render().spans]
 
 
 async def test_same_ids_across_refresh_yield_same_widgets(daemon, tmux):
@@ -359,3 +363,68 @@ async def test_spinner_frame_advances_and_wraps(daemon, tmux):
         for _ in range(9):
             child_widget._tick()
         assert child_widget._frame == 0
+
+
+# ---- send-trace overlays --------------------------------------------------
+
+
+async def test_an_overlay_lands_on_one_leaf_and_leaves_the_others_clean(daemon, tmux):
+    app = make_app()
+    async with app.run_test():
+        panel = _panel(app)
+        parent_widget = panel._key_widgets[("p", PARENT["id"])]
+        child_widget = panel._key_widgets[("p", CHILD["id"])]
+
+        panel.set_overlays({("p", CHILD["id"]): {(1, 4): "━"}})
+        assert SEND_STYLE in _styles(child_widget)
+        assert SEND_STYLE not in _styles(parent_widget)
+
+
+async def test_the_next_frame_clears_the_leaf_the_trace_left(daemon, tmux):
+    """set_overlays is given the whole picture, so a leaf it omits is cleared."""
+    app = make_app()
+    async with app.run_test():
+        panel = _panel(app)
+        parent_widget = panel._key_widgets[("p", PARENT["id"])]
+        child_widget = panel._key_widgets[("p", CHILD["id"])]
+
+        panel.set_overlays({("p", PARENT["id"]): {(1, 4): "━"}})
+        panel.set_overlays({("p", CHILD["id"]): {(1, 8): "┃"}})
+        assert SEND_STYLE not in _styles(parent_widget)
+        assert SEND_STYLE in _styles(child_widget)
+
+        panel.set_overlays({})
+        assert SEND_STYLE not in _styles(child_widget)
+        assert panel._overlaid == set()
+
+
+async def test_an_overlay_survives_a_tree_refresh(daemon, tmux):
+    """A refresh mid-animation must not blink the trace out for a frame.
+
+    The leaf is reconciled in place, and the overlay is per-widget state on
+    exactly the same terms as the spinner's timer — that is what surviving a
+    tick is for.
+    """
+    app = make_app()
+    async with app.run_test():
+        panel = _panel(app)
+        child_widget = panel._key_widgets[("p", CHILD["id"])]
+        panel.set_overlays({("p", CHILD["id"]): {(1, 8): "┃"}})
+
+        await app._refresh_tree()
+
+        assert panel._key_widgets[("p", CHILD["id"])] is child_widget
+        assert SEND_STYLE in _styles(child_widget)
+
+
+async def test_an_overlay_on_a_leaf_that_has_gone_is_not_an_error(daemon, tmux):
+    """The animation drops a step behind the tree; asking for a dead row is fine."""
+    app = make_app()
+    async with app.run_test() as pilot:
+        panel = _panel(app)
+        daemon["answers"]["participants.tree"] = [dict(PARENT, children=[])]
+        await app._refresh_tree()
+        await pilot.pause()
+
+        panel.set_overlays({("p", CHILD["id"]): {(1, 8): "┃"}})
+        panel.set_overlays({})

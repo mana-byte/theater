@@ -22,7 +22,10 @@ Keybindings:
     q               quit (unstages first; detaches, kills nothing)
 
 Polling: the tree refreshes every 1s, the bus tail every 0.4s. Both are
-async daemon calls; the app runs them as background workers.
+async daemon calls; the app runs them as background workers. The bus is read
+twice over, on two cursors: once for the panel, which must not consume rows
+while it is hidden, and once for the send animation, which must run whether
+the panel is showing or not.
 """
 
 from __future__ import annotations
@@ -48,10 +51,15 @@ from theater.config import Config, RegieSection
 from theater.regie.bus_view import format_bus_line
 from theater.regie.palette import SpawnCommands, ViewCommands
 from theater.regie.tree import (
+    Cell,
     Key,
+    LeafCell,
+    cell_leaf,
+    is_root_prefix,
     node_label,
     render_tree,
     selected_participant,
+    send_path,
 )
 from theater.tmux import client as tmux
 from theater.tmux import panes
@@ -66,10 +74,69 @@ TREE_INTERVAL = _DEFAULTS.tree_interval
 BUS_INTERVAL = _DEFAULTS.bus_interval
 BUS_BATCH = _DEFAULTS.bus_batch
 
+#: How often the travelling send trace moves. The number of moves comes from
+#: the route length so long cross-root sends do not skip most of their rails.
+#: A little slower than the spinners so cross-tree sends are easy to follow.
+#: Not config: a constant nobody has asked to tune is not a setting.
+SEND_ANIM_INTERVAL = 0.10
+
+#: A ceiling on concurrent traces. A busy machine can emit sends faster than
+#: one animation lasts, and a hundred bright rail cells at once is noise, not signal.
+MAX_SEND_ANIMS = 6
+
+#: Heavy trace glyphs to draw within one leaf: ``(row within the leaf, column)``.
+type LeafOverlay = dict[LeafCell, str]
+
+_UP = (-1, 0)
+_DOWN = (1, 0)
+_LEFT = (0, -1)
+_RIGHT = (0, 1)
+
+_SEND_TRACE_GLYPHS = {
+    frozenset({_LEFT}): "━",
+    frozenset({_RIGHT}): "━",
+    frozenset({_UP}): "┃",
+    frozenset({_DOWN}): "┃",
+    frozenset({_LEFT, _RIGHT}): "━",
+    frozenset({_UP, _DOWN}): "┃",
+    frozenset({_UP, _RIGHT}): "┗",
+    frozenset({_UP, _LEFT}): "┛",
+    frozenset({_DOWN, _RIGHT}): "┏",
+    frozenset({_DOWN, _LEFT}): "┓",
+}
+
+
+def _send_trace_glyph(path: list[Cell], index: int) -> str:
+    """A heavy line glyph matching how the route passes through *index*."""
+    row, col = path[index]
+    directions: set[tuple[int, int]] = set()
+    for neighbor_index in (index - 1, index + 1):
+        if 0 <= neighbor_index < len(path):
+            next_row, next_col = path[neighbor_index]
+            directions.add((next_row - row, next_col - col))
+    return _SEND_TRACE_GLYPHS.get(frozenset(directions), "━")
+
 
 def _is_participant_key(key: Key) -> bool:
     """Whether *key* identifies a participant or unmanaged pane (not a separator)."""
     return key[0] in ("p", "u")
+
+
+class SendAnim:
+    """One trace travelling from a sender's leaf to its target's.
+
+    Holds the two participant ids and how many route cells it has travelled —
+    never the route itself. The tree refreshes underneath it every second, and
+    a stored route would go stale the moment an agent above it dies and every
+    row shifts up. Recomputing per frame means the trace lands somewhere
+    sensible even if the path changed length, and disappears cleanly the moment
+    either end stops being visible.
+    """
+
+    def __init__(self, from_id: str, to_id: str) -> None:
+        self.from_id = from_id
+        self.to_id = to_id
+        self.step = 0
 
 
 class AgentLeaf(Static):
@@ -79,11 +146,12 @@ class AgentLeaf(Static):
     WORKING and AWAITING_INPUT are unmissable. One widget per participant —
     the cursor stays 1:1 with participants, not with lines.
 
-    The spinner timer is owned by the leaf itself: ``set_interval(0.1, tick)``
-    advancing the braille frame and calling ``update(..., layout=False)``.
-    Started only while the participant is WORKING, stopped when it leaves
-    that state or on unmount. An idle régie costs no frames. This is vibe's
-    pattern: the timer lives on the widget that needs it, not on the app.
+    The animation timer is owned by the leaf itself:
+    ``set_interval(0.1, tick)`` advances the braille spinner and working
+    harness pulse, then calls ``update(..., layout=False)``. Started only while
+    the participant is WORKING, stopped when it leaves that state or on
+    unmount. An idle régie costs no frames. This is vibe's pattern: the timer
+    lives on the widget that needs it, not on the app.
     """
 
     #: Text selection is disabled so dragging across leaves selects tmux
@@ -136,6 +204,7 @@ class AgentLeaf(Static):
         cont_prefix: str = "",
         key: Key | None = None,
         cwd_segments: int = 2,
+        is_first_root: bool = False,
         **kwargs,
     ) -> None:
         super().__init__("", **kwargs)
@@ -144,8 +213,12 @@ class AgentLeaf(Static):
         self._cont_prefix = cont_prefix
         self._key = key or ("p", node.get("id", ""))
         self._cwd_segments = cwd_segments
+        self._is_first_root = is_first_root
         self._frame: int = 0
         self._timer: Timer | None = None
+        #: Heavy line glyphs a send animation is currently drawing on this
+        #: leaf. Owned by the panel, which sets and clears them every frame.
+        self._overlay: LeafOverlay | None = None
         # Render the initial content so the leaf is not blank before its
         # first update_node call.
         self.update(self._render_label(), layout=False)
@@ -161,7 +234,21 @@ class AgentLeaf(Static):
             cont_prefix=self._cont_prefix,
             cwd_segments=self._cwd_segments,
             frame=self._frame,
+            is_first_root=self._is_first_root,
+            overlay=self._overlay,
         )
+
+    def set_overlay(self, overlay: LeafOverlay | None) -> None:
+        """Draw (or stop drawing) the send trace on this leaf.
+
+        A no-op when nothing changed: the animation frame touches every leaf
+        it might have left, and re-rendering the untouched ones would put the
+        whole tree through a repaint sixteen times a second.
+        """
+        if overlay == self._overlay:
+            return
+        self._overlay = overlay or None
+        self.update(self._render_label(), layout=False)
 
     def _tick(self) -> None:
         self._frame = (self._frame + 1) % 10
@@ -177,7 +264,9 @@ class AgentLeaf(Static):
             self._timer.stop()
             self._timer = None
 
-    def update_node(self, node: dict, prefix: str = "", *, cont_prefix: str = "") -> None:
+    def update_node(
+        self, node: dict, prefix: str = "", *, cont_prefix: str = "", is_first_root: bool = False
+    ) -> None:
         """Refresh the leaf's data from a new tree tick.
 
         Re-renders the content, and starts or stops the spinner timer
@@ -187,6 +276,7 @@ class AgentLeaf(Static):
         self._node = node
         self._prefix = prefix
         self._cont_prefix = cont_prefix
+        self._is_first_root = is_first_root
         self.update(self._render_label(), layout=False)
         if node.get("status") == "working":
             self._start_timer()
@@ -264,6 +354,10 @@ class TreePanel(VerticalScroll):
         #: the separator and the empty placeholder — both are ``Widget``
         #: subclasses, so the annotation is widened honestly.
         self._key_widgets: dict[Key, Widget] = {}
+        #: Which leaves currently carry a send trace, so the next frame knows
+        #: which ones to clear. Tracking the request rather than the widget:
+        #: a leaf that has since been unmounted took its overlay with it.
+        self._overlaid: set[Key] = set()
 
     DEFAULT_CSS = """
     TreePanel {
@@ -335,17 +429,19 @@ class TreePanel(VerticalScroll):
         ``update``. New participant rows get a fresh ``AgentLeaf``, new
         separator rows get a plain ``Label``.
 
-        *index* is the row's position in the flat line list, used only at
-        creation time to apply the alternating ``tree-alt`` class so the
-        list reads as stripes rather than a wall of identical rows. It is
-        not re-evaluated on updates: the class is set once when the widget
-        is mounted and left alone afterward, so a refresh tick cannot
-        trigger the re-render that would drop a pending click target.
+        *index* is the row's position in the flat line list. The alternating
+        ``tree-alt`` class is set only at creation time so a refresh tick
+        cannot trigger the re-render that would drop a pending click target.
+        The *is_first_root* flag is recomputed every tick and threaded to the
+        leaf so its spinner re-renders also blank row 1 for the first root.
         """
+        first_root = index == 0 and is_root_prefix(prefix)
         if key in self._key_widgets:
             widget = self._key_widgets[key]
             if isinstance(widget, AgentLeaf):
-                widget.update_node(node, prefix=prefix, cont_prefix=cont_prefix)
+                widget.update_node(
+                    node, prefix=prefix, cont_prefix=cont_prefix, is_first_root=first_root
+                )
             elif isinstance(widget, Label):
                 widget.update(label)
             return widget
@@ -356,6 +452,7 @@ class TreePanel(VerticalScroll):
                 cont_prefix=cont_prefix,
                 key=key,
                 cwd_segments=cwd_segments,
+                is_first_root=first_root,
             )
         else:
             widget = Label(label)
@@ -405,6 +502,24 @@ class TreePanel(VerticalScroll):
                 widget.add_class("tree-staged")
             if i == cursor:
                 widget.add_class("tree-cursor")
+
+    def set_overlays(self, overlays: dict[Key, LeafOverlay]) -> None:
+        """Put the send trace on the leaves that carry it, clear the rest.
+
+        Called once per animation frame with the whole picture rather than
+        per send, so a leaf the animation has moved off is cleared in the
+        same pass that draws where it moved to. An empty mapping is the
+        normal way an animation ends.
+        """
+        for key in self._overlaid - set(overlays):
+            widget = self._key_widgets.get(key)
+            if isinstance(widget, AgentLeaf):
+                widget.set_overlay(None)
+        for key, cells in overlays.items():
+            widget = self._key_widgets.get(key)
+            if isinstance(widget, AgentLeaf):
+                widget.set_overlay(cells)
+        self._overlaid = set(overlays)
 
     def scroll_to_cursor(self, cursor: int) -> None:
         """Ensure the cursor line is visible."""
@@ -495,6 +610,15 @@ class RegieApp(App):
     cursor: reactive[int] = reactive(0)
     tree_lines: reactive[list[tuple[Content, dict, Key, str, str]]] = reactive([])
     bus_cursor: int = 0
+    #: The send animation's own place in the bus. Separate from `bus_cursor`
+    #: on purpose: the panel must not consume rows it cannot display while
+    #: hidden, and the animation must run whether it is hidden or not. Two
+    #: readers of one log, each keeping its own place.
+    anim_cursor: int = 0
+    #: Whether the animation poll has seen the log once. The first poll only
+    #: takes the cursor: without it, starting the régie would replay every
+    #: send still in the daemon's buffer as if it had just happened.
+    _anim_primed: bool = False
     #: Whether the bus panel is showing. Toggled from the palette, not a key:
     #: a once-a-session decision. Hiding it pauses the poll (see _refresh_bus).
     bus_visible: reactive[bool] = reactive(False)
@@ -534,6 +658,13 @@ class RegieApp(App):
         #: failure). The palette reads None as "ask the local registry".
         self.harnesses: list[dict] | None = None
         self.bus_visible = self.settings.regie.bus_visible
+        #: Send traces in flight. Concurrent rather than queued: a queue would
+        #: show the second send a second after it happened, which is a lie
+        #: about when it was delivered.
+        self._send_anims: list[SendAnim] = []
+        #: Runs only while something is in flight — an idle régie costs no
+        #: frames, the same bargain AgentLeaf's spinner makes.
+        self._anim_timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
         # No Header: it restates the app's class name to someone who just
@@ -561,15 +692,9 @@ class RegieApp(App):
         if my_pane:
             self.my_pane = my_pane
             try:
-                self.my_window = await tmux.display_message(
-                    "#{window_id}", target=my_pane
-                )
-                self.my_session = await tmux.display_message(
-                    "#{session_id}", target=my_pane
-                )
-                self.my_session_name = await tmux.display_message(
-                    "#{session_name}", target=my_pane
-                )
+                self.my_window = await tmux.display_message("#{window_id}", target=my_pane)
+                self.my_session = await tmux.display_message("#{session_id}", target=my_pane)
+                self.my_session_name = await tmux.display_message("#{session_name}", target=my_pane)
             except Exception as exc:
                 logger.debug("could not discover window/session id: %s", exc)
         await self._enable_mouse()
@@ -578,8 +703,12 @@ class RegieApp(App):
         await self._load_harnesses()
         self.set_interval(self.settings.regie.tree_interval, self._refresh_tree)
         self.set_interval(self.settings.regie.bus_interval, self._refresh_bus)
+        self.set_interval(self.settings.regie.bus_interval, self._refresh_anim)
         await self._refresh_tree()
         await self._refresh_bus()
+        # Primes the animation cursor: whatever is already in the log
+        # happened before the régie was looking, and is not news.
+        await self._refresh_anim()
 
     async def _load_harnesses(self) -> None:
         """Ask the daemon what it can spawn, for the palette to offer.
@@ -660,9 +789,7 @@ class RegieApp(App):
                 # global value.
                 await tmux.unset_option("mouse", target=self.my_session)
             else:
-                await tmux.set_option(
-                    "mouse", self._mouse_prev, target=self.my_session
-                )
+                await tmux.set_option("mouse", self._mouse_prev, target=self.my_session)
         except Exception as exc:
             logger.debug("could not restore mouse: %s", exc)
 
@@ -695,9 +822,7 @@ class RegieApp(App):
                 # global value.
                 await tmux.unset_option("status", target=self.my_session)
             else:
-                await tmux.set_option(
-                    "status", self._status_prev, target=self.my_session
-                )
+                await tmux.set_option("status", self._status_prev, target=self.my_session)
         except Exception as exc:
             logger.debug("could not restore status line: %s", exc)
 
@@ -788,6 +913,95 @@ class RegieApp(App):
         for row in rows_sorted:
             log.write(format_bus_line(row, variables=variables))
         self.bus_cursor = rows[-1]["id"]
+
+    # ---- send animation --------------------------------------------------
+
+    async def _refresh_anim(self) -> None:
+        """Read the bus for sends, whether or not the panel is showing.
+
+        A second reader of the same log rather than a hook in `_refresh_bus`,
+        because the two want opposite things from a hidden panel: the panel
+        must not advance past rows it never drew, and the animation must not
+        stop just because nobody is reading the text. Its own cursor is the
+        whole of that separation, and this method never writes to the panel.
+
+        `agent.send` is the trigger rather than `job.created` because it is
+        emitted after the keystrokes reached the target's pane — the trace
+        stands for delivery, not for intent.
+        """
+        if not self._client:
+            return
+        try:
+            rows = await self._client.call(
+                "bus.tail", limit=self.settings.regie.bus_batch, after_id=self.anim_cursor
+            )
+            assert isinstance(rows, list)
+        except Exception as exc:
+            logger.debug("send animation poll failed: %s", exc)
+            return
+        if rows:
+            self.anim_cursor = max(int(row["id"]) for row in rows)
+        if not self._anim_primed:
+            self._anim_primed = True
+            return
+        for row in rows:
+            if row.get("kind") == "agent.send":
+                self.start_send_anim(row.get("from_id"), row.get("to_id"))
+
+    def start_send_anim(self, from_id: str | None, to_id: str | None) -> None:
+        """Begin a trace travelling from *from_id* to *to_id*, if it can.
+
+        Silently declines when there is no route: a send from the CLI, from an
+        external agent with no row, or to a participant that has already left
+        the tree has no visible route to draw. The visualisation is decoration —
+        the one thing it must never do is complain.
+        """
+        if len(self._send_anims) >= MAX_SEND_ANIMS:
+            return
+        if send_path(self.tree_lines, from_id, to_id) is None:
+            return
+        assert from_id and to_id  # send_path returned a route, so both exist
+        self._send_anims.append(SendAnim(from_id, to_id))
+        if self._anim_timer is None:
+            self._anim_timer = self.set_interval(SEND_ANIM_INTERVAL, self._tick_send_anims)
+
+    def _tick_send_anims(self) -> None:
+        """Draw every trace where it is now, then advance it one step.
+
+        Drawing before advancing is what puts the first frame on the sender
+        rather than one step past it. A trace that has run out of steps is
+        dropped here without being drawn, so the tick that retires the last
+        one is also the tick that clears the tree of it — an animation that
+        ends by stopping its own timer would otherwise leave its final frame
+        on screen for good.
+        """
+        overlays: dict[Key, LeafOverlay] = {}
+        alive: list[SendAnim] = []
+        for anim in self._send_anims:
+            path = send_path(self.tree_lines, anim.from_id, anim.to_id)
+            if not path or anim.step >= len(path):
+                continue
+            cell = path[anim.step]
+            leaf_index, row_in_leaf = cell_leaf(cell)
+            if not 0 <= leaf_index < len(self.tree_lines):
+                continue
+            key = self.tree_lines[leaf_index][2]
+            overlays.setdefault(key, {})[(row_in_leaf, cell[1])] = _send_trace_glyph(
+                path, anim.step
+            )
+            anim.step += 1
+            alive.append(anim)
+        self._send_anims = alive
+        panel = self._panel()
+        if panel is not None:
+            panel.set_overlays(overlays)
+        if not self._send_anims:
+            self._stop_anim_timer()
+
+    def _stop_anim_timer(self) -> None:
+        if self._anim_timer is not None:
+            self._anim_timer.stop()
+            self._anim_timer = None
 
     # ---- rendering -----------------------------------------------------
 

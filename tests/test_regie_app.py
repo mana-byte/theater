@@ -18,6 +18,7 @@ import pytest
 from theater.config import Config, RegieSection
 from theater.regie import app as app_mod
 from theater.regie.app import RegieApp
+from theater.regie.tree import SEND_STYLE, send_path
 
 PARENT = {
     "id": "aaaaaaaaaaaa",
@@ -48,6 +49,15 @@ BUS_ROW = {
     "from_id": "aaaaaaaaaaaa",
     "to_id": None,
     "payload": {"text": "hello", "tool": None, "ts": None, "turn_end": True, "index": 0},
+}
+
+SEND_ROW = {
+    "id": 1,
+    "ts": 1723000000,
+    "kind": "agent.send",
+    "from_id": PARENT["id"],
+    "to_id": CHILD["id"],
+    "payload": {"handle": "h1", "prompt": "do the thing"},
 }
 
 
@@ -160,6 +170,10 @@ def make_app(**regie) -> tuple[RegieApp, list[tuple[str, str]]]:
     return app, notes
 
 
+def _styles(widget) -> list[str]:
+    return [span.style for span in widget.render().spans]
+
+
 # ---- mount ---------------------------------------------------------------
 
 
@@ -206,6 +220,8 @@ async def test_every_tree_row_shares_one_left_inset(daemon, tmux):
         for leaf in leaves:
             assert leaf.styles.padding.top == 0
             assert leaf.styles.padding.bottom == 0
+            assert leaf.styles.margin.top == 0
+            assert leaf.styles.margin.bottom == 0
             assert leaf.styles.height.value == 3
 
 
@@ -511,6 +527,174 @@ async def test_a_hidden_bus_does_not_consume_the_events_it_cannot_show(daemon, t
         assert app.bus_cursor == 2
         log = app.query_one("#bus-panel", app_mod.RichLog)
         assert log.lines
+
+
+# ---- send animation ------------------------------------------------------
+
+
+async def test_a_send_animates_while_the_bus_panel_is_hidden(daemon, tmux):
+    """The animation reads the bus on its own cursor, so hiding costs nothing.
+
+    The panel's cursor must stay where it was — it has drawn nothing — while
+    the animation's own cursor moves past the row it consumed. Two readers of
+    one log; this is the test that keeps them apart.
+    """
+    app, _ = make_app()  # bus hidden
+    async with app.run_test():
+        daemon["answers"]["bus.tail"] = [SEND_ROW]
+        await app._refresh_anim()
+        assert len(app._send_anims) == 1
+        assert app.anim_cursor == 1
+        assert app.bus_cursor == 0
+        assert not app.query_one("#bus-panel", app_mod.RichLog).lines
+
+
+async def test_the_first_poll_only_takes_the_cursor(daemon, tmux):
+    """Sends already in the log happened before the régie was looking.
+
+    Without priming, starting the régie would replay the daemon's whole
+    buffer as a burst of traces for deliveries that are long finished.
+    """
+    daemon["answers"]["bus.tail"] = [SEND_ROW]
+    app, _ = make_app()
+    async with app.run_test():
+        # The mount poll primed the cursor and animated nothing.
+        assert app._send_anims == []
+        assert app.anim_cursor == 1
+        # A row arriving after that does animate.
+        daemon["answers"]["bus.tail"] = [dict(SEND_ROW, id=2)]
+        await app._refresh_anim()
+        assert len(app._send_anims) == 1
+
+
+async def test_only_sends_animate(daemon, tmux):
+    """Other bus traffic moves the cursor and nothing else."""
+    app, _ = make_app()
+    async with app.run_test():
+        daemon["answers"]["bus.tail"] = [BUS_ROW]
+        await app._refresh_anim()
+        assert app._send_anims == []
+        assert app.anim_cursor == 1
+
+
+async def test_a_send_with_no_visible_sender_or_target_is_dropped(daemon, tmux):
+    """A CLI send, an external agent, a row that has died — all just skipped."""
+    app, _ = make_app()
+    async with app.run_test():
+        app.start_send_anim(None, CHILD["id"])
+        app.start_send_anim("cli", CHILD["id"])
+        app.start_send_anim(PARENT["id"], "ffffffffffff")
+        app.start_send_anim(PARENT["id"], PARENT["id"])
+        assert app._send_anims == []
+        assert app._anim_timer is None
+
+
+async def test_the_trace_starts_on_the_sender_and_reaches_the_target(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test():
+        panel = app.query_one("#tree-panel", app_mod.TreePanel)
+        sender = panel._key_widgets[("p", PARENT["id"])]
+        target = panel._key_widgets[("p", CHILD["id"])]
+
+        app.start_send_anim(PARENT["id"], CHILD["id"])
+        app._tick_send_anims()
+        assert SEND_STYLE in _styles(sender)
+
+        path = send_path(app.tree_lines, PARENT["id"], CHILD["id"])
+        assert path is not None
+        for _ in range(len(path) - 1):
+            app._tick_send_anims()
+        assert SEND_STYLE in _styles(target)
+
+
+async def test_cross_root_trace_walks_every_cell_to_the_other_roots_child(daemon, tmux):
+    """Long root-to-child routes must not be squeezed into a fixed frame count."""
+    other_root = {
+        **PARENT,
+        "id": "cccccccccccc",
+        "name": "other-root",
+        "tmux_pane": "%12",
+        "children": [dict(CHILD)],
+    }
+    daemon["answers"]["participants.tree"] = [dict(PARENT, children=[]), other_root]
+    app, _ = make_app()
+    async with app.run_test():
+        panel = app.query_one("#tree-panel", app_mod.TreePanel)
+        path = send_path(app.tree_lines, PARENT["id"], CHILD["id"])
+        assert path is not None
+        assert len(path) > 13
+
+        app.start_send_anim(PARENT["id"], CHILD["id"])
+        for expected in path:
+            app._tick_send_anims()
+            leaf_index, row_in_leaf = app_mod.cell_leaf(expected)
+            key = app.tree_lines[leaf_index][2]
+            widget = panel._key_widgets[key]
+            assert isinstance(widget, app_mod.AgentLeaf)
+            assert set(widget._overlay or {}) == {(row_in_leaf, expected[1])}
+            assert next(iter((widget._overlay or {}).values())) in "━┃┏┓┗┛"
+
+
+async def test_the_animation_timer_runs_only_while_something_is_in_flight(daemon, tmux):
+    """It starts on the first trace and stops with the last one, leaving no glyph."""
+    app, _ = make_app()
+    async with app.run_test():
+        assert app._anim_timer is None
+        app.start_send_anim(PARENT["id"], CHILD["id"])
+        assert app._anim_timer is not None
+
+        path = send_path(app.tree_lines, PARENT["id"], CHILD["id"])
+        assert path is not None
+        for _ in range(len(path) + 1):
+            app._tick_send_anims()
+
+        assert app._send_anims == []
+        assert app._anim_timer is None
+        panel = app.query_one("#tree-panel", app_mod.TreePanel)
+        assert panel._overlaid == set()
+        for widget in panel._key_widgets.values():
+            assert SEND_STYLE not in _styles(widget)
+
+
+async def test_two_sends_animate_at_once(daemon, tmux):
+    """Concurrent rather than queued: a trace shown late lies about when it landed."""
+    app, _ = make_app()
+    async with app.run_test():
+        app.start_send_anim(PARENT["id"], CHILD["id"])
+        app.start_send_anim(CHILD["id"], PARENT["id"])
+        assert len(app._send_anims) == 2
+        app._tick_send_anims()
+        assert len(app._send_anims) == 2
+
+
+async def test_a_flood_of_sends_is_capped(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test():
+        for _ in range(app_mod.MAX_SEND_ANIMS + 5):
+            app.start_send_anim(PARENT["id"], CHILD["id"])
+        assert len(app._send_anims) == app_mod.MAX_SEND_ANIMS
+
+
+async def test_a_trace_whose_participant_vanishes_is_dropped_cleanly(daemon, tmux):
+    """The tree refreshes every second; an animation must survive losing an end."""
+    app, _ = make_app()
+    async with app.run_test():
+        app.start_send_anim(PARENT["id"], CHILD["id"])
+        app._tick_send_anims()
+        daemon["answers"]["participants.tree"] = [dict(PARENT, children=[])]
+        await app._refresh_tree()
+        app._tick_send_anims()
+        assert app._send_anims == []
+        assert app._anim_timer is None
+
+
+async def test_a_daemon_that_will_not_answer_leaves_the_animation_alone(daemon, tmux):
+    app, notes = make_app()
+    async with app.run_test():
+        daemon["broken"] = {"bus.tail"}
+        await app._refresh_anim()
+        assert app._send_anims == []
+    assert notes == []
 
 
 # ---- exit ----------------------------------------------------------------
