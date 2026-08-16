@@ -62,6 +62,13 @@ jobs = Table(
     Column("error_code", Text),
     Column("created_at", REAL, nullable=False),
     Column("finished_at", REAL),
+    # JSON transport persistence. response_format stores the raw serialized
+    # JSON schema hint; structured_result stores the complete bare JSON
+    # response without clipping; structured_status is null when JSON was not
+    # requested and later becomes "parsed" or "unavailable".
+    Column("response_format", Text),
+    Column("structured_result", Text),
+    Column("structured_status", Text),
 )
 
 Index("idx_jobs_caller", jobs.c.caller_id)
@@ -123,4 +130,45 @@ meta = Table(
     metadata,
     Column("key", Text, primary_key=True),
     Column("value", Text, nullable=False),
+)
+
+# Tree-scoped key-value scratchpad. Composite primary key on
+# (tree_root_id, repo_root, namespace, key) so each spawn tree can keep
+# per-namespace per-key values isolated from every other tree.
+tree_kv = Table(
+    "tree_kv",
+    metadata,
+    Column("tree_root_id", Text, primary_key=True),
+    Column("repo_root", Text, primary_key=True),
+    Column("namespace", Text, primary_key=True),
+    Column("key", Text, primary_key=True),
+    Column("value", Text, nullable=False),
+    Column("updated_at", REAL, nullable=False),
+    Column("updated_by", Text, nullable=False),
+)
+
+Index(
+    "idx_tree_kv_root",
+    tree_kv.c.tree_root_id,
+    tree_kv.c.repo_root,
+)
+
+# Plan checkpoints: a snapshot of the jobs table at a point in time,
+# associated with a participant and a name.
+checkpoints = Table(
+    "checkpoints",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("participant_id", Text, nullable=False),
+    Column("name", Text, nullable=False),
+    Column("notes", Text),
+    Column("jobs_snapshot", Text, nullable=False),
+    Column("created_at", REAL, nullable=False),
+    sqlite_autoincrement=True,
+)
+
+Index(
+    "idx_checkpoints_participant_name",
+    checkpoints.c.participant_id,
+    checkpoints.c.name,
 )

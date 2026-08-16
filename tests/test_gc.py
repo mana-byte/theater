@@ -16,7 +16,7 @@ import asyncio
 from theater.config import RetentionSection
 from theater.daemon.gc import SweepResult, sweep
 from theater.daemon.jobs import JobManager, JobState
-from theater.daemon.schema import bus, jobs, participants, touch
+from theater.daemon.schema import bus, checkpoints, jobs, participants, touch, tree_kv
 from theater.models import Job, Participant, Status, Tier, now
 
 # ---- helpers ---------------------------------------------------------------
@@ -126,6 +126,53 @@ def _bus(
             to_id=to_id,
             kind=kind,
             payload=payload,
+        )
+    )
+    pk = result.inserted_primary_key
+    assert pk is not None
+    return pk[0]
+
+
+def _kv(
+    store,
+    *,
+    tree_root_id: str,
+    repo_root: str = "/repo",
+    namespace: str = "ns1",
+    key: str = "k1",
+    value: str = "v1",
+    updated_by: str = "p1",
+    updated_at: float | None = None,
+) -> None:
+    store.conn.execute(
+        tree_kv.insert().values(
+            tree_root_id=tree_root_id,
+            repo_root=repo_root,
+            namespace=namespace,
+            key=key,
+            value=value,
+            updated_at=updated_at if updated_at is not None else now(),
+            updated_by=updated_by,
+        )
+    )
+
+
+def _checkpoint(
+    store,
+    *,
+    participant_id: str = "p1",
+    name: str = "plan",
+    notes: str | None = None,
+    jobs_snapshot: str = "[]",
+    created_at: float | None = None,
+) -> int:
+    result = store.conn.execute(
+        checkpoints.insert().values(
+            participant_id=participant_id,
+            name=name,
+            notes=notes,
+            jobs_snapshot=jobs_snapshot,
+            created_at=created_at if created_at is not None else now(),
         )
     )
     pk = result.inserted_primary_key
@@ -282,9 +329,7 @@ async def test_dead_participant_becomes_eligible_when_child_gone(store):
 
     # Delete the child's parent_id reference so parent is no longer a parent.
     store.conn.execute(
-        participants.update()
-        .where(participants.c.id == "child")
-        .values(parent_id=None)
+        participants.update().where(participants.c.id == "child").values(parent_id=None)
     )
 
     result = await sweep(store, _retention())
@@ -363,10 +408,7 @@ async def test_no_touch_row_survives_without_its_job(store):
     from sqlalchemy import select
 
     orphaned = store.conn.execute(
-        select(touch.c.id)
-        .where(
-            touch.c.job_handle.not_in(select(jobs.c.handle))
-        )
+        select(touch.c.id).where(touch.c.job_handle.not_in(select(jobs.c.handle)))
     ).fetchall()
     assert orphaned == []
 
@@ -422,9 +464,7 @@ async def test_refused_cap_trims_oldest(store):
     cap = 3
     ids = []
     for i in range(5):
-        ids.append(
-            _bus(store, kind="send.refused", ts=now() - (100 - i) * _DAY)
-        )
+        ids.append(_bus(store, kind="send.refused", ts=now() - (100 - i) * _DAY))
     # ids are autoincrement, so ids[0] < ids[1] < ... < ids[4]
     # The newest `cap` should survive: ids[2], ids[3], ids[4].
 
@@ -435,9 +475,7 @@ async def test_refused_cap_trims_oldest(store):
 
     remaining = [
         r[0]
-        for r in store.conn.execute(
-            select(bus.c.id).where(bus.c.kind == "send.refused")
-        ).fetchall()
+        for r in store.conn.execute(select(bus.c.id).where(bus.c.kind == "send.refused")).fetchall()
     ]
     # The newest `cap` rows survive — higher id = newer (autoincrement).
     assert remaining == sorted(ids)[-cap:]
@@ -543,3 +581,171 @@ async def test_sweep_on_empty_database_is_noop(store):
     assert result.touch == 0
     assert result.participants == 0
     assert result.running_marked == 0
+    assert result.tree_kv == 0
+    assert result.checkpoints == 0
+
+
+# ---- Checkpoints cleanup ---------------------------------------------------
+
+
+async def test_old_checkpoints_are_deleted(store):
+    """Checkpoints older than the jobs cutoff are deleted in batches."""
+    _participant(store, pid="p1")
+    _checkpoint(
+        store,
+        participant_id="p1",
+        name="old",
+        created_at=now() - 90 * _DAY,
+    )
+    _checkpoint(
+        store,
+        participant_id="p1",
+        name="recent",
+        created_at=now(),
+    )
+    result = await sweep(store, _retention(jobs_days=60))
+    assert result.checkpoints == 1
+    assert _count(store, checkpoints) == 1
+
+
+async def test_checkpoint_cleanup_is_batched(store):
+    """With batch set small, the sweep still removes all old checkpoints."""
+    _participant(store, pid="p1")
+    for i in range(10):
+        _checkpoint(
+            store,
+            participant_id="p1",
+            name=f"plan-{i}",
+            created_at=now() - 90 * _DAY,
+        )
+    result = await sweep(store, _retention(jobs_days=60, batch=3))
+    assert result.checkpoints == 10
+    assert _count(store, checkpoints) == 0
+
+
+async def test_recent_checkpoints_survive(store):
+    """Checkpoints newer than the cutoff are kept."""
+    _participant(store, pid="p1")
+    _checkpoint(
+        store,
+        participant_id="p1",
+        name="recent",
+        created_at=now(),
+    )
+    result = await sweep(store, _retention(jobs_days=60))
+    assert result.checkpoints == 0
+    assert _count(store, checkpoints) == 1
+
+
+# ---- tree_kv cleanup -------------------------------------------------------
+
+
+async def test_fully_dead_tree_kv_is_cleaned(store):
+    """When no participant in a tree is live, its kv rows are deleted."""
+    _participant(store, pid="root", status=Status.DEAD)
+    _kv(store, tree_root_id="root")
+    _kv(store, tree_root_id="root", key="k2")
+    result = await sweep(store, _retention())
+    assert result.tree_kv == 2
+    assert _count(store, tree_kv) == 0
+
+
+async def test_live_tree_kv_is_retained(store):
+    """When a participant in the tree is live, its kv rows survive."""
+    _participant(store, pid="root", status=Status.IDLE)
+    _kv(store, tree_root_id="root")
+    result = await sweep(store, _retention())
+    assert result.tree_kv == 0
+    assert _count(store, tree_kv) == 1
+
+
+async def test_dead_root_with_live_descendant_retains_kv(store):
+    """A dead root with a live descendant must retain the tree's kv rows.
+
+    The naive test — only checking whether the root row is live — would
+    wrongly delete kv for a tree whose root is dead but whose descendant
+    is still working. root_of() walks the lineage to find the live
+    participant's root, so the tree is retained.
+    """
+    _participant(store, pid="root", parent_id=None, status=Status.DEAD)
+    _participant(store, pid="child", parent_id="root", status=Status.IDLE)
+    _kv(store, tree_root_id="root")
+    result = await sweep(store, _retention())
+    assert result.tree_kv == 0
+    assert _count(store, tree_kv) == 1
+
+
+async def test_dead_tree_with_live_descendant_uses_correct_root(store):
+    """When the live descendant's root differs from the dead tree's root,
+    only the dead tree's kv is deleted."""
+    # Tree A: fully dead — root is dead, child is dead.
+    _participant(store, pid="rootA", parent_id=None, status=Status.DEAD)
+    _participant(store, pid="childA", parent_id="rootA", status=Status.DEAD)
+    _kv(store, tree_root_id="rootA")
+
+    # Tree B: has a live participant.
+    _participant(store, pid="rootB", parent_id=None, status=Status.IDLE)
+    _kv(store, tree_root_id="rootB")
+
+    result = await sweep(store, _retention())
+    assert result.tree_kv == 1
+    assert _count(store, tree_kv) == 1
+
+
+async def test_tree_kv_cleanup_is_batched(store):
+    """With a small batch, the sweep still removes all dead-tree kv rows."""
+    _participant(store, pid="root", status=Status.DEAD)
+    for i in range(10):
+        _kv(store, tree_root_id="root", key=f"k{i}")
+    result = await sweep(store, _retention(batch=3))
+    assert result.tree_kv == 10
+    assert _count(store, tree_kv) == 0
+
+
+# ---- SweepResult counts ----------------------------------------------------
+
+
+async def test_sweep_result_counts_match_all_tables(store):
+    """SweepResult fields match actual deletions across all tables."""
+    _participant(store, pid="p1")
+    _participant(store, pid="p2")
+
+    _job(
+        store,
+        handle="old1",
+        target_id="p1",
+        caller_id="cli",
+        state=JobState.DONE,
+        finished_at=now() - 90 * _DAY,
+        created_at=now() - 90 * _DAY,
+    )
+    _touch(store, job_handle="old1", path="x.py")
+
+    _bus(store, kind="job.created", ts=now() - 30 * _DAY)
+    _bus(store, kind="send.refused", ts=now() - 30 * _DAY)
+
+    _checkpoint(
+        store,
+        participant_id="p1",
+        name="old-plan",
+        created_at=now() - 90 * _DAY,
+    )
+
+    _participant(store, pid="kvroot", status=Status.DEAD)
+    _kv(store, tree_root_id="kvroot")
+
+    before_jobs = _count(store, jobs)
+    before_touch = _count(store, touch)
+    before_bus = _count(store, bus)
+    before_part = _count(store, participants)
+    before_ckpt = _count(store, checkpoints)
+    before_kv = _count(store, tree_kv)
+
+    result = await sweep(store, _retention(bus_days=7, jobs_days=60))
+
+    assert result.jobs == before_jobs - _count(store, jobs)
+    assert result.touch == before_touch - _count(store, touch)
+    assert result.bus == before_bus - _count(store, bus)
+    assert result.participants == before_part - _count(store, participants)
+    assert result.checkpoints == before_ckpt - _count(store, checkpoints)
+    assert result.tree_kv == before_kv - _count(store, tree_kv)

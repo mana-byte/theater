@@ -54,7 +54,7 @@ def test_migrations_created_the_alembic_version_table(store):
         store.conn.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'").scalars()
     )
     assert "alembic_version" in tables
-    assert {"participants", "jobs", "bus", "budgets"} <= tables
+    assert {"participants", "jobs", "bus", "budgets", "tree_kv", "checkpoints"} <= tables
     stamped = store.conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
     assert stamped == HEAD
 
@@ -115,5 +115,25 @@ def test_a_legacy_database_is_adopted_not_rebuilt(theater_home):
         # The legacy DB is stamped at BASELINE then upgraded to head, so the
         # version is HEAD — not BASELINE, and not just "not BASELINE".
         assert stamped == HEAD
+
+        # The legacy jobs table had no structured-result columns; the
+        # migration must have added them.
+        col_info = store.conn.exec_driver_sql("PRAGMA table_info(jobs)").fetchall()
+        col_names = {row[1] for row in col_info}
+        assert "response_format" in col_names
+        assert "structured_result" in col_names
+        assert "structured_status" in col_names
+
+        # A job created on a legacy row round-trips with null structured fields.
+        store.conn.exec_driver_sql(
+            "INSERT INTO jobs (handle, caller_id, target_id, kind, prompt, state, "
+            "result, error_code, created_at, finished_at) VALUES "
+            "('legacy1', 'cli', 'p1', 'spawn', 'go', 'done', 'ok', NULL, 1.0, 2.0)"
+        )
+        job = store.get_job("legacy1")
+        assert job is not None
+        assert job.response_format is None
+        assert job.structured_result is None
+        assert job.structured_status is None
     finally:
         store.close()

@@ -125,6 +125,9 @@ class Job:
     error_code: str | None
     created_at: float
     finished_at: float | None
+    response_format: str | None = None
+    structured_result: str | None = None
+    structured_status: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -138,6 +141,9 @@ class Job:
             "error_code": self.error_code,
             "created_at": self.created_at,
             "finished_at": self.finished_at,
+            "response_format": self.response_format,
+            "structured_result": self.structured_result,
+            "structured_status": self.structured_status,
         }
 
     @classmethod
@@ -153,6 +159,9 @@ class Job:
             error_code=row["error_code"],
             created_at=row["created_at"],
             finished_at=row["finished_at"],
+            response_format=row["response_format"],
+            structured_result=row["structured_result"],
+            structured_status=row["structured_status"],
         )
 
 

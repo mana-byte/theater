@@ -34,7 +34,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from theater.daemon.schema import bus, jobs, meta, participants
+from theater.daemon.schema import bus, checkpoints, jobs, meta, participants, tree_kv
 from theater.models import Job, Participant, Status, now
 
 MIGRATIONS = Path(__file__).parent / "migrations"
@@ -45,7 +45,7 @@ BASELINE = "0001"
 #: The latest revision. A legacy database is stamped at BASELINE and then
 #: upgraded to this; a fresh database lands here directly. Tests assert
 #: against this rather than hardcoding a revision string.
-HEAD = "0003"
+HEAD = "0006"
 
 
 def _set_pragmas(dbapi_connection, _record) -> None:
@@ -63,7 +63,7 @@ def _set_pragmas(dbapi_connection, _record) -> None:
     write is sub-millisecond) and short enough that a genuinely stuck lock —
     which would mean something is wrong with the database file or the
     filesystem — surfaces as an error rather than hanging the daemon's event
-    loop indefinitely. """
+    loop indefinitely."""
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA foreign_keys=ON")
@@ -86,9 +86,7 @@ class Store:
         # One long-lived autocommit connection: callers never commit,
         # and a write is visible to the next read immediately. The
         # daemon owns this file alone, so there is no second writer.
-        self.conn = self.engine.connect().execution_options(
-            isolation_level="AUTOCOMMIT"
-        )
+        self.conn = self.engine.connect().execution_options(isolation_level="AUTOCOMMIT")
 
     # ---- migrations ----------------------------------------------------
 
@@ -153,9 +151,7 @@ class Store:
         )
 
     def get_participant(self, pid: str) -> Participant | None:
-        row = self.conn.execute(
-            select(participants).where(participants.c.id == pid)
-        ).first()
+        row = self.conn.execute(select(participants).where(participants.c.id == pid)).first()
         return Participant.from_row(row._mapping) if row else None
 
     def find_by_pane(self, pane: str) -> Participant | None:
@@ -192,9 +188,7 @@ class Store:
 
     def touch(self, pid: str) -> None:
         self.conn.execute(
-            update(participants)
-            .where(participants.c.id == pid)
-            .values(last_activity=now())
+            update(participants).where(participants.c.id == pid).values(last_activity=now())
         )
 
     # ---- jobs ----------------------------------------------------------
@@ -212,6 +206,9 @@ class Store:
                 error_code=job.error_code,
                 created_at=job.created_at,
                 finished_at=job.finished_at,
+                response_format=getattr(job, "response_format", None),
+                structured_result=getattr(job, "structured_result", None),
+                structured_status=getattr(job, "structured_status", None),
             )
         )
 
@@ -220,8 +217,16 @@ class Store:
         return Job.from_row(row._mapping) if row else None
 
     def finish_job(
-        self, handle: str, *, state: str, result: str | None = None,
-        error_code: str | None = None, finished_at: float | None = None,
+        self,
+        handle: str,
+        *,
+        state: str,
+        result: str | None = None,
+        error_code: str | None = None,
+        finished_at: float | None = None,
+        response_format: str | None = None,
+        structured_result: str | None = None,
+        structured_status: str | None = None,
     ) -> None:
         self.conn.execute(
             update(jobs)
@@ -231,6 +236,9 @@ class Store:
                 result=result,
                 error_code=error_code,
                 finished_at=finished_at,
+                response_format=response_format,
+                structured_result=structured_result,
+                structured_status=structured_status,
             )
         )
 
@@ -277,9 +285,7 @@ class Store:
         failed: jobs.handle`. Read every suffix and take the numeric maximum
         instead; this runs once, at startup, over thousands of rows at most.
         """
-        rows = self.conn.execute(
-            select(jobs.c.handle).where(jobs.c.handle.like("%#%"))
-        ).fetchall()
+        rows = self.conn.execute(select(jobs.c.handle).where(jobs.c.handle.like("%#%"))).fetchall()
         best = 0
         for (handle,) in rows:
             _, _, seq = handle.rpartition("#")
@@ -314,6 +320,116 @@ class Store:
     def set_send_seq(self, value: int) -> None:
         self.set_meta("send_seq", str(value))
 
+    # ---- tree KV --------------------------------------------------------
+
+    def put_kv(
+        self,
+        *,
+        tree_root_id: str,
+        repo_root: str,
+        namespace: str,
+        key: str,
+        value: str,
+        updated_by: str,
+    ) -> None:
+        stmt = sqlite_insert(tree_kv).values(
+            tree_root_id=tree_root_id,
+            repo_root=repo_root,
+            namespace=namespace,
+            key=key,
+            value=value,
+            updated_at=now(),
+            updated_by=updated_by,
+        )
+        self.conn.execute(
+            stmt.on_conflict_do_update(
+                index_elements=[
+                    tree_kv.c.tree_root_id,
+                    tree_kv.c.repo_root,
+                    tree_kv.c.namespace,
+                    tree_kv.c.key,
+                ],
+                set_={
+                    "value": value,
+                    "updated_at": now(),
+                    "updated_by": updated_by,
+                },
+            )
+        )
+
+    def get_kv(
+        self,
+        *,
+        tree_root_id: str,
+        repo_root: str,
+        namespace: str,
+        key: str,
+    ) -> str | None:
+        row = self.conn.execute(
+            select(tree_kv.c.value)
+            .where(tree_kv.c.tree_root_id == tree_root_id)
+            .where(tree_kv.c.repo_root == repo_root)
+            .where(tree_kv.c.namespace == namespace)
+            .where(tree_kv.c.key == key)
+        ).first()
+        return row[0] if row else None
+
+    def list_kv(
+        self,
+        *,
+        tree_root_id: str,
+        repo_root: str,
+        namespace: str,
+        limit: int = 100,
+    ) -> list[dict]:
+        rows = self.conn.execute(
+            select(tree_kv)
+            .where(tree_kv.c.tree_root_id == tree_root_id)
+            .where(tree_kv.c.repo_root == repo_root)
+            .where(tree_kv.c.namespace == namespace)
+            .order_by(tree_kv.c.key.asc())
+            .limit(limit)
+        ).fetchall()
+        return [dict(r._mapping) for r in rows]
+
+    # ---- checkpoints ----------------------------------------------------
+
+    def create_checkpoint(
+        self,
+        *,
+        participant_id: str,
+        name: str,
+        jobs_snapshot: str,
+        notes: str | None = None,
+    ) -> int:
+        result = self.conn.execute(
+            insert(checkpoints).values(
+                participant_id=participant_id,
+                name=name,
+                notes=notes,
+                jobs_snapshot=jobs_snapshot,
+                created_at=now(),
+            )
+        )
+        pk = result.inserted_primary_key
+        assert pk is not None
+        return pk[0]
+
+    def get_checkpoint(self, checkpoint_id: int) -> dict | None:
+        row = self.conn.execute(
+            select(checkpoints).where(checkpoints.c.id == checkpoint_id)
+        ).first()
+        return dict(row._mapping) if row else None
+
+    def list_checkpoints(self, *, participant_id: str, limit: int = 100) -> list[dict]:
+        rows = self.conn.execute(
+            select(checkpoints)
+            .where(checkpoints.c.participant_id == participant_id)
+            .order_by(checkpoints.c.created_at.desc())
+            .limit(limit)
+        ).fetchall()
+        return [dict(r._mapping) for r in rows]
+
     # ---- metrics --------------------------------------------------------
 
     def turn_outcomes(self, *, since: float | None = None) -> list[dict]:
@@ -334,9 +450,7 @@ class Store:
         Left join: a job whose target has since been forgotten still counts,
         under "unknown", rather than vanishing and flattering the numbers.
         """
-        src = jobs.join(
-            participants, jobs.c.target_id == participants.c.id, isouter=True
-        )
+        src = jobs.join(participants, jobs.c.target_id == participants.c.id, isouter=True)
 
         def total(condition) -> ColumnElement[int]:
             return func.sum(case((condition, 1), else_=0))
@@ -345,9 +459,7 @@ class Store:
             select(
                 func.coalesce(participants.c.harness, "unknown").label("harness"),
                 func.count().label("turns"),
-                total(
-                    (jobs.c.state == "done") & (jobs.c.error_code.is_(None))
-                ).label("clean"),
+                total((jobs.c.state == "done") & (jobs.c.error_code.is_(None))).label("clean"),
                 total(jobs.c.error_code == "turn_end_unseen").label("rescued"),
                 total(jobs.c.state == "crashed").label("failed"),
                 total(jobs.c.state == "running").label("running"),
@@ -385,8 +497,12 @@ class Store:
     # ---- bus ----------------------------------------------------------
 
     def bus_append(
-        self, kind: str, *, from_id: str | None = None,
-        to_id: str | None = None, payload: dict | None = None,
+        self,
+        kind: str,
+        *,
+        from_id: str | None = None,
+        to_id: str | None = None,
+        payload: dict | None = None,
     ) -> int:
         result = self.conn.execute(
             insert(bus).values(
@@ -403,10 +519,7 @@ class Store:
 
     def bus_tail(self, limit: int = 100, *, after_id: int = 0) -> list[dict]:
         rows = self.conn.execute(
-            select(bus)
-            .where(bus.c.id > after_id)
-            .order_by(bus.c.id.desc())
-            .limit(limit)
+            select(bus).where(bus.c.id > after_id).order_by(bus.c.id.desc()).limit(limit)
         ).fetchall()
         out = []
         for r in reversed(rows):

@@ -5,7 +5,7 @@ Measured on a real machine over 4.26 days: 32.05 MB total, of which the
 ``bus`` table was 30.20 MB (94.2%) growing at 7.1 MB/day — about 2.6 GB/year.
 This module is the sweep that bounds it.
 
-The sweep runs in four phases, in this order:
+The sweep runs in six phases, in this order:
 
 1. **Stale running jobs** — mark abandoned ones finished, excluding handles
    the running daemon still knows about. This must come first so the jobs
@@ -16,7 +16,12 @@ The sweep runs in four phases, in this order:
 3. **Participants** — the three-clause gated delete. After the jobs phase,
    so a participant whose last job just went becomes eligible in the same
    sweep.
-4. **Bus** — delete rows older than ``bus_days`` (except ``send.refused``),
+4. **Checkpoints** — delete checkpoints older than the jobs cutoff in
+   bounded batches.
+5. **tree_kv** — delete rows whose spawn tree has no live participant.
+   Computes the roots of all live participants through lineage.root_of()
+   and retains those, deleting everything else in bounded batches.
+6. **Bus** — delete rows older than ``bus_days`` (except ``send.refused``),
    then trim ``send.refused`` to the newest ``refused_cap`` rows.
 
 **MF1 — never delete a running job.** ``JobManager.finish()`` looks the job
@@ -51,7 +56,8 @@ from dataclasses import dataclass
 from sqlalchemy import delete, select, text, update
 
 from theater.config import RetentionSection
-from theater.daemon.schema import bus, jobs, participants, touch
+from theater.daemon import lineage
+from theater.daemon.schema import bus, checkpoints, jobs, participants, touch, tree_kv
 from theater.daemon.store import Store
 from theater.models import now
 
@@ -74,6 +80,8 @@ class SweepResult:
     touch: int = 0
     participants: int = 0
     running_marked: int = 0
+    tree_kv: int = 0
+    checkpoints: int = 0
 
 
 async def sweep(
@@ -82,7 +90,7 @@ async def sweep(
     *,
     live_handles: frozenset[str] = frozenset(),
 ) -> SweepResult:
-    """Run all four GC phases in order, returning per-phase row counts.
+    """Run all six GC phases in order, returning per-phase row counts.
 
     ``sweep`` is async for one reason only: between batches it calls
     ``await asyncio.sleep(0)`` to yield the event loop, so a long sweep
@@ -101,6 +109,8 @@ async def sweep(
         touch=0,
         participants=0,
         running_marked=0,
+        tree_kv=0,
+        checkpoints=0,
     )
 
     cutoff_jobs = now() - retention.jobs_days * _DAY
@@ -108,28 +118,28 @@ async def sweep(
     stale_cutoff = now() - retention.stale_running_days * _DAY
 
     # Phase 1: stale running jobs.
-    marked = _sweep_stale_running(
-        store, stale_cutoff, retention.batch, live_handles
-    )
+    marked = _sweep_stale_running(store, stale_cutoff, retention.batch, live_handles)
     result = SweepResult(
         bus=result.bus,
         jobs=result.jobs,
         touch=result.touch,
         participants=result.participants,
         running_marked=marked,
+        tree_kv=result.tree_kv,
+        checkpoints=result.checkpoints,
     )
     await asyncio.sleep(0)
 
     # Phase 2: jobs + touch.
-    jobs_deleted, touch_deleted = await _sweep_jobs_and_touch(
-        store, cutoff_jobs, retention.batch
-    )
+    jobs_deleted, touch_deleted = await _sweep_jobs_and_touch(store, cutoff_jobs, retention.batch)
     result = SweepResult(
         bus=result.bus,
         jobs=jobs_deleted,
         touch=touch_deleted,
         participants=result.participants,
         running_marked=result.running_marked,
+        tree_kv=result.tree_kv,
+        checkpoints=result.checkpoints,
     )
 
     # Phase 3: participants — after jobs, so a participant whose last job
@@ -141,19 +151,48 @@ async def sweep(
         touch=result.touch,
         participants=part_deleted,
         running_marked=result.running_marked,
+        tree_kv=result.tree_kv,
+        checkpoints=result.checkpoints,
     )
     await asyncio.sleep(0)
 
-    # Phase 4: bus.
-    bus_deleted = await _sweep_bus(
-        store, cutoff_bus, retention.batch, retention.refused_cap
+    # Phase 4: checkpoints — after participant cleanup, before bus cleanup.
+    # Deletes checkpoints older than the jobs cutoff in bounded batches.
+    ckpt_deleted = await _sweep_checkpoints(store, cutoff_jobs, retention.batch)
+    result = SweepResult(
+        bus=result.bus,
+        jobs=result.jobs,
+        touch=result.touch,
+        participants=result.participants,
+        running_marked=result.running_marked,
+        tree_kv=result.tree_kv,
+        checkpoints=ckpt_deleted,
     )
+
+    # Phase 5: tree_kv — delete rows whose spawn tree has no live
+    # participant. A root can be dead while descendants remain live, so
+    # compute the roots of all live participants and retain their rows.
+    kv_deleted = await _sweep_tree_kv(store, retention.batch)
+    result = SweepResult(
+        bus=result.bus,
+        jobs=result.jobs,
+        touch=result.touch,
+        participants=result.participants,
+        running_marked=result.running_marked,
+        tree_kv=kv_deleted,
+        checkpoints=result.checkpoints,
+    )
+
+    # Phase 6: bus.
+    bus_deleted = await _sweep_bus(store, cutoff_bus, retention.batch, retention.refused_cap)
     result = SweepResult(
         bus=bus_deleted,
         jobs=result.jobs,
         touch=result.touch,
         participants=result.participants,
         running_marked=result.running_marked,
+        tree_kv=result.tree_kv,
+        checkpoints=result.checkpoints,
     )
 
     # The WAL was measured at 4.12 MB live and grows with churn; checkpointing
@@ -199,9 +238,7 @@ def _sweep_stale_running(
     return len(handles)
 
 
-async def _sweep_jobs_and_touch(
-    store: Store, cutoff: float, batch: int
-) -> tuple[int, int]:
+async def _sweep_jobs_and_touch(store: Store, cutoff: float, batch: int) -> tuple[int, int]:
     """Delete finished jobs older than the cutoff along with their touch rows.
 
     Filters on ``finished_at IS NOT NULL AND finished_at < cutoff`` — never on
@@ -235,12 +272,8 @@ async def _sweep_jobs_and_touch(
         # after first use — see JobManager._finish_with_touches for the same
         # precedent.
         with store.engine.begin() as conn:
-            touch_result = conn.execute(
-                delete(touch).where(touch.c.job_handle.in_(handles))
-            )
-            job_result = conn.execute(
-                delete(jobs).where(jobs.c.handle.in_(handles))
-            )
+            touch_result = conn.execute(delete(touch).where(touch.c.job_handle.in_(handles)))
+            job_result = conn.execute(delete(jobs).where(jobs.c.handle.in_(handles)))
         total_touch += touch_result.rowcount
         total_jobs += job_result.rowcount
         await asyncio.sleep(0)
@@ -272,16 +305,12 @@ def _sweep_participants(store: Store, batch: int) -> int:
         delete(participants)
         .where(participants.c.status == "dead")
         .where(
-            participants.c.id.not_in(
-                select(jobs.c.target_id).where(jobs.c.target_id.is_not(None))
-            )
+            participants.c.id.not_in(select(jobs.c.target_id).where(jobs.c.target_id.is_not(None)))
         )
         .where(participants.c.id.not_in(select(jobs.c.caller_id)))
         .where(
             participants.c.id.not_in(
-                select(participants.c.parent_id).where(
-                    participants.c.parent_id.is_not(None)
-                )
+                select(participants.c.parent_id).where(participants.c.parent_id.is_not(None))
             )
         )
     )
@@ -289,9 +318,7 @@ def _sweep_participants(store: Store, batch: int) -> int:
     return result.rowcount
 
 
-async def _sweep_bus(
-    store: Store, cutoff: float, batch: int, refused_cap: int
-) -> int:
+async def _sweep_bus(store: Store, cutoff: float, batch: int, refused_cap: int) -> int:
     """Delete old bus rows, then trim ``send.refused`` to the cap.
 
     ``send.refused`` events are the only record of a refused send
@@ -329,12 +356,76 @@ async def _sweep_bus(
             # Batch the deletion to avoid a single huge statement.
             for i in range(0, len(to_delete), batch):
                 chunk = to_delete[i : i + batch]
-                result = store.conn.execute(
-                    delete(bus).where(bus.c.id.in_(chunk))
-                )
+                result = store.conn.execute(delete(bus).where(bus.c.id.in_(chunk)))
                 total += result.rowcount
                 await asyncio.sleep(0)
 
+    return total
+
+
+async def _sweep_checkpoints(store: Store, cutoff: float, batch: int) -> int:
+    """Delete checkpoints older than the jobs cutoff in bounded batches.
+
+    Uses ``created_at`` for checkpoints — unlike jobs, a checkpoint has no
+    ``finished_at``, and a checkpoint is a static snapshot that never
+    transitions, so age is the right predicate.
+    """
+    total = 0
+    while True:
+        sub = select(checkpoints.c.id).where(checkpoints.c.created_at < cutoff).limit(batch)
+        ids = [r[0] for r in store.conn.execute(sub).fetchall()]
+        if not ids:
+            break
+        result = store.conn.execute(delete(checkpoints).where(checkpoints.c.id.in_(ids)))
+        total += result.rowcount
+        await asyncio.sleep(0)
+        if len(ids) < batch:
+            break
+    return total
+
+
+async def _sweep_tree_kv(store: Store, batch: int) -> int:
+    """Delete tree_kv rows whose spawn tree has no live participant.
+
+    A root can be dead while descendants remain live, so the naive test —
+    "is the root row live?" — is wrong. Instead, compute the root of every
+    live participant through ``lineage.root_of()``, retain those roots, and
+    delete everything else in bounded batches.
+    """
+    live = store.list_participants(include_dead=False)
+    live_roots: set[str] = set()
+    for p in live:
+        root = lineage.root_of(store, p.id)
+        live_roots.add(root)
+
+    if not live_roots:
+        # No live participants at all: delete every tree_kv row.
+        pass
+
+    total = 0
+    while True:
+        if live_roots:
+            sub = (
+                select(tree_kv.c.tree_root_id, tree_kv.c.repo_root)
+                .where(tree_kv.c.tree_root_id.not_in(live_roots))
+                .distinct()
+                .limit(batch)
+            )
+        else:
+            sub = select(tree_kv.c.tree_root_id, tree_kv.c.repo_root).distinct().limit(batch)
+        pairs = store.conn.execute(sub).fetchall()
+        if not pairs:
+            break
+        for tree_root_id, repo_root in pairs:
+            result = store.conn.execute(
+                delete(tree_kv)
+                .where(tree_kv.c.tree_root_id == tree_root_id)
+                .where(tree_kv.c.repo_root == repo_root)
+            )
+            total += result.rowcount
+        await asyncio.sleep(0)
+        if len(pairs) < batch:
+            break
     return total
 
 
