@@ -65,9 +65,7 @@ def _add_models_parser(sub) -> None:
     New subcommands get a builder like this one rather than another few lines
     there.
     """
-    models = sub.add_parser(
-        "models", help="Show, or discover, the models a spawn may name."
-    )
+    models = sub.add_parser("models", help="Show, or discover, the models a spawn may name.")
     models.add_argument(
         "--discover",
         metavar="HARNESS",
@@ -138,9 +136,7 @@ def _parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     daemon = sub.add_parser("daemon", help="Run the registry daemon in the foreground.")
-    daemon.add_argument(
-        "--log-level", default=os.environ.get("THEATER_LOG_LEVEL", "INFO")
-    )
+    daemon.add_argument("--log-level", default=os.environ.get("THEATER_LOG_LEVEL", "INFO"))
 
     mcp = sub.add_parser("mcp", help="Run the per-agent MCP server on stdio.")
     mcp.add_argument("--id", dest="participant_id", default=None)
@@ -149,9 +145,7 @@ def _parser() -> argparse.ArgumentParser:
     ls = sub.add_parser("ls", help="List participants.")
     once = ls.add_mutually_exclusive_group()
     once.add_argument("--json", action="store_true")
-    once.add_argument(
-        "--watch", action="store_true", help="Redraw until interrupted."
-    )
+    once.add_argument("--watch", action="store_true", help="Redraw until interrupted.")
     ls.add_argument(
         "--all",
         action="store_true",
@@ -193,8 +187,18 @@ def _parser() -> argparse.ArgumentParser:
     )
     spawn.add_argument(
         "--worktree",
-        action="store_true",
-        help="Create a git worktree for the child with isolated index and HEAD.",
+        nargs="?",
+        const=True,
+        default=False,
+        type=str,
+        help=(
+            "Create a git worktree for the child. Bare --worktree creates an "
+            "isolated worktree (unique index and HEAD). --worktree NAME creates "
+            "or joins a named shared linked worktree — multiple children with "
+            "the same name share one directory and branch. Expert mode: the "
+            "index and HEAD are shared, concurrent git add/commit operations "
+            "can interfere, and Theater does not enforce file ownership."
+        ),
     )
     spawn.add_argument(
         "--base-branch",
@@ -233,9 +237,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     adopt.add_argument("--json", action="store_true")
 
-    harnesses = sub.add_parser(
-        "harnesses", help="List the coding CLIs Theater knows how to drive."
-    )
+    harnesses = sub.add_parser("harnesses", help="List the coding CLIs Theater knows how to drive.")
     harnesses.add_argument("--json", action="store_true")
 
     conf = sub.add_parser("config", help="Show resolved settings and where they came from.")
@@ -252,9 +254,7 @@ def _parser() -> argparse.ArgumentParser:
     _add_name_parser(sub)
     _add_gc_parser(sub)
 
-    stats = sub.add_parser(
-        "stats", help="How turns have been ending, per harness."
-    )
+    stats = sub.add_parser("stats", help="How turns have been ending, per harness.")
     stats.add_argument(
         "--window",
         type=float,
@@ -326,8 +326,7 @@ def _format_ls(rows: list[dict], *, tree: bool, unmanaged: list[dict] | None = N
         return "no participants"
     body = flatten_tree(rows, _row_line) if tree else [_row_line(r) for r in rows]
     header = (
-        f"{'ID':<14}{'T':<2} {'NAME':<12}   "
-        f"{'HARNESS':<11} {'STATUS':<15} {'PANE':<6} DIRECTORY"
+        f"{'ID':<14}{'T':<2} {'NAME':<12}   {'HARNESS':<11} {'STATUS':<15} {'PANE':<6} DIRECTORY"
     )
     lines = [header, *body]
     if unmanaged:
@@ -405,8 +404,7 @@ def _spawn_harness(args) -> str:
         )
     if favourite not in HARNESSES:
         raise BadUsage(
-            f"theater.favourite is {favourite!r}, which is not a known harness "
-            f"({known})"
+            f"theater.favourite is {favourite!r}, which is not a known harness ({known})"
         )
     return favourite
 
@@ -466,9 +464,7 @@ async def _follow_bus(args) -> int:
         _emit_bus(_matching(rows, args.kind), args)
         while True:
             await asyncio.sleep(args.interval)
-            rows = await client.call(
-                "bus.tail", limit=_FOLLOW_BATCH, after_id=cursor
-            )
+            rows = await client.call("bus.tail", limit=_FOLLOW_BATCH, after_id=cursor)
             assert isinstance(rows, list)
             if not rows:
                 continue
@@ -703,13 +699,18 @@ def cmd_gc(args) -> int:
     touch = data.get("touch", 0)
     participants = data.get("participants", 0)
     running_marked = data.get("running_marked", 0)
-    total = bus + jobs + touch + participants + running_marked
+    tree_kv = data.get("tree_kv", 0)
+    checkpoints = data.get("checkpoints", 0)
+    total = bus + jobs + touch + participants + running_marked + tree_kv + checkpoints
 
     if total == 0:
         print("nothing to collect — database is already within retention")
     else:
-        print(f"collected: {bus} bus, {jobs} jobs, {touch} touch, "
-              f"{participants} participants, {running_marked} stale running marked")
+        print(
+            f"collected: {bus} bus, {jobs} jobs, {touch} touch, "
+            f"{participants} participants, {running_marked} stale running marked, "
+            f"{tree_kv} tree kv, {checkpoints} checkpoints"
+        )
 
     coverage = data.get("coverage") or {}
     print()
@@ -731,8 +732,10 @@ def cmd_gc(args) -> int:
         # The single most important line in this command: without it, a user
         # who deleted 94% of the database and saw the file not shrink will
         # report GC as broken.
-        print("file size unchanged — deleting rows does not shrink the file; "
-              "use `theater gc --vacuum` to reclaim space")
+        print(
+            "file size unchanged — deleting rows does not shrink the file; "
+            "use `theater gc --vacuum` to reclaim space"
+        )
     return 0
 
 
@@ -840,8 +843,7 @@ def cmd_models(args) -> int:
             # Asked and answered: none. Distinct from the case above, and
             # usually a provider that is not logged in yet.
             print(
-                f"theater: {name} reported no models — it may not be "
-                f"authenticated yet",
+                f"theater: {name} reported no models — it may not be authenticated yet",
                 file=sys.stderr,
             )
             return 1
@@ -950,11 +952,7 @@ def cmd_restart(args) -> int:
     comes back to the same participants.
     """
     if _shutdown_running_daemon() and not _await_daemon_gone():
-        held = (
-            paths.socket_path()
-            if paths.socket_path().exists()
-            else paths.pidfile_path()
-        )
+        held = paths.socket_path() if paths.socket_path().exists() else paths.pidfile_path()
         print(
             f"theater: daemon still holding {held} after {STOP_TIMEOUT:g}s "
             "— not starting a second one",

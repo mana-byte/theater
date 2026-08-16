@@ -13,6 +13,7 @@ import pytest
 
 from theater.client import DaemonClient
 from theater.daemon.server import Daemon
+from theater.mcp import tools as mcp_tools
 from theater.mcp.server import build
 
 
@@ -50,6 +51,10 @@ async def test_tools_are_registered(daemon):
         "register_pane",
         "await_sessions",
         "send",
+        "store_put",
+        "store_get",
+        "checkpoint",
+        "recovery_read",
         "read_transcript",
         "put_child_back_in_the_wound",
         "recall",
@@ -89,6 +94,34 @@ async def test_orchestration_directives_reach_the_tools_that_need_them(daemon):
     assert "timeout" in tools["await_sessions"]
     # "done" is the end of a turn, not a verdict on the work.
     assert "done" in tools["await_sessions"]
+    # Structured JSON transport is a daemon-managed hint, not MCP prompt surgery.
+    assert "json.loads" in tools["spawn_session"]
+    assert "no schema validation" in tools["spawn_session"]
+    assert "json.loads" in tools["send"]
+    assert "no schema validation" in tools["send"]
+
+
+async def test_new_feature_descriptions_reach_their_tools(daemon):
+    tools = {t.name: (t.description or "").lower() for t in await build("p1", "vibe").list_tools()}
+
+    for name in ("store_put", "store_get"):
+        desc = tools[name]
+        assert "exact string" in desc
+        assert "last-writer-wins" in desc
+        assert "spawn tree" in desc
+        assert "canonical main repo" in desc
+        assert "outside a git repository" in desc
+        assert "prefix listing" in desc
+        assert "cas" not in desc
+        assert "lock" not in desc
+
+    assert "explicit" in tools["checkpoint"]
+    assert "cumulative snapshot" in tools["checkpoint"]
+    assert "not an automatic execution checkpoint" in tools["checkpoint"]
+
+    assert "recorded snapshot" in tools["recovery_read"]
+    assert "current live state" in tools["recovery_read"]
+    assert "pruned handles" in tools["recovery_read"]
 
 
 async def test_await_description_communicates_first_any_completion(daemon):
@@ -164,6 +197,139 @@ async def test_spawn_session_forces_a_choice_of_approval(daemon):
     assert "approval" in required
     assert "prompt" not in required
     assert "cwd" not in required
+
+
+def _assert_nullable_object_schema(prop: dict) -> None:
+    assert prop["default"] is None
+    variants = prop["anyOf"]
+    assert {"type": "null"} in variants
+    objects = [variant for variant in variants if variant.get("type") == "object"]
+    assert objects
+    assert objects[0]["additionalProperties"] is True
+
+
+async def test_response_format_parameters_have_nullable_object_schema(daemon):
+    schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
+
+    for name in ("spawn_session", "send"):
+        prop = schema[name]["properties"]["response_format"]
+        _assert_nullable_object_schema(prop)
+        assert "response_format" not in schema[name].get("required", [])
+
+
+async def test_new_tool_schemas_match_public_signatures(daemon):
+    schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
+
+    assert schema["store_put"]["required"] == ["namespace", "key", "value"]
+    assert schema["store_get"]["required"] == ["namespace", "key"]
+    assert schema["checkpoint"]["required"] == ["name"]
+    assert schema["recovery_read"]["required"] == ["checkpoint_id"]
+
+    notes = schema["checkpoint"]["properties"]["notes"]
+    variants = notes["anyOf"]
+    assert {"type": "string"} in variants
+    assert {"type": "null"} in variants
+    assert notes["default"] is None
+
+
+async def test_response_format_wrappers_forward_to_tool_bodies(monkeypatch):
+    calls = {}
+
+    async def fake_spawn(session, **kwargs):
+        calls["spawn"] = (session, kwargs)
+        return {"ok": "spawn"}
+
+    async def fake_send(session, **kwargs):
+        calls["send"] = (session, kwargs)
+        return {"ok": "send"}
+
+    monkeypatch.setattr(mcp_tools, "spawn_session", fake_spawn)
+    monkeypatch.setattr(mcp_tools, "send_prompt", fake_send)
+
+    mcp = build("p1", "vibe")
+    spawn_format = {}
+    send_format = {"type": "object"}
+
+    assert _payload(
+        await mcp.call_tool(
+            "spawn_session",
+            {
+                "harness": "vibe",
+                "approval": "edits",
+                "prompt": "answer in JSON",
+                "response_format": spawn_format,
+            },
+        )
+    ) == {"ok": "spawn"}
+    assert _payload(
+        await mcp.call_tool(
+            "send",
+            {
+                "target_id": "p-child",
+                "prompt": "answer in JSON",
+                "response_format": send_format,
+            },
+        )
+    ) == {"ok": "send"}
+
+    spawn_session, spawn_kwargs = calls["spawn"]
+    send_session, send_kwargs = calls["send"]
+    assert isinstance(spawn_session, mcp_tools.Session)
+    assert isinstance(send_session, mcp_tools.Session)
+    assert spawn_kwargs["response_format"] == spawn_format
+    assert send_kwargs["response_format"] == send_format
+
+
+async def test_new_tool_wrappers_forward_to_tool_bodies(monkeypatch):
+    calls = []
+
+    async def fake_store_put(session, *, namespace: str, key: str, value: str) -> dict:
+        calls.append(("store_put", session, namespace, key, value))
+        return {"stored": True}
+
+    async def fake_store_get(session, *, namespace: str, key: str) -> dict:
+        calls.append(("store_get", session, namespace, key))
+        return {"value": "p-you"}
+
+    async def fake_checkpoint(session, *, name: str, notes: str | None = None) -> dict:
+        calls.append(("checkpoint", session, name, notes))
+        return {"checkpoint_id": 7, "jobs": []}
+
+    async def fake_recovery_read(session, *, checkpoint_id: int) -> dict:
+        calls.append(("recovery_read", session, checkpoint_id))
+        return {"checkpoint_id": checkpoint_id, "recorded": [], "live": []}
+
+    monkeypatch.setattr(mcp_tools, "store_put", fake_store_put)
+    monkeypatch.setattr(mcp_tools, "store_get", fake_store_get)
+    monkeypatch.setattr(mcp_tools, "checkpoint", fake_checkpoint)
+    monkeypatch.setattr(mcp_tools, "recovery_read", fake_recovery_read)
+
+    mcp = build("p1", "vibe")
+    assert _payload(
+        await mcp.call_tool(
+            "store_put",
+            {"namespace": "plan", "key": "owner", "value": "p-you"},
+        )
+    ) == {"stored": True}
+    assert _payload(await mcp.call_tool("store_get", {"namespace": "plan", "key": "owner"})) == {
+        "value": "p-you"
+    }
+    assert _payload(
+        await mcp.call_tool("checkpoint", {"name": "before merge", "notes": "watch p-you"})
+    ) == {"checkpoint_id": 7, "jobs": []}
+    assert _payload(await mcp.call_tool("recovery_read", {"checkpoint_id": 7})) == {
+        "checkpoint_id": 7,
+        "recorded": [],
+        "live": [],
+    }
+
+    assert [(call[0], *call[2:]) for call in calls] == [
+        ("store_put", "plan", "owner", "p-you"),
+        ("store_get", "plan", "owner"),
+        ("checkpoint", "before merge", "watch p-you"),
+        ("recovery_read", 7),
+    ]
+    assert all(isinstance(call[1], mcp_tools.Session) for call in calls)
 
 
 async def test_whoami_registers_on_first_call(daemon):

@@ -55,6 +55,12 @@ prompt:   the task, delivered on the child's command line at startup.
           handoff, so it has to carry the goal, the files it may change,
           what it must leave alone, how to check its own work, and what
           to report back. Everything you leave out, it will invent.
+response_format: optional JSON Schema hint for prompt guidance only. Pass a
+          JSON object or null. The daemon serializes and injects that guidance
+          exactly once; MCP forwards the object unchanged and does not inject
+          prompt text. After the job finishes, Theater parses the whole final
+          assistant answer with json.loads. It performs no schema validation,
+          JSON scraping, fence stripping, type coercion, or retry.
 approval: "manual" | "edits" | "yolo" — required, no default. This is
           the only thing standing between an unattended child and your
           filesystem, so choose it deliberately. A child you intend to
@@ -90,7 +96,12 @@ worktree: if True, create a git worktree for the child with its own
           file claims atomic or enforce ownership. The branch name
           theater/named/<name> is in the result. base_branch applies
           only when the named worktree is first created; a later join
-          with a conflicting base_branch is refused. Cannot be combined
+          with a different or explicit base_branch is refused. On the
+          last live participant's teardown the directory is removed but
+          the shared branch is always retained — other participants may
+          have completed work on it. After the last teardown the branch
+          remains, and the name cannot be recreated until the retained
+          branch is merged or deleted by the user. Cannot be combined
           with resume.
 base_branch: the branch to base the worktree on. Defaults to current HEAD.
 resume:    a session id, from `recall`, to resume instead of starting cold.
@@ -99,7 +110,10 @@ resume:    a session id, from `recall`, to resume instead of starting cold.
            itself). Some harnesses accept resume but cannot carry a prompt
            through it: opencode's `-s` routes to the session view and drops
            `--prompt`, so resuming opencode with a prompt is refused. Resume
-           without a prompt and use send to deliver the task.
+           without a prompt and use send to deliver the task. Resume with
+           response_format is refused for harnesses whose resume cannot carry
+           a prompt, because the JSON guidance is delivered through the same
+           prompt channel.
 
 The returned participant record includes `session_id`, the harness's opaque
 resume identifier. It is normally null at spawn time because the observer
@@ -194,6 +208,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         harness: str,
         approval: str,
         prompt: str | None = None,
+        response_format: dict | None = None,
         cwd: str | None = None,
         worktree: str | bool | None = False,
         base_branch: str | None = None,
@@ -204,6 +219,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
             session,
             harness=harness,
             prompt=prompt,
+            response_format=response_format,
             approval=approval,
             cwd=cwd,
             worktree=worktree,
@@ -257,7 +273,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         return await tools.await_sessions(session, handles=handles, max_wait=max_wait)
 
     @mcp.tool()
-    async def send(target_id: str, prompt: str) -> dict:
+    async def send(target_id: str, prompt: str, response_format: dict | None = None) -> dict:
         """Send a prompt to an already-running agent mid-session.
 
         The prompt is typed directly into the target's tmux pane via
@@ -272,12 +288,90 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
                    after a death and respawn; use the id for any targeting
                    that spans time or has destructive consequences.
         prompt:    the text to type into the target's pane.
+        response_format: optional JSON Schema hint for prompt guidance only.
+                   Pass a JSON object or null. The daemon serializes and
+                   injects that guidance exactly once; MCP forwards the object
+                   unchanged and does not inject prompt text. After the job
+                   finishes, Theater parses the whole final assistant answer
+                   with json.loads. It performs no schema validation, JSON
+                   scraping, fence stripping, type coercion, or retry.
 
         Fails with `human_present` if a human is detected at the target
         pane — never inject into a session a human is using. Fails with
         `busy` if the target is already processing a send prompt.
         """
-        return await tools.send_prompt(session, target_id=target_id, prompt=prompt)
+        return await tools.send_prompt(
+            session,
+            target_id=target_id,
+            prompt=prompt,
+            response_format=response_format,
+        )
+
+    @mcp.tool()
+    async def store_put(namespace: str, key: str, value: str) -> dict:
+        """Store one exact string for short-lived sibling coordination.
+
+        Values are exact strings: Theater does not parse, merge, or normalise
+        them. Writes are last-writer-wins. The daemon scopes access to your
+        spawn tree intersected with the canonical main repo, so this is a
+        sibling scratchpad inside git, not durable storage and not available
+        outside a git repository. There is no prefix listing in this MCP
+        surface.
+
+        namespace: coordination bucket chosen by the agents sharing it.
+        key:       exact key inside that namespace.
+        value:     exact string to store.
+        """
+        return await tools.store_put(
+            session,
+            namespace=namespace,
+            key=key,
+            value=value,
+        )
+
+    @mcp.tool()
+    async def store_get(namespace: str, key: str) -> dict:
+        """Read one exact string from the sibling scratchpad.
+
+        Returns {"value": str | null}. Values are exact strings and writes are
+        last-writer-wins. The daemon scopes access to your spawn tree
+        intersected with the canonical main repo, so this is a short-lived
+        scratchpad for siblings coordinating inside git and is unavailable
+        outside a git repository. There is no prefix listing in this MCP
+        surface.
+
+        namespace: coordination bucket chosen by the agents sharing it.
+        key:       exact key inside that namespace.
+        """
+        return await tools.store_get(session, namespace=namespace, key=key)
+
+    @mcp.tool()
+    async def checkpoint(name: str, notes: str | None = None) -> dict:
+        """Create an explicit cumulative snapshot of your delegated jobs.
+
+        This is not an automatic execution checkpoint; it is agent-initiated
+        bookkeeping. It records every job delegated by this participant up to
+        now and returns {"checkpoint_id": int, "jobs": [...]}. Use it before
+        a risky orchestration turn or handoff when you want a recovery marker.
+
+        name:  short label for the checkpoint.
+        notes: optional free-form notes for the later reader.
+        """
+        return await tools.checkpoint(session, name=name, notes=notes)
+
+    @mcp.tool()
+    async def recovery_read(checkpoint_id: int) -> dict:
+        """Read a checkpoint and compare it with live state now.
+
+        Returns checkpoint metadata plus the recorded snapshot, current live state,
+        and any pruned handles. Use it to see what changed since an
+        explicit agent-created checkpoint, including jobs that finished,
+        moved, disappeared from retention, or now have different structured
+        results.
+
+        checkpoint_id: the id returned by checkpoint.
+        """
+        return await tools.recovery_read(session, checkpoint_id=checkpoint_id)
 
     @mcp.tool()
     async def read_transcript(target_id: str, last_n: int = 5) -> dict:
@@ -341,13 +435,22 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         error — killing a dead thing is not a failure.
 
         **Side effect: destroying a worktree child erases uncommitted
-        work.** If the child was spawned with worktree=True, killing
-        it removes the git worktree and deletes its branch. Commits
-        already made on the branch are lost with the branch; uncommitted
-        changes in the worktree are lost irreversibly. There is no
-        confirmation prompt and no undo anywhere below this tool — the
-        user's yes is the only thing standing between a call and lost
-        work, which is why it has to be asked for every time.
+        work.** If the child was spawned with worktree=True (a unique
+        isolated worktree), killing it removes the git worktree and
+        deletes its branch. Commits already made on the branch are
+        lost with the branch; uncommitted changes in the worktree are
+        lost irreversibly. There is no confirmation prompt and no undo
+        anywhere below this tool — the user's yes is the only thing
+        standing between a call and lost work, which is why it has to
+        be asked for every time.
+
+        If the child was spawned with worktree="<name>" (a named shared
+        linked worktree), the directory is removed on the last live
+        participant's teardown but the shared branch is always retained
+        — other participants may already have completed work on it.
+        After the last teardown the branch remains, and the name cannot
+        be recreated until the retained branch is merged or deleted by
+        the user.
 
         So collect before you kill. Merge the branch, or record the
         commits somewhere outside the worktree, and only then ask. A

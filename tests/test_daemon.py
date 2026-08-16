@@ -18,6 +18,15 @@ from theater import paths
 from theater.harness import HARNESSES
 from theater.protocol import RemoteError
 
+_JSON_SCHEMA_PREFIX = (
+    "Return your final answer as a single bare JSON value (no code fences, no prose) "
+    "matching this schema hint: {schema}"
+)
+
+
+def _json_prompt(schema: str, prompt: str) -> str:
+    return f"{_JSON_SCHEMA_PREFIX.format(schema=schema)}\n\n{prompt}"
+
 
 async def test_ping(client):
     assert (await client.call("ping"))["pong"] is True
@@ -84,6 +93,103 @@ async def test_spawn_creates_an_identified_participant(client, fake_tmux):
     # The id must be reachable from inside the pane, and not only via the
     # environment, which the MCP SDK filters.
     assert record["id"] in window["env"]["VIBE_MCP_SERVERS"]
+
+
+async def test_spawn_response_format_augments_and_persists_prompt(client, fake_tmux):
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+    serialized = '{"properties":{"answer":{"type":"string"}},"type":"object"}'
+    expected = _json_prompt(serialized, "say hello")
+
+    record = await client.call(
+        "spawn",
+        harness="vibe",
+        prompt="say hello",
+        approval="manual",
+        cwd="/tmp",
+        response_format=schema,
+    )
+
+    assert fake_tmux.windows[0]["command"] == ["vibe", expected]
+    assert expected.count("Return your final answer as a single bare JSON value") == 1
+    job = await client.call("jobs.status", handle=record["handle"])
+    assert job["prompt"] == expected
+    assert job["response_format"] == serialized
+    assert job["structured_result"] is None
+    assert job["structured_status"] is None
+
+
+async def test_promptless_spawn_with_empty_response_format_stays_running(client, fake_tmux):
+    expected = _json_prompt("{}", "")
+    record = await client.call(
+        "spawn",
+        harness="vibe",
+        prompt="",
+        approval="manual",
+        cwd="/tmp",
+        response_format={},
+    )
+
+    assert fake_tmux.windows[0]["command"] == ["vibe", expected]
+    job = await client.call("jobs.status", handle=record["handle"])
+    assert job["state"] == "running"
+    assert job["prompt"] == expected
+    assert job["response_format"] == "{}"
+
+
+async def test_spawn_response_format_rejects_non_object_before_side_effects(client, fake_tmux):
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "spawn",
+            harness="vibe",
+            prompt="say hello",
+            approval="manual",
+            cwd="/tmp",
+            response_format=[],
+        )
+
+    assert exc.value.code == "bad_request"
+    assert "response_format must be a JSON object or null" in str(exc.value)
+    assert fake_tmux.windows == []
+
+
+async def test_spawn_response_format_refuses_resume_that_drops_prompt_before_side_effects(
+    client, fake_tmux, monkeypatch
+):
+    from theater.harness import Harness, LaunchPlan
+
+    class DropsPromptHarness(Harness):
+        name = "drops-prompt-rpc"
+        binary = "drops-prompt-rpc"
+        resume_takes_prompt = False
+
+        def plan_launch(
+            self,
+            *,
+            participant_id,
+            prompt,
+            config_path,
+            approval,
+            resume=None,
+        ):
+            return LaunchPlan(argv=["drops-prompt-rpc"])
+
+    monkeypatch.setitem(HARNESSES, "drops-prompt-rpc", DropsPromptHarness())
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "spawn",
+            harness="drops-prompt-rpc",
+            prompt="",
+            approval="manual",
+            cwd="/tmp",
+            resume="sess-abc",
+            response_format={},
+        )
+
+    assert exc.value.code == "bad_request"
+    assert "response_format" in str(exc.value)
+    assert await client.call("participants.list") == []
+    assert fake_tmux.windows == []
 
 
 async def test_a_freshly_spawned_participant_is_idle_before_hello(client, fake_tmux):
@@ -557,9 +663,7 @@ async def test_a_child_that_loses_its_pane_without_explicit_kill_crashes(
     a self-exit must keep its old behaviour so the distinction between
     crashed and killed stays meaningful.
     """
-    record = await client.call(
-        "spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp"
-    )
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
     handle = record["handle"]
 
     import theater.daemon.server as server_mod

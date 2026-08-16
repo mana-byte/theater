@@ -643,7 +643,8 @@ def test_named_worktree_retire_does_not_remove_when_others_live(repo, store):
 
 
 def test_named_worktree_retire_removes_when_last_participant(repo, store):
-    """Retiring the last live participant in a named worktree removes it."""
+    """Retiring the last live participant in a named worktree removes the
+    directory but always retains the shared branch."""
     from theater.daemon.store import Store
 
     db_path = Path(repo) / ".theater" / "test.db"
@@ -668,7 +669,7 @@ def test_named_worktree_retire_removes_when_last_participant(repo, store):
             text=True,
             check=False,
         )
-        assert verify.returncode != 0
+        assert verify.returncode == 0, "the named shared branch must survive teardown"
 
         # The named_worktrees row should be gone
         row = s.get_named_worktree(repo_root=repo, name="last-one")
@@ -706,3 +707,297 @@ def test_named_worktree_persists_across_restart(repo, store):
         assert branch2 == branch
     finally:
         s2.close()
+
+
+# ---- Fix 1: canonical scope from inside a linked worktree ---------------
+
+
+def test_named_worktree_canonical_scope_from_linked_worktree(repo, store):
+    """A named worktree created from inside another linked worktree must
+    key and locate itself under the canonical main repository."""
+    from theater.daemon.store import Store
+
+    # First create a regular True worktree to simulate being inside a linked worktree
+    inner_wt = wt.create_worktree(repo_root=repo, child_id="innerwt")
+
+    db_path = Path(repo) / ".theater" / "test.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    s = Store(db_path)
+    try:
+        registry = type("R", (), {"store": s})()
+        spawner = Spawner(registry=registry)
+
+        # Spawn a named worktree from inside the linked worktree
+        path, branch = spawner._spawn_named_worktree(
+            root=inner_wt, name="from-linked", base_branch=None
+        )
+
+        # The path should be under the canonical main repo, not under the linked worktree
+        assert ".theater/worktrees/named/from-linked" in path
+        assert path.startswith(repo)
+        assert not path.startswith(inner_wt)
+
+        # The named_worktrees row should be keyed by the canonical root
+        row = s.get_named_worktree(repo_root=repo, name="from-linked")
+        assert row is not None
+        assert row["path"] == path
+
+        # A second join from inside the linked worktree should find the same one
+        path2, branch2 = spawner._spawn_named_worktree(
+            root=inner_wt, name="from-linked", base_branch=None
+        )
+        assert path2 == path
+        assert branch2 == branch
+    finally:
+        s.close()
+
+
+# ---- Fix 2: base_branch rejection on join -------------------------------
+
+
+def test_named_worktree_base_branch_none_rejects_explicit_on_join(repo, store):
+    """If persisted base_branch is None, an explicit base_branch on join is rejected."""
+    from theater.daemon.store import Store
+
+    db_path = Path(repo) / ".theater" / "test.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    s = Store(db_path)
+    try:
+        registry = type("R", (), {"store": s})()
+        spawner = Spawner(registry=registry)
+
+        # Create with base_branch=None
+        spawner._spawn_named_worktree(root=repo, name="bb-none", base_branch=None)
+
+        # Join with an explicit base_branch should be rejected
+        with pytest.raises(BadRequest, match="base_branch"):
+            spawner._spawn_named_worktree(root=repo, name="bb-none", base_branch="main")
+    finally:
+        s.close()
+
+
+def test_named_worktree_base_branch_exact_match_allows_join(repo, store):
+    """An explicit base_branch that exactly equals the persisted value allows join."""
+    from theater.daemon.store import Store
+
+    db_path = Path(repo) / ".theater" / "test.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    s = Store(db_path)
+    try:
+        registry = type("R", (), {"store": s})()
+        spawner = Spawner(registry=registry)
+
+        # Create with base_branch="main"
+        spawner._spawn_named_worktree(root=repo, name="bb-main", base_branch="main")
+
+        # Join with the same base_branch should succeed
+        path2, branch2 = spawner._spawn_named_worktree(
+            root=repo, name="bb-main", base_branch="main"
+        )
+        assert path2 is not None
+        assert branch2 is not None
+    finally:
+        s.close()
+
+
+# ---- Fix 3: stale registry rows ----------------------------------------
+
+
+def test_named_worktree_join_refused_missing_path(repo, store):
+    """Joining a named worktree whose directory was deleted is refused."""
+    from theater.daemon.store import Store
+
+    db_path = Path(repo) / ".theater" / "test.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    s = Store(db_path)
+    try:
+        registry = type("R", (), {"store": s})()
+        spawner = Spawner(registry=registry)
+
+        path, _branch = spawner._spawn_named_worktree(
+            root=repo, name="stale-path", base_branch=None
+        )
+
+        # Delete the directory out from under us
+        import shutil
+
+        shutil.rmtree(path)
+
+        with pytest.raises(BadRequest, match="does not exist"):
+            spawner._spawn_named_worktree(root=repo, name="stale-path", base_branch=None)
+    finally:
+        s.close()
+
+
+def test_named_worktree_join_refused_wrong_branch(repo, store):
+    """Joining a named worktree where the checked-out branch was switched is refused."""
+    from theater.daemon.store import Store
+
+    db_path = Path(repo) / ".theater" / "test.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    s = Store(db_path)
+    try:
+        registry = type("R", (), {"store": s})()
+        spawner = Spawner(registry=registry)
+
+        path, _branch = spawner._spawn_named_worktree(root=repo, name="hijacked", base_branch=None)
+
+        # Switch the checked-out branch in the worktree
+        subprocess.run(
+            ["git", "checkout", "-b", "some-other-branch"],
+            cwd=path,
+            check=True,
+            capture_output=True,
+        )
+
+        with pytest.raises(BadRequest, match="checked out"):
+            spawner._spawn_named_worktree(root=repo, name="hijacked", base_branch=None)
+    finally:
+        s.close()
+
+
+# ---- Fix 4: named branch survives kill ---------------------------------
+
+
+def test_named_worktree_branch_survives_kill(repo, store):
+    """A named shared branch must never be auto-deleted on kill.
+
+    Participant A finishes, B is the last live member and is killed.
+    The directory is removed but the shared branch survives.
+    """
+    from theater.daemon.store import Store
+
+    db_path = Path(repo) / ".theater" / "test.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    s = Store(db_path)
+    try:
+        registry = type("R", (), {"store": s})()
+        spawner = Spawner(registry=registry)
+
+        path, _branch = spawner._spawn_named_worktree(
+            root=repo, name="survive-kill", base_branch=None
+        )
+
+        p_a = _named_participant("child-a", path, "survive-kill")
+        p_b = _named_participant("child-b", path, "survive-kill")
+        s.upsert_participant(p_a)
+        s.upsert_participant(p_b)
+
+        # A finishes first — retire and mark dead (full teardown for a
+        # self-exit uses delete_branch=False). B is still live.
+        spawner.retire(p_a, delete_branch=False)
+        s.set_status(p_a.id, "dead")
+
+        # Directory still exists (B is live)
+        assert Path(path).exists()
+
+        # B is killed — last live member, delete_branch=True
+        spawner.retire(p_b, delete_branch=True)
+        s.set_status(p_b.id, "dead")
+
+        # Directory removed
+        assert not Path(path).exists()
+
+        # Branch must survive — this is the core of Fix 4
+        verify = subprocess.run(
+            ["git", "rev-parse", "--verify", "theater/named/survive-kill"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert verify.returncode == 0, "named shared branch must survive kill"
+
+        # The named_worktrees row should be gone
+        row = s.get_named_worktree(repo_root=repo, name="survive-kill")
+        assert row is None
+    finally:
+        s.close()
+
+
+def test_named_worktree_name_not_recreatable_after_teardown(repo, store):
+    """After last teardown, the branch remains, so the name cannot be recreated."""
+    from theater.daemon.store import Store
+
+    db_path = Path(repo) / ".theater" / "test.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    s = Store(db_path)
+    try:
+        registry = type("R", (), {"store": s})()
+        spawner = Spawner(registry=registry)
+
+        spawner._spawn_named_worktree(root=repo, name="retained", base_branch=None)
+        p = _named_participant("only", wt.named_worktree_path(repo, "retained"), "retained")
+        s.upsert_participant(p)
+        spawner.retire(p, delete_branch=True)
+
+        # The row is gone, but the branch exists — creating again should fail
+        # because create_named_worktree checks if the branch already exists
+        with pytest.raises(BadRequest, match="already exists"):
+            spawner._spawn_named_worktree(root=repo, name="retained", base_branch=None)
+    finally:
+        s.close()
+
+
+# ---- Fix 6: runtime type validation ------------------------------------
+
+
+def test_validate_worktree_param_rejects_int():
+    from theater.daemon.methods import _validate_worktree_param
+    from theater.models import BadRequest
+
+    with pytest.raises(BadRequest, match="must be bool, str, or None"):
+        _validate_worktree_param(1)
+
+
+def test_validate_worktree_param_rejects_list():
+    from theater.daemon.methods import _validate_worktree_param
+    from theater.models import BadRequest
+
+    with pytest.raises(BadRequest, match="must be bool, str, or None"):
+        _validate_worktree_param(["name"])
+
+
+def test_validate_worktree_param_rejects_empty_string():
+    from theater.daemon.methods import _validate_worktree_param
+    from theater.models import BadRequest
+
+    with pytest.raises(BadRequest, match="non-empty string"):
+        _validate_worktree_param("")
+
+
+def test_validate_worktree_param_accepts_true():
+    from theater.daemon.methods import _validate_worktree_param
+
+    assert _validate_worktree_param(True) is True
+
+
+def test_validate_worktree_param_accepts_false():
+    from theater.daemon.methods import _validate_worktree_param
+
+    assert _validate_worktree_param(False) is False
+
+
+def test_validate_worktree_param_accepts_none():
+    from theater.daemon.methods import _validate_worktree_param
+
+    assert _validate_worktree_param(None) is False
+
+
+def test_validate_worktree_param_accepts_string():
+    from theater.daemon.methods import _validate_worktree_param
+
+    assert _validate_worktree_param("my-name") == "my-name"
+
+
+# ---- Fix 7: git check-ref-format validation ---------------------------
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["trailing.", "double..dot", "ends.lock", "has..double"],
+)
+def test_validate_name_rejects_invalid_git_refs(repo, name):
+    """Names that produce invalid git refs are rejected by check-ref-format."""
+    with pytest.raises(BadRequest):
+        wt.validate_name(name)

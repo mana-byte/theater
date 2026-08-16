@@ -18,7 +18,7 @@ from sqlalchemy import func, select
 
 from theater import cli
 from theater.daemon.jobs import JobState
-from theater.daemon.schema import bus, jobs, participants, touch
+from theater.daemon.schema import bus, checkpoints, jobs, participants, touch, tree_kv
 from theater.models import Job, Participant, Status, Tier, now
 
 _DAY = 86400.0
@@ -121,6 +121,35 @@ def _bus(
     return pk[0]
 
 
+def _checkpoint(store, *, created_at: float | None = None) -> int:
+    result = store.conn.execute(
+        checkpoints.insert().values(
+            participant_id="p1",
+            name="old",
+            notes=None,
+            jobs_snapshot="[]",
+            created_at=created_at if created_at is not None else now(),
+        )
+    )
+    pk = result.inserted_primary_key
+    assert pk is not None
+    return pk[0]
+
+
+def _tree_kv(store, *, tree_root_id: str = "p1", repo_root: str = "/repo") -> None:
+    store.conn.execute(
+        tree_kv.insert().values(
+            tree_root_id=tree_root_id,
+            repo_root=repo_root,
+            namespace="ns",
+            key="key",
+            value="value",
+            updated_at=now(),
+            updated_by=tree_root_id,
+        )
+    )
+
+
 def _count(store, table) -> int:
     return store.conn.execute(select(func.count()).select_from(table)).scalar()
 
@@ -142,17 +171,30 @@ async def test_gc_rpc_returns_all_keys_with_matching_counts(client, daemon, fake
     )
     _touch(daemon.store, job_handle="old1", path="x.py")
     _bus(daemon.store, kind="job.created", ts=now() - 30 * _DAY)
+    _checkpoint(daemon.store, created_at=now() - 90 * _DAY)
+    _tree_kv(daemon.store)
 
     before_jobs = _count(daemon.store, jobs)
     before_touch = _count(daemon.store, touch)
     before_bus = _count(daemon.store, bus)
     before_part = _count(daemon.store, participants)
+    before_checkpoints = _count(daemon.store, checkpoints)
+    before_tree_kv = _count(daemon.store, tree_kv)
 
     data = await client.call("gc")
 
     expected_keys = {
-        "bus", "jobs", "touch", "participants", "running_marked",
-        "coverage", "db_bytes_before", "db_bytes_after", "vacuum_ran",
+        "bus",
+        "jobs",
+        "touch",
+        "participants",
+        "running_marked",
+        "tree_kv",
+        "checkpoints",
+        "coverage",
+        "db_bytes_before",
+        "db_bytes_after",
+        "vacuum_ran",
     }
     assert set(data) == expected_keys
 
@@ -160,6 +202,8 @@ async def test_gc_rpc_returns_all_keys_with_matching_counts(client, daemon, fake
     assert data["touch"] == before_touch - _count(daemon.store, touch)
     assert data["bus"] == before_bus - _count(daemon.store, bus)
     assert data["participants"] == before_part - _count(daemon.store, participants)
+    assert data["checkpoints"] == before_checkpoints - _count(daemon.store, checkpoints)
+    assert data["tree_kv"] == before_tree_kv - _count(daemon.store, tree_kv)
 
     assert isinstance(data["coverage"], dict)
     assert set(data["coverage"]) == {"jobs_from", "bus_from"}
@@ -280,6 +324,8 @@ def _gc_payload(**over) -> dict:
         "touch": 0,
         "participants": 0,
         "running_marked": 0,
+        "tree_kv": 0,
+        "checkpoints": 0,
         "coverage": {"jobs_from": None, "bus_from": None},
         "db_bytes_before": 1024,
         "db_bytes_after": 1024,
@@ -316,10 +362,21 @@ def test_render_deleted_without_vacuum_warns_file_did_not_shrink(monkeypatch, ca
             touch=10,
             participants=2,
             running_marked=1,
+            tree_kv=3,
+            checkpoints=4,
         ),
     )
     assert "file size unchanged" in out
     assert "--vacuum" in out
+    assert "3 tree kv" in out
+    assert "4 checkpoints" in out
+
+
+def test_render_tree_kv_and_checkpoints_count_as_collection(monkeypatch, capsys):
+    out = _render(monkeypatch, capsys, _gc_payload(tree_kv=1, checkpoints=2))
+    assert "nothing to collect" not in out
+    assert "1 tree kv" in out
+    assert "2 checkpoints" in out
 
 
 def test_render_deleted_with_vacuum_reports_reclaimed_space(monkeypatch, capsys):

@@ -57,6 +57,9 @@ class SpawnRequest:
     #: validated only by `harness.check_resume`, which refuses a harness
     #: whose `plan_launch` has no `resume` parameter. None means start cold.
     resume: str | None = None
+    #: Raw serialized JSON response-format hint. Prompt construction lives in
+    #: daemon methods; the spawner only enforces launch-time capability traps.
+    response_format: str | None = None
 
 
 class Spawner:
@@ -80,6 +83,11 @@ class Spawner:
         if req.resume and req.prompt and not harness.resume_takes_prompt:
             raise BadRequest(
                 f"harness {req.harness!r} cannot resume a session with a prompt; "
+                f"resume it without one and use send to deliver the task"
+            )
+        if req.resume and req.response_format and not harness.resume_takes_prompt:
+            raise BadRequest(
+                f"harness {req.harness!r} cannot resume a session with response_format; "
                 f"resume it without one and use send to deliver the task"
             )
         # A resumed session's transcript describes files at its original cwd;
@@ -195,37 +203,59 @@ class Spawner:
         On first spawn for a name, creates the worktree and persists its
         identity in the ``named_worktrees`` table. On a later spawn with
         the same name and canonical main repo, joins the existing
-        directory and branch — no new worktree is created, and
-        ``base_branch`` must match (or be absent) what was used at
-        creation time.
+        directory and branch — no new worktree is created.
+
+        ``base_branch`` applies only when the named worktree is first
+        created. On a join, an explicit ``base_branch`` is allowed only
+        when it exactly equals the persisted ``base_branch``. If the
+        persisted value is ``None`` and the join supplies any explicit
+        branch, it is rejected. Omitting ``base_branch`` on a join is
+        always allowed.
+
+        Before joining, the persisted path is verified to exist as a
+        linked worktree of the same canonical repository with the
+        persisted branch checked out. If any fact is stale or mismatched,
+        the join is refused with an actionable ``BadRequest`` — a child
+        is never launched into a missing or hijacked directory.
 
         Returns ``(path, branch)``.
         """
+        # Always key and locate under the canonical main repository,
+        # not the caller's linked-worktree root. This lets a child spawned
+        # from inside another linked worktree find or create the shared
+        # named worktree in the right place.
+        canonical_root = worktree_mod.main_repo_root(root) or root
+
         store = self.registry.store
-        existing = store.get_named_worktree(repo_root=root, name=name)
+        existing = store.get_named_worktree(repo_root=canonical_root, name=name)
 
         if existing is not None:
-            # Join: the worktree must still be one Theater recognises.
-            # A conflicting base_branch is refused — the first spawn set
-            # the base, and a later join silently accepting a different
-            # one would be a surprise.
-            if (
-                base_branch is not None
-                and existing["base_branch"] is not None
-                and base_branch != existing["base_branch"]
-            ):
-                raise BadRequest(
-                    f"named worktree {name!r} was created with "
-                    f"base_branch={existing['base_branch']!r}; "
-                    f"cannot join with base_branch={base_branch!r}"
-                )
+            # base_branch on join: allowed only when it exactly equals the
+            # persisted value. If persisted is None, any explicit branch
+            # is rejected.
+            if base_branch is not None:
+                persisted_base = existing["base_branch"]
+                if persisted_base is None or base_branch != persisted_base:
+                    raise BadRequest(
+                        f"named worktree {name!r} was created with "
+                        f"base_branch={persisted_base!r}; cannot join with "
+                        f"base_branch={base_branch!r}"
+                    )
+
+            # Verify the persisted row is still intact before joining.
+            worktree_mod.verify_named_worktree(
+                repo_root=canonical_root,
+                name=name,
+                expected_path=existing["path"],
+                expected_branch=existing["branch"],
+            )
             return existing["path"], existing["branch"]
 
         path, branch = worktree_mod.create_named_worktree(
-            repo_root=root, name=name, base_branch=base_branch
+            repo_root=canonical_root, name=name, base_branch=base_branch
         )
         store.upsert_named_worktree(
-            repo_root=root,
+            repo_root=canonical_root,
             name=name,
             branch=branch,
             path=path,
@@ -306,8 +336,16 @@ class Spawner:
         another live participant is using it. When other participants are
         still live in the same cwd, this method does nothing — the
         shared worktree outlives any one child, and only the last child
-        out reclaims it. The ``named_worktrees`` row is deleted only when
-        the directory is actually removed.
+        out reclaims the directory. When the last child is retired, the
+        directory is removed but the **branch is always retained** —
+        other participants may already have completed work on it, and
+        a named shared branch must never be auto-deleted merely because
+        the final live participant was explicitly killed. The
+        ``named_worktrees`` row is deleted only when the directory is
+        actually removed. After the last teardown the branch remains, and
+        the name cannot be recreated until the retained branch is merged
+        or deleted by the user, or explicit future lifecycle support is
+        added.
 
         Failure is logged, never raised. The caller is in the middle of
         retiring a participant, and refusing to mark it dead because git
@@ -355,7 +393,11 @@ class Spawner:
             result = worktree_mod.remove_named_worktree(
                 repo_root=root,
                 name=named["name"],
-                delete_branch=delete_branch,
+                # Named branches are always retained: other participants may
+                # have completed work on the shared branch, and auto-deleting
+                # it merely because the last live participant was killed
+                # would destroy completed work.
+                delete_branch=False,
             )
             if result.ok:
                 self.registry.store.delete_named_worktree(

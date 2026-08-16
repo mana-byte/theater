@@ -90,9 +90,12 @@ def validate_name(name: str) -> None:
 
     Rejects empty strings, traversal (``..``, ``/``), option-like names
     (``-foo``), and names that are not valid single-component git refs.
-    Raises :class:`BadRequest` with an actionable message.
+    In addition to the single-safe-path-component checks, the final branch
+    is validated with ``git check-ref-format`` so that trailing dots,
+    repeated ``..``, ``.lock`` suffixes, and other ref-format violations
+    are caught. Raises :class:`BadRequest` with an actionable message.
     """
-    if not name or not name.strip():
+    if not isinstance(name, str) or not name.strip():
         raise BadRequest("worktree name must be a non-empty string")
     if _OPTION_LIKE.match(name):
         raise BadRequest(
@@ -114,6 +117,22 @@ def validate_name(name: str) -> None:
         raise BadRequest(f"worktree name {name!r} is reserved")
     if len(name) > 100:
         raise BadRequest(f"worktree name {name!r} is too long (max 100 characters)")
+    # Validate the full branch ref with git check-ref-format. This catches
+    # trailing dots, repeated '..', '.lock' suffixes, and other ref-format
+    # rules the regex above cannot enforce.
+    branch = named_branch_name(name)
+    result = subprocess.run(
+        ["git", "check-ref-format", "--branch", branch],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    if result.returncode != 0:
+        raise BadRequest(
+            f"worktree name {name!r} produces an invalid git ref {branch!r}: "
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
 
 
 def is_git_repo(path: str) -> bool:
@@ -485,6 +504,69 @@ def create_named_worktree(
 
     logger.info("created named worktree %r at %s (branch %s)", name, wt_path, branch)
     return wt_path, branch
+
+
+def verify_named_worktree(
+    *,
+    repo_root: str,
+    name: str,
+    expected_path: str,
+    expected_branch: str,
+) -> None:
+    """Verify that a persisted named-worktree row is still intact before joining.
+
+    Checks that:
+    - the expected path exists as a directory
+    - it is a linked worktree of the canonical main repository
+    - the expected branch is checked out there
+
+    Raises :class:`BadRequest` with an actionable message if any fact is
+    stale or mismatched. Never launches a child into a missing or hijacked
+    directory.
+    """
+    if not Path(expected_path).is_dir():
+        raise BadRequest(
+            f"named worktree {name!r} path {expected_path!r} does not exist; "
+            f"the directory was removed — delete the stale named-worktree "
+            f"row or pick a different name"
+        )
+
+    # Verify it is a linked worktree of the same canonical repo.
+    real_root = main_repo_root(expected_path)
+    if real_root is None:
+        raise BadRequest(
+            f"named worktree {name!r} at {expected_path!r} is not inside a "
+            f"git repository; cannot join"
+        )
+    if Path(real_root).resolve() != Path(repo_root).resolve():
+        raise BadRequest(
+            f"named worktree {name!r} at {expected_path!r} belongs to a "
+            f"different repository ({real_root!r}, expected {repo_root!r}); "
+            f"cannot join"
+        )
+
+    # Verify the expected branch is checked out in the worktree.
+    result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=expected_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    if result.returncode != 0:
+        raise BadRequest(
+            f"named worktree {name!r} at {expected_path!r}: cannot read "
+            f"checked-out branch: {result.stderr.strip()}"
+        )
+    checked_out = result.stdout.strip()
+    if checked_out != expected_branch:
+        raise BadRequest(
+            f"named worktree {name!r} at {expected_path!r} has branch "
+            f"{checked_out!r} checked out, expected {expected_branch!r}; "
+            f"the worktree was hijacked or manually switched — refusing to "
+            f"join"
+        )
 
 
 def remove_named_worktree(

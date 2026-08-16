@@ -23,6 +23,15 @@ from theater.harness.observation import (
 )
 from theater.protocol import RemoteError
 
+_JSON_SCHEMA_PREFIX = (
+    "Return your final answer as a single bare JSON value (no code fences, no prose) "
+    "matching this schema hint: {schema}"
+)
+
+
+def _json_prompt(schema: str, prompt: str) -> str:
+    return f"{_JSON_SCHEMA_PREFIX.format(schema=schema)}\n\n{prompt}"
+
 
 async def test_send_creates_a_running_job(client, fake_tmux):
     """send to an addressable target creates a job and delivers the prompt."""
@@ -35,6 +44,57 @@ async def test_send_creates_a_running_job(client, fake_tmux):
     # The prompt was delivered via send-keys to the right pane
     assert len(fake_tmux.sent) == 1
     assert fake_tmux.sent[0] == ("%1", "do the thing")
+
+
+async def test_send_response_format_augments_prompt_and_survives_await_shape(
+    client, fake_tmux, daemon
+):
+    target = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    serialized = '{"a":2,"b":1}'
+    expected = _json_prompt(serialized, "do the thing")
+
+    job = await client.call(
+        "send",
+        target=target["id"],
+        prompt="do the thing",
+        response_format={"b": 1, "a": 2},
+    )
+
+    assert fake_tmux.sent == [("%1", expected)]
+    assert job["prompt"] == expected
+    assert job["response_format"] == serialized
+    assert job["structured_result"] is None
+    assert job["structured_status"] is None
+
+    daemon.jobs.finish(
+        job["handle"],
+        state=JobState.DONE,
+        result='{"ok":true}',
+        raw_result='{"ok":true}',
+    )
+    status = await client.call("jobs.status", handle=job["handle"])
+    awaited = await client.call("jobs.await", handles=[job["handle"]], max_wait=1.0)
+
+    for row in (status, awaited[0]):
+        assert row["response_format"] == serialized
+        assert row["structured_result"] == '{"ok":true}'
+        assert row["structured_status"] == "parsed"
+
+
+async def test_send_response_format_rejects_non_object_before_delivery(client, fake_tmux):
+    target = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "send",
+            target=target["id"],
+            prompt="do the thing",
+            response_format="json",
+        )
+
+    assert exc.value.code == "bad_request"
+    assert "response_format must be a JSON object or null" in str(exc.value)
+    assert fake_tmux.sent == []
 
 
 async def test_send_to_unaddressable_rejected(client, fake_tmux):

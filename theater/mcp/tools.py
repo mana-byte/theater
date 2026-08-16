@@ -144,6 +144,7 @@ async def spawn_session(
     *,
     harness: str,
     prompt: str | None = None,
+    response_format: dict | None = None,
     approval: str,
     cwd: str | None = None,
     worktree: str | bool | None = False,
@@ -182,6 +183,14 @@ async def spawn_session(
     harnesses accept resume but cannot carry a prompt through it — see
     the tool description for the harness-specific behaviour.
 
+    `response_format` is a JSON Schema hint the daemon adds to the prompt
+    guidance exactly once. Theater stores it and later parses the whole
+    final assistant answer with ``json.loads``. It does not validate the
+    schema, scrape JSON from prose, strip fences, coerce types, or retry.
+    The dict is forwarded unchanged; MCP neither serializes nor injects it.
+    Resume plus `response_format` is refused for harnesses whose resume path
+    cannot carry a prompt.
+
     The returned ``session_id`` is populated asynchronously by the observer,
     so it is normally None for a newly spawned child. Re-list participants
     later to retrieve it after Theater has attached to the child's transcript.
@@ -200,6 +209,7 @@ async def spawn_session(
         base_branch=base_branch,
         model=model,
         resume=resume,
+        response_format=response_format,
     )
     assert isinstance(record, dict)
     return _summarise(record)
@@ -266,7 +276,9 @@ async def await_sessions(
     return [{k: v for k, v in job.items() if k not in ("prompt", "result")} for job in jobs]
 
 
-async def send_prompt(session: Session, *, target_id: str, prompt: str) -> dict:
+async def send_prompt(
+    session: Session, *, target_id: str, prompt: str, response_format: dict | None = None
+) -> dict:
     """Send a prompt to an already-running agent via tmux send-keys.
 
     The prompt is typed directly into the target's pane. The target must
@@ -281,6 +293,12 @@ async def send_prompt(session: Session, *, target_id: str, prompt: str) -> dict:
     targeting that spans time or has destructive consequences — a
     recycled name can identify a successor.
 
+    `response_format` is a JSON Schema hint the daemon adds to the prompt
+    guidance exactly once. Theater stores it and later parses the whole
+    final assistant answer with ``json.loads``. It does not validate the
+    schema, scrape JSON from prose, strip fences, coerce types, or retry.
+    The dict is forwarded unchanged; MCP neither serializes nor injects it.
+
     Returns a job handle that can be passed to `await_sessions`.
     """
     if not session._resolved:
@@ -290,9 +308,90 @@ async def send_prompt(session: Session, *, target_id: str, prompt: str) -> dict:
         target=target_id,
         prompt=prompt,
         caller_id=session.participant_id,
+        response_format=response_format,
     )
     assert isinstance(record, dict)
     return record
+
+
+async def store_put(session: Session, *, namespace: str, key: str, value: str) -> dict:
+    """Store an exact string in the caller's shared sibling scratchpad.
+
+    Values are exact strings: Theater does not parse, merge, or normalise them.
+    Writes are last-writer-wins. The daemon scopes access to the caller's spawn
+    tree intersected with the canonical main repo, so this is a short-lived
+    scratchpad for siblings coordinating inside git, not durable storage and
+    not available outside a git repository.
+    """
+    if not session._resolved:
+        await session.identify()
+    result = await session.client.call(
+        "store.put",
+        namespace=namespace,
+        key=key,
+        value=value,
+        caller_id=session.participant_id,
+    )
+    assert isinstance(result, dict)
+    return result
+
+
+async def store_get(session: Session, *, namespace: str, key: str) -> dict:
+    """Read an exact string from the caller's shared sibling scratchpad.
+
+    Values are returned exactly as stored, or null when absent. The namespace
+    and key are scoped by the daemon to the caller's spawn tree intersected
+    with the canonical main repo. This is a short-lived sibling scratchpad
+    inside git, with last-writer-wins semantics.
+    """
+    if not session._resolved:
+        await session.identify()
+    result = await session.client.call(
+        "store.get",
+        namespace=namespace,
+        key=key,
+        caller_id=session.participant_id,
+    )
+    assert isinstance(result, dict)
+    return result
+
+
+async def checkpoint(session: Session, *, name: str, notes: str | None = None) -> dict:
+    """Create an explicit cumulative snapshot for this participant's delegations.
+
+    A checkpoint is agent-initiated, not an automatic execution checkpoint.
+    The daemon records every job delegated by this participant up to this
+    point so a later recovery read can compare the recorded snapshot with live
+    current state.
+    """
+    if not session._resolved:
+        await session.identify()
+    result = await session.client.call(
+        "checkpoint.create",
+        name=name,
+        notes=notes,
+        caller_id=session.participant_id,
+    )
+    assert isinstance(result, dict)
+    return result
+
+
+async def recovery_read(session: Session, *, checkpoint_id: int) -> dict:
+    """Read a checkpoint plus the live state now visible to the caller.
+
+    Returns the checkpoint metadata, recorded snapshot, current live state, and
+    any pruned handles so the caller can see what changed since the explicit
+    checkpoint was created.
+    """
+    if not session._resolved:
+        await session.identify()
+    result = await session.client.call(
+        "checkpoint.read",
+        checkpoint_id=checkpoint_id,
+        caller_id=session.participant_id,
+    )
+    assert isinstance(result, dict)
+    return result
 
 
 async def put_child_back_in_the_wound(session: Session, *, target_id: str) -> dict:
@@ -315,12 +414,21 @@ async def put_child_back_in_the_wound(session: Session, *, target_id: str) -> di
     identify a successor.
 
     **Side effect: destroying a worktree child erases uncommitted work.**
-    If the child was spawned with ``worktree=True``, killing it removes
-    the git worktree and deletes its branch. Commits already made on the
-    branch are lost with the branch; uncommitted changes in the worktree
-    are lost irreversibly. This is the daemon's behaviour, not a choice
-    this tool makes, but it is the one fact the caller must know before
-    calling — there is no confirmation prompt, and no undo.
+    If the child was spawned with ``worktree=True`` (a unique isolated
+    worktree), killing it removes the git worktree and deletes its
+    branch. Commits already made on the branch are lost with the branch;
+    uncommitted changes in the worktree are lost irreversibly.
+
+    If the child was spawned with ``worktree="<name>"`` (a named shared
+    linked worktree), the directory is removed on the last live
+    participant's teardown but the **shared branch is always retained** —
+    other participants may already have completed work on it. After the
+    last teardown the branch remains, and the name cannot be recreated
+    until the retained branch is merged or deleted by the user.
+
+    This is the daemon's behaviour, not a choice this tool makes, but it
+    is the one fact the caller must know before calling — there is no
+    confirmation prompt, and no undo.
     """
     if not session._resolved:
         await session.identify()
