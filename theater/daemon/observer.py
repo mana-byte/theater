@@ -374,6 +374,13 @@ class Observer:
         #: Per-job count of consecutive turn ends that did not match the
         #: waiting prompt.
         self._unmatched: dict[str, int] = {}
+        #: Transcript path -> participant id, for the live-binding guarantee.
+        #: A transcript already bound to one live participant is not silently
+        #: rebound to another: two same-cwd siblings can otherwise collapse onto
+        #: one file, and the observer attributes one child's turns, status and
+        #: bus events to its sibling. Checked in `_on_attach`; cleaned up in the
+        #: `_watch` finally block.
+        self._bound_transcripts: dict[str, str] = {}
         self._supervisor: asyncio.Task | None = None
         self._stopping = asyncio.Event()
 
@@ -479,6 +486,14 @@ class Observer:
                     if self._apply(pid, batch, clock, turns):
                         clock.stir()
                         self._unblock(pid)
+                    elif batch.attached is not None:
+                        # Attachment was refused (collision with a live
+                        # participant). Detach the source so the next read
+                        # searches again — the session id may have been
+                        # discovered by then, making the lookup exact.
+                        source.detach()
+                        await self._sleep(self.search)
+                        continue
                     else:
                         await self._on_quiet(pid, observer, source, clock, turns)
                 except asyncio.CancelledError:
@@ -487,6 +502,7 @@ class Observer:
                     logger.exception("observing %s failed", pid)
                 await self._sleep(self.poll)
         finally:
+            self._release_transcript(pid)
             try:
                 await source.aclose()
             except (Exception, asyncio.CancelledError):
@@ -534,8 +550,11 @@ class Observer:
         across two of them, and text accumulated in one must still be there
         when the boundary arrives in the next.
         """
-        if batch.attached is not None:
-            self._on_attach(pid, batch.attached)
+        if batch.attached is not None and not self._on_attach(pid, batch.attached):
+            # Attachment refused: the transcript is already bound to a
+            # different live participant. Return False so the watcher
+            # detaches the source and goes back to searching.
+            return False
 
         # Resolved lazily: the job handle is looked up at most once per
         # _apply call, and only when at least one event carries paths. Most
@@ -746,8 +765,34 @@ class Observer:
             await self._check_idle_screen(pid, observer)
             clock.screen_quiet_since = now  # throttle
 
-    def _on_attach(self, pid: str, attached: Attachment) -> None:
-        """A source started reading somewhere. Say so, and settle the status."""
+    def _on_attach(self, pid: str, attached: Attachment) -> bool:
+        """A source started reading somewhere. Say so, and settle the status.
+
+        Returns whether the attachment was accepted. A transcript already
+        bound to a different live participant is refused rather than silently
+        rebound: two same-cwd siblings can otherwise collapse onto one file,
+        and the observer attributes one child's turns, status transitions and
+        bus events to its sibling. The per-harness `find_transcript` is the
+        replaceable seam (job 1); this guarantee is above it because it must
+        hold for every adapter, not just the ones that got discovery right.
+        """
+        owner = self._bound_transcripts.get(attached.location)
+        if owner is not None and owner != pid:
+            holder = self.store.get_participant(owner)
+            if holder is not None and holder.status is not Status.DEAD:
+                logger.warning(
+                    "transcript %s is already bound to %s; refusing to bind it "
+                    "to %s — two same-cwd participants would share one file",
+                    attached.location,
+                    owner,
+                    pid,
+                )
+                return False
+        # Release any previous binding this participant held, so a rotation
+        # (vibe opens a new session directory every turn) frees the old path
+        # before claiming the new one.
+        self._release_transcript(pid)
+        self._bound_transcripts[attached.location] = pid
         p = self.store.get_participant(pid)
         session_id = attached.session_id
         if p is not None and session_id and p.session_id != session_id:
@@ -773,6 +818,18 @@ class Observer:
             if event.turn_end:
                 result_text, raw_result = self._turn_result(event, Turn(""))
                 self._answer_turn(pid, result_text, raw_result=raw_result)
+        return True
+
+    def _release_transcript(self, pid: str) -> None:
+        """Drop a participant's claim on its transcript, if it still holds it.
+
+        Called when a watcher ends, so the path is free for a participant that
+        starts later in the same cwd. Only releases the binding this participant
+        owns — a collision refusal leaves no binding to release.
+        """
+        to_drop = [path for path, owner in self._bound_transcripts.items() if owner == pid]
+        for path in to_drop:
+            del self._bound_transcripts[path]
 
     def _settle(self, pid: str, desired: Status) -> None:
         p = self.store.get_participant(pid)

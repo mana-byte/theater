@@ -38,6 +38,7 @@ quantity and is labelled as such.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tomllib
 from pathlib import Path
@@ -64,6 +65,8 @@ from theater.harness.observation import (
     TranscriptObserver,
 )
 from theater.models import BadRequest
+
+logger = logging.getLogger("theater.harness.vibe")
 
 #: Vibe's idle prompt is `❯` (U+276F). Anything after the prompt is someone
 #: typing — presence, not idleness — so these stay exact matches.
@@ -339,28 +342,55 @@ class VibeObserver(TranscriptObserver):
         want = str(Path(cwd).resolve()) if cwd else None
         if want is None:
             return None
-        seen = 0
         # Directory names start with a fixed-width UTC timestamp, so reverse
         # lexicographic order is newest first without parsing anything.
+        # When session_id is None — the window after spawn before the observer
+        # discovers it — two siblings in the same cwd both match, and returning
+        # the newest for either participant is a mis-attribution. The
+        # observer's binding check (`_on_attach`) is the cross-cutting guarantee
+        # that refuses the second binding; this method returns the newest match
+        # so rotation (vibe opens a new session directory every turn) still
+        # works, and logs the ambiguity so it is not silent.
+        matches: list[Path] = []
+        seen = 0
         for d in sorted(self.root.glob("session_*"), reverse=True):
-            messages = d / "messages.jsonl"
-            if not messages.exists():
-                continue
-            if after is not None:
-                try:
-                    st = d.stat()
-                except OSError:
-                    continue
-                # Stat, not the name: the name's timestamp has no timezone
-                # marker and the caller's floor is a unix epoch.
-                if getattr(st, "st_birthtime", st.st_ctime) < after:
-                    continue
             seen += 1
             if seen > _SCAN_LIMIT:
-                return None
-            if self._meta_cwd(d) == want:
-                return messages
-        return None
+                break
+            if not self._is_candidate(d, want, after):
+                continue
+            matches.append(d / "messages.jsonl")
+        if not matches:
+            return None
+        if len(matches) > 1:
+            logger.warning(
+                "vibe find_transcript: %d session directories match cwd %s; "
+                "returning the newest — the observer will refuse a collision",
+                len(matches),
+                cwd,
+            )
+        return matches[0]
+
+    def _is_candidate(self, d: Path, want: str, after: float | None) -> bool:
+        """Whether a session directory is a viable transcript match.
+
+        Checks the messages file exists, the birth-time floor, and the cwd
+        from meta.json — the three conditions that were inline branches in
+        ``find_transcript`` before they overflowed the branch limit.
+        """
+        messages = d / "messages.jsonl"
+        if not messages.exists():
+            return False
+        if after is not None:
+            try:
+                st = d.stat()
+            except OSError:
+                return False
+            # Stat, not the name: the name's timestamp has no timezone
+            # marker and the caller's floor is a unix epoch.
+            if getattr(st, "st_birthtime", st.st_ctime) < after:
+                return False
+        return self._meta_cwd(d) == want
 
     def _meta(self, session_dir: Path) -> dict:
         try:

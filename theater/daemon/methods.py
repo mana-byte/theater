@@ -43,6 +43,7 @@ from theater.models import (
     NotYourChild,
     StaleTarget,
     Status,
+    Tier,
     now,
 )
 from theater.tmux import client as tmux
@@ -1005,7 +1006,12 @@ async def _read_transcript(daemon, params: dict) -> dict:
     if harness is None:
         raise BadRequest(f"cannot read transcript: harness {p.harness!r} is not known")
 
-    source = harness.observer.open_source(cwd=p.cwd, session_id=p.session_id, after=None)
+    # Same birth-time floor as the watch path (observer._open_source): the floor
+    # applies to SPAWNED participants only, because an adopted session's output
+    # predates Theater's first sight of it. Preserving that distinction exactly
+    # — do not apply a floor to adopted or external participants.
+    after = p.created_at if p.tier is Tier.SPAWNED else None
+    source = harness.observer.open_source(cwd=p.cwd, session_id=p.session_id, after=after)
     try:
         history = await source.history(last_n=last_n)
     finally:

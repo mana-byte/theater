@@ -726,6 +726,21 @@ class OpenCodeSource(Source):
         if self._after is not None:
             sql += " AND time_created >= ?"
             args.append(int(self._after * 1000))
+        # Check for multiple matches so an ambiguity is logged, not silent:
+        # two siblings in the same cwd both match, and returning the newest
+        # for either participant is a mis-attribution. The observer's binding
+        # check (`_on_attach`) is the cross-cutting guarantee that refuses the
+        # second binding; this method still returns the newest match so
+        # rotation (the same agent writing a new session) works.
+        count_sql = sql.replace("SELECT id", "SELECT COUNT(*)")
+        count = conn.execute(count_sql, args).fetchone()
+        if count is not None and count[0] > 1:
+            logger.warning(
+                "opencode _locate: %d sessions match cwd %s; "
+                "returning the newest — the observer will refuse a collision",
+                count[0],
+                self._cwd,
+            )
         sql += " ORDER BY time_created DESC LIMIT 1"
         row = conn.execute(sql, args).fetchone()
         return row[0] if row is not None else None

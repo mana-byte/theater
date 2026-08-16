@@ -65,6 +65,7 @@ would leave a caller awaiting a reply that is never coming.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import datetime
 from pathlib import Path
@@ -88,6 +89,8 @@ from theater.harness.observation import (
     TranscriptObserver,
 )
 from theater.models import BadRequest
+
+logger = logging.getLogger("theater.harness.codex")
 
 #: The composer prompt. A single glyph (U+203A), not the ASCII ">" that
 #: Claude Code uses.
@@ -320,10 +323,26 @@ class CodexObserver(TranscriptObserver):
                 if born < after:
                     continue
             candidates.append((st.st_mtime, path))
+        # Collect all matches so an ambiguity is logged, not silent: two
+        # siblings in the same cwd both match, and returning the newest for
+        # either participant is a mis-attribution. The observer's binding
+        # check (`_on_attach`) is the cross-cutting guarantee that refuses the
+        # second binding; this method still returns the newest match so
+        # rotation (the same agent writing a new transcript) works.
+        matches: list[Path] = []
         for _, path in sorted(candidates, reverse=True):
             if self._transcript_cwd(path) == want:
-                return path
-        return None
+                matches.append(path)
+        if not matches:
+            return None
+        if len(matches) > 1:
+            logger.warning(
+                "codex find_transcript: %d transcripts match cwd %s; "
+                "returning the newest — the observer will refuse a collision",
+                len(matches),
+                cwd,
+            )
+        return matches[0]
 
     def _transcript_cwd(self, path: Path) -> str | None:
         try:

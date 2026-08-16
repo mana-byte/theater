@@ -194,6 +194,18 @@ class Source(ABC):
         """Release anything held open. Called once, when the watcher stops."""
         return
 
+    def detach(self) -> None:
+        """Drop the current input location and go back to searching.
+
+        Called by the observer when a transcript path it just attached to is
+        already bound to a different live participant — the collision is
+        detected after the source has committed to the path, so the source
+        needs to forget it. The default is a no-op: a source whose location
+        cannot change (a database with a fixed session id) has nowhere else
+        to go, and detaching it would lose the cursor for nothing.
+        """
+        return
+
 
 class TranscriptSource(Source):
     """Tail an append-only transcript file. What `TranscriptObserver` returns.
@@ -280,6 +292,19 @@ class TranscriptSource(Source):
         return events
 
     # ---- internals ------------------------------------------------------
+
+    def detach(self) -> None:
+        """Drop the current file and go back to searching.
+
+        Called by the observer when the path this source just attached to is
+        already bound to a different live participant. The source forgets its
+        path, offset, index, and the session id it may have just read from the
+        wrong file — without clearing the latter, the next search would use the
+        wrong session id to find the wrong file again, and the collision would
+        repeat forever.
+        """
+        self._detach()
+        self._session_id = None
 
     def _detach(self) -> None:
         self.path = None
