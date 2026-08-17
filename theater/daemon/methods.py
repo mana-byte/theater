@@ -1181,6 +1181,7 @@ async def _read_transcript(daemon, params: dict) -> dict:
         after=after,
         session_exact=p.session_correlation == "exact",
         known_location=p.transcript_location,
+        pane_pid=p.live_pid,
     )
     try:
         history = await source.history(last_n=last_n)

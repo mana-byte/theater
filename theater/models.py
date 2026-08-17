@@ -75,6 +75,41 @@ class Participant:
         """
         return self.tier is not Tier.EXTERNAL and self.status is not Status.DEAD
 
+    @property
+    def live_pid(self) -> int | None:
+        """The launch process, withheld once this participant is known dead.
+
+        A pid outlives the process it named, and the operating system is free
+        to hand the number to something else. Anything that asks the operating
+        system about a dead participant's pid is therefore asking about
+        whatever inherited it — and for transcript correlation, where a wrong
+        answer attributes a live sibling's session to a dead row, that is a
+        mis-attribution no later evidence can undo.
+
+        Read what this is carefully: `DEAD` is a conclusion the registry has
+        already reached, not a kernel fact, so this narrows the window rather
+        than closing it. A process that exited a moment ago is still `RUNNING`
+        here until the observer notices, and a caller that cached the number
+        keeps it until its source is rebuilt. What remains is a race between
+        the reaper and pid reuse, in which the recycled pid must also land on a
+        codex holding a rollout for the same working directory.
+
+        Two different bounds on what that could cost, and only the first is
+        strong. A *watcher* cannot steal a location another live watcher has
+        already bound: exact-against-exact keeps the incumbent
+        (`daemon/observer.py`, `_accept_attachment`), so only an unbound
+        location is at risk. A *history* read is not bound by that at all —
+        `read_transcript` and recall open short-lived sources that never
+        consult the binding table — so within the race a recycled pid can
+        serve an incumbent's transcript to somebody else. Closing that needs
+        process identity established where the pane is owned, in the daemon,
+        rather than a pid handed to an adapter.
+
+        Not on the wire: `to_dict` is built from the dataclass fields, and this
+        is a reading of one of them rather than another one.
+        """
+        return None if self.status is Status.DEAD else self.pid
+
     def to_dict(self) -> dict:
         d = asdict(self)
         # Internal provenance used by the observer; not part of protocol v1.

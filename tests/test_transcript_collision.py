@@ -40,8 +40,9 @@ from theater.daemon.observer import (
     history_correlation_is_ambiguous,
 )
 from theater.daemon.registry import Registry
+from theater.harness.observation import ScreenKind, ScreenReading
 from theater.harness.source import Attachment, Batch, History, Source
-from theater.models import BadRequest, Tier
+from theater.models import BadRequest, Status, Tier
 
 
 def _make_session(root: Path, short: str, cwd: str, *, text: str = "hello") -> Path:
@@ -280,6 +281,52 @@ async def test_initial_ambiguity_releases_the_await_as_an_explicit_crash(
     job = jobs.get("ambiguous")
     assert job.state == "crashed"
     assert job.error_code == "transcript_correlation_ambiguous"
+
+
+async def test_rejected_initial_attachment_still_tracks_screen_status(
+    collision_registry, vibe_tree
+):
+    """A failed-closed transcript must not freeze the display at IDLE.
+
+    This is the Scapin regression: a second same-harness participant in one
+    cwd has a real transcript candidate, but Theater cannot safely attribute
+    it. The candidate stays rejected while the weaker pane channel remains
+    useful for the cosmetic WORKING/IDLE status.
+    """
+    harness = VibeHarness(root=vibe_tree["root"])
+    reading = {"kind": ScreenKind.WORKING}
+
+    def screen_reading(_capture: str) -> ScreenReading:
+        return ScreenReading(reading["kind"])
+
+    harness.observer.screen_reading = screen_reading  # type: ignore[method-assign]
+    observer = Observer(
+        collision_registry,
+        {"vibe": harness},
+        poll=0.01,
+        search=0.01,
+        sync=0.01,
+        awaiting=0.0,
+    )
+
+    async def capture_pane(_pane):
+        return "rendered pane"
+
+    observer._capture = capture_pane
+    first = collision_registry.register(harness="vibe", pane="%1", cwd=str(vibe_tree["project"]))
+    collision_registry.register(harness="vibe", pane="%2", cwd=str(vibe_tree["project"]))
+    observer.start()
+    try:
+        from tests.test_observer import until
+
+        assert await until(lambda: collision_registry.get(first.id).status is Status.WORKING)
+        assert not observer._bound_transcripts
+
+        reading["kind"] = ScreenKind.PROMPT
+        assert await until(lambda: collision_registry.get(first.id).status is Status.IDLE)
+        assert not observer._bound_transcripts
+    finally:
+        await observer.aclose()
 
 
 async def test_exact_claim_revokes_an_earlier_heuristic_binding(collision_registry, vibe_tree):

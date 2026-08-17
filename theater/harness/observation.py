@@ -176,6 +176,10 @@ class HarnessObserver(ABC):
         third-party observers nothing. A harness with a process-local
         correlation channel can override this method without pushing that
         concern into the reducer or changing the long-standing plugin method.
+
+        An override may accept **more** than this — ``pane_pid`` is the
+        current example — and :func:`open_participant_source` will offer it.
+        What an override must not do is accept less.
         """
         return self.open_source(cwd=cwd, session_id=session_id, after=after)
 
@@ -263,6 +267,7 @@ def open_participant_source(
     after: float | None = None,
     session_exact: bool = False,
     known_location: str | None = None,
+    pane_pid: int | None = None,
 ) -> Source:
     """Compatibility dispatch for the optional participant-aware hook.
 
@@ -271,14 +276,30 @@ def open_participant_source(
     has no inherited ``open_source_for`` method, so fall back to its established
     ``open_source`` call shape. An observer that needs exact correlation opts in
     by defining the new hook.
+
+    Each optional argument is offered only to an observer whose signature names
+    it, one parameter at a time rather than one version at a time: the shipped
+    adapters take different subsets, and a third-party plugin written against
+    any past release keeps working without knowing which release it was.
+
+    ``pane_pid`` is the participant's launch process — tmux's ``#{pane_pid}``.
+    It is the correlation channel of last resort for a CLI that mints its own
+    session id and shares a transcript root with its siblings: the files that
+    process holds open say which transcript is its own. Only ``codex`` asks
+    for it today. It is ``None`` for a participant with no pane, and for a
+    dead one, whose pid the operating system is free to have reused —
+    see :attr:`theater.models.Participant.live_pid`.
     """
     factory = getattr(observer, "open_source_for", None)
     if callable(factory):
+        accepted = inspect.signature(factory).parameters
         extra: dict[str, Any] = {}
-        if "session_exact" in inspect.signature(factory).parameters:
+        if "session_exact" in accepted:
             extra["session_exact"] = session_exact
-        if "known_location" in inspect.signature(factory).parameters:
+        if "known_location" in accepted:
             extra["known_location"] = known_location
+        if "pane_pid" in accepted:
+            extra["pane_pid"] = pane_pid
         return factory(
             participant_id=participant_id,
             cwd=cwd,
@@ -302,6 +323,12 @@ class TranscriptObserver(HarnessObserver):
     #: newer file may belong to a sibling. A participant-isolated observer may
     #: opt in because every candidate under its root has the same owner.
     relocate_by_cwd: bool = False
+
+    #: Whether `proven_transcript` can ever answer with anything. Left False by
+    #: the observers that have no proof to offer, so a source holding an
+    #: admitted location skips the call rather than paying a thread hop to be
+    #: told None on every attempt.
+    proves_ownership: bool = False
 
     def open_source(
         self,
@@ -362,6 +389,23 @@ class TranscriptObserver(HarnessObserver):
         whose creation time we therefore know exactly. It is left None for
         adopted participants, whose transcript predates our first sight of them.
         """
+
+    def proven_transcript(self, *, cwd: str | None) -> Path | None:
+        """A location this participant can be *shown* to own, or None.
+
+        Discovery's proof half, separated from its guessing half. Most harnesses
+        have no such proof and answer None, which is why this is concrete rather
+        than abstract; an adapter that can prove ownership — because the CLI
+        holds its own transcript open, say — overrides it.
+
+        The separation exists for the one caller that must not guess. A source
+        holding a location admitted earlier can only improve on it with proof:
+        calling `find_transcript` there would fall through to a cwd scan, and a
+        scan that swapped an admitted location for a sibling's newer file is the
+        exact mis-attribution the collision guard exists to catch. So this is
+        allowed to answer "no better evidence" and never "here is a guess".
+        """
+        return None
 
     @abstractmethod
     def session_id(self, transcript: Path) -> str | None:

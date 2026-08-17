@@ -4,12 +4,15 @@ When `theater adopt` runs, the foreground process is `theater`/`uv`/`python3`,
 not the harness session that is its ancestor in the process tree. This module
 walks the process tree from the pane's shell pid to find the actual harness
 binary.
+
+The walk itself lives in `theater.proc`, because transcript correlation asks
+the same operating system the same kind of question and a harness plugin must
+not import from the daemon to do it.
 """
 
 from __future__ import annotations
 
-import subprocess
-
+from theater import proc
 from theater.harness import HARNESSES
 
 
@@ -66,37 +69,10 @@ def match_binary(command: str, harnesses) -> str | None:
 
 
 def descendant_comms(root_pid: int) -> list[str]:
-    """Process names of root_pid and all its descendants, breadth-first.
+    """Process names of root_pid's descendants, breadth-first.
 
     Uses `ps` rather than /proc or psutil to stay dependency-free. The pane's
     shell spawned `vibe`, which spawned the bash tool running `theater adopt`
     — so `vibe` is in the tree even though it is not the foreground leaf.
     """
-    try:
-        out = subprocess.check_output(
-            ["ps", "-eo", "pid,ppid,comm"],
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return []
-    pid_children: dict[int, list[tuple[int, str]]] = {}
-    for line in out.strip().splitlines()[1:]:
-        parts = line.split(None, 2)
-        if len(parts) < 3:
-            continue
-        try:
-            pid = int(parts[0])
-            ppid = int(parts[1])
-        except ValueError:
-            continue
-        comm = parts[2]
-        pid_children.setdefault(ppid, []).append((pid, comm))
-    result: list[str] = []
-    queue = [root_pid]
-    while queue:
-        pid = queue.pop(0)
-        for child_pid, comm in pid_children.get(pid, []):
-            result.append(comm)
-            queue.append(child_pid)
-    return result
+    return [comm for _pid, comm in proc.descendants(root_pid)]

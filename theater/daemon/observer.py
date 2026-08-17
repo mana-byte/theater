@@ -562,6 +562,12 @@ class Observer:
                     if not self._accept_attachment(pid, source, batch):
                         # An initial candidate has nowhere accepted to keep
                         # watching, so stay on the slower discovery backoff.
+                        # The rejected transcript says nothing about status,
+                        # but the pane still does: without this screen arm a
+                        # same-cwd Codex participant remains IDLE throughout a
+                        # visible turn merely because its transcript ownership
+                        # failed closed.
+                        await self._screen_only(pid, observer, clock)
                         await self._sleep(self.search)
                         continue
                     self._clear_source_error_on_progress(pid, batch)
@@ -613,6 +619,7 @@ class Observer:
             after=after,
             session_exact=p.session_correlation == "exact",
             known_location=p.transcript_location,
+            pane_pid=p.live_pid,
         )
         if source.collision_domain is not None and p.transcript_domain != source.collision_domain:
             p.transcript_domain = source.collision_domain

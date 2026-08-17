@@ -290,6 +290,12 @@ class TranscriptSource(Source):
         self._exact_session = exact_session
         self.collision_domain = collision_domain
         self._known_location = Path(known_location) if known_location else None
+        #: Locations `proven_transcript` has answered with. Held here rather
+        #: than left to the adapter, so "the observer proved it" and "the
+        #: source calls it exact" cannot come apart: an override that proves a
+        #: location without also recording it somewhere would otherwise have
+        #: its answer labelled a guess.
+        self._proven: set[Path] = set()
         self.path: Path | None = None
         self.offset = 0
         self.index = 0
@@ -338,6 +344,13 @@ class TranscriptSource(Source):
         path, offset, index, mtime, session_id = self._pending
         self.path, self.offset, self.index, self.mtime = path, offset, index, mtime
         if session_id:
+            if self.correlation_for(path, session_id) != "exact":
+                # The id is about to be replaced by one read off a file we only
+                # guessed at. Leaving `exact_session` set would let the next
+                # question about this location answer "exact" — the id matches,
+                # because it was just copied from there — which launders the
+                # guess into proof and can outrank real evidence later.
+                self._exact_session = False
             self._session_id = session_id
         self._known_location = path
         self._pending = None
@@ -366,7 +379,9 @@ class TranscriptSource(Source):
         caller opens one just for this.
         """
         pinned = self._known_location is not None
-        path = self.path or self._known_location
+        path = self.path
+        if path is None and self._known_location is not None:
+            path = await self._upgraded(self._known_location)
         if path is None:
             path = await self._locate(session_id=self._session_id)
         if path is None:
@@ -375,24 +390,43 @@ class TranscriptSource(Source):
             # Never replace an admitted historical location with a cwd guess.
             return History(pinned=True)
         events = await asyncio.to_thread(self._read_all, path)
-        found_session = self._observer.session_id(path)
         return History(
             location=str(path),
             events=events[-last_n:] if last_n > 0 else events,
-            correlation=(
-                "exact"
-                if self._exact_attachments
-                or (
-                    self._exact_session
-                    and self._session_id is not None
-                    and found_session is not None
-                    and found_session == self._session_id
-                )
-                else "heuristic"
-            ),
+            correlation=self.correlation_for(path, self._observer.session_id(path)),
             collision_domain=self.collision_domain,
             pinned=pinned,
         )
+
+    def correlation_for(self, path: Path, session_id: str | None) -> Literal["exact", "heuristic"]:
+        """How well *path* is known to belong to this participant.
+
+        A method, and the one place both `read` and `history` ask the
+        question, because exactness is a property of the **location** rather
+        than of the source. A subclass whose discovery sometimes proves
+        ownership — and sometimes falls back to the same cwd scan as everyone
+        else — cannot answer with a flag fixed at construction without
+        claiming proof for the fallback.
+
+        Three ways to be exact are known here. ``exact_attachments`` says every
+        candidate under this source's root has one possible owner by
+        construction (a participant-isolated save directory). A location the
+        observer's proof channel answered with is exact by definition, and is
+        recorded here rather than trusted to the adapter. ``exact_session``
+        says the id we were given was itself exact — a launch receipt, or an
+        earlier proof already persisted — so a file carrying that id is the
+        right one.
+        """
+        if self._exact_attachments or path in self._proven:
+            return "exact"
+        if (
+            self._exact_session
+            and self._session_id is not None
+            and session_id is not None
+            and session_id == self._session_id
+        ):
+            return "exact"
+        return "heuristic"
 
     def _read_all(self, path: Path) -> list[Event]:
         events: list[Event] = []
@@ -428,6 +462,41 @@ class TranscriptSource(Source):
             after=self._after,
         )
 
+    async def _upgraded(self, pinned: Path) -> Path:
+        """*pinned*, unless the observer can prove a better location.
+
+        A location admitted earlier is only as good as the evidence that
+        admitted it. A heuristic one — the newest transcript in a shared
+        working directory — may be a sibling's, and a participant that was
+        bound that way stays bound that way forever: every later poll takes the
+        pin before discovery is ever consulted, so proof that arrives
+        afterwards never gets asked for. That is precisely the participant a
+        proof channel is for, so a pin that is not already exact is offered to
+        it once per attempt.
+
+        Proof only, and deliberately not `find_transcript`: a probe that fails
+        must leave the pin exactly as it was. Discovery would answer with a cwd
+        guess instead, which is how an admitted location drifts onto a
+        sibling's file — the one outcome worse than staying heuristic.
+        """
+        if not self._observer.proves_ownership:
+            return pinned
+        if self.correlation_for(pinned, self._observer.session_id(pinned)) == "exact":
+            return pinned
+        proven = await asyncio.to_thread(self._observer.proven_transcript, cwd=self._cwd)
+        if proven is None:
+            return pinned
+        self._proven.add(proven)
+        if proven == pinned:
+            return pinned
+        logger.info(
+            "transcript %s is held open by this participant's own process; "
+            "replacing the location admitted from cwd evidence (%s)",
+            proven,
+            pinned,
+        )
+        return proven
+
     async def _attach(self, path: Path | None = None) -> Attachment | None:
         """Stage the end of a transcript. None if there is not one yet.
 
@@ -437,6 +506,8 @@ class TranscriptSource(Source):
             path = self._known_location
             if path is not None and not path.exists():
                 path = None
+            if path is not None:
+                path = await self._upgraded(path)
             if path is None:
                 path = await self._locate(session_id=self._session_id)
             if path is None:
@@ -453,16 +524,7 @@ class TranscriptSource(Source):
             session_id=session_id,
             skipped=lines,
             last_event=last_event,
-            correlation=(
-                "exact"
-                if self._exact_attachments
-                or (
-                    self._exact_session
-                    and self._session_id is not None
-                    and session_id == self._session_id
-                )
-                else "heuristic"
-            ),
+            correlation=self.correlation_for(path, session_id),
             collision_domain=self.collision_domain,
         )
 

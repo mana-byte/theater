@@ -1,0 +1,183 @@
+"""What the operating system will tell us about a process.
+
+Two questions, and nothing else belongs here. *What did this process spawn* —
+asked by harness detection, because the pane's foreground command is not the
+harness when `theater adopt` is the thing running. *What files does this
+process hold open* — asked by transcript correlation, because a CLI that keeps
+its own transcript open is telling us which transcript is its own, and that is
+the only exact answer available for a harness that mints its session id
+internally.
+
+Both shell out rather than take a dependency. `psutil` would answer both more
+neatly, but Theater's whole install story is that it is a `uv` script with a
+tmux next to it; a wheel with a C extension in it is a worse trade than parsing
+`ps` output. The same reasoning is why the daemon shells out to `tmux` instead
+of speaking its control protocol.
+
+Every function here answers "nothing" rather than raising. A process that
+vanished between two calls is the normal case, not an error, and the callers
+are observation paths whose whole contract is to keep watching.
+"""
+
+from __future__ import annotations
+
+import logging
+import subprocess
+from pathlib import Path
+
+logger = logging.getLogger("theater.proc")
+
+#: Both probes are read-only interrogations of local kernel state and should
+#: return in milliseconds. The timeout exists for the pathological case — an
+#: `lsof` blocked on a wedged network mount — where hanging would stall the
+#: observer's search arm for every participant, not just this one.
+_TIMEOUT = 5
+
+#: What `lsof -F` prefixes a file name with. One field per line, the first
+#: character naming the field, so a name is every line after an `n`.
+_LSOF_NAME = "n"
+
+
+def descendants(root_pid: int) -> list[tuple[int, str]]:
+    """`(pid, comm)` for every descendant of *root_pid*, breadth-first.
+
+    The root itself is excluded — callers that care about it already have it.
+
+    One `ps` for the whole machine rather than one per level: the table is a
+    few hundred rows, and walking it in Python costs less than the process
+    spawns a recursive version would need.
+    """
+    children = _process_table()
+    found: list[tuple[int, str]] = []
+    queue = [root_pid]
+    seen = {root_pid}
+    while queue:
+        pid = queue.pop(0)
+        for child_pid, comm in children.get(pid, []):
+            if child_pid in seen:
+                # A cycle is impossible in a real process table, but this walk
+                # runs on data we parsed from text and a loop here would hang
+                # the daemon rather than mis-answer.
+                continue
+            seen.add(child_pid)
+            found.append((child_pid, comm))
+            queue.append(child_pid)
+    return found
+
+
+def comm(pid: int) -> str:
+    """The command name of one process, or "" if there is no such process.
+
+    One `ps` for one pid, where `descendants` reads the whole table. A caller
+    that only wants to know what a single known process is should ask this.
+    """
+    return _comm(pid)
+
+
+def open_files(pid: int) -> list[Path]:
+    """Absolute paths of the files *pid* holds open.
+
+    `/proc` where there is one, `lsof` where there is not. Both are best
+    effort: an unreadable `/proc/<pid>/fd` (another user's process) and a
+    missing `lsof` binary both answer with an empty list, which callers must
+    read as "no evidence", never as "no files".
+    """
+    fds = Path("/proc") / str(pid) / "fd"
+    if fds.is_dir():
+        return _proc_open_files(fds)
+    return _lsof_open_files(pid)
+
+
+# ---- internals ----------------------------------------------------------
+
+
+def _process_table() -> dict[int, list[tuple[int, str]]]:
+    """Parent pid -> its children, as `(pid, comm)`."""
+    try:
+        out = subprocess.check_output(
+            ["ps", "-eo", "pid,ppid,comm"],
+            text=True,
+            timeout=_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    children: dict[int, list[tuple[int, str]]] = {}
+    for line in out.strip().splitlines()[1:]:
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        children.setdefault(ppid, []).append((pid, parts[2]))
+    return children
+
+
+def _comm(pid: int) -> str:
+    """The command name of one process, or the empty string if it is gone."""
+    try:
+        out = subprocess.check_output(
+            ["ps", "-p", str(pid), "-o", "comm="],
+            text=True,
+            timeout=_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return out.strip()
+
+
+def _proc_open_files(fds: Path) -> list[Path]:
+    found: list[Path] = []
+    try:
+        entries = list(fds.iterdir())
+    except OSError:
+        # Another user's process, or one that exited mid-scan.
+        return []
+    for entry in entries:
+        try:
+            target = str(entry.readlink())
+        except OSError:
+            continue
+        if not target.startswith("/"):
+            # Sockets, pipes and epoll handles read back as `socket:[12345]`
+            # rather than as a path, and a path is all any caller wants.
+            continue
+        if target.endswith(" (deleted)"):
+            # The process still holds the inode, but the name no longer
+            # resolves. A correlation built on it would point at nothing.
+            continue
+        found.append(Path(target))
+    return found
+
+
+def _lsof_open_files(pid: int) -> list[Path]:
+    """`lsof -F n` output, which is one field per line prefixed by its letter.
+
+    `-n` and `-P` suppress host and port name resolution, which is what makes
+    `lsof` slow and is worthless for the file names we are after. The exit
+    status is deliberately ignored: `lsof` exits non-zero when *any* file
+    could not be examined, which on a normal desktop is routine, and the
+    files it did examine are still on stdout.
+    """
+    try:
+        completed = subprocess.run(
+            ["lsof", "-n", "-P", "-p", str(pid), "-F", "n"],
+            capture_output=True,
+            text=True,
+            timeout=_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    found: list[Path] = []
+    for line in completed.stdout.splitlines():
+        if not line.startswith(_LSOF_NAME):
+            continue
+        name = line[1:]
+        # Sockets and pipes are named too (`->127.0.0.1:443`, `pipe`), and the
+        # leading slash is what separates them from a file.
+        if name.startswith("/"):
+            found.append(Path(name))
+    return found

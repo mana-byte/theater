@@ -188,6 +188,7 @@ async def _read_job(
         after=None,
         session_exact=p.session_correlation == "exact",
         known_location=p.transcript_location,
+        pane_pid=p.live_pid,
     )
     try:
         history = await source.history(last_n=0)

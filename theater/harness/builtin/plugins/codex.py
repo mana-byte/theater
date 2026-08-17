@@ -44,6 +44,54 @@ filtering here goes through stat() and nothing else. The uuid suffix, on the
 other hand, is exactly `session_meta.payload.session_id` (checked on every
 transcript to hand), which makes a known session id a pure glob.
 
+Which rollout is ours
+---------------------
+Codex mints its `ThreadId` internally and the public CLI accepts a session id
+only on `resume` and `fork`, so a new interactive session cannot be launched
+with an id we chose. Until a transcript is found, the participant therefore has
+no session id at all, and discovery has nothing sharper than `session_meta.cwd`
+plus a birth-time floor. Two agents in one directory both satisfy that, so the
+reducer's collision guard refuses both — correctly, and at the cost of the
+await and of `read_transcript`.
+
+The exact channel is the process itself: codex holds its rollout open for the
+lifetime of the session, so the file descriptors of the pane's codex process
+name the transcript that belongs to it. That evidence survives a daemon
+restart, is available before the agent has made a single MCP call, and changes
+no Codex configuration — which is more than any of `CODEX_HOME` isolation, a
+`SessionStart` hook receipt, or `_meta.threadId` on an MCP request can say.
+
+It applies to spawned panes only. There the pane process *is* the CLI Theater
+started, so the pid the registry holds names that session for as long as the
+participant lives. An adopted pane runs a shell instead, and a shell outlives
+what it ran: the codex under it now need not be the codex the participant was
+adopted from, and no amount of counting processes can tell the difference. So
+adopted panes get no proof and keep the behaviour they have always had. Giving
+them proof means associating a participant with a *process* at adoption time
+and keeping it — daemon state, and the daemon's to keep.
+
+Three keys, then, in a deliberate order. A session id we were *given* — a
+resume token, a launch receipt — is asked first: it names the file outright,
+no second codex in the pane can confuse it, and it costs a glob instead of
+three subprocesses. The process is asked next. A session id we merely *read
+back* off a file comes last, behind the process, because it may itself be an
+earlier guess: put it first and discovery re-derives the same wrong file
+forever, with no way for proof to ever displace it.
+
+When the process cannot be inspected — no `/proc`, no `lsof`, a rollout not
+yet created, more than one open at once, or more than one codex in the pane to
+choose between — discovery falls back to the cwd scan exactly as before and the
+candidate is reported as heuristic. Nothing here decides what to do about that:
+the reducer's guard is the one place that refuses a contested attachment, and
+this adapter's job is only to say honestly how well it knows.
+
+Proof is also offered on its own, through `proven_transcript`. A participant
+bound before any of this existed carries a heuristic location that every later
+poll takes before discovery is consulted, so it would stay contested for the
+rest of its life; the source offers such a location to the proof channel, and
+only to the proof channel, so a failed probe leaves it alone rather than
+replacing it with a fresh guess.
+
 Record shape
 ------------
 One JSON record per line, `{timestamp, type, payload}`, discriminated on
@@ -69,7 +117,9 @@ import logging
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
+from theater import proc
 from theater.harness.base import (
     APPROVALS,
     SERVER_NAME,
@@ -88,6 +138,7 @@ from theater.harness.observation import (
     ScreenReading,
     TranscriptObserver,
 )
+from theater.harness.source import Source, TranscriptSource
 from theater.models import BadRequest
 
 logger = logging.getLogger("theater.harness.codex")
@@ -179,6 +230,31 @@ def _in_screen_tail(capture: str, marker: str) -> bool:
     """
     lines = [line.strip() for line in capture.splitlines() if line.strip()]
     return any(line.endswith(marker) for line in lines[-_SCREEN_TAIL_LINES:])
+
+
+def _resolve(path: Path) -> Path:
+    """`Path.resolve`, but a path we cannot stat is not an error here.
+
+    Every comparison in the correlation path is between a name the kernel gave
+    us and a name a human configured, and on macOS those differ by `/private`
+    for anything under a temporary directory. Resolving both sides is what
+    makes them comparable; a file that vanished mid-probe just compares as
+    itself.
+    """
+    try:
+        return path.resolve()
+    except OSError:
+        return path
+
+
+def _is_codex(comm: str) -> bool:
+    """Whether a `ps` command column names the codex CLI.
+
+    Compared on the basename: `ps -o comm` gives a bare `codex` for a plain
+    install and an absolute path for some wrappers, and under Nix the image
+    behind it is a `.codex-wrapped` shim the column never shows.
+    """
+    return comm.rsplit("/", 1)[-1] == CodexHarness.binary
 
 
 def _epoch(value) -> float | None:
@@ -280,6 +356,45 @@ class CodexHarness(Harness):
         return LaunchPlan(argv=argv, session_id=resume)
 
 
+class _CodexSource(TranscriptSource):
+    """A codex transcript source whose exactness is decided per location.
+
+    The flags `TranscriptSource` already understands are fixed when the source
+    is built: either every candidate under this root has one owner, or the
+    session id we were handed was itself exact. Neither describes codex, where
+    the same source proves ownership on one poll — the process was holding the
+    file — and can only guess on the next, because `lsof` is missing or the
+    rollout does not exist yet. So the question is asked about the path.
+    """
+
+    def __init__(self, observer: CodexObserver, **kwargs) -> None:
+        super().__init__(observer, **kwargs)
+        #: The same object as `self._observer`, kept under its own name so the
+        #: codex-only `proved` call does not read as a `TranscriptObserver` API.
+        self._codex = observer
+
+    def correlation_for(self, path: Path, session_id: str | None) -> Literal["exact", "heuristic"]:
+        if self._codex.proved(path):
+            return "exact"
+        return super().correlation_for(path, session_id)
+
+    def commit_attachment(self) -> None:
+        super().commit_attachment()
+        # One fact, held in two places: the source's flag labels the answer,
+        # the observer's decides which key discovery asks first. Committing a
+        # guessed location clears the first, and leaving the second set would
+        # send the next lookup to that id's glob ahead of the process — which
+        # is the ordering that cannot be corrected.
+        #
+        # Defence in depth rather than a live guard: today a committed location
+        # is taken before discovery runs, a revoked one clears the id, and a
+        # source rebuilt from the registry is given heuristic provenance — so
+        # there is no path on which the stale flag is currently read. Keeping
+        # the two in step costs one line and removes the need to re-derive that
+        # every time one of those three changes.
+        self._codex._session_exact = self._exact_session
+
+
 class CodexObserver(TranscriptObserver):
     """Read `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`.
 
@@ -288,9 +403,92 @@ class CodexObserver(TranscriptObserver):
     for part of every day.
     """
 
-    def __init__(self, root: Path | None = None):
+    #: The process holds its rollout open, so ownership can be shown rather
+    #: than inferred. It is the whole reason this adapter has a probe at all.
+    proves_ownership = True
+
+    def __init__(
+        self,
+        root: Path | None = None,
+        pane_pid: int | None = None,
+        session_exact: bool = False,
+    ):
         #: Injectable so tests never touch the real ~/.codex.
         self.root = root or Path.home() / ".codex" / "sessions"
+        #: The participant's launch process, when we have one to ask. Set only
+        #: on the per-participant clone `open_source_for` builds, which is why
+        #: that clone exists at all: this instance is otherwise shared by every
+        #: codex session on the machine.
+        self.pane_pid = pane_pid
+        #: Whether the id this clone was opened with is itself proof — a resume
+        #: token or a launch receipt — rather than an id read back off whatever
+        #: file an earlier cwd guess happened to pick. It decides which of the
+        #: two sharp keys is asked first; see `find_transcript`.
+        self._session_exact = session_exact
+        #: Rollouts this clone has seen held open by its own process. Resolved
+        #: paths, so a candidate reached by another spelling still matches.
+        self._proved: set[Path] = set()
+
+    def open_source(
+        self,
+        *,
+        cwd: str | None,
+        session_id: str | None = None,
+        after: float | None = None,
+        session_exact: bool = False,
+        known_location: str | None = None,
+    ) -> Source:
+        """A source that can report a process-proven location as exact.
+
+        A clone when the caller's provenance disagrees with this instance's.
+        The two are one fact seen from two sides — which key discovery asks
+        first, and how the answer is labelled — and a caller that says its id
+        is exact while the observer still thinks otherwise would get the
+        process asked ahead of an id it told us to trust.
+        """
+        reader = self
+        if session_exact != self._session_exact:
+            reader = CodexObserver(
+                root=self.root, pane_pid=self.pane_pid, session_exact=session_exact
+            )
+        return _CodexSource(
+            reader,
+            cwd=cwd,
+            session_id=session_id,
+            after=after,
+            exact_session=session_exact,
+            known_location=known_location,
+        )
+
+    def open_source_for(
+        self,
+        *,
+        participant_id: str,
+        cwd: str | None,
+        session_id: str | None = None,
+        after: float | None = None,
+        session_exact: bool = False,
+        known_location: str | None = None,
+        pane_pid: int | None = None,
+    ) -> Source:
+        """Give this participant's watcher its own reader, holding its own pid.
+
+        A clone rather than `self`, for the same reason vibe clones: the
+        observer on the harness is shared by every codex session, and the pid
+        — and what it has proved — is the one thing that is per-participant.
+        """
+        reader = CodexObserver(root=self.root, pane_pid=pane_pid, session_exact=session_exact)
+        return reader.open_source(
+            cwd=cwd,
+            session_id=session_id,
+            after=after,
+            session_exact=session_exact,
+            known_location=known_location,
+        )
+
+    def proved(self, path: Path) -> bool:
+        """Whether this clone's own process was found holding *path* open."""
+        return _resolve(path) in self._proved
 
     def find_transcript(
         self,
@@ -301,12 +499,55 @@ class CodexObserver(TranscriptObserver):
     ) -> Path | None:
         if not self.root.is_dir():
             return None
-        if session_id:
-            # The uuid suffix of the filename is the session id, so this is an
-            # exact lookup: no scan, and no need to guess the date directory.
-            hit = next(self.root.glob(f"*/*/*/rollout-*-{session_id}.jsonl"), None)
+        if session_id and self._session_exact:
+            # An id that is itself proof outranks the process. It names the
+            # file directly, so it cannot be confused by a second codex in the
+            # pane, and it costs one glob rather than three subprocesses.
+            hit = self._by_session_id(session_id)
             if hit is not None:
                 return hit
+        held = self.proven_transcript(cwd=cwd)
+        if held is not None:
+            return held
+        if session_id:
+            # Only an id we are unsure of reaches here — one read back off a
+            # file some earlier cwd guess picked. Behind the process for that
+            # reason: taking it first would re-derive that same wrong file
+            # forever, and no later proof could ever displace it.
+            hit = self._by_session_id(session_id)
+            if hit is not None:
+                return hit
+        return self._scan_by_cwd(cwd, after)
+
+    def _by_session_id(self, session_id: str) -> Path | None:
+        """The rollout whose filename carries *session_id*.
+
+        The uuid suffix of the filename is the session id, so this is an exact
+        lookup: no scan, and no need to guess the date directory.
+        """
+        return next(self.root.glob(f"*/*/*/rollout-*-{session_id}.jsonl"), None)
+
+    def proven_transcript(self, *, cwd: str | None) -> Path | None:
+        """The rollout this participant's own process is holding open, if any.
+
+        Discovery's proof half, callable on its own. A source that already has
+        an admitted location needs to ask for proof *without* asking for a
+        guess: `find_transcript` would fall through to the cwd scan, and
+        letting a scan replace an admitted location is the drift the whole
+        collision guard exists to prevent.
+        """
+        held = self._process_rollout(cwd)
+        if held is not None:
+            self._proved.add(held)
+        return held
+
+    def _scan_by_cwd(self, cwd: str, after: float | None) -> Path | None:
+        """The oldest channel: newest rollout whose `session_meta` cwd matches.
+
+        Kept exactly as it was, and reached only once the sharper keys have
+        had their turn. On its own it cannot tell two siblings apart, which is
+        the whole reason the process probe above it exists.
+        """
         want = str(Path(cwd).resolve()) if cwd else None
         if want is None:
             return None
@@ -343,6 +584,94 @@ class CodexObserver(TranscriptObserver):
                 cwd,
             )
         return matches[0]
+
+    def _process_rollout(self, cwd: str | None) -> Path | None:
+        """The rollout this participant's own codex process holds open.
+
+        Four conditions, all required, and the last is the one that matters:
+        the file is under the configured transcript root, it is named like a
+        rollout, its `session_meta` records the participant's working
+        directory, and **the one process that speaks for this participant**
+        holds exactly one such file open. Two would mean we do not understand
+        what we are looking at, and guessing between them is the
+        mis-attribution this whole path exists to prevent — so that answers
+        `None` and lets the cwd scan and the reducer's guard handle it as
+        before.
+
+        Note that the process is chosen before its files are read, rather than
+        pooling the open files of every codex in the pane. Pooling makes the
+        count of *rollouts* stand in for the count of *possible owners*, and
+        the two differ exactly when it is dangerous: two codex processes where
+        only one has written its rollout yet pool to a single file, which then
+        looks like proof and can be the other one's.
+
+        The birth-time floor is deliberately not applied. It is a proxy for
+        ownership, and we are holding the thing it was a proxy for; a resumed
+        session whose rollout predates the participant is still that
+        participant's rollout.
+        """
+        pid = self._owning_process()
+        if pid is None:
+            return None
+        want = _resolve(Path(cwd)) if cwd else None
+        root = _resolve(self.root)
+        found: set[Path] = set()
+        for path in proc.open_files(pid):
+            if not self._is_rollout(path, root):
+                continue
+            if want is not None and self._transcript_cwd(path) != str(want):
+                continue
+            found.add(_resolve(path))
+        if not found:
+            return None
+        if len(found) > 1:
+            logger.warning(
+                "codex process %s holds %d rollouts open under %s; "
+                "declining to pick one — falling back to cwd discovery",
+                pid,
+                len(found),
+                self.root,
+            )
+            return None
+        return found.pop()
+
+    def _owning_process(self) -> int | None:
+        """The pane's own process, and only if that process is codex itself.
+
+        A pane Theater spawned runs codex as the pane process, so `pane_pid`
+        *is* the CLI. That identity is durable: the registry recorded the pid
+        of the process it started, and while the participant lives that pid
+        names that session. Anything codex spawned below it — the agent's
+        tooling, or a codex it launched as a sub-agent — belongs to a
+        different session, so descendants are not consulted at all.
+
+        A pane whose root is something else, a shell for an adopted session,
+        gets no answer here. Searching beneath it is what the obvious version
+        of this does, and it is wrong in a way counting cannot fix: a shell
+        outlives the CLI it ran. Find exactly one codex under an adopted pane
+        and you have learned that one codex is running there *now*, not that
+        it is the one the participant was adopted from — the operator can have
+        quit the first and started a second, and the second's rollout would
+        then be proved as the first's. Uniqueness is not identity.
+
+        Closing that properly needs a durable association between the
+        participant and the process, established when the pane was adopted and
+        owned by the daemon, which is the only thing that may hold such state.
+        Until then this fails closed: no proof for adopted panes, which leaves
+        them exactly where they were — the cwd scan, and a collision guard that
+        refuses what it cannot tell apart.
+        """
+        if self.pane_pid is None:
+            return None
+        if not _is_codex(proc.comm(self.pane_pid)):
+            return None
+        return self.pane_pid
+
+    def _is_rollout(self, path: Path, root: Path) -> bool:
+        """Under the configured root, and named the way codex names a rollout."""
+        if path.suffix != ".jsonl" or _STEM.match(path.stem) is None:
+            return False
+        return _resolve(path).is_relative_to(root)
 
     def _transcript_cwd(self, path: Path) -> str | None:
         try:
