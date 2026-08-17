@@ -276,6 +276,11 @@ class Harness(ABC):
         than dropping the caller's choice on the floor. That omission is the
         compatibility story: an adapter written before this parameter existed
         keeps working for every launch that does not name a model.
+
+        `reasoning_effort` follows the same pattern as `model` but is not in
+        this abstract signature — it is added per-adapter, and the funnel
+        forwards it only to adapters whose `plan_launch` accepts it. A plugin
+        that cannot select a reasoning effort simply omits the parameter.
         """
 
     def discover_models(self) -> list[str]:

@@ -29,11 +29,12 @@ from theater.daemon.rails import (
     check_cycle,
     check_depth,
     check_model_allowed,
+    check_reasoning_allowed,
     check_wait_cycle,
 )
 from theater.daemon.schema import bus, jobs
 from theater.daemon.spawner import SpawnRequest
-from theater.harness import HARNESSES, describe, normalize, supports_model
+from theater.harness import HARNESSES, describe, normalize, supports_model, supports_reasoning
 from theater.harness.observation import (
     ScreenConfidence,
     ScreenKind,
@@ -614,6 +615,7 @@ async def _spawn(daemon, params: dict) -> dict:
         worktree=_validate_worktree_param(params.get("worktree", False)),
         base_branch=params.get("base_branch"),
         model=params.get("model"),
+        reasoning_effort=params.get("reasoning_effort"),
         resume=params.get("resume"),
         response_format=response_format,
     )
@@ -624,6 +626,9 @@ async def _spawn(daemon, params: dict) -> dict:
     # a model; whether the user permits this model is a question only the
     # config can answer, and the spawner has none.
     check_model_allowed(req.harness, req.model, daemon.config.models_for(req.harness))
+    check_reasoning_allowed(
+        req.harness, req.reasoning_effort, daemon.config.reasoning_for(req.harness)
+    )
 
     # Reserve the participant, worktree, plan, and config files — but not
     # the tmux pane. The job is created between reserve and launch so it is
@@ -1347,6 +1352,8 @@ async def _models(daemon, params: dict) -> list[dict]:
                 "harness": name,
                 "models": daemon.config.models_for(name),
                 "supported": harness is not None and supports_model(harness),
+                "reasoning": daemon.config.reasoning_for(name),
+                "reasoning_supported": harness is not None and supports_reasoning(harness),
                 "installed": row["installed"],
                 "error": row["error"],
             }

@@ -192,6 +192,10 @@ HARNESS_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 #: cannot see. Kept out of `_SECTIONS` and parsed by `_build_models` instead.
 MODELS_SECTION = "models"
 
+#: Same shape as `[models]`, keyed by harness name. Kept out of `_SECTIONS`
+#: and parsed by `_build_reasoning` for the same reason.
+REASONING_SECTION = "reasoning"
+
 
 @dataclass(frozen=True, slots=True)
 class Config:
@@ -207,6 +211,9 @@ class Config:
     #: or empty list permits no model *selection* — children use the CLI's own
     #: config. See `rails.check_model_allowed`.
     models: dict[str, list[str]] = field(default_factory=dict)
+    #: Harness name -> reasoning efforts `spawn --reasoning-effort` may name.
+    #: An allowlist, same shape and semantics as `models`.
+    reasoning: dict[str, list[str]] = field(default_factory=dict)
     #: Dotted key -> "default" | "config.toml". The whole point of
     #: `theater config`: a value alone cannot tell the user whether their edit
     #: took effect.
@@ -221,6 +228,10 @@ class Config:
     def models_for(self, harness: str) -> list[str]:
         """The allowlist for one harness. Empty means no model may be named."""
         return self.models.get(harness, [])
+
+    def reasoning_for(self, harness: str) -> list[str]:
+        """The reasoning-effort allowlist for one harness. Empty means none."""
+        return self.reasoning.get(harness, [])
 
 
 def _fail(path: Path, message: str) -> NoReturn:
@@ -355,6 +366,38 @@ def _build_models(path: Path, raw: Any) -> tuple[dict[str, list[str]], dict[str,
     return out, sources
 
 
+def _build_reasoning(path: Path, raw: Any) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """Parse `[reasoning]`, which has the same shape as `[models]`.
+
+    Kept separate from `_build_models` only so the two config sections can
+    appear independently — a user may want to allowlist models without
+    allowlisting reasoning efforts, or vice versa.
+    """
+    if not isinstance(raw, dict):
+        _fail(path, f"[{REASONING_SECTION}] must be a table, got {type(raw).__name__}")
+
+    out: dict[str, list[str]] = {}
+    sources: dict[str, str] = {}
+    for name, value in raw.items():
+        dotted = f"{REASONING_SECTION}.{name}"
+        if not HARNESS_NAME.match(name):
+            _fail(
+                path,
+                f"'{dotted}' is not a legal harness name: expected lowercase "
+                "letters, digits, '-' or '_', starting with a letter or digit",
+            )
+        names = _check_str_list(value)
+        if names is None:
+            got = type(value).__name__
+            _fail(path, f"'{dotted}' must be a list of strings, got {got}")
+        if len(set(names)) != len(names):
+            dupe = next(n for n in names if names.count(n) > 1)
+            _fail(path, f"'{dotted}' lists {dupe!r} more than once")
+        out[name] = names
+        sources[dotted] = "config.toml"
+    return out, sources
+
+
 def _check_no_declarations(path: Path, raw: Any) -> None:
     """Refuse a `[harness.<name>]` table left over from before v1.4.
 
@@ -399,7 +442,7 @@ def load(path: Path | None = None) -> Config:
     except OSError as exc:
         raise ConfigError(f"{target}: cannot read: {exc}") from exc
 
-    legal = [*_SECTIONS, MODELS_SECTION]
+    legal = [*_SECTIONS, MODELS_SECTION, REASONING_SECTION]
     for key in raw:
         if key not in legal:
             _fail(target, f"unknown section [{key}] ({_suggest(key, legal)})")
@@ -419,7 +462,19 @@ def load(path: Path | None = None) -> Config:
         models, model_sources = _build_models(target, raw[MODELS_SECTION])
         sources.update(model_sources)
 
-    return Config(**built, models=models, sources=sources, path=target, exists=True)
+    reasoning: dict[str, list[str]] = {}
+    if REASONING_SECTION in raw:
+        reasoning, reasoning_sources = _build_reasoning(target, raw[REASONING_SECTION])
+        sources.update(reasoning_sources)
+
+    return Config(
+        **built,
+        models=models,
+        reasoning=reasoning,
+        sources=sources,
+        path=target,
+        exists=True,
+    )
 
 
 def describe(config: Config) -> list[tuple[str, str, str]]:
@@ -442,4 +497,7 @@ def describe(config: Config) -> list[tuple[str, str, str]]:
     for harness in sorted(config.models):
         dotted = f"{MODELS_SECTION}.{harness}"
         rows.append((dotted, str(config.models[harness]), config.source(dotted)))
+    for harness in sorted(config.reasoning):
+        dotted = f"{REASONING_SECTION}.{harness}"
+        rows.append((dotted, str(config.reasoning[harness]), config.source(dotted)))
     return rows

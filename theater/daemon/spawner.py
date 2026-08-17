@@ -30,7 +30,7 @@ from pathlib import Path
 from theater import paths
 from theater.daemon import worktree as worktree_mod
 from theater.daemon.registry import Registry
-from theater.harness import check_model, check_resume, plan_launch
+from theater.harness import check_model, check_reasoning, check_resume, plan_launch
 from theater.harness import get as get_harness
 from theater.harness.base import LaunchPlan
 from theater.models import BadRequest, Participant, Status, TheaterError
@@ -64,6 +64,11 @@ class SpawnRequest:
     #: here and never validated: see `harness.plan_launch`. None means the
     #: harness picks, which is what every spawn did before this existed.
     model: str | None = None
+    #: Reasoning effort for the child (e.g. "low", "medium", "high"). Opaque
+    #: here and validated only by `harness.check_reasoning`, which refuses a
+    #: harness whose `plan_launch` has no `reasoning_effort` parameter. None
+    #: means the harness picks its default.
+    reasoning_effort: str | None = None
     #: Session id to resume, when the harness supports it. Opaque here and
     #: validated only by `harness.check_resume`, which refuses a harness
     #: whose `plan_launch` has no `resume` parameter. None means start cold.
@@ -265,6 +270,7 @@ class Spawner:
             config_path=config_path,
             approval=req.approval,
             model=req.model,
+            reasoning_effort=req.reasoning_effort,
             resume=req.resume,
             isolate_transcript=self._has_live_cwd_sibling(participant),
         )
@@ -343,6 +349,7 @@ class Spawner:
     ) -> tuple[Participant | None, Path | None]:
         """Refuse unsafe launches before a participant or worktree exists."""
         check_model(req.harness, req.model)
+        check_reasoning(req.harness, req.reasoning_effort)
         check_resume(req.harness, req.resume)
         self._reject_unsafe_resume_shape(req, harness)
         resume_predecessor = self._validate_resume_identity(req)

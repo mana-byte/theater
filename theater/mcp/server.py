@@ -76,6 +76,12 @@ model:    which model the child runs, spelled the way its own CLI spells it
           membership and nothing else: it cannot confirm the CLI honoured the
           name, so a typo someone allowed surfaces as a child on the wrong
           model, not as an error here.
+reasoning_effort: reasoning/thinking effort for the child (e.g. "low",
+          "medium", "high"). Optional; omit it and the harness uses its
+          default. Mirrors `model`: the config must list the effort for that
+          harness under [reasoning], and the adapter must accept it. Not all
+          harnesses support it — call list_models for `reasoning_supported`.
+          Theater checks membership and nothing else.
 worktree: if True, create a git worktree for the child with its own
           isolated index and HEAD. The branch name theater/<child-id>
           is in the result so you can merge it explicitly. The child's
@@ -203,6 +209,10 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         `supported: false` means the adapter cannot select a model at all, so
         no config edit helps.
 
+        `reasoning_supported: false` means the adapter cannot select a
+        reasoning effort. `reasoning` is the allowlist of efforts the config
+        permits for that harness; same semantics as `models`.
+
         Answered by the daemon, which is the process that enforces the list.
         """
         return await tools.models(session)
@@ -217,6 +227,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         worktree: str | bool | None = False,
         base_branch: str | None = None,
         model: str | None = None,
+        reasoning_effort: str | None = None,
         resume: str | None = None,
     ) -> dict:
         return await tools.spawn_session(
@@ -229,6 +240,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
             worktree=worktree,
             base_branch=base_branch,
             model=model,
+            reasoning_effort=reasoning_effort,
             resume=resume,
         )
 

@@ -235,6 +235,14 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     spawn.add_argument(
+        "--reasoning-effort",
+        default=None,
+        help=(
+            "Reasoning effort for the new agent (e.g. low, medium, high). "
+            "Not validated: an unknown value fails in the pane, not here."
+        ),
+    )
+    spawn.add_argument(
         "--worktree",
         nargs="?",
         const=True,
@@ -523,6 +531,7 @@ def cmd_spawn(args) -> int:
         worktree=args.worktree,
         base_branch=args.base_branch,
         model=args.model,
+        reasoning_effort=args.reasoning_effort,
     )
     if args.json:
         print(json.dumps(record, indent=2))

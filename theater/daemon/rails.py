@@ -82,6 +82,10 @@ class ModelNotAllowed(BadRequest):
     code = "model_not_allowed"
 
 
+class ReasoningNotAllowed(BadRequest):
+    code = "reasoning_not_allowed"
+
+
 def check_model_allowed(harness: str, model: str | None, allowed: list[str]) -> None:
     """Reject a spawn naming a model the config does not list for this harness.
 
@@ -110,6 +114,31 @@ def check_model_allowed(harness: str, model: str | None, allowed: list[str]) -> 
         raise ModelNotAllowed(
             f"model {model!r} is not configured for harness {harness!r}: "
             f"allowed are {', '.join(sorted(allowed))}"
+        )
+
+
+def check_reasoning_allowed(harness: str, reasoning_effort: str | None, allowed: list[str]) -> None:
+    """Reject a spawn naming a reasoning effort the config does not list.
+
+    `allowed` is `[reasoning].<harness>` from the user's config. Empty — which is
+    the default — means no reasoning effort may be *named*, not that none runs:
+    omitting `--reasoning-effort` is unaffected and the child comes up on
+    whatever its own CLI is configured for. The same policy as `check_model_allowed`:
+    intent, not correctness.
+    """
+    if reasoning_effort is None:
+        return
+    if not allowed:
+        raise ReasoningNotAllowed(
+            f"no reasoning efforts are configured for harness {harness!r}, so "
+            f"--reasoning-effort cannot be used with it: add them under "
+            f"[reasoning] in the config file, or omit --reasoning-effort to "
+            f"use that CLI's own default"
+        )
+    if reasoning_effort not in allowed:
+        raise ReasoningNotAllowed(
+            f"reasoning effort {reasoning_effort!r} is not configured for "
+            f"harness {harness!r}: allowed are {', '.join(sorted(allowed))}"
         )
 
 

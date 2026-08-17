@@ -133,6 +133,8 @@ async def models(session: Session) -> list[dict]:
             "harness": r["harness"],
             "models": r["models"],
             "supported": r["supported"],
+            "reasoning": r.get("reasoning", []),
+            "reasoning_supported": r.get("reasoning_supported", False),
         }
         for r in rows
         if r["installed"] and not r["error"]
@@ -150,6 +152,7 @@ async def spawn_session(
     worktree: str | bool | None = False,
     base_branch: str | None = None,
     model: str | None = None,
+    reasoning_effort: str | None = None,
     resume: str | None = None,
 ) -> dict:
     """Create a child agent in a new tmux window and return its record.
@@ -176,6 +179,13 @@ async def spawn_session(
     reports them. Membership is the whole of the check — Theater cannot confirm
     the name is real or that the CLI honoured it, so a typo the user vouched for
     surfaces as a child on the wrong model, not as an error here.
+
+    `reasoning_effort` mirrors `model`: passed to the harness unchanged, gated
+    by the same two checks (adapter capability + config allowlist). Omit it and
+    the harness uses its own default. The values a harness accepts are
+    CLI-specific (codex: none/minimal/low/medium/high/xhigh/max/ultra; claude:
+    low/medium/high/xhigh/max/auto); Theater checks membership in the
+    `[reasoning]` allowlist and nothing else.
 
     `resume` takes a session id from `recall` and attaches the new job to
     that existing harness session instead of starting cold. Refused up front
@@ -208,6 +218,7 @@ async def spawn_session(
         worktree=worktree,
         base_branch=base_branch,
         model=model,
+        reasoning_effort=reasoning_effort,
         resume=resume,
         response_format=response_format,
     )

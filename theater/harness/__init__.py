@@ -234,6 +234,25 @@ def check_model(harness: str, model: str | None) -> None:
         raise BadRequest(f"harness {harness!r} does not support model selection")
 
 
+def supports_reasoning(harness: Harness) -> bool:
+    """Whether this adapter accepts `reasoning_effort` in `plan_launch`.
+
+    Read off the signature for the same reason `supports_model` is: the
+    signature is the thing that is actually true.
+    """
+    return "reasoning_effort" in inspect.signature(harness.plan_launch).parameters
+
+
+def check_reasoning(harness: str, reasoning_effort: str | None) -> None:
+    """Raise if this harness cannot honour a reasoning-effort request.
+
+    Pure and cheap, so a caller can gate on it *before* creating anything —
+    the same contract `check_model` offers.
+    """
+    if reasoning_effort is not None and not supports_reasoning(get(harness)):
+        raise BadRequest(f"harness {harness!r} does not support reasoning effort selection")
+
+
 def supports_resume(harness: Harness) -> bool:
     """Whether this adapter accepts a `resume` in `plan_launch`.
 
@@ -266,16 +285,17 @@ def plan_launch(
     config_path: Path,
     approval: str,
     model: str | None = None,
+    reasoning_effort: str | None = None,
     resume: str | None = None,
     isolate_transcript: bool = False,
 ) -> LaunchPlan:
     """The one funnel every spawn goes through, and so the one compat seam.
 
-    `model` and `resume` are each forwarded only when the caller named one.
-    `isolate_transcript` is a daemon-computed launch hint and is forwarded only
-    to adapters whose signature explicitly accepts it. That keeps older and
-    third-party adapters compatible without making isolation a generic harness
-    requirement.
+    `model`, `reasoning_effort`, and `resume` are each forwarded only when the
+    caller named one. `isolate_transcript` is a daemon-computed launch hint and
+    is forwarded only to adapters whose signature explicitly accepts it. That
+    keeps older and third-party adapters compatible without making isolation a
+    generic harness requirement.
     That is what keeps a third-party adapter written against the older
     signature working: it is never called with a keyword it does not accept,
     and the only launches it cannot serve are the ones that ask for something
@@ -286,10 +306,13 @@ def plan_launch(
     """
     found = get(harness)
     check_model(harness, model)
+    check_reasoning(harness, reasoning_effort)
     check_resume(harness, resume)
     extra: dict[str, Any] = {}
     if model is not None:
         extra["model"] = model
+    if reasoning_effort is not None:
+        extra["reasoning_effort"] = reasoning_effort
     if resume is not None:
         extra["resume"] = resume
     if "isolate_transcript" in inspect.signature(found.plan_launch).parameters:
@@ -404,6 +427,7 @@ __all__ = [
     "TranscriptObserver",
     "TranscriptSource",
     "check_model",
+    "check_reasoning",
     "check_resume",
     "clip",
     "clipper",
@@ -417,6 +441,7 @@ __all__ = [
     "plan_launch",
     "status_after",
     "supports_model",
+    "supports_reasoning",
     "supports_resume",
     "theater_binary",
 ]

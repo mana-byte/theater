@@ -250,6 +250,7 @@ class ClaudeCodeHarness(Harness):
         config_path: Path,
         approval: str,
         model: str | None = None,
+        reasoning_effort: str | None = None,
         resume: str | None = None,
     ) -> LaunchPlan:
         if approval not in APPROVALS:
@@ -280,6 +281,8 @@ class ClaudeCodeHarness(Harness):
             # space-separated value sits next to the prompt positional, and
             # binding tightly is the habit that keeps this argv unambiguous.
             argv.append(f"--model={model}")
+        if reasoning_effort:
+            argv.append(f"--effort={reasoning_effort}")
         if resume:
             # `--resume <session-id>` resumes a specific session by id or name
             # (CHANGELOG line 2522). Interactive mode reattaches and still

@@ -324,6 +324,7 @@ class CodexHarness(Harness):
         config_path: Path,
         approval: str,
         model: str | None = None,
+        reasoning_effort: str | None = None,
         resume: str | None = None,
     ) -> LaunchPlan:
         if approval not in APPROVALS:
@@ -349,6 +350,8 @@ class CodexHarness(Harness):
         ]
         if model:
             argv += ["--model", model]
+        if reasoning_effort:
+            argv += ["-c", f"model_reasoning_effort={reasoning_effort}"]
         if approval == "yolo":
             argv.append("--dangerously-bypass-approvals-and-sandbox")
         elif approval == "edits":
