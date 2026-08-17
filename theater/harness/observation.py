@@ -51,7 +51,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from theater.harness.base import Event, NativeChild
-from theater.harness.source import TranscriptCandidate
+from theater.harness.source import StreamPoint, TranscriptCandidate
 from theater.provenance import TranscriptProvenance, normalize_provenance
 
 if TYPE_CHECKING:
@@ -259,6 +259,26 @@ class HarnessObserver(ABC):
         """
         return []
 
+    def stream_floor(self, location: str) -> StreamPoint | None:
+        """Capture the current stream position of a transcript, or None.
+
+        Called by the spawner at the last safe pre-launch moment to record
+        where a dead predecessor's transcript ended, so the successor's
+        observer can refuse to attribute stale pre-floor records as the
+        successor's own output. The floor is a fact about the stream at a
+        moment, not a permission: the reducer compares it against the
+        successor's first attachment and suppresses last-event-derived
+        status/completion unless the attachment is provably the same stream
+        (same device/inode, non-shrunk size, strictly more records).
+
+        Returns ``None`` by default — a source that cannot produce file facts
+        has no floor to offer. The spawner encodes ``None`` as
+        ``UNKNOWN_FLOOR`` so the reducer treats it as present-but-unknown
+        (suppress completion) rather than cold spawn (no suppression).
+        ``TranscriptObserver`` overrides this for file paths.
+        """
+        return None
+
     def transcript_candidates(
         self,
         *,
@@ -389,6 +409,26 @@ class TranscriptObserver(HarnessObserver):
         result as non-committable identity-loss evidence.
         """
         return None
+
+    def stream_floor(self, location: str) -> StreamPoint | None:
+        """Capture the stream position of a file-backed transcript.
+
+        Reads the file once with :func:`attach_point` and returns a
+        :class:`StreamPoint` carrying the record count, byte size, and the
+        device/inode from the same descriptor. Returns ``None`` when the
+        location is not a readable file — an unavailable floor is represented
+        as ``None`` rather than a partial fact, so the spawner persists a
+        present-but-unknown floor instead of one that could be confused with
+        a cold spawn.
+        """
+        from theater.harness.source import attach_point
+
+        try:
+            path = Path(location)
+            size, lines, _mtime, _last_line, dev, ino = attach_point(path)
+        except OSError:
+            return None
+        return StreamPoint(records=lines, size=size, dev=dev, ino=ino)
 
     def open_source(
         self,

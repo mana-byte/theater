@@ -66,8 +66,8 @@ class SourceContractError(NotImplementedError):
     """A source returned a batch it cannot complete the protocol for."""
 
 
-def attach_point(path: Path) -> tuple[int, int, int, str | None]:
-    """Byte offset, record count, mtime, and last complete line at end of file.
+def attach_point(path: Path) -> tuple[int, int, int, str | None, int | None, int | None]:
+    """Byte offset, record count, mtime, last complete line, dev, ino at end of file.
 
     The mtime is taken *after* the read, from the same descriptor, so it always
     covers every byte counted here even if a writer appended mid-scan.
@@ -76,6 +76,12 @@ def attach_point(path: Path) -> tuple[int, int, int, str | None]:
     status from it without replaying history onto the bus. A spawned agent
     that finishes its turn before the observer attaches would otherwise keep
     the wrong status: no new bytes arrive after attach, so nothing else fires.
+
+    The device and inode are taken from the same ``fstat`` as the mtime, so
+    they describe the file the bytes were read from — not a later ``stat``
+    that can race a rename or replacement. They are the opaque stream identity
+    a resume floor checks against: a truncated-and-rewritten file has a
+    different inode, and a file on a different device is a different stream.
     """
     size = 0
     lines = 0
@@ -85,7 +91,10 @@ def attach_point(path: Path) -> tuple[int, int, int, str | None]:
             size += len(chunk)
             lines += chunk.count(b"\n")
             tail.append(chunk)
-        mtime = os.fstat(fh.fileno()).st_mtime_ns
+        st = os.fstat(fh.fileno())
+        mtime = st.st_mtime_ns
+        dev = st.st_dev
+        ino = st.st_ino
     last_line: str | None = None
     if lines > 0:
         data = b"".join(tail)
@@ -95,7 +104,7 @@ def attach_point(path: Path) -> tuple[int, int, int, str | None]:
             # is the portion after the second-to-last newline (or all of head).
             _prefix, _sep2, last_bytes = head.rpartition(b"\n")
             last_line = last_bytes.decode("utf-8", errors="replace")
-    return size, lines, mtime, last_line
+    return size, lines, mtime, last_line, dev, ino
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +118,31 @@ class TranscriptCandidate:
     provenance: str = "unattributed"
     rejection_reason: str | None = None
     domain: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StreamPoint:
+    """Where a transcript stream was at a moment in time.
+
+    A backward-compatible fact type recording the position of a transcript
+    file at the last safe pre-launch moment. The reducer compares a saved
+    floor against an attachment's ``point`` to decide whether the stream the
+    successor sees is provably the same one the predecessor left — same
+    location, same device/inode, non-shrunk size, and strictly more records
+    than the floor.
+
+    ``records`` is the newline-delimited record count. ``size`` is the byte
+    offset. ``dev`` and ``ino`` are the opaque identity from ``fstat`` on
+    the same descriptor the bytes were read from. Any of them may be
+    ``None`` when the source could not produce the fact, and a floor with
+    missing facts is present-but-unknown: the reducer suppresses completion
+    rather than guessing.
+    """
+
+    records: int | None = None
+    size: int | None = None
+    dev: int | None = None
+    ino: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +173,11 @@ class Attachment:
     session_id: str | None = None
     skipped: int = 0
     last_event: Event | None = None
+    #: Opaque stream identity + position at attach time, taken from the same
+    #: descriptor as ``skipped``. ``None`` when the source cannot produce one
+    #: (e.g. a non-file source). The reducer compares it against a persisted
+    #: resume floor to authorise last_event-derived completion.
+    point: StreamPoint | None = None
     #: See :mod:`theater.provenance`. ``heuristic`` means cwd/time only and
     #: must not feed participant-attributed content.
     correlation: str = str(TranscriptProvenance.HEURISTIC)
@@ -817,7 +856,7 @@ class TranscriptSource(Source):
                 return None
         if not self._inside_domain(path):
             return None
-        size, lines, mtime, last_line = await asyncio.to_thread(attach_point, path)
+        size, lines, mtime, last_line, dev, ino = await asyncio.to_thread(attach_point, path)
         session_id = self._observer.session_id(path)
         last_event: Event | None = None
         if last_line is not None:
@@ -829,6 +868,7 @@ class TranscriptSource(Source):
             session_id=session_id,
             skipped=lines,
             last_event=last_event,
+            point=StreamPoint(records=lines, size=size, dev=dev, ino=ino),
             correlation=self.correlation_for(path, session_id),
             collision_domain=self.collision_domain,
         )

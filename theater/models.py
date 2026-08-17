@@ -54,6 +54,14 @@ class Participant:
     #: Last location accepted by the central attachment policy. Unlike
     #: ``session_correlation``, this is a pin, not proof of process identity.
     transcript_location: str | None = None
+    #: A persisted resume floor: the stream position of a trusted dead
+    #: predecessor's transcript at the last safe pre-launch moment, captured
+    #: so the successor's observer can suppress stale pre-floor records. Stored
+    #: as structured JSON (records, size, dev, ino). ``None`` for cold/adopted
+    #: participants; a present-but-unknown floor uses ``"unknown"`` to
+    #: distinguish "the spawner tried but could not capture facts" from "this
+    #: is a cold spawn with no floor".
+    resume_floor: str | None = None
     parent_id: str | None = None
     pid: int | None = None
     status: Status = Status.IDLE
@@ -118,6 +126,7 @@ class Participant:
         d.pop("session_correlation", None)
         d.pop("transcript_domain", None)
         d.pop("transcript_location", None)
+        d.pop("resume_floor", None)
         d["tier"] = str(self.tier)
         d["status"] = str(self.status)
         d["addressable"] = self.addressable
@@ -141,6 +150,7 @@ class Participant:
             session_correlation=row["session_correlation"],
             transcript_domain=row["transcript_domain"],
             transcript_location=row["transcript_location"],
+            resume_floor=row["resume_floor"],
             parent_id=row["parent_id"],
             pid=row["pid"],
             status=status,
