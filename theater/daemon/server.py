@@ -188,6 +188,9 @@ class Daemon:
         # acquire() opens a second fd against itself.
         try:
             self._clear_stale_socket(sock)
+            stranded = self.store.recover_stranded_restores()
+            if stranded:
+                logger.warning("recovered %d stranded checkpoint restore(s)", stranded)
             self._server = await asyncio.start_unix_server(
                 self._handle, path=str(sock), limit=protocol.MAX_MESSAGE_BYTES
             )

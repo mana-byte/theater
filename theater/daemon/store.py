@@ -45,7 +45,7 @@ from theater.daemon.schema import (
     participants,
     tree_kv,
 )
-from theater.models import Job, Participant, Status, now
+from theater.models import Job, Participant, Status, new_id, now
 from theater.provenance import TranscriptProvenance
 
 MIGRATIONS = Path(__file__).parent / "migrations"
@@ -56,7 +56,7 @@ BASELINE = "0001"
 #: The latest revision. A legacy database is stamped at BASELINE and then
 #: upgraded to this; a fresh database lands here directly. Tests assert
 #: against this rather than hardcoding a revision string.
-HEAD = "0009"
+HEAD = "0010"
 RECEIPT_TOKEN_PREFIX = "receipt_token:"
 
 
@@ -622,6 +622,101 @@ class Store:
             .limit(limit)
         ).fetchall()
         return [dict(r._mapping) for r in rows]
+
+    def claim_checkpoint_restore(self, checkpoint_id: int, restored_by: str) -> str | None:
+        """Atomically claim a checkpoint for restoration.
+
+        Returns a token on success, or None if the checkpoint is not in the
+        ``ready`` state. The caller uses the token to finalize or release
+        the restore. ``restored_by`` is set on successful finalization, not
+        here.
+        """
+        token = new_id()
+        result = self.conn.execute(
+            update(checkpoints)
+            .where(checkpoints.c.id == checkpoint_id)
+            .where(checkpoints.c.restore_state == "ready")
+            .values(
+                restore_state="restoring",
+                restore_started_at=now(),
+                restore_token=token,
+                restore_error=None,
+            )
+        )
+        if result.rowcount == 0:
+            return None
+        return token
+
+    def finalize_checkpoint_restore(
+        self,
+        checkpoint_id: int,
+        *,
+        token: str,
+        restored_by: str,
+        error: str | None = None,
+        result: str | None = None,
+    ) -> bool:
+        """Finalize a checkpoint restore as restored or failed.
+
+        On success (``error is None``), sets ``restore_state='restored'``,
+        ``restored_at``, ``restored_by``, and ``restore_result`` (JSON). On
+        failure, sets ``restore_state='failed'`` and ``restore_error``. The
+        token must match the one returned by ``claim_checkpoint_restore``.
+        """
+        if error is None:
+            values = {
+                "restore_state": "restored",
+                "restored_at": now(),
+                "restored_by": restored_by,
+                "restore_result": result,
+            }
+        else:
+            values = {"restore_state": "failed", "restore_error": error}
+        result_clause = (
+            update(checkpoints)
+            .where(checkpoints.c.id == checkpoint_id)
+            .where(checkpoints.c.restore_state == "restoring")
+            .where(checkpoints.c.restore_token == token)
+            .values(values)
+        )
+        result_obj = self.conn.execute(result_clause)
+        return result_obj.rowcount > 0
+
+    def release_checkpoint_restore(self, checkpoint_id: int, *, token: str) -> bool:
+        """Release a claimed checkpoint back to 'ready' state.
+
+        Used when a failure occurs before any side effect (e.g. validation,
+        JSON decode). The checkpoint can be safely re-attempted later.
+        """
+        result = self.conn.execute(
+            update(checkpoints)
+            .where(checkpoints.c.id == checkpoint_id)
+            .where(checkpoints.c.restore_state == "restoring")
+            .where(checkpoints.c.restore_token == token)
+            .values(
+                restore_state="ready",
+                restore_token=None,
+                restore_started_at=None,
+                restore_error=None,
+            )
+        )
+        return result.rowcount > 0
+
+    def recover_stranded_restores(self) -> int:
+        """Convert any leftover 'restoring' checkpoints to 'failed'.
+
+        Called at daemon startup. No restore RPC survives a daemon restart,
+        so any checkpoint left in 'restoring' was interrupted by a crash.
+        """
+        result = self.conn.execute(
+            update(checkpoints)
+            .where(checkpoints.c.restore_state == "restoring")
+            .values(
+                restore_state="failed",
+                restore_error="daemon restarted while restore was in progress",
+            )
+        )
+        return result.rowcount
 
     # ---- named worktrees ------------------------------------------------
 

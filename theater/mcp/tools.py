@@ -426,6 +426,38 @@ async def list_checkpoints(session: Session, *, limit: int = 100) -> list[dict]:
     return result
 
 
+async def recovery_restore(
+    session: Session, *, checkpoint_id: int, approval: str
+) -> dict:
+    """Prepare the checkpoint creator for restoration.
+
+    For a dead parent: spawns or resumes it as a child of the caller.
+    For a live parent: reuses it in place (lineage is not changed).
+    In both cases, returns the recorded jobs. This is a two-step
+    handoff: the parent is prepared, then the caller delivers recovery
+    instructions via ``send``.
+
+    The checkpoint is atomically claimed before any side effect and marked
+    restored on success or failed on error. A second restore is refused
+    with a state-specific error code.
+
+    Approval is required — there is no default.
+
+    Returns the restored parent's new participant id, the action taken
+    (``live``, ``resumed``, or ``respawned``), and the recorded jobs.
+    """
+    if not session._resolved:
+        await session.identify()
+    result = await session.client.call(
+        "checkpoint.restore",
+        checkpoint_id=checkpoint_id,
+        approval=approval,
+        caller_id=session.participant_id,
+    )
+    assert isinstance(result, dict)
+    return result
+
+
 async def put_child_back_in_the_wound(session: Session, *, target_id: str) -> dict:
     """Kill a child agent that the caller spawned.
 

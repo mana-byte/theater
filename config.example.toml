@@ -252,3 +252,37 @@ disabled = []
 # spawn time.
 # claude   = ["opus-4.1", "sonnet-4"]
 # opencode = ["anthropic/claude-sonnet-4"]
+
+
+[reasoning]
+
+# What `theater spawn --reasoning-effort` may name, per harness. One key per
+# harness, each a list of effort strings; a harness with no key here, or an
+# empty list, refuses every `--reasoning-effort` and its children run on
+# whatever their own CLI config chose.
+#
+# Absent is not a value Theater picked on your behalf — it is the behaviour
+# every spawn had before this option existed, which is the right thing to keep
+# doing until someone says otherwise. Naming an effort here is a deliberate
+# grant: an agent that can spawn can now spend it, at its price, without asking
+# a human first.
+#
+# Same shape and the same failure direction as `[models]` above: an allowlist,
+# not a denylist, so a model that appears in a later release does not become
+# spendable without editing this file.
+#
+# Names are passed to the CLI untouched — Theater checks membership and nothing
+# else. Spelling has to be the CLI's own, not a friendly alias, and matching is
+# exact: "HIGH" != "high". The lists below are the efforts each built-in CLI
+# advertises today, kept commented out so absence remains the default.
+#
+# How each harness receives the value:
+#   codex  -> `-c model_reasoning_effort=<value>`
+#   claude -> `--effort=<value>`
+#   opencode and vibe do not support reasoning effort — their adapters omit the
+#   parameter, and naming one for them is refused before it reaches the adapter.
+#
+# `theater models` shows the allowed efforts alongside the allowed models.
+#
+# codex   = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+# claude  = ["low", "medium", "high"]

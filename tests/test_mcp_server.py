@@ -56,6 +56,7 @@ async def test_tools_are_registered(daemon):
         "checkpoint",
         "list_checkpoints",
         "recovery_read",
+        "recovery_restore",
         "read_transcript",
         "put_child_back_in_the_wound",
         "recall",

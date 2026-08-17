@@ -342,3 +342,34 @@ class NameTaken(TheaterError):
     """
 
     code = "name_taken"
+
+
+class CheckpointAlreadyRestored(TheaterError):
+    """A restore was attempted on a checkpoint already restored.
+
+    A checkpoint can only be restored once. The caller should create a
+    fresh checkpoint if it needs a new restore point.
+    """
+
+    code = "checkpoint_already_restored"
+
+
+class CheckpointRestoreInProgress(TheaterError):
+    """A restore was attempted on a checkpoint currently being restored.
+
+    Another caller has claimed this checkpoint and is mid-restore. The
+    caller should wait for the in-flight restore to complete.
+    """
+
+    code = "checkpoint_restore_in_progress"
+
+
+class CheckpointRestoreFailed(TheaterError):
+    """A restore was attempted on a checkpoint that previously failed.
+
+    A failed restore may have left partial side effects (e.g. a spawned
+    pane). The caller should inspect the checkpoint's restore_error field
+    and create a fresh checkpoint if needed.
+    """
+
+    code = "checkpoint_restore_failed"

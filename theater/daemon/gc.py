@@ -457,11 +457,18 @@ async def _sweep_checkpoints(store: Store, cutoff: float, batch: int) -> int:
 
     Uses ``created_at`` for checkpoints — unlike jobs, a checkpoint has no
     ``finished_at``, and a checkpoint is a static snapshot that never
-    transitions, so age is the right predicate.
+    transitions, so age is the right predicate. A checkpoint in the
+    ``restoring`` state is exempt: an in-flight restore may be awaiting a
+    tmux operation, and deleting its row would strand the finalization.
     """
     total = 0
     while True:
-        sub = select(checkpoints.c.id).where(checkpoints.c.created_at < cutoff).limit(batch)
+        sub = (
+            select(checkpoints.c.id)
+            .where(checkpoints.c.created_at < cutoff)
+            .where(checkpoints.c.restore_state != "restoring")
+            .limit(batch)
+        )
         ids = [r[0] for r in store.conn.execute(sub).fetchall()]
         if not ids:
             break

@@ -441,6 +441,31 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         return await tools.list_checkpoints(session, limit=limit)
 
     @mcp.tool()
+    async def recovery_restore(checkpoint_id: int, approval: str) -> dict:
+        """Prepare the checkpoint creator for restoration.
+
+        For a dead parent: spawns or resumes it as a child of the caller.
+        For a live parent: reuses it in place and retains its existing
+        lineage — it does not become a child of the caller. In both cases,
+        returns the recorded jobs. This is a two-step handoff: the parent
+        is prepared, then the caller delivers recovery instructions via
+        ``send``. The checkpoint is atomically claimed before any side
+        effect and marked restored on success or failed on error. A
+        second restore is refused with a state-specific error code.
+
+        Approval is required — there is no default, matching ``spawn_session``.
+
+        Returns the restored parent's new participant id, the action taken
+        (``live``, ``resumed``, or ``respawned``), and the recorded jobs.
+
+        checkpoint_id: the id returned by ``checkpoint``.
+        approval:       ``manual``, ``edits``, or ``yolo`` — no default.
+        """
+        return await tools.recovery_restore(
+            session, checkpoint_id=checkpoint_id, approval=approval
+        )
+
+    @mcp.tool()
     async def read_transcript(target_id: str, last_n: int = 5) -> dict:
         """Read the transcript of a participant, returning full unclipped text.
 

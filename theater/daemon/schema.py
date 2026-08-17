@@ -168,6 +168,13 @@ checkpoints = Table(
     Column("notes", Text),
     Column("jobs_snapshot", Text, nullable=False),
     Column("created_at", REAL, nullable=False),
+    Column("restore_state", Text, nullable=False, server_default=text("'ready'")),
+    Column("restore_started_at", REAL),
+    Column("restore_token", Text),
+    Column("restored_at", REAL),
+    Column("restored_by", Text),
+    Column("restore_error", Text),
+    Column("restore_result", Text),
     sqlite_autoincrement=True,
 )
 
