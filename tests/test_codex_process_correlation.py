@@ -894,16 +894,16 @@ async def test_probe_identity_loss_populates_session_id(monkeypatch, codex_tree)
 async def test_probe_identity_loss_session_id_none_when_candidate_has_no_session_id(
     monkeypatch, codex_tree, tmp_path
 ):
-    """A candidate whose session_id the observer cannot read leaves evidence.session_id None.
+    """A candidate whose filename has no UUID tail leaves evidence.session_id None.
 
-    Not a tautological dataclass test: this exercises the real probe path,
-    confirming that ``probe_identity_loss`` populates ``session_id`` from the
-    observer's ``session_id(candidate)`` call and that a ``None`` return
-    propagates to the evidence without error.
+    Not a tautological dataclass test: this exercises the real probe path with
+    a genuine None-session candidate — a file whose ``session_meta`` carries
+    the right cwd (so ``_transcript_cwd`` matches and the candidate is found)
+    but whose name lacks the UUID stem pattern (so ``session_id`` returns None).
     """
-    # Make SESSION_A older than everything so the probe finds SESSION_B.
     os.utime(codex_tree["a"], ns=(1_000_000_000, 1_000_000_000))
-    os.utime(codex_tree["b"], ns=(2_000_000_000, 2_000_000_000))
+    # Make SESSION_B older than SESSION_A so the probe does not find it.
+    os.utime(codex_tree["b"], ns=(500_000_000, 500_000_000))
     hold(monkeypatch, {PID_A: []})
     reader = CodexObserver(
         root=codex_tree["root"], pane_pid=PID_A, session_provenance=TranscriptProvenance.OPERATOR
@@ -918,7 +918,23 @@ async def test_probe_identity_loss_session_id_none_when_candidate_has_no_session
     assert initial.attached is not None
     source.commit_attachment()
 
+    # A rollout whose session_meta has the right cwd but whose filename
+    # does not match the _STEM UUID pattern, so session_id() returns None.
+    day = codex_tree["root"] / "2026" / "08" / "17"
+    no_sid = day / "rollout-broken.jsonl"
+    no_sid.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-08-17T01:21:00.000Z",
+                "type": "session_meta",
+                "payload": {"id": "no-uuid-here", "cwd": str(codex_tree["project"])},
+            }
+        )
+        + "\n",
+    )
+    os.utime(no_sid, ns=(2_000_000_000, 2_000_000_000))
+
     evidence = await source.probe_identity_loss()
-    assert evidence is not None, "probe must find the newer candidate"
-    assert evidence.location == str(codex_tree["b"].resolve())
-    assert evidence.session_id == SESSION_B
+    assert evidence is not None, "probe must find the no-session candidate"
+    assert evidence.location == str(no_sid.resolve())
+    assert evidence.session_id is None

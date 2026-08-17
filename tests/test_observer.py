@@ -1513,3 +1513,58 @@ async def test_identity_loss_grace_sweep_restart_uses_persisted_timestamp(
     key = (participant.id, TRANSCRIPT_IDENTITY_LOST_CODE)
     assert restarted._source_errors[key] == persisted_ts
     assert manager.get("persisted-job").state == "crashed"
+
+
+@pytest.mark.asyncio
+async def test_quarantine_watch_branch_crashes_grace_skipped_job(registry, monkeypatch):
+    """A job that survives initial quarantine is crashed through the _watch branch.
+
+    This is a real ``_watch``-task test, not a direct helper invocation: the
+    quarantine branch calls ``_sweep_identity_lost_grace`` before
+    ``_screen_only`` on every tick. With short grace, a grace-skipped job
+    transitions RUNNING -> CRASHED through the live watch loop.
+    """
+    harness = WaitingHarness(ScreenReading(ScreenKind.WORKING, ScreenConfidence.HIGH))
+    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 0.05)
+    observer = Observer(
+        registry,
+        {"waiting": harness},
+        poll=0.01,
+        search=0.01,
+        sync=0.01,
+    )
+    manager = JobManager(registry.store)
+    observer.jobs = manager
+
+    async def capture_pane(_pane):
+        return "working"
+
+    observer._capture = capture_pane
+
+    participant = registry.register(harness="waiting", pane="%1", cwd="/tmp")
+    manager.create(handle="watch-job", caller_id="caller", target_id=participant.id, kind="send")
+
+    # Enter quarantine via the first observer (persists to bus).
+    first = Observer(registry, harnesses={})
+    first.mark_transcript_identity_lost(participant.id, "rotation evidence")
+    # Replay the persisted quarantine into the live observer's cache.
+    observer._restore_transcript_identity_loss(participant.id)
+    assert observer.transcript_identity_lost(participant.id)
+
+    # Start the real _watch task. The quarantine branch will run the sweep
+    # on every tick; with 0.05s grace, the job is initially RUNNING but
+    # crashes after the grace window elapses.
+    observer._tasks[participant.id] = asyncio.create_task(
+        observer._watch(participant.id, "waiting")
+    )
+    try:
+        # The job starts RUNNING — grace has not elapsed yet.
+        assert manager.get("watch-job").state == "running"
+
+        # Wait for the sweep to crash it through the quarantine branch.
+        assert await until(lambda: manager.get("watch-job").state == "crashed", timeout=2.0)
+        assert manager.get("watch-job").error_code == "transcript_identity_lost"
+        # The source was never read — quarantine takes the screen-only branch.
+        assert harness.source.reads == 0
+    finally:
+        await observer.aclose()

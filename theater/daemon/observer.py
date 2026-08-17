@@ -792,8 +792,12 @@ class Observer:
                         clock = QuietClock()
                         turns = TurnAccumulator()
                     if self.transcript_identity_lost(pid):
-                        await self._screen_only(pid, observer, clock)
+                        # Sweep before screen so a broken third-party screen
+                        # classifier cannot starve job terminalization: the
+                        # screen arm may raise or hang on capture, but the
+                        # grace sweep is pure bookkeeping and must run first.
                         self._sweep_identity_lost_grace(pid)
+                        await self._screen_only(pid, observer, clock)
                         await self._sleep(self.search)
                         continue
                     batch = await source.read()
@@ -1089,6 +1093,18 @@ class Observer:
             # would clear confirmation between every pair of 5s relocate windows,
             # making the threshold unreachable. This does not touch the three
             # quiet timers.
+            #
+            # Why this aligns with ``_apply``'s edge-progress rather than
+            # ``Batch.status`` levels: ``_apply`` returns True when
+            # ``batch.progressed or bool(batch.events) or batch.attached is not
+            # None`` — the same predicate used here. A ``Batch.status`` set
+            # without any of those is a source-derived classification with no
+            # new content from the pinned transcript, so it does not prove the
+            # pin is alive. The reset must track the same evidence that
+            # ``_apply`` treats as "the source produced something", because
+            # that is exactly the signal that the trusted pin is still writing
+            # — which is what makes identity-loss confirmation stale. (Per
+            # Ferramondo: confirmation reset is an edge event, not a level.)
             if batch.progressed or bool(batch.events) or batch.attached is not None:
                 self._reset_identity_loss_confirmation(pid)
 
