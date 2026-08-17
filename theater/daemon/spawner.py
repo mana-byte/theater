@@ -115,6 +115,7 @@ class Spawner:
         harness = get_harness(req.harness)
         if shutil.which(harness.binary) is None:
             raise BadRequest(f"{harness.binary!r} is not on PATH")
+        req = self._resolve_resume_reference(req)
         resume_predecessor, resume_domain = self._validate_before_create(req, harness)
         participant = self.registry.create_spawned(
             harness=req.harness,
@@ -343,6 +344,36 @@ class Spawner:
             os.fchmod(fd, 0o600)
             with os.fdopen(fd, "w") as fh:
                 fh.write(contents)
+
+    def _resolve_resume_reference(self, req: SpawnRequest) -> SpawnRequest:
+        """If ``resume`` is a Theater participant id, resolve it to the harness
+        session id the daemon already holds.
+
+        Participant primary-key matches take precedence: if the value is an
+        exact row id, it is resolved here. Otherwise the value is treated as a
+        native harness session id and the existing path handles it. This means
+        an unknown participant id is indistinguishable from a native session id
+        and fails the existing trusted-binding check — which is the right
+        failure for a value that is neither.
+        """
+        if req.resume is None:
+            return req
+        participant = self.registry.store.get_participant(req.resume)
+        if participant is None:
+            return req
+        if participant.harness != req.harness:
+            raise BadRequest(
+                f"participant {participant.id!r} belongs to harness "
+                f"{participant.harness!r}, not {req.harness!r}"
+            )
+        if participant.status is not Status.DEAD:
+            raise BadRequest(f"cannot resume participant {participant.id!r}: it is still live")
+        if not participant.session_id:
+            raise BadRequest(
+                f"cannot resume participant {participant.id!r}: "
+                "Theater has not recorded its harness session id"
+            )
+        return replace(req, resume=participant.session_id)
 
     def _validate_before_create(
         self, req: SpawnRequest, harness

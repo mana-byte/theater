@@ -859,3 +859,96 @@ async def test_resume_floor_unknown_when_file_unreadable(
     spawned = await spawner.spawn(req)
     reloaded = registry.store.get_participant(spawned.id)
     assert reloaded.resume_floor == UNKNOWN_FLOOR
+
+
+# ---- resume by Theater participant id ------------------------------------
+
+
+async def test_resume_by_participant_id_resolves_to_session_id(
+    registry, resume_harness, monkeypatch
+):
+    """A Theater participant id in resume is resolved to the harness session id."""
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    p = _trusted_resume(registry, harness="resume-spawn-test", session_id="native-sess-123")
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="resume-spawn-test",
+        prompt="",
+        cwd="/tmp",
+        approval="edits",
+        resume=p.id,
+    )
+    await spawner.spawn(req)
+    assert resume_harness.seen_resume == "native-sess-123"
+
+
+async def test_resume_by_participant_id_wrong_harness_refused(
+    registry, resume_harness, monkeypatch
+):
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    p = _trusted_resume(registry, harness="resume-spawn-test", session_id="native-sess-123")
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="vibe",
+        prompt="",
+        cwd="/tmp",
+        approval="edits",
+        resume=p.id,
+    )
+    with pytest.raises(BadRequest, match="belongs to harness"):
+        await spawner.spawn(req)
+
+
+async def test_resume_by_participant_id_live_refused(registry, resume_harness, monkeypatch):
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    p = _trusted_resume(
+        registry, harness="resume-spawn-test", session_id="native-sess-123", live=True
+    )
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="resume-spawn-test",
+        prompt="",
+        cwd="/tmp",
+        approval="edits",
+        resume=p.id,
+    )
+    with pytest.raises(BadRequest, match="still live"):
+        await spawner.spawn(req)
+
+
+async def test_resume_by_participant_id_no_session_id_refused(
+    registry, resume_harness, monkeypatch
+):
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    p = _trusted_resume(registry, harness="resume-spawn-test", session_id="native-sess-123")
+    p = registry.get(p.id)
+    p.session_id = None
+    registry.store.upsert_participant(p)
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="resume-spawn-test",
+        prompt="",
+        cwd="/tmp",
+        approval="edits",
+        resume=p.id,
+    )
+    with pytest.raises(BadRequest, match="has not recorded its harness session id"):
+        await spawner.spawn(req)
+
+
+async def test_resume_by_unknown_id_falls_through_to_native_path(
+    registry, resume_harness, monkeypatch
+):
+    """A value that is not a participant id is treated as a native session id."""
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    _trusted_resume(registry, harness="resume-spawn-test", session_id="native-sess-456")
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="resume-spawn-test",
+        prompt="",
+        cwd="/tmp",
+        approval="edits",
+        resume="not-a-participant-id",
+    )
+    with pytest.raises(BadRequest, match="no trusted"):
+        await spawner.spawn(req)

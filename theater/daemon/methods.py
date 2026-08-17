@@ -953,6 +953,52 @@ async def _checkpoint_read(daemon, params: dict) -> dict:
     }
 
 
+#: Maximum characters of checkpoint notes returned by `checkpoint.list`.
+#: `recovery_read` returns the full notes; this is the discovery preview.
+CHECKPOINT_NOTES_PREVIEW_CHARS = 300
+
+
+def _checkpoint_limit(params: dict) -> int:
+    raw = params.get("limit", 100)
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise BadRequest("limit must be an integer")
+    if raw < 1 or raw > 100:
+        raise BadRequest("limit must be between 1 and 100")
+    return raw
+
+
+def _checkpoint_summary(row: dict) -> dict:
+    notes = row.get("notes")
+    if notes is not None and len(notes) > CHECKPOINT_NOTES_PREVIEW_CHARS:
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "created_at": row["created_at"],
+            "notes": notes[:CHECKPOINT_NOTES_PREVIEW_CHARS],
+            "notes_truncated": True,
+        }
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "created_at": row["created_at"],
+        "notes": notes,
+        "notes_truncated": False,
+    }
+
+
+@method("checkpoint.list")
+async def _checkpoint_list(daemon, params: dict) -> list[dict]:
+    """List the caller's checkpoints, newest first.
+
+    Returns summaries only — ``recovery_read(id)`` is the detailed endpoint.
+    Notes are truncated to a preview length; ``notes_truncated`` flags it.
+    """
+    caller = _caller_participant(daemon, params, method_name="checkpoint.list")
+    limit = _checkpoint_limit(params)
+    rows = daemon.store.list_checkpoints(participant_id=caller.id, limit=limit)
+    return [_checkpoint_summary(row) for row in rows]
+
+
 @method("bus.tail")
 async def _bus_tail(daemon, params: dict) -> list[dict]:
     return daemon.store.bus_tail(

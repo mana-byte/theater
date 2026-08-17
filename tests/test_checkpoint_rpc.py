@@ -169,3 +169,97 @@ async def test_checkpoint_read_rejects_missing_checkpoint(client):
 
     assert exc.value.code == "bad_request"
     assert "no checkpoint" in str(exc.value)
+
+
+# ---- checkpoint.list ------------------------------------------------------
+
+
+async def test_checkpoint_list_returns_caller_checkpoints_newest_first(client, daemon):
+    caller = await client.call("hello", id="caller", harness="vibe", cwd="/tmp")
+    first = await client.call(
+        "checkpoint.create", caller_id=caller["id"], name="first", notes="alpha"
+    )
+    second = await client.call(
+        "checkpoint.create", caller_id=caller["id"], name="second", notes="beta"
+    )
+
+    rows = await client.call("checkpoint.list", caller_id=caller["id"])
+
+    assert [r["id"] for r in rows] == [second["checkpoint_id"], first["checkpoint_id"]]
+    assert rows[0]["name"] == "second"
+    assert rows[1]["name"] == "first"
+
+
+async def test_checkpoint_list_empty_when_none(client):
+    caller = await client.call("hello", id="caller", harness="vibe", cwd="/tmp")
+    rows = await client.call("checkpoint.list", caller_id=caller["id"])
+    assert rows == []
+
+
+async def test_checkpoint_list_isolates_by_caller(client, daemon):
+    a = await client.call("hello", id="a", harness="vibe", cwd="/tmp")
+    b = await client.call("hello", id="b", harness="vibe", cwd="/tmp")
+    await client.call("checkpoint.create", caller_id=a["id"], name="a-checkpoint")
+    await client.call("checkpoint.create", caller_id=b["id"], name="b-checkpoint")
+
+    rows_a = await client.call("checkpoint.list", caller_id=a["id"])
+    rows_b = await client.call("checkpoint.list", caller_id=b["id"])
+
+    assert [r["name"] for r in rows_a] == ["a-checkpoint"]
+    assert [r["name"] for r in rows_b] == ["b-checkpoint"]
+
+
+async def test_checkpoint_list_response_shape(client):
+    caller = await client.call("hello", id="caller", harness="vibe", cwd="/tmp")
+    created = await client.call(
+        "checkpoint.create", caller_id=caller["id"], name="cp", notes="short"
+    )
+
+    rows = await client.call("checkpoint.list", caller_id=caller["id"])
+    assert set(rows[0]) == {"id", "name", "created_at", "notes", "notes_truncated"}
+    assert rows[0]["id"] == created["checkpoint_id"]
+    assert rows[0]["notes"] == "short"
+    assert rows[0]["notes_truncated"] is False
+
+
+async def test_checkpoint_list_truncates_long_notes(client):
+    caller = await client.call("hello", id="caller", harness="vibe", cwd="/tmp")
+    long_notes = "x" * 500
+    await client.call("checkpoint.create", caller_id=caller["id"], name="cp", notes=long_notes)
+
+    rows = await client.call("checkpoint.list", caller_id=caller["id"])
+    assert len(rows[0]["notes"]) == 300
+    assert rows[0]["notes_truncated"] is True
+
+
+async def test_checkpoint_list_notes_none(client):
+    caller = await client.call("hello", id="caller", harness="vibe", cwd="/tmp")
+    await client.call("checkpoint.create", caller_id=caller["id"], name="cp", notes=None)
+
+    rows = await client.call("checkpoint.list", caller_id=caller["id"])
+    assert rows[0]["notes"] is None
+    assert rows[0]["notes_truncated"] is False
+
+
+async def test_checkpoint_list_limit(client, daemon):
+    caller = await client.call("hello", id="caller", harness="vibe", cwd="/tmp")
+    for i in range(5):
+        await client.call("checkpoint.create", caller_id=caller["id"], name=f"cp-{i}")
+
+    rows = await client.call("checkpoint.list", caller_id=caller["id"], limit=3)
+    assert len(rows) == 3
+
+
+async def test_checkpoint_list_rejects_invalid_limit(client):
+    caller = await client.call("hello", id="caller", harness="vibe", cwd="/tmp")
+    for raw in [0, -1, 101, True, "ten"]:
+        with pytest.raises(RemoteError) as exc:
+            await client.call("checkpoint.list", caller_id=caller["id"], limit=raw)
+        assert exc.value.code == "bad_request"
+
+
+async def test_checkpoint_list_requires_existing_caller(client):
+    with pytest.raises(RemoteError) as exc:
+        await client.call("checkpoint.list", caller_id="ghost")
+    assert exc.value.code == "bad_request"
+    assert "existing participant" in str(exc.value)

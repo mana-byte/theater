@@ -610,9 +610,15 @@ class Store:
 
     def list_checkpoints(self, *, participant_id: str, limit: int = 100) -> list[dict]:
         rows = self.conn.execute(
-            select(checkpoints)
+            select(
+                checkpoints.c.id,
+                checkpoints.c.participant_id,
+                checkpoints.c.name,
+                checkpoints.c.notes,
+                checkpoints.c.created_at,
+            )
             .where(checkpoints.c.participant_id == participant_id)
-            .order_by(checkpoints.c.created_at.desc())
+            .order_by(checkpoints.c.created_at.desc(), checkpoints.c.id.desc())
             .limit(limit)
         ).fetchall()
         return [dict(r._mapping) for r in rows]

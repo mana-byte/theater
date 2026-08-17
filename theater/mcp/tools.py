@@ -187,8 +187,11 @@ async def spawn_session(
     low/medium/high/xhigh/max/auto); Theater checks membership in the
     `[reasoning]` allowlist and nothing else.
 
-    `resume` takes a session id from `recall` and attaches the new job to
-    that existing harness session instead of starting cold. Refused up front
+    `resume` takes a session id from `recall` — or a Theater participant id —
+    and attaches the new job to that existing harness session instead of
+    starting cold. If the value matches a retained participant, the daemon
+    resolves it to that participant's harness session id internally.
+    Refused up front
     for a harness whose `plan_launch` has no `resume` parameter. Some
     harnesses accept resume but cannot carry a prompt through it — see
     the tool description for the harness-specific behaviour.
@@ -402,6 +405,24 @@ async def recovery_read(session: Session, *, checkpoint_id: int) -> dict:
         caller_id=session.participant_id,
     )
     assert isinstance(result, dict)
+    return result
+
+
+async def list_checkpoints(session: Session, *, limit: int = 100) -> list[dict]:
+    """List the caller's checkpoints, newest first.
+
+    Returns summaries only — call ``recovery_read`` with a checkpoint id for
+    the full snapshot and live comparison. Notes are truncated to a preview;
+    ``notes_truncated`` in each row flags it.
+    """
+    if not session._resolved:
+        await session.identify()
+    result = await session.client.call(
+        "checkpoint.list",
+        caller_id=session.participant_id,
+        limit=limit,
+    )
+    assert isinstance(result, list)
     return result
 
 

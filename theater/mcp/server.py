@@ -112,7 +112,11 @@ worktree: if True, create a git worktree for the child with its own
           Cannot be combined with resume.
 base_branch: the branch to base the worktree on. Defaults to current HEAD.
 resume:    a session id, from `recall`, to resume instead of starting cold.
-           The harness must support it (call list_harnesses; a harness that
+           Also accepts a Theater participant id: if the value matches a
+           retained participant, the daemon resolves it to that
+           participant's harness session id internally. Participant-id
+           matches take precedence over native session ids. The harness
+           must support it (call list_harnesses; a harness that
            cannot is listed but will refuse the spawn with a message naming
            itself). Some harnesses accept resume but cannot carry a prompt
            through it: opencode's `-s` routes to the session view and drops
@@ -423,6 +427,18 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         checkpoint_id: the id returned by checkpoint.
         """
         return await tools.recovery_read(session, checkpoint_id=checkpoint_id)
+
+    @mcp.tool()
+    async def list_checkpoints(limit: int = 100) -> list[dict]:
+        """List your retained checkpoints, newest first.
+
+        Returns id, name, created_at, and a truncated notes preview for each
+        checkpoint. Call recovery_read with a checkpoint id for the full
+        snapshot and live comparison.
+
+        limit: maximum number of checkpoints to return (1-100, default 100).
+        """
+        return await tools.list_checkpoints(session, limit=limit)
 
     @mcp.tool()
     async def read_transcript(target_id: str, last_n: int = 5) -> dict:
