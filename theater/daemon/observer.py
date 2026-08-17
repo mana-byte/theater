@@ -73,6 +73,7 @@ from theater.config import ObserverSection
 from theater.daemon.registry import Registry
 from theater.harness import (
     HARNESSES,
+    Event,
     EventKind,
     Harness,
     HarnessObserver,
@@ -97,6 +98,11 @@ from theater.provenance import (
     is_trusted_provenance,
     normalize_provenance,
     provenance_at_least,
+)
+from theater.resume_floor import (
+    decode_floor,
+    floor_authorises_completion,
+    floor_is_present,
 )
 from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
@@ -1622,12 +1628,40 @@ class Observer:
         # Derive an initial status from the last record skipped, so a spawned
         # agent that finished its turn before we attached does not stay IDLE.
         # No history replayed — only the status moves.
-        event = attached.last_event
-        if event is not None:
-            self._settle(pid, status_after(event))
-            if event.turn_end:
-                result_text, raw_result = self._turn_result(event, Turn(""))
-                self._answer_turn(pid, result_text, raw_result=raw_result)
+        #
+        # A resume floor suppresses both status and completion unless the
+        # attachment is provably the same stream (same device/inode, non-shrunk
+        # size, strictly beyond the saved record count). The floor is a one-shot:
+        # it is cleared after the first attachment so later drained events behave
+        # normally. A floor of ``None`` (cold/adopted) preserves the fast-spawn
+        # behaviour exactly.
+        floor_raw = p.resume_floor if p is not None else None
+        if attached.last_event is not None and not floor_is_present(floor_raw):
+            self._settle_from_event(pid, attached.last_event)
+        elif attached.last_event is not None:
+            floor = decode_floor(floor_raw)
+            if floor_authorises_completion(floor, floor_raw=floor_raw, point=attached.point):
+                self._settle_from_event(pid, attached.last_event)
+            else:
+                logger.info(
+                    "resume floor suppresses attach-derived status for %s (floor=%s, point=%s)",
+                    pid,
+                    floor_raw,
+                    attached.point,
+                )
+        # Clear the one-shot floor after the first attachment is processed,
+        # so later drained events behave normally. The floor served its
+        # purpose: it gated the attach-derived status/completion.
+        if floor_is_present(floor_raw) and p is not None:
+            p.resume_floor = None
+            self.store.upsert_participant(p)
+
+    def _settle_from_event(self, pid: str, event: Event) -> None:
+        """Settle status and answer a turn from an attach-time event."""
+        self._settle(pid, status_after(event))
+        if event.turn_end:
+            result_text, raw_result = self._turn_result(event, Turn(""))
+            self._answer_turn(pid, result_text, raw_result=raw_result)
 
     def _release_transcript(self, pid: str) -> None:
         """Drop a participant's claim on its transcript, if it still holds it.

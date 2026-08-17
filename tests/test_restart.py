@@ -329,3 +329,25 @@ async def test_restart_identity_loss_replay_crashes_old_job(theater_home, fake_t
     finally:
         observer_mod.OBSERVATION_FAILURE_GRACE = original_grace
     await d2.aclose()
+
+
+async def test_restart_preserves_resume_floor(theater_home, fake_tmux):
+    """A persisted resume floor survives daemon restart."""
+    d1 = Daemon(harnesses={})
+    await d1.start()
+    async with DaemonClient(autostart=False) as c:
+        await c.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+        rows = await c.call("participants.list")
+        pid = rows[0]["id"]
+        p = d1.registry.store.get_participant(pid)
+        p.resume_floor = "unknown"
+        d1.registry.store.upsert_participant(p)
+    await d1.aclose()
+
+    d2 = Daemon(harnesses={})
+    await d2.start()
+    async with DaemonClient(autostart=False) as c:
+        rows = await c.call("participants.list", include_dead=True)
+        p = d2.registry.store.get_participant(rows[0]["id"])
+        assert p.resume_floor == "unknown"
+    await d2.aclose()

@@ -28,6 +28,7 @@ from theater.harness import check_model, check_resume, plan_launch
 from theater.harness import get as get_harness
 from theater.models import BadRequest, Participant, Status, TheaterError
 from theater.provenance import TranscriptProvenance, is_trusted_provenance
+from theater.resume_floor import encode_floor
 from theater.tmux import client as tmux
 
 logger = logging.getLogger("theater.spawner")
@@ -73,7 +74,7 @@ class Spawner:
         harness = get_harness(req.harness)
         if shutil.which(harness.binary) is None:
             raise BadRequest(f"{harness.binary!r} is not on PATH")
-        resume_domain = self._validate_before_create(req, harness)
+        resume_predecessor, resume_domain = self._validate_before_create(req, harness)
         participant = self.registry.create_spawned(
             harness=req.harness,
             cwd=req.cwd,
@@ -137,6 +138,15 @@ class Spawner:
             plan = replace(plan, transcript_domain=str(resume_domain))
 
         self._record_launch_identity(participant, plan)
+
+        # Capture the predecessor's transcript stream floor at the last safe
+        # pre-launch moment — after identity is persisted but before tmux
+        # creates the pane and the successor can write output. The floor lets
+        # the successor's observer suppress stale pre-floor records that would
+        # otherwise be attributed as the successor's own first turn.
+        if resume_predecessor is not None:
+            participant.resume_floor = self._capture_resume_floor(harness, resume_predecessor)
+            self.registry.store.upsert_participant(participant)
 
         paths.ensure_home()
         self._write_plan_files(plan)
@@ -205,13 +215,16 @@ class Spawner:
             with os.fdopen(fd, "w") as fh:
                 fh.write(contents)
 
-    def _validate_before_create(self, req: SpawnRequest, harness) -> Path | None:
+    def _validate_before_create(
+        self, req: SpawnRequest, harness
+    ) -> tuple[Participant | None, Path | None]:
         """Refuse unsafe launches before a participant or worktree exists."""
         check_model(req.harness, req.model)
         check_resume(req.harness, req.resume)
         self._reject_unsafe_resume_shape(req, harness)
         resume_predecessor = self._validate_resume_identity(req)
-        return self._validate_vibe_resume_domain(req, resume_predecessor)
+        resume_domain = self._validate_vibe_resume_domain(req, resume_predecessor)
+        return resume_predecessor, resume_domain
 
     @staticmethod
     def _reject_unsafe_resume_shape(req: SpawnRequest, harness) -> None:
@@ -346,6 +359,23 @@ class Spawner:
             ):
                 return True
         return False
+
+    @staticmethod
+    def _capture_resume_floor(harness, predecessor: Participant) -> str:
+        """Capture the predecessor's transcript stream position before launch.
+
+        Called at the last safe pre-launch moment — after identity is
+        persisted, before tmux creates the pane. Returns the encoded floor
+        string (structured JSON or ``"unknown"``). An unreadable or non-file
+        transcript produces ``"unknown"``: present-but-unknown is still a
+        floor, and the reducer suppresses completion rather than treating
+        the successor as a cold spawn.
+        """
+        location = predecessor.transcript_location
+        if location is None:
+            return "unknown"
+        point = harness.observer.stream_floor(location)
+        return encode_floor(point)
 
     def _has_live_cwd_sibling(self, participant: Participant) -> bool:
         """Whether heuristic transcript discovery would share a collision key.

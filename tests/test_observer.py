@@ -1568,3 +1568,101 @@ async def test_quarantine_watch_branch_crashes_grace_skipped_job(registry, monke
         assert harness.source.reads == 0
     finally:
         await observer.aclose()
+
+
+# ---- resume floor: attach-derived completion enforcement ------------------
+
+
+async def test_resume_floor_suppresses_attach_status(registry, vibe_tree, observing):
+    """A present resume floor suppresses last_event-derived status at attach."""
+    append(vibe_tree["transcript"], USER, WORKING, RESULT, DONE)
+    p = registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
+    # Set a present-but-unknown floor so suppression applies.
+    p.resume_floor = "unknown"
+    registry.store.upsert_participant(p)
+
+    assert await until(lambda: "agent.transcript" in kinds(registry.store))
+    # Without the floor, status would be IDLE (the last record was DONE).
+    # With the floor, status stays IDLE (the default for a spawned participant)
+    # but no completion event fires — the bus carries only agent.transcript.
+    await asyncio.sleep(0.2)
+    assert kinds(registry.store) == ["agent.transcript"]
+    # The floor is cleared after the first attachment.
+    reloaded = registry.store.get_participant(p.id)
+    assert reloaded.resume_floor is None
+
+
+async def test_resume_floor_suppresses_turn_completion(registry, vibe_tree, observing):
+    """A present resume floor prevents attach-derived job completion."""
+    from theater.daemon.jobs import JobManager
+
+    manager = JobManager(registry.store)
+    observing.jobs = manager
+    append(vibe_tree["transcript"], USER, WORKING, RESULT, DONE)
+    p = registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
+    p.resume_floor = "unknown"
+    registry.store.upsert_participant(p)
+    manager.create(
+        handle="floor-job",
+        caller_id="caller",
+        target_id=p.id,
+        kind="send",
+        prompt="do thing",
+    )
+
+    assert await until(lambda: "agent.transcript" in kinds(registry.store))
+    await asyncio.sleep(0.3)
+    # The DONE record's turn_end would have completed the job; the floor
+    # suppresses it.
+    job = manager.get("floor-job")
+    assert job.state == "running"
+
+
+async def test_null_floor_preserves_cold_fast_spawn(registry, vibe_tree, observing):
+    """A NULL floor (cold spawn) preserves the existing attach behaviour."""
+    append(vibe_tree["transcript"], USER, WORKING, RESULT, DONE)
+    p = registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
+
+    assert await until(lambda: "agent.transcript" in kinds(registry.store))
+    assert await until(lambda: registry.get(p.id).status is Status.IDLE)
+    # No floor was set.
+    reloaded = registry.store.get_participant(p.id)
+    assert reloaded.resume_floor is None
+
+
+async def test_floor_cleared_after_first_attach(registry, vibe_tree, observing):
+    """The resume floor is a one-shot — cleared after the first attachment."""
+    append(vibe_tree["transcript"], USER, WORKING)
+    p = registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
+    p.resume_floor = "unknown"
+    registry.store.upsert_participant(p)
+
+    assert await until(lambda: "agent.transcript" in kinds(registry.store))
+    assert await until(lambda: registry.store.get_participant(p.id).resume_floor is None)
+
+
+async def test_post_floor_drained_events_behave_normally(registry, vibe_tree, observing):
+    """After the floor is cleared, new drained events complete jobs normally."""
+    from theater.daemon.jobs import JobManager
+
+    manager = JobManager(registry.store)
+    observing.jobs = manager
+    # Start with content that the floor will suppress at attach.
+    append(vibe_tree["transcript"], USER, WORKING, RESULT, DONE)
+    p = registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
+    p.resume_floor = "unknown"
+    registry.store.upsert_participant(p)
+    manager.create(
+        handle="post-floor-job",
+        caller_id="caller",
+        target_id=p.id,
+        kind="send",
+        prompt="do the thing",
+    )
+
+    assert await until(lambda: "agent.transcript" in kinds(registry.store))
+    # Floor is cleared.
+    assert await until(lambda: registry.store.get_participant(p.id).resume_floor is None)
+    # Now append new content — the DONE record completes the job.
+    append(vibe_tree["transcript"], USER, DONE)
+    assert await until(lambda: manager.get("post-floor-job").state == "done", timeout=3.0)
