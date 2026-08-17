@@ -632,7 +632,7 @@ async def _spawn(daemon, params: dict) -> dict:
     # turn end with no job to receive the result.
     reservation = await daemon.spawner.reserve(req)
     handle = reservation.participant.id
-    job_created = False
+    launched = False
     try:
         daemon.jobs.create(
             handle=handle,
@@ -646,8 +646,8 @@ async def _spawn(daemon, params: dict) -> dict:
             cwd=reservation.participant.cwd,
             response_format=response_format,
         )
-        job_created = True
         participant = await daemon.spawner.launch(reservation)
+        launched = True
         if not req.prompt:
             # A promptless spawn has nothing to wait for: resolving the job
             # here keeps it from eating the first turn end the human produces,
@@ -656,31 +656,34 @@ async def _spawn(daemon, params: dict) -> dict:
             # leaves the job CRASHED, not DONE.
             daemon.jobs.finish(handle, state=JobState.DONE, result="")
     except Exception:
-        # One cleanup boundary: after reserve succeeds, a failure in job
-        # creation or launch must leave consistent state.
+        # One cleanup boundary: after reserve succeeds, any failure — in
+        # jobs.create (including a bus_append that raised after the job
+        # row persisted), in launch, or in the promptless finish — must
+        # leave consistent state.
         #
-        # If jobs.create itself raised, the reservation's participant and
-        # worktree must be cleaned up — the spawner created them but the
-        # job will never exist to track the work.
+        # If launch has NOT succeeded, the participant and worktree must
+        # be cleaned up. This covers jobs.create failures where the job
+        # row may or may not have persisted (create_job at jobs.py:207
+        # precedes bus_append at :211, so a bus_append failure leaves a
+        # persisted RUNNING job that create() never returned).
         #
-        # If launch raised, the spawner's launch already cleaned up the
-        # participant/worktree via cleanup_reservation, so this only
-        # handles the job. A job that was created but is still RUNNING is
-        # CRASHED with a spawn failure code.
+        # If launch HAS succeeded, the pane is live and working — do not
+        # tear it down over a promptless finish failure. Only crash the
+        # job.
         #
-        # Both cleanup_reservation and mark_dead are idempotent, so calling
-        # cleanup here when launch already did is a safe no-op.
-        if not job_created:
+        # In both cases, check jobs.get(handle) and crash any persisted
+        # RUNNING job. This catches the bus_append-after-persist case
+        # where create() raised but the row exists.
+        if not launched:
             daemon.spawner.cleanup_reservation(reservation.participant)
-        else:
-            job = daemon.jobs.get(handle)
-            if job is not None and job.state == JobState.RUNNING:
-                daemon.jobs.finish(
-                    handle,
-                    state=JobState.CRASHED,
-                    result="",
-                    error_code="spawn_failed",
-                )
+        job = daemon.jobs.get(handle)
+        if job is not None and job.state == JobState.RUNNING:
+            daemon.jobs.finish(
+                handle,
+                state=JobState.CRASHED,
+                result="",
+                error_code="spawn_failed",
+            )
         raise
     result = participant.to_dict()
     result["handle"] = handle

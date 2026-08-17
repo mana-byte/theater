@@ -1615,3 +1615,70 @@ async def test_cleanup_reservation_is_idempotent(registry, monkeypatch):
     p = registry.get(participant.id)
     assert p is not None
     assert p.status.value == "dead"
+
+
+async def test_jobs_create_persists_then_raises_leaves_dead_and_crashed(
+    client, fake_tmux, daemon, monkeypatch
+):
+    """If jobs.create persists the row then raises, both are cleaned up.
+
+    JobManager.create() is not atomic: store.create_job (jobs.py:207)
+    persists the RUNNING row, then bus_append (:211) can raise. When that
+    happens, create() raises after the job is already in the database.
+    The old ``_spawn`` tracked ``job_created = False`` (because create
+    raised), cleaned the reservation, but never checked whether the job
+    had actually persisted — leaving a RUNNING job pointing at a DEAD
+    participant.
+
+    The fix drops the boolean and always checks ``jobs.get(handle)`` in
+    the except block, crashing any persisted RUNNING job. This test wraps
+    jobs.create so the job row is inserted and then an exception is
+    raised, simulating a bus_append failure.
+    """
+
+    def persist_then_explode(**kwargs):
+        # Insert the job row the way create() does, then raise
+        # before bus_append / returning.
+        from theater.models import Job, JobState
+        from theater.models import now as wall_now
+
+        job = Job(
+            handle=kwargs["handle"],
+            caller_id=kwargs["caller_id"],
+            target_id=kwargs["target_id"],
+            kind=kwargs["kind"],
+            prompt=kwargs.get("prompt"),
+            state=JobState.RUNNING,
+            result=None,
+            error_code=None,
+            created_at=wall_now(),
+            finished_at=None,
+            response_format=kwargs.get("response_format"),
+        )
+        daemon.store.create_job(job)
+        # Simulate bus_append failure after the row persisted.
+        raise RuntimeError("bus_append exploded")
+
+    monkeypatch.setattr(daemon.jobs, "create", persist_then_explode)
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "spawn",
+            harness="vibe",
+            prompt="say hello",
+            approval="manual",
+            cwd="/tmp",
+        )
+    assert exc.value.code == "internal"
+
+    # The participant must be DEAD (cleanup_reservation ran).
+    rows = await client.call("participants.list", include_dead=True)
+    assert len(rows) == 1
+    assert rows[0]["status"] == "dead"
+
+    # The job must exist and be CRASHED — not left RUNNING.
+    pid = rows[0]["id"]
+    job = daemon.jobs.get(pid)
+    assert job is not None, "job must exist (create_job persisted before the raise)"
+    assert job.state == "crashed", "persisted RUNNING job must be CRASHED on create failure"
+    assert job.error_code == "spawn_failed"
