@@ -351,35 +351,50 @@ class TranscriptSource(Source):
         self.index = 0
         self.mtime = 0
         self._pending: tuple[Path, int, int, int, str | None] | None = None
+        #: A trusted pin must be absent on two consecutive reads before the
+        #: observer treats ENOENT as identity loss. This closes the brief gap
+        #: exposed by atomic replacement without adding a wall-clock heuristic.
+        self._missing_trusted_pin_once: Path | None = None
 
     async def read(self) -> Batch:
         self._require_decision()
         if self.path is None:
             if reason := self._trusted_known_location_unavailable_reason():
-                return self._identity_lost_batch(reason)
+                assert self._known_location is not None
+                return self._confirmed_missing_pin_batch(self._known_location, reason)
             try:
                 attached = await self._attach()
             except OSError as exc:
                 if self._known_location_is_trusted() and exc.errno == errno.ENOENT:
-                    return self._identity_lost_batch(
+                    assert self._known_location is not None
+                    return self._confirmed_missing_pin_batch(
+                        self._known_location,
                         f"trusted transcript pin {str(self._known_location)!r} "
-                        "no longer exists on disk"
+                        "no longer exists on disk",
                     )
+                self._missing_trusted_pin_once = None
                 return self._source_unavailable_batch(exc)
+            self._missing_trusted_pin_once = None
             return Batch(attached=attached) if attached else Batch(waiting=True)
         try:
-            return self._drain()
+            batch = self._drain()
         except OSError as exc:
             if self._path_is_trusted_pin(self.path) and exc.errno == errno.ENOENT:
-                return self._identity_lost_batch(
-                    f"trusted transcript pin {str(self.path)!r} no longer exists on disk"
+                return self._confirmed_missing_pin_batch(
+                    self.path,
+                    f"trusted transcript pin {str(self.path)!r} no longer exists on disk",
                 )
             if exc.errno == errno.ENOENT:
                 # Heuristic transcript deleted or rotated; drop back to searching.
+                self._missing_trusted_pin_once = None
                 self._known_location = None
                 self._detach()
                 return Batch(waiting=True)
+            self._missing_trusted_pin_once = None
             return self._source_unavailable_batch(exc)
+        else:
+            self._missing_trusted_pin_once = None
+            return batch
 
     async def refresh(self) -> Batch:
         """Propose the newest transcript if the harness started a new one.
@@ -664,6 +679,20 @@ class TranscriptSource(Source):
             error_code=TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
             error=f"transcript source is unavailable: {exc}",
         )
+
+    def _confirmed_missing_pin_batch(self, path: Path, reason: str) -> Batch:
+        """Require consecutive pin absence while its containing root is healthy."""
+        root = self._domain_root or path.parent
+        try:
+            if not root.is_dir():
+                raise NotADirectoryError(errno.ENOTDIR, "transcript root is unavailable", root)
+        except OSError as exc:
+            self._missing_trusted_pin_once = None
+            return self._source_unavailable_batch(exc)
+        if self._missing_trusted_pin_once == path:
+            return self._identity_lost_batch(reason)
+        self._missing_trusted_pin_once = path
+        return Batch(waiting=True)
 
     def _trusted_pin_is_being_replaced_by_guess(self, path: Path, session_id: str | None) -> bool:
         return (

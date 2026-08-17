@@ -46,8 +46,14 @@ def trusted_location_unavailable_reason(
         return None
     path = Path(location).expanduser()
     if domain is not None:
+        root = Path(domain).expanduser()
         try:
-            root = Path(domain).expanduser().resolve(strict=False)
+            if not root.is_dir():
+                return None
+        except OSError:
+            return None
+        try:
+            root = root.resolve(strict=False)
             path.resolve(strict=False).relative_to(root)
         except ValueError:
             return (

@@ -22,7 +22,10 @@ import pytest
 from shipped import ClaudeCodeObserver
 
 from theater.harness.source import Batch, History, TranscriptSource
-from theater.transcript_identity import TRANSCRIPT_SOURCE_UNAVAILABLE_CODE
+from theater.transcript_identity import (
+    TRANSCRIPT_IDENTITY_LOST_CODE,
+    TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
+)
 
 
 def record(text: str, *, end: bool = True) -> str:
@@ -168,6 +171,56 @@ async def test_eio_on_a_trusted_pin_is_an_ordinary_source_error(root, workdir, m
     batch = await s.read()
 
     assert batch.waiting is True
+    assert batch.error_code == TRANSCRIPT_SOURCE_UNAVAILABLE_CODE
+    assert s.path == path
+
+
+async def test_trusted_pin_requires_consecutive_absence_before_identity_loss(root, workdir):
+    path = transcript(root, "aaa", workdir, record("hello"))
+    s = source(
+        root,
+        workdir,
+        session_id="aaa",
+        session_provenance="operator",
+        known_location=str(path),
+    )
+    await attach(s)
+    path.unlink()
+
+    first = await s.read()
+    assert first.waiting is True
+    assert first.error_code is None
+    assert s.path == path
+
+    # A replacement appearing between polls clears the pending absence rather
+    # than turning a normal atomic-replace window into quarantine.
+    transcript(root, "aaa", workdir, record("replacement"))
+    assert (await s.read()).error_code is None
+    path.unlink()
+    assert (await s.read()).error_code is None
+
+    confirmed = await s.read()
+    assert confirmed.error_code == TRANSCRIPT_IDENTITY_LOST_CODE
+    assert s.path == path
+
+
+async def test_missing_transcript_root_is_source_unavailable_not_identity_loss(root, workdir):
+    path = transcript(root, "aaa", workdir, record("hello"))
+    s = source(
+        root,
+        workdir,
+        session_id="aaa",
+        session_provenance="operator",
+        known_location=str(path),
+        collision_domain=str(root),
+    )
+    await attach(s)
+    path.unlink()
+    path.parent.rmdir()
+    root.rmdir()
+
+    batch = await s.read()
+
     assert batch.error_code == TRANSCRIPT_SOURCE_UNAVAILABLE_CODE
     assert s.path == path
 
