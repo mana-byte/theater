@@ -624,3 +624,146 @@ async def test_spawn_session_schema_includes_resume(daemon):
     props = schema["spawn_session"]["properties"]
     assert "resume" in props
     assert "resume" not in schema["spawn_session"].get("required", [])
+
+
+# ---- phase 3: reserve/launch split -----------------------------------
+
+
+async def test_reserve_creates_participant_without_pane(registry, monkeypatch):
+    """reserve mints the participant, worktree, and plan — but no tmux pane."""
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="vibe",
+        prompt="say hello",
+        cwd="/tmp",
+        approval="edits",
+    )
+    reservation = await spawner.reserve(req)
+
+    # The participant exists but has no pane yet.
+    p = registry.get(reservation.participant.id)
+    assert p is not None
+    assert p.tmux_pane is None
+    assert p.status.value == "idle"
+
+    # The reservation carries everything launch needs.
+    assert reservation.participant.id == p.id
+    assert reservation.plan is not None
+    assert reservation.child_cwd == "/tmp"
+    assert reservation.req is req
+
+
+async def test_launch_creates_pane_and_attaches(registry, fake_tmux):
+    """After launch, the participant has a pane and is addressable."""
+    import theater.daemon.spawner as spawner_mod
+
+    spawner_mod.shutil.which = lambda b: f"/usr/bin/{b}"
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="vibe",
+        prompt="say hello",
+        cwd="/tmp",
+        approval="edits",
+    )
+    reservation = await spawner.reserve(req)
+    assert reservation.participant.tmux_pane is None
+
+    participant = await spawner.launch(reservation)
+    assert participant.tmux_pane is not None
+    assert participant.tmux_pane in fake_tmux.panes
+
+
+async def test_reserve_failure_marks_participant_dead(registry, monkeypatch):
+    """A failure during reserve (after participant creation) cleans up."""
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+
+    # Sabotage plan_launch to fail after the participant exists.
+    import theater.daemon.spawner as spawner_mod
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("plan exploded")
+
+    monkeypatch.setattr(spawner_mod, "plan_launch", boom)
+
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="vibe",
+        prompt="say hello",
+        cwd="/tmp",
+        approval="edits",
+    )
+    with pytest.raises(RuntimeError, match="plan exploded"):
+        await spawner.reserve(req)
+
+    # The participant was created, then marked dead by cleanup.
+    participants = registry.list(include_dead=True)
+    assert len(participants) == 1
+    assert participants[0].status.value == "dead"
+
+
+async def test_launch_failure_marks_participant_dead(registry, fake_tmux, monkeypatch):
+    """A failure during launch marks the participant dead and retires worktree."""
+    import theater.daemon.spawner as spawner_mod
+
+    monkeypatch.setattr(spawner_mod.shutil, "which", lambda b: f"/usr/bin/{b}")
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="vibe",
+        prompt="say hello",
+        cwd="/tmp",
+        approval="edits",
+    )
+    reservation = await spawner.reserve(req)
+
+    # Sabotage tmux.new_window to fail during launch.
+    async def boom_new_window(**kwargs):
+        raise RuntimeError("tmux exploded")
+
+    monkeypatch.setattr(spawner_mod.tmux, "new_window", boom_new_window)
+
+    with pytest.raises(RuntimeError, match="tmux exploded"):
+        await spawner.launch(reservation)
+
+    p = registry.get(reservation.participant.id)
+    assert p is not None
+    assert p.status.value == "dead"
+
+
+async def test_spawn_wrapper_calls_reserve_then_launch(registry, fake_tmux):
+    """The backward-compatible spawn() delegates to reserve + launch."""
+    import theater.daemon.spawner as spawner_mod
+
+    spawner_mod.shutil.which = lambda b: f"/usr/bin/{b}"
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="vibe",
+        prompt="say hello",
+        cwd="/tmp",
+        approval="edits",
+    )
+    participant = await spawner.spawn(req)
+    assert participant.tmux_pane is not None
+    assert participant.tmux_pane in fake_tmux.panes
+
+
+async def test_reserve_writes_config_files(registry, monkeypatch):
+    """Config files are written during reserve, not deferred to launch.
+
+    Uses the claude harness, which writes its MCP config into plan.files.
+    """
+    from theater import paths
+
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="claude",
+        prompt="say hello",
+        cwd="/tmp",
+        approval="manual",
+    )
+    reservation = await spawner.reserve(req)
+
+    config = paths.mcp_config_path(reservation.participant.id)
+    assert config.exists()
+    assert reservation.participant.id in config.read_text()

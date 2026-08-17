@@ -625,25 +625,49 @@ async def _spawn(daemon, params: dict) -> dict:
     # config can answer, and the spawner has none.
     check_model_allowed(req.harness, req.model, daemon.config.models_for(req.harness))
 
-    participant = await daemon.spawner.spawn(req)
-    handle = participant.id
-    daemon.jobs.create(
-        handle=handle,
-        caller_id=params.get("parent_id") or "cli",
-        target_id=participant.id,
-        kind="spawn",
-        prompt=req.prompt or "",
-        # participant.cwd is the worktree path when worktree=True, or the
-        # requested cwd otherwise. Hashing against the parent repo when the
-        # child was in a worktree would resolve paths to the wrong files.
-        cwd=participant.cwd,
-        response_format=response_format,
-    )
-    if not req.prompt:
-        # A promptless spawn has nothing to wait for: resolving the job here
-        # keeps it from eating the first turn end the human produces, and
-        # from counting as work in flight that would block every `send`.
-        daemon.jobs.finish(handle, state=JobState.DONE, result="")
+    # Reserve the participant, worktree, plan, and config files — but not
+    # the tmux pane. The job is created between reserve and launch so it is
+    # RUNNING before the pane can produce output, closing the race where a
+    # fast child completes before the job exists and the observer sees a
+    # turn end with no job to receive the result.
+    reservation = await daemon.spawner.reserve(req)
+    handle = reservation.participant.id
+    try:
+        daemon.jobs.create(
+            handle=handle,
+            caller_id=params.get("parent_id") or "cli",
+            target_id=reservation.participant.id,
+            kind="spawn",
+            prompt=req.prompt or "",
+            # participant.cwd is the worktree path when worktree=True, or the
+            # requested cwd otherwise. Hashing against the parent repo when the
+            # child was in a worktree would resolve paths to the wrong files.
+            cwd=reservation.participant.cwd,
+            response_format=response_format,
+        )
+        if not req.prompt:
+            # A promptless spawn has nothing to wait for: resolving the job
+            # here keeps it from eating the first turn end the human produces,
+            # and from counting as work in flight that would block every
+            # `send`.
+            daemon.jobs.finish(handle, state=JobState.DONE, result="")
+        participant = await daemon.spawner.launch(reservation)
+    except Exception:
+        # One cleanup boundary: after reserve succeeds, a failure in job
+        # creation or launch must leave consistent state. The spawner's
+        # launch already cleans up the participant/worktree on failure, so
+        # this only handles the job. A job that was created but not yet
+        # finished is CRASHED with a spawn failure code; a job that was
+        # already finished (promptless spawn) is left alone.
+        job = daemon.jobs.get(handle)
+        if job is not None and job.state == JobState.RUNNING:
+            daemon.jobs.finish(
+                handle,
+                state=JobState.CRASHED,
+                result="",
+                error_code="spawn_failed",
+            )
+        raise
     result = participant.to_dict()
     result["handle"] = handle
     return result

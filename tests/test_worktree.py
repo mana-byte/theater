@@ -7,6 +7,7 @@ the repos are tiny (one commit, one file).
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 from pathlib import Path
 
@@ -1089,3 +1090,146 @@ def test_validate_name_rejects_invalid_git_refs(repo, name):
     """Names that produce invalid git refs are rejected by check-ref-format."""
     with pytest.raises(BadRequest):
         wt.validate_name(name)
+
+
+# ---- phase 3: reserve/launch worktree cleanup ------------------------
+
+
+async def test_reserve_then_launch_failure_retires_unique_worktree(repo, monkeypatch):
+    """A unique worktree created during reserve is retired when launch fails.
+
+    The reserve/launch split means the worktree exists before the pane. If
+    launch raises, ``_cleanup_failed`` must retire the worktree (remove
+    the directory and delete the branch) and mark the participant DEAD.
+    """
+    import theater.daemon.spawner as spawner_mod
+    from theater.daemon.spawner import Spawner, SpawnRequest
+    from theater.models import Status
+
+    monkeypatch.setattr(spawner_mod.shutil, "which", lambda b: f"/usr/bin/{b}")
+
+    from theater.daemon.store import Store
+
+    db_path = Path(repo) / ".theater" / "test.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    s = Store(db_path)
+    try:
+        registry = type("R", (), {"store": s})()
+        from theater.daemon.registry import Registry
+
+        registry = Registry(s)
+        spawner = Spawner(registry)
+
+        req = SpawnRequest(
+            harness="vibe",
+            prompt="say hello",
+            cwd=repo,
+            approval="edits",
+            worktree=True,
+        )
+        reservation = await spawner.reserve(req)
+        child_id = reservation.participant.id
+        wt_path = wt.worktree_path(repo, child_id)
+        assert Path(wt_path).exists(), "worktree must exist after reserve"
+
+        # Sabotage tmux.new_window so launch fails.
+        async def boom(**kwargs):
+            raise RuntimeError("tmux exploded")
+
+        monkeypatch.setattr(spawner_mod.tmux, "new_window", boom)
+
+        with pytest.raises(RuntimeError, match="tmux exploded"):
+            await spawner.launch(reservation)
+
+        # The worktree directory must be gone.
+        assert not Path(wt_path).exists(), f"worktree should be gone: {wt_path}"
+
+        # The branch must be deleted.
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "rev-parse", "--verify", wt.branch_name(child_id)],
+            cwd=repo,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert result.returncode != 0, "branch should be deleted"
+
+        # The participant must be DEAD.
+        p = registry.get(child_id)
+        assert p is not None
+        assert p.status is Status.DEAD
+    finally:
+        s.close()
+
+
+async def test_reserve_then_launch_failure_retires_named_worktree(repo, monkeypatch):
+    """A named worktree created during reserve is retired when launch fails.
+
+    Named worktree semantics: the directory is removed but the branch is
+    retained (other participants may have completed work on it).
+    """
+    import theater.daemon.spawner as spawner_mod
+    from theater.daemon.spawner import Spawner, SpawnRequest
+    from theater.models import Status
+
+    monkeypatch.setattr(spawner_mod.shutil, "which", lambda b: f"/usr/bin/{b}")
+
+    from theater.daemon.store import Store
+
+    db_path = Path(repo) / ".theater" / "test.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    s = Store(db_path)
+    try:
+        from theater.daemon.registry import Registry
+
+        registry = Registry(s)
+        spawner = Spawner(registry)
+
+        name = "phase3-named"
+        req = SpawnRequest(
+            harness="vibe",
+            prompt="say hello",
+            cwd=repo,
+            approval="edits",
+            worktree=name,
+        )
+        reservation = await spawner.reserve(req)
+        child_id = reservation.participant.id
+        wt_path = wt.named_worktree_path(repo, name)
+        assert Path(wt_path).exists(), "named worktree must exist after reserve"
+
+        async def boom(**kwargs):
+            raise RuntimeError("tmux exploded")
+
+        monkeypatch.setattr(spawner_mod.tmux, "new_window", boom)
+
+        with pytest.raises(RuntimeError, match="tmux exploded"):
+            await spawner.launch(reservation)
+
+        # The worktree directory must be gone (last live participant).
+        assert not Path(wt_path).exists(), f"named worktree dir should be gone: {wt_path}"
+
+        # The named branch is always retained.
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "rev-parse", "--verify", wt.named_branch_name(name)],
+            cwd=repo,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert result.returncode == 0, "named branch must be retained"
+
+        # The named-worktree row must be deleted (directory was removed).
+        row = s.get_named_worktree(repo_root=repo, name=name)
+        assert row is None, "named-worktree row should be deleted"
+
+        # The participant must be DEAD.
+        p = registry.get(child_id)
+        assert p is not None
+        assert p.status is Status.DEAD
+    finally:
+        s.close()

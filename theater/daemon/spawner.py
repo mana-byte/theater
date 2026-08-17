@@ -8,8 +8,14 @@ Sequence, and why it is this order:
   4. tmux new-window -d           returns the pane id; identity is now settled
   5. record the pane              nothing was inferred at any point
 
-If step 4 fails the participant is marked dead immediately rather than left as a
-ghost that the régie would draw forever.
+The spawn is split into ``reserve`` (steps 1-3) and ``launch`` (steps 4-5)
+so the daemon can create the spawn **job** between them — before the pane
+exists. This closes the ordering race where a child that finishes in the
+gap between pane creation and job creation had its turn end observed with
+no RUNNING job to receive the result.
+
+If ``launch`` fails the participant is marked dead immediately rather than
+left as a ghost that the régie would draw forever.
 """
 
 from __future__ import annotations
@@ -26,6 +32,7 @@ from theater.daemon import worktree as worktree_mod
 from theater.daemon.registry import Registry
 from theater.harness import check_model, check_resume, plan_launch
 from theater.harness import get as get_harness
+from theater.harness.base import LaunchPlan
 from theater.models import BadRequest, Participant, Status, TheaterError
 from theater.provenance import TranscriptProvenance, is_trusted_provenance
 from theater.tmux import client as tmux
@@ -65,11 +72,40 @@ class SpawnRequest:
     response_format: str | None = None
 
 
+@dataclass(slots=True)
+class Reservation:
+    """Everything ``reserve`` produced that ``launch`` needs.
+
+    Carries the participant row, the launch plan, the resolved child cwd,
+    the resolved tmux session name, the window name, and the original
+    request — enough to create the tmux window without re-deriving anything.
+    The daemon creates its spawn job between ``reserve`` and ``launch`` so
+    the job is RUNNING before the pane can produce output.
+    """
+
+    participant: Participant
+    plan: LaunchPlan
+    child_cwd: str
+    session: str
+    name: str
+    req: SpawnRequest
+
+
 class Spawner:
     def __init__(self, registry: Registry):
         self.registry = registry
 
-    async def spawn(self, req: SpawnRequest) -> Participant:
+    async def reserve(self, req: SpawnRequest) -> Reservation:
+        """Create the participant, worktree, plan, and config files.
+
+        Everything up to but not including the tmux window. The daemon
+        creates its spawn job between this call and ``launch`` so the
+        job is RUNNING before the pane can produce output.
+
+        On failure the participant is marked DEAD and any worktree is
+        retired before the exception propagates, so no ghost row or
+        leaked worktree is left behind.
+        """
         harness = get_harness(req.harness)
         if shutil.which(harness.binary) is None:
             raise BadRequest(f"{harness.binary!r} is not on PATH")
@@ -81,80 +117,49 @@ class Spawner:
             has_prompt=bool(req.prompt),
         )
 
-        # The child runs in the worktree, not the parent's repo — isolated
-        # index and HEAD (for a True worktree) or a shared named worktree
-        # (for a string worktree).
-        child_cwd = req.cwd
-        if req.worktree:
-            root = worktree_mod.repo_root(req.cwd)
-            if root is None:
-                self.registry.mark_dead(participant.id)
-                raise BadRequest(f"cannot create worktree: {req.cwd!r} is not in a git repo")
-            try:
-                if isinstance(req.worktree, str):
-                    child_cwd, participant.branch = self._spawn_named_worktree(
-                        root=root,
-                        name=req.worktree,
-                        base_branch=req.base_branch,
-                    )
-                else:
-                    child_cwd = worktree_mod.create_worktree(
-                        repo_root=root,
-                        child_id=participant.id,
-                        base_branch=req.base_branch,
-                    )
-                    participant.branch = worktree_mod.branch_name(participant.id)
-            except Exception:
-                self.registry.mark_dead(participant.id)
-                raise
-            participant.cwd = child_cwd
-            self.registry.store.upsert_participant(participant)
-            self.registry.store.bus_append(
-                "participant.worktree",
-                to_id=participant.id,
-                payload={
-                    "path": child_cwd,
-                    "branch": participant.branch,
-                    "root": root,
-                    "named": isinstance(req.worktree, str),
-                    "name": req.worktree if isinstance(req.worktree, str) else None,
-                },
-            )
+        try:
+            child_cwd = self._prepare_worktree(req, participant)
+            plan = self._build_plan(req, participant, resume_domain)
+            self._record_launch_identity(participant, plan)
 
-        config_path = paths.mcp_config_path(participant.id)
-        plan = plan_launch(
-            req.harness,
-            participant_id=participant.id,
-            prompt=req.prompt,
-            config_path=config_path,
-            approval=req.approval,
-            model=req.model,
-            resume=req.resume,
-            isolate_transcript=self._has_live_cwd_sibling(participant),
+            paths.ensure_home()
+            self._write_plan_files(plan)
+
+            session = await self._resolve_session(req.tmux_session, child_cwd)
+            name = req.window_name or f"{req.harness}-{participant.id[:6]}"
+        except Exception:
+            self._cleanup_failed(participant)
+            raise
+
+        return Reservation(
+            participant=participant,
+            plan=plan,
+            child_cwd=child_cwd,
+            session=session,
+            name=name,
+            req=req,
         )
-        if resume_domain is not None:
-            plan.env["VIBE_SESSION_LOGGING__SAVE_DIR"] = str(resume_domain)
-            plan = replace(plan, transcript_domain=str(resume_domain))
 
-        self._record_launch_identity(participant, plan)
+    async def launch(self, reservation: Reservation) -> Participant:
+        """Create the tmux window and attach the pane to the participant.
 
-        paths.ensure_home()
-        self._write_plan_files(plan)
-
-        session = await self._resolve_session(req.tmux_session, child_cwd)
-        name = req.window_name or f"{req.harness}-{participant.id[:6]}"
-
+        After this returns (or raises), the invariant holds: either the pane
+        exists and the participant is addressable, or the participant is DEAD
+        and any worktree is retired. A caller that created a job between
+        ``reserve`` and ``launch`` must finish that job CRASHED if this raises.
+        """
+        participant = reservation.participant
         try:
             pane = await tmux.new_window(
-                session=session,
-                name=name,
-                cwd=child_cwd,
-                command=plan.argv,
-                env={**plan.env, "THEATER_ID": participant.id},
-                background=req.background,
+                session=reservation.session,
+                name=reservation.name,
+                cwd=reservation.child_cwd,
+                command=reservation.plan.argv,
+                env={**reservation.plan.env, "THEATER_ID": participant.id},
+                background=reservation.req.background,
             )
         except Exception:
-            self.registry.mark_dead(participant.id)
+            self._cleanup_failed(participant)
             raise
 
         # Best-effort: the window exists and the harness is starting, so
@@ -169,6 +174,90 @@ class Spawner:
         return self.registry.attach_pane(
             participant.id, pane, pane_pid=info.pane_pid if info else None
         )
+
+    async def spawn(self, req: SpawnRequest) -> Participant:
+        """Reserve then launch in one call, for callers that do not need the gap.
+
+        Preserved for backward compatibility. The daemon's ``_spawn`` method
+        uses ``reserve``/``launch`` separately so it can create the job in
+        between.
+        """
+        reservation = await self.reserve(req)
+        return await self.launch(reservation)
+
+    def _prepare_worktree(self, req: SpawnRequest, participant: Participant) -> str:
+        """Create the worktree (if requested) and return the child cwd."""
+        child_cwd = req.cwd
+        if not req.worktree:
+            return child_cwd
+
+        root = worktree_mod.repo_root(req.cwd)
+        if root is None:
+            raise BadRequest(f"cannot create worktree: {req.cwd!r} is not in a git repo")
+        if isinstance(req.worktree, str):
+            child_cwd, participant.branch = self._spawn_named_worktree(
+                root=root,
+                name=req.worktree,
+                base_branch=req.base_branch,
+            )
+        else:
+            child_cwd = worktree_mod.create_worktree(
+                repo_root=root,
+                child_id=participant.id,
+                base_branch=req.base_branch,
+            )
+            participant.branch = worktree_mod.branch_name(participant.id)
+        participant.cwd = child_cwd
+        self.registry.store.upsert_participant(participant)
+        self.registry.store.bus_append(
+            "participant.worktree",
+            to_id=participant.id,
+            payload={
+                "path": child_cwd,
+                "branch": participant.branch,
+                "root": root,
+                "named": isinstance(req.worktree, str),
+                "name": req.worktree if isinstance(req.worktree, str) else None,
+            },
+        )
+        return child_cwd
+
+    def _build_plan(
+        self,
+        req: SpawnRequest,
+        participant: Participant,
+        resume_domain: Path | None,
+    ) -> LaunchPlan:
+        """Construct the launch plan and apply resume-domain overrides."""
+        config_path = paths.mcp_config_path(participant.id)
+        plan = plan_launch(
+            req.harness,
+            participant_id=participant.id,
+            prompt=req.prompt,
+            config_path=config_path,
+            approval=req.approval,
+            model=req.model,
+            resume=req.resume,
+            isolate_transcript=self._has_live_cwd_sibling(participant),
+        )
+        if resume_domain is not None:
+            plan.env["VIBE_SESSION_LOGGING__SAVE_DIR"] = str(resume_domain)
+            plan = replace(plan, transcript_domain=str(resume_domain))
+        return plan
+
+    def _cleanup_failed(self, participant: Participant) -> None:
+        """Mark a failed spawn's participant dead and retire its worktree.
+
+        Called from both ``reserve`` and ``launch`` when an exception will
+        propagate. The worktree is retired (directory removed, branch deleted
+        for a unique worktree, retained for a named worktree) and the
+        participant is marked DEAD. Failures inside ``retire`` are logged,
+        never raised — the caller is already raising, and refusing to mark
+        dead because git could not delete a directory would trade a leaked
+        worktree for a ghost row.
+        """
+        self.retire(participant, delete_branch=True)
+        self.registry.mark_dead(participant.id)
 
     def _record_launch_identity(self, participant: Participant, plan) -> None:
         """Persist exact launch facts before the process can write output."""
