@@ -53,6 +53,7 @@ from theater.models import (
     new_id,
     now,
 )
+from theater.provenance import TranscriptProvenance, is_trusted_provenance, normalize_provenance
 from theater.tmux import client as tmux
 from theater.tmux.presence import human_present
 
@@ -1179,7 +1180,7 @@ async def _read_transcript(daemon, params: dict) -> dict:
         cwd=p.cwd,
         session_id=p.session_id,
         after=after,
-        session_exact=p.session_correlation == "exact",
+        session_exact=normalize_provenance(p.session_correlation) is TranscriptProvenance.EXACT,
         known_location=p.transcript_location,
         pane_pid=p.live_pid,
     )
@@ -1192,15 +1193,20 @@ async def _read_transcript(daemon, params: dict) -> dict:
         raise BadRequest(
             f"cannot read transcript: {history.error or history.error_code} ({history.error_code})"
         )
+    if history.location is None:
+        raise BadRequest("cannot read transcript: transcript no longer exists on disk")
+    if not is_trusted_provenance(history.correlation):
+        raise BadRequest(
+            "cannot read transcript: this session is known only from cwd/time; "
+            "wait for exact/proven correlation or bind the session before reading it "
+            "(transcript_correlation_untrusted)"
+        )
     if daemon.observer.history_is_ambiguous(pid, history):
         raise BadRequest(
             "cannot read transcript: its session is known only from cwd/time and another "
             "live participant of the same harness shares that transcript root and cwd "
             "(transcript_correlation_ambiguous)"
         )
-    if history.location is None:
-        raise BadRequest("cannot read transcript: transcript no longer exists on disk")
-
     events = [
         {
             "index": event.raw_index,

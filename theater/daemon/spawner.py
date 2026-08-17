@@ -26,6 +26,7 @@ from theater.daemon.registry import Registry
 from theater.harness import check_model, check_resume, plan_launch
 from theater.harness import get as get_harness
 from theater.models import BadRequest, Participant, TheaterError
+from theater.provenance import is_trusted_provenance
 from theater.tmux import client as tmux
 
 logger = logging.getLogger("theater.spawner")
@@ -99,6 +100,7 @@ class Spawner:
                 "cannot resume into a worktree: the session's transcript "
                 "describes files that are not the worktree's files"
             )
+        self._validate_resume_identity(req)
         participant = self.registry.create_spawned(
             harness=req.harness,
             cwd=req.cwd,
@@ -203,6 +205,31 @@ class Spawner:
             participant.session_correlation = "exact"
         participant.transcript_domain = plan.transcript_domain
         self.registry.store.upsert_participant(participant)
+
+    def _validate_resume_identity(self, req: SpawnRequest) -> None:
+        """Resume only daemon-validated trusted session ids.
+
+        A raw session id is just a string. Without a participant row whose
+        transcript identity reached operator/proven/exact provenance, the
+        daemon has no principled way to know whether resuming it would attach
+        to another person's transcript. That intentionally drops compatibility
+        for arbitrary externally supplied ids; recall remains the safe source
+        of resume ids because it reports only recorded rows and marks
+        heuristic ids as non-resumable.
+        """
+        if req.resume is None:
+            return
+        for participant in self.registry.list(include_dead=True):
+            if (
+                participant.harness == req.harness
+                and participant.session_id == req.resume
+                and is_trusted_provenance(participant.session_correlation)
+            ):
+                return
+        raise BadRequest(
+            f"cannot resume session {req.resume!r}: Theater has no trusted "
+            "operator/proven/exact binding for that session id"
+        )
 
     def _has_live_cwd_sibling(self, participant: Participant) -> bool:
         """Whether heuristic transcript discovery would share a collision key.

@@ -84,6 +84,12 @@ from theater.harness.observation import open_participant_source
 from theater.harness.source import Attachment, Batch, History, Source, SourceContractError
 from theater.models import JobState, Status, Tier
 from theater.models import now as wall_now
+from theater.provenance import (
+    TranscriptProvenance,
+    is_trusted_provenance,
+    normalize_provenance,
+    provenance_at_least,
+)
 
 logger = logging.getLogger("theater.observer")
 
@@ -205,7 +211,7 @@ def history_correlation_is_ambiguous(registry: Registry, pid: str, history: Hist
     pins still refuse. Pre-epoch NULLs are an explicit compatibility allowance
     for installations where Theater had not begun recording locations yet.
     """
-    if history.correlation != "heuristic":
+    if is_trusted_provenance(history.correlation):
         return False
     if history.location is None:
         # Nothing can be misattributed when no content was found. Callers
@@ -629,7 +635,9 @@ class Observer:
             cwd=p.cwd,
             session_id=p.session_id,
             after=after,
-            session_exact=p.session_correlation == "exact",
+            session_exact=(
+                normalize_provenance(p.session_correlation) is TranscriptProvenance.EXACT
+            ),
             known_location=p.transcript_location,
             pane_pid=p.live_pid,
         )
@@ -1030,12 +1038,30 @@ class Observer:
                 decided = True
                 self._handle_attachment_ambiguity(pid, attached)
                 return False
+            if not is_trusted_provenance(attached.correlation):
+                logger.warning(
+                    "quarantining heuristic transcript %s for %s: cwd/time is not "
+                    "trusted participant identity",
+                    attached.location,
+                    pid,
+                )
+                source.discard_attachment()
+                decided = True
+                self._handle_attachment_ambiguity(pid, attached)
+                return False
+            if self._trusted_dead_owner_blocks(pid, attached):
+                source.discard_attachment()
+                decided = True
+                self._handle_attachment_ambiguity(pid, attached)
+                return False
             owner = self._bound_transcripts.get(attached.location)
             if owner is not None and owner != pid:
                 holder = self.store.get_participant(owner)
                 if holder is not None and holder.status is not Status.DEAD:
                     prior = self._binding_correlation.get(attached.location, "exact")
-                    if attached.correlation == "exact" and prior == "heuristic":
+                    if is_trusted_provenance(attached.correlation) and not (
+                        is_trusted_provenance(prior)
+                    ):
                         self._revoke_binding(attached.location, owner)
                     else:
                         logger.warning(
@@ -1143,6 +1169,34 @@ class Observer:
             return True
         return False
 
+    def _trusted_dead_owner_blocks(self, pid: str, attached: Attachment) -> bool:
+        """Dead trusted owners keep their transcript unless this is their successor."""
+        for other in self.registry.list(include_dead=True):
+            if (
+                other.id == pid
+                or other.status is not Status.DEAD
+                or other.transcript_location != attached.location
+                or not is_trusted_provenance(other.session_correlation)
+            ):
+                continue
+            same_session = (
+                attached.session_id is not None
+                and other.session_id is not None
+                and attached.session_id == other.session_id
+            )
+            if same_session and is_trusted_provenance(attached.correlation):
+                return False
+            logger.warning(
+                "transcript %s belongs to dead participant %s (%s); refusing %s (%s)",
+                attached.location,
+                other.id,
+                other.session_correlation,
+                pid,
+                attached.correlation,
+            )
+            return True
+        return False
+
     def history_is_ambiguous(self, pid: str, history: History) -> bool:
         """Whether a short-lived history read is only a contested cwd guess."""
         return history_correlation_is_ambiguous(self.registry, pid, history)
@@ -1163,11 +1217,20 @@ class Observer:
             if p.transcript_location != attached.location:
                 p.transcript_location = attached.location
                 changed = True
-            if session_id and p.session_id != session_id:
+            prior = normalize_provenance(p.session_correlation)
+            incoming = normalize_provenance(attached.correlation)
+            can_update_identity = is_trusted_provenance(incoming) and (
+                not is_trusted_provenance(prior) or provenance_at_least(incoming, prior)
+            )
+            if session_id and p.session_id != session_id and can_update_identity:
                 p.session_id = session_id
                 p.session_correlation = attached.correlation
                 changed = True
-            elif session_id and p.session_correlation != attached.correlation:
+            elif (
+                session_id
+                and p.session_correlation != attached.correlation
+                and can_update_identity
+            ):
                 p.session_correlation = attached.correlation
                 changed = True
             if changed:

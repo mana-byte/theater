@@ -36,6 +36,7 @@ from theater.daemon.schema import jobs, touch
 from theater.harness import HARNESSES, normalize
 from theater.harness.observation import open_participant_source
 from theater.models import BadRequest
+from theater.provenance import TranscriptProvenance, is_trusted_provenance, normalize_provenance
 
 logger = logging.getLogger("theater.recall.read")
 
@@ -186,7 +187,7 @@ async def _read_job(
         cwd=p.cwd,
         session_id=p.session_id,
         after=None,
-        session_exact=p.session_correlation == "exact",
+        session_exact=normalize_provenance(p.session_correlation) is TranscriptProvenance.EXACT,
         known_location=p.transcript_location,
         pane_pid=p.live_pid,
     )
@@ -210,6 +211,26 @@ async def _read_job(
         }
         return brief
 
+    if history.location is None:
+        # The source located nothing — transcript file deleted, or the
+        # opencode database has no session row.
+        brief["transcript"] = {
+            "available": False,
+            "reason": "transcript no longer exists on disk",
+        }
+        return brief
+
+    if not is_trusted_provenance(history.correlation):
+        brief["transcript"] = {
+            "available": False,
+            "reason": (
+                "session is known only from cwd/time; wait for exact/proven correlation "
+                "or bind it before reading"
+            ),
+            "error_code": "transcript_correlation_untrusted",
+        }
+        return brief
+
     if history_correlation_is_ambiguous(registry, p.id, history):
         brief["transcript"] = {
             "available": False,
@@ -218,15 +239,6 @@ async def _read_job(
                 "of the same harness shares that transcript root and cwd"
             ),
             "error_code": "transcript_correlation_ambiguous",
-        }
-        return brief
-
-    if history.location is None:
-        # The source located nothing — transcript file deleted, or the
-        # opencode database has no session row.
-        brief["transcript"] = {
-            "available": False,
-            "reason": "transcript no longer exists on disk",
         }
         return brief
 

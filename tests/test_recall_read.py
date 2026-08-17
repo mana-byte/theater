@@ -64,6 +64,7 @@ def _make_job(
     cwd: str | None = None,
     target_cwd: str | None = None,
     session_id: str | None = None,
+    session_correlation: str | None = None,
 ) -> str:
     """Create a job row and its target participant. Returns the participant id."""
     p = registry.register(
@@ -72,6 +73,9 @@ def _make_job(
         cwd=target_cwd or cwd,
         session_id=session_id,
     )
+    if session_correlation is not None or session_id is not None:
+        p.session_correlation = session_correlation or "exact"
+        registry.store.upsert_participant(p)
     store.create_job(
         type(
             "J",
@@ -244,7 +248,7 @@ async def test_job_segment_refuses_a_contested_heuristic_transcript(registry, tm
     )
 
     assert result["transcript"]["available"] is False
-    assert result["transcript"]["error_code"] == "transcript_correlation_ambiguous"
+    assert result["transcript"]["error_code"] == "transcript_correlation_untrusted"
 
 
 async def test_job_segment_missing_transcript_still_returns_metadata(registry, tmp_path):

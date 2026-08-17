@@ -107,6 +107,7 @@ from theater.harness.observation import (
 )
 from theater.harness.source import Attachment, Batch, History, Source
 from theater.models import BadRequest, Status
+from theater.provenance import TranscriptProvenance
 
 logger = logging.getLogger("theater.harness.opencode")
 
@@ -826,7 +827,13 @@ class OpenCodeSource(Source):
         return History(
             location=f"opencode://{sid}",
             events=events,
-            correlation=("exact" if self._session_exact or self._located_exact else "heuristic"),
+            correlation=(
+                str(TranscriptProvenance.EXACT)
+                if self._session_exact
+                else str(TranscriptProvenance.PROVEN)
+                if self._located_exact
+                else str(TranscriptProvenance.HEURISTIC)
+            ),
             pinned=pinned,
         )
 
@@ -1009,7 +1016,13 @@ class OpenCodeSource(Source):
                 location=f"opencode://{sid}",
                 session_id=sid,
                 skipped=row[1],
-                correlation="exact" if self._located_exact else "heuristic",
+                correlation=(
+                    str(TranscriptProvenance.EXACT)
+                    if self._session_exact
+                    else str(TranscriptProvenance.PROVEN)
+                    if self._located_exact
+                    else str(TranscriptProvenance.HEURISTIC)
+                ),
             ),
             status=status,
         )

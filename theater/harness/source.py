@@ -39,10 +39,11 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from theater.harness.base import Event
 from theater.models import Status
+from theater.provenance import TranscriptProvenance, normalize_provenance
 
 if TYPE_CHECKING:
     from theater.harness.observation import TranscriptObserver
@@ -114,10 +115,9 @@ class Attachment:
     session_id: str | None = None
     skipped: int = 0
     last_event: Event | None = None
-    #: ``exact`` means the native session id or a process-isolated root proved
-    #: ownership. ``heuristic`` means cwd/time only; the reducer refuses it
-    #: while a same-harness same-cwd competitor is alive.
-    correlation: Literal["exact", "heuristic"] = "heuristic"
+    #: See :mod:`theater.provenance`. ``heuristic`` means cwd/time only and
+    #: must not feed participant-attributed content.
+    correlation: str = str(TranscriptProvenance.HEURISTIC)
     #: Two heuristic candidates can collide only when their sources search the
     #: same namespace. Vibe uses the resolved save-directory root here: a
     #: global source cannot see a participant-isolated sibling and therefore
@@ -143,7 +143,7 @@ class History:
     events: Sequence[Event] = ()
     error_code: str | None = None
     error: str | None = None
-    correlation: Literal["exact", "heuristic"] = "heuristic"
+    correlation: str = str(TranscriptProvenance.HEURISTIC)
     collision_domain: str | None = None
     #: The location came from a prior reducer-accepted attachment rather than
     #: a fresh cwd scan. A pin prevents drift but does not upgrade heuristic
@@ -344,7 +344,9 @@ class TranscriptSource(Source):
         path, offset, index, mtime, session_id = self._pending
         self.path, self.offset, self.index, self.mtime = path, offset, index, mtime
         if session_id:
-            if self.correlation_for(path, session_id) != "exact":
+            if normalize_provenance(self.correlation_for(path, session_id)) is not (
+                TranscriptProvenance.EXACT
+            ):
                 # The id is about to be replaced by one read off a file we only
                 # guessed at. Leaving `exact_session` set would let the next
                 # question about this location answer "exact" — the id matches,
@@ -398,7 +400,7 @@ class TranscriptSource(Source):
             pinned=pinned,
         )
 
-    def correlation_for(self, path: Path, session_id: str | None) -> Literal["exact", "heuristic"]:
+    def correlation_for(self, path: Path, session_id: str | None) -> str:
         """How well *path* is known to belong to this participant.
 
         A method, and the one place both `read` and `history` ask the
@@ -417,16 +419,18 @@ class TranscriptSource(Source):
         earlier proof already persisted — so a file carrying that id is the
         right one.
         """
-        if self._exact_attachments or path in self._proven:
-            return "exact"
+        if self._exact_attachments:
+            return str(TranscriptProvenance.EXACT)
+        if path in self._proven:
+            return str(TranscriptProvenance.PROVEN)
         if (
             self._exact_session
             and self._session_id is not None
             and session_id is not None
             and session_id == self._session_id
         ):
-            return "exact"
-        return "heuristic"
+            return str(TranscriptProvenance.EXACT)
+        return str(TranscriptProvenance.HEURISTIC)
 
     def _read_all(self, path: Path) -> list[Event]:
         events: list[Event] = []
@@ -481,7 +485,9 @@ class TranscriptSource(Source):
         """
         if not self._observer.proves_ownership:
             return pinned
-        if self.correlation_for(pinned, self._observer.session_id(pinned)) == "exact":
+        if normalize_provenance(
+            self.correlation_for(pinned, self._observer.session_id(pinned))
+        ) is not TranscriptProvenance.HEURISTIC:
             return pinned
         proven = await asyncio.to_thread(self._observer.proven_transcript, cwd=self._cwd)
         if proven is None:

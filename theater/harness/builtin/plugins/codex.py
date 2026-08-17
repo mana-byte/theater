@@ -117,7 +117,6 @@ import logging
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
 
 from theater import proc
 from theater.harness.base import (
@@ -140,6 +139,7 @@ from theater.harness.observation import (
 )
 from theater.harness.source import Source, TranscriptSource
 from theater.models import BadRequest
+from theater.provenance import TranscriptProvenance
 
 logger = logging.getLogger("theater.harness.codex")
 
@@ -373,9 +373,9 @@ class _CodexSource(TranscriptSource):
         #: codex-only `proved` call does not read as a `TranscriptObserver` API.
         self._codex = observer
 
-    def correlation_for(self, path: Path, session_id: str | None) -> Literal["exact", "heuristic"]:
+    def correlation_for(self, path: Path, session_id: str | None) -> str:
         if self._codex.proved(path):
-            return "exact"
+            return str(TranscriptProvenance.PROVEN)
         return super().correlation_for(path, session_id)
 
     def commit_attachment(self) -> None:

@@ -548,6 +548,8 @@ def test_resume_true_when_harness_supports_and_session_id_exists(store, tmp_path
     """``resume: true`` when the harness can resume AND a session_id exists."""
     root = _setup_repo(tmp_path)
     p = _participant(store, cwd=root, harness="vibe", session_id="ses-1")
+    p.session_correlation = "exact"
+    store.upsert_participant(p)
     _job(store, handle="h1", target_id=p.id)
     _touch(
         store,
@@ -561,6 +563,26 @@ def test_resume_true_when_harness_supports_and_session_id_exists(store, tmp_path
     point = result["f.py"]["timeline"][0]
     assert point["resume"] is True
     assert "resume_note" not in point
+
+
+def test_resume_false_when_session_id_is_only_heuristic(store, tmp_path):
+    root = _setup_repo(tmp_path)
+    p = _participant(store, cwd=root, harness="vibe", session_id="ses-1")
+    p.session_correlation = "heuristic"
+    store.upsert_participant(p)
+    _job(store, handle="h1", target_id=p.id)
+    _touch(
+        store,
+        job_handle="h1",
+        path="f.py",
+        sha_before="aaa",
+        sha_after="bbb",
+    )
+
+    result = recall(store, paths=["f.py"], caller_cwd=root)
+    point = result["f.py"]["timeline"][0]
+    assert point["resume"] is False
+    assert "cwd/time" in point["resume_note"]
 
 
 def test_resume_false_when_no_session_id(store, tmp_path):

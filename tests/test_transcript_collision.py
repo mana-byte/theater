@@ -45,6 +45,21 @@ from theater.harness.source import Attachment, Batch, History, Source
 from theater.models import BadRequest, Status, Tier
 
 
+class _StagedSource(Source):
+    def __init__(self):
+        self.committed = False
+        self.discarded = False
+
+    async def read(self) -> Batch:
+        return Batch()
+
+    def commit_attachment(self) -> None:
+        self.committed = True
+
+    def discard_attachment(self) -> None:
+        self.discarded = True
+
+
 def _make_session(root: Path, short: str, cwd: str, *, text: str = "hello") -> Path:
     """Create a vibe session directory with meta.json and messages.jsonl."""
     d = root / f"session_20260816_191459_{short}"
@@ -339,7 +354,14 @@ async def test_exact_claim_revokes_an_earlier_heuristic_binding(collision_regist
     observer._sources[guessed.id] = guessed_source
     guessed_batch = await guessed_source.read()
     assert guessed_batch.attached.correlation == "heuristic"
-    assert observer._accept_attachment(guessed.id, guessed_source, guessed_batch)
+    guessed_source.commit_attachment()
+    observer._bound_transcripts[guessed_batch.attached.location] = guessed.id
+    observer._binding_correlation[guessed_batch.attached.location] = "heuristic"
+    observer._binding_sessions[guessed_batch.attached.location] = guessed_batch.attached.session_id
+    guessed.session_id = guessed_batch.attached.session_id
+    guessed.session_correlation = "heuristic"
+    guessed.transcript_location = guessed_batch.attached.location
+    collision_registry.store.upsert_participant(guessed)
 
     exact = collision_registry.register(
         harness="vibe",
@@ -400,14 +422,122 @@ async def test_read_transcript_refuses_a_fulgenzio_style_heuristic_swap(
         registry=collision_registry,
         observer=Observer(collision_registry, {"vibe": harness}),
     )
-    with pytest.raises(BadRequest, match="transcript_correlation_ambiguous"):
+    with pytest.raises(BadRequest, match="transcript_correlation_untrusted"):
         await methods_mod.METHODS["read_transcript"](daemon, {"id": fulgenzio.id, "last_n": 0})
 
 
-async def test_isolated_same_cwd_sibling_does_not_freeze_global_vibe_rotation(
+async def test_restored_heuristic_location_is_rejudged_after_restart(
+    collision_registry, vibe_tree
+):
+    adapter = VibeObserver(root=vibe_tree["root"])
+    observer = Observer(collision_registry, harnesses={})
+    participant = collision_registry.register(
+        harness="vibe",
+        pane=None,
+        cwd=str(vibe_tree["project"]),
+    )
+    participant.transcript_location = str(vibe_tree["transcript_b"])
+    participant.session_correlation = "heuristic"
+    collision_registry.store.upsert_participant(participant)
+    source = adapter.open_source(
+        cwd=participant.cwd,
+        known_location=participant.transcript_location,
+    )
+
+    batch = await source.read()
+
+    assert batch.attached is not None
+    assert batch.attached.location == participant.transcript_location
+    assert batch.attached.correlation == "heuristic"
+    assert not observer._accept_attachment(participant.id, source, batch)
+    assert source.path is None
+    assert collision_registry.get(participant.id).transcript_location == str(
+        vibe_tree["transcript_b"]
+    )
+
+
+def test_trusted_dead_owner_blocks_stranger_but_allows_successor(
+    collision_registry, vibe_tree
+):
+    observer = Observer(collision_registry, harnesses={})
+    dead = collision_registry.register(
+        harness="vibe",
+        pane=None,
+        cwd=str(vibe_tree["project"]),
+        session_id="aa5d2d32-1111-2222-3333",
+    )
+    dead.session_correlation = "exact"
+    dead.transcript_location = str(vibe_tree["transcript_b"])
+    collision_registry.store.upsert_participant(dead)
+    collision_registry.mark_dead(dead.id)
+
+    stranger = collision_registry.register(
+        harness="vibe",
+        pane=None,
+        cwd=str(vibe_tree["project"]),
+        session_id="other-session",
+    )
+    stranger_source = _StagedSource()
+    stranger_batch = Batch(
+        attached=Attachment(
+            location=str(vibe_tree["transcript_b"]),
+            session_id="other-session",
+            correlation="exact",
+        )
+    )
+    assert not observer._accept_attachment(stranger.id, stranger_source, stranger_batch)
+    assert stranger_source.discarded is True
+
+    successor = collision_registry.register(
+        harness="vibe",
+        pane=None,
+        cwd=str(vibe_tree["project"]),
+        session_id="aa5d2d32-1111-2222-3333",
+    )
+    successor_source = _StagedSource()
+    successor_batch = Batch(
+        attached=Attachment(
+            location=str(vibe_tree["transcript_b"]),
+            session_id="aa5d2d32-1111-2222-3333",
+            correlation="exact",
+        )
+    )
+    assert observer._accept_attachment(successor.id, successor_source, successor_batch)
+    assert successor_source.committed is True
+
+
+def test_proven_attach_does_not_downgrade_existing_exact_session_id(
+    collision_registry, vibe_tree
+):
+    observer = Observer(collision_registry, harnesses={})
+    participant = collision_registry.register(
+        harness="vibe",
+        pane=None,
+        cwd=str(vibe_tree["project"]),
+        session_id="exact-session",
+    )
+    participant.session_correlation = "exact"
+    collision_registry.store.upsert_participant(participant)
+
+    observer._on_attach(
+        participant.id,
+        Attachment(
+            location=str(vibe_tree["transcript_b"]),
+            session_id="process-proven-session",
+            correlation="proven",
+        ),
+    )
+
+    after = collision_registry.get(participant.id)
+    assert after.session_id == "exact-session"
+    assert after.session_correlation == "exact"
+    assert after.transcript_location == str(vibe_tree["transcript_b"])
+
+
+async def test_untrusted_global_vibe_rotation_is_quarantined_even_with_distinct_domain(
     collision_registry, vibe_tree, tmp_path
 ):
-    """Collision domains preserve the first Vibe process's rotation liveness."""
+    """A distinct domain avoids false sibling collisions, but does not prove ownership."""
     adapter = VibeObserver(root=vibe_tree["root"])
     observer = Observer(collision_registry, harnesses={})
     global_domain = str(vibe_tree["root"].resolve())
@@ -437,8 +567,8 @@ async def test_isolated_same_cwd_sibling_does_not_freeze_global_vibe_rotation(
     candidate = await source.refresh()
     assert candidate.attached is not None
     assert candidate.attached.correlation == "heuristic"
-    assert observer._accept_attachment(incumbent.id, source, candidate)
-    assert source.path == rotated
+    assert not observer._accept_attachment(incumbent.id, source, candidate)
+    assert source.path != rotated
 
 
 def test_distinct_persisted_locations_survive_dead_row_retention(collision_registry, vibe_tree):
@@ -633,15 +763,22 @@ async def test_accepted_rotation_commits_and_releases_the_old_binding(
     collision_registry, vibe_tree
 ):
     """A genuinely unowned rotation atomically replaces the old binding."""
-    adapter = VibeObserver(root=vibe_tree["root"])
+    adapter = VibeObserver(root=vibe_tree["root"], isolated=True)
     p = collision_registry.register(
         harness="vibe",
         pane=None,
         cwd=str(vibe_tree["project"]),
         session_id="a00bff57-1111-2222-3333",
     )
+    p.session_correlation = "exact"
+    collision_registry.store.upsert_participant(p)
     observer = Observer(collision_registry, harnesses={})
-    source = adapter.open_source(cwd=p.cwd, session_id=p.session_id, after=None)
+    source = adapter.open_source(
+        cwd=p.cwd,
+        session_id=p.session_id,
+        after=None,
+        session_exact=True,
+    )
     initial = await source.read()
     assert observer._accept_attachment(p.id, source, initial)
     old = str(vibe_tree["transcript_a"])
@@ -660,7 +797,7 @@ async def test_accepted_rotation_commits_and_releases_the_old_binding(
 
 class IncompleteAttachmentSource(Source):
     async def read(self) -> Batch:
-        return Batch(attached=Attachment("somewhere"))
+        return Batch(attached=Attachment("somewhere", correlation="exact"))
 
 
 async def test_attachment_source_without_handshake_fails_loudly(collision_registry):
@@ -685,8 +822,15 @@ async def test_attachment_check_failure_discards_the_candidate(
         cwd=str(vibe_tree["project"]),
         session_id="a00bff57-1111-2222-3333",
     )
+    p.session_correlation = "exact"
+    collision_registry.store.upsert_participant(p)
     observer = Observer(collision_registry, harnesses={})
-    source = adapter.open_source(cwd=p.cwd, session_id=p.session_id, after=None)
+    source = adapter.open_source(
+        cwd=p.cwd,
+        session_id=p.session_id,
+        after=None,
+        session_exact=True,
+    )
     batch = await source.read()
     assert batch.attached is not None
     observer._bound_transcripts[batch.attached.location] = "other"
@@ -716,7 +860,14 @@ async def test_observer_releases_binding_on_watcher_end(
     """
     from tests.test_observer import until
 
-    p_a = collision_registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
+    p_a = collision_registry.register(
+        harness="vibe",
+        pane=None,
+        cwd=str(vibe_tree["project"]),
+        session_id="aa5d2d32-1111-2222-3333",
+    )
+    p_a.session_correlation = "exact"
+    collision_registry.store.upsert_participant(p_a)
 
     assert await until(lambda: len(collision_observer._bound_transcripts) > 0, timeout=3.0)
 

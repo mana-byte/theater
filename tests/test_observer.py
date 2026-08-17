@@ -90,9 +90,11 @@ async def until(predicate, timeout: float = 5.0) -> bool:
 @pytest.fixture
 async def observing(registry, vibe_tree):
     """An observer wound tight enough to finish inside a test."""
+    harness = VibeHarness(root=vibe_tree["root"])
+    harness.observer.isolated = True
     observer = Observer(
         registry,
-        {"vibe": VibeHarness(root=vibe_tree["root"])},
+        {"vibe": harness},
         poll=0.01,
         search=0.01,
         sync=0.01,

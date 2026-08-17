@@ -178,14 +178,14 @@ async def test_the_held_rollout_wins_over_the_newest_cwd_match(monkeypatch, code
     assert found == codex_tree["a"].resolve()
 
 
-async def test_a_held_rollout_is_reported_as_exact(monkeypatch, codex_tree):
-    """Exactness is what lets the reducer accept a contested location."""
+async def test_a_held_rollout_is_reported_as_proven(monkeypatch, codex_tree):
+    """Process proof is trusted, distinct from an exact launch/session id."""
     hold(monkeypatch, {PID_A: [codex_tree["a"]]})
     reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
 
     history = await _history(reader, codex_tree["project"])
 
-    assert history.correlation == "exact"
+    assert history.correlation == "proven"
     assert history.location == str(codex_tree["a"].resolve())
 
 
@@ -209,7 +209,7 @@ async def test_two_siblings_each_read_their_own_transcript(monkeypatch, codex_tr
 
     assert [event.text for event in one.events if event.text] == ["agent A"]
     assert [event.text for event in two.events if event.text] == ["agent B"]
-    assert one.correlation == two.correlation == "exact"
+    assert one.correlation == two.correlation == "proven"
 
 
 async def test_process_evidence_outranks_a_session_id_we_were_given(monkeypatch, codex_tree):
@@ -269,7 +269,7 @@ async def test_one_source_recovers_when_the_rollout_finally_appears(monkeypatch,
     finally:
         await source.aclose()
 
-    assert second.correlation == "exact"
+    assert second.correlation == "proven"
     assert second.location == str(rollout.resolve())
 
 
@@ -425,7 +425,7 @@ async def test_a_heuristic_pin_is_replaced_by_what_the_process_holds(monkeypatch
     history = await _history(reader, codex_tree["project"], known_location=str(codex_tree["b"]))
 
     assert history.location == str(codex_tree["a"].resolve())
-    assert history.correlation == "exact"
+    assert history.correlation == "proven"
 
 
 async def test_the_watcher_restages_a_pinned_sibling_and_commits_the_proven_one(
@@ -451,7 +451,7 @@ async def test_the_watcher_restages_a_pinned_sibling_and_commits_the_proven_one(
 
         assert batch.attached is not None
         assert batch.attached.location == str(codex_tree["a"].resolve())
-        assert batch.attached.correlation == "exact"
+        assert batch.attached.correlation == "proven"
         assert source.path is None, "a candidate must not go live before the reducer accepts it"
 
         source.commit_attachment()
@@ -720,8 +720,8 @@ async def test_both_siblings_bind_and_neither_job_is_refused(
 
     assert bound[first.id] == str(codex_tree["a"].resolve())
     assert bound[second.id] == str(codex_tree["b"].resolve())
-    assert registry.get(first.id).session_correlation == "exact"
-    assert registry.get(second.id).session_correlation == "exact"
+    assert registry.get(first.id).session_correlation == "proven"
+    assert registry.get(second.id).session_correlation == "proven"
     assert registry.get(first.id).session_id == SESSION_A
     assert registry.get(second.id).session_id == SESSION_B
 

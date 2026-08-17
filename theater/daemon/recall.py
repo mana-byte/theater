@@ -35,6 +35,7 @@ from theater.daemon.blob import blob_sha
 from theater.daemon.schema import jobs, participants, touch
 from theater.daemon.store import Store
 from theater.harness import HARNESSES, supports_resume
+from theater.provenance import is_trusted_provenance
 
 #: Ceiling on ``task`` and ``result`` text in the timeline. Full text lives
 #: behind ``recall_read``, which the sibling agent owns.
@@ -78,7 +79,11 @@ def _segment_id_for_gap(path: str, before: str | None, after: str | None) -> str
     return f"gap:{path}:{_sha_or_dash(before)}..{_sha_or_dash(after)}"
 
 
-def _resume_info(harness_name: str, session_id: str | None) -> tuple[bool, str | None]:
+def _resume_info(
+    harness_name: str,
+    session_id: str | None,
+    session_correlation: str | None,
+) -> tuple[bool, str | None]:
     """Whether the caller can resume this session, and why not if not.
 
     ``resume: true`` only when the harness adapter accepts a ``resume``
@@ -94,6 +99,12 @@ def _resume_info(harness_name: str, session_id: str | None) -> tuple[bool, str |
         return False, f"harness {harness_name!r} does not support resume"
     if not session_id:
         return False, "no session id recorded"
+    if not is_trusted_provenance(session_correlation):
+        return (
+            False,
+            "session id was found only by cwd/time; wait for exact/proven correlation "
+            "or bind it before resuming",
+        )
     return True, None
 
 
@@ -196,6 +207,7 @@ def _build_timeline(
                 jobs.c.finished_at,
                 participants.c.harness,
                 participants.c.session_id,
+                participants.c.session_correlation,
                 participants.c.cwd,
                 participants.c.branch,
                 participants.c.parent_id,
@@ -249,7 +261,11 @@ def _build_timeline(
                 if len(timeline) >= depth:
                     break
 
-            resume, resume_note = _resume_info(row.harness, row.session_id)
+            resume, resume_note = _resume_info(
+                row.harness,
+                row.session_id,
+                row.session_correlation,
+            )
             point: dict = {
                 "segment": row.job_handle,
                 "sha": f"{_sha_or_dash(row.sha_before)} → {_sha_or_dash(row.sha_after)}",

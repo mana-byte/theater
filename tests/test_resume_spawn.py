@@ -15,7 +15,14 @@ import pytest
 
 from theater.daemon.spawner import Spawner, SpawnRequest
 from theater.harness import HARNESSES, Harness, LaunchPlan
-from theater.models import BadRequest
+from theater.models import BadRequest, Status
+
+
+def _trusted_resume(registry, *, harness: str, session_id: str = "sess-abc"):
+    p = registry.register(harness=harness, pane=None, cwd="/tmp", session_id=session_id)
+    p.session_correlation = "exact"
+    registry.store.upsert_participant(p)
+    return p
 
 
 class _ResumeHarness(Harness):
@@ -140,6 +147,7 @@ def drops_prompt_harness(monkeypatch):
 async def test_resume_reaches_plan_launch(registry, resume_harness, monkeypatch):
     """The session id travels from SpawnRequest through plan_launch."""
     monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    _trusted_resume(registry, harness="resume-spawn-test")
     spawner = Spawner(registry)
     req = SpawnRequest(
         harness="resume-spawn-test",
@@ -218,6 +226,7 @@ async def test_resume_without_prompt_allowed_for_dropping_harness(
     prompt to drop.
     """
     monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    _trusted_resume(registry, harness="drops-prompt-test")
     spawner = Spawner(registry)
     req = SpawnRequest(
         harness="drops-prompt-test",
@@ -228,6 +237,62 @@ async def test_resume_without_prompt_allowed_for_dropping_harness(
     )
     await spawner.spawn(req)
     assert drops_prompt_harness.seen_resume == "sess-abc"
+
+
+async def test_resume_refuses_unknown_session_id(registry, resume_harness, monkeypatch):
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="resume-spawn-test",
+        prompt="",
+        cwd="/tmp",
+        approval="edits",
+        resume="sess-abc",
+    )
+
+    with pytest.raises(BadRequest, match="no trusted"):
+        await spawner.spawn(req)
+
+
+async def test_resume_refuses_heuristic_session_id(registry, resume_harness, monkeypatch):
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    p = registry.register(
+        harness="resume-spawn-test",
+        pane=None,
+        cwd="/tmp",
+        session_id="sess-abc",
+    )
+    p.session_correlation = "heuristic"
+    registry.store.upsert_participant(p)
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="resume-spawn-test",
+        prompt="",
+        cwd="/tmp",
+        approval="edits",
+        resume="sess-abc",
+    )
+
+    with pytest.raises(BadRequest, match="no trusted"):
+        await spawner.spawn(req)
+
+
+async def test_resume_allows_trusted_dead_session(registry, resume_harness, monkeypatch):
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    p = _trusted_resume(registry, harness="resume-spawn-test")
+    registry.set_status(p.id, Status.DEAD)
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="resume-spawn-test",
+        prompt="",
+        cwd="/tmp",
+        approval="edits",
+        resume="sess-abc",
+    )
+
+    await spawner.spawn(req)
+
+    assert resume_harness.seen_resume == "sess-abc"
 
 
 async def test_resume_with_response_format_refused_before_side_effects(
