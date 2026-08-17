@@ -28,6 +28,7 @@ from shipped import OpenCodeHarness, OpenCodeObserver
 
 from theater.harness import EventKind
 from theater.models import BadRequest, Status
+from theater.provenance import TranscriptProvenance
 
 SCHEMA = """
 CREATE TABLE session (
@@ -584,9 +585,35 @@ def test_a_new_session_in_the_same_process_is_picked_up(rec, workdir, tmp_path):
     batch = asyncio.run(src.refresh())
 
     assert batch.attached.session_id == "ses_two"
+    assert batch.attached.correlation == str(TranscriptProvenance.EXACT)
     assert src._session == "ses_one", "the candidate must wait for observer acceptance"
     src.commit_attachment()
     assert src._session == "ses_two"
+
+
+def test_exact_session_without_receipt_does_not_bless_a_different_candidate(rec, workdir):
+    """A trusted stored OpenCode id is not global trust for same-cwd rows."""
+    src = OpenCodeObserver(db=rec.path).open_source_for(
+        participant_id="participant",
+        cwd=str(workdir),
+        session_id="ses_one",
+        session_provenance=TranscriptProvenance.EXACT,
+    )
+    initial = attach(src)
+    assert initial.attached.correlation == str(TranscriptProvenance.EXACT)
+    rec.conn.execute(
+        "INSERT INTO session (id, parent_id, directory, time_created) "
+        "VALUES ('ses_two', NULL, ?, 9999)",
+        (str(workdir.resolve()),),
+    )
+    rec.conn.commit()
+
+    conn = src._open()
+    assert conn is not None
+    candidate = src._attach(conn, "ses_two")
+
+    assert candidate.attached.session_id == "ses_two"
+    assert candidate.attached.correlation == str(TranscriptProvenance.HEURISTIC)
 
 
 def test_rejected_new_session_keeps_reading_the_accepted_session(rec, workdir, tmp_path):

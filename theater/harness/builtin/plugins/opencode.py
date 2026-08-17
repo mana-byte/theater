@@ -674,6 +674,7 @@ class OpenCodeSource(Source):
         self._cursor = -1
         self._pending: tuple[str, int] | None = None
         self._located_exact = False
+        self._located_receipt_sid: str | None = None
         #: message id -> role. Filled from the event stream and, for a message
         #: whose creation we skipped at attach, from the `message` table.
         self._roles: dict[str, str] = {}
@@ -703,12 +704,14 @@ class OpenCodeSource(Source):
         """Adopt the session after the observer accepts its binding."""
         if self._pending is None:
             raise RuntimeError("no opencode attachment is pending")
-        self._session, self._cursor = self._pending
+        session, cursor = self._pending
+        provenance = normalize_provenance(self._attachment_provenance(session))
+        self._session, self._cursor = session, cursor
         self._session_id = self._session
         self._known_location = f"opencode://{self._session}"
-        self._known_location_provenance = normalize_provenance(
-            self._attachment_provenance(self._session)
-        )
+        self._session_provenance = provenance
+        self._session_exact = provenance is TranscriptProvenance.EXACT
+        self._known_location_provenance = provenance
         self._pending = None
         self._roles.clear()
         self._text.clear()
@@ -728,8 +731,11 @@ class OpenCodeSource(Source):
         self._pending = None
         self._session = None
         self._session_id = None
+        self._session_provenance = TranscriptProvenance.HEURISTIC
+        self._session_exact = False
         self._known_location = None
         self._known_location_provenance = TranscriptProvenance.HEURISTIC
+        self._located_receipt_sid = None
         self._cursor = -1
         self._roles.clear()
         self._text.clear()
@@ -920,12 +926,15 @@ class OpenCodeSource(Source):
         if self._receipt is not None:
             sid = self._read_receipt()
             if sid is None:
+                self._located_exact = False
+                self._located_receipt_sid = None
                 return None
             row = conn.execute(
                 "SELECT id FROM session WHERE id = ? AND parent_id IS NULL",
                 (sid,),
             ).fetchone()
             self._located_exact = row is not None
+            self._located_receipt_sid = row[0] if row is not None else None
             return row[0] if row is not None else None
         if pinned and self._session_id:
             row = conn.execute(
@@ -933,8 +942,11 @@ class OpenCodeSource(Source):
             ).fetchone()
             if row is not None:
                 self._located_exact = self._session_exact
+                self._located_receipt_sid = None
                 return row[0]
         if not self._cwd:
+            self._located_exact = False
+            self._located_receipt_sid = None
             return None
         want = str(Path(self._cwd).resolve())
         sql = "SELECT id FROM session WHERE directory = ? AND parent_id IS NULL"
@@ -943,6 +955,7 @@ class OpenCodeSource(Source):
             sql += " AND time_created >= ?"
             args.append(int(self._after * 1000))
         self._located_exact = False
+        self._located_receipt_sid = None
         # Legacy discovery is a candidate, not an ownership claim. The reducer
         # rejects it when a same-cwd competitor makes it ambiguous.
         count_sql = sql.replace("SELECT id", "SELECT COUNT(*)")
@@ -1034,10 +1047,10 @@ class OpenCodeSource(Source):
             self._known_location_provenance
         ):
             return str(self._known_location_provenance)
-        if self._session_exact:
+        if self._located_receipt_sid == sid:
             return str(TranscriptProvenance.EXACT)
-        if self._located_exact:
-            return str(TranscriptProvenance.PROVEN)
+        if self._session_exact and self._session_id == sid:
+            return str(TranscriptProvenance.EXACT)
         return str(TranscriptProvenance.HEURISTIC)
 
     def _require_decision(self) -> None:
