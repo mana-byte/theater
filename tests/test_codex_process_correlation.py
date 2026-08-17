@@ -891,16 +891,34 @@ async def test_probe_identity_loss_populates_session_id(monkeypatch, codex_tree)
     assert evidence.session_id == SESSION_B
 
 
-async def test_probe_identity_loss_session_id_none_when_source_cannot_read_it(
-    monkeypatch, tmp_path
+async def test_probe_identity_loss_session_id_none_when_candidate_has_no_session_id(
+    monkeypatch, codex_tree, tmp_path
 ):
-    """A source whose candidate has no session_id leaves evidence.session_id as None."""
-    from theater.harness.source import IdentityLossEvidence
+    """A candidate whose session_id the observer cannot read leaves evidence.session_id None.
 
-    # The dataclass defaults session_id to None for backward compatibility.
-    evidence = IdentityLossEvidence(location="/some/path")
-    assert evidence.session_id is None
+    Not a tautological dataclass test: this exercises the real probe path,
+    confirming that ``probe_identity_loss`` populates ``session_id`` from the
+    observer's ``session_id(candidate)`` call and that a ``None`` return
+    propagates to the evidence without error.
+    """
+    # Make SESSION_A older than everything so the probe finds SESSION_B.
+    os.utime(codex_tree["a"], ns=(1_000_000_000, 1_000_000_000))
+    os.utime(codex_tree["b"], ns=(2_000_000_000, 2_000_000_000))
+    hold(monkeypatch, {PID_A: []})
+    reader = CodexObserver(
+        root=codex_tree["root"], pane_pid=PID_A, session_provenance=TranscriptProvenance.OPERATOR
+    )
+    source = reader.open_source(
+        cwd=str(codex_tree["project"]),
+        session_id=SESSION_A,
+        session_provenance=TranscriptProvenance.OPERATOR,
+        known_location=str(codex_tree["a"]),
+    )
+    initial = await source.read()
+    assert initial.attached is not None
+    source.commit_attachment()
 
-    # And can be populated when the source knows it.
-    evidence_with_sid = IdentityLossEvidence(location="/some/path", session_id="known-id")
-    assert evidence_with_sid.session_id == "known-id"
+    evidence = await source.probe_identity_loss()
+    assert evidence is not None, "probe must find the newer candidate"
+    assert evidence.location == str(codex_tree["b"].resolve())
+    assert evidence.session_id == SESSION_B

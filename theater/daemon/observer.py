@@ -572,13 +572,36 @@ class Observer:
         if not self.store.observation_error_active(pid, TRANSCRIPT_IDENTITY_LOST_CODE):
             return
         self._identity_lost.add(pid)
-        failed_at = wall_now()
+        # Use the persisted bus timestamp so a daemon restart does not reset
+        # ``failed_at`` to ``now()`` and grant endless fresh grace. The bus
+        # records the wall-clock ``ts`` of the observation error; if it is
+        # unavailable for any reason, fall back to ``now()``.
+        persisted_ts = self.store.observation_error_timestamp(pid, TRANSCRIPT_IDENTITY_LOST_CODE)
+        failed_at = persisted_ts if persisted_ts is not None else wall_now()
         self._source_errors[(pid, TRANSCRIPT_IDENTITY_LOST_CODE)] = failed_at
         # Restart replay: quarantine begins immediately, but job destruction
         # follows the same OBSERVATION_FAILURE_GRACE as other source errors.
         # A job created just before the daemon died must not be instantly
         # crashed merely because the restart replayed the audit.
+        self._sweep_identity_lost_grace(pid, failed_at)
+
+    def _sweep_identity_lost_grace(self, pid: str, failed_at: float | None = None) -> None:
+        """Re-evaluate running jobs against the identity-loss grace window.
+
+        Once a participant is quarantined, ``_watch`` takes the screen-only
+        branch forever and the normal source-error path that would crash jobs
+        after grace never runs again. This sweep closes that gap: it is called
+        on every quarantine tick and on restart replay, using the original
+        in-memory ``failed_at`` (or the persisted bus timestamp on restart)
+        so fresh jobs remain running initially but deterministically crash
+        after ``OBSERVATION_FAILURE_GRACE``.
+        """
         if self.jobs is None:
+            return
+        key = (pid, TRANSCRIPT_IDENTITY_LOST_CODE)
+        if failed_at is None:
+            failed_at = self._source_errors.get(key)
+        if failed_at is None:
             return
         now = wall_now()
         for job in self.store.running_jobs_for_target(pid):
@@ -629,34 +652,22 @@ class Observer:
             holder = self.store.get_participant(owner)
             if holder is not None and holder.status is not Status.DEAD:
                 return True
-        participant = self.store.get_participant(pid)
-        if participant is not None:
-            for other in self.registry.list():
-                if (
-                    other.id == pid
-                    or other.status is Status.DEAD
-                    or other.harness != participant.harness
-                ):
-                    continue
-                if location == other.transcript_location:
-                    return True
+        for other in self.registry.list():
+            if other.id == pid or other.status is Status.DEAD:
+                continue
+            if location == other.transcript_location:
+                return True
         return False
 
     def _session_id_bound_to_another_live(self, pid: str, session_id: str | None) -> bool:
         """Whether *session_id* is claimed by a different live participant."""
         if session_id is None:
             return False
-        participant = self.store.get_participant(pid)
-        if participant is not None:
-            for other in self.registry.list():
-                if (
-                    other.id == pid
-                    or other.status is Status.DEAD
-                    or other.harness != participant.harness
-                ):
-                    continue
-                if session_id == other.session_id and other.session_id is not None:
-                    return True
+        for other in self.registry.list():
+            if other.id == pid or other.status is Status.DEAD:
+                continue
+            if session_id == other.session_id and other.session_id is not None:
+                return True
         for loc, sid in self._binding_sessions.items():
             if sid != session_id:
                 continue
@@ -782,6 +793,7 @@ class Observer:
                         turns = TurnAccumulator()
                     if self.transcript_identity_lost(pid):
                         await self._screen_only(pid, observer, clock)
+                        self._sweep_identity_lost_grace(pid)
                         await self._sleep(self.search)
                         continue
                     batch = await source.read()
@@ -1041,16 +1053,7 @@ class Observer:
             # instantly crash a prompt created moments ago against a still-live
             # pane, and restart replay (``_restore_transcript_identity_loss``)
             # must not crash jobs that are still within their grace window.
-            now = wall_now()
-            for job in self.store.running_jobs_for_target(pid):
-                if now - max(failed_at, job.created_at) >= OBSERVATION_FAILURE_GRACE:
-                    self._finish(
-                        job.handle,
-                        batch.error or batch.error_code,
-                        error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
-                        state=JobState.CRASHED,
-                        raw_result=None,
-                    )
+            self._sweep_identity_lost_grace(pid, failed_at)
             return
         now = wall_now()
         for job in self.store.running_jobs_for_target(pid):
@@ -1079,11 +1082,15 @@ class Observer:
     def _clear_source_error_on_progress(self, pid: str, batch: Batch) -> None:
         if batch.error_code is None:
             self._clear_source_errors(pid)
-            # Semantic progress on the pinned source means the trusted pin is
-            # still alive. Reset the identity-loss confirmation counter without
-            # clearing quarantine itself (that requires an accepted attachment
-            # or operator rebind). This does not touch the three quiet timers.
-            self._reset_identity_loss_confirmation(pid)
+            # Reset the identity-loss confirmation counter only on actual source
+            # progress (semantic events, raw bookkeeping, or a fresh attachment),
+            # not merely on a clean Batch() from a normal empty poll. An empty
+            # poll has error_code None but no progress, and resetting on it
+            # would clear confirmation between every pair of 5s relocate windows,
+            # making the threshold unreachable. This does not touch the three
+            # quiet timers.
+            if batch.progressed or bool(batch.events) or batch.attached is not None:
+                self._reset_identity_loss_confirmation(pid)
 
     def _clear_source_errors(self, pid: str, *, include_identity_lost: bool = False) -> None:
         for key in [item for item in self._source_errors if item[0] == pid]:
@@ -1240,6 +1247,12 @@ class Observer:
                     )
                 clock.quiet_since = now
                 return
+            # A relocate window that found no admissible evidence — whether the
+            # probe returned None, the evidence was bound to another live
+            # participant, or the screen was not HIGH/WORKING — breaks the
+            # consecutive chain. Reset so the next qualifying window starts
+            # fresh rather than accumulating against a stale predecessor.
+            self._reset_identity_loss_confirmation(pid)
             # The relocate arm has its own throttle, just like screen and
             # rescue. In particular, a rejected candidate remains discoverable
             # on every scan; without this, staging it safely would re-read the

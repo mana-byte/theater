@@ -769,8 +769,22 @@ class Store:
         transition so a daemon restart does not forget a quarantine before the
         operator rebinds.
         """
+        return self._observation_error_row(participant_id, code) is not None
+
+    def observation_error_timestamp(self, participant_id: str, code: str) -> float | None:
+        """The wall-clock ``ts`` of the most recent uncleared observation error.
+
+        Returns ``None`` when the error is not active. Used by the observer on
+        restart replay to avoid resetting ``failed_at`` to ``now()`` — which
+        would grant endless fresh grace to a quarantine that persisted across
+        a daemon restart.
+        """
+        row = self._observation_error_row(participant_id, code)
+        return row["ts"] if row is not None else None
+
+    def _observation_error_row(self, participant_id: str, code: str) -> dict | None:
         rows = self.conn.execute(
-            select(bus.c.kind, bus.c.payload)
+            select(bus.c.kind, bus.c.payload, bus.c.ts)
             .where(bus.c.to_id == participant_id)
             .where(
                 bus.c.kind.in_(
@@ -785,20 +799,22 @@ class Store:
             )
             .order_by(bus.c.id.desc())
         ).fetchall()
-        for kind, payload in rows:
+        for row in rows:
+            kind = row.kind
+            payload = row.payload
             if kind in {
                 "agent.transcript",
                 "operator.transcript_bind",
                 "operator.transcript_unbind",
             }:
-                return False
+                return None
             try:
                 decoded = json.loads(payload or "{}")
             except ValueError:
                 continue
             if kind == "agent.transcript_receipt" and decoded.get("admission") == "accepted":
-                return False
+                return None
             found = decoded.get("code")
             if found == code:
-                return True
-        return False
+                return {"ts": row.ts, "kind": kind, "payload": decoded}
+        return None

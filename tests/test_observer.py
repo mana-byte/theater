@@ -1432,3 +1432,84 @@ async def test_identity_loss_restart_replay_crashes_old_jobs(registry, monkeypat
     job = manager.get("stale-job")
     assert job.state == "crashed"
     assert job.error_code == TRANSCRIPT_IDENTITY_LOST_CODE
+
+
+@pytest.mark.asyncio
+async def test_identity_loss_grace_sweep_transitions_running_to_crashed(registry, monkeypatch):
+    """B1: a job that survives initial quarantine is crashed by the periodic sweep.
+
+    Enter quarantine with positive grace (job stays RUNNING), then advance
+    ``failed_at`` backwards so the next sweep tick sees the grace as elapsed
+    and crashes the job. This mirrors what happens in the real watch loop:
+    the quarantine tick calls ``_sweep_identity_lost_grace`` on every iteration.
+    """
+    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 30.0)
+    observer = Observer(registry, harnesses={})
+    participant = registry.register(harness="vibe", pane="%1", cwd="/tmp")
+    manager = JobManager(registry.store)
+    observer.jobs = manager
+    manager.create(handle="sweep-job", caller_id="caller", target_id=participant.id, kind="send")
+
+    # Enter quarantine: job is fresh, grace has not elapsed.
+    observer.mark_transcript_identity_lost(participant.id, "rotation evidence")
+    assert observer.transcript_identity_lost(participant.id)
+    assert manager.get("sweep-job").state == "running"
+
+    # Simulate time passing: move the in-memory failed_at backwards AND the
+    # job's created_at backwards so the sweep sees the grace as elapsed.
+    key = (participant.id, "transcript_identity_lost")
+    observer._source_errors[key] = now() - 60.0
+    registry.store.conn.execute(
+        update(jobs_table).where(jobs_table.c.handle == "sweep-job").values(created_at=now() - 60.0)
+    )
+    registry.store.conn.commit()
+
+    # The sweep on the next quarantine tick crashes the job.
+    observer._sweep_identity_lost_grace(participant.id)
+    job = manager.get("sweep-job")
+    assert job.state == "crashed"
+    assert job.error_code == "transcript_identity_lost"
+
+
+@pytest.mark.asyncio
+async def test_identity_loss_grace_sweep_restart_uses_persisted_timestamp(
+    registry, monkeypatch, vibe_tree
+):
+    """B1: restart replay uses the persisted bus timestamp, not now(), for grace.
+
+    A daemon restart must not grant endless fresh grace by resetting
+    ``failed_at`` to ``now()``. The persisted observation-error timestamp
+    from the bus is used, so a job that predates the grace window is
+    immediately crashed on replay.
+    """
+    from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
+
+    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 0.0)
+    participant = registry.register(harness="vibe", pane="%1", cwd=str(vibe_tree["project"]))
+    participant.session_id = "deadbeef-1111-2222-3333"
+    participant.session_correlation = "operator"
+    participant.transcript_location = str(vibe_tree["transcript"])
+    registry.store.upsert_participant(participant)
+
+    first = Observer(registry, harnesses={})
+    first.mark_transcript_identity_lost(participant.id, "rotation evidence")
+
+    # Verify the bus recorded the observation error with a timestamp.
+    persisted_ts = registry.store.observation_error_timestamp(
+        participant.id, TRANSCRIPT_IDENTITY_LOST_CODE
+    )
+    assert persisted_ts is not None
+
+    manager = JobManager(registry.store)
+    manager.create(
+        handle="persisted-job", caller_id="caller", target_id=participant.id, kind="send"
+    )
+
+    restarted = Observer(registry, harnesses={}, jobs=manager)
+    restarted._restore_transcript_identity_loss(participant.id)
+
+    assert restarted.transcript_identity_lost(participant.id)
+    # The in-memory failed_at must match the persisted timestamp, not now().
+    key = (participant.id, TRANSCRIPT_IDENTITY_LOST_CODE)
+    assert restarted._source_errors[key] == persisted_ts
+    assert manager.get("persisted-job").state == "crashed"
