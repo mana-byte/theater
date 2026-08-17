@@ -40,6 +40,7 @@ from theater.daemon.observer import (
     history_correlation_is_ambiguous,
 )
 from theater.daemon.registry import Registry
+from theater.harness.builtin.plugins.vibe import ISOLATION_MARKER, isolation_marker_text
 from theater.harness.observation import ScreenKind, ScreenReading
 from theater.harness.source import Attachment, Batch, History, Source
 from theater.models import BadRequest, Status, Tier
@@ -425,6 +426,91 @@ async def test_read_transcript_refuses_a_fulgenzio_style_heuristic_swap(
     )
     with pytest.raises(BadRequest, match="transcript_correlation_untrusted"):
         await methods_mod.METHODS["read_transcript"](daemon, {"id": fulgenzio.id, "last_n": 0})
+
+
+async def test_read_transcript_reopens_vibe_isolated_domain_through_factory(
+    collision_registry, tmp_path, monkeypatch
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    domain = tmp_path / "isolated-vibe"
+    session = domain / "session_20260817_120000_sessabc1"
+    session.mkdir(parents=True)
+    (session / "meta.json").write_text(
+        json.dumps(
+            {
+                "session_id": "sessabc1-1111-2222-3333",
+                "environment": {"working_directory": str(project)},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session / "messages.jsonl").write_text(
+        json.dumps({"role": "assistant", "content": "isolated"}) + "\n",
+        encoding="utf-8",
+    )
+    participant = collision_registry.register(
+        harness="vibe",
+        pane=None,
+        cwd=str(project),
+        session_id="sessabc1-1111-2222-3333",
+    )
+    (domain / ISOLATION_MARKER).write_text(
+        isolation_marker_text(participant_id=participant.id, transcript_domain=domain),
+        encoding="utf-8",
+    )
+    participant.session_correlation = "exact"
+    participant.transcript_domain = str(domain.resolve())
+    collision_registry.store.upsert_participant(participant)
+    harness = VibeHarness(root=tmp_path / "shared-vibe")
+    monkeypatch.setitem(methods_mod.HARNESSES, "vibe", harness)
+    daemon = SimpleNamespace(
+        registry=collision_registry,
+        observer=Observer(collision_registry, {"vibe": harness}),
+    )
+
+    result = await methods_mod.METHODS["read_transcript"](
+        daemon, {"id": participant.id, "last_n": 0}
+    )
+
+    assert result["path"] == str(session / "messages.jsonl")
+    assert [event["text"] for event in result["events"]] == ["isolated"]
+
+
+async def test_read_transcript_pinned_symlink_escape_fails_closed(
+    collision_registry, tmp_path, monkeypatch
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    domain = tmp_path / "isolated-vibe"
+    domain.mkdir()
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text(json.dumps({"role": "assistant", "content": "outside"}) + "\n")
+    link = domain / "escape.jsonl"
+    link.symlink_to(outside)
+    participant = collision_registry.register(
+        harness="vibe",
+        pane=None,
+        cwd=str(project),
+        session_id="sessabc1-1111-2222-3333",
+    )
+    (domain / ISOLATION_MARKER).write_text(
+        isolation_marker_text(participant_id=participant.id, transcript_domain=domain),
+        encoding="utf-8",
+    )
+    participant.session_correlation = "operator"
+    participant.transcript_domain = str(domain.resolve())
+    participant.transcript_location = str(link)
+    collision_registry.store.upsert_participant(participant)
+    harness = VibeHarness(root=tmp_path / "shared-vibe")
+    monkeypatch.setitem(methods_mod.HARNESSES, "vibe", harness)
+    daemon = SimpleNamespace(
+        registry=collision_registry,
+        observer=Observer(collision_registry, {"vibe": harness}),
+    )
+
+    with pytest.raises(BadRequest, match="transcript no longer exists"):
+        await methods_mod.METHODS["read_transcript"](daemon, {"id": participant.id, "last_n": 0})
 
 
 async def test_restored_heuristic_location_is_rejudged_after_restart(collision_registry, vibe_tree):

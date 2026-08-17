@@ -637,6 +637,7 @@ class Observer:
             after=after,
             session_provenance=normalize_provenance(p.session_correlation),
             known_location=p.transcript_location,
+            transcript_domain=p.transcript_domain,
             pane_pid=p.live_pid,
         )
         if source.collision_domain is not None and p.transcript_domain != source.collision_domain:

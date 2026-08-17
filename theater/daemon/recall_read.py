@@ -189,6 +189,7 @@ async def _read_job(
         after=None,
         session_provenance=normalize_provenance(p.session_correlation),
         known_location=p.transcript_location,
+        transcript_domain=p.transcript_domain,
         pane_pid=p.live_pid,
     )
     try:

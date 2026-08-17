@@ -293,6 +293,7 @@ class TranscriptSource(Source):
         self._exact_attachments = exact_attachments
         self._session_provenance = normalize_provenance(session_provenance)
         self.collision_domain = collision_domain
+        self._domain_root = Path(collision_domain).resolve() if collision_domain else None
         self._known_location = Path(known_location) if known_location else None
         self._known_location_provenance = (
             self._session_provenance
@@ -398,6 +399,8 @@ class TranscriptSource(Source):
             path = await self._locate(session_id=self._session_id)
         if path is None:
             return History(pinned=pinned)
+        if not self._inside_domain(path):
+            return History(pinned=pinned)
         if pinned and not path.exists():
             # Never replace an admitted historical location with a cwd guess.
             return History(pinned=True)
@@ -430,7 +433,7 @@ class TranscriptSource(Source):
         carrying that id is the right one. Persisted proven/operator
         provenance is narrower: it trusts only the persisted known location.
         """
-        if self._exact_attachments:
+        if self._exact_attachments and self._inside_domain(path):
             return str(TranscriptProvenance.EXACT)
         if path in self._proven:
             return str(TranscriptProvenance.PROVEN)
@@ -473,15 +476,30 @@ class TranscriptSource(Source):
         if self._pending is not None:
             raise RuntimeError("attachment must be committed or discarded before reading again")
 
+    def _inside_domain(self, path: Path) -> bool:
+        if self._domain_root is None:
+            return True
+        try:
+            path.resolve().relative_to(self._domain_root)
+        except (OSError, ValueError):
+            return False
+        return True
+
     async def _locate(self, *, session_id: str | None) -> Path | None:
         if not self._cwd:
             return None
-        return await asyncio.to_thread(
+        path = await asyncio.to_thread(
             self._observer.find_transcript,
             cwd=self._cwd,
             session_id=session_id,
             after=self._after,
         )
+        if path is not None and not self._inside_domain(path):
+            logger.warning(
+                "transcript candidate %s is outside source domain %s", path, self._domain_root
+            )
+            return None
+        return path
 
     async def _upgraded(self, pinned: Path) -> Path:
         """*pinned*, unless the observer can prove a better location.
@@ -508,7 +526,7 @@ class TranscriptSource(Source):
         ):
             return pinned
         proven = await asyncio.to_thread(self._observer.proven_transcript, cwd=self._cwd)
-        if proven is None:
+        if proven is None or not self._inside_domain(proven):
             return pinned
         self._proven.add(proven)
         if proven == pinned:
@@ -528,7 +546,7 @@ class TranscriptSource(Source):
         """
         if path is None:
             path = self._known_location
-            if path is not None and not path.exists():
+            if path is not None and (not self._inside_domain(path) or not path.exists()):
                 path = None
             if path is not None:
                 path = await self._upgraded(path)
@@ -536,6 +554,8 @@ class TranscriptSource(Source):
                 path = await self._locate(session_id=self._session_id)
             if path is None:
                 return None
+        if not self._inside_domain(path):
+            return None
         size, lines, mtime, last_line = await asyncio.to_thread(attach_point, path)
         session_id = self._observer.session_id(path)
         last_event: Event | None = None

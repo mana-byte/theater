@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from theater.daemon.spawner import Spawner
 from theater.harness import HARNESSES, Harness, LaunchPlan, plan_launch
+from theater.harness.builtin.plugins.vibe import ISOLATION_MARKER, validate_isolated_domain
 from theater.models import BadRequest
 
 
@@ -27,16 +27,37 @@ def test_vibe_carries_the_id_in_an_env_override(tmp_path):
     )
 
     assert plan.argv == ["vibe", "say hello"]
-    assert plan.files == {}
+    assert list(plan.files) == [Path(plan.env["VIBE_SESSION_LOGGING__SAVE_DIR"]) / ISOLATION_MARKER]
 
     servers = json.loads(plan.env["VIBE_MCP_SERVERS"])
     assert servers[0]["name"] == "theater"
     assert servers[0]["args"] == ["mcp", "--id", "abc123"]
 
 
-def test_vibe_isolates_only_when_the_daemon_reports_a_same_cwd_sibling(tmp_path, monkeypatch):
+def test_vibe_cold_spawn_always_gets_an_isolated_transcript_domain(tmp_path, monkeypatch):
     monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
 
+    plan = plan_launch(
+        "vibe",
+        participant_id="first",
+        prompt="",
+        config_path=tmp_path / "first.json",
+        approval="manual",
+    )
+
+    save_dir = Path(plan.env["VIBE_SESSION_LOGGING__SAVE_DIR"])
+    assert save_dir.name == "first"
+    assert plan.transcript_domain == str(save_dir.resolve())
+    assert list(plan.files) == [save_dir / ISOLATION_MARKER]
+
+    save_dir.mkdir(parents=True)
+    (save_dir / ISOLATION_MARKER).write_text(plan.files[save_dir / ISOLATION_MARKER])
+    marker = validate_isolated_domain(save_dir, participant_id="first")
+    assert marker is not None
+    assert marker["transcript_domain"] == str(save_dir.resolve())
+
+
+def test_vibe_cold_spawn_ignores_the_legacy_isolation_hint(tmp_path):
     ordinary = plan_launch(
         "vibe",
         participant_id="first",
@@ -44,7 +65,7 @@ def test_vibe_isolates_only_when_the_daemon_reports_a_same_cwd_sibling(tmp_path,
         config_path=tmp_path / "first.json",
         approval="manual",
     )
-    isolated = plan_launch(
+    hinted = plan_launch(
         "vibe",
         participant_id="second",
         prompt="",
@@ -53,15 +74,15 @@ def test_vibe_isolates_only_when_the_daemon_reports_a_same_cwd_sibling(tmp_path,
         isolate_transcript=True,
     )
 
-    assert "VIBE_SESSION_LOGGING__SAVE_DIR" not in ordinary.env
-    assert ordinary.files == {}
-    save_dir = Path(isolated.env["VIBE_SESSION_LOGGING__SAVE_DIR"])
-    assert save_dir.name == "second"
-    assert isolated.transcript_domain == str(save_dir.resolve())
-    assert list(isolated.files) == [save_dir / ".theater-vibe-source"]
+    assert "VIBE_SESSION_LOGGING__SAVE_DIR" in ordinary.env
+    assert "VIBE_SESSION_LOGGING__SAVE_DIR" in hinted.env
+    assert Path(ordinary.env["VIBE_SESSION_LOGGING__SAVE_DIR"]).name == "first"
+    assert Path(hinted.env["VIBE_SESSION_LOGGING__SAVE_DIR"]).name == "second"
 
 
 def test_spawn_collision_hint_is_same_harness_and_resolved_cwd_only(registry, tmp_path):
+    from theater.daemon.spawner import Spawner
+
     project = tmp_path / "project"
     project.mkdir()
     elsewhere = tmp_path / "elsewhere"

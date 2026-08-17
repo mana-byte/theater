@@ -1182,6 +1182,7 @@ async def _read_transcript(daemon, params: dict) -> dict:
         after=after,
         session_provenance=normalize_provenance(p.session_correlation),
         known_location=p.transcript_location,
+        transcript_domain=p.transcript_domain,
         pane_pid=p.live_pid,
     )
     try:

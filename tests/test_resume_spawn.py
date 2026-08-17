@@ -15,6 +15,7 @@ import pytest
 
 from theater.daemon.spawner import Spawner, SpawnRequest
 from theater.harness import HARNESSES, Harness, LaunchPlan
+from theater.harness.builtin.plugins.vibe import ISOLATION_MARKER, isolation_marker_text
 from theater.models import BadRequest, Status
 
 
@@ -293,6 +294,73 @@ async def test_resume_allows_trusted_dead_session(registry, resume_harness, monk
     await spawner.spawn(req)
 
     assert resume_harness.seen_resume == "sess-abc"
+
+
+async def test_vibe_resume_reuses_trusted_isolated_domain(registry, tmp_path, fake_tmux):
+    project = tmp_path / "project"
+    project.mkdir()
+    domain = tmp_path / "isolated-vibe"
+    domain.mkdir()
+    transcript = domain / "session_20260817_120000_sessabc1" / "messages.jsonl"
+    transcript.parent.mkdir()
+    transcript.write_text('{"role":"assistant","content":"old"}\n', encoding="utf-8")
+    predecessor = registry.register(
+        harness="vibe",
+        pane=None,
+        cwd=str(project),
+        session_id="sessabc1-1111-2222-3333",
+    )
+    (domain / ISOLATION_MARKER).write_text(
+        isolation_marker_text(participant_id=predecessor.id, transcript_domain=domain),
+        encoding="utf-8",
+    )
+    predecessor.session_correlation = "operator"
+    predecessor.transcript_domain = str(domain.resolve())
+    predecessor.transcript_location = str(transcript)
+    registry.store.upsert_participant(predecessor)
+    registry.mark_dead(predecessor.id)
+
+    spawned = await Spawner(registry).spawn(
+        SpawnRequest(
+            harness="vibe",
+            prompt="continue",
+            cwd=str(project),
+            approval="manual",
+            resume="sessabc1-1111-2222-3333",
+        )
+    )
+
+    assert fake_tmux.windows[-1]["env"]["VIBE_SESSION_LOGGING__SAVE_DIR"] == str(domain.resolve())
+    assert registry.get(spawned.id).transcript_domain == str(domain.resolve())
+
+
+async def test_vibe_resume_refuses_legacy_shared_root(registry, tmp_path, fake_tmux):
+    project = tmp_path / "project"
+    project.mkdir()
+    shared = tmp_path / "shared-vibe"
+    shared.mkdir()
+    predecessor = registry.register(
+        harness="vibe",
+        pane=None,
+        cwd=str(project),
+        session_id="sessabc1-1111-2222-3333",
+    )
+    predecessor.session_correlation = "proven"
+    predecessor.transcript_domain = str(shared.resolve())
+    registry.store.upsert_participant(predecessor)
+
+    with pytest.raises(BadRequest, match="Rebind or migrate"):
+        await Spawner(registry).spawn(
+            SpawnRequest(
+                harness="vibe",
+                prompt="continue",
+                cwd=str(project),
+                approval="manual",
+                resume="sessabc1-1111-2222-3333",
+            )
+        )
+
+    assert fake_tmux.windows == []
 
 
 async def test_resume_with_response_format_refused_before_side_effects(

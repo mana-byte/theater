@@ -268,6 +268,7 @@ def open_participant_source(
     after: float | None = None,
     session_provenance: str | TranscriptProvenance | None = None,
     known_location: str | None = None,
+    transcript_domain: str | None = None,
     pane_pid: int | None = None,
 ) -> Source:
     """Compatibility dispatch for the optional participant-aware hook.
@@ -302,6 +303,8 @@ def open_participant_source(
             extra["session_exact"] = provenance is TranscriptProvenance.EXACT
         if "known_location" in accepted:
             extra["known_location"] = known_location
+        if "transcript_domain" in accepted:
+            extra["transcript_domain"] = transcript_domain
         if "pane_pid" in accepted:
             extra["pane_pid"] = pane_pid
         return factory(

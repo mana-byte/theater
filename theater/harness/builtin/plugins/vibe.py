@@ -37,9 +37,13 @@ quantity and is labelled as such.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import os
+import secrets
+import stat
 import tomllib
 from pathlib import Path
 from typing import Literal
@@ -120,6 +124,8 @@ _SCAN_LIMIT = 200
 #: participant's save directory is process-isolated and therefore safe to scan
 #: by cwd across Vibe's session rotations.
 ISOLATION_MARKER = ".theater-vibe-source"
+_MARKER_VERSION = 1
+_MARKER_KEY = "vibe-domain-marker.key"
 
 #: Vibe tool names that modify a file, mapped to the argument key that carries
 #: the path (`write_file.py:30`, `edit.py:35`). `grep` is excluded: its `path`
@@ -132,6 +138,94 @@ _WRITE_TOOLS: dict[str, str] = {
 _READ_TOOLS: dict[str, str] = {
     "read_file": "file_path",
 }
+
+
+def _canonical(path: Path) -> Path:
+    return path.expanduser().resolve(strict=False)
+
+
+def _marker_key() -> bytes:
+    """Daemon-local signing key for Vibe domain markers.
+
+    This is a tamper-evidence boundary for Theater's own bookkeeping, not a
+    same-UID security boundary: agents run as the same OS user and can usually
+    read anything that user can. The marker is therefore never sole proof of
+    ownership; resume still needs the daemon's trusted session provenance.
+    """
+    key_path = paths.home() / _MARKER_KEY
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        return key_path.read_bytes()
+    except FileNotFoundError:
+        key = secrets.token_bytes(32)
+        fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(key)
+        return key
+
+
+def _marker_mac(payload: dict[str, object]) -> str:
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hmac.new(_marker_key(), body, hashlib.sha256).hexdigest()
+
+
+def isolation_marker_text(*, participant_id: str, transcript_domain: Path) -> str:
+    """Signed marker content for a participant-owned Vibe transcript root."""
+    payload: dict[str, object] = {
+        "version": _MARKER_VERSION,
+        "harness": "vibe",
+        "participant_id": participant_id,
+        "transcript_domain": str(_canonical(transcript_domain)),
+        "domain_nonce": secrets.token_hex(16),
+    }
+    return json.dumps({**payload, "mac": _marker_mac(payload)}, sort_keys=True) + "\n"
+
+
+def validate_isolated_domain(
+    transcript_domain: Path, *, participant_id: str | None = None
+) -> dict[str, object] | None:
+    """Return marker data when *transcript_domain* is a Theater Vibe root.
+
+    The directory and marker must be ordinary same-owner filesystem objects,
+    and the marker content must bind the canonical path to the participant that
+    originally received the domain. A resumed successor may reuse that domain,
+    but only after the spawner has separately validated the predecessor's
+    trusted session provenance.
+    """
+    domain = _canonical(transcript_domain)
+    marker = domain / ISOLATION_MARKER
+    try:
+        domain_st = domain.lstat()
+        marker_st = marker.lstat()
+    except OSError:
+        return None
+    if not domain.is_dir() or not stat.S_ISDIR(domain_st.st_mode):
+        return None
+    if domain.is_symlink() or marker.is_symlink() or not marker.is_file():
+        return None
+    if not stat.S_ISREG(marker_st.st_mode):
+        return None
+    euid = os.geteuid() if hasattr(os, "geteuid") else None
+    if euid is not None and (domain_st.st_uid != euid or marker_st.st_uid != euid):
+        return None
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    mac = data.pop("mac", None)
+    if not isinstance(mac, str) or not hmac.compare_digest(mac, _marker_mac(data)):
+        return None
+    if data.get("version") != _MARKER_VERSION or data.get("harness") != "vibe":
+        return None
+    if data.get("transcript_domain") != str(domain):
+        return None
+    if participant_id is not None and data.get("participant_id") != participant_id:
+        return None
+    if not isinstance(data.get("domain_nonce"), str):
+        return None
+    return data
 
 
 def _extract_paths(
@@ -234,6 +328,8 @@ class VibeHarness(Harness):
     ) -> LaunchPlan:
         if approval not in APPROVALS:
             raise BadRequest(f"approval must be one of {', '.join(APPROVALS)}, got {approval!r}")
+        # Kept for the generic launch funnel; Vibe now isolates every cold spawn.
+        _ = isolate_transcript
         servers = [
             {
                 "name": SERVER_NAME,
@@ -265,24 +361,27 @@ class VibeHarness(Harness):
         # putting a child on a model nobody chose.
         env["VIBE_ACTIVE_MODEL"] = model or ""
         files: dict[Path, str] = {}
-        transcript_domain = self.observer.root.resolve()
-        if resume is None and isolate_transcript:
+        transcript_domain: Path | None = None
+        if resume is None:
             # Vibe's environment layer uses ``__`` for nested fields. Every
             # session and compaction produced by this process now lands below
             # one participant-owned root, so no cwd guess can reach a sibling.
-            # The daemon requests this only when another live Vibe already has
-            # the same cwd; the common one-Vibe-per-cwd case keeps Vibe's
-            # normal global save directory and /resume picker.
+            # Theater-spawned Vibe sessions deliberately leave the user's
+            # shared Vibe history. Resume re-enters only through the daemon's
+            # trusted predecessor validation.
             save_dir = self.observer.participant_root(participant_id)
             env["VIBE_SESSION_LOGGING__SAVE_DIR"] = str(save_dir)
-            files[save_dir / ISOLATION_MARKER] = participant_id + "\n"
-            transcript_domain = save_dir.resolve()
+            files[save_dir / ISOLATION_MARKER] = isolation_marker_text(
+                participant_id=participant_id,
+                transcript_domain=save_dir,
+            )
+            transcript_domain = _canonical(save_dir)
         return LaunchPlan(
             argv=argv,
             env=env,
             files=files,
             session_id=resume,
-            transcript_domain=str(transcript_domain),
+            transcript_domain=str(transcript_domain) if transcript_domain is not None else None,
         )
 
     def discover_models(self) -> list[str]:
@@ -335,10 +434,10 @@ class VibeHarness(Harness):
 class VibeObserver(TranscriptObserver):
     """Read `~/.vibe/logs/session/*/messages.jsonl`.
 
-    Later same-cwd Theater launches write below a participant-specific root;
-    the first keeps Vibe's machine-global history. Both relocate by cwd when
-    Vibe rotates during compaction. The reducer permits a heuristic relocation
-    only when no live same-cwd source searches the same root.
+    Theater cold launches write below a participant-specific root. Resumed
+    launches keep the trusted predecessor's root after the daemon validates
+    both the session provenance and the domain marker. Within an isolated root,
+    per-turn Vibe rotations are exact by construction.
     """
 
     def __init__(
@@ -362,6 +461,13 @@ class VibeObserver(TranscriptObserver):
     def participant_root(self, participant_id: str) -> Path:
         base = self.correlation_root or paths.home() / "observations" / "vibe"
         return base / participant_id
+
+    def _root_searchable(self) -> bool:
+        try:
+            st = self.root.lstat()
+        except OSError:
+            return False
+        return self.root.is_dir() and not self.root.is_symlink() and st.st_uid == os.geteuid()
 
     def open_source(
         self,
@@ -401,10 +507,37 @@ class VibeObserver(TranscriptObserver):
         after: float | None = None,
         session_provenance: str | TranscriptProvenance | None = None,
         known_location: str | None = None,
+        transcript_domain: str | None = None,
     ):
-        participant_root = self.participant_root(participant_id)
-        marker = participant_root / ISOLATION_MARKER
-        if marker.exists():
+        if transcript_domain is not None:
+            domain = _canonical(Path(transcript_domain))
+            if validate_isolated_domain(domain) is not None:
+                reader = VibeObserver(
+                    root=domain,
+                    correlation_root=self.correlation_root,
+                    isolated=True,
+                )
+                return reader.open_source(
+                    cwd=cwd,
+                    session_id=session_id,
+                    after=after,
+                    session_provenance=session_provenance,
+                    known_location=known_location,
+                )
+            reader = VibeObserver(
+                root=domain,
+                correlation_root=self.correlation_root,
+                isolated=False,
+            )
+            return reader.open_source(
+                cwd=cwd,
+                session_id=session_id,
+                after=after,
+                session_provenance=session_provenance,
+                known_location=known_location,
+            )
+        participant_root = _canonical(self.participant_root(participant_id))
+        if validate_isolated_domain(participant_root, participant_id=participant_id) is not None:
             reader = VibeObserver(
                 root=participant_root,
                 correlation_root=self.correlation_root,
@@ -433,7 +566,7 @@ class VibeObserver(TranscriptObserver):
         after: float | None = None,
     ) -> Path | None:
         self._cwd = cwd
-        if not self.root.is_dir():
+        if not self._root_searchable():
             return None
         if session_id:
             short = session_id.split("-")[0][:8]

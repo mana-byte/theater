@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from theater import paths
@@ -72,35 +72,7 @@ class Spawner:
         harness = get_harness(req.harness)
         if shutil.which(harness.binary) is None:
             raise BadRequest(f"{harness.binary!r} is not on PATH")
-        # Refusals before step 1: a refusal after it leaves a participant
-        # — and possibly a worktree — behind.
-        check_model(req.harness, req.model)
-        check_resume(req.harness, req.resume)
-        # A harness that accepts resume but silently drops the prompt
-        # (opencode: `-s` routes to session view, `--prompt` is only read
-        # on the home screen) must not be handed both. The spawner has no
-        # readiness detection, so injecting the prompt after startup would
-        # race the TUI and sometimes drop it. A loud refusal is better than
-        # a racy injection that fails silently.
-        if req.resume and req.prompt and not harness.resume_takes_prompt:
-            raise BadRequest(
-                f"harness {req.harness!r} cannot resume a session with a prompt; "
-                f"resume it without one and use send to deliver the task"
-            )
-        if req.resume and req.response_format and not harness.resume_takes_prompt:
-            raise BadRequest(
-                f"harness {req.harness!r} cannot resume a session with response_format; "
-                f"resume it without one and use send to deliver the task"
-            )
-        # A resumed session's transcript describes files at its original cwd;
-        # a fresh worktree points it at different files, so the transcript's
-        # path references would resolve to the wrong content.
-        if req.resume and req.worktree:
-            raise BadRequest(
-                "cannot resume into a worktree: the session's transcript "
-                "describes files that are not the worktree's files"
-            )
-        self._validate_resume_identity(req)
+        resume_domain = self._validate_before_create(req, harness)
         participant = self.registry.create_spawned(
             harness=req.harness,
             cwd=req.cwd,
@@ -159,6 +131,9 @@ class Spawner:
             resume=req.resume,
             isolate_transcript=self._has_live_cwd_sibling(participant),
         )
+        if resume_domain is not None:
+            plan.env["VIBE_SESSION_LOGGING__SAVE_DIR"] = str(resume_domain)
+            plan = replace(plan, transcript_domain=str(resume_domain))
 
         self._record_launch_identity(participant, plan)
 
@@ -206,7 +181,42 @@ class Spawner:
         participant.transcript_domain = plan.transcript_domain
         self.registry.store.upsert_participant(participant)
 
-    def _validate_resume_identity(self, req: SpawnRequest) -> None:
+    def _validate_before_create(self, req: SpawnRequest, harness) -> Path | None:
+        """Refuse unsafe launches before a participant or worktree exists."""
+        check_model(req.harness, req.model)
+        check_resume(req.harness, req.resume)
+        self._reject_unsafe_resume_shape(req, harness)
+        resume_predecessor = self._validate_resume_identity(req)
+        return self._validate_vibe_resume_domain(req, resume_predecessor)
+
+    @staticmethod
+    def _reject_unsafe_resume_shape(req: SpawnRequest, harness) -> None:
+        # A harness that accepts resume but silently drops the prompt
+        # (opencode: `-s` routes to session view, `--prompt` is only read
+        # on the home screen) must not be handed both. The spawner has no
+        # readiness detection, so injecting the prompt after startup would
+        # race the TUI and sometimes drop it. A loud refusal is better than
+        # a racy injection that fails silently.
+        if req.resume and req.prompt and not harness.resume_takes_prompt:
+            raise BadRequest(
+                f"harness {req.harness!r} cannot resume a session with a prompt; "
+                f"resume it without one and use send to deliver the task"
+            )
+        if req.resume and req.response_format and not harness.resume_takes_prompt:
+            raise BadRequest(
+                f"harness {req.harness!r} cannot resume a session with response_format; "
+                f"resume it without one and use send to deliver the task"
+            )
+        # A resumed session's transcript describes files at its original cwd;
+        # a fresh worktree points it at different files, so the transcript's
+        # path references would resolve to the wrong content.
+        if req.resume and req.worktree:
+            raise BadRequest(
+                "cannot resume into a worktree: the session's transcript "
+                "describes files that are not the worktree's files"
+            )
+
+    def _validate_resume_identity(self, req: SpawnRequest) -> Participant | None:
         """Resume only daemon-validated trusted session ids.
 
         A raw session id is just a string. Without a participant row whose
@@ -218,18 +228,60 @@ class Spawner:
         heuristic ids as non-resumable.
         """
         if req.resume is None:
-            return
+            return None
+        matches = []
         for participant in self.registry.list(include_dead=True):
             if (
                 participant.harness == req.harness
                 and participant.session_id == req.resume
                 and is_trusted_provenance(participant.session_correlation)
             ):
-                return
+                matches.append(participant)
+        if matches:
+            return max(matches, key=lambda p: (p.last_activity, p.created_at))
         raise BadRequest(
             f"cannot resume session {req.resume!r}: Theater has no trusted "
             "operator/proven/exact binding for that session id"
         )
+
+    def _validate_vibe_resume_domain(
+        self, req: SpawnRequest, predecessor: Participant | None
+    ) -> Path | None:
+        """Return the isolated root a Vibe resume may reuse, or refuse.
+
+        This deliberately sits behind ``_validate_resume_identity``. The Vibe
+        check is about whether a trusted predecessor's transcript namespace is
+        safe to reuse; it is not a second session-id validator and does not
+        require exact-only provenance.
+        """
+        if req.resume is None or req.harness != "vibe":
+            return None
+        if predecessor is None or predecessor.transcript_domain is None:
+            raise BadRequest(
+                "cannot resume Vibe session safely: predecessor has no isolated "
+                "transcript domain. Rebind or migrate the session into a Theater "
+                "isolated Vibe domain, then retry."
+            )
+        from theater.harness.builtin.plugins.vibe import validate_isolated_domain
+
+        domain = Path(predecessor.transcript_domain).expanduser().resolve(strict=False)
+        marker = validate_isolated_domain(domain, participant_id=predecessor.id)
+        if marker is None:
+            raise BadRequest(
+                "cannot resume Vibe session safely: predecessor uses a legacy or "
+                "untrusted transcript root. Rebind or migrate it into a Theater "
+                "isolated Vibe domain, then retry."
+            )
+        if predecessor.transcript_location is not None:
+            location = Path(predecessor.transcript_location)
+            try:
+                location.resolve().relative_to(domain)
+            except (OSError, ValueError) as exc:
+                raise BadRequest(
+                    "cannot resume Vibe session safely: predecessor transcript "
+                    "location is outside its isolated transcript domain"
+                ) from exc
+        return domain
 
     def _has_live_cwd_sibling(self, participant: Participant) -> bool:
         """Whether heuristic transcript discovery would share a collision key.
