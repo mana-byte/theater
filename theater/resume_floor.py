@@ -8,7 +8,7 @@ it to suppress stale pre-floor records.
 
 Encoding is structured JSON with validation, not a bare string: the four
 fields (records, size, dev, ino) are all optional, and a floor with missing
-facts is present-but-unknown. The string ``"unknown"`` distinguishes "the
+facts is present-but-unknown. The string ``UNKNOWN_FLOOR`` distinguishes "the
 spawner tried but could not capture facts" (suppress completion) from a
 ``None`` floor (cold spawn, no suppression).
 
@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from theater.harness.source import StreamPoint
+
 #: The string stored when the spawner captured a floor but could not produce
 #: file facts (non-file source, unreadable file, etc.). Distinct from ``None``
 #: (no floor at all — cold spawn) so the reducer suppresses completion rather
@@ -52,6 +53,17 @@ def encode_floor(point: StreamPoint | None) -> str:
     )
 
 
+def _valid_int(value: object) -> bool:
+    """Whether *value* is a real int (not bool) and non-negative.
+
+    ``bool`` is a subclass of ``int`` in Python, so ``isinstance(True, int)``
+    is ``True``. A JSON ``true`` decoded as a Python ``bool`` is not a valid
+    record count or byte offset, and accepting it would let a corrupt floor
+    authorise completion on a non-numeric fact.
+    """
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 def decode_floor(raw: str | None) -> StreamPoint | None:
     """Decode a persisted floor string back into a StreamPoint.
 
@@ -76,10 +88,10 @@ def decode_floor(raw: str | None) -> StreamPoint | None:
     from theater.harness.source import StreamPoint
 
     return StreamPoint(
-        records=data.get("records") if isinstance(data.get("records"), int) else None,
-        size=data.get("size") if isinstance(data.get("size"), int) else None,
-        dev=data.get("dev") if isinstance(data.get("dev"), int) else None,
-        ino=data.get("ino") if isinstance(data.get("ino"), int) else None,
+        records=data.get("records") if _valid_int(data.get("records")) else None,
+        size=data.get("size") if _valid_int(data.get("size")) else None,
+        dev=data.get("dev") if _valid_int(data.get("dev")) else None,
+        ino=data.get("ino") if _valid_int(data.get("ino")) else None,
     )
 
 
@@ -115,8 +127,11 @@ def floor_authorises_completion(
     * Non-shrunk size: the byte offset must be >= the floor's size.
     * Strictly beyond the saved record count: ``point.records > floor.records``.
 
-    A present-but-unknown floor (``floor_raw == UNKNOWN_FLOOR`` or any field
-    missing) never authorises — the reducer suppresses rather than guesses.
+    Fail-closed: **all four facts** (dev, ino, records, size) must be present
+    on **both** the floor and the point. A present-but-unknown floor
+    (``floor_raw == UNKNOWN_FLOOR`` or any field missing) never authorises.
+    Missing facts on either side refuse — the reducer suppresses rather than
+    guessing.
 
     Returns ``False`` when any guard fails or any fact is missing. Returns
     ``True`` only when every guard passes.
@@ -127,14 +142,13 @@ def floor_authorises_completion(
         return False
     if point is None:
         return False
-    if floor.dev is None or floor.ino is None:
+    # All four facts required on both sides — fail-closed on any missing.
+    if floor.dev is None or floor.ino is None or floor.records is None or floor.size is None:
         return False
-    if point.dev is None or point.ino is None:
+    if point.dev is None or point.ino is None or point.records is None or point.size is None:
         return False
     if point.dev != floor.dev or point.ino != floor.ino:
         return False
-    if floor.size is not None and point.size is not None and point.size < floor.size:
+    if point.size < floor.size:
         return False
-    if floor.records is not None and point.records is not None:
-        return point.records > floor.records
-    return True
+    return point.records > floor.records

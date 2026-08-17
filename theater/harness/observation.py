@@ -272,9 +272,10 @@ class HarnessObserver(ABC):
         (same device/inode, non-shrunk size, strictly more records).
 
         Returns ``None`` by default — a source that cannot produce file facts
-        has no floor to offer, and the reducer treats a ``None`` floor as
-        cold-spawn behaviour (no suppression). ``TranscriptObserver`` overrides
-        this for file paths.
+        has no floor to offer. The spawner encodes ``None`` as
+        ``UNKNOWN_FLOOR`` so the reducer treats it as present-but-unknown
+        (suppress completion) rather than cold spawn (no suppression).
+        ``TranscriptObserver`` overrides this for file paths.
         """
         return None
 

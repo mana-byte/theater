@@ -28,7 +28,7 @@ from theater.harness import check_model, check_resume, plan_launch
 from theater.harness import get as get_harness
 from theater.models import BadRequest, Participant, Status, TheaterError
 from theater.provenance import TranscriptProvenance, is_trusted_provenance
-from theater.resume_floor import encode_floor
+from theater.resume_floor import UNKNOWN_FLOOR, encode_floor
 from theater.tmux import client as tmux
 
 logger = logging.getLogger("theater.spawner")
@@ -373,7 +373,7 @@ class Spawner:
         """
         location = predecessor.transcript_location
         if location is None:
-            return "unknown"
+            return UNKNOWN_FLOOR
         point = harness.observer.stream_floor(location)
         return encode_floor(point)
 

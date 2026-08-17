@@ -268,6 +268,18 @@ class Store:
             update(participants).where(participants.c.id == pid).values(last_activity=now())
         )
 
+    def clear_resume_floor(self, pid: str) -> None:
+        """Clear the resume floor column without touching any other field.
+
+        A targeted single-column update, not a whole-row upsert: the caller
+        may hold a stale ``Participant`` snapshot taken before ``_settle``
+        moved status/last_activity, and replaying that snapshot would revert
+        those changes. This method writes only ``resume_floor = NULL``.
+        """
+        self.conn.execute(
+            update(participants).where(participants.c.id == pid).values(resume_floor=None)
+        )
+
     # ---- jobs ----------------------------------------------------------
 
     def create_job(self, job) -> None:

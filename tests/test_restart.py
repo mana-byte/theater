@@ -333,6 +333,8 @@ async def test_restart_identity_loss_replay_crashes_old_job(theater_home, fake_t
 
 async def test_restart_preserves_resume_floor(theater_home, fake_tmux):
     """A persisted resume floor survives daemon restart."""
+    from theater.resume_floor import UNKNOWN_FLOOR, floor_is_present
+
     d1 = Daemon(harnesses={})
     await d1.start()
     async with DaemonClient(autostart=False) as c:
@@ -340,7 +342,7 @@ async def test_restart_preserves_resume_floor(theater_home, fake_tmux):
         rows = await c.call("participants.list")
         pid = rows[0]["id"]
         p = d1.registry.store.get_participant(pid)
-        p.resume_floor = "unknown"
+        p.resume_floor = UNKNOWN_FLOOR
         d1.registry.store.upsert_participant(p)
     await d1.aclose()
 
@@ -349,5 +351,6 @@ async def test_restart_preserves_resume_floor(theater_home, fake_tmux):
     async with DaemonClient(autostart=False) as c:
         rows = await c.call("participants.list", include_dead=True)
         p = d2.registry.store.get_participant(rows[0]["id"])
-        assert p.resume_floor == "unknown"
+        assert floor_is_present(p.resume_floor)
+        assert p.resume_floor == UNKNOWN_FLOOR
     await d2.aclose()

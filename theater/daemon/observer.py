@@ -992,6 +992,17 @@ class Observer:
         elif last is not None:
             self._settle(pid, status_after(last))
 
+        # A non-attachment batch with actual source growth (events or progressed
+        # bytes from the committed cursor) is necessarily post-attach/post-launch.
+        # If a resume floor is still present from a suppressed earlier attachment,
+        # this growth proves the successor has moved beyond the floor — clear it
+        # via targeted update so the participant's own status/last_activity are
+        # not reverted. Empty or status-only polls do not clear.
+        if batch.attached is None and (batch.progressed or batch.events):
+            p_now = self.store.get_participant(pid)
+            if p_now is not None and floor_is_present(p_now.resume_floor):
+                self.store.clear_resume_floor(pid)
+
         return batch.progressed or bool(batch.events) or batch.attached is not None
 
     @staticmethod
@@ -1631,17 +1642,26 @@ class Observer:
         #
         # A resume floor suppresses both status and completion unless the
         # attachment is provably the same stream (same device/inode, non-shrunk
-        # size, strictly beyond the saved record count). The floor is a one-shot:
-        # it is cleared after the first attachment so later drained events behave
-        # normally. A floor of ``None`` (cold/adopted) preserves the fast-spawn
-        # behaviour exactly.
+        # size, strictly beyond the saved record count). The floor is NOT
+        # cleared by a suppressed or eventless first attachment: it must survive
+        # daemon restart so reattaching to the same predecessor turn_end remains
+        # suppressed. It is cleared only when (a) an attach point is authorised
+        # as provably beyond the floor, or (b) after an earlier suppressed
+        # accepted attachment, a later non-attachment batch carries actual
+        # source growth/events from the committed cursor (those bytes are
+        # necessarily post-attach/post-launch). A floor of ``None``
+        # (cold/adopted) preserves the fast-spawn behaviour exactly.
         floor_raw = p.resume_floor if p is not None else None
         if attached.last_event is not None and not floor_is_present(floor_raw):
             self._settle_from_event(pid, attached.last_event)
-        elif attached.last_event is not None:
+        elif attached.last_event is not None and floor_is_present(floor_raw):
             floor = decode_floor(floor_raw)
             if floor_authorises_completion(floor, floor_raw=floor_raw, point=attached.point):
                 self._settle_from_event(pid, attached.last_event)
+                # Authorised: the attach point proves the successor is past
+                # the floor. Clear via targeted update so status/last_activity
+                # changes made by _settle are not reverted.
+                self.store.clear_resume_floor(pid)
             else:
                 logger.info(
                     "resume floor suppresses attach-derived status for %s (floor=%s, point=%s)",
@@ -1649,12 +1669,10 @@ class Observer:
                     floor_raw,
                     attached.point,
                 )
-        # Clear the one-shot floor after the first attachment is processed,
-        # so later drained events behave normally. The floor served its
-        # purpose: it gated the attach-derived status/completion.
-        if floor_is_present(floor_raw) and p is not None:
-            p.resume_floor = None
-            self.store.upsert_participant(p)
+        # If the floor was present but the attach was suppressed or eventless,
+        # the floor is deliberately left in place. It will be cleared by the
+        # first later batch that carries actual source growth from the
+        # committed cursor (see _apply).
 
     def _settle_from_event(self, pid: str, event: Event) -> None:
         """Settle status and answer a turn from an attach-time event."""
