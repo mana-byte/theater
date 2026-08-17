@@ -1099,7 +1099,7 @@ async def test_reserve_then_launch_failure_retires_unique_worktree(repo, monkeyp
     """A unique worktree created during reserve is retired when launch fails.
 
     The reserve/launch split means the worktree exists before the pane. If
-    launch raises, ``_cleanup_failed`` must retire the worktree (remove
+    launch raises, ``cleanup_reservation`` must retire the worktree (remove
     the directory and delete the branch) and mark the participant DEAD.
     """
     import theater.daemon.spawner as spawner_mod

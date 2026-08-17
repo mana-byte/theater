@@ -128,7 +128,7 @@ class Spawner:
             session = await self._resolve_session(req.tmux_session, child_cwd)
             name = req.window_name or f"{req.harness}-{participant.id[:6]}"
         except Exception:
-            self._cleanup_failed(participant)
+            self.cleanup_reservation(participant)
             raise
 
         return Reservation(
@@ -143,10 +143,20 @@ class Spawner:
     async def launch(self, reservation: Reservation) -> Participant:
         """Create the tmux window and attach the pane to the participant.
 
-        After this returns (or raises), the invariant holds: either the pane
-        exists and the participant is addressable, or the participant is DEAD
-        and any worktree is retired. A caller that created a job between
-        ``reserve`` and ``launch`` must finish that job CRASHED if this raises.
+        Contract: on success the participant is addressable (pane attached).
+        On failure the participant is marked DEAD and any worktree retired
+        via :meth:`cleanup_reservation`, then the exception re-raises. The
+        caller is responsible for finishing any job it created CRASHED.
+
+        If ``tmux.new_window`` succeeds but ``attach_pane`` raises (e.g. a
+        database error), the pane is live in tmux but the participant record
+        has no pane id. ``cleanup_reservation`` does not kill the pane in
+        that case — it has no pane id to target. The pane becomes an
+        unmanaged pane that ``participants.unmanaged`` reports and a human
+        can kill. This is the same state a pane reaches when a participant
+        row is deleted out from under it; the unmanaged sweep is the
+        recovery path, not a panicking kill in a cleanup handler that is
+        already in an exception path.
         """
         participant = reservation.participant
         try:
@@ -159,7 +169,7 @@ class Spawner:
                 background=reservation.req.background,
             )
         except Exception:
-            self._cleanup_failed(participant)
+            self.cleanup_reservation(participant)
             raise
 
         # Best-effort: the window exists and the harness is starting, so
@@ -171,9 +181,16 @@ class Spawner:
             info = await tmux.pane_info(pane)
         except Exception:
             info = None
-        return self.registry.attach_pane(
-            participant.id, pane, pane_pid=info.pane_pid if info else None
-        )
+        try:
+            return self.registry.attach_pane(
+                participant.id, pane, pane_pid=info.pane_pid if info else None
+            )
+        except Exception:
+            # attach_pane failed after the pane was created. The pane is
+            # live but unmanaged; cleanup_reservation marks the participant
+            # DEAD but cannot kill the pane (it has no recorded pane id).
+            self.cleanup_reservation(participant)
+            raise
 
     async def spawn(self, req: SpawnRequest) -> Participant:
         """Reserve then launch in one call, for callers that do not need the gap.
@@ -245,18 +262,34 @@ class Spawner:
             plan = replace(plan, transcript_domain=str(resume_domain))
         return plan
 
-    def _cleanup_failed(self, participant: Participant) -> None:
-        """Mark a failed spawn's participant dead and retire its worktree.
+    def cleanup_reservation(self, participant: Participant) -> None:
+        """Idempotent cleanup for a failed spawn's participant and worktree.
 
-        Called from both ``reserve`` and ``launch`` when an exception will
-        propagate. The worktree is retired (directory removed, branch deleted
-        for a unique worktree, retained for a named worktree) and the
-        participant is marked DEAD. Failures inside ``retire`` are logged,
-        never raised — the caller is already raising, and refusing to mark
-        dead because git could not delete a directory would trade a leaked
-        worktree for a ghost row.
+        Called from ``reserve``, ``launch``, and the daemon's ``_spawn``
+        except block when an exception will propagate. Retires the worktree
+        (directory removed, branch deleted for a unique worktree, retained
+        for a named worktree) and marks the participant DEAD.
+
+        Idempotent: ``retire`` is already a no-op when the branch does not
+        start with the Theater prefix or the directory is gone, and
+        ``mark_dead`` is a no-op when the participant is already DEAD or
+        gone. Safe to call from both the spawner and the daemon's except
+        block without double-cleanup.
+
+        Robust: ``retire`` logs and never raises, so ``mark_dead`` always
+        runs. If ``retire`` somehow raises despite its contract, the
+        exception is caught and logged so ``mark_dead`` still runs — a
+        leaked worktree is strictly better than a ghost row the régie
+        draws forever.
         """
-        self.retire(participant, delete_branch=True)
+        try:
+            self.retire(participant, delete_branch=True)
+        except Exception:
+            logger.warning(
+                "retire raised for %s; proceeding to mark_dead",
+                participant.id,
+                exc_info=True,
+            )
         self.registry.mark_dead(participant.id)
 
     def _record_launch_identity(self, participant: Participant, plan) -> None:

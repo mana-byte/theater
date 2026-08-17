@@ -1440,11 +1440,12 @@ async def test_spawn_launch_failure_retires_worktree(
 
 
 async def test_promptless_spawn_stays_done_after_reserve_launch_split(client, fake_tmux):
-    """A promptless spawn resolves the job DONE immediately, before launch.
+    """A promptless spawn resolves the job DONE after launch succeeds.
 
-    The reserve/launch split must preserve this: the job is created after
-    reserve, finished DONE because there is no prompt, then launch creates
-    the pane. The job must not be RUNNING when launch runs.
+    The reserve/launch split must preserve the promptless semantics: the job
+    is created after reserve, launch creates the pane, and only then is the
+    job finished DONE — because a launch failure must leave the job CRASHED,
+    not DONE.
     """
     record = await client.call(
         "spawn",
@@ -1458,13 +1459,12 @@ async def test_promptless_spawn_stays_done_after_reserve_launch_split(client, fa
     assert job["error_code"] is None
 
 
-async def test_promptless_spawn_job_done_before_pane(client, fake_tmux, daemon, monkeypatch):
-    """For a promptless spawn, the job is DONE before the pane is created.
+async def test_promptless_spawn_job_running_during_launch(client, fake_tmux, daemon, monkeypatch):
+    """For a promptless spawn, the job is RUNNING (not DONE) during launch.
 
-    This is the promptless counterpart of the ordering test: the job is
-    created and immediately finished DONE in the gap between reserve and
-    launch, so the observer can never mistake a promptless spawn's turn
-    end for the answer to a job that does not exist yet.
+    The job is created after reserve and stays RUNNING while launch creates
+    the pane. It is finished DONE only after launch succeeds, so a launch
+    failure leaves the job CRASHED rather than DONE.
     """
     import theater.daemon.spawner as spawner_mod
 
@@ -1498,4 +1498,120 @@ async def test_promptless_spawn_job_done_before_pane(client, fake_tmux, daemon, 
 
     job = captured.get("job_at_launch")
     assert job is not None, "job must exist when tmux.new_window is called"
-    assert job.state == "done", "promptless spawn job must be DONE before pane launch"
+    assert job.state == "running", "promptless spawn job must be RUNNING during launch"
+
+
+async def test_jobs_create_failure_invokes_reservation_cleanup(
+    client, fake_tmux, daemon, monkeypatch
+):
+    """If jobs.create raises, the reservation's participant is cleaned up.
+
+    The daemon's ``_spawn`` must call ``cleanup_reservation`` when
+    ``jobs.create`` fails, because the spawner created the participant and
+    worktree during ``reserve`` but the job will never exist to track the
+    work. Without this cleanup the participant row and worktree directory
+    would leak.
+    """
+    from theater.daemon.spawner import Spawner
+
+    cleanup_calls: list[str] = []
+    original_cleanup = Spawner.cleanup_reservation
+
+    def spy_cleanup(self, participant):
+        cleanup_calls.append(participant.id)
+        return original_cleanup(self, participant)
+
+    monkeypatch.setattr(Spawner, "cleanup_reservation", spy_cleanup)
+
+    # Sabotage jobs.create to raise.
+    def boom_create(**kwargs):
+        raise RuntimeError("database is on fire")
+
+    monkeypatch.setattr(daemon.jobs, "create", boom_create)
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "spawn",
+            harness="vibe",
+            prompt="say hello",
+            approval="manual",
+            cwd="/tmp",
+        )
+    assert exc.value.code == "internal"
+
+    # cleanup_reservation must have been called for the participant.
+    assert len(cleanup_calls) >= 1, "cleanup_reservation must be called on jobs.create failure"
+
+    # The participant must be DEAD.
+    rows = await client.call("participants.list", include_dead=True)
+    assert len(rows) == 1
+    assert rows[0]["status"] == "dead"
+
+    # No job should exist (jobs.create raised before inserting).
+    assert daemon.jobs.get(rows[0]["id"]) is None
+
+
+async def test_promptless_launch_failure_leaves_crashed_job(client, fake_tmux, daemon, monkeypatch):
+    """A promptless spawn whose launch fails must leave the job CRASHED.
+
+    Before the fix, the promptless job was finished DONE before launch ran,
+    so a launch failure left a DONE job for a participant with no pane —
+    the caller would see a successful result for a spawn that never
+    launched. Now the DONE finish is deferred until after launch succeeds,
+    so a launch failure leaves the job CRASHED with spawn_failed.
+    """
+    import theater.daemon.spawner as spawner_mod
+
+    async def boom_new_window(**kwargs):
+        raise RuntimeError("tmux exploded")
+
+    monkeypatch.setattr(spawner_mod.tmux, "new_window", boom_new_window)
+
+    with pytest.raises(RemoteError):
+        await client.call(
+            "spawn",
+            harness="vibe",
+            prompt="",
+            approval="manual",
+            cwd="/tmp",
+        )
+
+    rows = await client.call("participants.list", include_dead=True)
+    assert len(rows) == 1
+    assert rows[0]["status"] == "dead"
+
+    pid = rows[0]["id"]
+    job = daemon.jobs.get(pid)
+    assert job is not None
+    assert job.state == "crashed", "promptless launch failure must CRASH the job, not DONE"
+    assert job.error_code == "spawn_failed"
+
+
+async def test_cleanup_reservation_is_idempotent(registry, monkeypatch):
+    """cleanup_reservation can be called twice without error.
+
+    The daemon's except block may call cleanup_reservation after launch
+    already called it. Both retire and mark_dead must be safe to call
+    twice.
+    """
+    import theater.daemon.spawner as spawner_mod
+    from theater.daemon.spawner import Spawner, SpawnRequest
+
+    monkeypatch.setattr(spawner_mod.shutil, "which", lambda b: f"/usr/bin/{b}")
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="vibe",
+        prompt="say hello",
+        cwd="/tmp",
+        approval="edits",
+    )
+    reservation = await spawner.reserve(req)
+    participant = reservation.participant
+
+    # Call cleanup twice — both must succeed.
+    spawner.cleanup_reservation(participant)
+    spawner.cleanup_reservation(participant)
+
+    p = registry.get(participant.id)
+    assert p is not None
+    assert p.status.value == "dead"
