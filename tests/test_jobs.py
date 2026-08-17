@@ -13,6 +13,14 @@ import json
 
 import pytest
 
+
+def _trust(daemon, participant_id: str) -> None:
+    participant = daemon.registry.get(participant_id)
+    participant.session_id = f"session-{participant_id}"
+    participant.session_correlation = "operator"
+    daemon.store.upsert_participant(participant)
+
+
 # ---- spawn creates a job ------------------------------------------------
 
 
@@ -167,6 +175,8 @@ async def test_await_between_two_peers_blocked_on_each_other_is_refused(client, 
 
     a = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
     b = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    _trust(daemon, a["id"])
+    _trust(daemon, b["id"])
     job = await client.call("send", target=b["id"], prompt="a asks b", caller_id=a["id"])
     # B is already blocked on A, as if mid-`await_sessions`.
     with daemon.jobs.waiting(b["id"], [a["id"]]), pytest.raises(RemoteError) as exc:
@@ -183,6 +193,8 @@ async def test_the_wait_graph_empties_when_an_await_returns(client, fake_tmux, d
     """An edge is a call in flight. A timeout ends the call, so it ends too."""
     a = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
     b = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    _trust(daemon, a["id"])
+    _trust(daemon, b["id"])
     job = await client.call("send", target=b["id"], prompt="a asks b", caller_id=a["id"])
     await client.call("jobs.await", handles=[job["handle"]], max_wait=0.05, caller_id=a["id"])
     assert daemon.jobs.wait_graph == {}

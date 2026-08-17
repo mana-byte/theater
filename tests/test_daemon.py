@@ -1211,8 +1211,12 @@ async def test_rename_rejects_taken_name_over_rpc(client, fake_tmux):
     assert exc.value.code == "name_taken"
 
 
-async def test_send_addressed_by_name_reaches_the_right_target(client, fake_tmux):
+async def test_send_addressed_by_name_reaches_the_right_target(client, fake_tmux, daemon):
     target = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    participant = daemon.registry.get(target["id"])
+    participant.session_id = "trusted-session"
+    participant.session_correlation = "operator"
+    daemon.store.upsert_participant(participant)
     job = await client.call("send", target=target["name"], prompt="hello by name")
     assert job["state"] == "running"
     assert job["target_id"] == target["id"]

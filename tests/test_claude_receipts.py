@@ -225,6 +225,60 @@ async def test_claude_receipt_rejects_dead_participant(claude_daemon, claude_cli
         )
 
 
+async def test_claude_long_idle_live_receipt_accepts_and_renews_legacy_expired_token(
+    claude_daemon, claude_client, tmp_path
+):
+    daemon, root = claude_daemon
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    _spawn_claude(daemon, cwd, pid="p-claude", token="old")
+    daemon.store.set_receipt_token("p-claude", "secret", expires_at=time.time() - 8 * 86400)
+    path = _transcript(root, "11111111-1111-4111-8111-111111111111", cwd)
+
+    await claude_client.call(
+        "claude.receipt",
+        id="p-claude",
+        token="secret",
+        session_id=path.stem,
+        transcript_path=str(path),
+    )
+
+    assert daemon.store.get_receipt_token("p-claude") == "secret"
+    payload = json.loads(daemon.store.get_meta("receipt_token:p-claude"))
+    assert "expires_at" not in payload
+
+
+async def test_claude_receipt_rejects_dead_expired_token_and_cleans_it_up(
+    claude_daemon, claude_client, tmp_path
+):
+    daemon, root = claude_daemon
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    _spawn_claude(daemon, cwd, pid="p-claude", token="secret")
+    token_file = tmp_path / "token"
+    token_file.write_text("secret")
+    daemon.store.set_receipt_token(
+        "p-claude",
+        "secret",
+        token_path=str(token_file),
+        expires_at=time.time() - 1,
+    )
+    daemon.store.set_status("p-claude", "dead")
+    path = _transcript(root, "11111111-1111-4111-8111-111111111111", cwd)
+
+    with pytest.raises(RemoteError, match="dead participant"):
+        await claude_client.call(
+            "claude.receipt",
+            id="p-claude",
+            token="secret",
+            session_id=path.stem,
+            transcript_path=str(path),
+        )
+
+    assert daemon.store.get_meta("receipt_token:p-claude") is None
+    assert not token_file.exists()
+
+
 async def test_claude_receipt_rejects_cross_participant_location(
     claude_daemon, claude_client, tmp_path
 ):
@@ -393,18 +447,21 @@ async def test_same_cwd_competitor_cannot_claim_unbound_foreign_receipt(
         )
 
 
-def test_receipt_tokens_expire_and_cleanup_token_file(store, tmp_path):
+def test_live_receipt_tokens_ignore_legacy_expiry(registry, tmp_path):
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
     token_file = tmp_path / "token"
     token_file.write_text("secret")
-    store.set_receipt_token(
-        "p-claude",
+    p = registry.create_spawned(harness="claude", cwd=str(cwd), pid="p-claude")
+    registry.store.set_receipt_token(
+        p.id,
         "secret",
         token_path=str(token_file),
         expires_at=time.time() - 1,
     )
 
-    assert store.get_receipt_token("p-claude") is None
-    assert not token_file.exists()
+    assert registry.store.get_receipt_token(p.id) == "secret"
+    assert token_file.exists()
 
 
 def test_mark_dead_removes_receipt_token_file(registry, tmp_path):

@@ -21,10 +21,15 @@ import pytest
 from theater.protocol import RemoteError
 
 
-async def _target(client, fake_tmux, *, pane="%1", command="vibe", pid=4242):
+async def _target(client, fake_tmux, daemon, *, pane="%1", command="vibe", pid=4242):
     """An addressable vibe participant sitting in a pane that really exists."""
     fake_tmux.add_pane(pane, command=command, pid=pid)
-    return await client.call("hello", harness="vibe", pane=pane, cwd="/tmp")
+    target = await client.call("hello", harness="vibe", pane=pane, cwd="/tmp")
+    participant = daemon.registry.get(target["id"])
+    participant.session_id = f"session-{target['id']}"
+    participant.session_correlation = "operator"
+    daemon.store.upsert_participant(participant)
+    return target
 
 
 def _refusals(daemon):
@@ -34,9 +39,9 @@ def _refusals(daemon):
 # --- the pane is gone -------------------------------------------------------
 
 
-async def test_send_into_a_closed_pane_is_refused(client, fake_tmux):
+async def test_send_into_a_closed_pane_is_refused(client, fake_tmux, daemon):
     """The CLI exited and took its window with it."""
-    target = await _target(client, fake_tmux)
+    target = await _target(client, fake_tmux, daemon)
     fake_tmux.remove_pane("%1")
 
     with pytest.raises(RemoteError) as exc:
@@ -48,7 +53,7 @@ async def test_send_into_a_closed_pane_is_refused(client, fake_tmux):
 
 async def test_a_closed_pane_marks_the_participant_dead(client, fake_tmux, daemon):
     """tmux is the witness, so the conclusion is safe to act on."""
-    target = await _target(client, fake_tmux)
+    target = await _target(client, fake_tmux, daemon)
     fake_tmux.remove_pane("%1")
 
     with pytest.raises(RemoteError):
@@ -58,7 +63,7 @@ async def test_a_closed_pane_marks_the_participant_dead(client, fake_tmux, daemo
 
 
 async def test_a_closed_pane_records_its_reason_on_the_bus(client, fake_tmux, daemon):
-    target = await _target(client, fake_tmux)
+    target = await _target(client, fake_tmux, daemon)
     fake_tmux.remove_pane("%1")
 
     with pytest.raises(RemoteError):
@@ -69,7 +74,7 @@ async def test_a_closed_pane_records_its_reason_on_the_bus(client, fake_tmux, da
 
 async def test_no_job_is_reserved_for_a_refused_send(client, fake_tmux, daemon):
     """The gate runs before the reservation, so nothing is left to clean up."""
-    target = await _target(client, fake_tmux)
+    target = await _target(client, fake_tmux, daemon)
     fake_tmux.remove_pane("%1")
 
     with pytest.raises(RemoteError):
@@ -84,7 +89,7 @@ async def test_no_job_is_reserved_for_a_refused_send(client, fake_tmux, daemon):
 async def test_a_respawned_pane_is_refused(client, fake_tmux, daemon):
     """Same pane id, different process. tmux never recycles ids, but
     `respawn-pane` keeps one and replaces everything behind it."""
-    target = await _target(client, fake_tmux, pid=4242)
+    target = await _target(client, fake_tmux, daemon, pid=4242)
     daemon.registry.attach_pane(target["id"], "%1", pane_pid=4242)
     fake_tmux.add_pane("%1", command="vibe", pid=9999)
 
@@ -97,7 +102,7 @@ async def test_a_respawned_pane_is_refused(client, fake_tmux, daemon):
 
 
 async def test_a_respawned_pane_marks_the_participant_dead(client, fake_tmux, daemon):
-    target = await _target(client, fake_tmux, pid=4242)
+    target = await _target(client, fake_tmux, daemon, pid=4242)
     daemon.registry.attach_pane(target["id"], "%1", pane_pid=4242)
     fake_tmux.add_pane("%1", command="vibe", pid=9999)
 
@@ -109,7 +114,7 @@ async def test_a_respawned_pane_marks_the_participant_dead(client, fake_tmux, da
 
 
 async def test_a_matching_epoch_delivers(client, fake_tmux, daemon):
-    target = await _target(client, fake_tmux, pid=4242)
+    target = await _target(client, fake_tmux, daemon, pid=4242)
     daemon.registry.attach_pane(target["id"], "%1", pane_pid=4242)
 
     await client.call("send", target=target["id"], prompt="hi")
@@ -120,7 +125,7 @@ async def test_a_matching_epoch_delivers(client, fake_tmux, daemon):
 async def test_a_missing_epoch_skips_the_pid_check(client, fake_tmux, daemon):
     """`hello` records no epoch. That must not make a live agent unreachable:
     an unknown pid is an absence of evidence, not evidence of replacement."""
-    target = await _target(client, fake_tmux, pid=4242)
+    target = await _target(client, fake_tmux, daemon, pid=4242)
     assert daemon.registry.get(target["id"]).pid is None
 
     await client.call("send", target=target["id"], prompt="hi")
@@ -133,7 +138,7 @@ async def test_a_missing_epoch_skips_the_pid_check(client, fake_tmux, daemon):
 
 async def test_a_shell_at_the_prompt_is_refused(client, fake_tmux, daemon):
     """The bug this whole phase exists for."""
-    target = await _target(client, fake_tmux, command="vibe")
+    target = await _target(client, fake_tmux, daemon, command="vibe")
     fake_tmux.add_pane("%1", command="zsh", pid=4242)
 
     with pytest.raises(RemoteError) as exc:
@@ -147,7 +152,7 @@ async def test_a_shell_at_the_prompt_is_refused(client, fake_tmux, daemon):
 async def test_a_dead_harness_does_not_mark_the_participant_dead(client, fake_tmux, daemon):
     """`ps` is the only witness here, and a `ps` that lied would cost a human
     an unexplained resurrection. Refuse, but leave the record alone."""
-    target = await _target(client, fake_tmux, command="vibe")
+    target = await _target(client, fake_tmux, daemon, command="vibe")
     fake_tmux.add_pane("%1", command="zsh", pid=4242)
 
     with pytest.raises(RemoteError):
@@ -156,7 +161,9 @@ async def test_a_dead_harness_does_not_mark_the_participant_dead(client, fake_tm
     assert daemon.registry.get(target["id"]).status.value != "dead"
 
 
-async def test_a_shell_with_the_harness_still_below_it_delivers(client, fake_tmux, monkeypatch):
+async def test_a_shell_with_the_harness_still_below_it_delivers(
+    client, fake_tmux, daemon, monkeypatch
+):
     """An agent running its own bash tool puts a shell in the foreground.
 
     That is the false positive the shell check would cause on its own, and
@@ -166,7 +173,7 @@ async def test_a_shell_with_the_harness_still_below_it_delivers(client, fake_tmu
     """
     import theater.daemon.methods as methods_mod
 
-    target = await _target(client, fake_tmux, command="vibe")
+    target = await _target(client, fake_tmux, daemon, command="vibe")
     fake_tmux.add_pane("%1", command="zsh", pid=4242)
     monkeypatch.setattr(methods_mod, "detect_harness", lambda cmd, pid: "vibe")
 
@@ -177,7 +184,7 @@ async def test_a_shell_with_the_harness_still_below_it_delivers(client, fake_tmu
 
 async def test_a_different_harness_in_the_seat_is_refused(client, fake_tmux, daemon):
     """The user quit vibe and started claude in the same pane."""
-    target = await _target(client, fake_tmux, command="vibe")
+    target = await _target(client, fake_tmux, daemon, command="vibe")
     fake_tmux.add_pane("%1", command="claude", pid=4242)
 
     with pytest.raises(RemoteError) as exc:
@@ -209,7 +216,7 @@ async def test_the_gate_runs_before_the_presence_check(client, fake_tmux, daemon
     """A pane that is not the target's is not worth scraping for a human."""
     import theater.daemon.methods as methods_mod
 
-    target = await _target(client, fake_tmux)
+    target = await _target(client, fake_tmux, daemon)
     fake_tmux.remove_pane("%1")
 
     async def human_here(pane_id):
@@ -232,7 +239,7 @@ async def test_the_gate_fails_open_when_tmux_errors(client, fake_tmux, daemon, m
     """
     from theater.tmux import client as tmux_client
 
-    target = await _target(client, fake_tmux)
+    target = await _target(client, fake_tmux, daemon)
 
     async def broken(session=None):
         raise RuntimeError("tmux server gone")
@@ -245,10 +252,10 @@ async def test_the_gate_fails_open_when_tmux_errors(client, fake_tmux, daemon, m
     assert _refusals(daemon) == []
 
 
-async def test_the_gate_is_skipped_when_tmux_is_unavailable(client, fake_tmux, monkeypatch):
+async def test_the_gate_is_skipped_when_tmux_is_unavailable(client, fake_tmux, daemon, monkeypatch):
     from theater.tmux import client as tmux_client
 
-    target = await _target(client, fake_tmux)
+    target = await _target(client, fake_tmux, daemon)
     monkeypatch.setattr(tmux_client, "available", lambda: False)
 
     await client.call("send", target=target["id"], prompt="hi")

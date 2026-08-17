@@ -241,6 +241,12 @@ class HumanPresent(TheaterError):
     code = "human_present"
 
 
+class TranscriptUntrusted(TheaterError):
+    """A send would require attributing a transcript that is not yet trusted."""
+
+    code = "transcript_untrusted"
+
+
 class AwaitingDecision(TheaterError):
     """The pane is showing an approval or trust modal, and typing would answer it.
 

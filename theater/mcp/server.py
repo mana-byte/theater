@@ -299,7 +299,9 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
 
         Fails with `human_present` if a human is detected at the target
         pane — never inject into a session a human is using. Fails with
-        `busy` if the target is already processing a send prompt.
+        `busy` if the target is already processing a send prompt. Fails with
+        `transcript_untrusted` for an adopted transcript-backed target that
+        still needs an operator/proven/exact transcript binding.
         """
         return await tools.send_prompt(
             session,

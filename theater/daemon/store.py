@@ -58,7 +58,6 @@ BASELINE = "0001"
 #: against this rather than hardcoding a revision string.
 HEAD = "0008"
 RECEIPT_TOKEN_PREFIX = "receipt_token:"
-RECEIPT_TOKEN_TTL = 7 * 24 * 60 * 60
 
 
 def _set_pragmas(dbapi_connection, _record) -> None:
@@ -389,20 +388,24 @@ class Store:
         token_path: str | None = None,
         expires_at: float | None = None,
     ) -> None:
-        payload = {
+        payload: dict[str, object] = {
             "token": token,
             "token_path": token_path,
-            "expires_at": expires_at if expires_at is not None else now() + RECEIPT_TOKEN_TTL,
         }
+        if expires_at is not None:
+            # Legacy field. Token validity is now tied to participant liveness,
+            # but retaining explicit old values lets cleanup tests exercise
+            # migrated metadata without inventing another shape.
+            payload["expires_at"] = expires_at
         self.set_meta(f"{RECEIPT_TOKEN_PREFIX}{participant_id}", json.dumps(payload))
 
     def get_receipt_token(self, participant_id: str) -> str | None:
+        participant = self.get_participant(participant_id)
+        if participant is None or participant.status is Status.DEAD:
+            self.delete_receipt_token(participant_id)
+            return None
         payload = self._receipt_token_payload(participant_id)
         if payload is None:
-            return None
-        expires = payload.get("expires_at")
-        if isinstance(expires, int | float) and expires <= now():
-            self.delete_receipt_token(participant_id)
             return None
         token = payload.get("token")
         return token if isinstance(token, str) else None
@@ -436,13 +439,10 @@ class Store:
             select(meta.c.key, meta.c.value).where(meta.c.key.like(f"{RECEIPT_TOKEN_PREFIX}%"))
         ).fetchall()
         deleted = 0
-        for key, raw in rows:
+        for key, _raw in rows:
             participant_id = key.removeprefix(RECEIPT_TOKEN_PREFIX)
-            payload = self._decode_receipt_token(raw)
-            expires = payload.get("expires_at") if payload is not None else None
             participant = self.get_participant(participant_id)
-            expired = isinstance(expires, int | float) and expires <= now()
-            if participant is not None and participant.status is not Status.DEAD and not expired:
+            if participant is not None and participant.status is not Status.DEAD:
                 continue
             self.delete_receipt_token(participant_id)
             deleted += 1

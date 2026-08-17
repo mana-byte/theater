@@ -26,7 +26,7 @@ from theater.daemon import worktree as worktree_mod
 from theater.daemon.registry import Registry
 from theater.harness import check_model, check_resume, plan_launch
 from theater.harness import get as get_harness
-from theater.models import BadRequest, Participant, TheaterError
+from theater.models import BadRequest, Participant, Status, TheaterError
 from theater.provenance import TranscriptProvenance, is_trusted_provenance
 from theater.tmux import client as tmux
 
@@ -253,19 +253,30 @@ class Spawner:
         """
         if req.resume is None:
             return None
-        matches = []
+        live_matches = []
+        dead_matches = []
         for participant in self.registry.list(include_dead=True):
             if (
                 participant.harness == req.harness
                 and participant.session_id == req.resume
                 and is_trusted_provenance(participant.session_correlation)
             ):
-                matches.append(participant)
-        if matches:
-            return max(matches, key=lambda p: (p.last_activity, p.created_at))
+                if participant.status is Status.DEAD:
+                    dead_matches.append(participant)
+                else:
+                    live_matches.append(participant)
+        if live_matches:
+            live = max(live_matches, key=lambda p: (p.last_activity, p.created_at))
+            raise BadRequest(
+                f"cannot resume session {req.resume!r}: trusted owner {live.id} is still "
+                "live. Use send to deliver work to the live participant, or wait for it "
+                "to die before resuming the session."
+            )
+        if dead_matches:
+            return max(dead_matches, key=lambda p: (p.last_activity, p.created_at))
         raise BadRequest(
             f"cannot resume session {req.resume!r}: Theater has no trusted "
-            "operator/proven/exact binding for that session id"
+            "dead operator/proven/exact binding for that session id"
         )
 
     def _validate_vibe_resume_domain(

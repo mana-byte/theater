@@ -16,13 +16,21 @@ import pytest
 from theater.daemon.spawner import Spawner, SpawnRequest
 from theater.harness import HARNESSES, Harness, LaunchPlan
 from theater.harness.builtin.plugins.vibe import ISOLATION_MARKER, isolation_marker_text
-from theater.models import BadRequest, Status
+from theater.models import BadRequest
 
 
-def _trusted_resume(registry, *, harness: str, session_id: str = "sess-abc"):
+def _trusted_resume(
+    registry,
+    *,
+    harness: str,
+    session_id: str = "sess-abc",
+    live: bool = False,
+):
     p = registry.register(harness=harness, pane=None, cwd="/tmp", session_id=session_id)
     p.session_correlation = "exact"
     registry.store.upsert_participant(p)
+    if not live:
+        registry.mark_dead(p.id)
     return p
 
 
@@ -280,8 +288,7 @@ async def test_resume_refuses_heuristic_session_id(registry, resume_harness, mon
 
 async def test_resume_allows_trusted_dead_session(registry, resume_harness, monkeypatch):
     monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
-    p = _trusted_resume(registry, harness="resume-spawn-test")
-    registry.set_status(p.id, Status.DEAD)
+    _trusted_resume(registry, harness="resume-spawn-test")
     spawner = Spawner(registry)
     req = SpawnRequest(
         harness="resume-spawn-test",
@@ -294,6 +301,22 @@ async def test_resume_allows_trusted_dead_session(registry, resume_harness, monk
     await spawner.spawn(req)
 
     assert resume_harness.seen_resume == "sess-abc"
+
+
+async def test_resume_refuses_live_trusted_session_id(registry, resume_harness, monkeypatch):
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    p = _trusted_resume(registry, harness="resume-spawn-test", live=True)
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="resume-spawn-test",
+        prompt="",
+        cwd="/tmp",
+        approval="edits",
+        resume="sess-abc",
+    )
+
+    with pytest.raises(BadRequest, match=f"trusted owner {p.id} is still live"):
+        await spawner.spawn(req)
 
 
 async def test_vibe_resume_reuses_trusted_isolated_domain(registry, tmp_path, fake_tmux):
@@ -386,6 +409,57 @@ async def test_vibe_resume_can_repeat_from_successor(registry, tmp_path, fake_tm
     assert registry.get(second.id).transcript_domain == str(domain)
 
 
+async def test_vibe_resume_refuses_live_successor_even_with_dead_lineage(
+    registry, tmp_path, fake_tmux
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    spawner = Spawner(registry)
+
+    cold = await spawner.spawn(
+        SpawnRequest(
+            harness="vibe",
+            prompt="start",
+            cwd=str(project),
+            approval="manual",
+        )
+    )
+    cold = registry.get(cold.id)
+    assert cold.transcript_domain is not None
+    domain = Path(cold.transcript_domain)
+    transcript = domain / "session_20260817_120000_sessabc1" / "messages.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text('{"role":"assistant","content":"cold"}\n', encoding="utf-8")
+    cold.session_id = "sessabc1-1111-2222-3333"
+    cold.session_correlation = "exact"
+    cold.transcript_location = str(transcript)
+    registry.store.upsert_participant(cold)
+    registry.mark_dead(cold.id)
+
+    live = await spawner.spawn(
+        SpawnRequest(
+            harness="vibe",
+            prompt="resume once",
+            cwd=str(project),
+            approval="manual",
+            resume="sessabc1-1111-2222-3333",
+        )
+    )
+
+    with pytest.raises(BadRequest, match=f"trusted owner {live.id} is still live"):
+        await spawner.spawn(
+            SpawnRequest(
+                harness="vibe",
+                prompt="resume twice",
+                cwd=str(project),
+                approval="manual",
+                resume="sessabc1-1111-2222-3333",
+            )
+        )
+
+    assert len(fake_tmux.windows) == 2
+
+
 async def test_vibe_resume_refuses_unrelated_trusted_row_for_marked_domain(
     registry, tmp_path, fake_tmux
 ):
@@ -415,6 +489,7 @@ async def test_vibe_resume_refuses_unrelated_trusted_row_for_marked_domain(
     unrelated.session_correlation = "exact"
     unrelated.transcript_domain = str(domain.resolve())
     registry.store.upsert_participant(unrelated)
+    registry.mark_dead(unrelated.id)
 
     with pytest.raises(BadRequest, match="different Theater session lineage"):
         await Spawner(registry).spawn(
@@ -444,6 +519,7 @@ async def test_vibe_resume_refuses_legacy_shared_root(registry, tmp_path, fake_t
     predecessor.session_correlation = "proven"
     predecessor.transcript_domain = str(shared.resolve())
     registry.store.upsert_participant(predecessor)
+    registry.mark_dead(predecessor.id)
 
     with pytest.raises(BadRequest, match="Rebind or migrate"):
         await Spawner(registry).spawn(

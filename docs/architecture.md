@@ -84,7 +84,7 @@ system.
 | Tier | How it got here | Identity | Addressable |
 |---|---|---|---|
 | `SPAWNED` | the daemon created the pane | by construction | yes |
-| `ADOPTED` | pre-existing pane, self-registered | self-reported, trusted | yes |
+| `ADOPTED` | pre-existing pane, self-registered | pane known; transcript untrusted until bound/proven | yes |
 | `EXTERNAL` | no pane at all | self-reported | **never** |
 
 `Participant.addressable` is not a permission flag. It is a physical statement:
@@ -119,6 +119,32 @@ records always carry the field but may initially report it as null. A later
 has completed. Like the rest of the machine-wide participant list, session ids
 follow Theater's single-user trust model; they are routing metadata, not
 authorization tokens.
+
+Transcript identity has its own provenance ladder:
+
+- `heuristic` — cwd/time or newest matching transcript; useful for candidates,
+  never enough to attribute text to a participant.
+- `operator` — a same-UID operator ran `theater bind <id> <candidate>
+  --confirm-id <id>` after inspecting `theater candidates <id>`.
+- `proven` — the daemon matched process-local evidence, such as Codex process
+  correlation, to the participant.
+- `exact` — the daemon constructed or received exact evidence: spawn/resume
+  session ids, Claude lifecycle receipts, or equivalent process receipts.
+
+Spawned sessions are trusted by construction where the launch plan supplies
+identity. Adopted Claude, Vibe, OpenCode, and unproven Codex sessions are not:
+the observer may keep screen-only status live, but `send` and `read_transcript`
+refuse with `transcript_untrusted`/correlation errors until provenance reaches
+operator/proven/exact. This is deliberate recovery workflow, not a missing
+autobind. A same-UID process that can run `theater` can bind, just as it can
+kill; the stable-id confirmation protects against operator mistakes, not a
+malicious local user.
+
+Resume is also provenance-gated. A session id may be resumed only when Theater
+has a trusted owner row for that harness/session id and every trusted owner for
+that id is dead. A live participant's session id is refused even when exact:
+live work goes through `send`, while resume continues dead sessions without two
+processes appending to the same harness session.
 
 ---
 
@@ -322,6 +348,19 @@ The observer always attaches at **EOF** and records how many records it
 skipped. A session that has been running for an hour before adoption does not
 replay an hour of history onto the bus. `skipped_records` appears in the
 `agent.transcript` bus event so the gap is explicit rather than silent.
+
+Claude spawned sessions get launch-local `SessionStart` and `PreCompact` hooks
+that call `theater claude-receipt` with a private token file. The token is
+valid for the lifetime of the live participant, not for a wall-clock TTL; death
+and GC delete the token and token file. `SessionStart` covers cold starts and
+post-compaction locations, while `PreCompact` records the old transcript before
+Claude rotates.
+
+Vibe cold spawns get a Theater-owned isolated transcript save directory with a
+signed marker naming the original participant. Resumes may re-enter that domain
+only through a trusted dead predecessor row whose session lineage matches the
+marker. This keeps repeat Vibe resumes out of the user's shared history without
+allowing an unrelated trusted row to claim the marker.
 
 ### Status derivation — three signals, three failure policies
 

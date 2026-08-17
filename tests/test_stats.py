@@ -181,6 +181,10 @@ async def test_a_refused_send_is_recorded_on_the_bus(
 ):
     """A refusal leaves no job, so without this it leaves no trace at all."""
     target = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    participant = daemon.registry.get(target["id"])
+    participant.session_id = "trusted-session"
+    participant.session_correlation = "operator"
+    daemon.store.upsert_participant(participant)
 
     if setup == "human":
         import theater.daemon.methods as methods_mod
@@ -210,6 +214,10 @@ async def test_an_unaddressable_target_is_recorded(client, daemon, fake_tmux):
 
 async def test_a_delivered_send_records_no_refusal(client, daemon, fake_tmux):
     target = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    participant = daemon.registry.get(target["id"])
+    participant.session_id = "trusted-session"
+    participant.session_correlation = "operator"
+    daemon.store.upsert_participant(participant)
     await client.call("send", target=target["id"], prompt="hi")
     assert daemon.store.refusal_counts() == {}
 

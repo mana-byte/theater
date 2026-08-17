@@ -53,6 +53,7 @@ from theater.models import (
     StaleTarget,
     Status,
     Tier,
+    TranscriptUntrusted,
     new_id,
     now,
 )
@@ -442,6 +443,7 @@ async def _claude_receipt(daemon, params: dict) -> dict:
     if participant.harness != "claude":
         raise BadRequest("claude receipt id does not name a Claude participant")
     if participant.status is Status.DEAD:
+        daemon.store.delete_receipt_token(pid)
         raise BadRequest("claude receipt id names a dead participant")
     expected = daemon.store.get_receipt_token(pid)
     if expected is None or not hmac.compare_digest(token, expected):
@@ -1108,6 +1110,27 @@ async def _check_approval_modal(daemon, target, refuse: Callable[..., NoReturn])
         )
 
 
+def _check_adopted_transcript_trust(target, refuse: Callable[..., NoReturn]) -> None:
+    """Refuse sends to adopted transcript harnesses before attribution is trusted."""
+    if target.tier is not Tier.ADOPTED or is_trusted_provenance(target.session_correlation):
+        return
+    harness = HARNESSES.get(normalize(target.harness))
+    if harness is None or not harness.observer.has_transcript:
+        return
+    pid = target.id
+    refuse(
+        TranscriptUntrusted(
+            f"participant {pid!r} is adopted, but its transcript identity is not yet "
+            "operator/proven/exact. Screen-only status observation remains live, but "
+            "Theater will not create a send job until attribution is trusted. Run "
+            f"`theater candidates {pid}` to inspect candidates, then "
+            f"`theater bind {pid} <candidate> --confirm-id {pid}` for the candidate "
+            "you verified."
+        ),
+        reason="transcript_untrusted",
+    )
+
+
 @method("send")
 async def _send(daemon, params: dict) -> dict:
     """Send a prompt to an already-running agent by pasting into its pane."""
@@ -1141,6 +1164,8 @@ async def _send(daemon, params: dict) -> dict:
 
     # Costs a capture-pane, so runs after the cheaper presence check.
     await _check_approval_modal(daemon, target, refuse)
+
+    _check_adopted_transcript_trust(target, refuse)
 
     # Busy is any running job that carried a prompt — a spawn prompt
     # occupies the pane exactly as a send does. Status is deliberately not

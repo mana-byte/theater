@@ -36,6 +36,16 @@ Theater lets agents running in different harnesses — Claude Code, Codex, Vibe 
 
 **Status lifecycle:** `idle` ↔ `working` ↔ `awaiting_input` → `dead`
 
+**Transcript provenance:** Theater labels session identity as `heuristic`
+(cwd/time only), `operator` (same-UID `theater bind`), `proven` (daemon-side
+process proof), or `exact` (spawn/receipt proof). Spawned participants get their
+Theater id and pane by construction; adopted participants start with only a pane
+and must not have transcript text attributed from a mere cwd guess. For
+transcript-backed adopted Claude, Vibe, OpenCode, and unproven Codex sessions,
+`send` and `read_transcript` are refused until provenance is
+operator/proven/exact. Screen-only status observation still runs before binding,
+so the tree can show working/idle while the operator recovers attribution.
+
 ---
 
 ## Requirements
@@ -169,6 +179,19 @@ Register the current pane as a Theater participant (for agents you started by ha
 theater adopt
 theater adopt --harness claude  # override harness detection
 ```
+
+Adoption is deliberately not transcript trust. To recover an adopted session,
+list candidates and bind the one you inspected:
+
+```sh
+theater candidates <id>
+theater bind <id> <candidate> --confirm-id <id>
+```
+
+`bind` is same-UID operator authority, like `kill`: a process that can run
+`theater` or speak the daemon socket can invoke it. The `--confirm-id` stable id
+check is there to prevent accidental name/alias binding, not to authenticate a
+human.
 
 ### `theater harnesses`
 
@@ -453,6 +476,12 @@ Each agent harness connects to Theater by running `theater mcp` as a stdio MCP s
 }
 ```
 
+For Theater-spawned Claude sessions, the launch plan also layers local
+`SessionStart` and `PreCompact` hooks that call `theater claude-receipt` with a
+private token file. The token is not a seven-day lease; it is valid while the
+participant is live and is deleted when the participant dies or GC removes the
+orphaned credential.
+
 Once connected, the agent has access to these tools:
 
 ### `whoami`
@@ -472,7 +501,14 @@ cwd:         working directory (defaults to caller's cwd)
 worktree:    true for an isolated git worktree; a string for a named shared linked worktree; false/omitted for none
 base_branch: branch to base the worktree on; for a named worktree, set at first creation
 model:       model the child runs on; omit for the CLI's own default
+resume:      trusted session id to continue; only allowed when the trusted owner row is dead
 ```
+
+Live resume is refused even for exact/proven/operator session ids. A live
+participant should receive work through `send`; resuming is for continuing a
+session after its previous owner is dead. Vibe resumes reuse Theater's signed
+isolated transcript domain marker, so repeat resumes work through dead
+successor rows without returning to the user's shared Vibe history.
 
 ### `list_models`
 The models `spawn_session` will accept for each spawnable harness. Answered by the daemon, which is what enforces the list — `theater models` reads the file on disk, and the two differ until a `theater restart`.
@@ -486,7 +522,7 @@ supported:  whether the adapter can select a model at all
 An empty `models` is the default and is not a dead end: spawn without `model` and the child comes up on its own CLI's default. `supported: false` cannot be fixed by config.
 
 ### `send`
-Delivers a prompt to an already-running addressable agent mid-session. Returns a handle for `await_sessions`. Fails with `human_present` if a human is at the target pane, or `busy` if the target is already handling a send.
+Delivers a prompt to an already-running addressable agent mid-session. Returns a handle for `await_sessions`. Fails with `human_present` if a human is at the target pane, `busy` if the target is already handling a send, or `transcript_untrusted` for an adopted transcript-backed target that still needs `theater candidates` / `theater bind`.
 
 ### `await_sessions`
 Blocks until ANY of the given handles reaches a terminal state, or `max_wait` seconds elapse — it does not wait for all handles. If any handle is already terminal, returns immediately. Returns one entry per requested handle with state (`done` | `crashed` | `killed` | `running`) and an error code if applicable. Process the terminal entries; re-await the still-running ones to keep waiting for them. The agent-facing reply drops prompt and result text — use `read_transcript` for the full content.
@@ -500,6 +536,10 @@ last_n:     number of events to return (0 = all); default 5
 ```
 
 Returns events with `role`, `text` (full), `tool_name`, and `turn_end`.
+
+For adopted sessions this is intentionally refused until the transcript is
+operator/proven/exact. That is part of the same recovery workflow as `send`: the
+operator binds first, then attribution-bearing reads are allowed.
 
 ### `register_pane`
 Makes the calling agent addressable by registering its tmux pane. Only needed if `whoami` reports tier `external` while the agent is actually inside tmux. The returned participant record includes the nullable, asynchronously discovered `session_id`.
