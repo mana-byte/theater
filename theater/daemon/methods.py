@@ -37,6 +37,7 @@ from theater.harness import HARNESSES, describe, normalize, supports_model
 from theater.harness.observation import (
     ScreenConfidence,
     ScreenKind,
+    enumerate_transcript_candidates,
     open_participant_source,
 )
 from theater.models import (
@@ -1384,7 +1385,12 @@ async def _transcript_candidates(daemon, params: dict) -> dict:
     if harness is None:
         raise BadRequest(f"cannot enumerate candidates: harness {p.harness!r} is not known")
     after = p.created_at if p.tier is Tier.SPAWNED else None
-    rows = harness.observer.transcript_candidates(cwd=p.cwd, after=after)
+    rows = enumerate_transcript_candidates(
+        harness.observer,
+        cwd=p.cwd,
+        domain=p.transcript_domain,
+        after=after,
+    )
     return {"id": p.id, "candidates": [_candidate_to_dict(daemon, row) for row in rows]}
 
 

@@ -610,15 +610,22 @@ class VibeObserver(TranscriptObserver):
         self,
         *,
         cwd: str | None,
+        domain: str | None = None,
         after: float | None = None,
     ) -> list[TranscriptCandidate]:
-        if not self.root.is_dir():
+        root = _canonical(Path(domain)) if domain else self.root.resolve()
+        if not root.is_dir():
             return []
         want = str(Path(cwd).resolve()) if cwd else None
-        domain = str(self.root.resolve())
+        resolved_domain = str(root)
         rows = [
-            self._candidate_row(d / "messages.jsonl", want=want, after=after, domain=domain)
-            for d in self.root.glob("session_*")
+            self._candidate_row(
+                d / "messages.jsonl",
+                want=want,
+                after=after,
+                domain=resolved_domain,
+            )
+            for d in root.glob("session_*")
         ]
         return sorted(rows, key=lambda c: (c.mtime or 0, c.location), reverse=True)
 

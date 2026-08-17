@@ -630,9 +630,12 @@ class OpenCodeObserver(HarnessObserver):
         self,
         *,
         cwd: str | None,
+        domain: str | None = None,
         after: float | None = None,
     ) -> list[TranscriptCandidate]:
         if not self.db.exists() or not cwd:
+            return []
+        if domain is not None and domain != f"opencode://{self.db.resolve()}":
             return []
         want = str(Path(cwd).resolve())
         try:

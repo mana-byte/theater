@@ -595,15 +595,17 @@ class CodexObserver(TranscriptObserver):
         self,
         *,
         cwd: str | None,
+        domain: str | None = None,
         after: float | None = None,
     ) -> list[TranscriptCandidate]:
-        if not self.root.is_dir():
+        root = Path(domain).resolve() if domain else self.root.resolve()
+        if not root.is_dir():
             return []
         want = str(Path(cwd).resolve()) if cwd else None
-        domain = str(self.root.resolve())
+        resolved_domain = str(root)
         rows = [
-            self._candidate_row(path, want=want, after=after, domain=domain)
-            for path in self.root.glob("*/*/*/rollout-*.jsonl")
+            self._candidate_row(path, want=want, after=after, domain=resolved_domain)
+            for path in root.glob("*/*/*/rollout-*.jsonl")
         ]
         return sorted(rows, key=lambda c: (c.mtime or 0, c.location), reverse=True)
 
@@ -646,7 +648,7 @@ class CodexObserver(TranscriptObserver):
             )
         if after is not None and getattr(st, "st_birthtime", st.st_ctime) < after:
             reason = "created before participant floor"
-        elif not self._is_rollout_shape(path):
+        elif not self._is_rollout_shape(path, root=Path(domain)):
             reason = "harness shape mismatch"
         elif session_id is None:
             reason = "unextractable session id"
@@ -665,11 +667,11 @@ class CodexObserver(TranscriptObserver):
             domain=domain,
         )
 
-    def _is_rollout_shape(self, path: Path) -> bool:
+    def _is_rollout_shape(self, path: Path, *, root: Path | None = None) -> bool:
         if path.suffix != ".jsonl" or _STEM.match(path.stem) is None:
             return False
         try:
-            relative = path.resolve().relative_to(self.root.resolve())
+            relative = path.resolve().relative_to((root or self.root).resolve())
         except (OSError, ValueError):
             return False
         return len(relative.parts) == 4

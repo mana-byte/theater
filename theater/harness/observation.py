@@ -263,6 +263,7 @@ class HarnessObserver(ABC):
         self,
         *,
         cwd: str | None,
+        domain: str | None = None,
         after: float | None = None,
     ) -> list[TranscriptCandidate]:
         """Operator recovery candidates, explicitly not participant-attributed content."""
@@ -278,6 +279,21 @@ class HarnessObserver(ABC):
     ) -> TranscriptCandidate:
         """Validate an operator-named candidate before the daemon persists trust."""
         raise ValueError(f"{type(self).__name__} has no operator-bindable transcript")
+
+
+def enumerate_transcript_candidates(
+    observer: HarnessObserver,
+    *,
+    cwd: str | None,
+    domain: str | None = None,
+    after: float | None = None,
+) -> list[TranscriptCandidate]:
+    """Compatibility dispatch for operator transcript candidate enumeration."""
+    accepted = inspect.signature(observer.transcript_candidates).parameters
+    extra: dict[str, Any] = {}
+    if "domain" in accepted:
+        extra["domain"] = domain
+    return observer.transcript_candidates(cwd=cwd, after=after, **extra)
 
 
 def open_participant_source(

@@ -370,15 +370,17 @@ class ClaudeCodeObserver(TranscriptObserver):
         self,
         *,
         cwd: str | None,
+        domain: str | None = None,
         after: float | None = None,
     ) -> list[TranscriptCandidate]:
-        if not self.root.is_dir():
+        root = Path(domain).resolve() if domain else self.root.resolve()
+        if not root.is_dir():
             return []
         want = str(Path(cwd).resolve()) if cwd else None
         rows: list[TranscriptCandidate] = []
-        domain = str(self.root.resolve())
-        for path in self.root.glob("*/*.jsonl"):
-            rows.append(self._candidate_row(path, want=want, after=after, domain=domain))
+        resolved_domain = str(root)
+        for path in root.glob("*/*.jsonl"):
+            rows.append(self._candidate_row(path, want=want, after=after, domain=resolved_domain))
         return sorted(rows, key=lambda c: (c.mtime or 0, c.location), reverse=True)
 
     def admit_operator_candidate(
@@ -420,7 +422,7 @@ class ClaudeCodeObserver(TranscriptObserver):
             )
         if after is not None and getattr(st, "st_birthtime", st.st_ctime) < after:
             reason = "created before participant floor"
-        elif path.suffix != ".jsonl" or path.parent.parent.resolve() != self.root.resolve():
+        elif path.suffix != ".jsonl" or path.parent.parent.resolve() != Path(domain).resolve():
             reason = "harness shape mismatch"
         elif session_id is None:
             reason = "unextractable session id"

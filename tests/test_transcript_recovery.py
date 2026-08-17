@@ -14,6 +14,7 @@ from shipped import ClaudeCodeObserver, CodexObserver, OpenCodeObserver, VibeHar
 from theater.daemon import methods
 from theater.daemon.registry import Registry
 from theater.harness import HARNESSES
+from theater.harness.builtin.plugins.vibe import ISOLATION_MARKER, isolation_marker_text
 from theater.models import BadRequest
 
 OPENCODE_SCHEMA = """
@@ -152,6 +153,42 @@ def test_older_candidate_remains_listed_after_newer_foreign_file(tmp_path):
     assert any(row.rejection_reason == "cwd mismatch" for row in rows)
 
 
+def test_vibe_isolated_candidate_enumeration_uses_participant_domain(
+    registry: Registry, tmp_path, monkeypatch
+):
+    global_root = tmp_path / "global-vibe"
+    isolated = tmp_path / "isolated-vibe"
+    global_root.mkdir()
+    isolated.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    global_candidate = _vibe_session(global_root, "global01", project, text="GLOBAL")
+    isolated_candidate = _vibe_session(isolated, "isolate1", project, text="ISOLATED")
+    p = registry.register(harness="vibe", pane="%1", cwd=str(project))
+    (isolated / ISOLATION_MARKER).write_text(
+        isolation_marker_text(participant_id=p.id, transcript_domain=isolated),
+        encoding="utf-8",
+    )
+    p.transcript_domain = str(isolated.resolve())
+    registry.store.upsert_participant(p)
+    monkeypatch.setitem(HARNESSES, "vibe", VibeHarness(root=global_root))
+
+    result = asyncio.run(methods._transcript_candidates(_daemon(registry), {"id": p.id}))
+    locations = {row["location"] for row in result["candidates"]}
+
+    assert str(isolated_candidate.resolve()) in locations
+    assert str(global_candidate.resolve()) not in locations
+    assert "ISOLATED" not in json.dumps(result)
+    assert all(row["owner"] is None and row["tombstone"] is None for row in result["candidates"])
+    with pytest.raises(BadRequest, match="outside"):
+        asyncio.run(
+            methods._transcript_bind(
+                _daemon(registry),
+                {"id": p.id, "candidate": str(global_candidate), "confirm_id": p.id},
+            )
+        )
+
+
 def test_operator_candidate_validation_rejects_bad_paths(tmp_path):
     root = tmp_path / "vibe"
     root.mkdir()
@@ -204,6 +241,40 @@ def test_claude_bind_admission_validates_shape_cwd_domain_and_floor(tmp_path):
         observer.admit_operator_candidate(cwd=str(project), candidate=str(outside))
     with pytest.raises(ValueError, match="created before participant floor"):
         observer.admit_operator_candidate(cwd=str(project), candidate=str(good), after=10**12)
+
+
+def test_claude_receipt_bound_candidate_conflicts_with_operator_bind(
+    registry: Registry, tmp_path, monkeypatch
+):
+    root = tmp_path / "claude"
+    root.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    candidate = _claude_transcript(root, "receipt-owned", project)
+    monkeypatch.setitem(
+        HARNESSES,
+        "claude",
+        SimpleNamespace(observer=ClaudeCodeObserver(root=root)),
+    )
+    owner = registry.register(harness="claude", pane="%1", cwd=str(project))
+    target = registry.register(harness="claude", pane="%2", cwd=str(project))
+    registry.store.record_transcript_receipt(
+        owner.id,
+        session_id="receipt-owned",
+        transcript_location=str(candidate.resolve()),
+    )
+
+    rows = asyncio.run(methods._transcript_candidates(_daemon(registry), {"id": target.id}))
+    found = next(row for row in rows["candidates"] if row["location"] == str(candidate.resolve()))
+    assert found["owner"] == owner.id
+
+    with pytest.raises(BadRequest, match="already owned"):
+        asyncio.run(
+            methods._transcript_bind(
+                _daemon(registry),
+                {"id": target.id, "candidate": str(candidate), "confirm_id": target.id},
+            )
+        )
 
 
 def test_codex_bind_admission_validates_shape_cwd_domain_and_floor(tmp_path):
