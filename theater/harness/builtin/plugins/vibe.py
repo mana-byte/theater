@@ -66,6 +66,7 @@ from theater.harness.observation import (
     TranscriptObserver,
 )
 from theater.models import BadRequest
+from theater.provenance import TranscriptProvenance
 
 logger = logging.getLogger("theater.harness.vibe")
 
@@ -368,7 +369,7 @@ class VibeObserver(TranscriptObserver):
         cwd: str | None,
         session_id: str | None = None,
         after: float | None = None,
-        session_exact: bool = False,
+        session_provenance: str | TranscriptProvenance | None = None,
         known_location: str | None = None,
     ):
         """Give every source its own parser state, including its cwd."""
@@ -386,7 +387,7 @@ class VibeObserver(TranscriptObserver):
             after=after,
             allow_refresh=True,
             exact_attachments=reader.isolated,
-            exact_session=session_exact,
+            session_provenance=session_provenance,
             collision_domain=str(reader.root.resolve()),
             known_location=known_location,
         )
@@ -398,7 +399,7 @@ class VibeObserver(TranscriptObserver):
         cwd: str | None,
         session_id: str | None = None,
         after: float | None = None,
-        session_exact: bool = False,
+        session_provenance: str | TranscriptProvenance | None = None,
         known_location: str | None = None,
     ):
         participant_root = self.participant_root(participant_id)
@@ -413,14 +414,14 @@ class VibeObserver(TranscriptObserver):
                 cwd=cwd,
                 session_id=session_id,
                 after=after,
-                session_exact=session_exact,
+                session_provenance=session_provenance,
                 known_location=known_location,
             )
         return self.open_source(
             cwd=cwd,
             session_id=session_id,
             after=after,
-            session_exact=session_exact,
+            session_provenance=session_provenance,
             known_location=known_location,
         )
 

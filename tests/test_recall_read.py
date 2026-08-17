@@ -12,11 +12,13 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
 from shipped import VibeHarness
 from sqlalchemy import insert, select
 
 from theater.daemon.recall_read import read_segment
 from theater.daemon.schema import touch
+from theater.provenance import TranscriptProvenance
 
 # ---- helpers -------------------------------------------------------------
 
@@ -74,7 +76,7 @@ def _make_job(
         session_id=session_id,
     )
     if session_correlation is not None or session_id is not None:
-        p.session_correlation = session_correlation or "exact"
+        p.session_correlation = session_correlation or str(TranscriptProvenance.EXACT)
         registry.store.upsert_participant(p)
     store.create_job(
         type(
@@ -233,7 +235,7 @@ async def test_job_segment_refuses_a_contested_heuristic_transcript(registry, tm
     )
     domain = str(root.resolve())
     target = registry.get(target_id)
-    target.session_correlation = "heuristic"
+    target.session_correlation = str(TranscriptProvenance.HEURISTIC)
     target.transcript_domain = domain
     registry.store.upsert_participant(target)
     sibling = registry.register(harness="vibe", pane=None, cwd=str(project))
@@ -242,6 +244,73 @@ async def test_job_segment_refuses_a_contested_heuristic_transcript(registry, tm
 
     result = await read_segment(
         "ambiguous-vibe",
+        store=registry.store,
+        registry=registry,
+        cwd=str(tmp_path),
+    )
+
+    assert result["transcript"]["available"] is False
+    assert result["transcript"]["error_code"] == "transcript_correlation_untrusted"
+
+
+@pytest.mark.parametrize(
+    "provenance",
+    [TranscriptProvenance.PROVEN, TranscriptProvenance.OPERATOR],
+)
+async def test_job_segment_trusts_restored_location_after_restart(registry, tmp_path, provenance):
+    """A short-lived recall source reopens persisted trusted provenance."""
+    root, project, sid, transcript = _vibe_session(tmp_path)
+    from theater import harness as harness_mod
+
+    harness_mod.HARNESSES["vibe"] = VibeHarness(root=root)
+    _append(transcript, {"role": "assistant", "content": str(provenance)})
+    target_id = _make_job(
+        registry.store,
+        registry,
+        handle=f"restored-{provenance}",
+        target_cwd=str(project),
+        session_id=sid,
+        session_correlation=str(provenance),
+    )
+    target = registry.get(target_id)
+    target.transcript_location = str(transcript)
+    registry.store.upsert_participant(target)
+
+    result = await read_segment(
+        f"restored-{provenance}",
+        store=registry.store,
+        registry=registry,
+        cwd=str(tmp_path),
+    )
+
+    assert result["transcript"]["available"] is True
+    assert result["transcript"]["events"][0]["text"] == str(provenance)
+
+
+@pytest.mark.parametrize(
+    "provenance",
+    [TranscriptProvenance.PROVEN, TranscriptProvenance.OPERATOR],
+)
+async def test_job_segment_does_not_apply_restored_trust_without_location(
+    registry, tmp_path, provenance
+):
+    """Persisted trusted provenance is scoped to its bound transcript path."""
+    root, project, sid, transcript = _vibe_session(tmp_path)
+    from theater import harness as harness_mod
+
+    harness_mod.HARNESSES["vibe"] = VibeHarness(root=root)
+    _append(transcript, {"role": "assistant", "content": "same id, unbound path"})
+    _make_job(
+        registry.store,
+        registry,
+        handle=f"unbound-{provenance}",
+        target_cwd=str(project),
+        session_id=sid,
+        session_correlation=str(provenance),
+    )
+
+    result = await read_segment(
+        f"unbound-{provenance}",
         store=registry.store,
         registry=registry,
         cwd=str(tmp_path),

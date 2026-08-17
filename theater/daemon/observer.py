@@ -635,9 +635,7 @@ class Observer:
             cwd=p.cwd,
             session_id=p.session_id,
             after=after,
-            session_exact=(
-                normalize_provenance(p.session_correlation) is TranscriptProvenance.EXACT
-            ),
+            session_provenance=normalize_provenance(p.session_correlation),
             known_location=p.transcript_location,
             pane_pid=p.live_pid,
         )
@@ -1023,9 +1021,9 @@ class Observer:
             return True
         decided = False
         try:
-            if attached.correlation == "heuristic" and self._has_cwd_competitor(
-                pid, attached.collision_domain
-            ):
+            if attached.correlation == str(
+                TranscriptProvenance.HEURISTIC
+            ) and self._has_cwd_competitor(pid, attached.collision_domain):
                 participant = self.store.get_participant(pid)
                 logger.warning(
                     "refusing heuristic transcript %s for %s: another live %s "
@@ -1058,7 +1056,9 @@ class Observer:
             if owner is not None and owner != pid:
                 holder = self.store.get_participant(owner)
                 if holder is not None and holder.status is not Status.DEAD:
-                    prior = self._binding_correlation.get(attached.location, "exact")
+                    prior = self._binding_correlation.get(
+                        attached.location, str(TranscriptProvenance.EXACT)
+                    )
                     if is_trusted_provenance(attached.correlation) and not (
                         is_trusted_provenance(prior)
                     ):
@@ -1227,9 +1227,7 @@ class Observer:
                 p.session_correlation = attached.correlation
                 changed = True
             elif (
-                session_id
-                and p.session_correlation != attached.correlation
-                and can_update_identity
+                session_id and p.session_correlation != attached.correlation and can_update_identity
             ):
                 p.session_correlation = attached.correlation
                 changed = True

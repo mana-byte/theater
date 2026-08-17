@@ -107,7 +107,11 @@ from theater.harness.observation import (
 )
 from theater.harness.source import Attachment, Batch, History, Source
 from theater.models import BadRequest, Status
-from theater.provenance import TranscriptProvenance
+from theater.provenance import (
+    TranscriptProvenance,
+    is_trusted_provenance,
+    normalize_provenance,
+)
 
 logger = logging.getLogger("theater.harness.opencode")
 
@@ -535,7 +539,7 @@ class OpenCodeObserver(HarnessObserver):
         cwd: str | None,
         session_id: str | None = None,
         after: float | None = None,
-        session_exact: bool = False,
+        session_provenance: str | TranscriptProvenance | None = None,
         known_location: str | None = None,
     ) -> Source:
         """Use an exact process receipt when this participant launched with one.
@@ -559,7 +563,7 @@ class OpenCodeObserver(HarnessObserver):
             after=after,
             participant_id=participant_id,
             receipt=receipt_path,
-            session_exact=session_exact,
+            session_provenance=session_provenance,
             known_location=known_location,
         )
 
@@ -646,15 +650,21 @@ class OpenCodeSource(Source):
         after: float | None = None,
         participant_id: str | None = None,
         receipt: Path | None = None,
-        session_exact: bool = False,
+        session_provenance: str | TranscriptProvenance | None = None,
         known_location: str | None = None,
     ) -> None:
         self._db = db
         self._cwd = cwd
         #: Set after an accepted attach, so a later re-open can use the sharper key.
         self._session_id = session_id
-        self._session_exact = session_exact
+        self._session_provenance = normalize_provenance(session_provenance)
+        self._session_exact = self._session_provenance is TranscriptProvenance.EXACT
         self._known_location = known_location
+        self._known_location_provenance = (
+            self._session_provenance
+            if self._known_location is not None
+            else TranscriptProvenance.HEURISTIC
+        )
         self._after = after
         self._participant_id = participant_id
         self._receipt = receipt
@@ -696,6 +706,9 @@ class OpenCodeSource(Source):
         self._session, self._cursor = self._pending
         self._session_id = self._session
         self._known_location = f"opencode://{self._session}"
+        self._known_location_provenance = normalize_provenance(
+            self._attachment_provenance(self._session)
+        )
         self._pending = None
         self._roles.clear()
         self._text.clear()
@@ -716,6 +729,7 @@ class OpenCodeSource(Source):
         self._session = None
         self._session_id = None
         self._known_location = None
+        self._known_location_provenance = TranscriptProvenance.HEURISTIC
         self._cursor = -1
         self._roles.clear()
         self._text.clear()
@@ -827,13 +841,7 @@ class OpenCodeSource(Source):
         return History(
             location=f"opencode://{sid}",
             events=events,
-            correlation=(
-                str(TranscriptProvenance.EXACT)
-                if self._session_exact
-                else str(TranscriptProvenance.PROVEN)
-                if self._located_exact
-                else str(TranscriptProvenance.HEURISTIC)
-            ),
+            correlation=self._attachment_provenance(sid),
             pinned=pinned,
         )
 
@@ -1016,16 +1024,21 @@ class OpenCodeSource(Source):
                 location=f"opencode://{sid}",
                 session_id=sid,
                 skipped=row[1],
-                correlation=(
-                    str(TranscriptProvenance.EXACT)
-                    if self._session_exact
-                    else str(TranscriptProvenance.PROVEN)
-                    if self._located_exact
-                    else str(TranscriptProvenance.HEURISTIC)
-                ),
+                correlation=self._attachment_provenance(sid),
             ),
             status=status,
         )
+
+    def _attachment_provenance(self, sid: str) -> str:
+        if self._known_location == f"opencode://{sid}" and is_trusted_provenance(
+            self._known_location_provenance
+        ):
+            return str(self._known_location_provenance)
+        if self._session_exact:
+            return str(TranscriptProvenance.EXACT)
+        if self._located_exact:
+            return str(TranscriptProvenance.PROVEN)
+        return str(TranscriptProvenance.HEURISTIC)
 
     def _require_decision(self) -> None:
         if self._pending is not None:

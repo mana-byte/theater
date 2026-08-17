@@ -26,7 +26,7 @@ from theater.daemon.registry import Registry
 from theater.harness import check_model, check_resume, plan_launch
 from theater.harness import get as get_harness
 from theater.models import BadRequest, Participant, TheaterError
-from theater.provenance import is_trusted_provenance
+from theater.provenance import TranscriptProvenance, is_trusted_provenance
 from theater.tmux import client as tmux
 
 logger = logging.getLogger("theater.spawner")
@@ -202,7 +202,7 @@ class Spawner:
             return
         if plan.session_id is not None:
             participant.session_id = plan.session_id
-            participant.session_correlation = "exact"
+            participant.session_correlation = str(TranscriptProvenance.EXACT)
         participant.transcript_domain = plan.transcript_domain
         self.registry.store.upsert_participant(participant)
 

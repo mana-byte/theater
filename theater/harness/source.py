@@ -43,7 +43,11 @@ from typing import TYPE_CHECKING
 
 from theater.harness.base import Event
 from theater.models import Status
-from theater.provenance import TranscriptProvenance, normalize_provenance
+from theater.provenance import (
+    TranscriptProvenance,
+    is_trusted_provenance,
+    normalize_provenance,
+)
 
 if TYPE_CHECKING:
     from theater.harness.observation import TranscriptObserver
@@ -275,7 +279,7 @@ class TranscriptSource(Source):
         after: float | None = None,
         allow_refresh: bool = False,
         exact_attachments: bool = False,
-        exact_session: bool = False,
+        session_provenance: str | TranscriptProvenance | None = None,
         collision_domain: str | None = None,
         known_location: str | None = None,
     ) -> None:
@@ -287,9 +291,14 @@ class TranscriptSource(Source):
         self._after = after
         self._allow_refresh = allow_refresh
         self._exact_attachments = exact_attachments
-        self._exact_session = exact_session
+        self._session_provenance = normalize_provenance(session_provenance)
         self.collision_domain = collision_domain
         self._known_location = Path(known_location) if known_location else None
+        self._known_location_provenance = (
+            self._session_provenance
+            if self._known_location is not None
+            else TranscriptProvenance.HEURISTIC
+        )
         #: Locations `proven_transcript` has answered with. Held here rather
         #: than left to the adapter, so "the observer proved it" and "the
         #: source calls it exact" cannot come apart: an override that proves a
@@ -342,19 +351,19 @@ class TranscriptSource(Source):
         if self._pending is None:
             raise RuntimeError("no transcript attachment is pending")
         path, offset, index, mtime, session_id = self._pending
+        provenance = normalize_provenance(self.correlation_for(path, session_id))
         self.path, self.offset, self.index, self.mtime = path, offset, index, mtime
         if session_id:
-            if normalize_provenance(self.correlation_for(path, session_id)) is not (
-                TranscriptProvenance.EXACT
-            ):
+            if provenance is not TranscriptProvenance.EXACT:
                 # The id is about to be replaced by one read off a file we only
-                # guessed at. Leaving `exact_session` set would let the next
+                # guessed at. Leaving an exact session claim set would let the next
                 # question about this location answer "exact" — the id matches,
                 # because it was just copied from there — which launders the
                 # guess into proof and can outrank real evidence later.
-                self._exact_session = False
+                self._session_provenance = TranscriptProvenance.HEURISTIC
             self._session_id = session_id
         self._known_location = path
+        self._known_location_provenance = provenance
         self._pending = None
 
     def discard_attachment(self) -> None:
@@ -372,6 +381,7 @@ class TranscriptSource(Source):
         # participant's own cwd/time evidence.
         self._session_id = None
         self._known_location = None
+        self._known_location_provenance = TranscriptProvenance.HEURISTIC
 
     async def history(self, *, last_n: int) -> History:
         """Re-read the whole transcript with the text left unclipped.
@@ -410,21 +420,28 @@ class TranscriptSource(Source):
         else — cannot answer with a flag fixed at construction without
         claiming proof for the fallback.
 
-        Three ways to be exact are known here. ``exact_attachments`` says every
-        candidate under this source's root has one possible owner by
+        Three ways to be trusted are known here. ``exact_attachments`` says
+        every candidate under this source's root has one possible owner by
         construction (a participant-isolated save directory). A location the
-        observer's proof channel answered with is exact by definition, and is
-        recorded here rather than trusted to the adapter. ``exact_session``
-        says the id we were given was itself exact — a launch receipt, or an
-        earlier proof already persisted — so a file carrying that id is the
-        right one.
+        observer's proof channel answered with is proven by definition, and is
+        recorded here rather than trusted to the adapter. Exact session
+        provenance says the id we were given was itself exact — a launch
+        receipt, or an earlier exact proof already persisted — so a file
+        carrying that id is the right one. Persisted proven/operator
+        provenance is narrower: it trusts only the persisted known location.
         """
         if self._exact_attachments:
             return str(TranscriptProvenance.EXACT)
         if path in self._proven:
             return str(TranscriptProvenance.PROVEN)
         if (
-            self._exact_session
+            self._known_location is not None
+            and path == self._known_location
+            and is_trusted_provenance(self._known_location_provenance)
+        ):
+            return str(self._known_location_provenance)
+        if (
+            self._session_provenance is TranscriptProvenance.EXACT
             and self._session_id is not None
             and session_id is not None
             and session_id == self._session_id
@@ -485,9 +502,10 @@ class TranscriptSource(Source):
         """
         if not self._observer.proves_ownership:
             return pinned
-        if normalize_provenance(
-            self.correlation_for(pinned, self._observer.session_id(pinned))
-        ) is not TranscriptProvenance.HEURISTIC:
+        if (
+            normalize_provenance(self.correlation_for(pinned, self._observer.session_id(pinned)))
+            is not TranscriptProvenance.HEURISTIC
+        ):
             return pinned
         proven = await asyncio.to_thread(self._observer.proven_transcript, cwd=self._cwd)
         if proven is None:

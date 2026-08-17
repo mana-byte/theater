@@ -139,7 +139,7 @@ from theater.harness.observation import (
 )
 from theater.harness.source import Source, TranscriptSource
 from theater.models import BadRequest
-from theater.provenance import TranscriptProvenance
+from theater.provenance import TranscriptProvenance, normalize_provenance
 
 logger = logging.getLogger("theater.harness.codex")
 
@@ -392,7 +392,7 @@ class _CodexSource(TranscriptSource):
         # there is no path on which the stale flag is currently read. Keeping
         # the two in step costs one line and removes the need to re-derive that
         # every time one of those three changes.
-        self._codex._session_exact = self._exact_session
+        self._codex._session_exact = self._session_provenance is TranscriptProvenance.EXACT
 
 
 class CodexObserver(TranscriptObserver):
@@ -412,6 +412,7 @@ class CodexObserver(TranscriptObserver):
         root: Path | None = None,
         pane_pid: int | None = None,
         session_exact: bool = False,
+        session_provenance: str | TranscriptProvenance | None = None,
     ):
         #: Injectable so tests never touch the real ~/.codex.
         self.root = root or Path.home() / ".codex" / "sessions"
@@ -424,7 +425,8 @@ class CodexObserver(TranscriptObserver):
         #: token or a launch receipt — rather than an id read back off whatever
         #: file an earlier cwd guess happened to pick. It decides which of the
         #: two sharp keys is asked first; see `find_transcript`.
-        self._session_exact = session_exact
+        provenance = normalize_provenance(session_provenance)
+        self._session_exact = session_exact or provenance is TranscriptProvenance.EXACT
         #: Rollouts this clone has seen held open by its own process. Resolved
         #: paths, so a candidate reached by another spelling still matches.
         self._proved: set[Path] = set()
@@ -435,7 +437,7 @@ class CodexObserver(TranscriptObserver):
         cwd: str | None,
         session_id: str | None = None,
         after: float | None = None,
-        session_exact: bool = False,
+        session_provenance: str | TranscriptProvenance | None = None,
         known_location: str | None = None,
     ) -> Source:
         """A source that can report a process-proven location as exact.
@@ -446,6 +448,8 @@ class CodexObserver(TranscriptObserver):
         is exact while the observer still thinks otherwise would get the
         process asked ahead of an id it told us to trust.
         """
+        provenance = normalize_provenance(session_provenance)
+        session_exact = provenance is TranscriptProvenance.EXACT
         reader = self
         if session_exact != self._session_exact:
             reader = CodexObserver(
@@ -456,7 +460,7 @@ class CodexObserver(TranscriptObserver):
             cwd=cwd,
             session_id=session_id,
             after=after,
-            exact_session=session_exact,
+            session_provenance=provenance,
             known_location=known_location,
         )
 
@@ -467,7 +471,7 @@ class CodexObserver(TranscriptObserver):
         cwd: str | None,
         session_id: str | None = None,
         after: float | None = None,
-        session_exact: bool = False,
+        session_provenance: str | TranscriptProvenance | None = None,
         known_location: str | None = None,
         pane_pid: int | None = None,
     ) -> Source:
@@ -477,12 +481,14 @@ class CodexObserver(TranscriptObserver):
         observer on the harness is shared by every codex session, and the pid
         — and what it has proved — is the one thing that is per-participant.
         """
+        provenance = normalize_provenance(session_provenance)
+        session_exact = provenance is TranscriptProvenance.EXACT
         reader = CodexObserver(root=self.root, pane_pid=pane_pid, session_exact=session_exact)
         return reader.open_source(
             cwd=cwd,
             session_id=session_id,
             after=after,
-            session_exact=session_exact,
+            session_provenance=provenance,
             known_location=known_location,
         )
 

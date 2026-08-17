@@ -43,6 +43,7 @@ from theater.daemon.registry import Registry
 from theater.harness.observation import ScreenKind, ScreenReading
 from theater.harness.source import Attachment, Batch, History, Source
 from theater.models import BadRequest, Status, Tier
+from theater.provenance import TranscriptProvenance
 
 
 class _StagedSource(Source):
@@ -374,7 +375,7 @@ async def test_exact_claim_revokes_an_earlier_heuristic_binding(collision_regist
     exact_source = adapter.open_source(
         cwd=exact.cwd,
         session_id=exact.session_id,
-        session_exact=True,
+        session_provenance=TranscriptProvenance.EXACT,
     )
     observer._sources[exact.id] = exact_source
     exact_batch = await exact_source.read()
@@ -426,9 +427,7 @@ async def test_read_transcript_refuses_a_fulgenzio_style_heuristic_swap(
         await methods_mod.METHODS["read_transcript"](daemon, {"id": fulgenzio.id, "last_n": 0})
 
 
-async def test_restored_heuristic_location_is_rejudged_after_restart(
-    collision_registry, vibe_tree
-):
+async def test_restored_heuristic_location_is_rejudged_after_restart(collision_registry, vibe_tree):
     adapter = VibeObserver(root=vibe_tree["root"])
     observer = Observer(collision_registry, harnesses={})
     participant = collision_registry.register(
@@ -456,9 +455,156 @@ async def test_restored_heuristic_location_is_rejudged_after_restart(
     )
 
 
-def test_trusted_dead_owner_blocks_stranger_but_allows_successor(
-    collision_registry, vibe_tree
+@pytest.mark.parametrize(
+    "provenance",
+    [TranscriptProvenance.PROVEN, TranscriptProvenance.OPERATOR],
+)
+async def test_restored_trusted_location_attaches_after_restart(
+    collision_registry, vibe_tree, provenance
 ):
+    harness = VibeHarness(root=vibe_tree["root"])
+    observer = Observer(
+        collision_registry,
+        {"vibe": harness},
+        poll=0.01,
+        search=0.01,
+        sync=0.01,
+    )
+    participant = collision_registry.register(
+        harness="vibe",
+        pane=None,
+        cwd=str(vibe_tree["project"]),
+        session_id="aa5d2d32-1111-2222-3333",
+    )
+    participant.session_correlation = str(provenance)
+    participant.transcript_location = str(vibe_tree["transcript_b"])
+    collision_registry.store.upsert_participant(participant)
+
+    observer.start()
+    try:
+        from tests.test_observer import kinds, until
+
+        assert await until(lambda: "agent.transcript" in kinds(collision_registry.store))
+        with vibe_tree["transcript_b"].open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"role": "assistant", "content": str(provenance)}) + "\n")
+        assert await until(lambda: "agent.assistant" in kinds(collision_registry.store))
+    finally:
+        await observer.aclose()
+
+
+@pytest.mark.parametrize(
+    "provenance",
+    [TranscriptProvenance.PROVEN, TranscriptProvenance.OPERATOR],
+)
+async def test_read_transcript_trusts_restored_location_only(
+    collision_registry, vibe_tree, monkeypatch, provenance
+):
+    harness = VibeHarness(root=vibe_tree["root"])
+    monkeypatch.setitem(methods_mod.HARNESSES, "vibe", harness)
+    participant = collision_registry.register(
+        harness="vibe",
+        pane=None,
+        cwd=str(vibe_tree["project"]),
+        session_id="aa5d2d32-1111-2222-3333",
+    )
+    participant.session_correlation = str(provenance)
+    participant.transcript_location = str(vibe_tree["transcript_b"])
+    collision_registry.store.upsert_participant(participant)
+    daemon = SimpleNamespace(
+        registry=collision_registry,
+        observer=Observer(collision_registry, {"vibe": harness}),
+    )
+
+    result = await methods_mod.METHODS["read_transcript"](
+        daemon, {"id": participant.id, "last_n": 0}
+    )
+
+    assert result["path"] == str(vibe_tree["transcript_b"])
+
+
+@pytest.mark.parametrize(
+    "provenance",
+    [TranscriptProvenance.PROVEN, TranscriptProvenance.OPERATOR],
+)
+async def test_read_transcript_does_not_apply_restored_trust_without_location(
+    collision_registry, vibe_tree, monkeypatch, provenance
+):
+    harness = VibeHarness(root=vibe_tree["root"])
+    monkeypatch.setitem(methods_mod.HARNESSES, "vibe", harness)
+    participant = collision_registry.register(
+        harness="vibe",
+        pane=None,
+        cwd=str(vibe_tree["project"]),
+        session_id="aa5d2d32-1111-2222-3333",
+    )
+    participant.session_correlation = str(provenance)
+    collision_registry.store.upsert_participant(participant)
+    daemon = SimpleNamespace(
+        registry=collision_registry,
+        observer=Observer(collision_registry, {"vibe": harness}),
+    )
+
+    with pytest.raises(BadRequest, match="transcript_correlation_untrusted"):
+        await methods_mod.METHODS["read_transcript"](daemon, {"id": participant.id, "last_n": 0})
+
+
+@pytest.mark.parametrize(
+    "provenance",
+    [TranscriptProvenance.PROVEN, TranscriptProvenance.OPERATOR],
+)
+async def test_trusted_location_does_not_bless_another_path(
+    collision_registry, vibe_tree, provenance
+):
+    source = VibeObserver(root=vibe_tree["root"]).open_source(
+        cwd=str(vibe_tree["project"]),
+        session_id="aa5d2d32-1111-2222-3333",
+        session_provenance=provenance,
+        known_location=str(vibe_tree["transcript_b"]),
+    )
+
+    other = vibe_tree["transcript_a"]
+
+    assert source.correlation_for(other, "aa5d2d32-1111-2222-3333") == str(
+        TranscriptProvenance.HEURISTIC
+    )
+
+
+@pytest.mark.parametrize(
+    "provenance",
+    [TranscriptProvenance.PROVEN, TranscriptProvenance.OPERATOR],
+)
+async def test_trusted_location_rotation_requires_fresh_proof_or_rebind(
+    collision_registry, vibe_tree, provenance
+):
+    adapter = VibeObserver(root=vibe_tree["root"])
+    observer = Observer(collision_registry, harnesses={})
+    participant = collision_registry.register(
+        harness="vibe",
+        pane=None,
+        cwd=str(vibe_tree["project"]),
+        session_id="aa5d2d32-1111-2222-3333",
+    )
+    participant.session_correlation = str(provenance)
+    participant.transcript_location = str(vibe_tree["transcript_b"])
+    collision_registry.store.upsert_participant(participant)
+    source = adapter.open_source(
+        cwd=participant.cwd,
+        session_id=participant.session_id,
+        session_provenance=provenance,
+        known_location=participant.transcript_location,
+    )
+
+    initial = await source.read()
+    assert observer._accept_attachment(participant.id, source, initial)
+    _make_session(vibe_tree["root"], "zzzzzzzz", str(vibe_tree["project"]))
+    rotated = await source.refresh()
+
+    assert rotated.attached is not None
+    assert rotated.attached.correlation == str(TranscriptProvenance.HEURISTIC)
+    assert not observer._accept_attachment(participant.id, source, rotated)
+
+
+def test_trusted_dead_owner_blocks_stranger_but_allows_successor(collision_registry, vibe_tree):
     observer = Observer(collision_registry, harnesses={})
     dead = collision_registry.register(
         harness="vibe",
@@ -506,9 +652,7 @@ def test_trusted_dead_owner_blocks_stranger_but_allows_successor(
     assert successor_source.committed is True
 
 
-def test_proven_attach_does_not_downgrade_existing_exact_session_id(
-    collision_registry, vibe_tree
-):
+def test_proven_attach_does_not_downgrade_existing_exact_session_id(collision_registry, vibe_tree):
     observer = Observer(collision_registry, harnesses={})
     participant = collision_registry.register(
         harness="vibe",
@@ -553,7 +697,7 @@ async def test_untrusted_global_vibe_rotation_is_quarantined_even_with_distinct_
     source = adapter.open_source(
         cwd=incumbent.cwd,
         session_id=incumbent.session_id,
-        session_exact=True,
+        session_provenance=TranscriptProvenance.EXACT,
     )
     observer._sources[incumbent.id] = source
     initial = await source.read()
@@ -696,13 +840,13 @@ async def test_rejected_rotation_keeps_events_and_awaits_session_local(
         cwd=p_a.cwd,
         session_id=p_a.session_id,
         after=None,
-        session_exact=True,
+        session_provenance=TranscriptProvenance.EXACT,
     )
     source_b = observer_adapter.open_source(
         cwd=p_b.cwd,
         session_id=p_b.session_id,
         after=None,
-        session_exact=True,
+        session_provenance=TranscriptProvenance.EXACT,
     )
     turns_a = TurnAccumulator()
 
@@ -777,7 +921,7 @@ async def test_accepted_rotation_commits_and_releases_the_old_binding(
         cwd=p.cwd,
         session_id=p.session_id,
         after=None,
-        session_exact=True,
+        session_provenance=TranscriptProvenance.EXACT,
     )
     initial = await source.read()
     assert observer._accept_attachment(p.id, source, initial)
@@ -829,7 +973,7 @@ async def test_attachment_check_failure_discards_the_candidate(
         cwd=p.cwd,
         session_id=p.session_id,
         after=None,
-        session_exact=True,
+        session_provenance=TranscriptProvenance.EXACT,
     )
     batch = await source.read()
     assert batch.attached is not None

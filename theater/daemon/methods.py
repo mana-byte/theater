@@ -53,7 +53,7 @@ from theater.models import (
     new_id,
     now,
 )
-from theater.provenance import TranscriptProvenance, is_trusted_provenance, normalize_provenance
+from theater.provenance import is_trusted_provenance, normalize_provenance
 from theater.tmux import client as tmux
 from theater.tmux.presence import human_present
 
@@ -1180,7 +1180,7 @@ async def _read_transcript(daemon, params: dict) -> dict:
         cwd=p.cwd,
         session_id=p.session_id,
         after=after,
-        session_exact=normalize_provenance(p.session_correlation) is TranscriptProvenance.EXACT,
+        session_provenance=normalize_provenance(p.session_correlation),
         known_location=p.transcript_location,
         pane_pid=p.live_pid,
     )

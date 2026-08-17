@@ -36,7 +36,7 @@ from theater.daemon.schema import jobs, touch
 from theater.harness import HARNESSES, normalize
 from theater.harness.observation import open_participant_source
 from theater.models import BadRequest
-from theater.provenance import TranscriptProvenance, is_trusted_provenance, normalize_provenance
+from theater.provenance import is_trusted_provenance, normalize_provenance
 
 logger = logging.getLogger("theater.recall.read")
 
@@ -187,7 +187,7 @@ async def _read_job(
         cwd=p.cwd,
         session_id=p.session_id,
         after=None,
-        session_exact=normalize_provenance(p.session_correlation) is TranscriptProvenance.EXACT,
+        session_provenance=normalize_provenance(p.session_correlation),
         known_location=p.transcript_location,
         pane_pid=p.live_pid,
     )

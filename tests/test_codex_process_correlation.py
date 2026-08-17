@@ -35,6 +35,7 @@ from theater.daemon import observer as observer_mod
 from theater.daemon.observer import Observer
 from theater.daemon.registry import Registry
 from theater.models import Status
+from theater.provenance import TranscriptProvenance
 
 # Two sessions born a minute apart, so "newest" is unambiguous and a test that
 # means to select the older one is visibly not just getting lucky.
@@ -282,7 +283,9 @@ async def test_an_id_we_were_given_outranks_the_process(monkeypatch, codex_tree)
     a second codex in the pane, a pid the kernel has since reissued.
     """
     asked = hold(monkeypatch, {PID_A: [codex_tree["a"]]})
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A, session_exact=True)
+    reader = CodexObserver(
+        root=codex_tree["root"], pane_pid=PID_A, session_provenance=TranscriptProvenance.EXACT
+    )
 
     found = reader.find_transcript(cwd=str(codex_tree["project"]), session_id=SESSION_B)
 
@@ -303,7 +306,9 @@ async def test_an_id_we_were_given_that_names_nothing_falls_through(monkeypatch,
     it.
     """
     hold(monkeypatch, {PID_A: [codex_tree["a"]]})
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A, session_exact=True)
+    reader = CodexObserver(
+        root=codex_tree["root"], pane_pid=PID_A, session_provenance=TranscriptProvenance.EXACT
+    )
 
     found = reader.find_transcript(
         cwd=str(codex_tree["project"]),
@@ -329,7 +334,7 @@ async def test_falling_through_an_exact_id_never_makes_the_guess_exact(monkeypat
         reader,
         codex_tree["project"],
         session_id="01a00cdf-0000-0000-0000-000000000000",
-        session_exact=True,
+        session_provenance=TranscriptProvenance.EXACT,
     )
 
     assert history.location == str(codex_tree["b"])
@@ -488,11 +493,13 @@ async def test_committing_a_guess_gives_up_the_claim_that_the_id_was_exact(monke
     real evidence later.
     """
     hold(monkeypatch, {PID_A: []})
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A, session_exact=True)
+    reader = CodexObserver(
+        root=codex_tree["root"], pane_pid=PID_A, session_provenance=TranscriptProvenance.EXACT
+    )
     source = reader.open_source(
         cwd=str(codex_tree["project"]),
         session_id="01a00cdf-0000-0000-0000-000000000000",
-        session_exact=True,
+        session_provenance=TranscriptProvenance.EXACT,
     )
     try:
         batch = await source.read()
@@ -522,7 +529,7 @@ async def test_open_source_does_not_let_the_two_provenance_flags_disagree(monkey
         reader,
         codex_tree["project"],
         session_id=SESSION_B,
-        session_exact=True,
+        session_provenance=TranscriptProvenance.EXACT,
     )
 
     assert history.location == str(codex_tree["b"])
@@ -532,13 +539,15 @@ async def test_open_source_does_not_let_the_two_provenance_flags_disagree(monkey
 async def test_a_pin_that_is_already_exact_is_not_probed(monkeypatch, codex_tree):
     """Nothing to gain, three subprocesses to lose."""
     asked = hold(monkeypatch, {PID_A: [codex_tree["a"]]})
-    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A, session_exact=True)
+    reader = CodexObserver(
+        root=codex_tree["root"], pane_pid=PID_A, session_provenance=TranscriptProvenance.EXACT
+    )
 
     history = await _history(
         reader,
         codex_tree["project"],
         session_id=SESSION_B,
-        session_exact=True,
+        session_provenance=TranscriptProvenance.EXACT,
         known_location=str(codex_tree["b"]),
     )
 

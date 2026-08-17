@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from theater.harness.base import Event, NativeChild
+from theater.provenance import TranscriptProvenance, normalize_provenance
 
 if TYPE_CHECKING:
     from theater.harness.source import Source
@@ -166,7 +167,7 @@ class HarnessObserver(ABC):
         cwd: str | None,
         session_id: str | None = None,
         after: float | None = None,
-        session_exact: bool = False,
+        session_provenance: str | TranscriptProvenance | None = None,
         known_location: str | None = None,
     ) -> Source:
         """Open a source with the Theater participant identity available.
@@ -265,7 +266,7 @@ def open_participant_source(
     cwd: str | None,
     session_id: str | None = None,
     after: float | None = None,
-    session_exact: bool = False,
+    session_provenance: str | TranscriptProvenance | None = None,
     known_location: str | None = None,
     pane_pid: int | None = None,
 ) -> Source:
@@ -294,8 +295,11 @@ def open_participant_source(
     if callable(factory):
         accepted = inspect.signature(factory).parameters
         extra: dict[str, Any] = {}
-        if "session_exact" in accepted:
-            extra["session_exact"] = session_exact
+        provenance = normalize_provenance(session_provenance)
+        if "session_provenance" in accepted:
+            extra["session_provenance"] = provenance
+        elif "session_exact" in accepted:
+            extra["session_exact"] = provenance is TranscriptProvenance.EXACT
         if "known_location" in accepted:
             extra["known_location"] = known_location
         if "pane_pid" in accepted:
@@ -354,7 +358,7 @@ class TranscriptObserver(HarnessObserver):
         cwd: str | None,
         session_id: str | None = None,
         after: float | None = None,
-        session_exact: bool = False,
+        session_provenance: str | TranscriptProvenance | None = None,
         known_location: str | None = None,
     ) -> Source:
         """Preserve persisted session-id provenance in the source claim."""
@@ -366,7 +370,7 @@ class TranscriptObserver(HarnessObserver):
             session_id=session_id,
             after=after,
             allow_refresh=self.relocate_by_cwd,
-            exact_session=session_exact,
+            session_provenance=session_provenance,
             known_location=known_location,
         )
 
