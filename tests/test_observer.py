@@ -1331,3 +1331,240 @@ async def test_await_surfaces_the_actionable_correlation_failure_message(registr
     assert rows[0]["error_code"] == error_code
     assert "may still be alive" in rows[0]["error"]
     assert "do not retry" in rows[0]["error"]
+
+
+# ---- Phase 1: identity-loss grace and restart replay ----------------------
+
+
+@pytest.mark.asyncio
+async def test_identity_loss_job_destruction_respects_observation_failure_grace(
+    registry, monkeypatch
+):
+    """A freshly-created job must not be instantly crashed by identity loss.
+
+    The OBSERVATION_FAILURE_GRACE that protects other source errors also
+    protects identity-loss job destruction: ``max(first_failure, job.created_at)``
+    must elapse before the job is crashed. Quarantine (``_identity_lost``)
+    begins immediately; job destruction waits.
+    """
+    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 30.0)
+    observer = Observer(registry, harnesses={})
+    participant = registry.register(harness="vibe", pane="%1", cwd="/tmp")
+    manager = JobManager(registry.store)
+    observer.jobs = manager
+    manager.create(handle="fresh-job", caller_id="caller", target_id=participant.id, kind="send")
+
+    # Enter quarantine. The job was just created, so the grace has not elapsed.
+    observer.mark_transcript_identity_lost(participant.id, "rotation evidence")
+
+    assert observer.transcript_identity_lost(participant.id)
+    job = manager.get("fresh-job")
+    assert job.state == "running"
+
+
+@pytest.mark.asyncio
+async def test_identity_loss_job_destruction_crashes_after_grace(registry, monkeypatch):
+    """Once the grace window elapses, identity loss crashes the job."""
+    from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
+
+    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 0.0)
+    observer = Observer(registry, harnesses={})
+    participant = registry.register(harness="vibe", pane="%1", cwd="/tmp")
+    manager = JobManager(registry.store)
+    observer.jobs = manager
+    manager.create(handle="old-job", caller_id="caller", target_id=participant.id, kind="send")
+
+    observer.mark_transcript_identity_lost(participant.id, "rotation evidence")
+
+    assert observer.transcript_identity_lost(participant.id)
+    job = manager.get("old-job")
+    assert job.state == "crashed"
+    assert job.error_code == TRANSCRIPT_IDENTITY_LOST_CODE
+
+
+@pytest.mark.asyncio
+async def test_identity_loss_restart_replay_applies_grace_to_job_destruction(
+    registry, monkeypatch, vibe_tree
+):
+    """Restart replay quarantines immediately but does not crash fresh jobs."""
+    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 30.0)
+    participant = registry.register(harness="vibe", pane="%1", cwd=str(vibe_tree["project"]))
+    participant.session_id = "deadbeef-1111-2222-3333"
+    participant.session_correlation = "operator"
+    participant.transcript_location = str(vibe_tree["transcript"])
+    registry.store.upsert_participant(participant)
+
+    first = Observer(registry, harnesses={})
+    first.mark_transcript_identity_lost(participant.id, "rotation evidence")
+
+    manager = JobManager(registry.store)
+    manager.create(handle="replay-job", caller_id="caller", target_id=participant.id, kind="send")
+
+    restarted = Observer(registry, harnesses={}, jobs=manager)
+    restarted._restore_transcript_identity_loss(participant.id)
+
+    assert restarted.transcript_identity_lost(participant.id)
+    assert manager.get("replay-job").state == "running"
+
+
+@pytest.mark.asyncio
+async def test_identity_loss_restart_replay_crashes_old_jobs(registry, monkeypatch, vibe_tree):
+    """Restart replay crashes jobs that predate the grace window."""
+    from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
+
+    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 0.0)
+    participant = registry.register(harness="vibe", pane="%1", cwd=str(vibe_tree["project"]))
+    participant.session_id = "deadbeef-1111-2222-3333"
+    participant.session_correlation = "operator"
+    participant.transcript_location = str(vibe_tree["transcript"])
+    registry.store.upsert_participant(participant)
+
+    first = Observer(registry, harnesses={})
+    first.mark_transcript_identity_lost(participant.id, "rotation evidence")
+
+    manager = JobManager(registry.store)
+    manager.create(handle="stale-job", caller_id="caller", target_id=participant.id, kind="send")
+
+    restarted = Observer(registry, harnesses={}, jobs=manager)
+    restarted._restore_transcript_identity_loss(participant.id)
+
+    assert restarted.transcript_identity_lost(participant.id)
+    job = manager.get("stale-job")
+    assert job.state == "crashed"
+    assert job.error_code == TRANSCRIPT_IDENTITY_LOST_CODE
+
+
+@pytest.mark.asyncio
+async def test_identity_loss_grace_sweep_transitions_running_to_crashed(registry, monkeypatch):
+    """B1: a job that survives initial quarantine is crashed by the periodic sweep.
+
+    Enter quarantine with positive grace (job stays RUNNING), then advance
+    ``failed_at`` backwards so the next sweep tick sees the grace as elapsed
+    and crashes the job. This mirrors what happens in the real watch loop:
+    the quarantine tick calls ``_sweep_identity_lost_grace`` on every iteration.
+    """
+    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 30.0)
+    observer = Observer(registry, harnesses={})
+    participant = registry.register(harness="vibe", pane="%1", cwd="/tmp")
+    manager = JobManager(registry.store)
+    observer.jobs = manager
+    manager.create(handle="sweep-job", caller_id="caller", target_id=participant.id, kind="send")
+
+    # Enter quarantine: job is fresh, grace has not elapsed.
+    observer.mark_transcript_identity_lost(participant.id, "rotation evidence")
+    assert observer.transcript_identity_lost(participant.id)
+    assert manager.get("sweep-job").state == "running"
+
+    # Simulate time passing: move the in-memory failed_at backwards AND the
+    # job's created_at backwards so the sweep sees the grace as elapsed.
+    key = (participant.id, "transcript_identity_lost")
+    observer._source_errors[key] = now() - 60.0
+    registry.store.conn.execute(
+        update(jobs_table).where(jobs_table.c.handle == "sweep-job").values(created_at=now() - 60.0)
+    )
+    registry.store.conn.commit()
+
+    # The sweep on the next quarantine tick crashes the job.
+    observer._sweep_identity_lost_grace(participant.id)
+    job = manager.get("sweep-job")
+    assert job.state == "crashed"
+    assert job.error_code == "transcript_identity_lost"
+
+
+@pytest.mark.asyncio
+async def test_identity_loss_grace_sweep_restart_uses_persisted_timestamp(
+    registry, monkeypatch, vibe_tree
+):
+    """B1: restart replay uses the persisted bus timestamp, not now(), for grace.
+
+    A daemon restart must not grant endless fresh grace by resetting
+    ``failed_at`` to ``now()``. The persisted observation-error timestamp
+    from the bus is used, so a job that predates the grace window is
+    immediately crashed on replay.
+    """
+    from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
+
+    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 0.0)
+    participant = registry.register(harness="vibe", pane="%1", cwd=str(vibe_tree["project"]))
+    participant.session_id = "deadbeef-1111-2222-3333"
+    participant.session_correlation = "operator"
+    participant.transcript_location = str(vibe_tree["transcript"])
+    registry.store.upsert_participant(participant)
+
+    first = Observer(registry, harnesses={})
+    first.mark_transcript_identity_lost(participant.id, "rotation evidence")
+
+    # Verify the bus recorded the observation error with a timestamp.
+    persisted_ts = registry.store.observation_error_timestamp(
+        participant.id, TRANSCRIPT_IDENTITY_LOST_CODE
+    )
+    assert persisted_ts is not None
+
+    manager = JobManager(registry.store)
+    manager.create(
+        handle="persisted-job", caller_id="caller", target_id=participant.id, kind="send"
+    )
+
+    restarted = Observer(registry, harnesses={}, jobs=manager)
+    restarted._restore_transcript_identity_loss(participant.id)
+
+    assert restarted.transcript_identity_lost(participant.id)
+    # The in-memory failed_at must match the persisted timestamp, not now().
+    key = (participant.id, TRANSCRIPT_IDENTITY_LOST_CODE)
+    assert restarted._source_errors[key] == persisted_ts
+    assert manager.get("persisted-job").state == "crashed"
+
+
+@pytest.mark.asyncio
+async def test_quarantine_watch_branch_crashes_grace_skipped_job(registry, monkeypatch):
+    """A job that survives initial quarantine is crashed through the _watch branch.
+
+    This is a real ``_watch``-task test, not a direct helper invocation: the
+    quarantine branch calls ``_sweep_identity_lost_grace`` before
+    ``_screen_only`` on every tick. With short grace, a grace-skipped job
+    transitions RUNNING -> CRASHED through the live watch loop.
+    """
+    harness = WaitingHarness(ScreenReading(ScreenKind.WORKING, ScreenConfidence.HIGH))
+    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 0.05)
+    observer = Observer(
+        registry,
+        {"waiting": harness},
+        poll=0.01,
+        search=0.01,
+        sync=0.01,
+    )
+    manager = JobManager(registry.store)
+    observer.jobs = manager
+
+    async def capture_pane(_pane):
+        return "working"
+
+    observer._capture = capture_pane
+
+    participant = registry.register(harness="waiting", pane="%1", cwd="/tmp")
+    manager.create(handle="watch-job", caller_id="caller", target_id=participant.id, kind="send")
+
+    # Enter quarantine via the first observer (persists to bus).
+    first = Observer(registry, harnesses={})
+    first.mark_transcript_identity_lost(participant.id, "rotation evidence")
+    # Replay the persisted quarantine into the live observer's cache.
+    observer._restore_transcript_identity_loss(participant.id)
+    assert observer.transcript_identity_lost(participant.id)
+
+    # Start the real _watch task. The quarantine branch will run the sweep
+    # on every tick; with 0.05s grace, the job is initially RUNNING but
+    # crashes after the grace window elapses.
+    observer._tasks[participant.id] = asyncio.create_task(
+        observer._watch(participant.id, "waiting")
+    )
+    try:
+        # The job starts RUNNING — grace has not elapsed yet.
+        assert manager.get("watch-job").state == "running"
+
+        # Wait for the sweep to crash it through the quarantine branch.
+        assert await until(lambda: manager.get("watch-job").state == "crashed", timeout=2.0)
+        assert manager.get("watch-job").error_code == "transcript_identity_lost"
+        # The source was never read — quarantine takes the screen-only branch.
+        assert harness.source.reads == 0
+    finally:
+        await observer.aclose()

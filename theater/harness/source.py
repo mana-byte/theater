@@ -156,9 +156,18 @@ class IdentityLossEvidence:
     This is intentionally not an :class:`Attachment`: the observer can use it
     only as loss evidence and therefore cannot accidentally commit it as the
     participant's new transcript.
+
+    ``session_id`` is the harness-native id the source read off the candidate,
+    when it knows one.  It is populated by the adapter (which already called
+    ``session_id`` on the candidate path) rather than by the observer, so the
+    registry-ownership guard in the reducer can reject evidence that belongs to
+    another live participant without the adapter needing to know about registry
+    state.  Backward-compatible: sources that do not supply it leave it ``None``,
+    and the guard treats ``None`` as "no session-id claim to check".
     """
 
     location: str
+    session_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -445,7 +454,7 @@ class TranscriptSource(Source):
         session_id = self._observer.session_id(candidate)
         if is_trusted_provenance(self.correlation_for(candidate, session_id)):
             return None
-        return IdentityLossEvidence(location=str(candidate))
+        return IdentityLossEvidence(location=str(candidate), session_id=session_id)
 
     def commit_attachment(self) -> None:
         """Make the observer-accepted candidate the live transcript."""
