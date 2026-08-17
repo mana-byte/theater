@@ -848,7 +848,8 @@ class WaitingHarness:
 
     def __init__(self, reading: ScreenReading):
         self.observer = ReadingObserver(reading)
-        self.observer.open_source = lambda **_: WaitingSource()  # type: ignore[method-assign]
+        self.source = WaitingSource()
+        self.observer.open_source = lambda **_: self.source  # type: ignore[method-assign]
 
 
 @pytest.mark.asyncio
@@ -871,6 +872,88 @@ async def test_a_source_that_never_attaches_still_gets_a_screen_check(registry):
     try:
         p = registry.register(harness="waiting", pane="%1", cwd="/tmp")
         assert await until(lambda: registry.get(p.id).status is Status.AWAITING_INPUT)
+    finally:
+        await observer.aclose()
+
+
+@pytest.mark.asyncio
+async def test_quarantined_full_watch_moves_screen_without_reading_source(registry):
+    """Restart replay quarantines before the source can attach or read."""
+    harness = WaitingHarness(ScreenReading(ScreenKind.WORKING, ScreenConfidence.HIGH))
+    participant = registry.register(harness="waiting", pane="%1", cwd="/tmp")
+    first = Observer(registry, harnesses={})
+    first.mark_transcript_identity_lost(participant.id, "positive rotation evidence")
+    observer = Observer(
+        registry,
+        {"waiting": harness},
+        poll=0.01,
+        search=0.01,
+        awaiting=0.0,
+    )
+
+    async def capture_pane(_pane):
+        return "rendered pane"
+
+    observer._capture = capture_pane
+    observer._tasks[participant.id] = asyncio.create_task(
+        observer._watch(participant.id, "waiting")
+    )
+    try:
+        assert await until(lambda: registry.get(participant.id).status is Status.WORKING)
+        harness.observer._reading = ScreenReading(ScreenKind.PROMPT, ScreenConfidence.HIGH)
+        assert await until(lambda: registry.get(participant.id).status is Status.IDLE)
+        assert harness.source.reads == 0
+        assert participant.id not in observer._bound_transcripts.values()
+    finally:
+        await observer.aclose()
+
+
+@pytest.mark.asyncio
+async def test_healthy_polling_replays_and_probes_pin_only_once(registry, vibe_tree, monkeypatch):
+    from theater.harness import source as source_mod
+
+    harness = VibeHarness(root=vibe_tree["root"])
+    participant = registry.register(
+        harness="vibe",
+        pane="%1",
+        cwd=str(vibe_tree["project"]),
+        session_id="deadbeef-1111-2222-3333",
+    )
+    participant.session_correlation = "exact"
+    participant.transcript_location = str(vibe_tree["transcript"])
+    registry.store.upsert_participant(participant)
+
+    replay_calls = 0
+    real_replay = registry.store.observation_error_active
+
+    def replay_once(pid, code):
+        nonlocal replay_calls
+        replay_calls += 1
+        return real_replay(pid, code)
+
+    probe_calls = 0
+    real_probe = source_mod.trusted_location_unavailable_reason
+
+    def probe_once(**kwargs):
+        nonlocal probe_calls
+        probe_calls += 1
+        return real_probe(**kwargs)
+
+    monkeypatch.setattr(registry.store, "observation_error_active", replay_once)
+    monkeypatch.setattr(source_mod, "trusted_location_unavailable_reason", probe_once)
+    observer = Observer(
+        registry,
+        {"vibe": harness},
+        poll=0.005,
+        search=0.005,
+        relocate=999.0,
+    )
+    observer.start()
+    try:
+        assert await until(lambda: participant.id in observer._bound_transcripts.values())
+        await asyncio.sleep(0.05)
+        assert replay_calls == 1
+        assert probe_calls == 1
     finally:
         await observer.aclose()
 
@@ -1164,7 +1247,12 @@ def test_events_count_as_activity_even_if_the_source_forgets_to_say_so(registry)
     assert clock.last_text == "hello"
 
 
-def test_correlation_failure_grace_starts_at_the_error_and_at_each_job(registry, monkeypatch):
+@pytest.mark.parametrize(
+    "error_code", ["transcript_correlation_failed", "transcript_source_unavailable"]
+)
+def test_source_failure_grace_starts_at_the_error_and_at_each_job(
+    registry, monkeypatch, error_code
+):
     p = registry.register(harness="scripted", pane=None, cwd="/tmp")
     manager = JobManager(registry.store)
     old = manager.create(handle="old", caller_id="caller", target_id=p.id, kind="send")
@@ -1180,7 +1268,7 @@ def test_correlation_failure_grace_starts_at_the_error_and_at_each_job(registry,
     observer = Observer(registry, harnesses={}, jobs=manager)
     failed = Batch(
         waiting=True,
-        error_code="transcript_correlation_failed",
+        error_code=error_code,
         error="receipt missing",
     )
 

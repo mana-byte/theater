@@ -68,7 +68,7 @@ from theater.tmux import client as tmux
 from theater.tmux.presence import human_present
 from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
-    participant_trusted_pin_unavailable_reason,
+    TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
     transcript_identity_recovery_message,
 )
 
@@ -128,6 +128,10 @@ _JOB_ERROR_MESSAGES = {
         "Theater lost the trusted transcript identity for this participant. Screen status "
         "may still be live, but transcript attribution is quarantined; inspect candidates "
         "and rebind the participant before sending more work."
+    ),
+    TRANSCRIPT_SOURCE_UNAVAILABLE_CODE: (
+        "The transcript source stayed unavailable past the observation grace. The pane may "
+        "still be healthy; inspect it before retrying or replacing any binding."
     ),
 }
 
@@ -389,12 +393,6 @@ def _checkpoint_jobs(daemon, participant_id: str) -> list[dict]:
 def _transcript_identity_lost(daemon, pid: str) -> bool:
     checker = getattr(daemon.observer, "transcript_identity_lost", None)
     return bool(checker(pid)) if callable(checker) else False
-
-
-def _mark_transcript_identity_lost(daemon, pid: str, reason: str) -> None:
-    marker = getattr(daemon.observer, "mark_transcript_identity_lost", None)
-    if callable(marker):
-        marker(pid, reason)
 
 
 @method("ping")
@@ -1141,11 +1139,7 @@ def _check_transcript_send_preflight(daemon, target, refuse: Callable[..., NoRet
     """
     if _transcript_identity_lost(daemon, target.id):
         refuse(
-            TranscriptIdentityLost(
-                transcript_identity_recovery_message(
-                    target.id, participant_trusted_pin_unavailable_reason(target)
-                )
-            ),
+            TranscriptIdentityLost(transcript_identity_recovery_message(target.id)),
             reason=TRANSCRIPT_IDENTITY_LOST_CODE,
         )
         return
@@ -1555,9 +1549,7 @@ async def _read_transcript(daemon, params: dict) -> dict:
     if harness is None:
         raise BadRequest(f"cannot read transcript: harness {p.harness!r} is not known")
     if _transcript_identity_lost(daemon, pid):
-        raise TranscriptIdentityLost(
-            transcript_identity_recovery_message(pid, participant_trusted_pin_unavailable_reason(p))
-        )
+        raise TranscriptIdentityLost(transcript_identity_recovery_message(pid))
 
     # Same birth-time floor as the watch path (observer._open_source): the floor
     # applies to SPAWNED participants only, because an adopted session's output
@@ -1582,7 +1574,11 @@ async def _read_transcript(daemon, params: dict) -> dict:
 
     if history.error_code is not None:
         if history.error_code == TRANSCRIPT_IDENTITY_LOST_CODE:
-            _mark_transcript_identity_lost(daemon, pid, history.error or history.error_code)
+            if p.status is Status.DEAD:
+                raise BadRequest(
+                    "cannot read transcript: trusted dead binding is retained for resume, "
+                    "but its transcript is unavailable"
+                )
             raise TranscriptIdentityLost(transcript_identity_recovery_message(pid, history.error))
         raise BadRequest(
             f"cannot read transcript: {history.error or history.error_code} ({history.error_code})"

@@ -128,6 +128,10 @@ _CWD_PROBE_RECORDS = 20
 #: candidates never turns into reading whole transcripts.
 _CWD_PROBE_BYTES = 256 * 1024
 
+#: Only this many newest files have their records opened during a loss probe.
+#: Listing/statting the root is unavoidable, but transcript reads stay bounded.
+_LOSS_CANDIDATE_PROBES = 8
+
 
 #: Tools that write a file, keyed by the input parameter carrying the path.
 #: MultiEdit batches several edits to one file but names it once, so it yields
@@ -382,6 +386,36 @@ class ClaudeCodeObserver(TranscriptObserver):
         for path in root.glob("*/*.jsonl"):
             rows.append(self._candidate_row(path, want=want, after=after, domain=resolved_domain))
         return sorted(rows, key=lambda c: (c.mtime or 0, c.location), reverse=True)
+
+    def identity_loss_candidate(
+        self,
+        *,
+        cwd: str | None,
+        current: Path,
+        current_mtime_ns: int,
+        after: float | None = None,
+    ) -> Path | None:
+        """Newest bounded cwd match newer than the still-readable pin."""
+        if not self.root.is_dir() or not cwd:
+            return None
+        want = str(Path(cwd).resolve())
+        candidates: list[tuple[int, Path]] = []
+        for path in self.root.glob("*/*.jsonl"):
+            if path == current or path.is_symlink():
+                continue
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            if st.st_mtime_ns <= current_mtime_ns:
+                continue
+            if after is not None and getattr(st, "st_birthtime", st.st_ctime) < after:
+                continue
+            candidates.append((st.st_mtime_ns, path))
+        for _mtime, path in sorted(candidates, reverse=True)[:_LOSS_CANDIDATE_PROBES]:
+            if self._transcript_cwd(path) == want:
+                return path
+        return None
 
     def admit_operator_candidate(
         self,

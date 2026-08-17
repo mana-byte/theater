@@ -29,6 +29,10 @@ from shipped import OpenCodeHarness, OpenCodeObserver
 from theater.harness import EventKind
 from theater.models import BadRequest, Status
 from theater.provenance import TranscriptProvenance
+from theater.transcript_identity import (
+    TRANSCRIPT_IDENTITY_LOST_CODE,
+    TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
+)
 
 SCHEMA = """
 CREATE TABLE session (
@@ -268,10 +272,43 @@ def test_an_unknown_approval_is_refused(tmp_path):
 # ---- attaching ----------------------------------------------------------
 
 
-def test_a_missing_database_is_waiting_not_an_error(tmp_path, workdir):
+def test_a_missing_database_is_ordinary_waiting(tmp_path, workdir):
     observer = OpenCodeObserver(db=tmp_path / "nope.db")
     batch = asyncio.run(observer.open_source(cwd=str(workdir)).read())
     assert batch.waiting is True
+
+
+def test_a_missing_database_does_not_claim_a_trusted_pin_was_lost(tmp_path, workdir):
+    source = OpenCodeObserver(db=tmp_path / "nope.db").open_source_for(
+        participant_id="participant",
+        cwd=str(workdir),
+        session_id="ses_missing",
+        session_provenance=TranscriptProvenance.OPERATOR,
+        known_location="opencode://ses_missing",
+    )
+
+    batch = asyncio.run(source.read())
+    history = asyncio.run(source.history(last_n=0))
+
+    assert batch.waiting is True
+    assert batch.error_code == TRANSCRIPT_SOURCE_UNAVAILABLE_CODE
+    assert history.error_code == TRANSCRIPT_SOURCE_UNAVAILABLE_CODE
+
+
+def test_only_a_missing_pinned_session_row_is_positive_identity_loss(rec, workdir):
+    source = OpenCodeObserver(db=rec.path).open_source_for(
+        participant_id="participant",
+        cwd=str(workdir),
+        session_id="ses_missing",
+        session_provenance=TranscriptProvenance.OPERATOR,
+        known_location="opencode://ses_missing",
+    )
+
+    batch = asyncio.run(source.read())
+    history = asyncio.run(source.history(last_n=0))
+
+    assert batch.error_code == TRANSCRIPT_IDENTITY_LOST_CODE
+    assert history.error_code == TRANSCRIPT_IDENTITY_LOST_CODE
 
 
 def test_a_directory_with_no_session_is_waiting(rec, tmp_path):

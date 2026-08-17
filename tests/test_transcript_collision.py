@@ -23,12 +23,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from shipped import VibeHarness, VibeObserver
+from shipped import ClaudeCodeHarness, VibeHarness, VibeObserver
 
 from theater.daemon import methods as methods_mod
 from theater.daemon import observer as observer_mod
@@ -100,6 +101,32 @@ def _make_session(root: Path, short: str, cwd: str, *, text: str = "hello") -> P
     messages = d / "messages.jsonl"
     messages.write_text(json.dumps({"role": "assistant", "content": text}) + "\n")
     return messages
+
+
+def _make_claude_transcript(root: Path, sid: str, cwd: str, *, text: str) -> Path:
+    project = root / "-project"
+    project.mkdir(parents=True, exist_ok=True)
+    path = project / f"{sid}.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "system", "cwd": cwd}),
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "id": f"message-{sid}",
+                            "stop_reason": "end_turn",
+                            "content": [{"type": "text", "text": text}],
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
 
 
 # ---- Fix 2: find_transcript logs when multiple session dirs match --------
@@ -707,10 +734,12 @@ async def test_trusted_location_rotation_requires_fresh_proof_or_rebind(
     assert observer._accept_attachment(participant.id, source, initial)
     _make_session(vibe_tree["root"], "zzzzzzzz", str(vibe_tree["project"]))
     rotated = await source.refresh()
+    evidence = await source.probe_identity_loss()
 
-    assert rotated.attached is not None
-    assert rotated.attached.correlation == str(TranscriptProvenance.HEURISTIC)
-    assert not observer._accept_attachment(participant.id, source, rotated)
+    assert rotated.attached is None
+    assert evidence is not None
+    assert evidence.location.endswith("zzzzzzzz/messages.jsonl")
+    assert source.path == vibe_tree["transcript_b"]
 
 
 def test_trusted_dead_owner_blocks_stranger_but_allows_successor(collision_registry, vibe_tree):
@@ -818,9 +847,10 @@ async def test_untrusted_global_vibe_rotation_is_quarantined_even_with_distinct_
 
     rotated = _make_session(vibe_tree["root"], "zzzzzzzz", str(vibe_tree["project"]))
     candidate = await source.refresh()
-    assert candidate.attached is not None
-    assert candidate.attached.correlation == "heuristic"
-    assert not observer._accept_attachment(incumbent.id, source, candidate)
+    evidence = await source.probe_identity_loss()
+    assert candidate.attached is None
+    assert evidence is not None
+    assert evidence.location == str(rotated)
     assert source.path != rotated
 
 
@@ -855,16 +885,27 @@ async def test_read_transcript_reports_a_missing_pin_instead_of_ambiguity(
     participant = collision_registry.register(
         harness="vibe", pane=None, cwd=str(vibe_tree["project"])
     )
+    participant.session_id = "missing-session"
+    participant.session_correlation = "operator"
     participant.transcript_location = str(tmp_path / "gone" / "messages.jsonl")
     participant.transcript_domain = str(vibe_tree["root"].resolve())
     collision_registry.store.upsert_participant(participant)
+    observer = Observer(collision_registry, {"vibe": harness})
+    jobs = JobManager(collision_registry.store)
+    jobs.create(handle="still-running", caller_id="caller", target_id=participant.id, kind="send")
     daemon = SimpleNamespace(
         registry=collision_registry,
-        observer=Observer(collision_registry, {"vibe": harness}),
+        observer=observer,
     )
 
-    with pytest.raises(BadRequest, match="no longer exists"):
+    with pytest.raises(TranscriptIdentityLost, match="no longer exists"):
         await methods_mod.METHODS["read_transcript"](daemon, {"id": participant.id, "last_n": 0})
+    assert not observer.transcript_identity_lost(participant.id)
+    assert jobs.get("still-running").state == "running"
+    assert not any(
+        row["kind"] == "agent.observation_error"
+        for row in collision_registry.store.bus_tail(limit=500)
+    )
 
 
 def test_duplicate_persisted_location_remains_ambiguous(collision_registry, vibe_tree):
@@ -967,12 +1008,13 @@ async def test_rejected_rotation_keeps_events_and_awaits_session_local(
     observer._apply(p_b.id, batch_b, QuietClock(), TurnAccumulator())
     assert len(observer._bound_transcripts) == 2
 
-    # Cwd-only relocation finds B, but B already owns it. Rejection must be a
-    # no-op on A's accepted path rather than the old eager switch-and-detach.
+    # Cwd-only relocation finds B only through the non-committable loss probe.
+    # It must be a no-op on A's accepted path.
     candidate = await source_a.refresh()
-    assert candidate.attached is not None
-    assert candidate.attached.location == str(vibe_tree["transcript_b"])
-    assert not observer._accept_attachment(p_a.id, source_a, candidate)
+    evidence = await source_a.probe_identity_loss()
+    assert candidate.attached is None
+    assert evidence is not None
+    assert evidence.location == str(vibe_tree["transcript_b"])
     assert source_a.path == vibe_tree["transcript_a"]
     assert not any(key[0] == p_a.id for key in observer._source_errors)
 
@@ -1038,6 +1080,58 @@ async def test_identity_loss_growing_pin_stays_bound_and_attributed(collision_re
     assert not any(
         row["kind"] == "agent.observation_error"
         and row["payload"]["code"] == "transcript_identity_lost"
+        for row in rows
+    )
+
+
+@pytest.mark.parametrize(
+    ("screen_kind", "lost"),
+    [(ScreenKind.WORKING, True), (ScreenKind.PROMPT, False)],
+)
+async def test_claude_readable_pin_uses_newer_candidate_only_as_loss_evidence(
+    collision_registry, tmp_path, screen_kind, lost
+):
+    root = tmp_path / "claude" / "projects"
+    project = tmp_path / "project"
+    project.mkdir()
+    old = _make_claude_transcript(root, "old-session", str(project), text="mine")
+    os.utime(old, ns=(1_000_000_000, 1_000_000_000))
+    harness = ClaudeCodeHarness(root=root)
+    harness.observer.screen_reading = lambda _capture: ScreenReading(  # type: ignore[method-assign]
+        screen_kind, ScreenConfidence.HIGH
+    )
+    observer = Observer(collision_registry, {"claude": harness}, relocate=0.0)
+
+    async def capture_pane(_pane):
+        return "real Claude screen"
+
+    observer._capture = capture_pane
+    participant = collision_registry.register(
+        harness="claude", pane="%1", cwd=str(project), session_id="old-session"
+    )
+    participant.session_correlation = "operator"
+    participant.transcript_location = str(old)
+    collision_registry.store.upsert_participant(participant)
+    source = observer._open_source(participant.id, harness.observer)
+    assert source is not None
+    initial = await source.read()
+    assert observer._accept_attachment(participant.id, source, initial)
+
+    newer = _make_claude_transcript(root, "new-session", str(project), text="not mine")
+    os.utime(newer, ns=(2_000_000_000, 2_000_000_000))
+    clock = QuietClock()
+    clock.quiet_since = time.monotonic() - 10
+    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+
+    assert observer.transcript_identity_lost(participant.id) is lost
+    assert source.path == old
+    assert old.read_text(encoding="utf-8"), "the motivating rotation keeps the old file"
+    assert str(newer) not in observer._bound_transcripts
+    rows = collision_registry.store.bus_tail(limit=500)
+    assert not any(
+        row["kind"] == "agent.assistant"
+        and row["from_id"] == participant.id
+        and row["payload"]["text"] == "not mine"
         for row in rows
     )
 
@@ -1115,7 +1209,7 @@ async def test_identity_loss_inert_working_new_candidate_enters_quarantine_once(
     assert len(rows) == 1
 
 
-def test_identity_loss_missing_pin_is_derived_and_not_spammed(collision_registry, tmp_path):
+def test_identity_loss_predicate_does_not_probe_or_transition(collision_registry, tmp_path):
     observer = Observer(collision_registry, harnesses={})
     participant = collision_registry.register(harness="vibe", pane="%1", cwd=str(tmp_path))
     participant.session_id = "missing-session"
@@ -1123,8 +1217,8 @@ def test_identity_loss_missing_pin_is_derived_and_not_spammed(collision_registry
     participant.transcript_location = str(tmp_path / "gone" / "messages.jsonl")
     collision_registry.store.upsert_participant(participant)
 
-    assert observer.transcript_identity_lost(participant.id)
-    assert observer.transcript_identity_lost(participant.id)
+    assert not observer.transcript_identity_lost(participant.id)
+    assert not observer.transcript_identity_lost(participant.id)
 
     rows = [
         row
@@ -1133,7 +1227,7 @@ def test_identity_loss_missing_pin_is_derived_and_not_spammed(collision_registry
         and row["to_id"] == participant.id
         and row["payload"]["code"] == "transcript_identity_lost"
     ]
-    assert len(rows) == 1
+    assert rows == []
 
 
 async def test_identity_loss_rebind_rearms_and_is_idempotent(
@@ -1183,6 +1277,7 @@ def test_identity_loss_replays_across_restart_without_event_spam(collision_regis
     first = Observer(collision_registry, harnesses={})
     first.mark_transcript_identity_lost(participant.id, "rotation evidence")
     restarted = Observer(collision_registry, harnesses={})
+    restarted._restore_transcript_identity_loss(participant.id)
 
     assert restarted.transcript_identity_lost(participant.id)
     rows = [

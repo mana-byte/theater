@@ -283,7 +283,7 @@ is allowlisted and then rejected by the CLI.
 
 ## The observer, method by method
 
-Four methods you will usually write and two that have defaults.
+Four methods you will usually write and three that have defaults.
 `find_transcript`, `session_id` and `parse` are abstract on
 `TranscriptObserver`; `is_idle_screen` is abstract on every observer, because
 the daemon needs it for two things reading cannot do — telling "blocked on a
@@ -291,6 +291,11 @@ permission prompt" apart from "thinking", and confirming a pane looks idle
 before rescuing a job whose turn end was never seen. `native_children` defaults
 to none. `open_source` defaults to tailing a file, and only a harness whose
 output is not a file replaces it — see "When the output is not a file" below.
+
+`identity_loss_candidate` is the third default. Shared-root formats may override
+it with a bounded search for a newer same-cwd candidate. Its result is exposed
+only as quarantine evidence: it is never an attachment and can never auto-repoint
+the source. Exact/proven rotations still belong in `Source.refresh`.
 
 ### `find_transcript(*, cwd, session_id=None, after=None) -> Path | None`
 

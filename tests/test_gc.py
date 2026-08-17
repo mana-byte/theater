@@ -12,12 +12,14 @@ the same code path without the test being slow or flaky.
 from __future__ import annotations
 
 import asyncio
+import json
 
 from theater.config import RetentionSection
 from theater.daemon.gc import SweepResult, sweep
 from theater.daemon.jobs import JobManager, JobState
 from theater.daemon.schema import bus, checkpoints, jobs, participants, touch, tree_kv
 from theater.models import Job, Participant, Status, Tier, now
+from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
 # ---- helpers ---------------------------------------------------------------
 
@@ -443,6 +445,45 @@ async def test_old_bus_rows_are_deleted(store):
     result = await sweep(store, _retention(bus_days=7))
     assert result.bus == 2
     assert _count(store, bus) == 0
+
+
+async def test_active_identity_loss_audit_survives_batched_bus_retention(store):
+    _participant(store, status=Status.IDLE)
+    old_ts = now() - 30 * _DAY
+    loss_id = _bus(
+        store,
+        kind="agent.observation_error",
+        ts=old_ts,
+        to_id="p1",
+        payload=json.dumps({"code": TRANSCRIPT_IDENTITY_LOST_CODE}),
+    )
+    _bus(store, kind="job.created", ts=old_ts)
+    _bus(store, kind="job.finished", ts=old_ts)
+
+    result = await sweep(store, _retention(bus_days=7, batch=1))
+
+    assert result.bus == 2
+    assert [row[0] for row in store.conn.execute(bus.select()).fetchall()] == [loss_id]
+
+
+async def test_cleared_identity_loss_audit_returns_to_normal_retention(store):
+    _participant(store, status=Status.IDLE)
+    old_ts = now() - 30 * _DAY
+    _bus(
+        store,
+        kind="agent.observation_error",
+        ts=old_ts,
+        to_id="p1",
+        payload=json.dumps({"code": TRANSCRIPT_IDENTITY_LOST_CODE}),
+    )
+    _bus(store, kind="operator.transcript_unbind", ts=now(), to_id="p1", payload="{}")
+
+    result = await sweep(store, _retention(bus_days=7, batch=1))
+
+    assert result.bus == 1
+    assert [row._mapping["kind"] for row in store.conn.execute(bus.select())] == [
+        "operator.transcript_unbind"
+    ]
 
 
 async def test_send_refused_of_same_age_survives(store):

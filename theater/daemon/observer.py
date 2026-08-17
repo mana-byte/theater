@@ -93,7 +93,6 @@ from theater.provenance import (
 )
 from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
-    participant_trusted_pin_unavailable_reason,
     transcript_identity_recovery_message,
 )
 
@@ -474,6 +473,10 @@ class Observer:
         self._sources: dict[str, Source] = {}
         self._receipt_candidates: dict[str, tuple[str, str]] = {}
         self._reset_watch_state: set[str] = set()
+        #: Live quarantine state. Audit replay populates it once per watcher
+        #: lifecycle; predicates consult only this cache and never scan the bus.
+        self._identity_lost: set[str] = set()
+        self._identity_loss_replayed: set[str] = set()
         self._supervisor: asyncio.Task | None = None
         self._stopping = asyncio.Event()
 
@@ -483,6 +486,9 @@ class Observer:
         if not self.harnesses:
             logger.debug("no harnesses configured; observation disabled")
             return
+        # Seed watcher-local quarantine caches before the socket can service a
+        # send against a participant whose restart audit has not been replayed.
+        self._reconcile()
         self._supervisor = asyncio.create_task(self._supervise())
 
     async def aclose(self) -> None:
@@ -503,6 +509,7 @@ class Observer:
         self._retired.discard(pid)
         self._reset_watch_state.discard(pid)
         self._clear_source_errors(pid, include_identity_lost=True)
+        self._identity_loss_replayed.discard(pid)
         if task is not None:
             task.cancel()
             with contextlib.suppress(Exception, asyncio.CancelledError):
@@ -519,37 +526,39 @@ class Observer:
         """Mirror an accepted operator binding in the live collision table."""
         if prior_owner is not None:
             self._release_transcript(prior_owner)
+            self._clear_source_errors(prior_owner, include_identity_lost=True)
+            self._identity_loss_replayed.discard(prior_owner)
         self._release_transcript(pid)
         self._bound_transcripts[location] = pid
         self._binding_correlation[location] = str(TranscriptProvenance.OPERATOR)
         self._binding_sessions[location] = session_id
 
     def transcript_identity_lost(self, pid: str) -> bool:
-        """Whether transcript attribution for *pid* is currently quarantined.
-
-        The condition is derived, not stored in the participant row. The source
-        and screen detect it live; the existing bus audit stream lets a restarted
-        daemon remember that a positive loss transition happened until a later
-        operator bind or trusted attach supersedes it.
-        """
-        if (pid, TRANSCRIPT_IDENTITY_LOST_CODE) in self._source_errors:
-            self._finish_identity_lost_jobs(pid, transcript_identity_recovery_message(pid))
-            return True
-        if self.store.observation_error_active(pid, TRANSCRIPT_IDENTITY_LOST_CODE):
-            self._source_errors.setdefault((pid, TRANSCRIPT_IDENTITY_LOST_CODE), wall_now())
-            self._finish_identity_lost_jobs(pid, transcript_identity_recovery_message(pid))
-            return True
+        """Pure cached predicate; only the watch path may enter quarantine."""
         participant = self.store.get_participant(pid)
-        if participant is None:
+        if participant is None or participant.status is Status.DEAD:
             return False
-        reason = participant_trusted_pin_unavailable_reason(participant)
-        if reason is None:
-            return False
-        self.mark_transcript_identity_lost(pid, reason)
-        return True
+        return pid in self._identity_lost
+
+    def _restore_transcript_identity_loss(self, pid: str) -> None:
+        """Replay retained audit once for this watcher lifecycle."""
+        if pid in self._identity_loss_replayed:
+            return
+        self._identity_loss_replayed.add(pid)
+        participant = self.store.get_participant(pid)
+        if participant is None or participant.status is Status.DEAD:
+            return
+        if not self.store.observation_error_active(pid, TRANSCRIPT_IDENTITY_LOST_CODE):
+            return
+        self._identity_lost.add(pid)
+        self._source_errors[(pid, TRANSCRIPT_IDENTITY_LOST_CODE)] = wall_now()
+        self._finish_identity_lost_jobs(pid, transcript_identity_recovery_message(pid))
 
     def mark_transcript_identity_lost(self, pid: str, reason: str) -> None:
-        """Enter the derived identity-loss quarantine for one participant."""
+        """Enter quarantine from positive evidence in the observation path."""
+        participant = self.store.get_participant(pid)
+        if participant is None or participant.status is Status.DEAD:
+            return
         self._handle_source_error(
             pid,
             Batch(
@@ -599,6 +608,8 @@ class Observer:
                 continue
             self._unobservable.discard(pid)
             watch = self._watch if observer.has_transcript else self._watch_screen
+            if observer.has_transcript:
+                self._restore_transcript_identity_loss(pid)
             self._tasks[pid] = asyncio.create_task(watch(pid, p.harness))
 
     def _warn_unobservable(self, pid: str, p) -> None:
@@ -621,6 +632,7 @@ class Observer:
         source = self._open_source(pid, observer)
         if source is None:
             return
+        self._restore_transcript_identity_loss(pid)
         self._register_source(pid, source)
         clock = QuietClock()
         turns = TurnAccumulator()
@@ -680,6 +692,7 @@ class Observer:
                 await self._sleep(self.poll)
         finally:
             self._clear_source_errors(pid, include_identity_lost=True)
+            self._identity_loss_replayed.discard(pid)
             self._reset_watch_state.discard(pid)
             self._receipt_candidates.pop(pid, None)
             self._sources.pop(pid, None)
@@ -863,6 +876,12 @@ class Observer:
         """
         assert batch.error_code is not None
         key = (pid, batch.error_code)
+        identity_was_active = pid in self._identity_lost
+        if batch.error_code == TRANSCRIPT_IDENTITY_LOST_CODE:
+            participant = self.store.get_participant(pid)
+            if participant is None or participant.status is Status.DEAD:
+                return
+            self._identity_lost.add(pid)
         for stale in [item for item in self._source_errors if item[0] == pid and item != key]:
             self._source_errors.pop(stale, None)
         failed_at = self._source_errors.get(key)
@@ -870,10 +889,7 @@ class Observer:
             failed_at = wall_now()
             self._source_errors[key] = failed_at
             logger.error("observation failed for %s: %s", pid, batch.error or batch.error_code)
-            if not (
-                batch.error_code == TRANSCRIPT_IDENTITY_LOST_CODE
-                and self.store.observation_error_active(pid, TRANSCRIPT_IDENTITY_LOST_CODE)
-            ):
+            if not (batch.error_code == TRANSCRIPT_IDENTITY_LOST_CODE and identity_was_active):
                 self.store.bus_append(
                     "agent.observation_error",
                     to_id=pid,
@@ -917,6 +933,8 @@ class Observer:
             if key[1] == TRANSCRIPT_IDENTITY_LOST_CODE and not include_identity_lost:
                 continue
             self._source_errors.pop(key, None)
+        if include_identity_lost:
+            self._identity_lost.discard(pid)
 
     def _turn_result(self, event, turn: Turn) -> tuple[str, str | object | None]:
         if not (event.text or event.raw_text):
@@ -1030,27 +1048,34 @@ class Observer:
         # a directory scan.
         if clock.quiet_for(now) > self.relocate:
             batch = await source.refresh()
-            if (
-                batch.attached is not None
-                and self._is_untrusted_rotation(pid, batch.attached)
-                and await self._screen_is_positively_working(pid, observer)
-            ):
+            self._validate_batch(source, batch)
+            self._report_source_error(pid, batch)
+            untrusted_refresh = batch.attached is not None and self._is_untrusted_rotation(
+                pid, batch.attached
+            )
+            if untrusted_refresh:
+                # Defence for third-party sources: heuristic movement is not
+                # admissible through refresh and is not loss evidence either.
+                # Only the bounded, non-committable probe below can supply it.
                 source.discard_attachment()
+            # A refused rotation leaves the accepted source untouched. Keep
+            # running the other quiet arms and return to the normal poll
+            # cadence; this is not an unattached discovery search.
+            accepted = not untrusted_refresh and self._accept_attachment(pid, source, batch)
+            if accepted and self._apply(pid, batch, clock, turns):
+                await self._on_progress(pid, observer, batch, clock)
+                return
+            evidence = await source.probe_identity_loss()
+            if evidence is not None and await self._screen_is_positively_working(pid, observer):
                 self.mark_transcript_identity_lost(
                     pid,
                     (
                         "a newer same-harness/cwd transcript candidate appeared while the "
-                        "trusted pin was inert and the pane was visibly working"
+                        "trusted pin was inert and the pane was visibly working: "
+                        f"{evidence.location}"
                     ),
                 )
                 clock.quiet_since = now
-                return
-            # A refused rotation leaves the accepted source untouched. Keep
-            # running the other quiet arms and return to the normal poll
-            # cadence; this is not an unattached discovery search.
-            accepted = self._accept_attachment(pid, source, batch)
-            if accepted and self._apply(pid, batch, clock, turns):
-                await self._on_progress(pid, observer, batch, clock)
                 return
             # The relocate arm has its own throttle, just like screen and
             # rescue. In particular, a rejected candidate remains discoverable
@@ -1352,6 +1377,10 @@ class Observer:
             )
             self._binding_correlation[location] = str(TranscriptProvenance.EXACT)
             self._binding_sessions[location] = session_id
+        if result in {"accepted", "staged"}:
+            # A staged exact receipt deliberately has not persisted ownership
+            # yet, but it must re-arm the watcher so the reducer can inspect
+            # and commit that exact attachment on its next read.
             self._clear_source_errors(pid, include_identity_lost=True)
         return result
 

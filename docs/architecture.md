@@ -141,16 +141,21 @@ kill; the stable-id confirmation protects against operator mistakes, not a
 malicious local user.
 
 Trusted provenance can later lose transcript identity without losing the pane.
-Theater derives `transcript_identity_lost` when a trusted pin is gone or
-unreadable, or when a newer eligible same-harness/cwd/domain candidate appears
+Theater derives `transcript_identity_lost` when a trusted pin is positively gone
+or no longer a file, or when a newer eligible same-harness/cwd/domain candidate appears
 while the pin is inert and the screen is positively WORKING. Elapsed time alone
 never triggers it. The old `transcript_location` stays pinned; heuristic
 candidates are shown to the operator but never auto-adopted. While quarantined,
 screen status continues, but transcript attribution, turn completion, `send`,
 `read_transcript`, `recall_read`, and `resume` refuse with candidates/bind
 recovery instructions. No participant state column stores this: the condition is
-re-evaluated from the row, source/files, screen, and the existing audit stream,
-where a later bind or trusted attach supersedes the lost event.
+detected only by the observer, cached for the watcher lifecycle, and replayed
+once from the audit stream after restart. Active loss audit rows are exempt from
+bus age collection; a later bind, transfer-unbind, or trusted attach clears the
+replay state and makes the older loss row retention-eligible again.
+Generic source failures such as `EIO`, permissions, or an unavailable OpenCode
+database retain the binding and use the ordinary observation-failure grace;
+they are not identity evidence.
 
 Resume is also provenance-gated. A session id may be resumed only when Theater
 has a trusted owner row for that harness/session id and every trusted owner for

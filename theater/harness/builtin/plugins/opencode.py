@@ -112,7 +112,10 @@ from theater.provenance import (
     is_trusted_provenance,
     normalize_provenance,
 )
-from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
+from theater.transcript_identity import (
+    TRANSCRIPT_IDENTITY_LOST_CODE,
+    TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
+)
 
 logger = logging.getLogger("theater.harness.opencode")
 
@@ -856,11 +859,7 @@ class OpenCodeSource(Source):
         self._require_decision()
         conn = self._open()
         if conn is None:
-            if self._trusted_known_location():
-                return self._identity_lost_batch(
-                    "OpenCode database for trusted transcript pin is unreadable"
-                )
-            return Batch(waiting=True)
+            return self._source_unavailable_batch("OpenCode database is unavailable")
         try:
             if self._session is None:
                 found = self._locate(conn, pinned=True)
@@ -872,11 +871,11 @@ class OpenCodeSource(Source):
                     )
                 return self._correlation_problem(conn) or Batch(waiting=True)
             return self._drain(conn)
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
             # Opened read-only under a live writer; a lock or transient error
-            # is a missed poll, not a dead watcher.
+            # is an ordinary source failure, not positive identity loss.
             logger.debug("reading the opencode database failed", exc_info=True)
-            return Batch()
+            return self._source_unavailable_batch(f"reading OpenCode database failed: {exc}")
 
     def _refresh(self) -> Batch:
         """Propose the newest session for this directory if there is one.
@@ -892,16 +891,16 @@ class OpenCodeSource(Source):
             return Batch()
         conn = self._open()
         if conn is None:
-            return Batch()
+            return self._source_unavailable_batch("OpenCode database is unavailable")
         try:
             found = self._locate(conn, pinned=False)
             if found is None or found == self._session:
                 return Batch()
             logger.info("opencode session changed: %s -> %s", self._session, found)
             return self._attach(conn, found)
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
             logger.debug("relocating the opencode session failed", exc_info=True)
-            return Batch()
+            return self._source_unavailable_batch(f"reading OpenCode database failed: {exc}")
 
     def _history(self, last_n: int) -> History:
         """Rebuild the conversation from `message` and `part`.
@@ -912,13 +911,11 @@ class OpenCodeSource(Source):
         """
         conn = self._open()
         if conn is None:
-            if self._trusted_known_location():
-                return History(
-                    error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
-                    error="OpenCode database for trusted transcript pin is unreadable",
-                    pinned=True,
-                )
-            return History()
+            return History(
+                error_code=TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
+                error="OpenCode database is unavailable",
+                pinned=self._trusted_known_location(),
+            )
         pinned_sid = None
         if self._known_location and self._known_location.startswith("opencode://"):
             pinned_sid = self._known_location.removeprefix("opencode://") or None
@@ -956,9 +953,13 @@ class OpenCodeSource(Source):
             )
             for mid, raw in rows:
                 events.extend(self._replay(_loads(raw), parts.get(mid, [])))
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
             logger.debug("reading opencode history failed", exc_info=True)
-            return History()
+            return History(
+                error_code=TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
+                error=f"reading OpenCode database failed: {exc}",
+                pinned=pinned,
+            )
         if last_n > 0:
             events = events[-last_n:]
         # Stored rows carry no sequence number, so position stands in for one.
@@ -1185,6 +1186,14 @@ class OpenCodeSource(Source):
         return Batch(
             waiting=True,
             error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
+            error=reason,
+        )
+
+    @staticmethod
+    def _source_unavailable_batch(reason: str) -> Batch:
+        return Batch(
+            waiting=True,
+            error_code=TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
             error=reason,
         )
 

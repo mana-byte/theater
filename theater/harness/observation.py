@@ -374,6 +374,22 @@ class TranscriptObserver(HarnessObserver):
     #: told None on every attempt.
     proves_ownership: bool = False
 
+    def identity_loss_candidate(
+        self,
+        *,
+        cwd: str | None,
+        current: Path,
+        current_mtime_ns: int,
+        after: float | None = None,
+    ) -> Path | None:
+        """A bounded newer heuristic candidate, used only as loss evidence.
+
+        Shared-root formats opt in explicitly. Returning a path here never
+        attaches to it; :class:`TranscriptSource` deliberately exposes the
+        result as non-committable identity-loss evidence.
+        """
+        return None
+
     def open_source(
         self,
         *,

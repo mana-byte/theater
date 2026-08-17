@@ -33,6 +33,7 @@ source that knows is believed.
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
 import os
 from abc import ABC, abstractmethod
@@ -50,6 +51,7 @@ from theater.provenance import (
 )
 from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
+    TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
     trusted_location_unavailable_reason,
 )
 
@@ -148,6 +150,18 @@ class Attachment:
 
 
 @dataclass(frozen=True, slots=True)
+class IdentityLossEvidence:
+    """An unattributed candidate that may prove a trusted pin went stale.
+
+    This is intentionally not an :class:`Attachment`: the observer can use it
+    only as loss evidence and therefore cannot accidentally commit it as the
+    participant's new transcript.
+    """
+
+    location: str
+
+
+@dataclass(frozen=True, slots=True)
 class History:
     """A session's past, read back in full. What `read_transcript` asks for.
 
@@ -237,6 +251,10 @@ class Source(ABC):
         check.
         """
         return Batch()
+
+    async def probe_identity_loss(self) -> IdentityLossEvidence | None:
+        """Return bounded heuristic rotation evidence, never a new binding."""
+        return None
 
     def commit_attachment(self) -> None:
         """Adopt the attachment most recently returned by ``read``/``refresh``.
@@ -342,24 +360,26 @@ class TranscriptSource(Source):
             try:
                 attached = await self._attach()
             except OSError as exc:
-                if self._known_location_is_trusted():
+                if self._known_location_is_trusted() and exc.errno == errno.ENOENT:
                     return self._identity_lost_batch(
-                        "trusted transcript pin "
-                        f"{str(self._known_location)!r} is not readable: {exc}"
+                        f"trusted transcript pin {str(self._known_location)!r} "
+                        "no longer exists on disk"
                     )
-                raise
+                return self._source_unavailable_batch(exc)
             return Batch(attached=attached) if attached else Batch(waiting=True)
         try:
             return self._drain()
         except OSError as exc:
-            if self._path_is_trusted_pin(self.path):
+            if self._path_is_trusted_pin(self.path) and exc.errno == errno.ENOENT:
                 return self._identity_lost_batch(
-                    f"trusted transcript pin {str(self.path)!r} is not readable: {exc}"
+                    f"trusted transcript pin {str(self.path)!r} no longer exists on disk"
                 )
-            # Heuristic transcript deleted or rotated; drop back to searching.
-            self._known_location = None
-            self._detach()
-            return Batch(waiting=True)
+            if exc.errno == errno.ENOENT:
+                # Heuristic transcript deleted or rotated; drop back to searching.
+                self._known_location = None
+                self._detach()
+                return Batch(waiting=True)
+            return self._source_unavailable_batch(exc)
 
     async def refresh(self) -> Batch:
         """Propose the newest transcript if the harness started a new one.
@@ -374,14 +394,43 @@ class TranscriptSource(Source):
         of the other clocks.
         """
         self._require_decision()
-        if not self._allow_refresh:
-            return Batch()
-        path = await self._locate(session_id=None)
+        path = await self._proven_rotation()
+        if path is None and self._allow_refresh:
+            path = await self._locate(session_id=None)
         if path is None or path == self.path:
+            return Batch()
+        session_id = self._observer.session_id(path)
+        if self._trusted_pin_is_being_replaced_by_guess(path, session_id):
+            # Heuristic movement is never an attachment. The separate bounded
+            # probe may report it as loss evidence, but it cannot auto-repoint.
             return Batch()
         logger.info("transcript rotated: %s -> %s", self.path, path)
         attached = await self._attach(path)
         return Batch(attached=attached) if attached else Batch()
+
+    async def probe_identity_loss(self) -> IdentityLossEvidence | None:
+        """Look for a newer heuristic candidate without staging it.
+
+        The adapter owns the bounded search. This source supplies the accepted
+        path and cursor mtime, then rejects trusted results: exact/proven
+        rotations belong to :meth:`refresh`, while this channel exists only to
+        support quarantine evidence.
+        """
+        if self.path is None or not self._path_is_trusted_pin(self.path):
+            return None
+        candidate = await asyncio.to_thread(
+            self._observer.identity_loss_candidate,
+            cwd=self._cwd,
+            current=self.path,
+            current_mtime_ns=self.mtime,
+            after=self._after,
+        )
+        if candidate is None or candidate == self.path or not self._inside_domain(candidate):
+            return None
+        session_id = self._observer.session_id(candidate)
+        if is_trusted_provenance(self.correlation_for(candidate, session_id)):
+            return None
+        return IdentityLossEvidence(location=str(candidate))
 
     def commit_attachment(self) -> None:
         """Make the observer-accepted candidate the live transcript."""
@@ -455,7 +504,45 @@ class TranscriptSource(Source):
             path = await self._locate(session_id=self._session_id)
         if path is None:
             return History(pinned=pinned)
-        if not self._inside_domain(path):
+        if path_error := self._history_path_error(path, pinned=pinned):
+            return path_error
+        try:
+            events = await asyncio.to_thread(
+                self._read_all,
+                path,
+                strict=self._path_is_trusted_pin(path),
+            )
+        except OSError as exc:
+            if exc.errno != errno.ENOENT:
+                return History(
+                    error_code=TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
+                    error=f"transcript source {str(path)!r} is unavailable: {exc}",
+                    pinned=True,
+                )
+            return History(
+                error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
+                error=f"trusted transcript pin {str(path)!r} no longer exists on disk",
+                pinned=True,
+            )
+        return History(
+            location=str(path),
+            events=events[-last_n:] if last_n > 0 else events,
+            correlation=self.correlation_for(path, self._observer.session_id(path)),
+            collision_domain=self.collision_domain,
+            pinned=pinned,
+        )
+
+    def _history_path_error(self, path: Path, *, pinned: bool) -> History | None:
+        """Validate a history location without turning generic I/O into loss."""
+        try:
+            inside_domain = self._inside_domain(path)
+        except OSError as exc:
+            return History(
+                error_code=TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
+                error=f"transcript source {str(path)!r} is unavailable: {exc}",
+                pinned=pinned,
+            )
+        if not inside_domain:
             if self._path_is_trusted_pin(path):
                 return History(
                     error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
@@ -466,34 +553,25 @@ class TranscriptSource(Source):
                     pinned=True,
                 )
             return History(pinned=pinned)
-        if pinned and not path.exists():
-            # Never replace an admitted historical location with a cwd guess.
-            if self._path_is_trusted_pin(path):
-                return History(
-                    error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
-                    error=f"trusted transcript pin {str(path)!r} no longer exists on disk",
-                    pinned=True,
-                )
-            return History(pinned=True)
-        try:
-            events = await asyncio.to_thread(
-                self._read_all,
-                path,
-                strict=self._path_is_trusted_pin(path),
-            )
-        except OSError as exc:
-            return History(
-                error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
-                error=f"trusted transcript pin {str(path)!r} is not readable: {exc}",
-                pinned=True,
-            )
-        return History(
-            location=str(path),
-            events=events[-last_n:] if last_n > 0 else events,
-            correlation=self.correlation_for(path, self._observer.session_id(path)),
-            collision_domain=self.collision_domain,
-            pinned=pinned,
-        )
+        if pinned:
+            try:
+                path.stat()
+            except OSError as exc:
+                # Never replace an admitted historical location with a cwd guess.
+                if self._path_is_trusted_pin(path) and exc.errno == errno.ENOENT:
+                    return History(
+                        error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
+                        error=f"trusted transcript pin {str(path)!r} no longer exists on disk",
+                        pinned=True,
+                    )
+                if exc.errno != errno.ENOENT:
+                    return History(
+                        error_code=TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
+                        error=f"transcript source {str(path)!r} is unavailable: {exc}",
+                        pinned=True,
+                    )
+                return History(pinned=True)
+        return None
 
     def correlation_for(self, path: Path, session_id: str | None) -> str:
         """How well *path* is known to belong to this participant.
@@ -579,6 +657,32 @@ class TranscriptSource(Source):
             error=reason,
         )
 
+    @staticmethod
+    def _source_unavailable_batch(exc: OSError) -> Batch:
+        return Batch(
+            waiting=True,
+            error_code=TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
+            error=f"transcript source is unavailable: {exc}",
+        )
+
+    def _trusted_pin_is_being_replaced_by_guess(self, path: Path, session_id: str | None) -> bool:
+        return (
+            self.path is not None
+            and self._path_is_trusted_pin(self.path)
+            and path != self.path
+            and not is_trusted_provenance(self.correlation_for(path, session_id))
+        )
+
+    async def _proven_rotation(self) -> Path | None:
+        """A process-proven replacement, if this adapter can supply one."""
+        if self.path is None or not self._observer.proves_ownership:
+            return None
+        proven = await asyncio.to_thread(self._observer.proven_transcript, cwd=self._cwd)
+        if proven is None or proven == self.path or not self._inside_domain(proven):
+            return None
+        self._proven[proven] = TranscriptProvenance.PROVEN
+        return proven
+
     def _detach(self) -> None:
         """Forget an accepted file that vanished; collision rejection is staged."""
         self.path = None
@@ -593,7 +697,7 @@ class TranscriptSource(Source):
             return True
         try:
             path.resolve().relative_to(self._domain_root)
-        except (OSError, ValueError):
+        except ValueError:
             return False
         return True
 
@@ -658,8 +762,15 @@ class TranscriptSource(Source):
         """
         if path is None:
             path = self._known_location
-            if path is not None and (not self._inside_domain(path) or not path.exists()):
+            if path is not None and not self._inside_domain(path):
                 path = None
+            if path is not None:
+                try:
+                    path.stat()
+                except OSError as exc:
+                    if exc.errno != errno.ENOENT or self._path_is_trusted_pin(path):
+                        raise
+                    path = None
             if path is not None:
                 path = await self._upgraded(path)
             if path is None:

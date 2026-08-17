@@ -288,6 +288,47 @@ async def test_job_segment_reports_transcript_identity_lost(registry, tmp_path):
         f"theater bind {target_id} <candidate> --confirm-id {target_id}"
         in (result["transcript"]["reason"])
     )
+    assert not observer.transcript_identity_lost(target_id)
+    assert not any(
+        row["kind"] == "agent.observation_error" for row in registry.store.bus_tail(limit=500)
+    )
+
+
+async def test_dead_trusted_owner_missing_transcript_is_unavailable_not_quarantined(
+    registry, tmp_path
+):
+    root, project, sid, _transcript = _vibe_session(tmp_path)
+    from theater import harness as harness_mod
+
+    harness_mod.HARNESSES["vibe"] = VibeHarness(root=root)
+    target_id = _make_job(
+        registry.store,
+        registry,
+        handle="dead-missing-vibe",
+        target_cwd=str(project),
+        session_id=sid,
+        session_correlation=str(TranscriptProvenance.OPERATOR),
+    )
+    target = registry.get(target_id)
+    target.transcript_location = str(tmp_path / "gone" / "messages.jsonl")
+    target.transcript_domain = str(root.resolve())
+    registry.store.upsert_participant(target)
+    registry.mark_dead(target_id)
+    observer = Observer(registry, harnesses={})
+
+    result = await read_segment(
+        "dead-missing-vibe",
+        store=registry.store,
+        registry=registry,
+        cwd=str(tmp_path),
+        observer=observer,
+    )
+
+    assert result["transcript"]["available"] is False
+    assert result["transcript"]["error_code"] is None
+    assert "retained for resume" in result["transcript"]["reason"]
+    assert registry.get(target_id).session_id == sid
+    assert not observer.transcript_identity_lost(target_id)
 
 
 @pytest.mark.parametrize(

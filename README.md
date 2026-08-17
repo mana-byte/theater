@@ -45,7 +45,7 @@ transcript-backed adopted Claude, Vibe, OpenCode, and unproven Codex sessions,
 `send` and `read_transcript` are refused until provenance is
 operator/proven/exact. Screen-only status observation still runs before binding,
 so the tree can show working/idle while the operator recovers attribution.
-If a trusted bound transcript later disappears, becomes unreadable, or a newer
+If a trusted bound transcript later disappears, is positively no longer a file, or a newer
 same-harness/cwd candidate appears while the pinned transcript is inert and the
 pane is visibly working, Theater enters `transcript_identity_lost`: screen status
 stays live, but transcript attribution, turn completion, `send`,
@@ -518,8 +518,8 @@ resume:      trusted session id to continue; only allowed when the trusted owner
 Live resume is refused even for exact/proven/operator session ids. A live
 participant should receive work through `send`; resuming is for continuing a
 session after its previous owner is dead. If the trusted owner row was already
-garbage-collected, Theater has no tombstone yet and refuses with a safe recovery
-message rather than trusting the raw session id. Vibe resumes reuse Theater's
+garbage-collected, Theater has no tombstone yet: resume outside Theater, then
+adopt and bind that pane, or wait for tombstone support. Vibe resumes reuse Theater's
 signed isolated transcript domain marker, so repeat resumes work through dead
 successor rows without returning to the user's shared Vibe history.
 

@@ -430,6 +430,47 @@ async def test_receipt_does_not_persist_until_source_admits(registry, tmp_path):
     assert got.transcript_location is None
 
 
+async def test_staged_exact_receipt_rearms_quarantined_watcher(registry, tmp_path):
+    from theater.daemon.observer import Observer
+
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    root = tmp_path / "claude" / "projects"
+    old = _transcript(root, "11111111-1111-4111-8111-111111111111", cwd)
+    replacement = _transcript(root, "22222222-2222-4222-8222-222222222222", cwd)
+    source = TranscriptSource(
+        ClaudeCodeObserver(root=root),
+        cwd=str(cwd),
+        session_id=old.stem,
+        session_provenance=TranscriptProvenance.EXACT,
+        known_location=str(old),
+    )
+    initial = await source.read()
+    assert initial.attached is not None
+    source.commit_attachment()
+    participant = registry.create_spawned(harness="claude", cwd=str(cwd), pid="p-claude")
+    participant.session_id = old.stem
+    participant.session_correlation = "exact"
+    participant.transcript_location = str(old)
+    registry.store.upsert_participant(participant)
+    observer = Observer(registry, harnesses={})
+    observer._sources[participant.id] = source
+    observer.mark_transcript_identity_lost(participant.id, "rotation evidence")
+
+    admission = observer.transcript_receipt(
+        participant.id,
+        location=str(replacement),
+        session_id=replacement.stem,
+    )
+    candidate = await source.read()
+
+    assert admission == "staged"
+    assert not observer.transcript_identity_lost(participant.id)
+    assert candidate.attached is not None
+    assert candidate.attached.location == str(replacement)
+    assert candidate.attached.correlation == "exact"
+
+
 async def test_same_cwd_competitor_cannot_claim_unbound_foreign_receipt(
     claude_daemon, claude_client, tmp_path
 ):

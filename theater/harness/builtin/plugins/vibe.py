@@ -629,6 +629,25 @@ class VibeObserver(TranscriptObserver):
         ]
         return sorted(rows, key=lambda c: (c.mtime or 0, c.location), reverse=True)
 
+    def identity_loss_candidate(
+        self,
+        *,
+        cwd: str | None,
+        current: Path,
+        current_mtime_ns: int,
+        after: float | None = None,
+    ) -> Path | None:
+        """Reuse Vibe's already-bounded newest-first session search."""
+        if not cwd:
+            return None
+        candidate = self.find_transcript(cwd=cwd, session_id=None, after=after)
+        if candidate is None or candidate == current:
+            return None
+        try:
+            return candidate if candidate.stat().st_mtime_ns > current_mtime_ns else None
+        except OSError:
+            return None
+
     def admit_operator_candidate(
         self,
         *,

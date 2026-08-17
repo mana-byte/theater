@@ -22,8 +22,9 @@ The sweep runs in six phases, in this order:
 6. **tree_kv** — delete rows whose spawn tree has no live participant.
    Computes the roots of all live participants through lineage.root_of()
    and retains those, deleting everything else in bounded batches.
-7. **Bus** — delete rows older than ``bus_days`` (except ``send.refused``),
-   then trim ``send.refused`` to the newest ``refused_cap`` rows.
+7. **Bus** — delete rows older than ``bus_days`` (except ``send.refused`` and
+   active transcript-identity-loss audit rows), then trim ``send.refused`` to
+   the newest ``refused_cap`` rows.
 
 **MF1 — never delete a running job.** ``JobManager.finish()`` looks the job
 up and does ``if job is None: return None`` *before* setting the asyncio
@@ -51,6 +52,7 @@ imports the tables from ``theater.daemon.schema`` and executes against
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 
@@ -61,6 +63,7 @@ from theater.daemon import lineage
 from theater.daemon.schema import bus, checkpoints, jobs, participants, touch, tree_kv
 from theater.daemon.store import Store
 from theater.models import now
+from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
 logger = logging.getLogger("theater.gc")
 
@@ -329,27 +332,36 @@ async def _sweep_bus(store: Store, cutoff: float, batch: int, refused_cap: int) 
 
     ``send.refused`` events are the only record of a refused send
     (``_refuse_send`` deliberately writes no job row), so they are exempt
-    from the age TTL and capped by row count instead.
+    from the age TTL and capped by row count instead. The newest uncleared
+    transcript-identity-loss row for each live participant is also retained,
+    because watcher restart replay depends on it; superseded rows age normally.
     """
     total = 0
+    protected = await _active_identity_loss_audit_ids(store, batch)
     # Age-based deletion: everything old except send.refused.
     # SQLAlchemy Core's delete() does not support .limit(), so select the
     # ids first and then delete by id — the same subquery pattern the jobs
     # phase uses.
+    after_id = 0
     while True:
         sub = (
             select(bus.c.id)
             .where(bus.c.ts < cutoff)
             .where(bus.c.kind != "send.refused")
+            .where(bus.c.id > after_id)
+            .order_by(bus.c.id)
             .limit(batch)
         )
-        ids = [r[0] for r in store.conn.execute(sub).fetchall()]
-        if not ids:
+        scanned = [r[0] for r in store.conn.execute(sub).fetchall()]
+        if not scanned:
             break
-        result = store.conn.execute(delete(bus).where(bus.c.id.in_(ids)))
-        total += result.rowcount
+        after_id = scanned[-1]
+        ids = [row_id for row_id in scanned if row_id not in protected]
+        if ids:
+            result = store.conn.execute(delete(bus).where(bus.c.id.in_(ids)))
+            total += result.rowcount
         await asyncio.sleep(0)
-        if len(ids) < batch:
+        if len(scanned) < batch:
             break
 
     # Cap-based trimming of send.refused: keep the newest refused_cap rows.
@@ -367,6 +379,77 @@ async def _sweep_bus(store: Store, cutoff: float, batch: int, refused_cap: int) 
                 await asyncio.sleep(0)
 
     return total
+
+
+async def _active_identity_loss_audit_ids(store: Store, batch: int) -> set[int]:
+    """Newest uncleared loss event for each live participant, in batches.
+
+    Quarantine is restart-replayed from the bus rather than stored on the
+    participant row. Its active audit row therefore outlives the ordinary bus
+    TTL. Superseded loss rows remain retention-bounded, and dead/orphaned rows
+    are not protected because dead bindings are never quarantined.
+    """
+    kinds = (
+        "agent.observation_error",
+        "agent.transcript",
+        "agent.transcript_receipt",
+        "operator.transcript_bind",
+        "operator.transcript_unbind",
+    )
+    decided: set[str] = set()
+    active: dict[str, int] = {}
+    before_id: int | None = None
+    while True:
+        stmt = (
+            select(bus.c.id, bus.c.to_id, bus.c.kind, bus.c.payload)
+            .where(bus.c.to_id.is_not(None))
+            .where(bus.c.kind.in_(kinds))
+            .order_by(bus.c.id.desc())
+            .limit(batch)
+        )
+        if before_id is not None:
+            stmt = stmt.where(bus.c.id < before_id)
+        rows = store.conn.execute(stmt).fetchall()
+        if not rows:
+            break
+        for row_id, participant_id, kind, payload in rows:
+            if participant_id in decided:
+                continue
+            try:
+                decoded = json.loads(payload or "{}")
+            except ValueError:
+                decoded = {}
+            clears = kind in {
+                "agent.transcript",
+                "operator.transcript_bind",
+                "operator.transcript_unbind",
+            } or (kind == "agent.transcript_receipt" and decoded.get("admission") == "accepted")
+            if clears:
+                decided.add(participant_id)
+            elif (
+                kind == "agent.observation_error"
+                and decoded.get("code") == TRANSCRIPT_IDENTITY_LOST_CODE
+            ):
+                active[participant_id] = row_id
+                decided.add(participant_id)
+        before_id = rows[-1][0]
+        await asyncio.sleep(0)
+        if len(rows) < batch:
+            break
+
+    live: set[str] = set()
+    participant_ids = list(active)
+    lookup_batch = min(batch, 500)
+    for offset in range(0, len(participant_ids), lookup_batch):
+        chunk = participant_ids[offset : offset + lookup_batch]
+        rows = store.conn.execute(
+            select(participants.c.id)
+            .where(participants.c.id.in_(chunk))
+            .where(participants.c.status != "dead")
+        ).fetchall()
+        live.update(row[0] for row in rows)
+        await asyncio.sleep(0)
+    return {row_id for participant_id, row_id in active.items() if participant_id in live}
 
 
 async def _sweep_checkpoints(store: Store, cutoff: float, batch: int) -> int:

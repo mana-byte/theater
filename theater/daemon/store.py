@@ -189,6 +189,22 @@ class Store:
                         transcript_location=None,
                     )
                 )
+                conn.execute(
+                    insert(bus).values(
+                        ts=now(),
+                        from_id="cli",
+                        to_id=prior_owner.id,
+                        kind="operator.transcript_unbind",
+                        payload=json.dumps(
+                            {
+                                "actor_surface": "cli",
+                                "target": prior_owner.id,
+                                "transferred_to": target.id,
+                                "path": audit_payload.get("path"),
+                            }
+                        ),
+                    )
+                )
             conn.execute(
                 sqlite_insert(participants)
                 .values(**target_values)
@@ -748,9 +764,10 @@ class Store:
     def observation_error_active(self, participant_id: str, code: str) -> bool:
         """Whether an observation error remains uncleared in the audit stream.
 
-        This is not a state column. The observer derives the condition again from
-        the live row/source/screen, and the bus records the transition so a
-        daemon restart does not forget a quarantine before the operator rebinds.
+        This is not a state column. A watcher calls this once at lifecycle start
+        to rebuild its cache; predicates never call it. The bus records the
+        transition so a daemon restart does not forget a quarantine before the
+        operator rebinds.
         """
         rows = self.conn.execute(
             select(bus.c.kind, bus.c.payload)
@@ -762,13 +779,18 @@ class Store:
                         "agent.transcript",
                         "agent.transcript_receipt",
                         "operator.transcript_bind",
+                        "operator.transcript_unbind",
                     ]
                 )
             )
             .order_by(bus.c.id.desc())
         ).fetchall()
         for kind, payload in rows:
-            if kind in {"agent.transcript", "operator.transcript_bind"}:
+            if kind in {
+                "agent.transcript",
+                "operator.transcript_bind",
+                "operator.transcript_unbind",
+            }:
                 return False
             try:
                 decoded = json.loads(payload or "{}")

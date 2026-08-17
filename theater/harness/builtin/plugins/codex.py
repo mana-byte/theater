@@ -183,6 +183,10 @@ _SCREEN_TAIL_LINES = 5
 #: from being read into memory.
 _CWD_PROBE_BYTES = 256 * 1024
 
+#: Bound record reads during heuristic loss detection. Directory enumeration
+#: still sees the root, but only the newest few files are opened for cwd.
+_LOSS_CANDIDATE_PROBES = 8
+
 #: The filename is `rollout-<local ISO with - separators>-<uuid>`. Anchoring on
 #: the fixed-width timestamp is what lets the uuid keep its own hyphens.
 _STEM = re.compile(r"^rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-(.+)$")
@@ -608,6 +612,36 @@ class CodexObserver(TranscriptObserver):
             for path in root.glob("*/*/*/rollout-*.jsonl")
         ]
         return sorted(rows, key=lambda c: (c.mtime or 0, c.location), reverse=True)
+
+    def identity_loss_candidate(
+        self,
+        *,
+        cwd: str | None,
+        current: Path,
+        current_mtime_ns: int,
+        after: float | None = None,
+    ) -> Path | None:
+        """A newer cwd match, bounded and never itself process proof."""
+        if not self.root.is_dir() or not cwd:
+            return None
+        want = str(Path(cwd).resolve())
+        candidates: list[tuple[int, Path]] = []
+        for path in self.root.glob("*/*/*/rollout-*.jsonl"):
+            if path == current or path.is_symlink():
+                continue
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            if st.st_mtime_ns <= current_mtime_ns:
+                continue
+            if after is not None and getattr(st, "st_birthtime", st.st_ctime) < after:
+                continue
+            candidates.append((st.st_mtime_ns, path))
+        for _mtime, path in sorted(candidates, reverse=True)[:_LOSS_CANDIDATE_PROBES]:
+            if self._transcript_cwd(path) == want:
+                return path
+        return None
 
     def admit_operator_candidate(
         self,

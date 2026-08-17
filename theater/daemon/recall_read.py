@@ -91,7 +91,7 @@ async def read_segment(
 # ---- job segments --------------------------------------------------------
 
 
-async def _read_job(  # noqa: PLR0912
+async def _read_job(
     handle: str,
     *,
     store,
@@ -220,18 +220,19 @@ async def _read_job(  # noqa: PLR0912
         await source.aclose()
 
     if history.error_code is not None:
-        if history.error_code == TRANSCRIPT_IDENTITY_LOST_CODE and observer is not None:
-            marker = getattr(observer, "mark_transcript_identity_lost", None)
-            if callable(marker):
-                marker(p.id, history.error or history.error_code)
+        dead_identity_loss = (
+            history.error_code == TRANSCRIPT_IDENTITY_LOST_CODE and p.status.value == "dead"
+        )
         brief["transcript"] = {
             "available": False,
             "reason": (
-                transcript_identity_recovery_message(p.id, history.error)
+                "trusted dead binding is retained for resume, but its transcript is unavailable"
+                if dead_identity_loss
+                else transcript_identity_recovery_message(p.id, history.error)
                 if history.error_code == TRANSCRIPT_IDENTITY_LOST_CODE
                 else history.error or history.error_code
             ),
-            "error_code": history.error_code,
+            "error_code": None if dead_identity_loss else history.error_code,
         }
         return brief
 

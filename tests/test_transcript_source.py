@@ -14,6 +14,7 @@ what it actually does, not what would be safe.
 
 from __future__ import annotations
 
+import errno
 import json
 from pathlib import Path
 
@@ -21,6 +22,7 @@ import pytest
 from shipped import ClaudeCodeObserver
 
 from theater.harness.source import Batch, History, TranscriptSource
+from theater.transcript_identity import TRANSCRIPT_SOURCE_UNAVAILABLE_CODE
 
 
 def record(text: str, *, end: bool = True) -> str:
@@ -143,6 +145,31 @@ async def test_after_losing_the_file_a_replacement_is_picked_up(root, workdir):
 
     assert batch.attached is not None
     assert batch.attached.location.endswith("bbb.jsonl")
+
+
+async def test_eio_on_a_trusted_pin_is_an_ordinary_source_error(root, workdir, monkeypatch):
+    path = transcript(root, "aaa", workdir, record("hello"))
+    s = source(
+        root,
+        workdir,
+        session_id="aaa",
+        session_provenance="operator",
+        known_location=str(path),
+    )
+    await attach(s)
+    real_stat = Path.stat
+
+    def eio(self, *args, **kwargs):
+        if self == path:
+            raise OSError(errno.EIO, "simulated I/O error")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", eio)
+    batch = await s.read()
+
+    assert batch.waiting is True
+    assert batch.error_code == TRANSCRIPT_SOURCE_UNAVAILABLE_CODE
+    assert s.path == path
 
 
 # ---- rotation -------------------------------------------------------------

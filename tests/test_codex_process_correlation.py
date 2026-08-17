@@ -24,6 +24,7 @@ release changes how it writes its rollout.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -41,6 +42,7 @@ from theater.provenance import TranscriptProvenance
 # means to select the older one is visibly not just getting lucky.
 SESSION_A = "01a00cdf-17f9-7851-99a4-b0dbaad18bed"
 SESSION_B = "01a00cdf-c496-7f92-8429-d75394c3edfb"
+SESSION_C = "01a00cdf-ffff-7f92-8429-d75394c3edfc"
 PID_A = 74065
 PID_B = 74675
 #: The shell a pane runs when the session was adopted rather than spawned.
@@ -480,6 +482,67 @@ async def test_a_pin_the_process_cannot_improve_on_is_left_alone(monkeypatch, co
 
     assert history.location == str(codex_tree["a"])
     assert history.correlation == "heuristic"
+
+
+async def test_newer_codex_guess_is_only_noncommittable_loss_evidence(monkeypatch, codex_tree):
+    os.utime(codex_tree["a"], ns=(1_000_000_000, 1_000_000_000))
+    os.utime(codex_tree["b"], ns=(1_500_000_000, 1_500_000_000))
+    hold(monkeypatch, {PID_A: []})
+    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
+    source = reader.open_source(
+        cwd=str(codex_tree["project"]),
+        session_id=SESSION_A,
+        session_provenance=TranscriptProvenance.OPERATOR,
+        known_location=str(codex_tree["a"]),
+    )
+    initial = await source.read()
+    assert initial.attached is not None
+    source.commit_attachment()
+    newer = _rollout(
+        codex_tree["root"],
+        SESSION_C,
+        codex_tree["project"],
+        at="01-20-46",
+        text="not attributed",
+    )
+    os.utime(newer, ns=(2_000_000_000, 2_000_000_000))
+
+    refresh = await source.refresh()
+    evidence = await source.probe_identity_loss()
+
+    assert refresh.attached is None
+    assert evidence is not None
+    assert evidence.location == str(newer)
+    assert source.path == codex_tree["a"]
+
+
+async def test_process_proven_codex_rotation_still_attaches(monkeypatch, codex_tree):
+    held = {PID_A: [codex_tree["a"]]}
+    hold(monkeypatch, held)
+    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
+    source = reader.open_source(
+        cwd=str(codex_tree["project"]),
+        session_id=SESSION_A,
+        session_provenance=TranscriptProvenance.OPERATOR,
+        known_location=str(codex_tree["a"]),
+    )
+    initial = await source.read()
+    assert initial.attached is not None
+    source.commit_attachment()
+    newer = _rollout(
+        codex_tree["root"],
+        SESSION_C,
+        codex_tree["project"],
+        at="01-20-46",
+        text="still mine",
+    )
+    held[PID_A] = [newer]
+
+    refresh = await source.refresh()
+
+    assert refresh.attached is not None
+    assert refresh.attached.location == str(newer.resolve())
+    assert refresh.attached.correlation == "proven"
 
 
 async def test_committing_a_guess_gives_up_the_claim_that_the_id_was_exact(monkeypatch, codex_tree):

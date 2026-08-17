@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import errno
+import stat
 from pathlib import Path
-from typing import Any
 
 from theater.provenance import is_trusted_provenance
 
 TRANSCRIPT_IDENTITY_LOST_CODE = "transcript_identity_lost"
+TRANSCRIPT_SOURCE_UNAVAILABLE_CODE = "transcript_source_unavailable"
 
 
 def transcript_identity_recovery_message(pid: str, detail: str | None = None) -> str:
@@ -47,27 +49,22 @@ def trusted_location_unavailable_reason(
         try:
             root = Path(domain).expanduser().resolve(strict=False)
             path.resolve(strict=False).relative_to(root)
-        except (OSError, ValueError):
+        except ValueError:
             return (
                 f"trusted transcript pin {location!r} no longer exists inside its "
                 "trusted transcript domain"
             )
+        except OSError:
+            return None
     try:
-        if not path.exists():
-            return f"trusted transcript pin {location!r} no longer exists on disk"
-        if not path.is_file():
-            return f"trusted transcript pin {location!r} is not a readable transcript file"
-        with path.open("rb"):
-            pass
+        mode = path.stat().st_mode
     except OSError as exc:
-        return f"trusted transcript pin {location!r} is not readable: {exc}"
+        if exc.errno == errno.ENOENT:
+            return f"trusted transcript pin {location!r} no longer exists on disk"
+        # EIO, permission failures, exhausted descriptors and other generic
+        # source failures do not prove that the persisted identity is wrong.
+        # The source reports those through the ordinary observation grace.
+        return None
+    if not stat.S_ISREG(mode):
+        return f"trusted transcript pin {location!r} is not a readable transcript file"
     return None
-
-
-def participant_trusted_pin_unavailable_reason(participant: Any) -> str | None:
-    """Filesystem loss reason for a participant's trusted pinned transcript."""
-    return trusted_location_unavailable_reason(
-        location=getattr(participant, "transcript_location", None),
-        provenance=getattr(participant, "session_correlation", None),
-        domain=getattr(participant, "transcript_domain", None),
-    )

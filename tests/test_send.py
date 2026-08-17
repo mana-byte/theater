@@ -118,14 +118,9 @@ async def test_adopted_codex_with_proven_process_correlation_can_send(client, fa
     assert fake_tmux.sent == [("%7", "do the thing")]
 
 
-async def test_transcript_identity_lost_refuses_send_before_job_creation(
-    client, fake_tmux, daemon, tmp_path
-):
+async def test_transcript_identity_lost_refuses_send_before_job_creation(client, fake_tmux, daemon):
     target = await _target(client, daemon)
-    participant = daemon.registry.get(target["id"])
-    participant.transcript_location = str(tmp_path / "missing" / "messages.jsonl")
-    participant.transcript_domain = str(tmp_path.resolve())
-    daemon.store.upsert_participant(participant)
+    daemon.observer.mark_transcript_identity_lost(target["id"], "positive watcher evidence")
 
     with pytest.raises(RemoteError) as exc:
         await client.call("send", target=target["id"], prompt="do not create")

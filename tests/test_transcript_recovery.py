@@ -16,6 +16,7 @@ from theater.daemon.registry import Registry
 from theater.harness import HARNESSES
 from theater.harness.builtin.plugins.vibe import ISOLATION_MARKER, isolation_marker_text
 from theater.models import BadRequest
+from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
 OPENCODE_SCHEMA = """
 CREATE TABLE session (
@@ -379,9 +380,14 @@ def test_live_and_dead_owner_conflicts_require_exact_transfer(
     assert result["prior_owner"] == owner.id
     assert registry.store.get_participant(target.id).session_correlation == "operator"
     assert daemon.observer.reset[-2:] == [owner.id, target.id]
-    events = registry.store.bus_tail(limit=1)
-    assert events[0]["kind"] == "operator.transcript_bind"
-    assert events[0]["payload"]["prior_owner"] == owner.id
+    events = registry.store.bus_tail(limit=2)
+    assert [event["kind"] for event in events] == [
+        "operator.transcript_unbind",
+        "operator.transcript_bind",
+    ]
+    assert events[-1]["payload"]["prior_owner"] == owner.id
+    assert events[0]["payload"]["transferred_to"] == target.id
+    assert not registry.store.observation_error_active(owner.id, TRANSCRIPT_IDENTITY_LOST_CODE)
 
 
 def test_store_operator_bind_rolls_back_transfer_target_and_audit_on_failure(
