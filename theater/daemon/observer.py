@@ -1202,6 +1202,14 @@ class Observer:
         """Whether a short-lived history read is only a contested cwd guess."""
         return history_correlation_is_ambiguous(self.registry, pid, history)
 
+    def transcript_receipt(self, pid: str, *, location: str, session_id: str) -> None:
+        """Tell a live source that the daemon has exact receipt evidence."""
+        source = self._sources.get(pid)
+        if source is None:
+            return
+        source.admit_exact_location(location=location, session_id=session_id)
+        self._reset_watch_state.add(pid)
+
     def _on_attach(self, pid: str, attached: Attachment) -> None:
         """Record the effects of an attachment already accepted and committed."""
         # Release any previous binding this participant held, so a rotation

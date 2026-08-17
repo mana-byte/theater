@@ -331,6 +331,38 @@ class Store:
     def set_send_seq(self, value: int) -> None:
         self.set_meta("send_seq", str(value))
 
+    def set_receipt_token(self, participant_id: str, token: str) -> None:
+        self.set_meta(f"receipt_token:{participant_id}", token)
+
+    def get_receipt_token(self, participant_id: str) -> str | None:
+        return self.get_meta(f"receipt_token:{participant_id}")
+
+    def record_transcript_receipt(
+        self,
+        participant_id: str,
+        *,
+        session_id: str,
+        transcript_domain: str,
+        transcript_location: str,
+    ) -> Participant | None:
+        """Atomically persist exact receipt provenance for a participant."""
+        with self.engine.begin() as conn:
+            conn.execute(
+                update(participants)
+                .where(participants.c.id == participant_id)
+                .values(
+                    session_id=session_id,
+                    session_correlation="exact",
+                    transcript_domain=transcript_domain,
+                    transcript_location=transcript_location,
+                    last_activity=now(),
+                )
+            )
+            row = conn.execute(
+                select(participants).where(participants.c.id == participant_id)
+            ).first()
+        return Participant.from_row(row._mapping) if row else None
+
     # ---- tree KV --------------------------------------------------------
 
     def put_kv(

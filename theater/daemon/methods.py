@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import hmac
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from sqlalchemy import func, select
@@ -179,6 +181,85 @@ def _optional_string_param(params: dict, key: str, *, method_name: str) -> str |
     return value
 
 
+def _claude_transcript_root(daemon) -> Path:
+    harness = daemon.observer.harnesses.get("claude") or HARNESSES.get("claude")
+    observer = getattr(harness, "observer", None)
+    root = getattr(observer, "root", None)
+    if not isinstance(root, Path):
+        raise BadRequest("claude receipt cannot validate transcript root")
+    return root.resolve()
+
+
+def _canonical_claude_transcript(daemon, raw_path: str) -> tuple[Path, str]:
+    root = _claude_transcript_root(daemon)
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        raise BadRequest("claude receipt transcript_path must be absolute")
+    canonical = path.resolve(strict=False)
+    try:
+        rel = canonical.relative_to(root)
+    except ValueError:
+        raise BadRequest(
+            "claude receipt transcript_path is outside Claude's transcript root"
+        ) from None
+    if canonical.suffix != ".jsonl" or len(rel.parts) != 2:
+        raise BadRequest(
+            "claude receipt transcript_path must name a Claude project JSONL transcript"
+        )
+    return canonical, str(root)
+
+
+def _validate_claude_transcript_records(path: Path, *, session_id: str, cwd: str | None) -> None:
+    """Reject an existing transcript whose own records contradict the receipt."""
+    if not path.exists():
+        return
+    wanted_cwd = str(Path(cwd).resolve()) if cwd else None
+    try:
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            for i, line in enumerate(fh):
+                if i >= 20:
+                    return
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                found_session = record.get("session_id") or record.get("sessionId")
+                if isinstance(found_session, str) and found_session and found_session != session_id:
+                    raise BadRequest("claude receipt session_id contradicts transcript records")
+                found_cwd = record.get("cwd")
+                if (
+                    wanted_cwd is not None
+                    and isinstance(found_cwd, str)
+                    and found_cwd
+                    and str(Path(found_cwd).resolve()) != wanted_cwd
+                ):
+                    raise BadRequest("claude receipt transcript cwd contradicts participant cwd")
+    except OSError as exc:
+        raise BadRequest(f"claude receipt transcript_path is not readable: {exc}") from exc
+
+
+def _reject_cross_participant_receipt(
+    daemon,
+    *,
+    participant_id: str,
+    session_id: str,
+    transcript_location: str,
+) -> None:
+    for other in daemon.registry.list(include_dead=True):
+        if other.id == participant_id:
+            continue
+        if other.harness != "claude":
+            continue
+        if other.transcript_location == transcript_location:
+            raise BadRequest(
+                "claude receipt transcript_path is already owned by another participant"
+            )
+        if other.session_id == session_id and other.session_correlation == "exact":
+            raise BadRequest("claude receipt session_id is already owned by another participant")
+
+
 def _serialized_response_format(params: dict) -> str | None:
     raw = params.get("response_format")
     if raw is None:
@@ -291,6 +372,49 @@ async def _status(daemon, params: dict) -> dict:
     target = daemon.registry.resolve(pid)
     daemon.registry.set_status(target.id, status)
     return daemon.registry.get(target.id).to_dict()
+
+
+@method("claude.receipt")
+async def _claude_receipt(daemon, params: dict) -> dict:
+    """Authenticated receipt of Claude's current transcript identity."""
+    pid = _string_param(params, "id", method_name="claude.receipt")
+    token = _string_param(params, "token", method_name="claude.receipt")
+    session_id = _string_param(params, "session_id", method_name="claude.receipt")
+    transcript_path = _string_param(params, "transcript_path", method_name="claude.receipt")
+
+    participant = daemon.store.get_participant(pid)
+    if participant is None:
+        raise BadRequest("claude receipt id does not name an existing participant")
+    if participant.harness != "claude":
+        raise BadRequest("claude receipt id does not name a Claude participant")
+    expected = daemon.store.get_receipt_token(pid)
+    if expected is None or not hmac.compare_digest(token, expected):
+        raise BadRequest("claude receipt token is invalid")
+
+    path, domain = _canonical_claude_transcript(daemon, transcript_path)
+    if path.stem != session_id:
+        raise BadRequest("claude receipt session_id does not match transcript_path")
+    _validate_claude_transcript_records(path, session_id=session_id, cwd=participant.cwd)
+    _reject_cross_participant_receipt(
+        daemon,
+        participant_id=pid,
+        session_id=session_id,
+        transcript_location=str(path),
+    )
+
+    updated = daemon.store.record_transcript_receipt(
+        pid,
+        session_id=session_id,
+        transcript_domain=domain,
+        transcript_location=str(path),
+    )
+    daemon.observer.transcript_receipt(pid, location=str(path), session_id=session_id)
+    daemon.store.bus_append(
+        "agent.transcript_receipt",
+        to_id=pid,
+        payload={"path": str(path), "session_id": session_id},
+    )
+    return {"ok": True, "participant": updated.to_dict() if updated is not None else None}
 
 
 @method("participant.kill")

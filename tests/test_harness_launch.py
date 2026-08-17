@@ -243,6 +243,35 @@ def test_model_reaches_every_harness_by_its_own_lever(tmp_path):
     assert not any(a.startswith("--model") for a in plan.argv)
 
 
+def test_claude_launch_adds_receipt_hooks_without_editing_user_settings(tmp_path, monkeypatch):
+    monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
+    plan = plan_launch(
+        "claude",
+        participant_id="abc123",
+        prompt="",
+        config_path=tmp_path / "mcp.json",
+        approval="manual",
+    )
+
+    settings_arg = next(arg for arg in plan.argv if arg.startswith("--settings="))
+    settings_path = Path(settings_arg.removeprefix("--settings="))
+    token_path = next(iter(plan.private_files))
+    settings = json.loads(plan.files[settings_path])
+
+    assert settings_path.name == "abc123.settings.json"
+    assert token_path.name == "abc123.receipt-token"
+    assert plan.receipt_token
+    assert plan.private_files[token_path] == plan.receipt_token + "\n"
+    assert set(settings["hooks"]) == {"SessionStart", "PreCompact"}
+    assert "Stop" not in settings["hooks"]
+    for entries in settings["hooks"].values():
+        command = entries[0]["hooks"][0]["command"]
+        assert "claude-receipt" in command
+        assert "--id abc123" in command
+        assert str(token_path) in command
+        assert plan.receipt_token not in command
+
+
 def test_no_model_asked_means_no_model_flag(tmp_path):
     for harness in ("claude", "codex", "opencode", "vibe"):
         plan = plan_launch(

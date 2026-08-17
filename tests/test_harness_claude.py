@@ -236,8 +236,9 @@ def test_an_empty_prompt_leaves_claude_waiting_rather_than_running_nothing(tmp_p
         approval="manual",
     )
     assert plan.argv[:2] == ["claude", f"--mcp-config={tmp_path / 'mcp.json'}"]
-    assert plan.argv[2] == f"--session-id={plan.session_id}"
-    assert len(plan.argv) == 3
+    assert plan.argv[2].startswith("--settings=")
+    assert plan.argv[3] == f"--session-id={plan.session_id}"
+    assert len(plan.argv) == 4
 
 
 def test_the_config_written_alongside_names_this_participant(tmp_path):

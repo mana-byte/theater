@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -138,9 +139,7 @@ class Spawner:
         self._record_launch_identity(participant, plan)
 
         paths.ensure_home()
-        for path, contents in plan.files.items():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(contents)
+        self._write_plan_files(plan)
 
         session = await self._resolve_session(req.tmux_session, child_cwd)
         name = req.window_name or f"{req.harness}-{participant.id[:6]}"
@@ -173,13 +172,31 @@ class Spawner:
 
     def _record_launch_identity(self, participant: Participant, plan) -> None:
         """Persist exact launch facts before the process can write output."""
-        if plan.session_id is None and plan.transcript_domain is None:
+        if (
+            plan.session_id is None
+            and plan.transcript_domain is None
+            and plan.receipt_token is None
+        ):
             return
         if plan.session_id is not None:
             participant.session_id = plan.session_id
             participant.session_correlation = str(TranscriptProvenance.EXACT)
         participant.transcript_domain = plan.transcript_domain
         self.registry.store.upsert_participant(participant)
+        if plan.receipt_token is not None:
+            self.registry.store.set_receipt_token(participant.id, plan.receipt_token)
+
+    @staticmethod
+    def _write_plan_files(plan) -> None:
+        """Write public config files and private launch secrets."""
+        for path, contents in plan.files.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(contents)
+        for path, contents in plan.private_files.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(contents)
 
     def _validate_before_create(self, req: SpawnRequest, harness) -> Path | None:
         """Refuse unsafe launches before a participant or worktree exists."""

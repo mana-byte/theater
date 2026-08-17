@@ -120,6 +120,23 @@ def _add_gc_parser(sub) -> None:
     gc.add_argument("--json", action="store_true")
 
 
+def _add_receipt_parser(sub) -> None:
+    """Register the hidden Claude hook ingestion command."""
+    receipt = sub.add_parser("claude-receipt", help=argparse.SUPPRESS)
+    receipt.add_argument("--id", required=True)
+    receipt.add_argument("--token-file", required=True)
+
+
+def _add_process_parsers(sub) -> None:
+    """Register daemon-side process entry points."""
+    daemon = sub.add_parser("daemon", help="Run the registry daemon in the foreground.")
+    daemon.add_argument("--log-level", default=os.environ.get("THEATER_LOG_LEVEL", "INFO"))
+
+    mcp = sub.add_parser("mcp", help="Run the per-agent MCP server on stdio.")
+    mcp.add_argument("--id", dest="participant_id", default=None)
+    mcp.add_argument("--harness", default="unknown")
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="theater",
@@ -135,12 +152,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="command", required=True)
 
-    daemon = sub.add_parser("daemon", help="Run the registry daemon in the foreground.")
-    daemon.add_argument("--log-level", default=os.environ.get("THEATER_LOG_LEVEL", "INFO"))
-
-    mcp = sub.add_parser("mcp", help="Run the per-agent MCP server on stdio.")
-    mcp.add_argument("--id", dest="participant_id", default=None)
-    mcp.add_argument("--harness", default="unknown")
+    _add_process_parsers(sub)
+    _add_receipt_parser(sub)
 
     ls = sub.add_parser("ls", help="List participants.")
     once = ls.add_mutually_exclusive_group()
@@ -303,6 +316,48 @@ def cmd_mcp(args) -> int:
     from theater.mcp.server import main
 
     main(args.participant_id, args.harness)
+    return 0
+
+
+def _hook_string(data: dict, *names: str) -> str | None:
+    for name in names:
+        value = data.get(name)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def cmd_claude_receipt(args) -> int:
+    """Ingest a Claude lifecycle hook receipt.
+
+    Hidden from normal CLI help. The hook provides JSON on stdin; the launch
+    token lives in a daemon-written file so it is not exposed in participant
+    rows, transcripts, or argv.
+    """
+    try:
+        token = Path(args.token_file).read_text().strip()
+        payload = json.load(sys.stdin)
+    except (OSError, ValueError) as exc:
+        print(f"theater: claude receipt could not read hook input: {exc}", file=sys.stderr)
+        return 1
+    if not isinstance(payload, dict):
+        print("theater: claude receipt hook input must be a JSON object", file=sys.stderr)
+        return 1
+    session_id = _hook_string(payload, "session_id", "sessionId")
+    transcript_path = _hook_string(payload, "transcript_path", "transcriptPath")
+    if session_id is None or transcript_path is None:
+        print(
+            "theater: claude receipt hook input lacks session_id or transcript_path",
+            file=sys.stderr,
+        )
+        return 1
+    call_sync(
+        "claude.receipt",
+        id=args.id,
+        token=token,
+        session_id=session_id,
+        transcript_path=transcript_path,
+    )
     return 0
 
 
@@ -989,6 +1044,7 @@ def cmd_regie(args) -> int:
 _COMMANDS = {
     "daemon": cmd_daemon,
     "mcp": cmd_mcp,
+    "claude-receipt": cmd_claude_receipt,
     "ls": cmd_ls,
     "bus": cmd_bus,
     "spawn": cmd_spawn,

@@ -43,11 +43,14 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
+import shlex
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from theater import paths
 from theater.harness.base import (
     APPROVALS,
     SERVER_NAME,
@@ -141,6 +144,39 @@ _READ_TOOLS: dict[str, str] = {
 }
 
 
+def _receipt_hook_command(participant_id: str, token_path: Path) -> str:
+    """Command run by Claude lifecycle hooks.
+
+    Claude's hook schema accepts command-type hooks under ``hooks.<event>[]``.
+    The hook process receives the lifecycle JSON on stdin; the command keeps
+    Theater's token out of argv by passing only the private token-file path.
+    """
+    return shlex.join(
+        [
+            theater_binary(),
+            "claude-receipt",
+            "--id",
+            participant_id,
+            "--token-file",
+            str(token_path),
+        ]
+    )
+
+
+def _claude_receipt_settings(participant_id: str, token_path: Path) -> dict:
+    """Launch-local Claude settings layered via ``--settings``.
+
+    User settings remain untouched. ``SessionStart`` covers cold starts,
+    resumes, clears and forks. ``PreCompact`` records the old location before a
+    compaction boundary; the post-compaction ``SessionStart`` supplies the new
+    one when Claude rotates. ``Stop`` is intentionally absent because it does
+    not prove a new transcript location.
+    """
+    hook = {"type": "command", "command": _receipt_hook_command(participant_id, token_path)}
+    entry = {"hooks": [hook]}
+    return {"hooks": {"SessionStart": [entry], "PreCompact": [entry]}}
+
+
 def _epoch(value) -> float | None:
     """Claude Code writes ISO-8601 with a Z suffix."""
     if not isinstance(value, str) or not value:
@@ -219,10 +255,13 @@ class ClaudeCodeHarness(Harness):
                 }
             }
         }
+        settings_path = paths.claude_settings_path(participant_id)
+        token_path = paths.claude_receipt_token_path(participant_id)
+        receipt_token = secrets.token_urlsafe(32)
         # `=` form: `--mcp-config` is variadic and space-separated in Claude
         # Code 2.x, so the space form greedily consumes the prompt positional
         # as a second config path and claude exits before the observer attaches.
-        argv = ["claude", f"--mcp-config={config_path}"]
+        argv = ["claude", f"--mcp-config={config_path}", f"--settings={settings_path}"]
         # Claude accepts a caller-selected UUID for a cold session. Choosing it
         # before the pane exists removes the same-cwd creation race entirely:
         # the registry and transcript filename share an exact id from startup.
@@ -247,8 +286,17 @@ class ClaudeCodeHarness(Harness):
             argv.append(prompt)
         return LaunchPlan(
             argv=argv,
-            files={config_path: json.dumps(config, indent=2) + "\n"},
+            files={
+                config_path: json.dumps(config, indent=2) + "\n",
+                settings_path: json.dumps(
+                    _claude_receipt_settings(participant_id, token_path),
+                    indent=2,
+                )
+                + "\n",
+            },
+            private_files={token_path: receipt_token + "\n"},
             session_id=native_session_id,
+            receipt_token=receipt_token,
         )
 
 
