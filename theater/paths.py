@@ -76,7 +76,9 @@ def ensure_home() -> Path:
     root = home()
     root.mkdir(parents=True, exist_ok=True)
     mcp_config_dir().mkdir(parents=True, exist_ok=True)
-    (root / "claude").mkdir(parents=True, exist_ok=True)
+    claude = root / "claude"
+    claude.mkdir(parents=True, exist_ok=True)
+    claude.chmod(0o700)
     (root / "observations").mkdir(parents=True, exist_ok=True)
     harnesses_dir().mkdir(parents=True, exist_ok=True)
     return root

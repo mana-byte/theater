@@ -15,6 +15,7 @@ why the `jobs` table was created empty two phases before anything wrote to it.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from sqlalchemy import (
     Connection,
     case,
     create_engine,
+    delete,
     event,
     func,
     insert,
@@ -54,6 +56,8 @@ BASELINE = "0001"
 #: upgraded to this; a fresh database lands here directly. Tests assert
 #: against this rather than hardcoding a revision string.
 HEAD = "0008"
+RECEIPT_TOKEN_PREFIX = "receipt_token:"
+RECEIPT_TOKEN_TTL = 7 * 24 * 60 * 60
 
 
 def _set_pragmas(dbapi_connection, _record) -> None:
@@ -331,18 +335,91 @@ class Store:
     def set_send_seq(self, value: int) -> None:
         self.set_meta("send_seq", str(value))
 
-    def set_receipt_token(self, participant_id: str, token: str) -> None:
-        self.set_meta(f"receipt_token:{participant_id}", token)
+    def set_receipt_token(
+        self,
+        participant_id: str,
+        token: str,
+        *,
+        token_path: str | None = None,
+        expires_at: float | None = None,
+    ) -> None:
+        payload = {
+            "token": token,
+            "token_path": token_path,
+            "expires_at": expires_at if expires_at is not None else now() + RECEIPT_TOKEN_TTL,
+        }
+        self.set_meta(f"{RECEIPT_TOKEN_PREFIX}{participant_id}", json.dumps(payload))
 
     def get_receipt_token(self, participant_id: str) -> str | None:
-        return self.get_meta(f"receipt_token:{participant_id}")
+        payload = self._receipt_token_payload(participant_id)
+        if payload is None:
+            return None
+        expires = payload.get("expires_at")
+        if isinstance(expires, int | float) and expires <= now():
+            self.delete_receipt_token(participant_id)
+            return None
+        token = payload.get("token")
+        return token if isinstance(token, str) else None
+
+    def renew_receipt_token(self, participant_id: str) -> None:
+        payload = self._receipt_token_payload(participant_id)
+        if payload is None:
+            return
+        token = payload.get("token")
+        if not isinstance(token, str):
+            return
+        token_path = payload.get("token_path")
+        self.set_receipt_token(
+            participant_id,
+            token,
+            token_path=token_path if isinstance(token_path, str) else None,
+        )
+
+    def delete_receipt_token(self, participant_id: str) -> None:
+        payload = self._receipt_token_payload(participant_id)
+        token_path = payload.get("token_path") if payload is not None else None
+        if isinstance(token_path, str) and token_path:
+            with contextlib.suppress(OSError):
+                Path(token_path).unlink(missing_ok=True)
+        self.conn.execute(
+            delete(meta).where(meta.c.key == f"{RECEIPT_TOKEN_PREFIX}{participant_id}")
+        )
+
+    def cleanup_receipt_tokens(self) -> int:
+        rows = self.conn.execute(
+            select(meta.c.key, meta.c.value).where(meta.c.key.like(f"{RECEIPT_TOKEN_PREFIX}%"))
+        ).fetchall()
+        deleted = 0
+        for key, raw in rows:
+            participant_id = key.removeprefix(RECEIPT_TOKEN_PREFIX)
+            payload = self._decode_receipt_token(raw)
+            expires = payload.get("expires_at") if payload is not None else None
+            participant = self.get_participant(participant_id)
+            expired = isinstance(expires, int | float) and expires <= now()
+            if participant is not None and participant.status is not Status.DEAD and not expired:
+                continue
+            self.delete_receipt_token(participant_id)
+            deleted += 1
+        return deleted
+
+    def _receipt_token_payload(self, participant_id: str) -> dict | None:
+        return self._decode_receipt_token(self.get_meta(f"{RECEIPT_TOKEN_PREFIX}{participant_id}"))
+
+    @staticmethod
+    def _decode_receipt_token(raw: str | None) -> dict | None:
+        if raw is None:
+            return None
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            return {"token": raw, "expires_at": 0}
+        return payload if isinstance(payload, dict) else None
 
     def record_transcript_receipt(
         self,
         participant_id: str,
         *,
         session_id: str,
-        transcript_domain: str,
         transcript_location: str,
     ) -> Participant | None:
         """Atomically persist exact receipt provenance for a participant."""
@@ -353,9 +430,7 @@ class Store:
                 .values(
                     session_id=session_id,
                     session_correlation="exact",
-                    transcript_domain=transcript_domain,
                     transcript_location=transcript_location,
-                    last_activity=now(),
                 )
             )
             row = conn.execute(

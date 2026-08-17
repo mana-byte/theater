@@ -385,8 +385,10 @@ class Registry:
             # mask can be reused.  This covers a row killed directly via
             # Store.set_status that left a dangling mapping behind.
             self._names.pop(pid, None)
+            self.store.delete_receipt_token(pid)
             return
         self.store.set_status(pid, Status.DEAD)
+        self.store.delete_receipt_token(pid)
         self._names.pop(pid, None)
         self.store.bus_append("participant.dead", to_id=pid)
 

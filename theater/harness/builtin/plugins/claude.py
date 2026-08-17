@@ -73,6 +73,8 @@ from theater.harness.observation import (
 from theater.models import BadRequest
 
 logger = logging.getLogger("theater.harness.claude")
+CLAUDE_RECEIPT_COMMAND = "claude-receipt"
+CLAUDE_RECEIPT_EVENTS = ("SessionStart", "PreCompact")
 
 #: Screen lines that mean "waiting for you". Anything after the prompt is
 #: someone typing, which is presence, not idleness — so these stay exact.
@@ -154,7 +156,7 @@ def _receipt_hook_command(participant_id: str, token_path: Path) -> str:
     return shlex.join(
         [
             theater_binary(),
-            "claude-receipt",
+            CLAUDE_RECEIPT_COMMAND,
             "--id",
             participant_id,
             "--token-file",
@@ -174,7 +176,7 @@ def _claude_receipt_settings(participant_id: str, token_path: Path) -> dict:
     """
     hook = {"type": "command", "command": _receipt_hook_command(participant_id, token_path)}
     entry = {"hooks": [hook]}
-    return {"hooks": {"SessionStart": [entry], "PreCompact": [entry]}}
+    return {"hooks": {event: [entry] for event in CLAUDE_RECEIPT_EVENTS}}
 
 
 def _epoch(value) -> float | None:

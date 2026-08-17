@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import asyncio
+import io
 import json
+import stat
+import time
 from pathlib import Path
 
 import pytest
 
+from theater import cli, paths
 from theater.client import DaemonClient
 from theater.daemon.server import Daemon
 from theater.daemon.store import Store
+from theater.harness.base import Event, EventKind
 from theater.harness.builtin.plugins.claude import ClaudeCodeHarness, ClaudeCodeObserver
-from theater.harness.source import TranscriptSource
+from theater.harness.source import Batch, TranscriptSource
 from theater.protocol import RemoteError
 
 
@@ -35,6 +41,15 @@ def _spawn_claude(daemon, cwd: Path, *, pid: str, token: str = "tok"):
     participant = daemon.registry.create_spawned(harness="claude", cwd=str(cwd), pid=pid)
     daemon.store.set_receipt_token(participant.id, token)
     return participant
+
+
+async def _until(predicate, timeout: float = 3.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(0.01)
+    return False
 
 
 @pytest.fixture
@@ -72,11 +87,14 @@ async def test_claude_initial_receipt_records_exact_location(
         transcript_path=str(path),
     )
 
+    assert await _until(
+        lambda: daemon.store.get_participant("p-claude").transcript_location == str(path.resolve())
+    )
     got = daemon.store.get_participant("p-claude")
     assert got.session_id == path.stem
     assert got.session_correlation == "exact"
     assert got.transcript_location == str(path.resolve())
-    assert got.transcript_domain == str(root.resolve())
+    assert got.transcript_domain is None
 
 
 async def test_claude_receipt_updates_after_compaction_rotation(
@@ -98,9 +116,13 @@ async def test_claude_receipt_updates_after_compaction_rotation(
             transcript_path=str(path),
         )
 
-    got = daemon.store.get_participant("p-claude")
-    assert got.session_id == second.stem
-    assert got.transcript_location == str(second.resolve())
+    assert await _until(
+        lambda: (
+            daemon.store.get_participant("p-claude").session_id == second.stem
+            and daemon.store.get_participant("p-claude").transcript_location
+            == str(second.resolve())
+        )
+    )
 
 
 async def test_claude_duplicate_receipt_is_idempotent(claude_daemon, claude_client, tmp_path):
@@ -119,9 +141,13 @@ async def test_claude_duplicate_receipt_is_idempotent(claude_daemon, claude_clie
             transcript_path=str(path),
         )
 
+    assert await _until(
+        lambda: daemon.store.get_participant("p-claude").transcript_location == str(path.resolve())
+    )
     got = daemon.store.get_participant("p-claude")
     assert got.session_id == path.stem
     assert got.transcript_location == str(path.resolve())
+    assert "p-claude" not in daemon.observer._reset_watch_state
 
 
 async def test_claude_receipt_rejects_invalid_token_path_and_harness(
@@ -180,6 +206,24 @@ async def test_claude_receipt_rejects_out_of_domain_path(claude_daemon, claude_c
         )
 
 
+async def test_claude_receipt_rejects_dead_participant(claude_daemon, claude_client, tmp_path):
+    daemon, root = claude_daemon
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    _spawn_claude(daemon, cwd, pid="p-claude", token="secret")
+    path = _transcript(root, "11111111-1111-4111-8111-111111111111", cwd)
+    daemon.registry.mark_dead("p-claude")
+
+    with pytest.raises(RemoteError, match="dead participant"):
+        await claude_client.call(
+            "claude.receipt",
+            id="p-claude",
+            token="secret",
+            session_id=path.stem,
+            transcript_path=str(path),
+        )
+
+
 async def test_claude_receipt_rejects_cross_participant_location(
     claude_daemon, claude_client, tmp_path
 ):
@@ -187,7 +231,6 @@ async def test_claude_receipt_rejects_cross_participant_location(
     cwd = tmp_path / "repo"
     cwd.mkdir()
     _spawn_claude(daemon, cwd, pid="first", token="one")
-    _spawn_claude(daemon, cwd, pid="second", token="two")
     path = _transcript(root, "11111111-1111-4111-8111-111111111111", cwd)
 
     await claude_client.call(
@@ -197,6 +240,10 @@ async def test_claude_receipt_rejects_cross_participant_location(
         session_id=path.stem,
         transcript_path=str(path),
     )
+    assert await _until(
+        lambda: daemon.store.get_participant("first").transcript_location == str(path.resolve())
+    )
+    _spawn_claude(daemon, cwd, pid="second", token="two")
     with pytest.raises(RemoteError, match="another participant"):
         await claude_client.call(
             "claude.receipt",
@@ -225,7 +272,6 @@ def test_claude_receipt_survives_store_reopen(theater_home, tmp_path):
     store.record_transcript_receipt(
         "p-claude",
         session_id=path.stem,
-        transcript_domain=str(path.parent.parent),
         transcript_location=str(path),
     )
     store.close()
@@ -259,9 +305,245 @@ async def test_receipt_nudges_transcript_source_to_reattach(tmp_path):
     assert batch.attached.location == str(first)
     source.commit_attachment()
 
-    source.admit_exact_location(location=str(second), session_id=second.stem)
+    assert source.admit_exact_location(location=str(second), session_id=second.stem) == "staged"
     batch = await source.read()
 
     assert batch.attached is not None
     assert batch.attached.location == str(second)
     assert batch.attached.correlation == "exact"
+
+
+async def test_current_path_receipt_does_not_detach_or_reset_mid_turn(registry, tmp_path):
+    from theater.daemon.jobs import JobManager
+    from theater.daemon.observer import Observer, QuietClock, TurnAccumulator
+
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    root = tmp_path / "claude" / "projects"
+    path = _transcript(root, "11111111-1111-4111-8111-111111111111", cwd)
+    source = TranscriptSource(
+        ClaudeCodeObserver(root=root),
+        cwd=str(cwd),
+        session_id=path.stem,
+        exact_session=True,
+    )
+    await source.read()
+    source.commit_attachment()
+
+    p = registry.create_spawned(harness="claude", cwd=str(cwd), pid="p-claude")
+    p.transcript_location = str(path)
+    registry.store.upsert_participant(p)
+    jobs = JobManager(registry.store)
+    jobs.create(handle="h1", caller_id="caller", target_id=p.id, kind="send")
+    observer = Observer(registry, harnesses={}, jobs=jobs)
+    observer._sources[p.id] = source
+    clock = QuietClock(quiet_since=1.0, screen_quiet_since=2.0, rescue_since=3.0)
+    turns = TurnAccumulator()
+    turns.say("partial")
+
+    assert observer.transcript_receipt(p.id, location=str(path), session_id=path.stem) == "accepted"
+    assert p.id not in observer._reset_watch_state
+    assert (clock.quiet_since, clock.screen_quiet_since, clock.rescue_since) == (1.0, 2.0, 3.0)
+    observer._apply(
+        p.id,
+        Batch(events=[Event(kind=EventKind.ASSISTANT, turn_end=True)]),
+        clock,
+        turns,
+    )
+
+    assert jobs.get("h1").result == "partial"
+
+
+async def test_receipt_does_not_persist_until_source_admits(registry, tmp_path):
+    from theater.daemon.observer import Observer
+
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    path = (
+        tmp_path / "claude" / "projects" / "project" / "11111111-1111-4111-8111-111111111111.jsonl"
+    )
+    p = registry.create_spawned(harness="claude", cwd=str(cwd), pid="p-claude")
+    observer = Observer(registry, harnesses={})
+
+    assert observer.transcript_receipt(p.id, location=str(path), session_id=path.stem) == "staged"
+
+    got = registry.store.get_participant(p.id)
+    assert got.session_correlation is None
+    assert got.transcript_location is None
+
+
+async def test_same_cwd_competitor_cannot_claim_unbound_foreign_receipt(
+    claude_daemon, claude_client, tmp_path
+):
+    daemon, root = claude_daemon
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    _spawn_claude(daemon, cwd, pid="first", token="one")
+    _spawn_claude(daemon, cwd, pid="second", token="two")
+    path = _transcript(root, "33333333-3333-4333-8333-333333333333", cwd)
+
+    with pytest.raises(RemoteError, match="shares its cwd"):
+        await claude_client.call(
+            "claude.receipt",
+            id="first",
+            token="one",
+            session_id=path.stem,
+            transcript_path=str(path),
+        )
+
+
+def test_receipt_tokens_expire_and_cleanup_token_file(store, tmp_path):
+    token_file = tmp_path / "token"
+    token_file.write_text("secret")
+    store.set_receipt_token(
+        "p-claude",
+        "secret",
+        token_path=str(token_file),
+        expires_at=time.time() - 1,
+    )
+
+    assert store.get_receipt_token("p-claude") is None
+    assert not token_file.exists()
+
+
+def test_mark_dead_removes_receipt_token_file(registry, tmp_path):
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    token_file = tmp_path / "token"
+    token_file.write_text("secret")
+    p = registry.create_spawned(harness="claude", cwd=str(cwd), pid="p-claude")
+    registry.store.set_receipt_token(p.id, "secret", token_path=str(token_file))
+
+    registry.mark_dead(p.id)
+
+    assert registry.store.get_meta(f"receipt_token:{p.id}") is None
+    assert not token_file.exists()
+
+
+async def test_gc_removes_orphaned_receipt_tokens(store, tmp_path):
+    from theater.config import RetentionSection
+    from theater.daemon.gc import sweep
+
+    token_file = tmp_path / "token"
+    token_file.write_text("secret")
+    store.set_receipt_token("missing", "secret", token_path=str(token_file))
+
+    await sweep(store, RetentionSection())
+
+    assert store.get_meta("receipt_token:missing") is None
+    assert not token_file.exists()
+
+
+async def test_gc_removes_dead_participant_receipt_tokens(registry, tmp_path):
+    from theater.config import RetentionSection
+    from theater.daemon.gc import sweep
+
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    token_file = tmp_path / "token"
+    token_file.write_text("secret")
+    p = registry.create_spawned(harness="claude", cwd=str(cwd), pid="p-claude")
+    registry.store.set_receipt_token(p.id, "secret", token_path=str(token_file))
+    registry.store.set_status(p.id, "dead")
+
+    await sweep(registry.store, RetentionSection())
+
+    assert registry.store.get_meta(f"receipt_token:{p.id}") is None
+    assert not token_file.exists()
+
+
+def test_private_token_file_is_restricted_even_when_preexisting(registry, tmp_path):
+    from theater.daemon.spawner import Spawner
+    from theater.harness.base import LaunchPlan
+
+    token_file = paths.claude_receipt_token_path("p-claude")
+    token_file.parent.mkdir(parents=True, exist_ok=True)
+    token_file.parent.chmod(0o755)
+    token_file.write_text("old")
+    token_file.chmod(0o644)
+
+    Spawner(registry)._write_plan_files(LaunchPlan(argv=[], private_files={token_file: "new\n"}))
+
+    assert stat.S_IMODE(token_file.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+
+
+def test_claude_receipt_cli_is_quiet_and_does_not_autostart(monkeypatch, capsys, tmp_path):
+    token_file = tmp_path / "token"
+    token_file.write_text("secret")
+    args = cli._parser().parse_args(
+        ["claude-receipt", "--id", "p-claude", "--token-file", str(token_file)]
+    )
+    monkeypatch.setattr("sys.stdin", type("Input", (), {"read": lambda self: "not-json"})())
+
+    assert cli.cmd_claude_receipt(args) == 0
+    out = capsys.readouterr()
+    assert out.out == ""
+    assert out.err == ""
+
+
+def _receipt_args(token_file: Path):
+    return cli._parser().parse_args(
+        ["claude-receipt", "--id", "p-claude", "--token-file", str(token_file)]
+    )
+
+
+def _receipt_stdin(path: Path) -> io.StringIO:
+    return io.StringIO(
+        json.dumps(
+            {
+                "session_id": path.stem,
+                "transcript_path": str(path),
+            }
+        )
+    )
+
+
+def test_claude_receipt_cli_uses_non_autostart_client(monkeypatch, tmp_path):
+    token_file = tmp_path / "token"
+    token_file.write_text("secret")
+    transcript = tmp_path / "11111111-1111-4111-8111-111111111111.jsonl"
+    seen = []
+
+    class Client:
+        def __init__(self, *, autostart=True):
+            seen.append(autostart)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return None
+
+        async def call(self, method, **params):
+            return {"ok": True}
+
+    monkeypatch.setattr(cli, "DaemonClient", Client)
+    monkeypatch.setattr("sys.stdin", _receipt_stdin(transcript))
+
+    assert cli.cmd_claude_receipt(_receipt_args(token_file)) == 0
+    assert seen == [False]
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ConnectionError("no daemon"),
+        RemoteError("bad_request", "rejected"),
+    ],
+)
+def test_claude_receipt_cli_is_quiet_when_daemon_cannot_accept(monkeypatch, capsys, tmp_path, exc):
+    token_file = tmp_path / "token"
+    token_file.write_text("secret")
+    transcript = tmp_path / "11111111-1111-4111-8111-111111111111.jsonl"
+
+    async def reject(*args, **kwargs):
+        raise exc
+
+    monkeypatch.setattr(cli, "_send_claude_receipt", reject)
+    monkeypatch.setattr("sys.stdin", _receipt_stdin(transcript))
+
+    assert cli.cmd_claude_receipt(_receipt_args(token_file)) == 0
+    out = capsys.readouterr()
+    assert out.out == ""
+    assert out.err == ""

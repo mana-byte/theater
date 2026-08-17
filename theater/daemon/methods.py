@@ -124,6 +124,8 @@ _CHECKPOINT_JOB_KEYS = (
     "created_at",
     "finished_at",
 )
+CLAUDE_RECEIPT_RPC = "claude.receipt"
+CLAUDE_RECEIPT_BUS_KIND = "agent.transcript_receipt"
 
 
 def method(name: str) -> Callable[[Handler], Handler]:
@@ -190,7 +192,7 @@ def _claude_transcript_root(daemon) -> Path:
     return root.resolve()
 
 
-def _canonical_claude_transcript(daemon, raw_path: str) -> tuple[Path, str]:
+def _canonical_claude_transcript(daemon, raw_path: str) -> Path:
     root = _claude_transcript_root(daemon)
     path = Path(raw_path).expanduser()
     if not path.is_absolute():
@@ -206,19 +208,20 @@ def _canonical_claude_transcript(daemon, raw_path: str) -> tuple[Path, str]:
         raise BadRequest(
             "claude receipt transcript_path must name a Claude project JSONL transcript"
         )
-    return canonical, str(root)
+    return canonical
 
 
-def _validate_claude_transcript_records(path: Path, *, session_id: str, cwd: str | None) -> None:
+def _validate_claude_transcript_records(path: Path, *, session_id: str, cwd: str | None) -> bool:
     """Reject an existing transcript whose own records contradict the receipt."""
     if not path.exists():
-        return
+        return False
     wanted_cwd = str(Path(cwd).resolve()) if cwd else None
+    found_evidence = False
     try:
         with path.open(encoding="utf-8", errors="replace") as fh:
             for i, line in enumerate(fh):
                 if i >= 20:
-                    return
+                    return found_evidence
                 try:
                     record = json.loads(line)
                 except ValueError:
@@ -228,6 +231,8 @@ def _validate_claude_transcript_records(path: Path, *, session_id: str, cwd: str
                 found_session = record.get("session_id") or record.get("sessionId")
                 if isinstance(found_session, str) and found_session and found_session != session_id:
                     raise BadRequest("claude receipt session_id contradicts transcript records")
+                if found_session == session_id:
+                    found_evidence = True
                 found_cwd = record.get("cwd")
                 if (
                     wanted_cwd is not None
@@ -236,8 +241,11 @@ def _validate_claude_transcript_records(path: Path, *, session_id: str, cwd: str
                     and str(Path(found_cwd).resolve()) != wanted_cwd
                 ):
                     raise BadRequest("claude receipt transcript cwd contradicts participant cwd")
+                if isinstance(found_cwd, str) and found_cwd:
+                    found_evidence = True
     except OSError as exc:
         raise BadRequest(f"claude receipt transcript_path is not readable: {exc}") from exc
+    return found_evidence
 
 
 def _reject_cross_participant_receipt(
@@ -258,6 +266,44 @@ def _reject_cross_participant_receipt(
             )
         if other.session_id == session_id and other.session_correlation == "exact":
             raise BadRequest("claude receipt session_id is already owned by another participant")
+
+
+def _reject_unbound_same_cwd_receipt(
+    daemon,
+    *,
+    participant_id: str,
+    participant_session_id: str | None,
+    participant_location: str | None,
+    session_id: str,
+    transcript_location: str,
+) -> None:
+    participant = daemon.store.get_participant(participant_id)
+    if participant is None or not participant.cwd:
+        return
+    # The launch token proves this caller can read the hook's private file; it
+    # does not prove Claude's JSON is honest. A same-user process with that
+    # token can still name a plausible transcript. The checks above bind the
+    # claim to Claude's transcript root, the filename/session id, and records
+    # in the file. This additional guard refuses the dangerous ambiguous case:
+    # a brand-new transcript claim while another live Claude participant could
+    # plausibly own the same cwd. With no competitor, the remaining trust
+    # boundary is the local Unix user that can read Theater's private token.
+    cwd = Path(participant.cwd).resolve()
+    for other in daemon.registry.list():
+        if (
+            other.id == participant_id
+            or other.status is Status.DEAD
+            or other.harness != "claude"
+            or not other.cwd
+            or Path(other.cwd).resolve() != cwd
+        ):
+            continue
+        if session_id == participant_session_id or transcript_location == participant_location:
+            return
+        raise BadRequest(
+            "claude receipt cannot claim a new unbound transcript while another live "
+            "Claude participant shares its cwd"
+        )
 
 
 def _serialized_response_format(params: dict) -> str | None:
@@ -374,47 +420,55 @@ async def _status(daemon, params: dict) -> dict:
     return daemon.registry.get(target.id).to_dict()
 
 
-@method("claude.receipt")
+@method(CLAUDE_RECEIPT_RPC)
 async def _claude_receipt(daemon, params: dict) -> dict:
     """Authenticated receipt of Claude's current transcript identity."""
-    pid = _string_param(params, "id", method_name="claude.receipt")
-    token = _string_param(params, "token", method_name="claude.receipt")
-    session_id = _string_param(params, "session_id", method_name="claude.receipt")
-    transcript_path = _string_param(params, "transcript_path", method_name="claude.receipt")
+    pid = _string_param(params, "id", method_name=CLAUDE_RECEIPT_RPC)
+    token = _string_param(params, "token", method_name=CLAUDE_RECEIPT_RPC)
+    session_id = _string_param(params, "session_id", method_name=CLAUDE_RECEIPT_RPC)
+    transcript_path = _string_param(params, "transcript_path", method_name=CLAUDE_RECEIPT_RPC)
 
     participant = daemon.store.get_participant(pid)
     if participant is None:
         raise BadRequest("claude receipt id does not name an existing participant")
     if participant.harness != "claude":
         raise BadRequest("claude receipt id does not name a Claude participant")
+    if participant.status is Status.DEAD:
+        raise BadRequest("claude receipt id names a dead participant")
     expected = daemon.store.get_receipt_token(pid)
     if expected is None or not hmac.compare_digest(token, expected):
         raise BadRequest("claude receipt token is invalid")
 
-    path, domain = _canonical_claude_transcript(daemon, transcript_path)
+    path = _canonical_claude_transcript(daemon, transcript_path)
     if path.stem != session_id:
         raise BadRequest("claude receipt session_id does not match transcript_path")
-    _validate_claude_transcript_records(path, session_id=session_id, cwd=participant.cwd)
+    found_record = _validate_claude_transcript_records(
+        path, session_id=session_id, cwd=participant.cwd
+    )
+    if not found_record and session_id != participant.session_id:
+        raise BadRequest("claude receipt transcript does not yet contain matching evidence")
     _reject_cross_participant_receipt(
         daemon,
         participant_id=pid,
         session_id=session_id,
         transcript_location=str(path),
     )
-
-    updated = daemon.store.record_transcript_receipt(
-        pid,
+    _reject_unbound_same_cwd_receipt(
+        daemon,
+        participant_id=pid,
+        participant_session_id=participant.session_id,
+        participant_location=participant.transcript_location,
         session_id=session_id,
-        transcript_domain=domain,
         transcript_location=str(path),
     )
-    daemon.observer.transcript_receipt(pid, location=str(path), session_id=session_id)
+    admission = daemon.observer.transcript_receipt(pid, location=str(path), session_id=session_id)
+    daemon.store.renew_receipt_token(pid)
     daemon.store.bus_append(
-        "agent.transcript_receipt",
+        CLAUDE_RECEIPT_BUS_KIND,
         to_id=pid,
-        payload={"path": str(path), "session_id": session_id},
+        payload={"path": str(path), "session_id": session_id, "admission": admission},
     )
-    return {"ok": True, "participant": updated.to_dict() if updated is not None else None}
+    return {"ok": True, "admission": admission}
 
 
 @method("participant.kill")

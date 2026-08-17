@@ -327,6 +327,17 @@ def _hook_string(data: dict, *names: str) -> str | None:
     return None
 
 
+async def _send_claude_receipt(args, *, token: str, session_id: str, transcript_path: str) -> None:
+    async with DaemonClient(autostart=False) as client:
+        await client.call(
+            "claude.receipt",
+            id=args.id,
+            token=token,
+            session_id=session_id,
+            transcript_path=transcript_path,
+        )
+
+
 def cmd_claude_receipt(args) -> int:
     """Ingest a Claude lifecycle hook receipt.
 
@@ -337,27 +348,25 @@ def cmd_claude_receipt(args) -> int:
     try:
         token = Path(args.token_file).read_text().strip()
         payload = json.load(sys.stdin)
-    except (OSError, ValueError) as exc:
-        print(f"theater: claude receipt could not read hook input: {exc}", file=sys.stderr)
-        return 1
+    except (OSError, ValueError):
+        return 0
     if not isinstance(payload, dict):
-        print("theater: claude receipt hook input must be a JSON object", file=sys.stderr)
-        return 1
+        return 0
     session_id = _hook_string(payload, "session_id", "sessionId")
     transcript_path = _hook_string(payload, "transcript_path", "transcriptPath")
     if session_id is None or transcript_path is None:
-        print(
-            "theater: claude receipt hook input lacks session_id or transcript_path",
-            file=sys.stderr,
+        return 0
+    try:
+        asyncio.run(
+            _send_claude_receipt(
+                args,
+                token=token,
+                session_id=session_id,
+                transcript_path=transcript_path,
+            )
         )
-        return 1
-    call_sync(
-        "claude.receipt",
-        id=args.id,
-        token=token,
-        session_id=session_id,
-        transcript_path=transcript_path,
-    )
+    except (RemoteError, ConnectionError, OSError):
+        return 0
     return 0
 
 

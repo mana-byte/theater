@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     from theater.harness.observation import TranscriptObserver
 
 logger = logging.getLogger("theater.harness.source")
+ReceiptAdmission = Literal["accepted", "staged"]
 
 
 class SourceContractError(NotImplementedError):
@@ -245,7 +246,7 @@ class Source(ABC):
         """Drop an accepted heuristic attachment superseded by exact evidence."""
         raise SourceContractError(f"{type(self).__name__} cannot revoke an accepted attachment")
 
-    def admit_exact_location(self, *, location: str, session_id: str) -> None:
+    def admit_exact_location(self, *, location: str, session_id: str) -> ReceiptAdmission:
         """Move discovery to a daemon-proven transcript location."""
         raise SourceContractError(f"{type(self).__name__} cannot admit transcript receipts")
 
@@ -388,15 +389,18 @@ class TranscriptSource(Source):
         self._known_location = None
         self._known_location_provenance = TranscriptProvenance.HEURISTIC
 
-    def admit_exact_location(self, *, location: str, session_id: str) -> None:
+    def admit_exact_location(self, *, location: str, session_id: str) -> ReceiptAdmission:
         """Use a receipt-proven path on the next read."""
         path = Path(location)
         self._pending = None
         self._session_id = session_id
         self._exact_session = True
         self._known_location = path
-        if self.path != path:
-            self._detach()
+        self._proven.add(path)
+        if self.path == path:
+            return "accepted"
+        self._detach()
+        return "staged"
 
     async def history(self, *, last_n: int) -> History:
         """Re-read the whole transcript with the text left unclipped.

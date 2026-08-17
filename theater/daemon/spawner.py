@@ -184,7 +184,12 @@ class Spawner:
         participant.transcript_domain = plan.transcript_domain
         self.registry.store.upsert_participant(participant)
         if plan.receipt_token is not None:
-            self.registry.store.set_receipt_token(participant.id, plan.receipt_token)
+            token_path = next(iter(plan.private_files), None)
+            self.registry.store.set_receipt_token(
+                participant.id,
+                plan.receipt_token,
+                token_path=str(token_path) if token_path is not None else None,
+            )
 
     @staticmethod
     def _write_plan_files(plan) -> None:
@@ -194,7 +199,9 @@ class Spawner:
             path.write_text(contents)
         for path, contents in plan.private_files.items():
             path.parent.mkdir(parents=True, exist_ok=True)
+            path.parent.chmod(0o700)
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            os.fchmod(fd, 0o600)
             with os.fdopen(fd, "w") as fh:
                 fh.write(contents)
 

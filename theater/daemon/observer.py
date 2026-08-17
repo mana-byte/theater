@@ -466,6 +466,7 @@ class Observer:
         self._binding_correlation: dict[str, str] = {}
         self._binding_sessions: dict[str, str | None] = {}
         self._sources: dict[str, Source] = {}
+        self._receipt_candidates: dict[str, tuple[str, str]] = {}
         self._reset_watch_state: set[str] = set()
         self._supervisor: asyncio.Task | None = None
         self._stopping = asyncio.Event()
@@ -552,7 +553,7 @@ class Observer:
         source = self._open_source(pid, observer)
         if source is None:
             return
-        self._sources[pid] = source
+        self._register_source(pid, source)
         clock = QuietClock()
         turns = TurnAccumulator()
 
@@ -608,6 +609,7 @@ class Observer:
         finally:
             self._clear_source_errors(pid)
             self._reset_watch_state.discard(pid)
+            self._receipt_candidates.pop(pid, None)
             self._sources.pop(pid, None)
             self._release_transcript(pid)
             try:
@@ -644,6 +646,10 @@ class Observer:
             p.transcript_domain = source.collision_domain
             self.store.upsert_participant(p)
         return source
+
+    def _register_source(self, pid: str, source: Source) -> None:
+        self._sources[pid] = source
+        self._stage_pending_receipt(pid, source)
 
     @staticmethod
     def _validate_batch(source: Source, batch: Batch) -> None:
@@ -1202,13 +1208,34 @@ class Observer:
         """Whether a short-lived history read is only a contested cwd guess."""
         return history_correlation_is_ambiguous(self.registry, pid, history)
 
-    def transcript_receipt(self, pid: str, *, location: str, session_id: str) -> None:
-        """Tell a live source that the daemon has exact receipt evidence."""
+    def transcript_receipt(self, pid: str, *, location: str, session_id: str) -> str:
+        """Stage exact receipt evidence without persisting it before admission."""
         source = self._sources.get(pid)
         if source is None:
+            self._receipt_candidates[pid] = (location, session_id)
+            return "staged"
+        return self._stage_receipt_source(pid, source, location=location, session_id=session_id)
+
+    def _stage_pending_receipt(self, pid: str, source: Source) -> None:
+        candidate = self._receipt_candidates.pop(pid, None)
+        if candidate is None:
             return
-        source.admit_exact_location(location=location, session_id=session_id)
-        self._reset_watch_state.add(pid)
+        location, session_id = candidate
+        self._stage_receipt_source(pid, source, location=location, session_id=session_id)
+
+    def _stage_receipt_source(
+        self, pid: str, source: Source, *, location: str, session_id: str
+    ) -> str:
+        result = source.admit_exact_location(location=location, session_id=session_id)
+        if result == "accepted":
+            self.store.record_transcript_receipt(
+                pid,
+                session_id=session_id,
+                transcript_location=location,
+            )
+            self._binding_correlation[location] = "exact"
+            self._binding_sessions[location] = session_id
+        return result
 
     def _on_attach(self, pid: str, attached: Attachment) -> None:
         """Record the effects of an attachment already accepted and committed."""

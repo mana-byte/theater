@@ -16,12 +16,13 @@ The sweep runs in six phases, in this order:
 3. **Participants** — the three-clause gated delete. After the jobs phase,
    so a participant whose last job just went becomes eligible in the same
    sweep.
-4. **Checkpoints** — delete checkpoints older than the jobs cutoff in
+4. **Receipt tokens** — remove expired/orphaned Claude hook tokens from meta.
+5. **Checkpoints** — delete checkpoints older than the jobs cutoff in
    bounded batches.
-5. **tree_kv** — delete rows whose spawn tree has no live participant.
+6. **tree_kv** — delete rows whose spawn tree has no live participant.
    Computes the roots of all live participants through lineage.root_of()
    and retains those, deleting everything else in bounded batches.
-6. **Bus** — delete rows older than ``bus_days`` (except ``send.refused``),
+7. **Bus** — delete rows older than ``bus_days`` (except ``send.refused``),
    then trim ``send.refused`` to the newest ``refused_cap`` rows.
 
 **MF1 — never delete a running job.** ``JobManager.finish()`` looks the job
@@ -156,7 +157,12 @@ async def sweep(
     )
     await asyncio.sleep(0)
 
-    # Phase 4: checkpoints — after participant cleanup, before bus cleanup.
+    # Phase 4: receipt tokens — after participant cleanup, so orphaned tokens
+    # from rows deleted in this sweep vanish in the same pass.
+    store.cleanup_receipt_tokens()
+    await asyncio.sleep(0)
+
+    # Phase 5: checkpoints — after participant cleanup, before bus cleanup.
     # Deletes checkpoints older than the jobs cutoff in bounded batches.
     ckpt_deleted = await _sweep_checkpoints(store, cutoff_jobs, retention.batch)
     result = SweepResult(
@@ -169,7 +175,7 @@ async def sweep(
         checkpoints=ckpt_deleted,
     )
 
-    # Phase 5: tree_kv — delete rows whose spawn tree has no live
+    # Phase 6: tree_kv — delete rows whose spawn tree has no live
     # participant. A root can be dead while descendants remain live, so
     # compute the roots of all live participants and retain their rows.
     kv_deleted = await _sweep_tree_kv(store, retention.batch)
@@ -183,7 +189,7 @@ async def sweep(
         checkpoints=result.checkpoints,
     )
 
-    # Phase 6: bus.
+    # Phase 7: bus.
     bus_deleted = await _sweep_bus(store, cutoff_bus, retention.batch, retention.refused_cap)
     result = SweepResult(
         bus=bus_deleted,
