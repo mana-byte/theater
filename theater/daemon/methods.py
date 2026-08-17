@@ -625,25 +625,66 @@ async def _spawn(daemon, params: dict) -> dict:
     # config can answer, and the spawner has none.
     check_model_allowed(req.harness, req.model, daemon.config.models_for(req.harness))
 
-    participant = await daemon.spawner.spawn(req)
-    handle = participant.id
-    daemon.jobs.create(
-        handle=handle,
-        caller_id=params.get("parent_id") or "cli",
-        target_id=participant.id,
-        kind="spawn",
-        prompt=req.prompt or "",
-        # participant.cwd is the worktree path when worktree=True, or the
-        # requested cwd otherwise. Hashing against the parent repo when the
-        # child was in a worktree would resolve paths to the wrong files.
-        cwd=participant.cwd,
-        response_format=response_format,
-    )
-    if not req.prompt:
-        # A promptless spawn has nothing to wait for: resolving the job here
-        # keeps it from eating the first turn end the human produces, and
-        # from counting as work in flight that would block every `send`.
-        daemon.jobs.finish(handle, state=JobState.DONE, result="")
+    # Reserve the participant, worktree, plan, and config files — but not
+    # the tmux pane. The job is created between reserve and launch so it is
+    # RUNNING before the pane can produce output, closing the race where a
+    # fast child completes before the job exists and the observer sees a
+    # turn end with no job to receive the result.
+    reservation = await daemon.spawner.reserve(req)
+    handle = reservation.participant.id
+    launched = False
+    try:
+        daemon.jobs.create(
+            handle=handle,
+            caller_id=params.get("parent_id") or "cli",
+            target_id=reservation.participant.id,
+            kind="spawn",
+            prompt=req.prompt or "",
+            # participant.cwd is the worktree path when worktree=True, or the
+            # requested cwd otherwise. Hashing against the parent repo when the
+            # child was in a worktree would resolve paths to the wrong files.
+            cwd=reservation.participant.cwd,
+            response_format=response_format,
+        )
+        participant = await daemon.spawner.launch(reservation)
+        launched = True
+        if not req.prompt:
+            # A promptless spawn has nothing to wait for: resolving the job
+            # here keeps it from eating the first turn end the human produces,
+            # and from counting as work in flight that would block every
+            # `send`. Done *after* launch succeeds so a launch failure still
+            # leaves the job CRASHED, not DONE.
+            daemon.jobs.finish(handle, state=JobState.DONE, result="")
+    except Exception:
+        # One cleanup boundary: after reserve succeeds, any failure — in
+        # jobs.create (including a bus_append that raised after the job
+        # row persisted), in launch, or in the promptless finish — must
+        # leave consistent state.
+        #
+        # If launch has NOT succeeded, the participant and worktree must
+        # be cleaned up. This covers jobs.create failures where the job
+        # row may or may not have persisted (create_job at jobs.py:207
+        # precedes bus_append at :211, so a bus_append failure leaves a
+        # persisted RUNNING job that create() never returned).
+        #
+        # If launch HAS succeeded, the pane is live and working — do not
+        # tear it down over a promptless finish failure. Only crash the
+        # job.
+        #
+        # In both cases, check jobs.get(handle) and crash any persisted
+        # RUNNING job. This catches the bus_append-after-persist case
+        # where create() raised but the row exists.
+        if not launched:
+            daemon.spawner.cleanup_reservation(reservation.participant)
+        job = daemon.jobs.get(handle)
+        if job is not None and job.state == JobState.RUNNING:
+            daemon.jobs.finish(
+                handle,
+                state=JobState.CRASHED,
+                result="",
+                error_code="spawn_failed",
+            )
+        raise
     result = participant.to_dict()
     result["handle"] = handle
     return result

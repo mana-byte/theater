@@ -1302,3 +1302,383 @@ async def test_read_transcript_by_dead_name_fails_not_found(client, fake_tmux):
     with pytest.raises(RemoteError) as exc:
         await client.call("read_transcript", id=_FIXED_NAME, last_n=5)
     assert exc.value.code == "not_found"
+
+
+# ---- phase 3: spawn reserve/launch ordering -----------------------------
+
+
+async def test_spawn_job_exists_before_pane_launch(client, fake_tmux, daemon):
+    """The job is RUNNING before the tmux window is created.
+
+    Before the reserve/launch split, ``spawn`` created the pane and returned,
+    then ``_spawn`` created the job — leaving a gap where a fast child could
+    finish before the job existed. Now ``reserve`` runs first, the job is
+    created, then ``launch`` creates the pane. This test patches
+    ``tmux.new_window`` to assert the job is already RUNNING at the moment
+    the pane is about to be created.
+    """
+    from theater.tmux import client as tmux_client
+
+    original_new_window = tmux_client.new_window
+    captured: dict = {}
+
+    async def spy_new_window(*, session, name, cwd, command, env=None, background=True):
+        # At this point the job must already exist and be RUNNING.
+        # The participant id is in the env under THEATER_ID.
+        pid = env.get("THEATER_ID", "")
+        job = daemon.jobs.get(pid)
+        captured["job_at_launch"] = job
+        return await original_new_window(
+            session=session,
+            name=name,
+            cwd=cwd,
+            command=command,
+            env=env,
+            background=background,
+        )
+
+    # Patch the spawner's tmux module, which is the same object the fake
+    # fixture already patched.
+    import theater.daemon.spawner as spawner_mod
+
+    monkeypatch_target = spawner_mod.tmux
+    original = monkeypatch_target.new_window
+    monkeypatch_target.new_window = spy_new_window
+    try:
+        record = await client.call(
+            "spawn",
+            harness="vibe",
+            prompt="say hello",
+            approval="manual",
+            cwd="/tmp",
+        )
+    finally:
+        monkeypatch_target.new_window = original
+
+    job = captured.get("job_at_launch")
+    assert job is not None, "job must exist when tmux.new_window is called"
+    assert job.state == "running"
+    assert job.handle == record["handle"]
+    assert job.target_id == record["id"]
+
+
+async def test_spawn_launch_failure_leaves_crashed_job_and_dead_participant(
+    client, fake_tmux, daemon, monkeypatch
+):
+    """If the tmux launch fails, the job is CRASHED and the participant is DEAD.
+
+    The reserve/launch split means the job exists before the pane. If
+    ``launch`` raises, the cleanup boundary in ``_spawn`` must finish the
+    job as CRASHED with a spawn failure code, and the spawner must mark the
+    participant DEAD and retire any worktree.
+    """
+    import theater.daemon.spawner as spawner_mod
+
+    # Patch tmux.new_window (on the spawner's tmux module reference) to fail.
+    async def boom_new_window(**kwargs):
+        raise RuntimeError("tmux exploded")
+
+    monkeypatch.setattr(spawner_mod.tmux, "new_window", boom_new_window)
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "spawn",
+            harness="vibe",
+            prompt="say hello",
+            approval="manual",
+            cwd="/tmp",
+        )
+    assert exc.value.code == "internal"
+
+    # The participant was created by reserve, then marked dead by launch's
+    # cleanup. Find it in the list with include_dead=True.
+    rows = await client.call("participants.list", include_dead=True)
+    assert len(rows) == 1
+    assert rows[0]["status"] == "dead"
+
+    # The job was created between reserve and launch, then finished CRASHED
+    # by the cleanup boundary.
+    pid = rows[0]["id"]
+    job = daemon.jobs.get(pid)
+    assert job is not None
+    assert job.state == "crashed"
+    assert job.error_code == "spawn_failed"
+
+
+async def test_spawn_launch_failure_retires_worktree(
+    client, fake_tmux, daemon, tmp_path, monkeypatch
+):
+    """A worktree created during reserve is retired when launch fails."""
+    import theater.daemon.spawner as spawner_mod
+
+    repo_root = _make_repo(tmp_path)
+
+    async def boom_new_window(**kwargs):
+        raise RuntimeError("tmux exploded")
+
+    monkeypatch.setattr(spawner_mod.tmux, "new_window", boom_new_window)
+
+    with pytest.raises(RemoteError):
+        await client.call(
+            "spawn",
+            harness="vibe",
+            prompt="say hello",
+            approval="manual",
+            cwd=repo_root,
+            worktree=True,
+        )
+
+    rows = await client.call("participants.list", include_dead=True)
+    assert len(rows) == 1
+    assert rows[0]["status"] == "dead"
+
+    # The worktree directory must be gone.
+    from theater.daemon import worktree as wt
+
+    wt_path = wt.worktree_path(repo_root, rows[0]["id"])
+    assert not Path(wt_path).exists(), f"worktree directory should be gone: {wt_path}"
+
+
+async def test_promptless_spawn_stays_done_after_reserve_launch_split(client, fake_tmux):
+    """A promptless spawn resolves the job DONE after launch succeeds.
+
+    The reserve/launch split must preserve the promptless semantics: the job
+    is created after reserve, launch creates the pane, and only then is the
+    job finished DONE — because a launch failure must leave the job CRASHED,
+    not DONE.
+    """
+    record = await client.call(
+        "spawn",
+        harness="vibe",
+        prompt="",
+        approval="manual",
+        cwd="/tmp",
+    )
+    job = await client.call("jobs.status", handle=record["handle"])
+    assert job["state"] == "done"
+    assert job["error_code"] is None
+
+
+async def test_promptless_spawn_job_running_during_launch(client, fake_tmux, daemon, monkeypatch):
+    """For a promptless spawn, the job is RUNNING (not DONE) during launch.
+
+    The job is created after reserve and stays RUNNING while launch creates
+    the pane. It is finished DONE only after launch succeeds, so a launch
+    failure leaves the job CRASHED rather than DONE.
+    """
+    import theater.daemon.spawner as spawner_mod
+
+    original_new_window = spawner_mod.tmux.new_window
+    captured: dict = {}
+
+    async def spy_new_window(*, session, name, cwd, command, env=None, background=True):
+        pid = env.get("THEATER_ID", "")
+        job = daemon.jobs.get(pid)
+        captured["job_at_launch"] = job
+        return await original_new_window(
+            session=session,
+            name=name,
+            cwd=cwd,
+            command=command,
+            env=env,
+            background=background,
+        )
+
+    spawner_mod.tmux.new_window = spy_new_window
+    try:
+        await client.call(
+            "spawn",
+            harness="vibe",
+            prompt="",
+            approval="manual",
+            cwd="/tmp",
+        )
+    finally:
+        spawner_mod.tmux.new_window = original_new_window
+
+    job = captured.get("job_at_launch")
+    assert job is not None, "job must exist when tmux.new_window is called"
+    assert job.state == "running", "promptless spawn job must be RUNNING during launch"
+
+
+async def test_jobs_create_failure_invokes_reservation_cleanup(
+    client, fake_tmux, daemon, monkeypatch
+):
+    """If jobs.create raises, the reservation's participant is cleaned up.
+
+    The daemon's ``_spawn`` must call ``cleanup_reservation`` when
+    ``jobs.create`` fails, because the spawner created the participant and
+    worktree during ``reserve`` but the job will never exist to track the
+    work. Without this cleanup the participant row and worktree directory
+    would leak.
+    """
+    from theater.daemon.spawner import Spawner
+
+    cleanup_calls: list[str] = []
+    original_cleanup = Spawner.cleanup_reservation
+
+    def spy_cleanup(self, participant):
+        cleanup_calls.append(participant.id)
+        return original_cleanup(self, participant)
+
+    monkeypatch.setattr(Spawner, "cleanup_reservation", spy_cleanup)
+
+    # Sabotage jobs.create to raise.
+    def boom_create(**kwargs):
+        raise RuntimeError("database is on fire")
+
+    monkeypatch.setattr(daemon.jobs, "create", boom_create)
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "spawn",
+            harness="vibe",
+            prompt="say hello",
+            approval="manual",
+            cwd="/tmp",
+        )
+    assert exc.value.code == "internal"
+
+    # cleanup_reservation must have been called for the participant.
+    assert len(cleanup_calls) >= 1, "cleanup_reservation must be called on jobs.create failure"
+
+    # The participant must be DEAD.
+    rows = await client.call("participants.list", include_dead=True)
+    assert len(rows) == 1
+    assert rows[0]["status"] == "dead"
+
+    # No job should exist (jobs.create raised before inserting).
+    assert daemon.jobs.get(rows[0]["id"]) is None
+
+
+async def test_promptless_launch_failure_leaves_crashed_job(client, fake_tmux, daemon, monkeypatch):
+    """A promptless spawn whose launch fails must leave the job CRASHED.
+
+    Before the fix, the promptless job was finished DONE before launch ran,
+    so a launch failure left a DONE job for a participant with no pane —
+    the caller would see a successful result for a spawn that never
+    launched. Now the DONE finish is deferred until after launch succeeds,
+    so a launch failure leaves the job CRASHED with spawn_failed.
+    """
+    import theater.daemon.spawner as spawner_mod
+
+    async def boom_new_window(**kwargs):
+        raise RuntimeError("tmux exploded")
+
+    monkeypatch.setattr(spawner_mod.tmux, "new_window", boom_new_window)
+
+    with pytest.raises(RemoteError):
+        await client.call(
+            "spawn",
+            harness="vibe",
+            prompt="",
+            approval="manual",
+            cwd="/tmp",
+        )
+
+    rows = await client.call("participants.list", include_dead=True)
+    assert len(rows) == 1
+    assert rows[0]["status"] == "dead"
+
+    pid = rows[0]["id"]
+    job = daemon.jobs.get(pid)
+    assert job is not None
+    assert job.state == "crashed", "promptless launch failure must CRASH the job, not DONE"
+    assert job.error_code == "spawn_failed"
+
+
+async def test_cleanup_reservation_is_idempotent(registry, monkeypatch):
+    """cleanup_reservation can be called twice without error.
+
+    The daemon's except block may call cleanup_reservation after launch
+    already called it. Both retire and mark_dead must be safe to call
+    twice.
+    """
+    import theater.daemon.spawner as spawner_mod
+    from theater.daemon.spawner import Spawner, SpawnRequest
+
+    monkeypatch.setattr(spawner_mod.shutil, "which", lambda b: f"/usr/bin/{b}")
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="vibe",
+        prompt="say hello",
+        cwd="/tmp",
+        approval="edits",
+    )
+    reservation = await spawner.reserve(req)
+    participant = reservation.participant
+
+    # Call cleanup twice — both must succeed.
+    spawner.cleanup_reservation(participant)
+    spawner.cleanup_reservation(participant)
+
+    p = registry.get(participant.id)
+    assert p is not None
+    assert p.status.value == "dead"
+
+
+async def test_jobs_create_persists_then_raises_leaves_dead_and_crashed(
+    client, fake_tmux, daemon, monkeypatch
+):
+    """If jobs.create persists the row then raises, both are cleaned up.
+
+    JobManager.create() is not atomic: store.create_job (jobs.py:207)
+    persists the RUNNING row, then bus_append (:211) can raise. When that
+    happens, create() raises after the job is already in the database.
+    The old ``_spawn`` tracked ``job_created = False`` (because create
+    raised), cleaned the reservation, but never checked whether the job
+    had actually persisted — leaving a RUNNING job pointing at a DEAD
+    participant.
+
+    The fix drops the boolean and always checks ``jobs.get(handle)`` in
+    the except block, crashing any persisted RUNNING job. This test wraps
+    jobs.create so the job row is inserted and then an exception is
+    raised, simulating a bus_append failure.
+    """
+
+    def persist_then_explode(**kwargs):
+        # Insert the job row the way create() does, then raise
+        # before bus_append / returning.
+        from theater.models import Job, JobState
+        from theater.models import now as wall_now
+
+        job = Job(
+            handle=kwargs["handle"],
+            caller_id=kwargs["caller_id"],
+            target_id=kwargs["target_id"],
+            kind=kwargs["kind"],
+            prompt=kwargs.get("prompt"),
+            state=JobState.RUNNING,
+            result=None,
+            error_code=None,
+            created_at=wall_now(),
+            finished_at=None,
+            response_format=kwargs.get("response_format"),
+        )
+        daemon.store.create_job(job)
+        # Simulate bus_append failure after the row persisted.
+        raise RuntimeError("bus_append exploded")
+
+    monkeypatch.setattr(daemon.jobs, "create", persist_then_explode)
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "spawn",
+            harness="vibe",
+            prompt="say hello",
+            approval="manual",
+            cwd="/tmp",
+        )
+    assert exc.value.code == "internal"
+
+    # The participant must be DEAD (cleanup_reservation ran).
+    rows = await client.call("participants.list", include_dead=True)
+    assert len(rows) == 1
+    assert rows[0]["status"] == "dead"
+
+    # The job must exist and be CRASHED — not left RUNNING.
+    pid = rows[0]["id"]
+    job = daemon.jobs.get(pid)
+    assert job is not None, "job must exist (create_job persisted before the raise)"
+    assert job.state == "crashed", "persisted RUNNING job must be CRASHED on create failure"
+    assert job.error_code == "spawn_failed"
