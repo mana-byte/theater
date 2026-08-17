@@ -59,6 +59,7 @@ from theater.harness.source import (
     Batch,
     History,
     Source,
+    StreamPoint,
     TranscriptSource,
 )
 from theater.models import BadRequest
@@ -399,6 +400,7 @@ __all__ = [
     "ScreenKind",
     "ScreenReading",
     "Source",
+    "StreamPoint",
     "TranscriptObserver",
     "TranscriptSource",
     "check_model",

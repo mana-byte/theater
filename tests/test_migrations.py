@@ -67,6 +67,11 @@ def test_migrations_created_the_alembic_version_table(store):
     assert stamped == HEAD
     assert float(store.get_meta("transcript_location_epoch")) > 0
 
+    # Migration 0009 added resume_floor to participants.
+    col_info = store.conn.exec_driver_sql("PRAGMA table_info(participants)").fetchall()
+    col_names = {row[1] for row in col_info}
+    assert "resume_floor" in col_names
+
 
 def test_bus_ids_are_never_reused(store):
     """AUTOINCREMENT, not bare rowid: `bus_tail(after_id=)` is a cursor."""
@@ -132,6 +137,14 @@ def test_a_legacy_database_is_adopted_not_rebuilt(theater_home):
         assert "response_format" in col_names
         assert "structured_result" in col_names
         assert "structured_status" in col_names
+
+        # Migration 0009 added resume_floor to participants.
+        part_cols = store.conn.exec_driver_sql("PRAGMA table_info(participants)").fetchall()
+        part_col_names = {row[1] for row in part_cols}
+        assert "resume_floor" in part_col_names
+        # Legacy rows get NULL for resume_floor — cold spawn behaviour.
+        survivor = store.get_participant("abc")
+        assert survivor.resume_floor is None
 
         # A job created on a legacy row round-trips with null structured fields.
         store.conn.exec_driver_sql(

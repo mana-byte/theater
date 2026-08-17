@@ -31,6 +31,7 @@ participants = Table(
     Column("session_correlation", Text),
     Column("transcript_domain", Text),
     Column("transcript_location", Text),
+    Column("resume_floor", Text),
     Column("parent_id", Text),
     Column("pid", Integer),
     Column("status", Text, nullable=False),

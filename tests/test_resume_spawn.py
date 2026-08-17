@@ -767,3 +767,95 @@ async def test_reserve_writes_config_files(registry, monkeypatch):
     config = paths.mcp_config_path(reservation.participant.id)
     assert config.exists()
     assert reservation.participant.id in config.read_text()
+
+
+# ---- resume floor persistence ---------------------------------------------
+
+
+async def test_resume_persists_floor_on_successor(registry, resume_harness, monkeypatch, tmp_path):
+    """A resume spawn captures the predecessor's stream floor on the successor."""
+    from theater.resume_floor import UNKNOWN_FLOOR
+
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    transcript_path = tmp_path / "messages.jsonl"
+    transcript_path.write_text('{"role":"assistant","content":"old"}\n', encoding="utf-8")
+    predecessor = _trusted_resume(registry, harness="resume-spawn-test")
+    predecessor = registry.get(predecessor.id)
+    predecessor.transcript_location = str(transcript_path)
+    registry.store.upsert_participant(predecessor)
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="resume-spawn-test",
+        prompt="",
+        cwd="/tmp",
+        approval="edits",
+        resume="sess-abc",
+    )
+    spawned = await spawner.spawn(req)
+    reloaded = registry.store.get_participant(spawned.id)
+    assert reloaded.resume_floor is not None
+    assert reloaded.resume_floor != UNKNOWN_FLOOR
+
+
+async def test_resume_floor_unknown_when_transcript_missing(
+    registry, resume_harness, monkeypatch, tmp_path
+):
+    """A missing predecessor transcript location produces an unknown floor."""
+    from theater.resume_floor import UNKNOWN_FLOOR
+
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    predecessor = _trusted_resume(registry, harness="resume-spawn-test")
+    predecessor = registry.get(predecessor.id)
+    # transcript_location stays None — the predecessor never attached
+    registry.store.upsert_participant(predecessor)
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="resume-spawn-test",
+        prompt="",
+        cwd="/tmp",
+        approval="edits",
+        resume="sess-abc",
+    )
+    spawned = await spawner.spawn(req)
+    reloaded = registry.store.get_participant(spawned.id)
+    assert reloaded.resume_floor == UNKNOWN_FLOOR
+
+
+async def test_cold_spawn_has_no_floor(registry, resume_harness, monkeypatch):
+    """A cold spawn (no resume) has a NULL resume_floor."""
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="resume-spawn-test",
+        prompt="do thing",
+        cwd="/tmp",
+        approval="edits",
+    )
+    spawned = await spawner.spawn(req)
+    reloaded = registry.store.get_participant(spawned.id)
+    assert reloaded.resume_floor is None
+
+
+async def test_resume_floor_unknown_when_file_unreadable(
+    registry, resume_harness, monkeypatch, tmp_path
+):
+    """An unreadable predecessor transcript produces an unknown floor."""
+    from theater.resume_floor import UNKNOWN_FLOOR
+
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    transcript_path = tmp_path / "missing" / "messages.jsonl"
+    predecessor = _trusted_resume(registry, harness="resume-spawn-test")
+    predecessor = registry.get(predecessor.id)
+    predecessor.transcript_location = str(transcript_path)
+    registry.store.upsert_participant(predecessor)
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="resume-spawn-test",
+        prompt="",
+        cwd="/tmp",
+        approval="edits",
+        resume="sess-abc",
+    )
+    spawned = await spawner.spawn(req)
+    reloaded = registry.store.get_participant(spawned.id)
+    assert reloaded.resume_floor == UNKNOWN_FLOOR

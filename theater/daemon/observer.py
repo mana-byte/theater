@@ -73,6 +73,7 @@ from theater.config import ObserverSection
 from theater.daemon.registry import Registry
 from theater.harness import (
     HARNESSES,
+    Event,
     EventKind,
     Harness,
     HarnessObserver,
@@ -97,6 +98,11 @@ from theater.provenance import (
     is_trusted_provenance,
     normalize_provenance,
     provenance_at_least,
+)
+from theater.resume_floor import (
+    decode_floor,
+    floor_authorises_completion,
+    floor_is_present,
 )
 from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
@@ -986,6 +992,17 @@ class Observer:
         elif last is not None:
             self._settle(pid, status_after(last))
 
+        # A non-attachment batch with actual source growth (events or progressed
+        # bytes from the committed cursor) is necessarily post-attach/post-launch.
+        # If a resume floor is still present from a suppressed earlier attachment,
+        # this growth proves the successor has moved beyond the floor — clear it
+        # via targeted update so the participant's own status/last_activity are
+        # not reverted. Empty or status-only polls do not clear.
+        if batch.attached is None and (batch.progressed or batch.events):
+            p_now = self.store.get_participant(pid)
+            if p_now is not None and floor_is_present(p_now.resume_floor):
+                self.store.clear_resume_floor(pid)
+
         return batch.progressed or bool(batch.events) or batch.attached is not None
 
     @staticmethod
@@ -1622,12 +1639,47 @@ class Observer:
         # Derive an initial status from the last record skipped, so a spawned
         # agent that finished its turn before we attached does not stay IDLE.
         # No history replayed — only the status moves.
-        event = attached.last_event
-        if event is not None:
-            self._settle(pid, status_after(event))
-            if event.turn_end:
-                result_text, raw_result = self._turn_result(event, Turn(""))
-                self._answer_turn(pid, result_text, raw_result=raw_result)
+        #
+        # A resume floor suppresses both status and completion unless the
+        # attachment is provably the same stream (same device/inode, non-shrunk
+        # size, strictly beyond the saved record count). The floor is NOT
+        # cleared by a suppressed or eventless first attachment: it must survive
+        # daemon restart so reattaching to the same predecessor turn_end remains
+        # suppressed. It is cleared only when (a) an attach point is authorised
+        # as provably beyond the floor, or (b) after an earlier suppressed
+        # accepted attachment, a later non-attachment batch carries actual
+        # source growth/events from the committed cursor (those bytes are
+        # necessarily post-attach/post-launch). A floor of ``None``
+        # (cold/adopted) preserves the fast-spawn behaviour exactly.
+        floor_raw = p.resume_floor if p is not None else None
+        if attached.last_event is not None and not floor_is_present(floor_raw):
+            self._settle_from_event(pid, attached.last_event)
+        elif attached.last_event is not None and floor_is_present(floor_raw):
+            floor = decode_floor(floor_raw)
+            if floor_authorises_completion(floor, floor_raw=floor_raw, point=attached.point):
+                self._settle_from_event(pid, attached.last_event)
+                # Authorised: the attach point proves the successor is past
+                # the floor. Clear via targeted update so status/last_activity
+                # changes made by _settle are not reverted.
+                self.store.clear_resume_floor(pid)
+            else:
+                logger.info(
+                    "resume floor suppresses attach-derived status for %s (floor=%s, point=%s)",
+                    pid,
+                    floor_raw,
+                    attached.point,
+                )
+        # If the floor was present but the attach was suppressed or eventless,
+        # the floor is deliberately left in place. It will be cleared by the
+        # first later batch that carries actual source growth from the
+        # committed cursor (see _apply).
+
+    def _settle_from_event(self, pid: str, event: Event) -> None:
+        """Settle status and answer a turn from an attach-time event."""
+        self._settle(pid, status_after(event))
+        if event.turn_end:
+            result_text, raw_result = self._turn_result(event, Turn(""))
+            self._answer_turn(pid, result_text, raw_result=raw_result)
 
     def _release_transcript(self, pid: str) -> None:
         """Drop a participant's claim on its transcript, if it still holds it.

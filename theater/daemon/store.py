@@ -56,7 +56,7 @@ BASELINE = "0001"
 #: The latest revision. A legacy database is stamped at BASELINE and then
 #: upgraded to this; a fresh database lands here directly. Tests assert
 #: against this rather than hardcoding a revision string.
-HEAD = "0008"
+HEAD = "0009"
 RECEIPT_TOKEN_PREFIX = "receipt_token:"
 
 
@@ -162,6 +162,7 @@ class Store:
             "session_correlation": p.session_correlation,
             "transcript_domain": p.transcript_domain,
             "transcript_location": p.transcript_location,
+            "resume_floor": p.resume_floor,
             "parent_id": p.parent_id,
             "pid": p.pid,
             "status": str(p.status),
@@ -265,6 +266,18 @@ class Store:
     def touch(self, pid: str) -> None:
         self.conn.execute(
             update(participants).where(participants.c.id == pid).values(last_activity=now())
+        )
+
+    def clear_resume_floor(self, pid: str) -> None:
+        """Clear the resume floor column without touching any other field.
+
+        A targeted single-column update, not a whole-row upsert: the caller
+        may hold a stale ``Participant`` snapshot taken before ``_settle``
+        moved status/last_activity, and replaying that snapshot would revert
+        those changes. This method writes only ``resume_floor = NULL``.
+        """
+        self.conn.execute(
+            update(participants).where(participants.c.id == pid).values(resume_floor=None)
         )
 
     # ---- jobs ----------------------------------------------------------
