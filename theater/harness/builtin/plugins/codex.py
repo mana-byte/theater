@@ -613,6 +613,7 @@ class CodexObserver(TranscriptObserver):
         cwd: str | None,
         candidate: str,
         domain: str | None = None,
+        after: float | None = None,
     ) -> TranscriptCandidate:
         want = str(Path(cwd).resolve()) if cwd else None
         root = Path(domain).resolve() if domain else self.root.resolve()
@@ -622,7 +623,7 @@ class CodexObserver(TranscriptObserver):
         real = path.resolve()
         if not real.is_relative_to(root):
             raise ValueError("candidate path is outside this harness transcript domain")
-        row = self._candidate_row(real, want=want, after=None, domain=str(root))
+        row = self._candidate_row(real, want=want, after=after, domain=str(root))
         if row.rejection_reason:
             raise ValueError(row.rejection_reason)
         return row
@@ -645,7 +646,7 @@ class CodexObserver(TranscriptObserver):
             )
         if after is not None and getattr(st, "st_birthtime", st.st_ctime) < after:
             reason = "created before participant floor"
-        elif path.suffix != ".jsonl" or _STEM.match(path.stem) is None:
+        elif not self._is_rollout_shape(path):
             reason = "harness shape mismatch"
         elif session_id is None:
             reason = "unextractable session id"
@@ -663,6 +664,15 @@ class CodexObserver(TranscriptObserver):
             rejection_reason=reason,
             domain=domain,
         )
+
+    def _is_rollout_shape(self, path: Path) -> bool:
+        if path.suffix != ".jsonl" or _STEM.match(path.stem) is None:
+            return False
+        try:
+            relative = path.resolve().relative_to(self.root.resolve())
+        except (OSError, ValueError):
+            return False
+        return len(relative.parts) == 4
 
     def _process_rollout(self, cwd: str | None) -> Path | None:
         """The rollout this participant's own codex process holds open.

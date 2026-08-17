@@ -274,6 +274,7 @@ class HarnessObserver(ABC):
         cwd: str | None,
         candidate: str,
         domain: str | None = None,
+        after: float | None = None,
     ) -> TranscriptCandidate:
         """Validate an operator-named candidate before the daemon persists trust."""
         raise ValueError(f"{type(self).__name__} has no operator-bindable transcript")

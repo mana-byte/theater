@@ -387,6 +387,7 @@ class ClaudeCodeObserver(TranscriptObserver):
         cwd: str | None,
         candidate: str,
         domain: str | None = None,
+        after: float | None = None,
     ) -> TranscriptCandidate:
         want = str(Path(cwd).resolve()) if cwd else None
         root = Path(domain).resolve() if domain else self.root.resolve()
@@ -396,7 +397,7 @@ class ClaudeCodeObserver(TranscriptObserver):
         real = path.resolve()
         if not real.is_relative_to(root):
             raise ValueError("candidate path is outside this harness transcript domain")
-        row = self._candidate_row(real, want=want, after=None, domain=str(root))
+        row = self._candidate_row(real, want=want, after=after, domain=str(root))
         if row.rejection_reason:
             raise ValueError(row.rejection_reason)
         return row

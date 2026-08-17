@@ -501,8 +501,17 @@ class Observer:
             with contextlib.suppress(Exception, asyncio.CancelledError):
                 await task
 
-    def record_operator_binding(self, pid: str, location: str, session_id: str | None) -> None:
+    def record_operator_binding(
+        self,
+        pid: str,
+        location: str,
+        session_id: str | None,
+        *,
+        prior_owner: str | None = None,
+    ) -> None:
         """Mirror an accepted operator binding in the live collision table."""
+        if prior_owner is not None:
+            self._release_transcript(prior_owner)
         self._release_transcript(pid)
         self._bound_transcripts[location] = pid
         self._binding_correlation[location] = str(TranscriptProvenance.OPERATOR)

@@ -112,7 +112,14 @@ def _add_name_parser(sub) -> None:
 
     bind = sub.add_parser(
         "bind",
-        help="Bind a participant to an operator-verified transcript candidate.",
+        help="Bind a participant to a transcript candidate (same-UID operator authority).",
+        description=(
+            "Bind a participant to a transcript candidate. This is CLI/operator RPC "
+            "authority, the same trust boundary as `theater kill`: it is not human "
+            "authentication. A same-user process that can run theater or speak the "
+            "daemon socket can invoke it. The stable-id confirmation prevents "
+            "accidental alias-based binding."
+        ),
     )
     bind.add_argument("id", help="Stable participant id or live name.")
     bind.add_argument("candidate", help="Candidate path or session URI from `theater candidates`.")

@@ -680,6 +680,7 @@ class OpenCodeObserver(HarnessObserver):
         cwd: str | None,
         candidate: str,
         domain: str | None = None,
+        after: float | None = None,
     ) -> TranscriptCandidate:
         if not self.db.exists():
             raise ValueError("OpenCode database does not exist")
@@ -694,7 +695,8 @@ class OpenCodeObserver(HarnessObserver):
             conn = sqlite3.connect(f"file:{self.db}?mode=ro", uri=True)
             try:
                 row = conn.execute(
-                    "SELECT id, directory FROM session WHERE id = ? AND parent_id IS NULL",
+                    "SELECT id, directory, time_created FROM session "
+                    "WHERE id = ? AND parent_id IS NULL",
                     (sid,),
                 ).fetchone()
             finally:
@@ -705,6 +707,8 @@ class OpenCodeObserver(HarnessObserver):
             raise ValueError("harness shape mismatch")
         if want is not None and row[1] != want:
             raise ValueError("cwd mismatch")
+        if after is not None and isinstance(row[2], (int, float)) and row[2] < after * 1000:
+            raise ValueError("created before participant floor")
         return TranscriptCandidate(
             location=f"opencode://{row[0]}",
             session_id=str(row[0]),

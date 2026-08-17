@@ -2,17 +2,26 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
+import time
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from shipped import VibeHarness, VibeObserver
+from shipped import ClaudeCodeObserver, CodexObserver, OpenCodeObserver, VibeHarness, VibeObserver
 
 from theater.daemon import methods
 from theater.daemon.registry import Registry
 from theater.harness import HARNESSES
 from theater.models import BadRequest
+
+OPENCODE_SCHEMA = """
+CREATE TABLE session (
+    id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT,
+    time_created INTEGER, time_updated INTEGER
+);
+"""
 
 
 def _vibe_session(root: Path, short: str, cwd: Path, *, text: str = "hello") -> Path:
@@ -32,6 +41,69 @@ def _vibe_session(root: Path, short: str, cwd: Path, *, text: str = "hello") -> 
     return messages
 
 
+def _claude_transcript(root: Path, sid: str, cwd: Path, *, text: str = "hello") -> Path:
+    d = root / "project"
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{sid}.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "cwd": str(cwd),
+                "sessionId": sid,
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": text}],
+                    "stop_reason": "end_turn",
+                    "id": "msg_1",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _codex_rollout(root: Path, sid: str, cwd: Path, *, text: str = "hello") -> Path:
+    d = root / "2026" / "08" / "17"
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"rollout-2026-08-17T12-00-00-{sid}.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-08-17T12:00:00.000Z",
+                "type": "session_meta",
+                "payload": {"session_id": sid, "cwd": str(cwd)},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "timestamp": "2026-08-17T12:00:01.000Z",
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": text},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _opencode_db(path: Path, sid: str, cwd: Path, *, created: int = 1000) -> None:
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(OPENCODE_SCHEMA)
+        conn.execute(
+            "INSERT INTO session (id, parent_id, directory, time_created) VALUES (?, NULL, ?, ?)",
+            (sid, str(cwd.resolve()), created),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 class _OperatorObserver:
     def __init__(self) -> None:
         self.reset: list[str] = []
@@ -40,18 +112,25 @@ class _OperatorObserver:
     async def reset_for_operator_bind(self, pid: str) -> None:
         self.reset.append(pid)
 
-    def record_operator_binding(self, pid: str, location: str, session_id: str | None) -> None:
+    def record_operator_binding(
+        self,
+        pid: str,
+        location: str,
+        session_id: str | None,
+        *,
+        prior_owner: str | None = None,
+    ) -> None:
         self.bound.append((pid, location, session_id))
 
     def history_is_ambiguous(self, pid, history) -> bool:
         return False
 
 
-def _daemon(registry: Registry) -> SimpleNamespace:
+def _daemon(registry: Registry, observer: _OperatorObserver | None = None) -> SimpleNamespace:
     return SimpleNamespace(
         registry=registry,
         store=registry.store,
-        observer=_OperatorObserver(),
+        observer=observer or _OperatorObserver(),
     )
 
 
@@ -101,6 +180,82 @@ def test_operator_candidate_validation_rejects_bad_paths(tmp_path):
         observer.admit_operator_candidate(cwd=str(project), candidate=str(foreign))
     with pytest.raises(ValueError, match="harness shape"):
         observer.admit_operator_candidate(cwd=str(project), candidate=str(wrong_shape))
+    with pytest.raises(ValueError, match="created before participant floor"):
+        observer.admit_operator_candidate(cwd=str(project), candidate=str(good), after=10**12)
+
+
+def test_claude_bind_admission_validates_shape_cwd_domain_and_floor(tmp_path):
+    root = tmp_path / "claude"
+    root.mkdir()
+    project = tmp_path / "project"
+    other = tmp_path / "other"
+    project.mkdir()
+    other.mkdir()
+    observer = ClaudeCodeObserver(root=root)
+    good = _claude_transcript(root, "claude-session", project)
+    foreign = _claude_transcript(root, "foreign-session", other)
+    outside = _claude_transcript(tmp_path / "outside-claude", "outside-session", project)
+
+    row = observer.admit_operator_candidate(cwd=str(project), candidate=str(good))
+    assert row.session_id == "claude-session"
+    with pytest.raises(ValueError, match="cwd mismatch"):
+        observer.admit_operator_candidate(cwd=str(project), candidate=str(foreign))
+    with pytest.raises(ValueError, match="outside"):
+        observer.admit_operator_candidate(cwd=str(project), candidate=str(outside))
+    with pytest.raises(ValueError, match="created before participant floor"):
+        observer.admit_operator_candidate(cwd=str(project), candidate=str(good), after=10**12)
+
+
+def test_codex_bind_admission_validates_shape_cwd_domain_and_floor(tmp_path):
+    root = tmp_path / "codex"
+    root.mkdir()
+    project = tmp_path / "project"
+    other = tmp_path / "other"
+    project.mkdir()
+    other.mkdir()
+    observer = CodexObserver(root=root)
+    good = _codex_rollout(root, "019ff5c6-717c-7a70-9ec4-66dd1f4d173e", project)
+    foreign = _codex_rollout(root, "119ff5c6-717c-7a70-9ec4-66dd1f4d173e", other)
+    wrong_dir = root / "rollout-2026-08-17T12-00-00-219ff5c6-717c-7a70-9ec4-66dd1f4d173e.jsonl"
+    wrong_dir.write_text(good.read_text(encoding="utf-8"), encoding="utf-8")
+
+    row = observer.admit_operator_candidate(cwd=str(project), candidate=str(good))
+    assert row.session_id == "019ff5c6-717c-7a70-9ec4-66dd1f4d173e"
+    with pytest.raises(ValueError, match="cwd mismatch"):
+        observer.admit_operator_candidate(cwd=str(project), candidate=str(foreign))
+    with pytest.raises(ValueError, match="harness shape"):
+        observer.admit_operator_candidate(cwd=str(project), candidate=str(wrong_dir))
+    with pytest.raises(ValueError, match="created before participant floor"):
+        observer.admit_operator_candidate(cwd=str(project), candidate=str(good), after=10**12)
+
+
+def test_opencode_bind_admission_validates_session_cwd_domain_and_floor(tmp_path):
+    db = tmp_path / "opencode.db"
+    project = tmp_path / "project"
+    other = tmp_path / "other"
+    project.mkdir()
+    other.mkdir()
+    _opencode_db(db, "opencode-session", project, created=1000)
+    observer = OpenCodeObserver(db=db)
+
+    row = observer.admit_operator_candidate(
+        cwd=str(project), candidate="opencode://opencode-session"
+    )
+    assert row.session_id == "opencode-session"
+    with pytest.raises(ValueError, match="cwd mismatch"):
+        observer.admit_operator_candidate(cwd=str(other), candidate="opencode://opencode-session")
+    with pytest.raises(ValueError, match="harness shape"):
+        observer.admit_operator_candidate(cwd=str(project), candidate="opencode://missing")
+    with pytest.raises(ValueError, match="outside"):
+        observer.admit_operator_candidate(
+            cwd=str(project),
+            candidate="opencode://opencode-session",
+            domain="opencode://elsewhere",
+        )
+    with pytest.raises(ValueError, match="created before participant floor"):
+        observer.admit_operator_candidate(
+            cwd=str(project), candidate="opencode://opencode-session", after=2.0
+        )
 
 
 def test_live_and_dead_owner_conflicts_require_exact_transfer(
@@ -152,9 +307,82 @@ def test_live_and_dead_owner_conflicts_require_exact_transfer(
     )
     assert result["prior_owner"] == owner.id
     assert registry.store.get_participant(target.id).session_correlation == "operator"
+    assert daemon.observer.reset[-2:] == [owner.id, target.id]
     events = registry.store.bus_tail(limit=1)
     assert events[0]["kind"] == "operator.transcript_bind"
     assert events[0]["payload"]["prior_owner"] == owner.id
+
+
+def test_store_operator_bind_rolls_back_transfer_target_and_audit_on_failure(
+    registry: Registry,
+):
+    owner = registry.register(harness="vibe", pane="%1", cwd="/tmp/project")
+    target = registry.register(harness="vibe", pane="%2", cwd="/tmp/project")
+    owner.transcript_location = "/tmp/transcript.jsonl"
+    owner.session_id = "old-session"
+    owner.session_correlation = "operator"
+    registry.store.upsert_participant(owner)
+
+    target.transcript_location = "/tmp/transcript.jsonl"
+    target.session_id = "new-session"
+    target.session_correlation = "operator"
+    with pytest.raises(TypeError):
+        registry.store.bind_operator_transcript(
+            target=target,
+            prior_owner=owner,
+            audit_payload={"cannot_json": object()},
+        )
+
+    kept_owner = registry.store.get_participant(owner.id)
+    kept_target = registry.store.get_participant(target.id)
+    assert kept_owner.transcript_location == "/tmp/transcript.jsonl"
+    assert kept_owner.session_id == "old-session"
+    assert kept_owner.session_correlation == "operator"
+    assert kept_target.transcript_location is None
+    assert kept_target.session_id is None
+    assert all(row["kind"] != "operator.transcript_bind" for row in registry.store.bus_tail())
+
+
+def test_daemon_bind_does_not_update_memory_when_atomic_store_write_fails(
+    registry: Registry, tmp_path, monkeypatch
+):
+    root = tmp_path / "vibe"
+    root.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    candidate = _vibe_session(root, "atomic01", project)
+    monkeypatch.setitem(HARNESSES, "vibe", VibeHarness(root=root))
+    owner = registry.register(harness="vibe", pane="%1", cwd=str(project))
+    target = registry.register(harness="vibe", pane="%2", cwd=str(project))
+    owner.transcript_location = str(candidate.resolve())
+    owner.session_id = "atomic01-1111-2222-3333"
+    owner.session_correlation = "operator"
+    registry.store.upsert_participant(owner)
+    observer = _OperatorObserver()
+
+    def fail_bind_operator_transcript(**_kwargs):
+        raise RuntimeError("write failed")
+
+    monkeypatch.setattr(registry.store, "bind_operator_transcript", fail_bind_operator_transcript)
+    with pytest.raises(RuntimeError, match="write failed"):
+        asyncio.run(
+            methods._transcript_bind(
+                _daemon(registry, observer),
+                {
+                    "id": target.id,
+                    "candidate": str(candidate),
+                    "confirm_id": target.id,
+                    "transfer_from": owner.id,
+                    "transfer_confirm_id": owner.id,
+                },
+            )
+        )
+
+    kept_owner = registry.store.get_participant(owner.id)
+    kept_target = registry.store.get_participant(target.id)
+    assert kept_owner.transcript_location == str(candidate.resolve())
+    assert kept_target.transcript_location is None
+    assert observer.bound == []
 
 
 def test_bind_persists_operator_and_read_transcript_uses_bound_path(
@@ -202,6 +430,28 @@ def test_bind_does_not_persist_operator_after_rejected_candidate(
             methods._transcript_bind(
                 _daemon(registry),
                 {"id": p.id, "candidate": str(foreign), "confirm_id": p.id},
+            )
+        )
+    stored = registry.store.get_participant(p.id)
+    assert stored.session_correlation is None
+    assert stored.transcript_location is None
+
+
+def test_bind_applies_spawned_creation_floor(registry: Registry, tmp_path, monkeypatch):
+    root = tmp_path / "vibe"
+    root.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    old = _vibe_session(root, "oldfloor", project)
+    monkeypatch.setitem(HARNESSES, "vibe", VibeHarness(root=root))
+    time.sleep(0.02)
+    p = registry.create_spawned(harness="vibe", cwd=str(project))
+
+    with pytest.raises(BadRequest, match="created before participant floor"):
+        asyncio.run(
+            methods._transcript_bind(
+                _daemon(registry),
+                {"id": p.id, "candidate": str(old), "confirm_id": p.id},
             )
         )
     stored = registry.store.get_participant(p.id)

@@ -141,7 +141,18 @@ class Store:
     # ---- participants -------------------------------------------------
 
     def upsert_participant(self, p: Participant) -> None:
-        values = {
+        values = self._participant_values(p)
+        stmt = sqlite_insert(participants).values(**values)
+        self.conn.execute(
+            stmt.on_conflict_do_update(
+                index_elements=[participants.c.id],
+                set_={k: v for k, v in values.items() if k != "id"},
+            )
+        )
+
+    @staticmethod
+    def _participant_values(p: Participant) -> dict:
+        return {
             "id": p.id,
             "harness": p.harness,
             "tier": str(p.tier),
@@ -158,13 +169,47 @@ class Store:
             "last_activity": p.last_activity,
             "created_at": p.created_at,
         }
-        stmt = sqlite_insert(participants).values(**values)
-        self.conn.execute(
-            stmt.on_conflict_do_update(
-                index_elements=[participants.c.id],
-                set_={k: v for k, v in values.items() if k != "id"},
+
+    def bind_operator_transcript(
+        self,
+        *,
+        target: Participant,
+        prior_owner: Participant | None,
+        audit_payload: dict,
+    ) -> int:
+        """Move transcript ownership and append the audit row atomically."""
+        target_values = self._participant_values(target)
+        with self.engine.begin() as conn:
+            if prior_owner is not None:
+                conn.execute(
+                    update(participants)
+                    .where(participants.c.id == prior_owner.id)
+                    .values(
+                        session_id=None,
+                        session_correlation=None,
+                        transcript_location=None,
+                    )
+                )
+            conn.execute(
+                sqlite_insert(participants)
+                .values(**target_values)
+                .on_conflict_do_update(
+                    index_elements=[participants.c.id],
+                    set_={k: v for k, v in target_values.items() if k != "id"},
+                )
             )
-        )
+            result = conn.execute(
+                insert(bus).values(
+                    ts=now(),
+                    from_id="cli",
+                    to_id=target.id,
+                    kind="operator.transcript_bind",
+                    payload=json.dumps(audit_payload),
+                )
+            )
+            pk = result.inserted_primary_key
+            assert pk is not None
+            return pk[0]
 
     def get_participant(self, pid: str) -> Participant | None:
         row = self.conn.execute(select(participants).where(participants.c.id == pid)).first()

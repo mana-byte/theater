@@ -1411,6 +1411,7 @@ async def _transcript_bind(daemon, params: dict) -> dict:
             cwd=p.cwd,
             candidate=raw_candidate,
             domain=p.transcript_domain,
+            after=p.created_at if p.tier is Tier.SPAWNED else None,
         )
     except ValueError as exc:
         raise BadRequest(f"cannot bind transcript: {exc}") from None
@@ -1432,31 +1433,32 @@ async def _transcript_bind(daemon, params: dict) -> dict:
     elif transfer_from is not None:
         raise BadRequest("transfer-from was provided but the candidate has no current owner")
 
-    await daemon.observer.reset_for_operator_bind(pid)
     p = daemon.registry.get(pid)
     p.transcript_location = location
     p.session_id = admitted.session_id
     p.session_correlation = str(TranscriptProvenance.OPERATOR)
     p.transcript_domain = admitted.domain
     p.last_activity = now()
-    if owner is not None:
-        owner.transcript_location = None
-        owner.session_id = None
-        owner.session_correlation = None
-        daemon.store.upsert_participant(owner)
-    daemon.store.upsert_participant(p)
-    daemon.observer.record_operator_binding(pid, location, admitted.session_id)
-    daemon.store.bus_append(
-        "operator.transcript_bind",
-        to_id=pid,
-        from_id="cli",
-        payload={
-            "actor_surface": "cli",
-            "target": pid,
-            "path": location,
-            "session_id": admitted.session_id,
-            "prior_owner": prior_owner,
-        },
+    audit_payload = {
+        "actor_surface": "cli",
+        "target": pid,
+        "path": location,
+        "session_id": admitted.session_id,
+        "prior_owner": prior_owner,
+    }
+    daemon.store.bind_operator_transcript(
+        target=p,
+        prior_owner=owner,
+        audit_payload=audit_payload,
+    )
+    if prior_owner is not None:
+        await daemon.observer.reset_for_operator_bind(prior_owner)
+    await daemon.observer.reset_for_operator_bind(pid)
+    daemon.observer.record_operator_binding(
+        pid,
+        location,
+        admitted.session_id,
+        prior_owner=prior_owner,
     )
     return {
         "id": pid,
