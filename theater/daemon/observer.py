@@ -82,7 +82,14 @@ from theater.harness import (
     status_after,
 )
 from theater.harness.observation import open_participant_source
-from theater.harness.source import Attachment, Batch, History, Source, SourceContractError
+from theater.harness.source import (
+    Attachment,
+    Batch,
+    History,
+    IdentityLossEvidence,
+    Source,
+    SourceContractError,
+)
 from theater.models import JobState, Status, Tier
 from theater.models import now as wall_now
 from theater.provenance import (
@@ -150,6 +157,14 @@ _ANSWERED_TURNS = 32
 #: prompts sharing 120 characters are the same question — and short enough
 #: that the clip point is nowhere near it.
 _PROMPT_MATCH = 120
+
+#: Consecutive relocate/evidence windows that must agree before identity-loss
+#: quarantine is entered. One window alone is not enough: a heuristic candidate
+#: that appears once and then vanishes is a transient scan artifact, not proof
+#: that the trusted pin went stale. The evidence location must repeat across
+#: two consecutive relocate windows while the screen reads HIGH/WORKING, and any
+#: semantic progress on the pinned source resets this confirmation state.
+IDENTITY_LOSS_CONFIRMATIONS = 2
 
 #: How many consecutive turn ends that do not match the waiting job's prompt
 #: are tolerated before the job is released. One is legitimate: a human
@@ -477,6 +492,12 @@ class Observer:
         #: lifecycle; predicates consult only this cache and never scan the bus.
         self._identity_lost: set[str] = set()
         self._identity_loss_replayed: set[str] = set()
+        #: Pending identity-loss confirmations: pid -> (location, count).
+        #: Quarantine is entered only after IDENTITY_LOSS_CONFIRMATIONS
+        #: consecutive relocate windows report the SAME evidence location
+        #: while the screen reads HIGH/WORKING. Any semantic progress on the
+        #: pinned source resets the count to zero.
+        self._identity_loss_pending: dict[str, tuple[str, int]] = {}
         self._supervisor: asyncio.Task | None = None
         self._stopping = asyncio.Event()
 
@@ -551,8 +572,123 @@ class Observer:
         if not self.store.observation_error_active(pid, TRANSCRIPT_IDENTITY_LOST_CODE):
             return
         self._identity_lost.add(pid)
-        self._source_errors[(pid, TRANSCRIPT_IDENTITY_LOST_CODE)] = wall_now()
-        self._finish_identity_lost_jobs(pid, transcript_identity_recovery_message(pid))
+        failed_at = wall_now()
+        self._source_errors[(pid, TRANSCRIPT_IDENTITY_LOST_CODE)] = failed_at
+        # Restart replay: quarantine begins immediately, but job destruction
+        # follows the same OBSERVATION_FAILURE_GRACE as other source errors.
+        # A job created just before the daemon died must not be instantly
+        # crashed merely because the restart replayed the audit.
+        if self.jobs is None:
+            return
+        now = wall_now()
+        for job in self.store.running_jobs_for_target(pid):
+            if now - max(failed_at, job.created_at) >= OBSERVATION_FAILURE_GRACE:
+                self._finish(
+                    job.handle,
+                    transcript_identity_recovery_message(pid),
+                    error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
+                    state=JobState.CRASHED,
+                    raw_result=None,
+                )
+
+    def _evidence_is_bound_to_another_live_participant(
+        self, pid: str, evidence: IdentityLossEvidence
+    ) -> bool:
+        """Whether loss evidence names a transcript another live participant owns.
+
+        The probe found a heuristic candidate that looks newer than the trusted
+        pin. Before quarantining on it, the reducer must reject evidence whose
+        location or session_id is already claimed by a different live
+        participant — otherwise a sibling's legitimate transcript is mistaken
+        for identity-loss evidence, and the participant is quarantined for a
+        rotation that never happened.
+
+        Three checks, any of which rejects:
+
+        * The evidence location is in ``_bound_transcripts`` under a different
+          live pid.
+        * The evidence location is persisted as another live participant's
+          ``transcript_location``.
+        * The evidence ``session_id`` (when the source supplied one) is in
+          ``_binding_sessions`` under a different location, or matches another
+          live participant's ``session_id``.
+
+        The registry-ownership policy lives here, not in the adapter: the
+        source reports the facts (location, session_id) and the reducer decides
+        whether they disqualify the evidence. A ``None`` session_id means the
+        source could not read one, and only the location checks apply.
+        """
+        if self._location_bound_to_another_live(pid, evidence.location):
+            return True
+        return self._session_id_bound_to_another_live(pid, evidence.session_id)
+
+    def _location_bound_to_another_live(self, pid: str, location: str) -> bool:
+        """Whether *location* is claimed by a different live participant."""
+        owner = self._bound_transcripts.get(location)
+        if owner is not None and owner != pid:
+            holder = self.store.get_participant(owner)
+            if holder is not None and holder.status is not Status.DEAD:
+                return True
+        participant = self.store.get_participant(pid)
+        if participant is not None:
+            for other in self.registry.list():
+                if (
+                    other.id == pid
+                    or other.status is Status.DEAD
+                    or other.harness != participant.harness
+                ):
+                    continue
+                if location == other.transcript_location:
+                    return True
+        return False
+
+    def _session_id_bound_to_another_live(self, pid: str, session_id: str | None) -> bool:
+        """Whether *session_id* is claimed by a different live participant."""
+        if session_id is None:
+            return False
+        participant = self.store.get_participant(pid)
+        if participant is not None:
+            for other in self.registry.list():
+                if (
+                    other.id == pid
+                    or other.status is Status.DEAD
+                    or other.harness != participant.harness
+                ):
+                    continue
+                if session_id == other.session_id and other.session_id is not None:
+                    return True
+        for loc, sid in self._binding_sessions.items():
+            if sid != session_id:
+                continue
+            bound_pid = self._bound_transcripts.get(loc)
+            if bound_pid is not None and bound_pid != pid:
+                holder = self.store.get_participant(bound_pid)
+                if holder is not None and holder.status is not Status.DEAD:
+                    return True
+        return False
+
+    def _confirm_identity_loss(self, pid: str, evidence: IdentityLossEvidence) -> bool:
+        """Require consecutive relocate windows with the same evidence location.
+
+        One window is not enough: a heuristic candidate that appears once and
+        then vanishes — or whose location changes between scans — is a transient
+        artifact, not proof that the trusted pin went stale. The evidence
+        location must repeat across ``IDENTITY_LOSS_CONFIRMATIONS`` consecutive
+        relocate windows while the screen reads HIGH/WORKING. Any semantic
+        progress on the pinned source resets the confirmation state, because
+        output from the trusted pin means the pin is still alive.
+
+        Returns ``True`` when the confirmation threshold is reached, signalling
+        the caller to enter quarantine. Returns ``False`` to keep accumulating.
+        """
+        pending = self._identity_loss_pending.get(pid)
+        count = pending[1] + 1 if pending is not None and pending[0] == evidence.location else 1
+        self._identity_loss_pending[pid] = (evidence.location, count)
+        return count >= IDENTITY_LOSS_CONFIRMATIONS
+
+    def _reset_identity_loss_confirmation(self, pid: str) -> None:
+        """Semantic progress on the pinned source resets confirmation."""
+        self._identity_loss_pending.pop(pid, None)
 
     def mark_transcript_identity_lost(self, pid: str, reason: str) -> None:
         """Enter quarantine from positive evidence in the observation path."""
@@ -898,7 +1034,23 @@ class Observer:
         if self.jobs is None:
             return
         if batch.error_code == TRANSCRIPT_IDENTITY_LOST_CODE:
-            self._finish_identity_lost_jobs(pid, batch.error or batch.error_code)
+            # Quarantine/watch behaviour may begin immediately — the participant
+            # is already in ``_identity_lost`` — but job destruction must follow
+            # the same ``max(first_failure, job.created_at)`` grace as other
+            # source errors. A source that just started failing must not
+            # instantly crash a prompt created moments ago against a still-live
+            # pane, and restart replay (``_restore_transcript_identity_loss``)
+            # must not crash jobs that are still within their grace window.
+            now = wall_now()
+            for job in self.store.running_jobs_for_target(pid):
+                if now - max(failed_at, job.created_at) >= OBSERVATION_FAILURE_GRACE:
+                    self._finish(
+                        job.handle,
+                        batch.error or batch.error_code,
+                        error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
+                        state=JobState.CRASHED,
+                        raw_result=None,
+                    )
             return
         now = wall_now()
         for job in self.store.running_jobs_for_target(pid):
@@ -927,6 +1079,11 @@ class Observer:
     def _clear_source_error_on_progress(self, pid: str, batch: Batch) -> None:
         if batch.error_code is None:
             self._clear_source_errors(pid)
+            # Semantic progress on the pinned source means the trusted pin is
+            # still alive. Reset the identity-loss confirmation counter without
+            # clearing quarantine itself (that requires an accepted attachment
+            # or operator rebind). This does not touch the three quiet timers.
+            self._reset_identity_loss_confirmation(pid)
 
     def _clear_source_errors(self, pid: str, *, include_identity_lost: bool = False) -> None:
         for key in [item for item in self._source_errors if item[0] == pid]:
@@ -935,6 +1092,7 @@ class Observer:
             self._source_errors.pop(key, None)
         if include_identity_lost:
             self._identity_lost.discard(pid)
+            self._identity_loss_pending.pop(pid, None)
 
     def _turn_result(self, event, turn: Turn) -> tuple[str, str | object | None]:
         if not (event.text or event.raw_text):
@@ -1066,15 +1224,20 @@ class Observer:
                 await self._on_progress(pid, observer, batch, clock)
                 return
             evidence = await source.probe_identity_loss()
-            if evidence is not None and await self._screen_is_positively_working(pid, observer):
-                self.mark_transcript_identity_lost(
-                    pid,
-                    (
-                        "a newer same-harness/cwd transcript candidate appeared while the "
-                        "trusted pin was inert and the pane was visibly working: "
-                        f"{evidence.location}"
-                    ),
-                )
+            if (
+                evidence is not None
+                and not self._evidence_is_bound_to_another_live_participant(pid, evidence)
+                and await self._screen_is_positively_working(pid, observer)
+            ):
+                if self._confirm_identity_loss(pid, evidence):
+                    self.mark_transcript_identity_lost(
+                        pid,
+                        (
+                            "a newer same-harness/cwd transcript candidate appeared while the "
+                            "trusted pin was inert and the pane was visibly working: "
+                            f"{evidence.location}"
+                        ),
+                    )
                 clock.quiet_since = now
                 return
             # The relocate arm has its own throttle, just like screen and

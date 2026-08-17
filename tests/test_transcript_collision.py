@@ -1121,7 +1121,13 @@ async def test_claude_readable_pin_uses_newer_candidate_only_as_loss_evidence(
     os.utime(newer, ns=(2_000_000_000, 2_000_000_000))
     clock = QuietClock()
     clock.quiet_since = time.monotonic() - 10
+    # Two consecutive relocate windows with the same evidence location are
+    # required before quarantine. The first call alone does not quarantine.
     await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    if lost:
+        assert not observer.transcript_identity_lost(participant.id)
+        clock.quiet_since = time.monotonic() - 10
+        await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
 
     assert observer.transcript_identity_lost(participant.id) is lost
     assert source.path == old
@@ -1164,13 +1170,14 @@ async def test_identity_loss_inert_idle_pin_stays_bound(collision_registry, vibe
 
 
 async def test_identity_loss_inert_working_new_candidate_enters_quarantine_once(
-    collision_registry, vibe_tree
+    collision_registry, vibe_tree, monkeypatch
 ):
     harness = VibeHarness(root=vibe_tree["root"])
     harness.observer.screen_reading = lambda _capture: ScreenReading(  # type: ignore[method-assign]
         ScreenKind.WORKING, ScreenConfidence.HIGH
     )
     jobs = JobManager(collision_registry.store)
+    monkeypatch.setattr(observer_mod, "OBSERVATION_FAILURE_GRACE", 0.0)
     observer = Observer(collision_registry, {"vibe": harness}, relocate=0.0, jobs=jobs)
 
     async def capture_pane(_pane):
@@ -1187,6 +1194,10 @@ async def test_identity_loss_inert_working_new_candidate_enters_quarantine_once(
     clock = QuietClock()
     clock.quiet_since = time.monotonic() - 10
 
+    # Two consecutive relocate windows with the same evidence are required.
+    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    assert not observer.transcript_identity_lost(participant.id)
+    clock.quiet_since = time.monotonic() - 10
     await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
     observer.mark_transcript_identity_lost(participant.id, "repeat should not spam")
 
@@ -1423,3 +1434,201 @@ async def test_observer_releases_binding_on_watcher_end(
     collision_registry.mark_dead(p_a.id)
 
     assert await until(lambda: len(collision_observer._bound_transcripts) == 0, timeout=3.0)
+
+
+# ---- Phase 1: identity-loss evidence safety and confirmation ---------------
+
+
+async def test_identity_loss_evidence_bound_to_another_live_participant_is_rejected(
+    collision_registry, vibe_tree
+):
+    """Loss evidence whose location is another live participant's transcript is rejected."""
+    harness = VibeHarness(root=vibe_tree["root"])
+    harness.observer.screen_reading = lambda _capture: ScreenReading(  # type: ignore[method-assign]
+        ScreenKind.WORKING, ScreenConfidence.HIGH
+    )
+    observer = Observer(collision_registry, {"vibe": harness}, relocate=0.0)
+
+    async def capture_pane(_pane):
+        return "working"
+
+    observer._capture = capture_pane
+
+    # Sibling B owns transcript_b with an exact pin.
+    sibling = collision_registry.register(
+        harness="vibe",
+        pane="%2",
+        cwd=str(vibe_tree["project"]),
+        session_id="aa5d2d32-1111-2222-3333",
+    )
+    sibling.session_correlation = "exact"
+    sibling.transcript_location = str(vibe_tree["transcript_b"])
+    collision_registry.store.upsert_participant(sibling)
+    observer._bound_transcripts[str(vibe_tree["transcript_b"])] = sibling.id
+    observer._binding_correlation[str(vibe_tree["transcript_b"])] = "exact"
+    observer._binding_sessions[str(vibe_tree["transcript_b"])] = "aa5d2d32-1111-2222-3333"
+
+    # Participant A has a trusted pin on transcript_a.
+    participant = collision_registry.register(
+        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+    )
+    participant = _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
+    source = await _accept_bound_source(observer, harness, participant)
+
+    # The probe will find transcript_b (the sibling's) as a newer candidate.
+    # The reducer must reject this evidence because transcript_b is bound to
+    # another live participant.
+    from theater.harness.source import IdentityLossEvidence
+
+    evidence = IdentityLossEvidence(
+        location=str(vibe_tree["transcript_b"]),
+        session_id="aa5d2d32-1111-2222-3333",
+    )
+    assert observer._evidence_is_bound_to_another_live_participant(participant.id, evidence)
+
+    # Even after two relocate windows, quarantine must not be entered.
+    clock = QuietClock()
+    clock.quiet_since = time.monotonic() - 10
+    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    clock.quiet_since = time.monotonic() - 10
+    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    assert not observer.transcript_identity_lost(participant.id)
+
+
+async def test_identity_loss_evidence_session_id_matching_another_live_participant_is_rejected(
+    collision_registry, vibe_tree
+):
+    """Loss evidence whose session_id matches another live participant is rejected."""
+    observer = Observer(collision_registry, harnesses={})
+
+    # Sibling has a different transcript_location but the same session_id.
+    sibling = collision_registry.register(
+        harness="vibe",
+        pane="%2",
+        cwd=str(vibe_tree["project"]),
+        session_id="shared-session-id",
+    )
+    sibling.session_correlation = "exact"
+    sibling.transcript_location = str(vibe_tree["transcript_b"])
+    collision_registry.store.upsert_participant(sibling)
+
+    participant = collision_registry.register(
+        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+    )
+
+    from theater.harness.source import IdentityLossEvidence
+
+    evidence = IdentityLossEvidence(
+        location="/some/other/path",
+        session_id="shared-session-id",
+    )
+    assert observer._evidence_is_bound_to_another_live_participant(participant.id, evidence)
+
+
+async def test_identity_loss_confirmation_requires_two_windows_with_same_location(
+    collision_registry, vibe_tree
+):
+    """One relocate window is not enough; two with the same location are required."""
+    harness = VibeHarness(root=vibe_tree["root"])
+    harness.observer.screen_reading = lambda _capture: ScreenReading(  # type: ignore[method-assign]
+        ScreenKind.WORKING, ScreenConfidence.HIGH
+    )
+    observer = Observer(collision_registry, {"vibe": harness}, relocate=0.0)
+
+    async def capture_pane(_pane):
+        return "working"
+
+    observer._capture = capture_pane
+    participant = collision_registry.register(
+        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+    )
+    participant = _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
+    source = await _accept_bound_source(observer, harness, participant)
+    _make_session(vibe_tree["root"], "zzzzzzzz", str(vibe_tree["project"]))
+
+    clock = QuietClock()
+    clock.quiet_since = time.monotonic() - 10
+
+    # First relocate window: evidence found, but no quarantine yet.
+    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    assert not observer.transcript_identity_lost(participant.id)
+    assert participant.id in observer._identity_loss_pending
+
+    # Second relocate window: same evidence location, now quarantine.
+    clock.quiet_since = time.monotonic() - 10
+    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    assert observer.transcript_identity_lost(participant.id)
+
+
+async def test_identity_loss_confirmation_resets_on_semantic_progress(
+    collision_registry, vibe_tree
+):
+    """Semantic progress on the pinned source resets the confirmation counter."""
+    harness = VibeHarness(root=vibe_tree["root"])
+    harness.observer.screen_reading = lambda _capture: ScreenReading(  # type: ignore[method-assign]
+        ScreenKind.WORKING, ScreenConfidence.HIGH
+    )
+    observer = Observer(collision_registry, {"vibe": harness}, relocate=0.0)
+
+    async def capture_pane(_pane):
+        return "working"
+
+    observer._capture = capture_pane
+    participant = collision_registry.register(
+        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+    )
+    participant = _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
+    source = await _accept_bound_source(observer, harness, participant)
+    _make_session(vibe_tree["root"], "zzzzzzzz", str(vibe_tree["project"]))
+
+    clock = QuietClock()
+    clock.quiet_since = time.monotonic() - 10
+
+    # First relocate window: evidence found, counter at 1.
+    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    assert participant.id in observer._identity_loss_pending
+    assert observer._identity_loss_pending[participant.id][1] == 1
+
+    # Semantic progress on the pinned source resets the counter.
+    observer._clear_source_error_on_progress(participant.id, Batch())
+    assert participant.id not in observer._identity_loss_pending
+
+    # Next relocate window starts fresh: counter at 1 again, not 2.
+    clock.quiet_since = time.monotonic() - 10
+    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    assert not observer.transcript_identity_lost(participant.id)
+    assert observer._identity_loss_pending[participant.id][1] == 1
+
+
+async def test_identity_loss_confirmation_resets_when_location_changes(
+    collision_registry, vibe_tree
+):
+    """A different evidence location resets the confirmation counter."""
+    harness = VibeHarness(root=vibe_tree["root"])
+    harness.observer.screen_reading = lambda _capture: ScreenReading(  # type: ignore[method-assign]
+        ScreenKind.WORKING, ScreenConfidence.HIGH
+    )
+    observer = Observer(collision_registry, {"vibe": harness}, relocate=0.0)
+
+    async def capture_pane(_pane):
+        return "working"
+
+    observer._capture = capture_pane
+    participant = collision_registry.register(
+        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+    )
+    participant = _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
+    source = await _accept_bound_source(observer, harness, participant)
+    first_new = _make_session(vibe_tree["root"], "yyyyyyyy", str(vibe_tree["project"]))
+
+    clock = QuietClock()
+    clock.quiet_since = time.monotonic() - 10
+    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    assert observer._identity_loss_pending[participant.id] == (str(first_new), 1)
+
+    # A different candidate location resets the counter to 1, not 2.
+    second_new = _make_session(vibe_tree["root"], "zzzzzzzz", str(vibe_tree["project"]))
+    clock.quiet_since = time.monotonic() - 10
+    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    assert not observer.transcript_identity_lost(participant.id)
+    assert observer._identity_loss_pending[participant.id] == (str(second_new), 1)

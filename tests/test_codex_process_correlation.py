@@ -861,3 +861,46 @@ def test_a_process_table_we_cannot_read_yields_no_descendants(monkeypatch):
 
     monkeypatch.setattr(subprocess, "check_output", check_output)
     assert proc.descendants(PID_A) == []
+
+
+# ---- IdentityLossEvidence carries the session_id the source already knows ---
+
+
+async def test_probe_identity_loss_populates_session_id(monkeypatch, codex_tree):
+    """The probe returns the harness session_id it read off the candidate."""
+    os.utime(codex_tree["a"], ns=(1_000_000_000, 1_000_000_000))
+    hold(monkeypatch, {PID_A: []})
+    reader = CodexObserver(
+        root=codex_tree["root"], pane_pid=PID_A, session_provenance=TranscriptProvenance.OPERATOR
+    )
+    source = reader.open_source(
+        cwd=str(codex_tree["project"]),
+        session_id=SESSION_A,
+        session_provenance=TranscriptProvenance.OPERATOR,
+        known_location=str(codex_tree["a"]),
+    )
+    initial = await source.read()
+    assert initial.attached is not None
+    source.commit_attachment()
+
+    # SESSION_B is already newer than SESSION_A in the fixture.
+    os.utime(codex_tree["b"], ns=(2_000_000_000, 2_000_000_000))
+
+    evidence = await source.probe_identity_loss()
+    assert evidence is not None
+    assert evidence.session_id == SESSION_B
+
+
+async def test_probe_identity_loss_session_id_none_when_source_cannot_read_it(
+    monkeypatch, tmp_path
+):
+    """A source whose candidate has no session_id leaves evidence.session_id as None."""
+    from theater.harness.source import IdentityLossEvidence
+
+    # The dataclass defaults session_id to None for backward compatibility.
+    evidence = IdentityLossEvidence(location="/some/path")
+    assert evidence.session_id is None
+
+    # And can be populated when the source knows it.
+    evidence_with_sid = IdentityLossEvidence(location="/some/path", session_id="known-id")
+    assert evidence_with_sid.session_id == "known-id"
