@@ -386,17 +386,11 @@ class Store:
         token: str,
         *,
         token_path: str | None = None,
-        expires_at: float | None = None,
     ) -> None:
         payload: dict[str, object] = {
             "token": token,
             "token_path": token_path,
         }
-        if expires_at is not None:
-            # Legacy field. Token validity is now tied to participant liveness,
-            # but retaining explicit old values lets cleanup tests exercise
-            # migrated metadata without inventing another shape.
-            payload["expires_at"] = expires_at
         self.set_meta(f"{RECEIPT_TOKEN_PREFIX}{participant_id}", json.dumps(payload))
 
     def get_receipt_token(self, participant_id: str) -> str | None:
@@ -750,3 +744,39 @@ class Store:
             d["payload"] = json.loads(d["payload"]) if d["payload"] else None
             out.append(d)
         return out
+
+    def observation_error_active(self, participant_id: str, code: str) -> bool:
+        """Whether an observation error remains uncleared in the audit stream.
+
+        This is not a state column. The observer derives the condition again from
+        the live row/source/screen, and the bus records the transition so a
+        daemon restart does not forget a quarantine before the operator rebinds.
+        """
+        rows = self.conn.execute(
+            select(bus.c.kind, bus.c.payload)
+            .where(bus.c.to_id == participant_id)
+            .where(
+                bus.c.kind.in_(
+                    [
+                        "agent.observation_error",
+                        "agent.transcript",
+                        "agent.transcript_receipt",
+                        "operator.transcript_bind",
+                    ]
+                )
+            )
+            .order_by(bus.c.id.desc())
+        ).fetchall()
+        for kind, payload in rows:
+            if kind in {"agent.transcript", "operator.transcript_bind"}:
+                return False
+            try:
+                decoded = json.loads(payload or "{}")
+            except ValueError:
+                continue
+            if kind == "agent.transcript_receipt" and decoded.get("admission") == "accepted":
+                return False
+            found = decoded.get("code")
+            if found == code:
+                return True
+        return False

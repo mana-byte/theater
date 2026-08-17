@@ -363,6 +363,17 @@ are going on the bus, which is an activity feed, not an archive: clip with
 The helper `clipper(clip_text)` returns the right function; use it rather than
 branching.
 
+Spawned transcript-backed adapters need a real identity channel if their
+transcripts live in a shared namespace. A cwd/time match is `heuristic`: Theater
+may show it in `theater candidates`, but it will not attribute text, complete
+turns, allow trusted resume, or accept sends on that evidence alone. Use
+participant-isolated transcript storage, an exact launch/lifecycle receipt, or a
+daemon-checkable process proof so the source can report `exact` or `proven`
+ownership. If a trusted pin later disappears or a newer heuristic candidate
+appears while the old pin is inert and the screen is working, Theater enters
+`transcript_identity_lost` and waits for operator bind rather than repointing
+your source.
+
 `index` is the zero-based record number. Pass it through as `raw_index`. Several
 events may share one index — a Vibe assistant turn with three tool calls is four
 events.

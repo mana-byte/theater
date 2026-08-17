@@ -7,6 +7,8 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 
+from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
+
 
 class Tier(StrEnum):
     """How a participant reached the registry. See init_idea_grilled.md §6."""
@@ -245,6 +247,12 @@ class TranscriptUntrusted(TheaterError):
     """A send would require attributing a transcript that is not yet trusted."""
 
     code = "transcript_untrusted"
+
+
+class TranscriptIdentityLost(TheaterError):
+    """A trusted transcript pin lost identity and must be rebound by an operator."""
+
+    code = TRANSCRIPT_IDENTITY_LOST_CODE
 
 
 class AwaitingDecision(TheaterError):

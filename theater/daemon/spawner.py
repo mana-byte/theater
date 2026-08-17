@@ -29,6 +29,11 @@ from theater.harness import get as get_harness
 from theater.models import BadRequest, Participant, Status, TheaterError
 from theater.provenance import TranscriptProvenance, is_trusted_provenance
 from theater.tmux import client as tmux
+from theater.transcript_identity import (
+    TRANSCRIPT_IDENTITY_LOST_CODE,
+    participant_trusted_pin_unavailable_reason,
+    transcript_identity_recovery_message,
+)
 
 logger = logging.getLogger("theater.spawner")
 
@@ -255,16 +260,35 @@ class Spawner:
             return None
         live_matches = []
         dead_matches = []
+        lost_matches = []
         for participant in self.registry.list(include_dead=True):
             if (
                 participant.harness == req.harness
                 and participant.session_id == req.resume
                 and is_trusted_provenance(participant.session_correlation)
             ):
+                lost_reason = None
+                if self.registry.store.observation_error_active(
+                    participant.id, TRANSCRIPT_IDENTITY_LOST_CODE
+                ):
+                    lost_reason = "the trusted transcript identity is quarantined"
+                else:
+                    lost_reason = participant_trusted_pin_unavailable_reason(participant)
+                if lost_reason is not None:
+                    lost_matches.append((participant, lost_reason))
+                    continue
                 if participant.status is Status.DEAD:
                     dead_matches.append(participant)
                 else:
                     live_matches.append(participant)
+        if lost_matches:
+            participant, reason = max(
+                lost_matches, key=lambda item: (item[0].last_activity, item[0].created_at)
+            )
+            raise BadRequest(
+                f"cannot resume session {req.resume!r}: "
+                f"{transcript_identity_recovery_message(participant.id, reason)}"
+            )
         if live_matches:
             live = max(live_matches, key=lambda p: (p.last_activity, p.created_at))
             raise BadRequest(
@@ -276,7 +300,11 @@ class Spawner:
             return max(dead_matches, key=lambda p: (p.last_activity, p.created_at))
         raise BadRequest(
             f"cannot resume session {req.resume!r}: Theater has no trusted "
-            "dead operator/proven/exact binding for that session id"
+            "dead operator/proven/exact binding for that session id. Safe recovery is "
+            "to inspect the retained participant with `theater candidates <id>` and "
+            "rebind with `theater bind <id> <candidate> --confirm-id <id>`; if the "
+            "trusted owner row was already garbage-collected, Theater cannot prove a "
+            "safe resume for that raw session id in this commit."
         )
 
     def _validate_vibe_resume_domain(

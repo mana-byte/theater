@@ -232,7 +232,10 @@ async def test_claude_long_idle_live_receipt_accepts_and_renews_legacy_expired_t
     cwd = tmp_path / "repo"
     cwd.mkdir()
     _spawn_claude(daemon, cwd, pid="p-claude", token="old")
-    daemon.store.set_receipt_token("p-claude", "secret", expires_at=time.time() - 8 * 86400)
+    daemon.store.set_meta(
+        "receipt_token:p-claude",
+        json.dumps({"token": "secret", "token_path": None, "expires_at": time.time() - 8 * 86400}),
+    )
     path = _transcript(root, "11111111-1111-4111-8111-111111111111", cwd)
 
     await claude_client.call(
@@ -257,11 +260,11 @@ async def test_claude_receipt_rejects_dead_expired_token_and_cleans_it_up(
     _spawn_claude(daemon, cwd, pid="p-claude", token="secret")
     token_file = tmp_path / "token"
     token_file.write_text("secret")
-    daemon.store.set_receipt_token(
-        "p-claude",
-        "secret",
-        token_path=str(token_file),
-        expires_at=time.time() - 1,
+    daemon.store.set_meta(
+        "receipt_token:p-claude",
+        json.dumps(
+            {"token": "secret", "token_path": str(token_file), "expires_at": time.time() - 1}
+        ),
     )
     daemon.store.set_status("p-claude", "dead")
     path = _transcript(root, "11111111-1111-4111-8111-111111111111", cwd)
@@ -453,11 +456,11 @@ def test_live_receipt_tokens_ignore_legacy_expiry(registry, tmp_path):
     token_file = tmp_path / "token"
     token_file.write_text("secret")
     p = registry.create_spawned(harness="claude", cwd=str(cwd), pid="p-claude")
-    registry.store.set_receipt_token(
-        p.id,
-        "secret",
-        token_path=str(token_file),
-        expires_at=time.time() - 1,
+    registry.store.set_meta(
+        f"receipt_token:{p.id}",
+        json.dumps(
+            {"token": "secret", "token_path": str(token_file), "expires_at": time.time() - 1}
+        ),
     )
 
     assert registry.store.get_receipt_token(p.id) == "secret"

@@ -114,7 +114,10 @@ resume:    a session id, from `recall`, to resume instead of starting cold.
            without a prompt and use send to deliver the task. Resume with
            response_format is refused for harnesses whose resume cannot carry
            a prompt, because the JSON guidance is delivered through the same
-           prompt channel.
+           prompt channel. Resume is also refused for live trusted owners and
+           for `transcript_identity_lost`; recover by inspecting
+           `theater candidates <id>` and rebinding with
+           `theater bind <id> <candidate> --confirm-id <id>`.
 
 The returned participant record includes `session_id`, the harness's opaque
 resume identifier. It is normally null at spawn time because the observer
@@ -301,7 +304,9 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         pane — never inject into a session a human is using. Fails with
         `busy` if the target is already processing a send prompt. Fails with
         `transcript_untrusted` for an adopted transcript-backed target that
-        still needs an operator/proven/exact transcript binding.
+        still needs an operator/proven/exact transcript binding, and with
+        `transcript_identity_lost` when a trusted transcript pin must be
+        rebound before attribution can resume.
         """
         return await tools.send_prompt(
             session,
@@ -428,6 +433,13 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
 
         Returns {"id": ..., "events": [...], "path": ...}. Each event
         has "role", "text" (full), "tool_name", and "turn_end".
+
+        Refuses with `transcript_untrusted` until adopted transcript-backed
+        sessions are operator/proven/exact. Refuses with
+        `transcript_identity_lost` if a trusted pin lost identity; screen
+        status may still be live, but attribution-bearing reads wait for
+        `theater candidates <id>` / `theater bind <id> <candidate>
+        --confirm-id <id>`.
         """
         return await tools.read_transcript(session, target_id=target_id, last_n=last_n)
 

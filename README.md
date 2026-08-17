@@ -45,6 +45,12 @@ transcript-backed adopted Claude, Vibe, OpenCode, and unproven Codex sessions,
 `send` and `read_transcript` are refused until provenance is
 operator/proven/exact. Screen-only status observation still runs before binding,
 so the tree can show working/idle while the operator recovers attribution.
+If a trusted bound transcript later disappears, becomes unreadable, or a newer
+same-harness/cwd candidate appears while the pinned transcript is inert and the
+pane is visibly working, Theater enters `transcript_identity_lost`: screen status
+stays live, but transcript attribution, turn completion, `send`,
+`read_transcript`, `recall_read`, and `resume` refuse until `theater bind`
+re-arms the participant.
 
 ---
 
@@ -192,6 +198,11 @@ theater bind <id> <candidate> --confirm-id <id>
 `theater` or speak the daemon socket can invoke it. The `--confirm-id` stable id
 check is there to prevent accidental name/alias binding, not to authenticate a
 human.
+
+The same workflow recovers `transcript_identity_lost`. Theater keeps the old
+trusted location pinned and never auto-repoints to a heuristic candidate. Inspect
+`theater candidates <id>`, then bind the candidate you verified; after the bind,
+the next observation poll attaches from that trusted location again.
 
 ### `theater harnesses`
 
@@ -506,8 +517,10 @@ resume:      trusted session id to continue; only allowed when the trusted owner
 
 Live resume is refused even for exact/proven/operator session ids. A live
 participant should receive work through `send`; resuming is for continuing a
-session after its previous owner is dead. Vibe resumes reuse Theater's signed
-isolated transcript domain marker, so repeat resumes work through dead
+session after its previous owner is dead. If the trusted owner row was already
+garbage-collected, Theater has no tombstone yet and refuses with a safe recovery
+message rather than trusting the raw session id. Vibe resumes reuse Theater's
+signed isolated transcript domain marker, so repeat resumes work through dead
 successor rows without returning to the user's shared Vibe history.
 
 ### `list_models`
@@ -522,7 +535,7 @@ supported:  whether the adapter can select a model at all
 An empty `models` is the default and is not a dead end: spawn without `model` and the child comes up on its own CLI's default. `supported: false` cannot be fixed by config.
 
 ### `send`
-Delivers a prompt to an already-running addressable agent mid-session. Returns a handle for `await_sessions`. Fails with `human_present` if a human is at the target pane, `busy` if the target is already handling a send, or `transcript_untrusted` for an adopted transcript-backed target that still needs `theater candidates` / `theater bind`.
+Delivers a prompt to an already-running addressable agent mid-session. Returns a handle for `await_sessions`. Fails with `human_present` if a human is at the target pane, `busy` if the target is already handling a send, `transcript_untrusted` for an adopted transcript-backed target that still needs `theater candidates` / `theater bind`, or `transcript_identity_lost` for a trusted pin that must be rebound.
 
 ### `await_sessions`
 Blocks until ANY of the given handles reaches a terminal state, or `max_wait` seconds elapse — it does not wait for all handles. If any handle is already terminal, returns immediately. Returns one entry per requested handle with state (`done` | `crashed` | `killed` | `running`) and an error code if applicable. Process the terminal entries; re-await the still-running ones to keep waiting for them. The agent-facing reply drops prompt and result text — use `read_transcript` for the full content.
@@ -539,7 +552,9 @@ Returns events with `role`, `text` (full), `tool_name`, and `turn_end`.
 
 For adopted sessions this is intentionally refused until the transcript is
 operator/proven/exact. That is part of the same recovery workflow as `send`: the
-operator binds first, then attribution-bearing reads are allowed.
+operator binds first, then attribution-bearing reads are allowed. If a trusted
+pin later loses identity, `read_transcript` and `recall_read` refuse with
+`transcript_identity_lost` and the same candidates/bind recovery instructions.
 
 ### `register_pane`
 Makes the calling agent addressable by registering its tmux pane. Only needed if `whoami` reports tier `external` while the agent is actually inside tmux. The returned participant record includes the nullable, asynchronously discovered `session_id`.

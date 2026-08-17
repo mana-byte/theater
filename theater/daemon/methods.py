@@ -53,6 +53,7 @@ from theater.models import (
     StaleTarget,
     Status,
     Tier,
+    TranscriptIdentityLost,
     TranscriptUntrusted,
     new_id,
     now,
@@ -65,6 +66,11 @@ from theater.provenance import (
 )
 from theater.tmux import client as tmux
 from theater.tmux.presence import human_present
+from theater.transcript_identity import (
+    TRANSCRIPT_IDENTITY_LOST_CODE,
+    participant_trusted_pin_unavailable_reason,
+    transcript_identity_recovery_message,
+)
 
 if TYPE_CHECKING:
     from theater.daemon.server import Daemon
@@ -117,6 +123,11 @@ _JOB_ERROR_MESSAGES = {
         "Theater found transcript output that is not uniquely attributable to this "
         "participant. The agent may still be alive and working; do not retry the task, "
         "and inspect its pane before deciding what to do."
+    ),
+    TRANSCRIPT_IDENTITY_LOST_CODE: (
+        "Theater lost the trusted transcript identity for this participant. Screen status "
+        "may still be live, but transcript attribution is quarantined; inspect candidates "
+        "and rebind the participant before sending more work."
     ),
 }
 
@@ -373,6 +384,17 @@ def _checkpoint_jobs(daemon, participant_id: str) -> list[dict]:
     )
     rows = daemon.store.conn.execute(stmt).fetchall()
     return [{key: row._mapping[key] for key in _CHECKPOINT_JOB_KEYS} for row in rows]
+
+
+def _transcript_identity_lost(daemon, pid: str) -> bool:
+    checker = getattr(daemon.observer, "transcript_identity_lost", None)
+    return bool(checker(pid)) if callable(checker) else False
+
+
+def _mark_transcript_identity_lost(daemon, pid: str, reason: str) -> None:
+    marker = getattr(daemon.observer, "mark_transcript_identity_lost", None)
+    if callable(marker):
+        marker(pid, reason)
 
 
 @method("ping")
@@ -1110,8 +1132,23 @@ async def _check_approval_modal(daemon, target, refuse: Callable[..., NoReturn])
         )
 
 
-def _check_adopted_transcript_trust(target, refuse: Callable[..., NoReturn]) -> None:
-    """Refuse sends to adopted transcript harnesses before attribution is trusted."""
+def _check_transcript_send_preflight(daemon, target, refuse: Callable[..., NoReturn]) -> None:
+    """Refuse sends whose transcript attribution is absent or quarantined.
+
+    Adopted transcript-backed panes start screen-observable but untrusted; a
+    bound participant can later become quarantined if the trusted pin loses
+    identity. Both refusals happen here, before job creation.
+    """
+    if _transcript_identity_lost(daemon, target.id):
+        refuse(
+            TranscriptIdentityLost(
+                transcript_identity_recovery_message(
+                    target.id, participant_trusted_pin_unavailable_reason(target)
+                )
+            ),
+            reason=TRANSCRIPT_IDENTITY_LOST_CODE,
+        )
+        return
     if target.tier is not Tier.ADOPTED or is_trusted_provenance(target.session_correlation):
         return
     harness = HARNESSES.get(normalize(target.harness))
@@ -1125,7 +1162,8 @@ def _check_adopted_transcript_trust(target, refuse: Callable[..., NoReturn]) -> 
             "Theater will not create a send job until attribution is trusted. Run "
             f"`theater candidates {pid}` to inspect candidates, then "
             f"`theater bind {pid} <candidate> --confirm-id {pid}` for the candidate "
-            "you verified."
+            "you verified. If no candidates are listed yet, retry after the next "
+            "observation poll before binding."
         ),
         reason="transcript_untrusted",
     )
@@ -1165,7 +1203,7 @@ async def _send(daemon, params: dict) -> dict:
     # Costs a capture-pane, so runs after the cheaper presence check.
     await _check_approval_modal(daemon, target, refuse)
 
-    _check_adopted_transcript_trust(target, refuse)
+    _check_transcript_send_preflight(daemon, target, refuse)
 
     # Busy is any running job that carried a prompt — a spawn prompt
     # occupies the pane exactly as a send does. Status is deliberately not
@@ -1516,6 +1554,10 @@ async def _read_transcript(daemon, params: dict) -> dict:
     harness = HARNESSES.get(harness_name)
     if harness is None:
         raise BadRequest(f"cannot read transcript: harness {p.harness!r} is not known")
+    if _transcript_identity_lost(daemon, pid):
+        raise TranscriptIdentityLost(
+            transcript_identity_recovery_message(pid, participant_trusted_pin_unavailable_reason(p))
+        )
 
     # Same birth-time floor as the watch path (observer._open_source): the floor
     # applies to SPAWNED participants only, because an adopted session's output
@@ -1539,6 +1581,9 @@ async def _read_transcript(daemon, params: dict) -> dict:
         await source.aclose()
 
     if history.error_code is not None:
+        if history.error_code == TRANSCRIPT_IDENTITY_LOST_CODE:
+            _mark_transcript_identity_lost(daemon, pid, history.error or history.error_code)
+            raise TranscriptIdentityLost(transcript_identity_recovery_message(pid, history.error))
         raise BadRequest(
             f"cannot read transcript: {history.error or history.error_code} ({history.error_code})"
         )
@@ -1636,4 +1681,5 @@ async def _recall_read(daemon, params: dict) -> dict:
         store=daemon.store,
         registry=daemon.registry,
         cwd=caller_cwd,
+        observer=daemon.observer,
     )

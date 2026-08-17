@@ -48,6 +48,10 @@ from theater.provenance import (
     is_trusted_provenance,
     normalize_provenance,
 )
+from theater.transcript_identity import (
+    TRANSCRIPT_IDENTITY_LOST_CODE,
+    trusted_location_unavailable_reason,
+)
 
 if TYPE_CHECKING:
     from theater.harness.observation import TranscriptObserver
@@ -333,12 +337,26 @@ class TranscriptSource(Source):
     async def read(self) -> Batch:
         self._require_decision()
         if self.path is None:
-            attached = await self._attach()
+            if reason := self._trusted_known_location_unavailable_reason():
+                return self._identity_lost_batch(reason)
+            try:
+                attached = await self._attach()
+            except OSError as exc:
+                if self._known_location_is_trusted():
+                    return self._identity_lost_batch(
+                        "trusted transcript pin "
+                        f"{str(self._known_location)!r} is not readable: {exc}"
+                    )
+                raise
             return Batch(attached=attached) if attached else Batch(waiting=True)
         try:
             return self._drain()
-        except FileNotFoundError:
-            # Transcript deleted or rotated; drop back to searching.
+        except OSError as exc:
+            if self._path_is_trusted_pin(self.path):
+                return self._identity_lost_batch(
+                    f"trusted transcript pin {str(self.path)!r} is not readable: {exc}"
+                )
+            # Heuristic transcript deleted or rotated; drop back to searching.
             self._known_location = None
             self._detach()
             return Batch(waiting=True)
@@ -426,17 +444,49 @@ class TranscriptSource(Source):
         pinned = self._known_location is not None
         path = self.path
         if path is None and self._known_location is not None:
+            if reason := self._trusted_known_location_unavailable_reason():
+                return History(
+                    error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
+                    error=reason,
+                    pinned=True,
+                )
             path = await self._upgraded(self._known_location)
         if path is None:
             path = await self._locate(session_id=self._session_id)
         if path is None:
             return History(pinned=pinned)
         if not self._inside_domain(path):
+            if self._path_is_trusted_pin(path):
+                return History(
+                    error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
+                    error=(
+                        f"trusted transcript pin {str(path)!r} no longer exists inside its "
+                        "trusted transcript domain"
+                    ),
+                    pinned=True,
+                )
             return History(pinned=pinned)
         if pinned and not path.exists():
             # Never replace an admitted historical location with a cwd guess.
+            if self._path_is_trusted_pin(path):
+                return History(
+                    error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
+                    error=f"trusted transcript pin {str(path)!r} no longer exists on disk",
+                    pinned=True,
+                )
             return History(pinned=True)
-        events = await asyncio.to_thread(self._read_all, path)
+        try:
+            events = await asyncio.to_thread(
+                self._read_all,
+                path,
+                strict=self._path_is_trusted_pin(path),
+            )
+        except OSError as exc:
+            return History(
+                error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
+                error=f"trusted transcript pin {str(path)!r} is not readable: {exc}",
+                pinned=True,
+            )
         return History(
             location=str(path),
             events=events[-last_n:] if last_n > 0 else events,
@@ -484,7 +534,7 @@ class TranscriptSource(Source):
             return str(TranscriptProvenance.EXACT)
         return str(TranscriptProvenance.HEURISTIC)
 
-    def _read_all(self, path: Path) -> list[Event]:
+    def _read_all(self, path: Path, *, strict: bool = False) -> list[Event]:
         events: list[Event] = []
         try:
             with path.open(encoding="utf-8", errors="replace") as fh:
@@ -493,11 +543,41 @@ class TranscriptSource(Source):
                     if line:
                         events.extend(self._observer.parse(line, index, clip_text=False))
         except OSError:
+            if strict:
+                raise
             # A transcript that vanished mid-read is the same non-event here.
             return []
         return events
 
     # ---- internals ------------------------------------------------------
+
+    def _known_location_is_trusted(self) -> bool:
+        return self._known_location is not None and is_trusted_provenance(
+            self._known_location_provenance
+        )
+
+    def _path_is_trusted_pin(self, path: Path | None) -> bool:
+        return (
+            path is not None
+            and self._known_location is not None
+            and path == self._known_location
+            and is_trusted_provenance(self._known_location_provenance)
+        )
+
+    def _trusted_known_location_unavailable_reason(self) -> str | None:
+        return trusted_location_unavailable_reason(
+            location=str(self._known_location) if self._known_location is not None else None,
+            provenance=str(self._known_location_provenance),
+            domain=str(self._domain_root) if self._domain_root is not None else None,
+        )
+
+    @staticmethod
+    def _identity_lost_batch(reason: str) -> Batch:
+        return Batch(
+            waiting=True,
+            error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
+            error=reason,
+        )
 
     def _detach(self) -> None:
         """Forget an accepted file that vanished; collision rejection is staged."""

@@ -76,6 +76,7 @@ from theater.harness import (
     EventKind,
     Harness,
     HarnessObserver,
+    ScreenConfidence,
     ScreenKind,
     clip,
     status_after,
@@ -89,6 +90,11 @@ from theater.provenance import (
     is_trusted_provenance,
     normalize_provenance,
     provenance_at_least,
+)
+from theater.transcript_identity import (
+    TRANSCRIPT_IDENTITY_LOST_CODE,
+    participant_trusted_pin_unavailable_reason,
+    transcript_identity_recovery_message,
 )
 
 logger = logging.getLogger("theater.observer")
@@ -496,6 +502,7 @@ class Observer:
         task = self._tasks.pop(pid, None)
         self._retired.discard(pid)
         self._reset_watch_state.discard(pid)
+        self._clear_source_errors(pid, include_identity_lost=True)
         if task is not None:
             task.cancel()
             with contextlib.suppress(Exception, asyncio.CancelledError):
@@ -516,6 +523,41 @@ class Observer:
         self._bound_transcripts[location] = pid
         self._binding_correlation[location] = str(TranscriptProvenance.OPERATOR)
         self._binding_sessions[location] = session_id
+
+    def transcript_identity_lost(self, pid: str) -> bool:
+        """Whether transcript attribution for *pid* is currently quarantined.
+
+        The condition is derived, not stored in the participant row. The source
+        and screen detect it live; the existing bus audit stream lets a restarted
+        daemon remember that a positive loss transition happened until a later
+        operator bind or trusted attach supersedes it.
+        """
+        if (pid, TRANSCRIPT_IDENTITY_LOST_CODE) in self._source_errors:
+            self._finish_identity_lost_jobs(pid, transcript_identity_recovery_message(pid))
+            return True
+        if self.store.observation_error_active(pid, TRANSCRIPT_IDENTITY_LOST_CODE):
+            self._source_errors.setdefault((pid, TRANSCRIPT_IDENTITY_LOST_CODE), wall_now())
+            self._finish_identity_lost_jobs(pid, transcript_identity_recovery_message(pid))
+            return True
+        participant = self.store.get_participant(pid)
+        if participant is None:
+            return False
+        reason = participant_trusted_pin_unavailable_reason(participant)
+        if reason is None:
+            return False
+        self.mark_transcript_identity_lost(pid, reason)
+        return True
+
+    def mark_transcript_identity_lost(self, pid: str, reason: str) -> None:
+        """Enter the derived identity-loss quarantine for one participant."""
+        self._handle_source_error(
+            pid,
+            Batch(
+                waiting=True,
+                error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
+                error=transcript_identity_recovery_message(pid, reason),
+            ),
+        )
 
     async def _sleep(self, seconds: float) -> None:
         """Wait, but wake immediately on shutdown."""
@@ -572,7 +614,7 @@ class Observer:
 
     # ---- one participant -----------------------------------------------
 
-    async def _watch(self, pid: str, harness_name: str) -> None:
+    async def _watch(self, pid: str, harness_name: str) -> None:  # noqa: PLR0912, PLR0915
         # Resolved by name on every start so a restarted watcher picks up a
         # registry that has since been reinstalled.
         observer = self.harnesses[harness_name].observer
@@ -590,6 +632,10 @@ class Observer:
                         self._reset_watch_state.discard(pid)
                         clock = QuietClock()
                         turns = TurnAccumulator()
+                    if self.transcript_identity_lost(pid):
+                        await self._screen_only(pid, observer, clock)
+                        await self._sleep(self.search)
+                        continue
                     batch = await source.read()
                     self._validate_batch(source, batch)
                     if batch.waiting:
@@ -633,7 +679,7 @@ class Observer:
                     logger.exception("observing %s failed", pid)
                 await self._sleep(self.poll)
         finally:
-            self._clear_source_errors(pid)
+            self._clear_source_errors(pid, include_identity_lost=True)
             self._reset_watch_state.discard(pid)
             self._receipt_candidates.pop(pid, None)
             self._sources.pop(pid, None)
@@ -824,12 +870,19 @@ class Observer:
             failed_at = wall_now()
             self._source_errors[key] = failed_at
             logger.error("observation failed for %s: %s", pid, batch.error or batch.error_code)
-            self.store.bus_append(
-                "agent.observation_error",
-                to_id=pid,
-                payload={"code": batch.error_code, "message": batch.error or ""},
-            )
+            if not (
+                batch.error_code == TRANSCRIPT_IDENTITY_LOST_CODE
+                and self.store.observation_error_active(pid, TRANSCRIPT_IDENTITY_LOST_CODE)
+            ):
+                self.store.bus_append(
+                    "agent.observation_error",
+                    to_id=pid,
+                    payload={"code": batch.error_code, "message": batch.error or ""},
+                )
         if self.jobs is None:
+            return
+        if batch.error_code == TRANSCRIPT_IDENTITY_LOST_CODE:
+            self._finish_identity_lost_jobs(pid, batch.error or batch.error_code)
             return
         now = wall_now()
         for job in self.store.running_jobs_for_target(pid):
@@ -859,8 +912,10 @@ class Observer:
         if batch.error_code is None:
             self._clear_source_errors(pid)
 
-    def _clear_source_errors(self, pid: str) -> None:
+    def _clear_source_errors(self, pid: str, *, include_identity_lost: bool = False) -> None:
         for key in [item for item in self._source_errors if item[0] == pid]:
+            if key[1] == TRANSCRIPT_IDENTITY_LOST_CODE and not include_identity_lost:
+                continue
             self._source_errors.pop(key, None)
 
     def _turn_result(self, event, turn: Turn) -> tuple[str, str | object | None]:
@@ -975,6 +1030,21 @@ class Observer:
         # a directory scan.
         if clock.quiet_for(now) > self.relocate:
             batch = await source.refresh()
+            if (
+                batch.attached is not None
+                and self._is_untrusted_rotation(pid, batch.attached)
+                and await self._screen_is_positively_working(pid, observer)
+            ):
+                source.discard_attachment()
+                self.mark_transcript_identity_lost(
+                    pid,
+                    (
+                        "a newer same-harness/cwd transcript candidate appeared while the "
+                        "trusted pin was inert and the pane was visibly working"
+                    ),
+                )
+                clock.quiet_since = now
+                return
             # A refused rotation leaves the accepted source untouched. Keep
             # running the other quiet arms and return to the normal poll
             # cadence; this is not an unattached discovery search.
@@ -1035,6 +1105,27 @@ class Observer:
         if clock.screen_quiet_for(now) > self.awaiting:
             await self._check_idle_screen(pid, observer)
             clock.screen_quiet_since = now  # throttle
+
+    def _is_untrusted_rotation(self, pid: str, attached: Attachment) -> bool:
+        participant = self.store.get_participant(pid)
+        return (
+            participant is not None
+            and participant.transcript_location is not None
+            and attached.location != participant.transcript_location
+            and is_trusted_provenance(participant.session_correlation)
+            and not is_trusted_provenance(attached.correlation)
+        )
+
+    async def _screen_is_positively_working(self, pid: str, observer: HarnessObserver) -> bool:
+        p = self.store.get_participant(pid)
+        if p is None or p.status is Status.DEAD or not p.tmux_pane:
+            return False
+        capture = await self._capture(p.tmux_pane)
+        if capture is None:
+            return False
+        reading = observer.screen_reading(capture)
+        self._apply_screen_reading(pid, reading)
+        return reading.kind is ScreenKind.WORKING and reading.confidence is ScreenConfidence.HIGH
 
     def _accept_attachment(self, pid: str, source: Source, batch: Batch) -> bool:
         """Accept or reject a staged source attachment in one central place.
@@ -1119,7 +1210,7 @@ class Observer:
                     source.discard_attachment()
             raise
         self._on_attach(pid, attached)
-        self._clear_source_errors(pid)
+        self._clear_source_errors(pid, include_identity_lost=True)
         return True
 
     def _handle_attachment_ambiguity(self, pid: str, attached: Attachment) -> None:
@@ -1261,6 +1352,7 @@ class Observer:
             )
             self._binding_correlation[location] = str(TranscriptProvenance.EXACT)
             self._binding_sessions[location] = session_id
+            self._clear_source_errors(pid, include_identity_lost=True)
         return result
 
     def _on_attach(self, pid: str, attached: Attachment) -> None:
@@ -1365,6 +1457,9 @@ class Observer:
         if capture is None:
             return
         reading = observer.screen_reading(capture)
+        self._apply_screen_reading(pid, reading)
+
+    def _apply_screen_reading(self, pid: str, reading) -> None:
         # PROMPT -> IDLE cannot defer to rescue: `_rescue_jobs` does not touch
         # status, so a participant whose turn ended unobserved would read
         # WORKING forever.
@@ -1534,6 +1629,18 @@ class Observer:
                 result_text,
                 error_code=error_code,
                 raw_result=raw_result,
+            )
+
+    def _finish_identity_lost_jobs(self, pid: str, result_text: str) -> None:
+        if self.jobs is None:
+            return
+        for job in self.store.running_jobs_for_target(pid):
+            self._finish(
+                job.handle,
+                result_text,
+                error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
+                state=JobState.CRASHED,
+                raw_result=None,
             )
 
     def _finish(

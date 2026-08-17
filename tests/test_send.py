@@ -118,6 +118,31 @@ async def test_adopted_codex_with_proven_process_correlation_can_send(client, fa
     assert fake_tmux.sent == [("%7", "do the thing")]
 
 
+async def test_transcript_identity_lost_refuses_send_before_job_creation(
+    client, fake_tmux, daemon, tmp_path
+):
+    target = await _target(client, daemon)
+    participant = daemon.registry.get(target["id"])
+    participant.transcript_location = str(tmp_path / "missing" / "messages.jsonl")
+    participant.transcript_domain = str(tmp_path.resolve())
+    daemon.store.upsert_participant(participant)
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call("send", target=target["id"], prompt="do not create")
+
+    assert exc.value.code == "transcript_identity_lost"
+    assert f"theater candidates {target['id']}" in exc.value.message
+    assert f"theater bind {target['id']} <candidate> --confirm-id {target['id']}" in (
+        exc.value.message
+    )
+    assert daemon.store.running_jobs_for_target(target["id"]) == []
+    rows = daemon.store.conn.execute(
+        jobs.select().where(jobs.c.target_id == target["id"])
+    ).fetchall()
+    assert rows == []
+    assert fake_tmux.sent == []
+
+
 async def test_adopted_vibe_send_and_history_work_after_operator_bind(
     client, fake_tmux, daemon, tmp_path, monkeypatch
 ):

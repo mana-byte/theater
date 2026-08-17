@@ -16,6 +16,7 @@ import pytest
 from shipped import VibeHarness
 from sqlalchemy import insert, select
 
+from theater.daemon.observer import Observer
 from theater.daemon.recall_read import read_segment
 from theater.daemon.schema import touch
 from theater.provenance import TranscriptProvenance
@@ -251,6 +252,42 @@ async def test_job_segment_refuses_a_contested_heuristic_transcript(registry, tm
 
     assert result["transcript"]["available"] is False
     assert result["transcript"]["error_code"] == "transcript_correlation_untrusted"
+
+
+async def test_job_segment_reports_transcript_identity_lost(registry, tmp_path):
+    root, project, sid, _transcript = _vibe_session(tmp_path)
+    from theater import harness as harness_mod
+
+    harness_mod.HARNESSES["vibe"] = VibeHarness(root=root)
+    target_id = _make_job(
+        registry.store,
+        registry,
+        handle="lost-vibe",
+        target_cwd=str(project),
+        session_id=sid,
+        session_correlation=str(TranscriptProvenance.OPERATOR),
+    )
+    target = registry.get(target_id)
+    target.transcript_location = str(tmp_path / "gone" / "messages.jsonl")
+    target.transcript_domain = str(root.resolve())
+    registry.store.upsert_participant(target)
+    observer = Observer(registry, harnesses={})
+
+    result = await read_segment(
+        "lost-vibe",
+        store=registry.store,
+        registry=registry,
+        cwd=str(tmp_path),
+        observer=observer,
+    )
+
+    assert result["transcript"]["available"] is False
+    assert result["transcript"]["error_code"] == "transcript_identity_lost"
+    assert f"theater candidates {target_id}" in result["transcript"]["reason"]
+    assert (
+        f"theater bind {target_id} <candidate> --confirm-id {target_id}"
+        in (result["transcript"]["reason"])
+    )
 
 
 @pytest.mark.parametrize(

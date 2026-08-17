@@ -37,6 +37,10 @@ from theater.harness import HARNESSES, normalize
 from theater.harness.observation import open_participant_source
 from theater.models import BadRequest
 from theater.provenance import is_trusted_provenance, normalize_provenance
+from theater.transcript_identity import (
+    TRANSCRIPT_IDENTITY_LOST_CODE,
+    transcript_identity_recovery_message,
+)
 
 logger = logging.getLogger("theater.recall.read")
 
@@ -64,6 +68,7 @@ async def read_segment(
     store,
     registry,
     cwd: str,
+    observer=None,
 ) -> dict:
     """Explain what happened inside one timeline segment.
 
@@ -80,17 +85,18 @@ async def read_segment(
     """
     if segment_id.startswith("gap:"):
         return _read_gap(segment_id, cwd=cwd)
-    return await _read_job(segment_id, store=store, registry=registry)
+    return await _read_job(segment_id, store=store, registry=registry, observer=observer)
 
 
 # ---- job segments --------------------------------------------------------
 
 
-async def _read_job(
+async def _read_job(  # noqa: PLR0912
     handle: str,
     *,
     store,
     registry,
+    observer=None,
 ) -> dict:
     """The brief for a job segment: metadata from ``jobs`` plus the
     transcript read back through ``open_source``.
@@ -169,6 +175,15 @@ async def _read_job(
     brief["branch"] = p.branch
     brief["parent_id"] = p.parent_id
 
+    checker = getattr(observer, "transcript_identity_lost", None)
+    if callable(checker) and checker(p.id):
+        brief["transcript"] = {
+            "available": False,
+            "reason": transcript_identity_recovery_message(p.id),
+            "error_code": TRANSCRIPT_IDENTITY_LOST_CODE,
+        }
+        return brief
+
     harness_name = normalize(p.harness)
     harness = HARNESSES.get(harness_name)
     if harness is None:
@@ -205,9 +220,17 @@ async def _read_job(
         await source.aclose()
 
     if history.error_code is not None:
+        if history.error_code == TRANSCRIPT_IDENTITY_LOST_CODE and observer is not None:
+            marker = getattr(observer, "mark_transcript_identity_lost", None)
+            if callable(marker):
+                marker(p.id, history.error or history.error_code)
         brief["transcript"] = {
             "available": False,
-            "reason": history.error or history.error_code,
+            "reason": (
+                transcript_identity_recovery_message(p.id, history.error)
+                if history.error_code == TRANSCRIPT_IDENTITY_LOST_CODE
+                else history.error or history.error_code
+            ),
             "error_code": history.error_code,
         }
         return brief

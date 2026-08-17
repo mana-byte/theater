@@ -319,6 +319,32 @@ async def test_resume_refuses_live_trusted_session_id(registry, resume_harness, 
         await spawner.spawn(req)
 
 
+async def test_resume_refuses_transcript_identity_lost_session(
+    registry, resume_harness, monkeypatch, tmp_path
+):
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    p = _trusted_resume(registry, harness="resume-spawn-test")
+    p = registry.get(p.id)
+    p.transcript_location = str(tmp_path / "missing" / "messages.jsonl")
+    p.transcript_domain = str(tmp_path.resolve())
+    registry.store.upsert_participant(p)
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="resume-spawn-test",
+        prompt="",
+        cwd="/tmp",
+        approval="edits",
+        resume="sess-abc",
+    )
+
+    with pytest.raises(BadRequest) as exc:
+        await spawner.spawn(req)
+
+    assert "transcript_identity_lost" in str(exc.value)
+    assert f"theater candidates {p.id}" in str(exc.value)
+    assert f"theater bind {p.id} <candidate> --confirm-id {p.id}" in str(exc.value)
+
+
 async def test_vibe_resume_reuses_trusted_isolated_domain(registry, tmp_path, fake_tmux):
     project = tmp_path / "project"
     project.mkdir()

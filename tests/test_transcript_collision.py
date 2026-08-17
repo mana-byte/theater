@@ -41,9 +41,9 @@ from theater.daemon.observer import (
 )
 from theater.daemon.registry import Registry
 from theater.harness.builtin.plugins.vibe import ISOLATION_MARKER, isolation_marker_text
-from theater.harness.observation import ScreenKind, ScreenReading
+from theater.harness.observation import ScreenConfidence, ScreenKind, ScreenReading
 from theater.harness.source import Attachment, Batch, History, Source
-from theater.models import BadRequest, Status, Tier
+from theater.models import BadRequest, Status, Tier, TranscriptIdentityLost
 from theater.provenance import TranscriptProvenance
 
 
@@ -60,6 +60,29 @@ class _StagedSource(Source):
 
     def discard_attachment(self) -> None:
         self.discarded = True
+
+
+def _trust_pin(registry: Registry, participant, transcript: Path, *, provenance: str = "operator"):
+    participant.session_id = "a00bff57-1111-2222-3333"
+    participant.session_correlation = provenance
+    participant.transcript_location = str(transcript)
+    participant.transcript_domain = str(transcript.parents[1].resolve())
+    registry.store.upsert_participant(participant)
+    return registry.get(participant.id)
+
+
+async def _accept_bound_source(observer: Observer, harness: VibeHarness, participant):
+    source = harness.observer.open_source(
+        cwd=participant.cwd,
+        session_id=participant.session_id,
+        session_provenance=participant.session_correlation,
+        known_location=participant.transcript_location,
+    )
+    batch = await source.read()
+    assert batch.attached is not None
+    assert observer._accept_attachment(participant.id, source, batch)
+    observer._apply(participant.id, batch, QuietClock(), TurnAccumulator())
+    return source
 
 
 def _make_session(root: Path, short: str, cwd: str, *, text: str = "hello") -> Path:
@@ -509,7 +532,7 @@ async def test_read_transcript_pinned_symlink_escape_fails_closed(
         observer=Observer(collision_registry, {"vibe": harness}),
     )
 
-    with pytest.raises(BadRequest, match="transcript no longer exists"):
+    with pytest.raises(TranscriptIdentityLost, match="no longer exists"):
         await methods_mod.METHODS["read_transcript"](daemon, {"id": participant.id, "last_n": 0})
 
 
@@ -987,6 +1010,206 @@ async def test_rejected_rotation_keeps_events_and_awaits_session_local(
     result = await asyncio.wait_for(waiting, timeout=0.2)
     assert result[0].state == "done"
     assert result[0].result == "A is done"
+
+
+async def test_identity_loss_growing_pin_stays_bound_and_attributed(collision_registry, vibe_tree):
+    harness = VibeHarness(root=vibe_tree["root"])
+    observer = Observer(collision_registry, {"vibe": harness})
+    participant = collision_registry.register(
+        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+    )
+    participant = _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
+    source = await _accept_bound_source(observer, harness, participant)
+
+    with vibe_tree["transcript_a"].open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"role": "assistant", "content": "still me"}) + "\n")
+    batch = await source.read()
+    assert batch.progressed
+    observer._apply(participant.id, batch, QuietClock(), TurnAccumulator())
+
+    assert not observer.transcript_identity_lost(participant.id)
+    rows = collision_registry.store.bus_tail(limit=500)
+    assert any(
+        row["kind"] == "agent.assistant"
+        and row["from_id"] == participant.id
+        and row["payload"]["text"] == "still me"
+        for row in rows
+    )
+    assert not any(
+        row["kind"] == "agent.observation_error"
+        and row["payload"]["code"] == "transcript_identity_lost"
+        for row in rows
+    )
+
+
+async def test_identity_loss_inert_idle_pin_stays_bound(collision_registry, vibe_tree):
+    harness = VibeHarness(root=vibe_tree["root"])
+    harness.observer.screen_reading = lambda _capture: ScreenReading(  # type: ignore[method-assign]
+        ScreenKind.PROMPT, ScreenConfidence.HIGH
+    )
+    observer = Observer(collision_registry, {"vibe": harness}, relocate=0.0, awaiting=999.0)
+
+    async def capture_pane(_pane):
+        return "prompt"
+
+    observer._capture = capture_pane
+    participant = collision_registry.register(
+        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+    )
+    participant = _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
+    source = await _accept_bound_source(observer, harness, participant)
+    _make_session(vibe_tree["root"], "zzzzzzzz", str(vibe_tree["project"]))
+    clock = QuietClock()
+    clock.quiet_since = time.monotonic() - 10
+
+    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+
+    assert source.path == vibe_tree["transcript_a"]
+    assert not observer.transcript_identity_lost(participant.id)
+    assert collision_registry.get(participant.id).status is Status.IDLE
+
+
+async def test_identity_loss_inert_working_new_candidate_enters_quarantine_once(
+    collision_registry, vibe_tree
+):
+    harness = VibeHarness(root=vibe_tree["root"])
+    harness.observer.screen_reading = lambda _capture: ScreenReading(  # type: ignore[method-assign]
+        ScreenKind.WORKING, ScreenConfidence.HIGH
+    )
+    jobs = JobManager(collision_registry.store)
+    observer = Observer(collision_registry, {"vibe": harness}, relocate=0.0, jobs=jobs)
+
+    async def capture_pane(_pane):
+        return "working"
+
+    observer._capture = capture_pane
+    participant = collision_registry.register(
+        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+    )
+    participant = _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
+    source = await _accept_bound_source(observer, harness, participant)
+    jobs.create(handle="lost-job", caller_id="caller", target_id=participant.id, kind="send")
+    newer = _make_session(vibe_tree["root"], "zzzzzzzz", str(vibe_tree["project"]))
+    clock = QuietClock()
+    clock.quiet_since = time.monotonic() - 10
+
+    await observer._on_quiet(participant.id, harness.observer, source, clock, TurnAccumulator())
+    observer.mark_transcript_identity_lost(participant.id, "repeat should not spam")
+
+    assert source.path == vibe_tree["transcript_a"]
+    assert collision_registry.get(participant.id).transcript_location == str(
+        vibe_tree["transcript_a"]
+    )
+    assert str(newer) not in observer._bound_transcripts
+    assert collision_registry.get(participant.id).status is Status.WORKING
+    job = jobs.get("lost-job")
+    assert job.state == "crashed"
+    assert job.error_code == "transcript_identity_lost"
+    rows = [
+        row
+        for row in collision_registry.store.bus_tail(limit=500)
+        if row["kind"] == "agent.observation_error"
+        and row["to_id"] == participant.id
+        and row["payload"]["code"] == "transcript_identity_lost"
+    ]
+    assert len(rows) == 1
+
+
+def test_identity_loss_missing_pin_is_derived_and_not_spammed(collision_registry, tmp_path):
+    observer = Observer(collision_registry, harnesses={})
+    participant = collision_registry.register(harness="vibe", pane="%1", cwd=str(tmp_path))
+    participant.session_id = "missing-session"
+    participant.session_correlation = "operator"
+    participant.transcript_location = str(tmp_path / "gone" / "messages.jsonl")
+    collision_registry.store.upsert_participant(participant)
+
+    assert observer.transcript_identity_lost(participant.id)
+    assert observer.transcript_identity_lost(participant.id)
+
+    rows = [
+        row
+        for row in collision_registry.store.bus_tail(limit=500)
+        if row["kind"] == "agent.observation_error"
+        and row["to_id"] == participant.id
+        and row["payload"]["code"] == "transcript_identity_lost"
+    ]
+    assert len(rows) == 1
+
+
+async def test_identity_loss_rebind_rearms_and_is_idempotent(
+    collision_registry, vibe_tree, monkeypatch
+):
+    harness = VibeHarness(root=vibe_tree["root"])
+    monkeypatch.setitem(methods_mod.HARNESSES, "vibe", harness)
+    observer = Observer(collision_registry, {"vibe": harness})
+    participant = collision_registry.register(
+        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+    )
+    participant = _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
+    observer.mark_transcript_identity_lost(participant.id, "rotation evidence")
+    daemon = SimpleNamespace(
+        registry=collision_registry, observer=observer, store=collision_registry.store
+    )
+
+    first = await methods_mod.METHODS["transcript.bind"](
+        daemon,
+        {
+            "id": participant.id,
+            "candidate": str(vibe_tree["transcript_b"]),
+            "confirm_id": participant.id,
+        },
+    )
+    second = await methods_mod.METHODS["transcript.bind"](
+        daemon,
+        {
+            "id": participant.id,
+            "candidate": str(vibe_tree["transcript_b"]),
+            "confirm_id": participant.id,
+        },
+    )
+
+    assert first["location"] == str(vibe_tree["transcript_b"].resolve())
+    assert second["location"] == first["location"]
+    assert not observer.transcript_identity_lost(participant.id)
+    source = await _accept_bound_source(observer, harness, collision_registry.get(participant.id))
+    assert source.path == vibe_tree["transcript_b"]
+
+
+def test_identity_loss_replays_across_restart_without_event_spam(collision_registry, vibe_tree):
+    participant = collision_registry.register(
+        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+    )
+    _trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
+    first = Observer(collision_registry, harnesses={})
+    first.mark_transcript_identity_lost(participant.id, "rotation evidence")
+    restarted = Observer(collision_registry, harnesses={})
+
+    assert restarted.transcript_identity_lost(participant.id)
+    rows = [
+        row
+        for row in collision_registry.store.bus_tail(limit=500)
+        if row["kind"] == "agent.observation_error"
+        and row["to_id"] == participant.id
+        and row["payload"]["code"] == "transcript_identity_lost"
+    ]
+    assert len(rows) == 1
+
+
+async def test_unique_heuristic_candidate_is_never_auto_adopted(collision_registry, vibe_tree):
+    harness = VibeHarness(root=vibe_tree["root"])
+    observer = Observer(collision_registry, {"vibe": harness})
+    participant = collision_registry.register(
+        harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
+    )
+    source = harness.observer.open_source(cwd=participant.cwd)
+
+    batch = await source.read()
+
+    assert batch.attached is not None
+    assert batch.attached.correlation == "heuristic"
+    assert not observer._accept_attachment(participant.id, source, batch)
+    assert source.path is None
+    assert collision_registry.get(participant.id).transcript_location is None
 
 
 async def test_accepted_rotation_commits_and_releases_the_old_binding(

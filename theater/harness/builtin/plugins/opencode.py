@@ -112,6 +112,7 @@ from theater.provenance import (
     is_trusted_provenance,
     normalize_provenance,
 )
+from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
 logger = logging.getLogger("theater.harness.opencode")
 
@@ -855,12 +856,20 @@ class OpenCodeSource(Source):
         self._require_decision()
         conn = self._open()
         if conn is None:
+            if self._trusted_known_location():
+                return self._identity_lost_batch(
+                    "OpenCode database for trusted transcript pin is unreadable"
+                )
             return Batch(waiting=True)
         try:
             if self._session is None:
                 found = self._locate(conn, pinned=True)
                 if found:
                     return self._attach(conn, found)
+                if self._trusted_known_location():
+                    return self._identity_lost_batch(
+                        f"trusted transcript pin {self._known_location!r} no longer exists"
+                    )
                 return self._correlation_problem(conn) or Batch(waiting=True)
             return self._drain(conn)
         except sqlite3.Error:
@@ -903,12 +912,28 @@ class OpenCodeSource(Source):
         """
         conn = self._open()
         if conn is None:
+            if self._trusted_known_location():
+                return History(
+                    error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
+                    error="OpenCode database for trusted transcript pin is unreadable",
+                    pinned=True,
+                )
             return History()
         pinned_sid = None
         if self._known_location and self._known_location.startswith("opencode://"):
             pinned_sid = self._known_location.removeprefix("opencode://") or None
         pinned = self._session is None and pinned_sid is not None
         try:
+            if (
+                pinned_sid is not None
+                and self._trusted_known_location()
+                and not self._session_exists(conn, pinned_sid)
+            ):
+                return History(
+                    error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
+                    error=f"trusted transcript pin {self._known_location!r} no longer exists",
+                    pinned=True,
+                )
             sid = self._session or pinned_sid or self._locate(conn, pinned=True)
             if sid is None:
                 problem = self._correlation_problem(conn)
@@ -1030,6 +1055,15 @@ class OpenCodeSource(Source):
             self._located_exact = row is not None
             self._located_receipt_sid = row[0] if row is not None else None
             return row[0] if row is not None else None
+        pinned_sid = self._pinned_sid()
+        if pinned and pinned_sid is not None and self._trusted_known_location():
+            row = conn.execute(
+                "SELECT id FROM session WHERE id = ? AND parent_id IS NULL",
+                (pinned_sid,),
+            ).fetchone()
+            self._located_exact = row is not None
+            self._located_receipt_sid = None
+            return row[0] if row is not None else None
         if pinned and self._session_id:
             row = conn.execute(
                 "SELECT id FROM session WHERE id = ?", (self._session_id,)
@@ -1134,6 +1168,34 @@ class OpenCodeSource(Source):
                 correlation=self._attachment_provenance(sid),
             ),
             status=status,
+        )
+
+    def _pinned_sid(self) -> str | None:
+        if self._known_location and self._known_location.startswith("opencode://"):
+            return self._known_location.removeprefix("opencode://") or None
+        return None
+
+    def _trusted_known_location(self) -> bool:
+        return self._pinned_sid() is not None and is_trusted_provenance(
+            self._known_location_provenance
+        )
+
+    @staticmethod
+    def _identity_lost_batch(reason: str) -> Batch:
+        return Batch(
+            waiting=True,
+            error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
+            error=reason,
+        )
+
+    @staticmethod
+    def _session_exists(conn: sqlite3.Connection, sid: str) -> bool:
+        return (
+            conn.execute(
+                "SELECT 1 FROM session WHERE id = ? AND parent_id IS NULL",
+                (sid,),
+            ).fetchone()
+            is not None
         )
 
     def _attachment_provenance(self, sid: str) -> str:
