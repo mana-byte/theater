@@ -316,6 +316,15 @@ def test_new_bytes_restart_both_clocks():
     assert cursor.quiet_for(20.0) == 0.0
 
 
+def test_raw_only_progress_preserves_the_screen_clock():
+    cursor = QuietClock()
+    cursor.begin_quiet(0.0)
+    cursor.stir_raw()
+    assert cursor.quiet_since is None
+    assert cursor.rescue_since is None
+    assert cursor.screen_quiet_for(20.0) == 20.0
+
+
 def test_the_rescue_clock_survives_the_screen_check_throttling_itself():
     """The rescue must not read a clock that another timer keeps pushing.
 
@@ -957,6 +966,38 @@ class SourceHarness:
         self.observer = ScriptedObserver(*batches)
 
 
+class RawOnlySource(Source):
+    """A live source whose records the adapter does not understand."""
+
+    def __init__(self):
+        self.refreshes = 0
+
+    async def read(self) -> Batch:
+        return Batch(progressed=True)
+
+    async def refresh(self) -> Batch:
+        self.refreshes += 1
+        return Batch()
+
+
+class RawOnlyObserver(ReadingObserver):
+    has_transcript = True
+
+    def __init__(self, kind=ScreenKind.PROMPT):
+        super().__init__(ScreenReading(kind, ScreenConfidence.HIGH))
+        self.source = RawOnlySource()
+
+    def open_source(self, *, cwd, session_id=None, after=None):
+        return self.source
+
+
+class RawOnlyHarness:
+    binary = "raw-only"
+
+    def __init__(self, kind=ScreenKind.PROMPT):
+        self.observer = RawOnlyObserver(kind)
+
+
 def said(text: str, *, turn_end: bool) -> Event:
     return Event(kind=EventKind.ASSISTANT, text=text, turn_end=turn_end)
 
@@ -1031,6 +1072,84 @@ def test_consumed_input_counts_as_activity_even_with_no_events(registry):
     turns = TurnAccumulator()
     assert observer._apply("nobody", Batch(progressed=True), clock, turns) is True
     assert observer._apply("nobody", Batch(), clock, turns) is False
+
+
+@pytest.mark.parametrize(
+    ("screen_kind", "expected"),
+    [
+        (ScreenKind.PROMPT, Status.IDLE),
+        (ScreenKind.APPROVAL, Status.AWAITING_INPUT),
+    ],
+)
+async def test_raw_only_progress_keeps_screen_status_live_without_relocating_or_rescuing(
+    registry, screen_kind, expected
+):
+    harness = RawOnlyHarness(screen_kind)
+    jobs = JobManager(registry.store)
+    observer = Observer(
+        registry,
+        {"raw-only": harness},
+        jobs=jobs,
+        poll=0.005,
+        search=0.01,
+        sync=0.01,
+        relocate=0.0,
+        awaiting=0.05,
+        rescue=0.0,
+    )
+    captures = 0
+
+    async def capture_pane(_pane):
+        nonlocal captures
+        captures += 1
+        return "rendered prompt"
+
+    observer._capture = capture_pane
+    p = registry.register(harness="raw-only", pane="%1", cwd="/tmp")
+    registry.set_status(p.id, Status.WORKING)
+    jobs.create(handle="raw-only-job", caller_id="caller", target_id=p.id, kind="send")
+    observer.start()
+    try:
+        assert await until(lambda: registry.get(p.id).status is expected)
+        # Several more raw-only polls happen before the screen arm is due
+        # again. They must not erase an approval verdict in the meantime.
+        await asyncio.sleep(0.02)
+        assert registry.get(p.id).status is expected
+        assert captures > 0
+        assert harness.observer.source.refreshes == 0
+        assert jobs.get("raw-only-job").state == JobState.RUNNING
+    finally:
+        await observer.aclose()
+
+
+async def test_raw_only_progress_honours_the_screen_throttle(registry, monkeypatch):
+    observer, screen, p = screen_checked(
+        registry,
+        reading=ScreenReading(ScreenKind.PROMPT, ScreenConfidence.HIGH),
+        status=Status.WORKING,
+    )
+    observer.awaiting = 10.0
+    captures = 0
+
+    async def capture_pane(_pane):
+        nonlocal captures
+        captures += 1
+        return "rendered prompt"
+
+    observer._capture = capture_pane
+    tick = [5.0]
+    monkeypatch.setattr(observer_mod.time, "monotonic", lambda: tick[0])
+    clock = QuietClock(screen_quiet_since=0.0)
+    raw = Batch(progressed=True)
+
+    await observer._on_progress(p.id, screen, raw, clock)
+    tick[0] = 11.0
+    await observer._on_progress(p.id, screen, raw, clock)
+    tick[0] = 12.0
+    await observer._on_progress(p.id, screen, raw, clock)
+
+    assert captures == 1
+    assert registry.get(p.id).status is Status.IDLE
 
 
 def test_events_count_as_activity_even_if_the_source_forgets_to_say_so(registry):

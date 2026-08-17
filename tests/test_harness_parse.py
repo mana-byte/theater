@@ -635,6 +635,53 @@ def test_claude_idle_fixture_classifies_as_prompt():
     assert reading.kind is ScreenKind.PROMPT
 
 
+def test_claude_agents_footer_fixture_classifies_as_prompt():
+    """The agent-switcher footer can replace Claude's usual shortcut hint."""
+    capture = _screen("claude_idle_agents_footer.txt")
+    assert "? for shortcuts" not in capture
+    reading = ClaudeCodeObserver().screen_reading(capture)
+    assert reading.kind is ScreenKind.PROMPT
+    assert reading.confidence is ScreenConfidence.HIGH
+
+
+def test_claude_agents_footer_words_in_agent_prose_are_not_a_prompt():
+    capture = "The documentation tells users to press ← for agents\n\n❯\u00a0"
+    reading = ClaudeCodeObserver().screen_reading(capture)
+    assert reading.kind is ScreenKind.UNKNOWN
+
+
+def test_claude_bare_composer_is_not_a_prompt():
+    """Claude keeps the composer visible throughout a working turn."""
+    reading = ClaudeCodeObserver().screen_reading("working through it\n\n❯\u00a0")
+    assert reading.kind is ScreenKind.UNKNOWN
+
+
+def test_claude_manual_mode_agents_footer_classifies_as_prompt():
+    capture = "\n".join(
+        [
+            "finished",
+            "❯\u00a0",
+            "  ⏸ manual mode on · PR #46559 · ← for agents",
+        ]
+    )
+    reading = ClaudeCodeObserver().screen_reading(capture)
+    assert reading.kind is ScreenKind.PROMPT
+
+
+def test_claude_working_accept_edits_footer_wins_over_agents_footer():
+    """Working must win when the idle-looking suffix shares the same line."""
+    capture = "\n".join(
+        [
+            "✶ Determining…",
+            "❯\u00a0",
+            "  ⏵⏵ accept edits on · esc to interrupt · ← for agents",
+        ]
+    )
+    reading = ClaudeCodeObserver().screen_reading(capture)
+    assert reading.kind is ScreenKind.WORKING
+    assert reading.confidence is ScreenConfidence.HIGH
+
+
 def test_vibe_approval_fixture_classifies_as_approval_not_working():
     """The working marker is present in the same capture as the permission box.
 

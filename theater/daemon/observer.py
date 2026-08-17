@@ -367,9 +367,21 @@ class QuietClock:
     last_text: str = ""
 
     def stir(self) -> None:
-        """Something happened: every timer starts counting again from zero."""
+        """Semantic output arrived: every timer starts again from zero."""
         self.quiet_since = None
         self.screen_quiet_since = None
+        self.rescue_since = None
+
+    def stir_raw(self) -> None:
+        """Input was consumed but produced no event or authoritative status.
+
+        Bytes prove the current source is alive, so relocation and rescue must
+        both restart. They say nothing about the participant's rendered state:
+        an adapter may be consuming a new record shape it cannot parse, and
+        resetting the screen clock here would blind the independent fallback
+        for as long as those records keep arriving.
+        """
+        self.quiet_since = None
         self.rescue_since = None
 
     def begin_quiet(self, now: float) -> None:
@@ -572,8 +584,8 @@ class Observer:
                         continue
                     self._clear_source_error_on_progress(pid, batch)
                     if self._apply(pid, batch, clock, turns):
-                        clock.stir()
-                        self._unblock(pid)
+                        self._unblock_on_semantic_progress(pid, batch)
+                        await self._on_progress(pid, observer, batch, clock)
                     else:
                         await self._on_quiet(pid, observer, source, clock, turns)
                 except asyncio.CancelledError:
@@ -725,6 +737,37 @@ class Observer:
             self._settle(pid, status_after(last))
 
         return batch.progressed or bool(batch.events) or batch.attached is not None
+
+    @staticmethod
+    def _has_semantic_progress(batch: Batch) -> bool:
+        """Whether a batch says something about the participant, not just its source.
+
+        ``progressed`` deliberately includes bookkeeping and unknown records so
+        they protect a live turn from relocation and rescue. Events, explicit
+        status and attachment evidence are the subset that can also restart the
+        independent screen-status clock. Derived here rather than declared by a
+        plugin, so a batch cannot contradict its own contents.
+        """
+        return bool(batch.events) or batch.status is not None or batch.attached is not None
+
+    def _unblock_on_semantic_progress(self, pid: str, batch: Batch) -> None:
+        """Raw bookkeeping cannot overrule a modal found by the screen arm."""
+        if self._has_semantic_progress(batch):
+            self._unblock(pid)
+
+    async def _on_progress(
+        self,
+        pid: str,
+        observer: HarnessObserver,
+        batch: Batch,
+        clock: QuietClock,
+    ) -> None:
+        """Reset only the clocks justified by this batch's evidence."""
+        if self._has_semantic_progress(batch):
+            clock.stir()
+            return
+        clock.stir_raw()
+        await self._screen_status_due(pid, observer, clock)
 
     def _handle_source_error(self, pid: str, batch: Batch) -> None:
         """Report broken exact correlation and bound affected awaits.
@@ -898,7 +941,7 @@ class Observer:
             # cadence; this is not an unattached discovery search.
             accepted = self._accept_attachment(pid, source, batch)
             if accepted and self._apply(pid, batch, clock, turns):
-                clock.stir()
+                await self._on_progress(pid, observer, batch, clock)
                 return
             # The relocate arm has its own throttle, just like screen and
             # rescue. In particular, a rejected candidate remains discoverable
@@ -935,6 +978,17 @@ class Observer:
 
         Same window and same throttle as the arm it mirrors, so a participant
         does not get checked faster for having no transcript.
+        """
+        await self._screen_status_due(pid, observer, clock)
+
+    async def _screen_status_due(
+        self, pid: str, observer: HarnessObserver, clock: QuietClock
+    ) -> None:
+        """Run the independently throttled status-only screen arm when due.
+
+        Used both before attachment and while an attached source consumes raw
+        records that produce no semantic evidence. It cannot relocate a source
+        or rescue a job; those decisions retain their own clocks and evidence.
         """
         now = time.monotonic()
         if clock.screen_quiet_since is None:

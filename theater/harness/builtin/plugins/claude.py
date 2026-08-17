@@ -97,6 +97,17 @@ WORKING_MARKER = "esc to interrupt"
 #: *and* working, and its text changes with the approval mode.
 IDLE_FOOTER = "? for shortcuts"
 
+#: Alternate idle footer shown when the agent switcher occupies the shortcut
+#: slot. The permission-mode text to its left is not enough: Claude draws it
+#: during a turn too. Match the complete chrome shape in ``screen_reading`` —
+#: tail-scoped, mode-line-prefixed and end-anchored — so agent prose cannot
+#: impersonate an idle prompt.
+IDLE_AGENTS_FOOTER = "← for agents"
+#: Claude renders a different leading glyph for manual and accept-edits modes.
+#: Both are chrome rather than agent output; the footer suffix and tail scope
+#: remain the other two guards against prose impersonating an idle prompt.
+MODE_LINE_PREFIXES = ("⏸", "⏵⏵")
+
 #: How far up from the bottom to look for the prompt and footer. A real
 #: capture has several lines of padding below the footer, so a window of one
 #: would miss it.
@@ -598,6 +609,12 @@ class ClaudeCodeObserver(TranscriptObserver):
         if any(WORKING_MARKER in line for line in tail):
             return ScreenReading(kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH)
         if any(IDLE_FOOTER in line for line in tail):
+            return ScreenReading(kind=ScreenKind.PROMPT, confidence=ScreenConfidence.HIGH)
+        if any(
+            line.strip().startswith(MODE_LINE_PREFIXES)
+            and line.rstrip().endswith(IDLE_AGENTS_FOOTER)
+            for line in tail
+        ):
             return ScreenReading(kind=ScreenKind.PROMPT, confidence=ScreenConfidence.HIGH)
         return ScreenReading(kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW)
 
