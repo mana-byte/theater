@@ -334,6 +334,102 @@ async def test_vibe_resume_reuses_trusted_isolated_domain(registry, tmp_path, fa
     assert registry.get(spawned.id).transcript_domain == str(domain.resolve())
 
 
+async def test_vibe_resume_can_repeat_from_successor(registry, tmp_path, fake_tmux):
+    project = tmp_path / "project"
+    project.mkdir()
+    spawner = Spawner(registry)
+
+    cold = await spawner.spawn(
+        SpawnRequest(
+            harness="vibe",
+            prompt="start",
+            cwd=str(project),
+            approval="manual",
+        )
+    )
+    cold = registry.get(cold.id)
+    assert cold.transcript_domain is not None
+    domain = Path(cold.transcript_domain)
+    transcript = domain / "session_20260817_120000_sessabc1" / "messages.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text('{"role":"assistant","content":"cold"}\n', encoding="utf-8")
+    cold.session_id = "sessabc1-1111-2222-3333"
+    cold.session_correlation = "exact"
+    cold.transcript_location = str(transcript)
+    registry.store.upsert_participant(cold)
+    registry.mark_dead(cold.id)
+
+    first = await spawner.spawn(
+        SpawnRequest(
+            harness="vibe",
+            prompt="resume once",
+            cwd=str(project),
+            approval="manual",
+            resume="sessabc1-1111-2222-3333",
+        )
+    )
+    registry.mark_dead(first.id)
+
+    second = await spawner.spawn(
+        SpawnRequest(
+            harness="vibe",
+            prompt="resume twice",
+            cwd=str(project),
+            approval="manual",
+            resume="sessabc1-1111-2222-3333",
+        )
+    )
+
+    assert fake_tmux.windows[-2]["env"]["VIBE_SESSION_LOGGING__SAVE_DIR"] == str(domain)
+    assert fake_tmux.windows[-1]["env"]["VIBE_SESSION_LOGGING__SAVE_DIR"] == str(domain)
+    assert registry.get(first.id).transcript_domain == str(domain)
+    assert registry.get(second.id).transcript_domain == str(domain)
+
+
+async def test_vibe_resume_refuses_unrelated_trusted_row_for_marked_domain(
+    registry, tmp_path, fake_tmux
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    domain = tmp_path / "isolated-vibe"
+    domain.mkdir()
+    owner = registry.register(
+        harness="vibe",
+        pane=None,
+        cwd=str(project),
+        session_id="owner-session-1111",
+    )
+    (domain / ISOLATION_MARKER).write_text(
+        isolation_marker_text(participant_id=owner.id, transcript_domain=domain),
+        encoding="utf-8",
+    )
+    owner.session_correlation = "exact"
+    owner.transcript_domain = str(domain.resolve())
+    registry.store.upsert_participant(owner)
+    unrelated = registry.register(
+        harness="vibe",
+        pane=None,
+        cwd=str(project),
+        session_id="resume-session-2222",
+    )
+    unrelated.session_correlation = "exact"
+    unrelated.transcript_domain = str(domain.resolve())
+    registry.store.upsert_participant(unrelated)
+
+    with pytest.raises(BadRequest, match="different Theater session lineage"):
+        await Spawner(registry).spawn(
+            SpawnRequest(
+                harness="vibe",
+                prompt="continue",
+                cwd=str(project),
+                approval="manual",
+                resume="resume-session-2222",
+            )
+        )
+
+    assert fake_tmux.windows == []
+
+
 async def test_vibe_resume_refuses_legacy_shared_root(registry, tmp_path, fake_tmux):
     project = tmp_path / "project"
     project.mkdir()

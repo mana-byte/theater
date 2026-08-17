@@ -265,12 +265,23 @@ class Spawner:
         from theater.harness.builtin.plugins.vibe import validate_isolated_domain
 
         domain = Path(predecessor.transcript_domain).expanduser().resolve(strict=False)
-        marker = validate_isolated_domain(domain, participant_id=predecessor.id)
+        marker = validate_isolated_domain(domain)
         if marker is None:
             raise BadRequest(
                 "cannot resume Vibe session safely: predecessor uses a legacy or "
                 "untrusted transcript root. Rebind or migrate it into a Theater "
                 "isolated Vibe domain, then retry."
+            )
+        marker_owner = marker.get("participant_id")
+        if not isinstance(marker_owner, str) or not self._vibe_domain_owner_matches_session(
+            owner_id=marker_owner,
+            session_id=req.resume,
+            domain=domain,
+        ):
+            raise BadRequest(
+                "cannot resume Vibe session safely: isolated transcript domain "
+                "belongs to a different Theater session lineage. Rebind or "
+                "migrate the session into its own isolated Vibe domain, then retry."
             )
         if predecessor.transcript_location is not None:
             location = Path(predecessor.transcript_location)
@@ -282,6 +293,22 @@ class Spawner:
                     "location is outside its isolated transcript domain"
                 ) from exc
         return domain
+
+    def _vibe_domain_owner_matches_session(
+        self, *, owner_id: str, session_id: str, domain: Path
+    ) -> bool:
+        """Whether the signed domain owner anchors this trusted resume chain."""
+        for participant in self.registry.list(include_dead=True):
+            if (
+                participant.id == owner_id
+                and participant.harness == "vibe"
+                and participant.session_id == session_id
+                and is_trusted_provenance(participant.session_correlation)
+                and participant.transcript_domain is not None
+                and Path(participant.transcript_domain).expanduser().resolve(strict=False) == domain
+            ):
+                return True
+        return False
 
     def _has_live_cwd_sibling(self, participant: Participant) -> bool:
         """Whether heuristic transcript discovery would share a collision key.

@@ -170,7 +170,7 @@ def _marker_mac(payload: dict[str, object]) -> str:
 
 
 def isolation_marker_text(*, participant_id: str, transcript_domain: Path) -> str:
-    """Signed marker content for a participant-owned Vibe transcript root."""
+    """Signed marker content for the participant that created a Vibe root."""
     payload: dict[str, object] = {
         "version": _MARKER_VERSION,
         "harness": "vibe",
@@ -186,11 +186,10 @@ def validate_isolated_domain(
 ) -> dict[str, object] | None:
     """Return marker data when *transcript_domain* is a Theater Vibe root.
 
-    The directory and marker must be ordinary same-owner filesystem objects,
-    and the marker content must bind the canonical path to the participant that
-    originally received the domain. A resumed successor may reuse that domain,
-    but only after the spawner has separately validated the predecessor's
-    trusted session provenance.
+    The directory and marker must be ordinary same-owner filesystem objects.
+    The marker binds the canonical path to the original domain owner; the
+    spawner separately checks that owner is a trusted row for the resumed
+    session before any successor may reuse the domain.
     """
     domain = _canonical(transcript_domain)
     marker = domain / ISOLATION_MARKER
