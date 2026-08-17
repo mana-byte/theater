@@ -79,7 +79,7 @@ def _add_models_parser(sub) -> None:
 
 
 def _add_name_parser(sub) -> None:
-    """Register `theater name` and `theater kill`, extracted for the same
+    """Register small participant-targeting commands, extracted for the same
     reason as `models`: ``_parser`` sits at the statement cap the linter
     enforces.
     """
@@ -102,6 +102,35 @@ def _add_name_parser(sub) -> None:
         help="Participant id or current name (live participants only).",
     )
     name.add_argument("new_name", help="The new name.")
+
+    candidates = sub.add_parser(
+        "candidates",
+        help="List transcript candidates for operator recovery.",
+    )
+    candidates.add_argument("id", help="Stable participant id or live name.")
+    candidates.add_argument("--json", action="store_true")
+
+    bind = sub.add_parser(
+        "bind",
+        help="Bind a participant to an operator-verified transcript candidate.",
+    )
+    bind.add_argument("id", help="Stable participant id or live name.")
+    bind.add_argument("candidate", help="Candidate path or session URI from `theater candidates`.")
+    bind.add_argument(
+        "--confirm-id",
+        required=True,
+        help="Must exactly equal the stable target participant id.",
+    )
+    bind.add_argument(
+        "--transfer-from",
+        default=None,
+        help="Current owner stable participant id, required to transfer an owned candidate.",
+    )
+    bind.add_argument(
+        "--transfer-confirm-id",
+        default=None,
+        help="Must exactly equal --transfer-from when transferring ownership.",
+    )
 
 
 def _add_gc_parser(sub) -> None:
@@ -566,6 +595,54 @@ def cmd_name(args) -> int:
     record = call_sync("participant.rename", id=args.target, name=args.new_name)
     assert isinstance(record, dict)
     print(f"renamed {args.target} -> {record.get('name')}")
+    return 0
+
+
+def _candidate_line(row: dict) -> str:
+    owner = row.get("owner") or "-"
+    tombstone = row.get("tombstone") or "-"
+    reason = row.get("rejection_reason") or "-"
+    size = row.get("size")
+    mtime = row.get("mtime")
+    stamp = event_stamp(mtime) if mtime else "-"
+    size_text = _format_bytes(size) if isinstance(size, int) else "-"
+    return (
+        f"{row.get('location'):<72} {row.get('session_id') or '-':<36} "
+        f"{stamp:<17} {size_text:>9} {owner:<14} {tombstone:<14} {reason}"
+    )
+
+
+def cmd_candidates(args) -> int:
+    data = call_sync("transcript.candidates", id=args.id)
+    assert isinstance(data, dict)
+    rows = data.get("candidates") or []
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return 0
+    if not rows:
+        print("no candidates")
+        return 0
+    print(
+        f"{'LOCATION':<72} {'SESSION':<36} {'MTIME':<17} {'SIZE':>9} "
+        f"{'OWNER':<14} {'TOMBSTONE':<14} REJECTION"
+    )
+    for row in rows:
+        print(_candidate_line(row))
+    return 0
+
+
+def cmd_bind(args) -> int:
+    record = call_sync(
+        "transcript.bind",
+        id=args.id,
+        candidate=args.candidate,
+        confirm_id=args.confirm_id,
+        transfer_from=args.transfer_from,
+        transfer_confirm_id=args.transfer_confirm_id,
+    )
+    assert isinstance(record, dict)
+    prior = f" (transferred from {record['prior_owner']})" if record.get("prior_owner") else ""
+    print(f"bound {record['id']} -> {record['location']}{prior}")
     return 0
 
 
@@ -1059,6 +1136,8 @@ _COMMANDS = {
     "spawn": cmd_spawn,
     "kill": cmd_kill,
     "name": cmd_name,
+    "candidates": cmd_candidates,
+    "bind": cmd_bind,
     "adopt": cmd_adopt,
     "harnesses": cmd_harnesses,
     "stats": cmd_stats,

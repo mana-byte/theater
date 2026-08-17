@@ -69,6 +69,7 @@ from theater.harness.observation import (
     ScreenReading,
     TranscriptObserver,
 )
+from theater.harness.source import TranscriptCandidate
 from theater.models import BadRequest
 from theater.provenance import TranscriptProvenance
 
@@ -604,6 +605,89 @@ class VibeObserver(TranscriptObserver):
                 cwd,
             )
         return matches[0]
+
+    def transcript_candidates(
+        self,
+        *,
+        cwd: str | None,
+        after: float | None = None,
+    ) -> list[TranscriptCandidate]:
+        if not self.root.is_dir():
+            return []
+        want = str(Path(cwd).resolve()) if cwd else None
+        domain = str(self.root.resolve())
+        rows = [
+            self._candidate_row(d / "messages.jsonl", want=want, after=after, domain=domain)
+            for d in self.root.glob("session_*")
+        ]
+        return sorted(rows, key=lambda c: (c.mtime or 0, c.location), reverse=True)
+
+    def admit_operator_candidate(
+        self,
+        *,
+        cwd: str | None,
+        candidate: str,
+        domain: str | None = None,
+    ) -> TranscriptCandidate:
+        want = str(Path(cwd).resolve()) if cwd else None
+        root = Path(domain).resolve() if domain else self.root.resolve()
+        path = Path(candidate).expanduser()
+        if path.is_symlink():
+            raise ValueError("candidate path is a symlink")
+        real = path.resolve()
+        if not real.is_relative_to(root):
+            raise ValueError("candidate path is outside this harness transcript domain")
+        row = self._candidate_row(real, want=want, after=None, domain=str(root))
+        if row.rejection_reason:
+            raise ValueError(row.rejection_reason)
+        return row
+
+    def _candidate_row(
+        self,
+        path: Path,
+        *,
+        want: str | None,
+        after: float | None,
+        domain: str,
+    ) -> TranscriptCandidate:
+        reason = None
+        session_id = self.session_id(path)
+        try:
+            st = path.stat()
+        except OSError:
+            return TranscriptCandidate(
+                location=str(path),
+                session_id=session_id,
+                rejection_reason="not readable",
+                domain=domain,
+            )
+        if after is not None:
+            try:
+                born = getattr(path.parent.stat(), "st_birthtime", path.parent.stat().st_ctime)
+            except OSError:
+                born = st.st_ctime
+            if born < after:
+                reason = "created before participant floor"
+        if reason is None and (
+            path.name != "messages.jsonl" or not path.parent.name.startswith("session_")
+        ):
+            reason = "harness shape mismatch"
+        elif reason is None and session_id is None:
+            reason = "unextractable session id"
+        elif reason is None:
+            found_cwd = self._meta_cwd(path.parent)
+            if found_cwd is None:
+                reason = "harness mismatch or unextractable cwd"
+            elif want is not None and found_cwd != want:
+                reason = "cwd mismatch"
+        return TranscriptCandidate(
+            location=str(path),
+            session_id=session_id,
+            mtime=st.st_mtime,
+            size=st.st_size,
+            rejection_reason=reason,
+            domain=domain,
+        )
 
     def _is_candidate(self, d: Path, want: str, after: float | None) -> bool:
         """Whether a session directory is a viable transcript match.

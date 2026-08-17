@@ -608,6 +608,72 @@ def test_name_command_calls_rename_and_prints_the_result(answers, capsys):
     assert "Pierrot" in capsys.readouterr().out
 
 
+def test_candidates_prints_metadata_without_content(answers, capsys):
+    answers["replies"] = {
+        "transcript.candidates": {
+            "id": "p-abc123",
+            "candidates": [
+                {
+                    "location": "/tmp/session/messages.jsonl",
+                    "session_id": "sid-1",
+                    "mtime": 0,
+                    "size": 120,
+                    "provenance": "unattributed",
+                    "rejection_reason": None,
+                    "owner": None,
+                    "tombstone": None,
+                }
+            ],
+        }
+    }
+    assert cli.cmd_candidates(parse("candidates", "p-abc123")) == 0
+    out = capsys.readouterr().out
+    assert "/tmp/session/messages.jsonl" in out
+    assert "sid-1" in out
+    assert "content" not in out.lower()
+    assert answers["calls"] == [("transcript.candidates", {"id": "p-abc123"})]
+
+
+def test_bind_forwards_confirmation_and_transfer_flags(answers, capsys):
+    answers["replies"] = {
+        "transcript.bind": {
+            "id": "p-target",
+            "location": "/tmp/session/messages.jsonl",
+            "session_id": "sid-1",
+            "prior_owner": "p-old",
+        }
+    }
+    assert (
+        cli.cmd_bind(
+            parse(
+                "bind",
+                "p-target",
+                "/tmp/session/messages.jsonl",
+                "--confirm-id",
+                "p-target",
+                "--transfer-from",
+                "p-old",
+                "--transfer-confirm-id",
+                "p-old",
+            )
+        )
+        == 0
+    )
+    assert answers["calls"] == [
+        (
+            "transcript.bind",
+            {
+                "id": "p-target",
+                "candidate": "/tmp/session/messages.jsonl",
+                "confirm_id": "p-target",
+                "transfer_from": "p-old",
+                "transfer_confirm_id": "p-old",
+            },
+        )
+    ]
+    assert "transferred from p-old" in capsys.readouterr().out
+
+
 def test_bus_with_no_events_says_so(answers, capsys):
     answers["replies"] = {"bus.tail": []}
     assert cli.cmd_bus(parse("bus")) == 0

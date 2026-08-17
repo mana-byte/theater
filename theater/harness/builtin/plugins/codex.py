@@ -137,7 +137,7 @@ from theater.harness.observation import (
     ScreenReading,
     TranscriptObserver,
 )
-from theater.harness.source import Source, TranscriptSource
+from theater.harness.source import Source, TranscriptCandidate, TranscriptSource
 from theater.models import BadRequest
 from theater.provenance import TranscriptProvenance, normalize_provenance
 
@@ -590,6 +590,79 @@ class CodexObserver(TranscriptObserver):
                 cwd,
             )
         return matches[0]
+
+    def transcript_candidates(
+        self,
+        *,
+        cwd: str | None,
+        after: float | None = None,
+    ) -> list[TranscriptCandidate]:
+        if not self.root.is_dir():
+            return []
+        want = str(Path(cwd).resolve()) if cwd else None
+        domain = str(self.root.resolve())
+        rows = [
+            self._candidate_row(path, want=want, after=after, domain=domain)
+            for path in self.root.glob("*/*/*/rollout-*.jsonl")
+        ]
+        return sorted(rows, key=lambda c: (c.mtime or 0, c.location), reverse=True)
+
+    def admit_operator_candidate(
+        self,
+        *,
+        cwd: str | None,
+        candidate: str,
+        domain: str | None = None,
+    ) -> TranscriptCandidate:
+        want = str(Path(cwd).resolve()) if cwd else None
+        root = Path(domain).resolve() if domain else self.root.resolve()
+        path = Path(candidate).expanduser()
+        if path.is_symlink():
+            raise ValueError("candidate path is a symlink")
+        real = path.resolve()
+        if not real.is_relative_to(root):
+            raise ValueError("candidate path is outside this harness transcript domain")
+        row = self._candidate_row(real, want=want, after=None, domain=str(root))
+        if row.rejection_reason:
+            raise ValueError(row.rejection_reason)
+        return row
+
+    def _candidate_row(
+        self,
+        path: Path,
+        *,
+        want: str | None,
+        after: float | None,
+        domain: str,
+    ) -> TranscriptCandidate:
+        reason = None
+        session_id = self.session_id(path)
+        try:
+            st = path.stat()
+        except OSError:
+            return TranscriptCandidate(
+                location=str(path), rejection_reason="not readable", domain=domain
+            )
+        if after is not None and getattr(st, "st_birthtime", st.st_ctime) < after:
+            reason = "created before participant floor"
+        elif path.suffix != ".jsonl" or _STEM.match(path.stem) is None:
+            reason = "harness shape mismatch"
+        elif session_id is None:
+            reason = "unextractable session id"
+        else:
+            found_cwd = self._transcript_cwd(path)
+            if found_cwd is None:
+                reason = "harness mismatch or unextractable cwd"
+            elif want is not None and found_cwd != want:
+                reason = "cwd mismatch"
+        return TranscriptCandidate(
+            location=str(path),
+            session_id=session_id,
+            mtime=st.st_mtime,
+            size=st.st_size,
+            rejection_reason=reason,
+            domain=domain,
+        )
 
     def _process_rollout(self, cwd: str | None) -> Path | None:
         """The rollout this participant's own codex process holds open.

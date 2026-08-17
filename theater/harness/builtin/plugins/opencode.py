@@ -105,7 +105,7 @@ from theater.harness.observation import (
     ScreenKind,
     ScreenReading,
 )
-from theater.harness.source import Attachment, Batch, History, Source
+from theater.harness.source import Attachment, Batch, History, Source, TranscriptCandidate
 from theater.models import BadRequest, Status
 from theater.provenance import (
     TranscriptProvenance,
@@ -625,6 +625,93 @@ class OpenCodeObserver(HarnessObserver):
         if self.is_idle_screen(capture):
             return ScreenReading(kind=ScreenKind.PROMPT, confidence=ScreenConfidence.HIGH)
         return ScreenReading(kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW)
+
+    def transcript_candidates(
+        self,
+        *,
+        cwd: str | None,
+        after: float | None = None,
+    ) -> list[TranscriptCandidate]:
+        if not self.db.exists() or not cwd:
+            return []
+        want = str(Path(cwd).resolve())
+        try:
+            st = self.db.stat()
+        except OSError:
+            st = None
+        rows: list[TranscriptCandidate] = []
+        try:
+            conn = sqlite3.connect(f"file:{self.db}?mode=ro", uri=True)
+            try:
+                sql = (
+                    "SELECT id, directory, time_created FROM session "
+                    "WHERE parent_id IS NULL ORDER BY time_created DESC"
+                )
+                for sid, directory, created in conn.execute(sql):
+                    reason = None
+                    before_floor = (
+                        after is not None
+                        and isinstance(created, (int, float))
+                        and created < after * 1000
+                    )
+                    if before_floor:
+                        reason = "created before participant floor"
+                    elif directory != want:
+                        reason = "cwd mismatch"
+                    rows.append(
+                        TranscriptCandidate(
+                            location=f"opencode://{sid}",
+                            session_id=str(sid),
+                            mtime=st.st_mtime if st else None,
+                            size=st.st_size if st else None,
+                            rejection_reason=reason,
+                            domain=f"opencode://{self.db.resolve()}",
+                        )
+                    )
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return []
+        return rows
+
+    def admit_operator_candidate(
+        self,
+        *,
+        cwd: str | None,
+        candidate: str,
+        domain: str | None = None,
+    ) -> TranscriptCandidate:
+        if not self.db.exists():
+            raise ValueError("OpenCode database does not exist")
+        if domain is not None and domain != f"opencode://{self.db.resolve()}":
+            raise ValueError("candidate session is outside this harness transcript domain")
+        sid = candidate.removeprefix("opencode://")
+        if not sid:
+            raise ValueError("unextractable session id")
+        want = str(Path(cwd).resolve()) if cwd else None
+        try:
+            st = self.db.stat()
+            conn = sqlite3.connect(f"file:{self.db}?mode=ro", uri=True)
+            try:
+                row = conn.execute(
+                    "SELECT id, directory FROM session WHERE id = ? AND parent_id IS NULL",
+                    (sid,),
+                ).fetchone()
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            raise ValueError("OpenCode database is not readable") from exc
+        if row is None:
+            raise ValueError("harness shape mismatch")
+        if want is not None and row[1] != want:
+            raise ValueError("cwd mismatch")
+        return TranscriptCandidate(
+            location=f"opencode://{row[0]}",
+            session_id=str(row[0]),
+            mtime=st.st_mtime,
+            size=st.st_size,
+            domain=f"opencode://{self.db.resolve()}",
+        )
 
 
 class OpenCodeSource(Source):

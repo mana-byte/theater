@@ -93,6 +93,19 @@ def attach_point(path: Path) -> tuple[int, int, int, str | None]:
 
 
 @dataclass(frozen=True, slots=True)
+class TranscriptCandidate:
+    """An operator-visible transcript candidate, not participant-attributed content."""
+
+    location: str
+    session_id: str | None = None
+    mtime: float | None = None
+    size: int | None = None
+    provenance: str = "unattributed"
+    rejection_reason: str | None = None
+    domain: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Attachment:
     """A candidate input location, reported whenever a source finds one.
 

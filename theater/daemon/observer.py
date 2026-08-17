@@ -491,6 +491,23 @@ class Observer:
         self._tasks.clear()
         self._supervisor = None
 
+    async def reset_for_operator_bind(self, pid: str) -> None:
+        """Stop a live watcher so it reopens from the operator-pinned location."""
+        task = self._tasks.pop(pid, None)
+        self._retired.discard(pid)
+        self._reset_watch_state.discard(pid)
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await task
+
+    def record_operator_binding(self, pid: str, location: str, session_id: str | None) -> None:
+        """Mirror an accepted operator binding in the live collision table."""
+        self._release_transcript(pid)
+        self._bound_transcripts[location] = pid
+        self._binding_correlation[location] = str(TranscriptProvenance.OPERATOR)
+        self._binding_sessions[location] = session_id
+
     async def _sleep(self, seconds: float) -> None:
         """Wait, but wake immediately on shutdown."""
         with contextlib.suppress(TimeoutError):

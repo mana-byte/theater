@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from theater.harness.base import Event, NativeChild
+from theater.harness.source import TranscriptCandidate
 from theater.provenance import TranscriptProvenance, normalize_provenance
 
 if TYPE_CHECKING:
@@ -257,6 +258,25 @@ class HarnessObserver(ABC):
         transcript path.
         """
         return []
+
+    def transcript_candidates(
+        self,
+        *,
+        cwd: str | None,
+        after: float | None = None,
+    ) -> list[TranscriptCandidate]:
+        """Operator recovery candidates, explicitly not participant-attributed content."""
+        return []
+
+    def admit_operator_candidate(
+        self,
+        *,
+        cwd: str | None,
+        candidate: str,
+        domain: str | None = None,
+    ) -> TranscriptCandidate:
+        """Validate an operator-named candidate before the daemon persists trust."""
+        raise ValueError(f"{type(self).__name__} has no operator-bindable transcript")
 
 
 def open_participant_source(

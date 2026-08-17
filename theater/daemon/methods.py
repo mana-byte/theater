@@ -1336,6 +1336,136 @@ async def _shutdown(daemon, params: dict) -> dict:
 _READABLE = ("assistant", "user", "tool_call", "tool_result")
 
 
+def _canonical_location(value: str) -> str:
+    if value.startswith("opencode://"):
+        return value
+    return str(Path(value).expanduser().resolve())
+
+
+def _same_location(a: str | None, b: str) -> bool:
+    if a is None:
+        return False
+    if a.startswith("opencode://") or b.startswith("opencode://"):
+        return a == b
+    try:
+        return str(Path(a).resolve()) == str(Path(b).resolve())
+    except OSError:
+        return a == b
+
+
+def _candidate_owner(daemon, location: str, *, exclude: str | None = None):
+    for other in daemon.registry.list(include_dead=True):
+        if other.id != exclude and _same_location(other.transcript_location, location):
+            return other
+    return None
+
+
+def _candidate_to_dict(daemon, candidate) -> dict:
+    location = _canonical_location(candidate.location)
+    owner = _candidate_owner(daemon, location)
+    return {
+        "location": location,
+        "session_id": candidate.session_id,
+        "mtime": candidate.mtime,
+        "size": candidate.size,
+        "provenance": candidate.provenance,
+        "rejection_reason": candidate.rejection_reason,
+        "domain": candidate.domain,
+        "owner": owner.id if owner is not None and owner.status is not Status.DEAD else None,
+        "tombstone": owner.id if owner is not None and owner.status is Status.DEAD else None,
+    }
+
+
+@method("transcript.candidates")
+async def _transcript_candidates(daemon, params: dict) -> dict:
+    p = daemon.registry.resolve(_require(params, "id"))
+    harness_name = normalize(p.harness)
+    harness = HARNESSES.get(harness_name)
+    if harness is None:
+        raise BadRequest(f"cannot enumerate candidates: harness {p.harness!r} is not known")
+    after = p.created_at if p.tier is Tier.SPAWNED else None
+    rows = harness.observer.transcript_candidates(cwd=p.cwd, after=after)
+    return {"id": p.id, "candidates": [_candidate_to_dict(daemon, row) for row in rows]}
+
+
+@method("transcript.bind")
+async def _transcript_bind(daemon, params: dict) -> dict:
+    target = _string_param(params, "id", method_name="transcript.bind")
+    p = daemon.registry.resolve(target)
+    pid = p.id
+    if params.get("confirm_id") != pid:
+        raise BadRequest("transcript.bind requires confirm_id to equal the stable participant id")
+    raw_candidate = _string_param(params, "candidate", method_name="transcript.bind")
+    transfer_from = _optional_string_param(params, "transfer_from", method_name="transcript.bind")
+    if transfer_from is not None and params.get("transfer_confirm_id") != transfer_from:
+        raise BadRequest(
+            "transcript.bind transfer requires transfer_confirm_id to equal transfer_from"
+        )
+
+    harness_name = normalize(p.harness)
+    harness = HARNESSES.get(harness_name)
+    if harness is None:
+        raise BadRequest(f"cannot bind transcript: harness {p.harness!r} is not known")
+    try:
+        admitted = harness.observer.admit_operator_candidate(
+            cwd=p.cwd,
+            candidate=raw_candidate,
+            domain=p.transcript_domain,
+        )
+    except ValueError as exc:
+        raise BadRequest(f"cannot bind transcript: {exc}") from None
+    location = _canonical_location(admitted.location)
+    owner = _candidate_owner(daemon, location, exclude=pid)
+    prior_owner = None
+    if owner is not None:
+        prior_owner = owner.id
+        if transfer_from is None:
+            raise BadRequest(
+                f"candidate is already owned by participant {owner.id}; "
+                "pass --transfer-from with that exact stable id to move it"
+            )
+        if transfer_from != owner.id:
+            raise BadRequest(
+                f"transfer-from must name the current owner exactly ({owner.id}), "
+                f"got {transfer_from!r}"
+            )
+    elif transfer_from is not None:
+        raise BadRequest("transfer-from was provided but the candidate has no current owner")
+
+    await daemon.observer.reset_for_operator_bind(pid)
+    p = daemon.registry.get(pid)
+    p.transcript_location = location
+    p.session_id = admitted.session_id
+    p.session_correlation = str(TranscriptProvenance.OPERATOR)
+    p.transcript_domain = admitted.domain
+    p.last_activity = now()
+    if owner is not None:
+        owner.transcript_location = None
+        owner.session_id = None
+        owner.session_correlation = None
+        daemon.store.upsert_participant(owner)
+    daemon.store.upsert_participant(p)
+    daemon.observer.record_operator_binding(pid, location, admitted.session_id)
+    daemon.store.bus_append(
+        "operator.transcript_bind",
+        to_id=pid,
+        from_id="cli",
+        payload={
+            "actor_surface": "cli",
+            "target": pid,
+            "path": location,
+            "session_id": admitted.session_id,
+            "prior_owner": prior_owner,
+        },
+    )
+    return {
+        "id": pid,
+        "location": location,
+        "session_id": admitted.session_id,
+        "prior_owner": prior_owner,
+    }
+
+
 @method("read_transcript")
 async def _read_transcript(daemon, params: dict) -> dict:
     """Read a participant's session back, with the text unclipped.
