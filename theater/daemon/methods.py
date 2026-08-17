@@ -55,7 +55,12 @@ from theater.models import (
     new_id,
     now,
 )
-from theater.provenance import is_trusted_provenance, normalize_provenance
+from theater.provenance import (
+    TranscriptProvenance,
+    is_trusted_provenance,
+    normalize_provenance,
+    provenance_at_least,
+)
 from theater.tmux import client as tmux
 from theater.tmux.presence import human_present
 
@@ -264,7 +269,9 @@ def _reject_cross_participant_receipt(
             raise BadRequest(
                 "claude receipt transcript_path is already owned by another participant"
             )
-        if other.session_id == session_id and other.session_correlation == "exact":
+        if other.session_id == session_id and provenance_at_least(
+            other.session_correlation, TranscriptProvenance.OPERATOR
+        ):
             raise BadRequest("claude receipt session_id is already owned by another participant")
 
 

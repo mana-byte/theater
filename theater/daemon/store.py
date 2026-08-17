@@ -46,6 +46,7 @@ from theater.daemon.schema import (
     tree_kv,
 )
 from theater.models import Job, Participant, Status, now
+from theater.provenance import TranscriptProvenance
 
 MIGRATIONS = Path(__file__).parent / "migrations"
 
@@ -429,7 +430,7 @@ class Store:
                 .where(participants.c.id == participant_id)
                 .values(
                     session_id=session_id,
-                    session_correlation="exact",
+                    session_correlation=str(TranscriptProvenance.EXACT),
                     transcript_location=transcript_location,
                 )
             )

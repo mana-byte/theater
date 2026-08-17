@@ -17,6 +17,7 @@ from theater.harness.base import Event, EventKind
 from theater.harness.builtin.plugins.claude import ClaudeCodeHarness, ClaudeCodeObserver
 from theater.harness.source import Batch, TranscriptSource
 from theater.protocol import RemoteError
+from theater.provenance import TranscriptProvenance
 
 
 def _transcript(root: Path, session_id: str, cwd: Path, *, project: str = "project") -> Path:
@@ -92,7 +93,7 @@ async def test_claude_initial_receipt_records_exact_location(
     )
     got = daemon.store.get_participant("p-claude")
     assert got.session_id == path.stem
-    assert got.session_correlation == "exact"
+    assert got.session_correlation == str(TranscriptProvenance.EXACT)
     assert got.transcript_location == str(path.resolve())
     assert got.transcript_domain is None
 
@@ -280,7 +281,7 @@ def test_claude_receipt_survives_store_reopen(theater_home, tmp_path):
     try:
         got = reopened.get_participant("p-claude")
         assert got.session_id == path.stem
-        assert got.session_correlation == "exact"
+        assert got.session_correlation == str(TranscriptProvenance.EXACT)
         assert got.transcript_location == str(path)
         assert reopened.get_receipt_token("p-claude") == "secret"
     finally:
@@ -297,7 +298,7 @@ async def test_receipt_nudges_transcript_source_to_reattach(tmp_path):
         ClaudeCodeObserver(root=root),
         cwd=str(cwd),
         session_id=first.stem,
-        exact_session=True,
+        session_provenance=TranscriptProvenance.EXACT,
     )
 
     batch = await source.read()
@@ -310,7 +311,7 @@ async def test_receipt_nudges_transcript_source_to_reattach(tmp_path):
 
     assert batch.attached is not None
     assert batch.attached.location == str(second)
-    assert batch.attached.correlation == "exact"
+    assert batch.attached.correlation == str(TranscriptProvenance.EXACT)
 
 
 async def test_current_path_receipt_does_not_detach_or_reset_mid_turn(registry, tmp_path):
@@ -325,7 +326,7 @@ async def test_current_path_receipt_does_not_detach_or_reset_mid_turn(registry, 
         ClaudeCodeObserver(root=root),
         cwd=str(cwd),
         session_id=path.stem,
-        exact_session=True,
+        session_provenance=TranscriptProvenance.EXACT,
     )
     await source.read()
     source.commit_attachment()

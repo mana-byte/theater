@@ -1233,7 +1233,7 @@ class Observer:
                 session_id=session_id,
                 transcript_location=location,
             )
-            self._binding_correlation[location] = "exact"
+            self._binding_correlation[location] = str(TranscriptProvenance.EXACT)
             self._binding_sessions[location] = session_id
         return result
 

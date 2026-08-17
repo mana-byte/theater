@@ -39,7 +39,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from theater.harness.base import Event
 from theater.models import Status
@@ -305,12 +305,12 @@ class TranscriptSource(Source):
             if self._known_location is not None
             else TranscriptProvenance.HEURISTIC
         )
-        #: Locations `proven_transcript` has answered with. Held here rather
-        #: than left to the adapter, so "the observer proved it" and "the
-        #: source calls it exact" cannot come apart: an override that proves a
-        #: location without also recording it somewhere would otherwise have
-        #: its answer labelled a guess.
-        self._proven: set[Path] = set()
+        #: Locations proven outside cwd discovery, with their strength. Held
+        #: here rather than left to the adapter, so "the observer proved it"
+        #: and "the source calls it trusted" cannot come apart: an override
+        #: that proves a location without also recording it somewhere would
+        #: otherwise have its answer labelled a guess.
+        self._proven: dict[Path, TranscriptProvenance] = {}
         self.path: Path | None = None
         self.offset = 0
         self.index = 0
@@ -394,9 +394,10 @@ class TranscriptSource(Source):
         path = Path(location)
         self._pending = None
         self._session_id = session_id
-        self._exact_session = True
+        self._session_provenance = TranscriptProvenance.EXACT
         self._known_location = path
-        self._proven.add(path)
+        self._known_location_provenance = TranscriptProvenance.EXACT
+        self._proven[path] = TranscriptProvenance.EXACT
         if self.path == path:
             return "accepted"
         self._detach()
@@ -454,7 +455,7 @@ class TranscriptSource(Source):
         if self._exact_attachments and self._inside_domain(path):
             return str(TranscriptProvenance.EXACT)
         if path in self._proven:
-            return str(TranscriptProvenance.PROVEN)
+            return str(self._proven[path])
         if (
             self._known_location is not None
             and path == self._known_location
@@ -546,7 +547,7 @@ class TranscriptSource(Source):
         proven = await asyncio.to_thread(self._observer.proven_transcript, cwd=self._cwd)
         if proven is None or not self._inside_domain(proven):
             return pinned
-        self._proven.add(proven)
+        self._proven[proven] = TranscriptProvenance.PROVEN
         if proven == pinned:
             return pinned
         logger.info(
