@@ -14,10 +14,12 @@ from theater.daemon.rails import (
     CycleDetected,
     DepthExceeded,
     ModelNotAllowed,
+    ReasoningNotAllowed,
     check_budget,
     check_cycle,
     check_depth,
     check_model_allowed,
+    check_reasoning_allowed,
     check_wait_cycle,
 )
 from theater.daemon.registry import Registry
@@ -207,3 +209,50 @@ def test_matching_is_exact():
         check_model_allowed("vibe", "BIG", ["big"])
     with pytest.raises(ModelNotAllowed):
         check_model_allowed("vibe", "big", ["bigger"])
+
+
+# ---- the reasoning allowlist --------------------------------------------
+
+
+def test_naming_no_reasoning_effort_is_always_allowed():
+    """The case every install starts in, and the one that must never break."""
+    check_reasoning_allowed("codex", None, [])  # does not raise
+
+
+def test_a_listed_reasoning_effort_is_allowed():
+    check_reasoning_allowed("codex", "high", ["low", "high"])  # does not raise
+
+
+def test_a_reasoning_effort_that_is_not_listed_is_refused():
+    with pytest.raises(ReasoningNotAllowed) as exc:
+        check_reasoning_allowed("codex", "ultra", ["low", "high"])
+    message = str(exc.value)
+    assert "ultra" in message
+    assert "high, low" in message
+
+
+def test_an_empty_reasoning_allowlist_refuses_an_explicit_effort():
+    with pytest.raises(ReasoningNotAllowed) as exc:
+        check_reasoning_allowed("codex", "high", [])
+    assert "no reasoning efforts are configured" in str(exc.value)
+
+
+def test_the_reasoning_empty_case_names_the_harness_it_refused_for():
+    with pytest.raises(ReasoningNotAllowed) as exc:
+        check_reasoning_allowed("claude", "high", [])
+    assert "claude" in str(exc.value)
+
+
+def test_an_empty_string_reasoning_effort_is_rejected():
+    """None means "use default", but "" is a non-value that would be silently
+    dropped by the adapter's truthiness guard."""
+    with pytest.raises(ReasoningNotAllowed) as exc:
+        check_reasoning_allowed("codex", "", ["low", "high", ""])
+    assert "must not be empty" in str(exc.value)
+
+
+def test_reasoning_matching_is_exact():
+    with pytest.raises(ReasoningNotAllowed):
+        check_reasoning_allowed("codex", "HIGH", ["high"])
+    with pytest.raises(ReasoningNotAllowed):
+        check_reasoning_allowed("codex", "high", ["higher"])

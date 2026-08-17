@@ -407,6 +407,80 @@ async def test_an_unlisted_harness_still_spawns_without_a_model(fake_tmux):
         await daemon.aclose()
 
 
+# ---- the reasoning allowlist --------------------------------------------
+
+
+def test_reasoning_are_read_per_harness():
+    write('[reasoning]\ncodex = ["low", "high"]\n')
+    assert cfg.load().reasoning_for("codex") == ["low", "high"]
+
+
+def test_reasoning_section_is_recognized_as_legal():
+    """The section the parser builds must also be in the legal set."""
+    write('[reasoning]\ncodex = ["high"]\n')
+    loaded = cfg.load()
+    assert loaded.exists is True
+    assert loaded.reasoning_for("codex") == ["high"]
+
+
+def test_reasoning_and_models_coexist():
+    write('[models]\nvibe = ["small"]\n[reasoning]\ncodex = ["high"]\n')
+    loaded = cfg.load()
+    assert loaded.models_for("vibe") == ["small"]
+    assert loaded.reasoning_for("codex") == ["high"]
+
+
+def test_a_harness_with_no_reasoning_entry_allows_nothing():
+    write('[reasoning]\ncodex = ["high"]\n')
+    assert cfg.load().reasoning_for("claude") == []
+
+
+def test_no_reasoning_section_at_all_is_not_an_error():
+    write("[rails]\ndepth_cap = 2\n")
+    assert cfg.load().reasoning_for("vibe") == []
+
+
+def test_reasoning_must_be_a_table():
+    write("reasoning = 3\n")
+    with pytest.raises(cfg.ConfigError) as exc:
+        cfg.load()
+    assert "must be a table" in str(exc.value)
+
+
+def test_a_reasoning_entry_must_be_a_list_of_strings():
+    write("[reasoning]\ncodex = 3\n")
+    with pytest.raises(cfg.ConfigError) as exc:
+        cfg.load()
+    assert "must be a list of strings" in str(exc.value)
+
+
+def test_reasoning_listed_twice_is_refused():
+    write('[reasoning]\ncodex = ["high", "high"]\n')
+    with pytest.raises(cfg.ConfigError) as exc:
+        cfg.load()
+    assert "more than once" in str(exc.value)
+
+
+def test_reasoning_illegal_harness_name_is_refused():
+    write('[reasoning]\n"Not A Harness" = ["high"]\n')
+    with pytest.raises(cfg.ConfigError) as exc:
+        cfg.load()
+    assert "legal harness name" in str(exc.value)
+
+
+def test_a_typo_of_the_reasoning_section_suggests_it():
+    write('[reasonig]\ncodex = ["high"]\n')
+    with pytest.raises(cfg.ConfigError) as exc:
+        cfg.load()
+    assert "reasoning" in str(exc.value)
+
+
+def test_describe_reports_a_configured_reasoning_allowlist():
+    write('[reasoning]\ncodex = ["high"]\n')
+    rows = cfg.describe(cfg.load())
+    assert any(key == "reasoning.codex" for key, _, _ in rows)
+
+
 # ---- the CLI ------------------------------------------------------------
 
 

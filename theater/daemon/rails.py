@@ -125,9 +125,17 @@ def check_reasoning_allowed(harness: str, reasoning_effort: str | None, allowed:
     omitting `--reasoning-effort` is unaffected and the child comes up on
     whatever its own CLI is configured for. The same policy as `check_model_allowed`:
     intent, not correctness.
+
+    An empty string is rejected: `None` means "use the default", but `""` is a
+    non-value that would pass the allowlist check only to be silently dropped
+    by the adapter's truthiness guard.
     """
     if reasoning_effort is None:
         return
+    if not reasoning_effort:
+        raise ReasoningNotAllowed(
+            "reasoning effort must not be empty: omit --reasoning-effort to use the harness default"
+        )
     if not allowed:
         raise ReasoningNotAllowed(
             f"no reasoning efforts are configured for harness {harness!r}, so "

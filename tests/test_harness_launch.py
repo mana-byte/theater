@@ -349,3 +349,87 @@ def test_unknown_harness_and_approval_are_rejected(tmp_path):
         plan_launch(
             "vibe", participant_id="a", prompt="", config_path=Path("/x"), approval="whatever"
         )
+
+
+# ---- reasoning effort reaches the harnesses that support it --------------
+
+
+def test_reasoning_effort_reaches_codex_via_config_override(tmp_path):
+    plan = plan_launch(
+        "codex",
+        participant_id="a",
+        prompt="",
+        config_path=tmp_path / "x.json",
+        approval="manual",
+        reasoning_effort="high",
+    )
+    assert "model_reasoning_effort=high" in plan.argv
+
+
+def test_reasoning_effort_reaches_claude_via_effort_flag(tmp_path):
+    plan = plan_launch(
+        "claude",
+        participant_id="a",
+        prompt="",
+        config_path=tmp_path / "x.json",
+        approval="manual",
+        reasoning_effort="high",
+    )
+    assert "--effort=high" in plan.argv
+
+
+def test_no_reasoning_effort_asked_means_no_lever(tmp_path):
+    for harness in ("claude", "codex", "opencode", "vibe"):
+        plan = plan_launch(
+            harness,
+            participant_id="a",
+            prompt="",
+            config_path=tmp_path / "x.json",
+            approval="manual",
+        )
+        assert not any(a.startswith("--effort") for a in plan.argv), harness
+        assert not any("model_reasoning_effort=" in a for a in plan.argv), harness
+
+
+def test_a_harness_that_does_not_support_reasoning_is_refused(tmp_path):
+    """Vibe and opencode omit the parameter; the funnel refuses before the adapter."""
+    with pytest.raises(BadRequest, match="does not support reasoning effort"):
+        plan_launch(
+            "vibe",
+            participant_id="a",
+            prompt="",
+            config_path=tmp_path / "x.json",
+            approval="manual",
+            reasoning_effort="high",
+        )
+    with pytest.raises(BadRequest, match="does not support reasoning effort"):
+        plan_launch(
+            "opencode",
+            participant_id="a",
+            prompt="",
+            config_path=tmp_path / "x.json",
+            approval="manual",
+            reasoning_effort="high",
+        )
+
+
+def test_a_legacy_harness_still_launches_without_reasoning(monkeypatch, tmp_path):
+    """An adapter written before reasoning_effort existed is never called with it."""
+
+    class LegacyHarness(Harness):
+        name = "legacy2"
+        binary = "legacy2"
+
+        def plan_launch(self, *, participant_id, prompt, config_path, approval):
+            return LaunchPlan(argv=["legacy2", participant_id])
+
+    monkeypatch.setitem(HARNESSES, "legacy2", LegacyHarness())
+
+    plan = plan_launch(
+        "legacy2",
+        participant_id="abc",
+        prompt="",
+        config_path=Path("/x"),
+        approval="manual",
+    )
+    assert plan.argv == ["legacy2", "abc"]
