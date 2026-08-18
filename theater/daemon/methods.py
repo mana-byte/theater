@@ -960,6 +960,7 @@ async def _checkpoint_read(daemon, params: dict) -> dict:
         "checkpoint": {
             "id": row["id"],
             "participant_id": row["participant_id"],
+            "creator_name": row.get("creator_name"),
             "name": row["name"],
             "notes": row["notes"],
             "created_at": row["created_at"],

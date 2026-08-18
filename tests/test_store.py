@@ -552,3 +552,27 @@ def test_checkpoint_release_clears_restore_claimed_by(store):
     row = store.get_checkpoint(cid)
     assert row["restore_claimed_by"] is None
     assert row["restore_state"] == "ready"
+
+
+def test_recover_stranded_restores_promotes_claimed_by_to_restored_by(store):
+    """recover_stranded_restores must converge on the same row shape as finalize(error=...).
+
+    Specifically: restored_by is set to the claimant (via column-to-column copy
+    in a single UPDATE statement) and restore_claimed_by is cleared to NULL.
+    This verifies that SQLite evaluates the right-hand side against the
+    pre-update row, so both can be set correctly in one statement.
+    """
+    cid = store.create_checkpoint(participant_id="p1", name="cp", jobs_snapshot="[]")
+    token = store.claim_checkpoint_restore(cid, "crash-restorer")
+    assert token is not None
+
+    count = store.recover_stranded_restores()
+    assert count == 1
+
+    row = store.get_checkpoint(cid)
+    assert row["restore_state"] == "failed"
+    assert row["restore_error"] == "daemon restarted while restore was in progress"
+    # The claimant must be promoted to restored_by, not lost.
+    assert row["restored_by"] == "crash-restorer"
+    # restore_claimed_by must be cleared — same shape as finalize(error=...).
+    assert row["restore_claimed_by"] is None

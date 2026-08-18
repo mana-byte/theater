@@ -745,6 +745,12 @@ class Store:
 
         Called at daemon startup. No restore RPC survives a daemon restart,
         so any checkpoint left in 'restoring' was interrupted by a crash.
+
+        ``restore_claimed_by`` is promoted to ``restored_by`` (SQL evaluates
+        the right-hand side against the pre-update row, so both can be set in
+        the same statement) and then cleared. This converges the crash path
+        onto the same row shape as ``finalize_checkpoint_restore(error=...)``:
+        ``restored_by`` names the claimant, ``restore_claimed_by`` is NULL.
         """
         result = self.conn.execute(
             update(checkpoints)
@@ -752,6 +758,8 @@ class Store:
             .values(
                 restore_state="failed",
                 restore_error="daemon restarted while restore was in progress",
+                restored_by=checkpoints.c.restore_claimed_by,
+                restore_claimed_by=None,
             )
         )
         return result.rowcount

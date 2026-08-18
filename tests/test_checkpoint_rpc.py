@@ -127,6 +127,7 @@ async def test_checkpoint_read_reports_recorded_live_and_pruned_jobs(client, dae
     assert read["checkpoint"]["participant_id"] == caller["id"]
     assert read["checkpoint"]["name"] == "baseline"
     assert read["checkpoint"]["notes"] is None
+    assert "creator_name" in read["checkpoint"]
     assert "jobs_snapshot" not in read["checkpoint"]
     assert _handles(read["recorded_jobs"]) == ["done", "pruned"]
     assert _handles(read["live_jobs"]) == ["done"]
