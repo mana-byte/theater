@@ -191,8 +191,11 @@ def _display_width(text: str) -> int:
     locale-dependent Ambiguous-width characters.  That is acceptable because
     the check is cosmetic column alignment in ``theater harnesses``, not a
     layout engine: a wide glyph that slips through shears one column, which
-    is the failure the check exists to catch, and the four shipped icons are
-    all single-cell under this estimate.
+    is the failure the check exists to catch.  The shipped icons ``◇``
+    (opencode) and ``▤`` (vibe) are East Asian Ambiguous — one cell here,
+    two under a CJK locale, where ``theater harnesses`` shears their rows.
+    Theater accepts this because the consequence is a misaligned column in
+    one listing, not incorrect behaviour.
 
     Control characters are counted as one by this function — the caller
     rejects them separately, because a control character that is also one
