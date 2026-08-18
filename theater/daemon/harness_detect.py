@@ -60,12 +60,39 @@ def is_shell(command: str) -> bool:
 
 
 def match_binary(command: str, harnesses) -> str | None:
-    """Return the harness name if a command basename matches a harness binary."""
+    """Return the harness name if a command basename matches a harness binary.
+
+    Two normalisations are applied to the basename before comparison:
+    - A leading ``.`` is stripped (nixpkgs ``makeWrapper`` prefixes the
+      wrapped binary with ``.`` and appends ``-wrapped``).
+    - A trailing ``-wrapped`` is stripped.
+
+    These are generic across harnesses — not special-cased per name — because
+    the wrapper convention is shared. A plugin may also declare additional
+    binary names via the ``binaries`` class attribute.
+    """
     basename = command.rsplit("/", 1)[-1]
+    normalised = _unwrap(basename)
     for harness in harnesses.values():
-        if harness.binary in (basename, command):
+        names = harness.binaries or {harness.binary}
+        if basename in names or normalised in names or command in names:
             return harness.name
     return None
+
+
+def _unwrap(basename: str) -> str:
+    """Strip nixpkgs makeWrapper affixes from a binary basename.
+
+    ``.claude-wrapped`` → ``claude``. Kept generic: no per-harness
+    special-casing, only the leading ``.`` and trailing ``-wrapped``
+    that ``makeWrapper`` adds.
+    """
+    name = basename
+    if name.startswith("."):
+        name = name[1:]
+    if name.endswith("-wrapped"):
+        name = name[: -len("-wrapped")]
+    return name
 
 
 def descendant_comms(root_pid: int) -> list[str]:

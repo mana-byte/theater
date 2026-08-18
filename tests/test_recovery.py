@@ -1183,9 +1183,7 @@ async def test_restore_v2_self_restore_creator_dies_during_pane_check(
     # a dead node as still live.
     assert result["creator"]["status"] == "dead"
     assert result["restore_state"] == "failed"
-    child_report = next(
-        r for r in result["descendants"] if r["original_participant_id"] == "child"
-    )
+    child_report = next(r for r in result["descendants"] if r["original_participant_id"] == "child")
     assert child_report["action"] == "skipped"
     assert child_report["classification"] == "ancestor_skipped"
 

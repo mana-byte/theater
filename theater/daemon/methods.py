@@ -1382,7 +1382,7 @@ async def _checkpoint_restore(daemon, params: dict) -> dict:
 
     if is_v2_snapshot(snapshot_data):
         # V2 preflight: snapshot-based, not DB-row-based. Also simulate topology rails.
-        _v2_preflight(daemon, checkpoint_id, snapshot_data, caller.id)
+        await _v2_preflight(daemon, checkpoint_id, snapshot_data, caller.id)
         # Topology/rail preflight before claim (item 10).
         preflight_topology(
             daemon,
@@ -1480,7 +1480,51 @@ async def _checkpoint_restore(daemon, params: dict) -> dict:
     return restore_result_data
 
 
-def _v2_preflight(daemon, checkpoint_id: int, snapshot_data: dict, caller_id: str) -> None:
+async def _verify_creator_pane_harness(daemon, checkpoint_id: int, creator: Participant) -> None:
+    """Verify the live creator's pane harness before the atomic claim.
+
+    Mirrors the send path (``_check_pane_harness``, lines 1691-1707): ``"unknown"``
+    detection is absence of evidence, not evidence of a foreign harness, so it
+    only refuses when a DIFFERENT harness is positively identified or a shell is
+    at the prompt. A missing pane (stale_live) is deliberately NOT refused
+    here: ``restore_tree`` handles that gracefully by marking the row dead
+    and reclassifying, so refusing it in preflight would burn a checkpoint
+    that could otherwise self-heal. Raises ``BadRequest`` on a predictable
+    refusal so the checkpoint stays ``ready`` and retryable.
+    """
+    from theater.tmux import client as tmux
+
+    if not tmux.available():
+        return  # tmux not queryable; trust the DB row
+    assert creator.tmux_pane is not None  # checked by caller before this point
+    try:
+        pane = await tmux.pane_info(creator.tmux_pane)
+    except Exception:
+        return  # tmux error; let restore_tree handle it
+    if pane is None:
+        # Pane gone — restore_tree marks the row dead and reclassifies.
+        # Not a preflight refusal: this is a recoverable condition.
+        return
+    if creator.harness == "unknown":
+        return  # nothing to compare against
+    found = detect_harness(pane.current_command, pane.pane_pid)
+    if found == creator.harness:
+        return
+    if found != "unknown":
+        raise BadRequest(
+            f"checkpoint {checkpoint_id!r}: creator {creator.id!r} pane "
+            f"{creator.tmux_pane!r} runs {found!r}, not {creator.harness!r}; "
+            f"refusing to restore a mismatched live pane"
+        )
+    if is_shell(pane.current_command):
+        raise BadRequest(
+            f"checkpoint {checkpoint_id!r}: creator {creator.id!r} harness "
+            f"{creator.harness!r} has exited in pane {creator.tmux_pane!r}; "
+            f"a shell ({pane.current_command}) is at the prompt"
+        )
+
+
+async def _v2_preflight(daemon, checkpoint_id: int, snapshot_data: dict, caller_id: str) -> None:
     """Validate a v2 snapshot before claiming. Raises BadRequest on any violation.
 
     Checks (all before the claim):
@@ -1547,6 +1591,16 @@ def _v2_preflight(daemon, checkpoint_id: int, snapshot_data: dict, caller_id: st
                 f"checkpoint {checkpoint_id!r}: creator {creator_id!r} is live but "
                 f"has no pane; cannot restore without an addressable pane"
             )
+        # Verify the creator's pane harness identity before the atomic claim.
+        # A predictable failure (the pane runs a different harness, or the
+        # CLI has exited and left a shell) must refuse here, leaving the
+        # checkpoint ``ready`` and retryable — not consume the claim and
+        # finalise ``failed`` (terminal). This mirrors the send path's
+        # semantics (methods.py:1691-1707): ``"unknown"`` detection is
+        # absence of evidence, not evidence of a foreign harness, so it
+        # only refuses when a DIFFERENT harness is positively identified
+        # or a shell is at the prompt.
+        await _verify_creator_pane_harness(daemon, checkpoint_id, live_creator)
         # Cycle check: a live creator that is an ancestor of the caller would deadlock.
         ancestor_ids = set(lineage.ancestor_ids(daemon.store, caller_id))
         if creator_id in ancestor_ids:

@@ -14,6 +14,7 @@ from theater.daemon.recovery import (
     validate_v2_snapshot,
 )
 from theater.models import BadRequest, Job, Participant, Status, Tier
+from theater.protocol import RemoteError
 
 
 def _participant(
@@ -163,23 +164,32 @@ async def test_lost_progress_claim_halts_and_returns_partial(
 
 
 async def test_harness_mismatch_is_failed_without_touching_pane(client, daemon, fake_tmux) -> None:
-    original = _participant(daemon, "creator", pane="%1")
+    """A harness mismatch on the creator's pane is refused by preflight.
+
+    Previously this consumed the checkpoint (terminal ``failed``).  Now
+    preflight catches it before the claim, so the checkpoint stays
+    ``ready`` and retryable — the old test asserted the consumed-claim
+    behaviour, which was the bug.
+    """
+    _participant(daemon, "creator", pane="%1")
     _participant(daemon, "restorer", pane="%2")
     fake_tmux.add_pane("%1", command="claude")
     fake_tmux.add_pane("%2", command="vibe")
     created = await client.call("checkpoint.create", caller_id="creator", name="mismatch")
 
-    result = await client.call(
-        "checkpoint.restore",
-        checkpoint_id=created["checkpoint_id"],
-        approval="yolo",
-        caller_id="restorer",
-    )
-
-    assert result["restore_state"] == "failed"
-    assert result["creator"]["action"] == "failed"
-    assert result["creator"]["current_participant_id"] == original.id
-    assert daemon.store.get_participant(original.id).status is not Status.DEAD
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "checkpoint.restore",
+            checkpoint_id=created["checkpoint_id"],
+            approval="yolo",
+            caller_id="restorer",
+        )
+    assert exc.value.code == "bad_request"
+    assert "runs" in str(exc.value)
+    # The checkpoint must NOT have been consumed.
+    cp = daemon.store.get_checkpoint(created["checkpoint_id"])
+    assert cp is not None and cp["restore_state"] == "ready"
+    # No pane was touched.
     assert fake_tmux.sent == []
 
 

@@ -126,6 +126,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from theater.daemon import lineage
+from theater.daemon.harness_detect import is_shell
 from theater.daemon.rails import (
     check_budget,
     check_depth,
@@ -729,12 +730,36 @@ def classify_node(  # noqa: PLR0912
                 )
             assert isinstance(pane_info, dict)
             pane_harness = pane_info.get("harness")
-            if pane_harness and pane_harness != live_participant.harness:
-                return "live_harness_conflict", (
-                    f"participant {orig_id!r}: pane {live_participant.tmux_pane!r} "
-                    f"runs {pane_harness!r} not {live_participant.harness!r}"
+            # "unknown" means detection could not identify the harness — it is
+            # absence of evidence, NOT evidence of a foreign harness. The send
+            # path (methods.py) already handles this correctly; this mirrors
+            # its semantics so a wrapper-renamed binary (e.g. .claude-wrapped)
+            # does not cause a live creator to be misclassified as a conflict.
+            if live_participant.harness == "unknown":
+                # Nothing to compare against; trust the DB row.
+                return "live", "participant is live (recorded harness is 'unknown')"
+            if pane_harness == live_participant.harness:
+                return "live", "participant is live with tmux-verified pane"
+            if pane_harness == "unknown":
+                # Detection failed. If the pane's foreground is a shell, the
+                # CLI has exited and left a prompt — classify stale_live so
+                # the restore path transitions it through death handling.
+                # Otherwise trust the DB row (wrapper rename, etc.).
+                raw_command = pane_info.get("command", "")
+                if is_shell(raw_command):
+                    return "stale_live", (
+                        f"participant {orig_id!r}: pane {live_participant.tmux_pane!r} "
+                        f"shows a shell ({raw_command!r}); harness likely exited"
+                    )
+                return "live", (
+                    f"participant {orig_id!r}: pane harness detection returned 'unknown' "
+                    f"(command {raw_command!r}); trusting DB row"
                 )
-            return "live", "participant is live with tmux-verified pane"
+            # A positively identified DIFFERENT harness — real conflict.
+            return "live_harness_conflict", (
+                f"participant {orig_id!r}: pane {live_participant.tmux_pane!r} "
+                f"runs {pane_harness!r} not {live_participant.harness!r}"
+            )
 
         # DEAD retained row.
         # stale_live/live_harness_conflict states are not reachable here
@@ -1553,6 +1578,16 @@ async def restore_tree(  # noqa: PLR0912, PLR0915
 
         if report.new_participant_id is not None:
             id_map[orig_id] = report.new_participant_id
+        elif orig_id == creator_id and report.action == "failed":
+            # Creator failed verification but its DB row may still be live.
+            # If so, children can still find their real parent — map to the
+            # creator's original ID so descendants reconcile independently
+            # rather than being blind-skipped by the cascade.
+            creator_live = daemon.store.get_participant(orig_id)
+            if creator_live is not None and creator_live.status is not Status.DEAD:
+                id_map[orig_id] = orig_id
+            else:
+                id_map[orig_id] = None
         else:
             id_map[orig_id] = None
 
@@ -1572,31 +1607,59 @@ async def restore_tree(  # noqa: PLR0912, PLR0915
             break
 
         # Creator failure: mark remaining nodes as ancestor-skipped then return failed.
+        # Narrow the cascade: only skip descendants when the creator genuinely
+        # needed reconstruction (was dead / needed resume / respawn) and that
+        # failed. When the creator's DB row is still LIVE and it merely failed
+        # verification (e.g. harness conflict), its children still have their
+        # real parent — reconcile each descendant independently instead of
+        # blind-skipping them.
         if orig_id == creator_id and (
             report.action == "failed"
             or (report.action == "skipped" and report.classification != "completed")
         ):
-            # Mark all unprocessed nodes as ancestor-skipped.
-            creator_idx = restore_order.index(orig_id)
-            remaining = restore_order[creator_idx + 1 :]
-            for pending_id in remaining:
-                pending_recorded = nodes_by_id.get(pending_id) or _stub_node(pending_id)
-                pending_live = daemon.store.get_participant(pending_id)
-                skip = _make_skip_report(
-                    orig_id=pending_id,
-                    recorded=pending_recorded,
-                    live_participant=pending_live,
-                    original_parent_id=pending_recorded.get("parent_id"),
-                    reason=(
-                        f"creator {creator_id!r} was not restored "
-                        f"(action={report.action!r}); descendant skipped"
-                    ),
-                )
-                reports.append(skip)
-                progress[pending_id] = _report_to_progress(skip)
-            if not _persist_progress():
-                halt_reason = "lost restore claim while persisting creator-failure audit"
-            break
+            creator_live = daemon.store.get_participant(creator_id)
+            creator_is_live = creator_live is not None and creator_live.status is not Status.DEAD
+            if report.action == "failed" and creator_is_live:
+                # Creator is still live (failed verification, not reconstruction).
+                # Children still have their real parent; let the loop reconcile
+                # each descendant independently. Do NOT cascade-skip.
+                pass
+            else:
+                # Creator genuinely needed reconstruction and failed, or was
+                # skipped (work already done). Mark remaining nodes as
+                # ancestor-skipped. Classify each pending node first so the
+                # report states what it actually was, rather than asserting
+                # nothing.
+                creator_idx = restore_order.index(orig_id)
+                remaining = restore_order[creator_idx + 1 :]
+                for pending_id in remaining:
+                    pending_recorded = nodes_by_id.get(pending_id) or _stub_node(pending_id)
+                    pending_live = daemon.store.get_participant(pending_id)
+                    # Classify the pending node so the skip report carries
+                    # what it actually was (live, completed, etc.).
+                    pending_cls, _ = classify_node(
+                        pending_recorded,
+                        pending_live,
+                        live_jobs_by_handle,
+                        pane_info=_PANE_INFO_TMUX_UNAVAILABLE,
+                        revive_completed=revive_completed,
+                    )
+                    skip = _make_skip_report(
+                        orig_id=pending_id,
+                        recorded=pending_recorded,
+                        live_participant=pending_live,
+                        original_parent_id=pending_recorded.get("parent_id"),
+                        reason=(
+                            f"creator {creator_id!r} was not restored "
+                            f"(action={report.action!r}); descendant skipped "
+                            f"(was {pending_cls!r})"
+                        ),
+                    )
+                    reports.append(skip)
+                    progress[pending_id] = _report_to_progress(skip)
+                if not _persist_progress():
+                    halt_reason = "lost restore claim while persisting creator-failure audit"
+                break
 
     if halt_reason is not None:
         processed = {report.original_participant_id for report in reports}
