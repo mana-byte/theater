@@ -57,7 +57,7 @@ BASELINE = "0001"
 #: The latest revision. A legacy database is stamped at BASELINE and then
 #: upgraded to this; a fresh database lands here directly. Tests assert
 #: against this rather than hardcoding a revision string.
-HEAD = "0013"
+HEAD = "0014"
 RECEIPT_TOKEN_PREFIX = "receipt_token:"
 
 
