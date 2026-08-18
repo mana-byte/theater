@@ -48,6 +48,14 @@ def test_is_opaque_location_rejects_scheme_starting_with_digit():
     assert not is_opaque_location("1abc://session")
 
 
+def test_is_opaque_location_colon_suffixed_relative_path_is_accepted_false_positive():
+    # ``a://b`` is a legal relative POSIX path (a directory called ``a:``
+    # containing ``b``), but the scheme-detection rule treats it as opaque.
+    # This is the accepted collision documented in ``_OPAQUE_SCHEME_RE``'s
+    # comment — pinning it here so it is a deliberate decision, not a surprise.
+    assert is_opaque_location("a://b")
+
+
 # --- _canonical_location -----------------------------------------------------
 
 
