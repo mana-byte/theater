@@ -81,7 +81,7 @@ A plugin answers two unrelated questions, and since v1.6 they are two classes.
 class NovaHarness(Harness):
     name = "nova"                  # required
     binary = "nova"                # required
-    icon = "◈"                     # one character
+    icon = "◈"                     # one display cell
     aliases = ("nova-cli",)        # optional
 
     def __init__(self, root: Path | None = None):
@@ -131,34 +131,36 @@ detection chain finds it without further configuration.
 ### How a pane is matched to a harness
 
 When `theater adopt` runs, the foreground process is `theater` or `uv`, not
-the harness session that is its ancestor in the process tree. Detection walks
-three tiers, in order:
+the harness session that is its ancestor in the process tree. Detection
+works in two stages:
 
-1. **Exact match against `binary` plus `binaries`.** The pane's foreground
-   command basename is compared to the set `{harness.binary} | harness.binaries`
-   for every registered harness. Plugin-declared and free — no process listing
-   is needed.
+1. **String comparison against declared names.** The pane's foreground
+   command is compared to `{harness.binary} | harness.binaries` for every
+   registered harness. Three forms of the command are tried in the same
+   loop: the basename, the unwrapped basename (a leading `.` stripped and
+   a trailing `-wrapped` stripped — how Nix's `makeWrapper` renames
+   binaries, so `.claude-wrapped` unwraps to `claude`), and the raw command
+   string. Plugin-declared and free — no process listing is needed.
 
-2. **An unwrap convention.** The basename is stripped of a leading `.` and a
-   trailing `-wrapped` before the same comparison. This is how Nix's
-   `makeWrapper` renames binaries: `.claude-wrapped` unwraps to `claude`. The
-   convention is generic, not per-harness.
-
-3. **Fallback to process-tree `comm`.** If the foreground does not match, the
-   pane's root process `comm` is checked, then its descendants breadth-first.
-   This needs no declaration but costs a `ps` listing.
+2. **Process-tree fallback.** Only if the string comparison finds nothing,
+   the pane's root process `comm` is checked, then its descendants
+   breadth-first. This needs no declaration but costs a `ps` listing.
 
 One caveat matters in practice: the kernel caps a process name at 15 usable
 characters, so a long wrapper name is truncated before the unwrap convention
 sees it. `.opencode-wrapped` appears as `.opencode-wrapp`, and stripping the
 leading dot and trailing `-wrapped` from that does not yield `opencode`. A
 plugin whose wrapper name is long enough to truncate should declare the
-truncated string in `binaries` so tier 1 catches it.
+truncated string in `binaries` so stage 1 catches it.
 
-`icon` is exactly one character. A single glyph, not an image: terminal image
-protocols do not survive tmux. Width 1 so no listing reflows when a harness is
-added, and preferably a codepoint a default font has — a Nerd Font private-use
-glyph renders as an empty box for anyone who has not installed one.
+`icon` is one display cell, not one character. A wide emoji is refused
+because it would break column alignment in listings; a base character plus
+combining marks is fine because it occupies one cell. The loader also refuses
+any non-printable codepoint. The width is a conservative estimate from
+`unicodedata`, not an exact terminal measurement — a glyph that renders
+differently in someone's font will not be caught here, so prefer a codepoint
+a default font has. A Nerd Font private-use glyph renders as an empty box for
+anyone who has not installed one.
 
 `aliases` are other spellings that should resolve to `name` when an agent
 reports its own harness at registration. An agent that calls itself `nova-cli`
@@ -789,16 +791,17 @@ What that means in practice:
 - The first failure also emits an `agent.observation_error` bus event.
 
 The guide warned earlier that heuristic evidence is insufficient and named
-isolation, receipts, and process proof. Of those three, the one mechanism
-that is public and works today is **`LaunchPlan.session_id`**: when the CLI
-lets Theater choose or learn the native session id at launch, returning it
-on the launch plan is what makes the resulting attachment trusted. The
-spawner persists `session_correlation = exact` before the process starts, so
-the observer's source never has to guess from cwd during the creation race.
+isolated storage, receipts, and process proof. Of those three, the one
+mechanism that is public and works today is **`LaunchPlan.session_id`**: when
+the CLI lets Theater choose or learn the native session id at launch,
+returning it on the launch plan is what makes the resulting attachment
+trusted. The spawner persists `session_correlation = exact` before the
+process starts, so the observer's source never has to guess from cwd during
+the creation race.
 
-Receipt tokens and transcript isolation are internal daemon mechanisms
-currently being generalised for plugin use; they are not yet a supported
-extension point. Do not build a plugin that depends on them.
+Receipt tokens are an internal daemon mechanism not yet exposed as a
+supported plugin extension point. Do not build a plugin that depends on
+them.
 
 If your harness writes no transcript file, you have two options, and both
 change only the observer — `NovaHarness` above is already finished either
@@ -856,7 +859,7 @@ nothing anywhere saying so — is the defect this design exists to prevent.
 | an observer subclassing neither base | `…/nova.py: harness 'nova' has a NovaObserver observer, which does not subclass theater.harness.HarnessObserver` |
 | `name = "My Nova"` | `…/nova.py: harness name 'My Nova' must be lowercase letters, digits, '-' or '_'` |
 | `binary = ""` | `…/nova.py: harness 'nova' sets no binary to look for` |
-| `icon = "<>"` | `…/nova.py: harness 'nova' has icon '<>'; it must be exactly one character` |
+| `icon = "<>"` | `…/nova.py: harness 'nova' has icon '<>'; it must be exactly one display cell` |
 | an alias another harness owns | `…/nova.py claims alias 'mistral-vibe', which already resolves to 'vibe'` |
 
 These surface wherever the registry is built: `theater daemon`, and every CLI
@@ -924,9 +927,19 @@ trusted:
   raises `ValueError`, meaning "no operator-bindable transcript."
 
 A `TranscriptObserver` that knows how to list transcripts in its root
-overrides `transcript_candidates`. The daemon calls `admit_operator_candidate`
-when an operator runs `theater bind` to verify the candidate is real before
-promoting it to trusted.
+overrides both. The daemon calls `admit_operator_candidate` when an operator
+runs `theater bind` to verify the candidate is real before promoting it to
+trusted.
+
+The trap is that `TranscriptObserver` itself overrides neither. It inherits
+the `[]` default and the `ValueError`-raising default from `HarnessObserver`,
+even though it already knows how to find transcripts through `find_transcript`.
+Every built-in hand-rolls both methods. If you subclass
+`TranscriptObserver` and skip them, Theater's untrusted-transcript error
+text will tell the operator to run `theater candidates` and `theater bind` —
+and both will fail against your harness, because your observer returns
+nothing and admits nothing. The recovery commands are printed unconditionally;
+they are not a promise that your plugin can answer them.
 
 ### Other specialised hooks
 
