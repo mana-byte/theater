@@ -95,10 +95,12 @@ def test_same_location_opencode_regression_guard():
 
 def test_same_location_paths_resolve(tmp_path):
     a = tmp_path / "a.jsonl"
-    b = tmp_path / "a.jsonl"
     a.write_text("[]")
-    # Same file via different string forms — resolve should make them equal.
-    assert _same_location(str(a), str(b))
+    # Build the string manually so the redundant "." survives — Path normalises
+    # it away during construction, which would make this a tautology.
+    other = f"{tmp_path}/./a.jsonl"
+    assert str(a) != other
+    assert _same_location(str(a), other)
 
 
 def test_same_location_none_is_false():
