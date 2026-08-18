@@ -304,6 +304,18 @@ class Spawner:
         The participant row and any requested worktree are already created by
         this point; the honest claim is "before any launch-plan or token file
         is written and before tmux".
+
+        Known limitation: a plan rejected here can leave a newly created
+        *named* worktree's ``theater/named/<name>`` branch behind, because
+        named-worktree cleanup retains the branch by design (an AGENTS.md
+        invariant — other participants may have work on it), so that name
+        cannot be reused until a human deletes the branch. This requires a
+        malformed launch plan to trigger and cannot be improved while
+        ``_build_plan`` calls ``_has_live_cwd_sibling``, which reads
+        ``participant.cwd`` set by ``_prepare_worktree`` — moving the plan
+        build before the worktree would compute the ``isolate_transcript``
+        hint against the wrong cwd. The follow-up stack removes that hint
+        and will reorder then.
         """
         if plan.receipt_token_path is None:
             return None
