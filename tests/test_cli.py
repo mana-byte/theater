@@ -340,6 +340,76 @@ def test_harnesses_prefers_the_running_daemons_answer(monkeypatch, capsys):
     assert "vibe" not in out
 
 
+def test_harnesses_icon_column_pads_by_display_width(monkeypatch, capsys):
+    """An icon of base-plus-combining (2 codepoints, 1 cell) must produce the
+    same column offset as a single-codepoint icon (1 cell).  Padding by
+    codepoint count — ``f"{icon:<2}"`` — pads the combining sequence to 2
+    codepoints (no spaces), shifting every column after it left by one."""
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def call(self, method, **params):
+            assert method == "harnesses"
+            return [
+                {
+                    "name": "aaa",
+                    "icon": "\u273b",
+                    "binary": "aaa",
+                    "installed": True,
+                    "path": "/usr/bin/aaa",
+                    "source": "shipped",
+                },
+                {
+                    "name": "bbb",
+                    "icon": "e\u0301",
+                    "binary": "bbb",
+                    "installed": True,
+                    "path": "/usr/bin/bbb",
+                    "source": "shipped",
+                },
+            ]
+
+    monkeypatch.setattr(cli, "DaemonClient", FakeClient)
+    assert cli.cmd_harnesses(parse("harnesses")) == 0
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    row_aaa = lines[1]
+    row_bbb = lines[2]
+
+    # Literal expectations, derived by hand — not from pad_to_width.
+    # Icon column is 2 display cells + 1 separator space.
+    # "✻" is 1 cell → 1 padding space → prefix is "✻ " + separator = "✻  ".
+    # "e\u0301" is 1 cell → 1 padding space → prefix is "e\u0301 " + separator = "e\u0301  ".
+    assert row_aaa.startswith("\u273b  aaa")
+    assert row_bbb.startswith("e\u0301  bbb")
+
+    # The NAME column is 10 cells wide.  Both rows must have "shipped" at
+    # the same codepoint offset relative to the start of the row, because
+    # the icon prefix occupies the same number of *display cells* even
+    # though it occupies a different number of codepoints.  The prefix
+    # "✻  " is 3 codepoints; the prefix "e\u0301  " is 4 codepoints.  NAME
+    # is 10 + 1 separator = 11, so SOURCE starts at codepoint offset 14
+    # in row_aaa and 15 in row_bbb — but both show "shipped" at the same
+    # *display* column.
+    assert row_aaa[3 + 10 + 1 : 3 + 10 + 1 + 7] == "shipped"
+    assert row_bbb[4 + 10 + 1 : 4 + 10 + 1 + 7] == "shipped"
+
+    # The two prefixes have the same display width (3 cells each) even
+    # though they differ in codepoint count (3 vs 4).
+    from theater.formatting import display_width
+
+    assert display_width(row_aaa[: row_aaa.index("aaa")]) == 3
+    assert display_width(row_bbb[: row_bbb.index("bbb")]) == 3
+
+
 def test_the_harness_column_lines_up_across_header_rows_and_unmanaged():
     """The icon added a column; every row type has to shift by the same amount."""
     out = cli._format_ls(

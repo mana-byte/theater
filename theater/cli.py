@@ -31,6 +31,7 @@ from theater.formatting import (
     event_summary,
     event_who,
     flatten_tree,
+    pad_to_width,
     reach_mark,
     tier_mark,
     tilde,
@@ -737,13 +738,13 @@ def cmd_harnesses(args) -> int:
     if args.json:
         print(json.dumps(rows, indent=2))
         return 0
-    print(f"{'':<2} {'NAME':<10} {'SOURCE':<8} {'BINARY':<10} {'INSTALLED':<10} PATH")
+    print(f"{pad_to_width('', 2)} {'NAME':<10} {'SOURCE':<8} {'BINARY':<10} {'INSTALLED':<10} PATH")
     for r in rows:
         # A plugin that would not load has no binary to look for, so
         # "installed: no" would blame PATH for a syntax error. Say broken.
         mark = "broken" if r.get("error") else ("yes" if r["installed"] else "no")
         print(
-            f"{r['icon']:<2} {r['name']:<10} {r.get('source', '-'):<8} "
+            f"{pad_to_width(r['icon'], 2)} {r['name']:<10} {r.get('source', '-'):<8} "
             f"{r['binary'] or '-':<10} {mark:<10} "
             f"{tilde(r['path']) if r['path'] else '-'}"
         )
