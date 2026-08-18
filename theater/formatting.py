@@ -98,7 +98,7 @@ def pad_to_width(text: str, column: int) -> str:
     """Left-justify *text* to *column* terminal cells, padding with spaces.
 
     Unlike ``str.ljust`` (which counts codepoints), this pads by display
-    width so a base-plus-comining icon that occupies one cell but two
+    width so a base-plus-combining icon that occupies one cell but two
     codepoints gets the same padding as a single-codepoint icon.
     """
     cells = display_width(text)
