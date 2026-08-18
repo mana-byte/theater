@@ -136,6 +136,7 @@ from theater.models import BadRequest, Participant, Status, Tier
 from theater.provenance import is_trusted_provenance
 
 if TYPE_CHECKING:
+    from theater import proc
     from theater.daemon.server import Daemon
 
 logger = logging.getLogger("theater.recovery")
@@ -728,13 +729,41 @@ def classify_node(  # noqa: PLR0912
                     f"confirmed gone by tmux"
                 )
             assert isinstance(pane_info, dict)
-            pane_harness = pane_info.get("harness")
-            if pane_harness and pane_harness != live_participant.harness:
+            # Consume the pre-detected harness from pane_info directly —
+            # _get_pane_info already ran detect_harness, so re-detecting
+            # here would spend up to two subprocess spawns (proc.comm +
+            # proc.descendants) on the "unknown" fallback path, twice per
+            # node, stalling the daemon event loop.  compare_detected_harness
+            # is the pure judgement with no I/O.
+            from theater.daemon.harness_detect import (
+                PaneHarnessVerdict,
+                compare_detected_harness,
+            )
+
+            raw_command = pane_info.get("command", "")
+            detected_harness = pane_info.get("harness", "unknown")
+            verdict = compare_detected_harness(
+                live_participant.harness, detected_harness, raw_command
+            )
+            if verdict is PaneHarnessVerdict.MATCH:
+                return "live", "participant is live with tmux-verified pane"
+            if verdict is PaneHarnessVerdict.CONFLICT:
                 return "live_harness_conflict", (
                     f"participant {orig_id!r}: pane {live_participant.tmux_pane!r} "
-                    f"runs {pane_harness!r} not {live_participant.harness!r}"
+                    f"runs {detected_harness!r} not {live_participant.harness!r}"
                 )
-            return "live", "participant is live with tmux-verified pane"
+            if verdict is PaneHarnessVerdict.HARNESS_GONE:
+                return "stale_live", (
+                    f"participant {orig_id!r}: pane {live_participant.tmux_pane!r} "
+                    f"shows a shell ({raw_command!r}); harness likely exited"
+                )
+            # UNDETERMINED: detection returned "unknown" with a non-shell
+            # command.  Absence of evidence, not evidence of a foreign
+            # harness — trust the DB row (wrapper rename, etc.).
+            return "live", (
+                f"participant {orig_id!r}: pane harness detection returned 'unknown' "
+                f"(command {raw_command!r}); trusting DB row"
+            )
 
         # DEAD retained row.
         # stale_live/live_harness_conflict states are not reachable here
@@ -846,13 +875,21 @@ def _classify_as_dead(
 # ---- pane verification helpers -----------------------------------------------
 
 
-async def _get_pane_info(daemon: Daemon, pane_id: str | None) -> dict | object | None:
+async def _get_pane_info(
+    daemon: Daemon,
+    pane_id: str | None,
+    snapshot: proc.ProcessSnapshot | None = None,
+) -> dict | object | None:
     """Query tmux for pane details.
 
     Returns:
     - dict with 'harness' key: pane exists and harness detected.
     - None: tmux available but pane not found (gone).
     - _PANE_INFO_TMUX_UNAVAILABLE: tmux not queryable; caller trusts DB row.
+
+    ``snapshot``: a process-table snapshot captured once by the caller so a
+    multi-node restore pays one ``ps`` instead of one per pane.  See
+    ``restore_tree``.
     """
     if not pane_id:
         return None
@@ -868,8 +905,12 @@ async def _get_pane_info(daemon: Daemon, pane_id: str | None) -> dict | object |
     except Exception:
         return _PANE_INFO_TMUX_UNAVAILABLE
     else:
-        harness = detect_harness(pane.current_command, pane.pane_pid)
-        return {"pane_id": pane_id, "harness": harness, "command": pane.current_command}
+        return {
+            "pane_id": pane_id,
+            "harness": detect_harness(pane.current_command, pane.pane_pid, snapshot),
+            "command": pane.current_command,
+            "pane_pid": pane.pane_pid,
+        }
 
 
 # ---- BFS order ---------------------------------------------------------------
@@ -1369,12 +1410,33 @@ async def restore_tree(  # noqa: PLR0912, PLR0915
         r._mapping["handle"]: {k: r._mapping[k] for k in _SNAPSHOT_JOB_KEYS} for r in live_rows
     }
 
+    # Capture one process-table snapshot off the event loop and thread it
+    # through _get_pane_info → detect_harness so an N-node tree pays one ps
+    # instead of N.  Only live nodes with panes need it; if there are none,
+    # skip the capture entirely.
+    from theater import proc
+
+    needs_snapshot = False
+    for pid in all_ids:
+        p = daemon.store.get_participant(pid)
+        if p is not None and p.status is not Status.DEAD and p.tmux_pane:
+            needs_snapshot = True
+            break
+    proc_snapshot = (
+        await asyncio.to_thread(proc.ProcessSnapshot.capture) if needs_snapshot else None
+    )
+
     id_map: dict[str, str | None] = {}
     reports: list[NodeRestoreReport] = []
     restore_order = _bfs_order(creator_id, nodes_by_id)
     creator_report: NodeRestoreReport | None = None
     progress: dict[str, dict] = {}
     halt_reason: str | None = None
+    #: Tracks whether the creator's failure was a harness-verification rejection
+    #: (live_harness_conflict → failed) rather than a reconstruction failure.
+    #: Set in the loop body when classify_node returns live_harness_conflict;
+    #: read by the cascade gate and the id_map block.
+    _creator_harness_conflict = False
 
     def _persist_progress() -> bool:
         """Persist progress blob. Returns False if the token-gated write fails."""
@@ -1390,7 +1452,9 @@ async def restore_tree(  # noqa: PLR0912, PLR0915
         live_participant = daemon.store.get_participant(orig_id)
         pane_info_result: dict | object | None = _PANE_INFO_TMUX_UNAVAILABLE
         if live_participant is not None and live_participant.tmux_pane:
-            pane_info_result = await _get_pane_info(daemon, live_participant.tmux_pane)
+            pane_info_result = await _get_pane_info(
+                daemon, live_participant.tmux_pane, proc_snapshot
+            )
 
         classification, reason = classify_node(
             recorded,
@@ -1420,6 +1484,11 @@ async def restore_tree(  # noqa: PLR0912, PLR0915
                 revive_completed=revive_completed,
             )
         elif classification == "live_harness_conflict":
+            # Preserve the original classification for the cascade gate below.
+            # The report will carry ``failed`` as its classification (the node
+            # is unrestorable), but the non-cascade branch needs to know the
+            # failure was a verification rejection, not a reconstruction failure.
+            _creator_harness_conflict = True
             classification = "failed"
             reason = f"{reason}; refusing to touch or duplicate a mismatched live pane"
         elif classification == "stale_live":
@@ -1553,6 +1622,20 @@ async def restore_tree(  # noqa: PLR0912, PLR0915
 
         if report.new_participant_id is not None:
             id_map[orig_id] = report.new_participant_id
+        elif orig_id == creator_id and _creator_harness_conflict:
+            # Creator failed harness verification but its DB row is still
+            # live (live_harness_conflict → failed, without touching the row).
+            # Children still have their real parent — map to the creator's
+            # original ID so descendants reconcile independently rather than
+            # being blind-skipped by the cascade.  Other failure classifications
+            # (live_lineage_conflict, reparent failure, stale_live → dead)
+            # do NOT keep the creator's row usable, so they fall through to
+            # ``id_map = None``.
+            creator_live = daemon.store.get_participant(orig_id)
+            if creator_live is not None and creator_live.status is not Status.DEAD:
+                id_map[orig_id] = orig_id
+            else:
+                id_map[orig_id] = None
         else:
             id_map[orig_id] = None
 
@@ -1572,31 +1655,73 @@ async def restore_tree(  # noqa: PLR0912, PLR0915
             break
 
         # Creator failure: mark remaining nodes as ancestor-skipped then return failed.
+        # Narrow the cascade: only skip descendants when the creator genuinely
+        # needed reconstruction (was dead / needed resume / respawn) and that
+        # failed, OR when the creator was skipped (work already done).  When
+        # the creator's DB row is still LIVE and it merely failed harness
+        # verification (``live_harness_conflict``), its children still have
+        # their real parent — reconcile each descendant independently instead
+        # of blind-skipping them.
+        #
+        # Reachability note: the only live-creator failure classification that
+        # keeps the DB row alive is ``live_harness_conflict`` (turned into
+        # ``failed`` in restore_tree without touching the row).  Other
+        # live-creator failures — ``live_lineage_conflict`` (different live
+        # parent) and reparent failure — are unreachable for the creator
+        # specifically: its ``new_parent_id`` is set to ``live_cr.parent_id``
+        # at the top of the loop, so the reparent block's
+        # ``new_parent_id not in (live_participant.parent_id, orig_id)`` guard
+        # is always False.  ``stale_live`` transitions the row to DEAD before
+        # failing, so it falls into the dead-creator branch below.  We gate
+        # explicitly on ``live_harness_conflict`` rather than on "any failed
+        # + live" so an edit that makes one of the unreachable paths reachable
+        # does not silently swallow it into the non-cascade branch.
         if orig_id == creator_id and (
             report.action == "failed"
             or (report.action == "skipped" and report.classification != "completed")
         ):
-            # Mark all unprocessed nodes as ancestor-skipped.
-            creator_idx = restore_order.index(orig_id)
-            remaining = restore_order[creator_idx + 1 :]
-            for pending_id in remaining:
-                pending_recorded = nodes_by_id.get(pending_id) or _stub_node(pending_id)
-                pending_live = daemon.store.get_participant(pending_id)
-                skip = _make_skip_report(
-                    orig_id=pending_id,
-                    recorded=pending_recorded,
-                    live_participant=pending_live,
-                    original_parent_id=pending_recorded.get("parent_id"),
-                    reason=(
-                        f"creator {creator_id!r} was not restored "
-                        f"(action={report.action!r}); descendant skipped"
-                    ),
-                )
-                reports.append(skip)
-                progress[pending_id] = _report_to_progress(skip)
-            if not _persist_progress():
-                halt_reason = "lost restore claim while persisting creator-failure audit"
-            break
+            if _creator_harness_conflict:
+                # Creator is still live (failed harness verification, not
+                # reconstruction).  Children still have their real parent; let
+                # the loop reconcile each descendant independently.  Do NOT
+                # cascade-skip.
+                pass
+            else:
+                # Creator genuinely needed reconstruction and failed, or was
+                # skipped (work already done). Mark remaining nodes as
+                # ancestor-skipped. Classify each pending node first so the
+                # report states what it actually was, rather than asserting
+                # nothing.
+                creator_idx = restore_order.index(orig_id)
+                remaining = restore_order[creator_idx + 1 :]
+                for pending_id in remaining:
+                    pending_recorded = nodes_by_id.get(pending_id) or _stub_node(pending_id)
+                    pending_live = daemon.store.get_participant(pending_id)
+                    # Classify the pending node so the skip report carries
+                    # what it actually was (live, completed, etc.).
+                    pending_cls, _ = classify_node(
+                        pending_recorded,
+                        pending_live,
+                        live_jobs_by_handle,
+                        pane_info=_PANE_INFO_TMUX_UNAVAILABLE,
+                        revive_completed=revive_completed,
+                    )
+                    skip = _make_skip_report(
+                        orig_id=pending_id,
+                        recorded=pending_recorded,
+                        live_participant=pending_live,
+                        original_parent_id=pending_recorded.get("parent_id"),
+                        reason=(
+                            f"creator {creator_id!r} was not restored "
+                            f"(action={report.action!r}); descendant skipped "
+                            f"(was {pending_cls!r})"
+                        ),
+                    )
+                    reports.append(skip)
+                    progress[pending_id] = _report_to_progress(skip)
+                if not _persist_progress():
+                    halt_reason = "lost restore claim while persisting creator-failure audit"
+                break
 
     if halt_reason is not None:
         processed = {report.original_participant_id for report in reports}

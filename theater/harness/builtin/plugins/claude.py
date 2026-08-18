@@ -228,6 +228,11 @@ def _relativise(path: str, cwd: str | None) -> str | None:
 class ClaudeCodeHarness(Harness):
     name = "claude"
     binary = "claude"
+    #: Wrapper-renamed spellings for the unmanaged-pane sweep (``known_binaries``).
+    #: Not load-bearing for detection: ``match_binary``'s generic ``_unwrap``
+    #: already normalises ``.claude-wrapped`` → ``claude``.  Kept so a pane
+    #: running the wrapped binary is surfaced by the sweep.
+    binaries = frozenset({".claude-wrapped", "claude-wrapped"})
     #: Claude Code prints this same spoked asterisk as its own spinner glyph,
     #: so it reads as the product's mark rather than an arbitrary bullet.
     icon = "✻"

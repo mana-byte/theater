@@ -236,6 +236,12 @@ class Harness(ABC):
     name: str
     #: Executable to look for on PATH.
     binary: str
+    #: Binary basenames this harness can be recognised under, including
+    #: wrapper-renamed variants (e.g. nixpkgs ``makeWrapper`` produces
+    #: ``.claude-wrapped``). The primary ``binary`` is ALWAYS included
+    #: regardless of what this set contains; this is for additional names only.
+    #: Per AGENTS.md, per-harness knowledge belongs in the plugin, not the daemon.
+    binaries: frozenset[str] = frozenset()
     #: A single glyph: terminal image protocols do not survive tmux. Kept to
     #: width 1 so no listing reflows, and from symbols a default font has rather
     #: than a Nerd Font private-use codepoint, which renders as a blank box.

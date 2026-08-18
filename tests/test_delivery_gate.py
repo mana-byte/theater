@@ -175,7 +175,8 @@ async def test_a_shell_with_the_harness_still_below_it_delivers(
 
     target = await _target(client, fake_tmux, daemon, command="vibe")
     fake_tmux.add_pane("%1", command="zsh", pid=4242)
-    monkeypatch.setattr(methods_mod, "detect_harness", lambda cmd, pid: "vibe")
+    # The send path calls detect_harness by its imported name in methods.py.
+    monkeypatch.setattr(methods_mod, "detect_harness", lambda cmd, pid, snapshot=None: "vibe")
 
     await client.call("send", target=target["id"], prompt="hi")
 

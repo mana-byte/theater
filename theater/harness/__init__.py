@@ -396,9 +396,14 @@ def known_binaries() -> set[str]:
 
     Used by the unmanaged-pane sweep: a pane whose current command matches one
     of these is a harness the daemon can observe if only it knew the session,
-    so it should be surfaced rather than invisible.
+    so it should be surfaced rather than invisible. Includes plugin-declared
+    ``binaries`` aliases (e.g. wrapper-renamed binaries) when set.
     """
-    return {h.binary for h in HARNESSES.values()}
+    result: set[str] = set()
+    for h in HARNESSES.values():
+        result.add(h.binary)
+        result |= h.binaries
+    return result
 
 
 __all__ = [
