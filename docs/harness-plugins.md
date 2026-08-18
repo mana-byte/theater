@@ -981,10 +981,10 @@ two failure modes with different severity:
 |---|---|
 | an alias another harness owns | `…/nova.py claims alias 'mistral-vibe', which already resolves to 'vibe'` |
 
-Load failures and collisions surface wherever the registry is built: `theater
-daemon` and `theater harnesses`. (Commands that do not install plugins, like
-`theater config`, read only the TOML file and never reach the loader.) Check
-your plugin with the cheapest one:
+Load failures and collisions surface wherever the registry is built — every
+CLI command except `theater config`, which reads only the TOML file and never
+reaches the loader because it must be able to explain a broken config file.
+Check your plugin with the cheapest one:
 
 ```
 theater harnesses
