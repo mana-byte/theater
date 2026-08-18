@@ -69,6 +69,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from theater import timing
 from theater.config import ObserverSection
 from theater.daemon.registry import Registry
 from theater.harness import (
@@ -763,6 +764,7 @@ class Observer:
             watch = self._watch if observer.has_transcript else self._watch_screen
             if observer.has_transcript:
                 self._restore_transcript_identity_loss(pid)
+            timing.ready_lag("observer.watch", pid, p.created_at, harness=p.harness)
             self._tasks[pid] = asyncio.create_task(watch(pid, p.harness))
 
     def _warn_unobservable(self, pid: str, p) -> None:
@@ -1615,6 +1617,7 @@ class Observer:
                 not is_trusted_provenance(prior) or provenance_at_least(incoming, prior)
             )
             if session_id and p.session_id != session_id and can_update_identity:
+                timing.ready_lag("observer.attach", pid, p.created_at, harness=p.harness)
                 p.session_id = session_id
                 p.session_correlation = attached.correlation
                 changed = True

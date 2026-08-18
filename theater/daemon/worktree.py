@@ -37,9 +37,21 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from theater import timing
 from theater.models import BadRequest
 
 logger = logging.getLogger("theater.worktree")
+
+
+def _git(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
+    """Run and time a git command."""
+    with timing.span(
+        f"git.{'-'.join(argv[1:3])}", slow_ms=timing.GIT_MS, cwd=kwargs.get("cwd")
+    ) as sp:
+        proc = subprocess.run(argv, **kwargs)  # noqa: PLW1510  (callers pass check=)
+        sp["rc"] = proc.returncode
+        return proc
+
 
 #: Branch prefix for all Theater-managed worktrees.
 BRANCH_PREFIX = "theater/"
@@ -121,7 +133,7 @@ def validate_name(name: str) -> None:
     # trailing dots, repeated '..', '.lock' suffixes, and other ref-format
     # rules the regex above cannot enforce.
     branch = named_branch_name(name)
-    result = subprocess.run(
+    result = _git(
         ["git", "check-ref-format", "--branch", branch],
         check=False,
         capture_output=True,
@@ -138,7 +150,7 @@ def validate_name(name: str) -> None:
 def is_git_repo(path: str) -> bool:
     """Is `path` inside a git repo?"""
     try:
-        result = subprocess.run(
+        result = _git(
             ["git", "rev-parse", "--git-dir"],
             cwd=path,
             check=False,
@@ -160,7 +172,7 @@ def repo_root(path: str) -> str | None:
     :func:`main_repo_root` when you need the shared root.
     """
     try:
-        result = subprocess.run(
+        result = _git(
             ["git", "rev-parse", "--show-toplevel"],
             cwd=path,
             check=False,
@@ -189,7 +201,7 @@ def main_repo_root(path: str, child_id: str | None = None) -> str | None:
     guarantees, provided *child_id* is given.
     """
     try:
-        result = subprocess.run(
+        result = _git(
             ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
             cwd=path,
             check=False,
@@ -246,7 +258,7 @@ def create_worktree(*, repo_root: str, child_id: str, base_branch: str | None = 
     branch = branch_name(child_id)
     wt_path = worktree_path(repo_root, child_id)
 
-    check = subprocess.run(
+    check = _git(
         ["git", "rev-parse", "--verify", branch],
         cwd=repo_root,
         check=False,
@@ -261,7 +273,7 @@ def create_worktree(*, repo_root: str, child_id: str, base_branch: str | None = 
     if base_branch:
         args.append(base_branch)
 
-    result = subprocess.run(
+    result = _git(
         args,
         cwd=repo_root,
         check=False,
@@ -330,7 +342,7 @@ def remove_worktree(
     # in which case we prune the stale admin record and continue to
     # branch deletion. A genuine git error (corrupt metadata) means
     # pruning won't help, but we still try branch deletion.
-    wt_result = subprocess.run(
+    wt_result = _git(
         ["git", "worktree", "remove", "--force", wt_path],
         cwd=real_root,
         check=False,
@@ -345,7 +357,7 @@ def remove_worktree(
         # so the branch is not "checked out" in a dead worktree.
         stderr = wt_result.stderr.strip()
         logger.warning("git worktree remove failed for %s: %s", child_id, stderr)
-        prune_result = subprocess.run(
+        prune_result = _git(
             ["git", "worktree", "prune", "--verbose"],
             cwd=real_root,
             check=False,
@@ -371,7 +383,7 @@ def remove_worktree(
     # gone, that is the desired end state.
     branch_removed = False
     if delete_branch:
-        br_result = subprocess.run(
+        br_result = _git(
             ["git", "branch", "-D", branch],
             cwd=real_root,
             check=False,
@@ -385,7 +397,7 @@ def remove_worktree(
             stderr = br_result.stderr.strip()
             # git branch -D returns nonzero if the branch doesn't exist.
             # If rev-parse can't find it, it's already gone — success.
-            verify = subprocess.run(
+            verify = _git(
                 ["git", "rev-parse", "--verify", branch],
                 cwd=real_root,
                 check=False,
@@ -452,7 +464,7 @@ def create_named_worktree(
     branch = named_branch_name(name)
     wt_path = named_worktree_path(repo_root, name)
 
-    check = subprocess.run(
+    check = _git(
         ["git", "rev-parse", "--verify", branch],
         cwd=repo_root,
         check=False,
@@ -476,7 +488,7 @@ def create_named_worktree(
     if base_branch:
         args.append(base_branch)
 
-    result = subprocess.run(
+    result = _git(
         args,
         cwd=repo_root,
         check=False,
@@ -549,7 +561,7 @@ def verify_named_worktree(
         )
 
     # Verify the expected branch is checked out in the worktree.
-    result = subprocess.run(
+    result = _git(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
         cwd=expected_path,
         check=False,
@@ -591,7 +603,7 @@ def remove_named_worktree(
     real_root = main_repo_root(repo_root) or repo_root
     wt_path = named_worktree_path(real_root, name)
 
-    wt_result = subprocess.run(
+    wt_result = _git(
         ["git", "worktree", "remove", "--force", wt_path],
         cwd=real_root,
         check=False,
@@ -604,7 +616,7 @@ def remove_named_worktree(
     if not worktree_removed:
         stderr = wt_result.stderr.strip()
         logger.warning("git worktree remove failed for named worktree %s: %s", name, stderr)
-        prune_result = subprocess.run(
+        prune_result = _git(
             ["git", "worktree", "prune", "--verbose"],
             cwd=real_root,
             check=False,
@@ -625,7 +637,7 @@ def remove_named_worktree(
 
     branch_removed = False
     if delete_branch:
-        br_result = subprocess.run(
+        br_result = _git(
             ["git", "branch", "-D", branch],
             cwd=real_root,
             check=False,
@@ -637,7 +649,7 @@ def remove_named_worktree(
 
         if not branch_removed:
             stderr = br_result.stderr.strip()
-            verify = subprocess.run(
+            verify = _git(
                 ["git", "rev-parse", "--verify", branch],
                 cwd=real_root,
                 check=False,

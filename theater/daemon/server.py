@@ -20,11 +20,12 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import signal
 import socket as _socket
 
 from theater import harness as harness_registry
-from theater import paths, protocol
+from theater import paths, protocol, timing
 from theater.config import Config
 from theater.config import load as load_config
 
@@ -122,6 +123,7 @@ class Daemon:
             self._server: asyncio.Server | None = None
             self._reaper: asyncio.Task | None = None
             self._gc: asyncio.Task | None = None
+            self._lag: asyncio.Task | None = None
             #: Participant ids whose kill is in flight. While a pid is in
             #: here, the reaper skips it when assigning CRASHED — the
             #: explicit-kill path must win the first-terminal-write race so
@@ -202,6 +204,7 @@ class Daemon:
         await self._reconcile()
         self._init_send_seq()
         self._reaper = asyncio.create_task(self._reap_loop())
+        self._lag = asyncio.create_task(timing.lag_monitor(self._stopping))
         if self.config.retention.enabled:
             self._gc = asyncio.create_task(self._gc_loop())
         self.observer.start()
@@ -298,6 +301,10 @@ class Daemon:
             self._gc.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._gc
+        if self._lag:
+            self._lag.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._lag
         for task in list(self._conns):
             task.cancel()
         if self._conns:
@@ -533,8 +540,11 @@ class Daemon:
         if handler is None:
             return protocol.err(req_id, "unknown_method", f"no method {name!r}")
 
+        # `jobs.await` is exempt because blocking is what it is *for*.
+        slow_ms = math.inf if name == "jobs.await" else timing.DEFAULT_SLOW_MS
         try:
-            result = await handler(self, params)
+            with timing.span(f"rpc.{name}", slow_ms=slow_ms, caller=params.get("caller_id")):
+                result = await handler(self, params)
         except TheaterError as exc:
             return protocol.err(req_id, exc.code, str(exc))
         except Exception as exc:

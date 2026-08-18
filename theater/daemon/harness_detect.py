@@ -35,7 +35,9 @@ class PaneHarnessVerdict(StrEnum):
     HARNESS_GONE = "harness_gone"
 
 
-def detect_harness(pane_command: str, pane_pid: int) -> str:
+def detect_harness(
+    pane_command: str, pane_pid: int, snapshot: proc.ProcessSnapshot | None = None
+) -> str:
     """Map a pane to a canonical harness name, or 'unknown'.
 
     `pane_current_command` is the instantaneous foreground process — which,
@@ -50,6 +52,12 @@ def detect_harness(pane_command: str, pane_pid: int) -> str:
     harness binary. The pane's shell spawned `vibe`, which spawned the bash
     tool running `theater adopt` — so `vibe` is in the tree even though it
     is not the foreground leaf.
+
+    A caller checking several panes in one pass (the unmanaged sweep, a
+    tree restore) may pass a `snapshot` captured once up front, so this walk
+    costs no `ps` of its own. Omit it — the default — and a descendant walk
+    here captures a fresh one, which is what single-pane callers like `adopt`
+    and the delivery gate's stale-target check need.
     """
     name = match_binary(pane_command, HARNESSES)
     if name:
@@ -59,13 +67,26 @@ def detect_harness(pane_command: str, pane_pid: int) -> str:
     # it directly before the descendant walk.  This closes the false-negative
     # where the foreground is a tool subprocess (not the harness, not a
     # descendant) and detection would otherwise return "unknown".
+    #
+    # ``ProcessSnapshot._children`` is keyed parent → [(child, comm)], so a
+    # root pid's OWN comm is not derivable from the snapshot.  The root check
+    # therefore still costs ``proc.comm`` — one ``ps`` — even when a snapshot
+    # is supplied.  Widening ``ProcessSnapshot`` to carry root comms would
+    # mean touching a data structure main just landed, from a branch main
+    # has not seen — a second conflict.  The one ``ps`` is cheap and runs
+    # off the event loop when the caller captures the snapshot via
+    # ``asyncio.to_thread``.
     if pane_pid > 0:
         root_comm = proc.comm(pane_pid)
         if root_comm:
             name = match_binary(root_comm, HARNESSES)
             if name:
                 return name
-        for comm in descendant_comms(pane_pid):
+        if snapshot is not None:
+            comms = descendant_comms(pane_pid, snapshot)
+        else:
+            comms = descendant_comms(pane_pid)
+        for comm in comms:
             name = match_binary(comm, HARNESSES)
             if name:
                 return name
@@ -129,6 +150,7 @@ def compare_pane_harness(
     recorded_harness: str,
     pane_current_command: str,
     pane_pid: int,
+    snapshot: proc.ProcessSnapshot | None = None,
 ) -> PaneHarnessVerdict:
     """One-call convenience: detect then judge.
 
@@ -138,7 +160,7 @@ def compare_pane_harness(
     detection has already been done (e.g. ``pane_info["harness"]`` from
     ``_get_pane_info``) to avoid a redundant subprocess spawn.
     """
-    detected = detect_harness(pane_current_command, pane_pid)
+    detected = detect_harness(pane_current_command, pane_pid, snapshot)
     return compare_detected_harness(recorded_harness, detected, pane_current_command)
 
 
@@ -179,11 +201,15 @@ def _unwrap(basename: str) -> str:
     return name
 
 
-def descendant_comms(root_pid: int) -> list[str]:
+def descendant_comms(root_pid: int, snapshot: proc.ProcessSnapshot | None = None) -> list[str]:
     """Process names of root_pid's descendants, breadth-first.
 
     Uses `ps` rather than /proc or psutil to stay dependency-free. The pane's
     shell spawned `vibe`, which spawned the bash tool running `theater adopt`
     — so `vibe` is in the tree even though it is not the foreground leaf.
+
+    Walks a supplied `snapshot` if given, rather than capturing a fresh one —
+    the caller already paid for the `ps` and this walk is nearly free.
     """
-    return [comm for _pid, comm in proc.descendants(root_pid)]
+    pairs = snapshot.descendants(root_pid) if snapshot is not None else proc.descendants(root_pid)
+    return [comm for _pid, comm in pairs]

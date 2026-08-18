@@ -136,6 +136,7 @@ from theater.models import BadRequest, Participant, Status, Tier
 from theater.provenance import is_trusted_provenance
 
 if TYPE_CHECKING:
+    from theater import proc
     from theater.daemon.server import Daemon
 
 logger = logging.getLogger("theater.recovery")
@@ -874,13 +875,21 @@ def _classify_as_dead(
 # ---- pane verification helpers -----------------------------------------------
 
 
-async def _get_pane_info(daemon: Daemon, pane_id: str | None) -> dict | object | None:
+async def _get_pane_info(
+    daemon: Daemon,
+    pane_id: str | None,
+    snapshot: proc.ProcessSnapshot | None = None,
+) -> dict | object | None:
     """Query tmux for pane details.
 
     Returns:
     - dict with 'harness' key: pane exists and harness detected.
     - None: tmux available but pane not found (gone).
     - _PANE_INFO_TMUX_UNAVAILABLE: tmux not queryable; caller trusts DB row.
+
+    ``snapshot``: a process-table snapshot captured once by the caller so a
+    multi-node restore pays one ``ps`` instead of one per pane.  See
+    ``restore_tree``.
     """
     if not pane_id:
         return None
@@ -898,7 +907,7 @@ async def _get_pane_info(daemon: Daemon, pane_id: str | None) -> dict | object |
     else:
         return {
             "pane_id": pane_id,
-            "harness": detect_harness(pane.current_command, pane.pane_pid),
+            "harness": detect_harness(pane.current_command, pane.pane_pid, snapshot),
             "command": pane.current_command,
             "pane_pid": pane.pane_pid,
         }
@@ -1401,6 +1410,22 @@ async def restore_tree(  # noqa: PLR0912, PLR0915
         r._mapping["handle"]: {k: r._mapping[k] for k in _SNAPSHOT_JOB_KEYS} for r in live_rows
     }
 
+    # Capture one process-table snapshot off the event loop and thread it
+    # through _get_pane_info → detect_harness so an N-node tree pays one ps
+    # instead of N.  Only live nodes with panes need it; if there are none,
+    # skip the capture entirely.
+    from theater import proc
+
+    needs_snapshot = False
+    for pid in all_ids:
+        p = daemon.store.get_participant(pid)
+        if p is not None and p.status is not Status.DEAD and p.tmux_pane:
+            needs_snapshot = True
+            break
+    proc_snapshot = (
+        await asyncio.to_thread(proc.ProcessSnapshot.capture) if needs_snapshot else None
+    )
+
     id_map: dict[str, str | None] = {}
     reports: list[NodeRestoreReport] = []
     restore_order = _bfs_order(creator_id, nodes_by_id)
@@ -1427,7 +1452,9 @@ async def restore_tree(  # noqa: PLR0912, PLR0915
         live_participant = daemon.store.get_participant(orig_id)
         pane_info_result: dict | object | None = _PANE_INFO_TMUX_UNAVAILABLE
         if live_participant is not None and live_participant.tmux_pane:
-            pane_info_result = await _get_pane_info(daemon, live_participant.tmux_pane)
+            pane_info_result = await _get_pane_info(
+                daemon, live_participant.tmux_pane, proc_snapshot
+            )
 
         classification, reason = classify_node(
             recorded,

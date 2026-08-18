@@ -28,7 +28,7 @@ import shutil
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from theater import paths
+from theater import paths, timing
 from theater.daemon import worktree as worktree_mod
 from theater.daemon.registry import Registry
 from theater.harness import check_model, check_reasoning, check_resume, plan_launch
@@ -126,9 +126,11 @@ class Spawner:
         )
 
         try:
-            child_cwd = self._prepare_worktree(req, participant)
+            with timing.span("spawn.worktree", id=participant.id, kind=req.worktree or None):
+                child_cwd = self._prepare_worktree(req, participant)
             plan = self._build_plan(req, participant, resume_domain)
-            self._record_launch_provenance(req, participant)
+            with timing.span("spawn.provenance", id=participant.id):
+                self._record_launch_provenance(req, participant)
             self._record_launch_identity(participant, plan)
 
             # Capture the predecessor's transcript stream floor at the last
@@ -179,14 +181,15 @@ class Spawner:
         """
         participant = reservation.participant
         try:
-            pane = await tmux.new_window(
-                session=reservation.session,
-                name=reservation.name,
-                cwd=reservation.child_cwd,
-                command=reservation.plan.argv,
-                env={**reservation.plan.env, "THEATER_ID": participant.id},
-                background=reservation.req.background,
-            )
+            with timing.span("spawn.launch", id=participant.id, harness=participant.harness):
+                pane = await tmux.new_window(
+                    session=reservation.session,
+                    name=reservation.name,
+                    cwd=reservation.child_cwd,
+                    command=reservation.plan.argv,
+                    env={**reservation.plan.env, "THEATER_ID": participant.id},
+                    background=reservation.req.background,
+                )
         except Exception:
             self.cleanup_reservation(participant)
             raise
@@ -741,21 +744,24 @@ class Spawner:
         """
         p = self.registry.get(participant_id)
         if p.tmux_pane:
-            await tmux.kill_pane(p.tmux_pane)
-            # Confirm the pane is gone before marking the record dead.
-            # `kill_pane` is fire-and-forget (check=False); a pane that
-            # survives and is marked dead becomes a ghost the unmanaged
-            # sweep draws back as a row the UI cannot kill.
-            for _ in range(self.KILL_POLL_ATTEMPTS):
-                info = await tmux.pane_info(p.tmux_pane)
-                if info is None:
-                    break
-                await asyncio.sleep(self.KILL_POLL_INTERVAL)
-            else:
-                raise TheaterError(
-                    f"pane {p.tmux_pane} of {participant_id!r} survived "
-                    f"kill-pane; record left alive to avoid a ghost"
-                )
+            # Separate confirmation retries from tmux command latency.
+            with timing.span("kill.pane", id=p.id, pane=p.tmux_pane) as sp:
+                await tmux.kill_pane(p.tmux_pane)
+                # Confirm the pane is gone before marking the record dead.
+                # `kill_pane` is fire-and-forget (check=False); a pane that
+                # survives and is marked dead becomes a ghost the unmanaged
+                # sweep draws back as a row the UI cannot kill.
+                for attempt in range(self.KILL_POLL_ATTEMPTS):
+                    sp["attempts"] = attempt + 1
+                    info = await tmux.pane_info(p.tmux_pane)
+                    if info is None:
+                        break
+                    await asyncio.sleep(self.KILL_POLL_INTERVAL)
+                else:
+                    raise TheaterError(
+                        f"pane {p.tmux_pane} of {participant_id!r} survived "
+                        f"kill-pane; record left alive to avoid a ghost"
+                    )
         return p
 
     def teardown(self, p: Participant) -> None:
@@ -767,8 +773,9 @@ class Spawner:
         directory.
         """
         # An explicit kill discards the child's work, branch included.
-        self.retire(p, delete_branch=True)
-        self.registry.mark_dead(p.id)
+        with timing.span("kill.teardown", id=p.id):
+            self.retire(p, delete_branch=True)
+            self.registry.mark_dead(p.id)
 
     def retire(self, p: Participant, *, delete_branch: bool) -> None:
         """Reclaim the git worktree of a participant that is going away.

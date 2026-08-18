@@ -167,6 +167,16 @@ def _add_process_parsers(sub) -> None:
     """Register daemon-side process entry points."""
     daemon = sub.add_parser("daemon", help="Run the registry daemon in the foreground.")
     daemon.add_argument("--log-level", default=os.environ.get("THEATER_LOG_LEVEL", "INFO"))
+    daemon.add_argument(
+        "--timing",
+        action="store_true",
+        default=os.environ.get("THEATER_TIMING", "") not in ("", "0"),
+        help=(
+            "Log every timed operation, not just the slow ones. The env var "
+            "THEATER_TIMING=1 does the same and reaches a daemon that autostarted "
+            "itself, which the flag cannot."
+        ),
+    )
 
     mcp = sub.add_parser("mcp", help="Run the per-agent MCP server on stdio.")
     mcp.add_argument("--id", dest="participant_id", default=None)
@@ -340,12 +350,15 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def cmd_daemon(args) -> int:
+    from theater import timing
     from theater.daemon.server import run
 
     logging.basicConfig(
         level=getattr(logging, str(args.log_level).upper(), logging.INFO),
         format="%(asctime)s %(levelname)-7s %(name)s %(message)s",
     )
+    if getattr(args, "timing", False):
+        timing.enable_trace()
     try:
         asyncio.run(run())
     except RuntimeError as exc:

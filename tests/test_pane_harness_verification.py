@@ -437,10 +437,10 @@ async def test_live_creator_harness_race_children_reconciled(
     # creator only, simulating the pane changing between preflight and restore.
     real_get_pane_info = recovery_mod._get_pane_info
 
-    async def _race_pane_info(daemon_arg, pane_id):
+    async def _race_pane_info(daemon_arg, pane_id, snapshot=None):
         if pane_id == "%10":
             return {"pane_id": "%10", "harness": "claude", "command": "claude", "pane_pid": 10001}
-        return await real_get_pane_info(daemon_arg, pane_id)
+        return await real_get_pane_info(daemon_arg, pane_id, snapshot)
 
     monkeypatch.setattr(recovery_mod, "_get_pane_info", _race_pane_info)
 
@@ -505,10 +505,10 @@ async def test_detect_harness_called_once_per_pane(client, daemon, fake_tmux, mo
     call_count = 0
     real_detect = hd.detect_harness
 
-    def _counting_detect(cmd, pid):
+    def _counting_detect(cmd, pid, snapshot=None):
         nonlocal call_count
         call_count += 1
-        return real_detect(cmd, pid)
+        return real_detect(cmd, pid, snapshot)
 
     # Patch at the harness_detect module level so _get_pane_info (which
     # imports detect_harness lazily) sees the counter.  Also patch methods.py
@@ -526,11 +526,14 @@ async def test_detect_harness_called_once_per_pane(client, daemon, fake_tmux, mo
     )
 
     assert result["restore_state"] == "restored"
-    # 2 panes queried (creator + child), each detected exactly once:
-    #   - preflight: creator pane → 1 call
-    #   - restore_tree: creator pane via _get_pane_info → 1 call
-    #   - restore_tree: child pane via _get_pane_info → 1 call
-    # Total = 3, not 4 (which it would be if classify_node re-detected).
+    # 3 detect_harness calls, one per pane queried:
+    #   - preflight: creator pane → 1 call (no snapshot; fresh ps)
+    #   - restore_tree: creator pane via _get_pane_info → 1 call (shared snapshot)
+    #   - restore_tree: child pane via _get_pane_info → 1 call (shared snapshot)
+    # A count of 4 would mean classify_node is re-detecting instead of
+    # consuming pane_info['harness'].  The shared snapshot means the two
+    # restore-path calls pay one ps total, not two — but the function is
+    # still called once per pane.
     assert call_count == 3, (
         f"detect_harness called {call_count} times, expected 3 "
         f"(1 preflight + 2 restore); a count of 4 means classify_node is "

@@ -1162,9 +1162,9 @@ async def test_restore_v2_self_restore_creator_dies_during_pane_check(
 
     real_get_pane_info = recovery_mod._get_pane_info
 
-    async def _die_during_pane_check(daemon, pane_id):
+    async def _die_during_pane_check(daemon, pane_id, snapshot=None):
         daemon.store.set_status("creator", Status.DEAD)
-        return await real_get_pane_info(daemon, pane_id)
+        return await real_get_pane_info(daemon, pane_id, snapshot)
 
     monkeypatch.setattr(recovery_mod, "_get_pane_info", _die_during_pane_check)
 

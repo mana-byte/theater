@@ -21,12 +21,13 @@ from typing import TYPE_CHECKING, Any, NoReturn
 
 from sqlalchemy import func, select
 
-from theater import paths, protocol
+from theater import paths, proc, protocol
 from theater.daemon import lineage, worktree
 from theater.daemon.harness_detect import (
     PaneHarnessVerdict,
     compare_detected_harness,
     detect_harness,
+    match_binary,
 )
 from theater.daemon.rails import (
     check_budget,
@@ -704,11 +705,18 @@ async def _unmanaged(daemon, params: dict) -> list[dict]:
         return []
     panes = await tmux.list_panes()
     registered = {p.tmux_pane for p in daemon.registry.list() if p.tmux_pane}
+    candidates = [p for p in panes if p.pane_id not in registered]
+
+    # A pane whose foreground command IS the harness binary (the common case)
+    # needs no process walk at all. Only capture the machine's process table
+    # — one `ps`, off the event loop — when some candidate needs it, and reuse
+    # that single snapshot for every one of them rather than one `ps` each.
+    needs_walk = any(match_binary(p.current_command, HARNESSES) is None for p in candidates)
+    snapshot = await asyncio.to_thread(proc.ProcessSnapshot.capture) if needs_walk else None
+
     out: list[dict] = []
-    for p in panes:
-        if p.pane_id in registered:
-            continue
-        harness = detect_harness(p.current_command, p.pane_pid)
+    for p in candidates:
+        harness = detect_harness(p.current_command, p.pane_pid, snapshot)
         if harness != "unknown":
             out.append(
                 {
