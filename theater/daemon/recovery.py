@@ -1415,6 +1415,19 @@ async def restore_tree(  # noqa: PLR0912, PLR0915
     # through _get_pane_info → detect_harness so an N-node tree pays one ps
     # instead of N.  Only live nodes with panes need it; if there are none,
     # skip the capture entirely.
+    #
+    # The snapshot is captured as late as possible — right before the
+    # per-node loop — so the root comms it provides are from as near the
+    # same instant as the pane facts gathered inside the loop.  A residual
+    # tradeoff remains: the snapshot is one observation reused for every
+    # node, so a same-PID ``exec`` or a PID-reuse race between the snapshot
+    # and a later node's ``tmux.pane_info`` could yield a stale root comm
+    # and a false MATCH.  This is the same class of staleness any cached
+    # process-table has; the alternative (one ``ps`` per node) is the
+    # stall this fix exists to eliminate.  A stale "unknown" degrades to
+    # ``undetermined`` and a stale conflict to a safe refusal — both are
+    # handled — so only a stale *match* is consequential, and the window
+    # is the loop body's duration.
     from theater import proc
 
     needs_snapshot = False

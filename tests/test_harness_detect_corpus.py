@@ -62,7 +62,7 @@ CORPUS = [
     # (pane_current_command, expected_detect_result)
     (".claude-wrapped", "claude"),
     (".codex-wrapped", "codex"),
-    (".opencode-wrapp", "unknown"),
+    (".opencode-wrapp", "opencode"),
     ("python3.12", "unknown"),
 ]
 
@@ -73,10 +73,10 @@ def test_corpus_detect_harness(pane_command, expected):
 
     With no process evidence at all (empty snapshot, no root comm), the command
     string alone yields the expected result.  The kernel truncates process
-    names at 15 characters, so `.opencode-wrapped` never appears in full and
-    the unwrap convention cannot recover it from the pane command alone.  It
-    resolves only via the process-tree fallback (see
-    ``test_corpus_opencode_wrapp_fallback``).
+    names at 15 characters, so ``.opencode-wrapped`` never appears in full.
+    However, the observation-key index built at registration time maps the
+    truncated form ``.opencode-wrapp`` to ``opencode``, so it resolves directly
+    from the pane command — no process-tree fallback needed.
     """
     snapshot = proc.ProcessSnapshot()
     detected = detect_harness(pane_command, 999_999, snapshot=snapshot)
@@ -98,16 +98,63 @@ def test_corpus_match_binary(pane_command, expected):
 # ---- process-tree fallback for .opencode-wrapp ------------------------------
 
 
-def test_corpus_opencode_wrapp_fallback(monkeypatch):
-    """`.opencode-wrapp` resolves to `opencode` via the process-tree fallback.
+def test_corpus_opencode_wrapp_resolves_without_process_evidence(monkeypatch):
+    """`.opencode-wrapp` resolves to `opencode` from the pane command alone.
 
     The pane command is truncated at 15 characters, so the unwrap convention
-    cannot strip `-wrapped`.  But the real binary `opencode` appears as a
-    descendant in the process tree, and the descendant walk finds it.
+    cannot strip `-wrapped`.  The observation-key index built at registration
+    time maps the truncated form to the harness, so no process evidence is
+    needed.
     """
     monkeypatch.setattr(proc, "comm", lambda pid: "")
-    snapshot = proc.ProcessSnapshot(_children={50000: [(50001, "opencode")]})
+    snapshot = proc.ProcessSnapshot()
     assert detect_harness(".opencode-wrapp", 50000, snapshot=snapshot) == "opencode"
+
+
+def test_match_binary_respects_injected_harnesses_dict():
+    """``match_binary`` must only return a harness that is in the ``harnesses``
+    dict the caller supplied.  The observation-key index is global, but a
+    caller passing a restricted set must not get a harness outside it.
+    """
+    # Empty dict — no harness is eligible, even though the global index
+    # knows about opencode.
+    assert match_binary(".opencode-wrapp", {}) is None
+    # The real registry — opencode is present and resolves.
+    assert match_binary(".opencode-wrapp", HARNESSES) == "opencode"
+
+
+def test_truncated_root_comm_resolves_via_observation_key(monkeypatch):
+    """A root ``ps`` comm that is truncated to 15 chars resolves via the
+    observation-key index, not just pane commands.
+
+    On Linux, ``/proc/<pid>/comm`` is capped at ``TASK_COMM_LEN`` (15 chars),
+    so ``ps -o comm=`` for a ``.opencode-wrapped`` process returns
+    ``.opencode-wrapp``.  The root-comm check in ``detect_harness`` calls
+    ``match_binary`` with that comm, which must resolve to ``opencode``.
+    """
+    root_pid = 50000
+    # The snapshot's comm map has the TRUNCATED form, simulating what
+    # ps -eo pid,ppid,comm would report on Linux for a 17-char process name.
+    snapshot = proc.ProcessSnapshot(_comms={root_pid: ".opencode-wrapp"})
+    assert detect_harness("python3.12", root_pid, snapshot=snapshot) == "opencode"
+
+
+def test_truncated_descendant_comm_resolves_via_observation_key(monkeypatch):
+    """A descendant ``ps`` comm that is truncated to 15 chars resolves via
+    the observation-key index.
+
+    Same Linux ``TASK_COMM_LEN`` truncation as the root-comm case, but the
+    comm comes from the descendant walk, not the root check.  The descendant
+    walk examines many processes, so this is the wider exposure surface for
+    a false positive — but the lookup is exact against pre-claimed keys,
+    not a prefix scan.
+    """
+    root_pid = 50000
+    child_pid = 50001
+    snapshot = proc.ProcessSnapshot(
+        _children={root_pid: [(child_pid, ".opencode-wrapp")]},
+    )
+    assert detect_harness("python3.12", root_pid, snapshot=snapshot) == "opencode"
 
 
 # ---- the load-bearing safety-policy guards ----------------------------------

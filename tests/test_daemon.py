@@ -1134,9 +1134,13 @@ class _FakeSnapshot:
 
     def __init__(self, by_pid: dict[int, list[tuple[int, str]]]):
         self._by_pid = by_pid
+        self._comms: dict[int, str] = {}
 
     def descendants(self, pid: int) -> list[tuple[int, str]]:
         return self._by_pid.get(pid, [])
+
+    def comm(self, pid: int) -> str:
+        return self._comms.get(pid, "")
 
 
 async def test_unmanaged_finds_harness_panes_with_no_participant(client, fake_tmux, monkeypatch):
@@ -1237,6 +1241,54 @@ async def test_unmanaged_dispatches_the_capture_through_to_thread(client, fake_t
 
     assert rows == []
     assert to_thread_calls == [methods.proc.ProcessSnapshot.capture]
+
+
+async def test_unmanaged_does_exactly_one_ps_regardless_of_pane_count(
+    client, fake_tmux, monkeypatch
+):
+    """The unmanaged sweep forks exactly one ``ps -eo pid,ppid,comm`` regardless
+    of how many candidate panes need a process-tree walk.  Before the fix, each
+    pane that missed the fast path cost its own ``ps -p <pid> -o comm=`` fork
+    inside ``detect_harness`` — N+1 calls for N panes.
+    """
+    import subprocess as subprocess_mod
+
+    # Build N unresolved fake panes — all show "python3.12" (not a harness
+    # binary) with distinct pids so none hit the fast path.
+    num_panes = 50
+    fake_tmux.visible_panes = [
+        _make_pane(f"%{i}", command="python3.12", cwd="/tmp/x", pane_pid=10000 + i)
+        for i in range(num_panes)
+    ]
+
+    calls: list[list[str]] = []
+
+    def fake_check_output(argv, **kwargs):
+        calls.append(list(argv))
+        if argv == ["ps", "-eo", "pid,ppid,comm"]:
+            # Return a table with no harness binaries — all panes miss.
+            lines = ["  PID  PPID COMM"]
+            for i in range(num_panes):
+                pid = 10000 + i
+                lines.append(f"{pid} 1 python3.12")
+            return "\n".join(lines) + "\n"
+        # Any ``ps -p <pid> -o comm=`` should NOT be called — the snapshot
+        # provides root comms.  Return empty so a stray call is visible.
+        return ""
+
+    monkeypatch.setattr(subprocess_mod, "check_output", fake_check_output)
+
+    async def sync_to_thread(func, /, *args, **kwargs):
+        # Run synchronously — the fake check_output is not I/O.
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(methods.asyncio, "to_thread", sync_to_thread)
+
+    rows = await client.call("participants.unmanaged")
+
+    assert rows == []
+    assert len(calls) == 1, f"expected exactly one ps, got {len(calls)}: {calls}"
+    assert calls[0] == ["ps", "-eo", "pid,ppid,comm"]
 
 
 # ---- the harness list --------------------------------------------------

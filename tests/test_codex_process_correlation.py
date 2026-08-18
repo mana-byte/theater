@@ -928,6 +928,74 @@ def test_descendants_still_captures_a_fresh_snapshot_per_call(monkeypatch):
     assert len(calls) == 2
 
 
+def test_process_snapshot_comm_reads_root_from_parsed_table(monkeypatch):
+    """``snapshot.comm(pid)`` returns the process name from the already-parsed
+    table — no second ``ps``.  The whole point of the ``_comms`` map: a caller
+    that captured a snapshot for a descendant walk can also read root comms
+    from it for free.
+    """
+    root_pid = 50000
+    table = f"  PID  PPID COMM\n{root_pid} 1 opencode\n50001 {root_pid} node\n"
+
+    calls: list[list[str]] = []
+
+    def check_output(argv, **kwargs):
+        calls.append(list(argv))
+        return table
+
+    monkeypatch.setattr(subprocess, "check_output", check_output)
+
+    snapshot = proc.ProcessSnapshot.capture()
+    assert len(calls) == 1
+    assert calls[0] == ["ps", "-eo", "pid,ppid,comm"]
+
+    assert snapshot.comm(root_pid) == "opencode"
+
+    # Repeated reads stay at one ps — comm() reads the parsed table.
+    assert snapshot.comm(root_pid) == "opencode"
+    assert snapshot.comm(50001) == "node"
+    assert snapshot.comm(99999) == ""
+    _ = snapshot.descendants(root_pid)
+    _ = snapshot.descendants(root_pid)
+    assert len(calls) == 1
+
+
+def test_detect_harness_reads_root_comm_from_snapshot(monkeypatch):
+    """``detect_harness`` uses ``snapshot.comm()`` for the root check when a
+    snapshot is supplied — no ``ps -p`` fork.  A pane whose foreground is
+    ``python3.12`` but whose root process is ``opencode`` resolves via the
+    snapshot with zero additional subprocess spawns.
+    """
+    from theater.config import Config
+    from theater.daemon.harness_detect import detect_harness
+    from theater.harness import install
+
+    install(Config())
+
+    root_pid = 50000
+    table = f"  PID  PPID COMM\n{root_pid} 1 opencode\n50001 {root_pid} node\n"
+
+    calls: list[list[str]] = []
+
+    def check_output(argv, **kwargs):
+        calls.append(list(argv))
+        return table
+
+    monkeypatch.setattr(subprocess, "check_output", check_output)
+
+    snapshot = proc.ProcessSnapshot.capture()
+    assert len(calls) == 1
+
+    # detect_harness("python3.12", root_pid, snapshot) must find "opencode"
+    # via snapshot.comm(root_pid) — the foreground is "python3.12" (no match),
+    # and descendants are "node" (no match), but the root IS "opencode".
+    result = detect_harness("python3.12", root_pid, snapshot=snapshot)
+    assert result == "opencode"
+
+    # Still only one ps — no per-pane fork.
+    assert len(calls) == 1
+
+
 # ---- IdentityLossEvidence carries the session_id the source already knows ---
 
 

@@ -88,6 +88,21 @@ _PLUGINS: dict[str, Plugin] = {}
 #: both files, the same shape as the alias collision guard.
 _BINARIES: dict[str, tuple[str, str]] = {}
 
+#: Tmux observation keys — 15-character truncated forms of binary names that
+#: tmux's ``pane_current_command`` would report when the kernel truncates a
+#: longer process name.  Mapped to a (harness name, claimant path) pair.
+#: Two different harnesses claiming the same observation key would be
+#: silently resolved by iteration order in the pane matcher — refused at
+#: load time with both files named, the same shape as ``_BINARIES``.
+_OBSERVATION_KEYS: dict[str, tuple[str, str]] = {}
+
+#: The kernel truncates ``pane_current_command`` at 15 characters.  A binary
+#: name longer than that arrives truncated and cannot be matched by exact
+#: comparison.  Observation keys are the first 15 characters of every spelling
+#: the matcher would accept, so the pane matcher can resolve a truncated pane
+#: command to the right harness.
+_TMUX_TRUNCATION = 15
+
 #: Local plugins that would not load. Listed by `theater harnesses` as broken —
 #: a plugin the user believes they installed and cannot find is the failure this
 #: release exists to remove.
@@ -132,6 +147,7 @@ def install(
     _ALIASES.clear()
     _PLUGINS.clear()
     _BINARIES.clear()
+    _OBSERVATION_KEYS.clear()
     _BROKEN.clear()
 
     shipped = plugins.scan(
@@ -175,6 +191,9 @@ def install(
         _claim_binary(found.harness.binary, found.name, str(found.path))
         for extra in found.harness.binaries:
             _claim_binary(extra, found.name, str(found.path))
+        _claim_observation_keys(found.harness.binary, found.name, str(found.path))
+        for extra in found.harness.binaries:
+            _claim_observation_keys(extra, found.name, str(found.path))
 
     return sorted(HARNESSES)
 
@@ -293,10 +312,10 @@ def _binary_claim_keys(binary: str) -> set[str]:
 
 
 def _release_claims(harness: Harness, name: str) -> None:
-    """Remove a superseded harness's binary claims from ``_BINARIES``.
+    """Remove a superseded harness's binary and observation-key claims.
 
     When a local plugin overrides a shipped one of the same name, the shipped
-    harness's binary claims must be released before the new ones are recorded.
+    harness's claims must be released before the new ones are recorded.
     Otherwise a binary the override drops stays claimed by a harness that no
     longer wants it, and a later plugin claiming it is refused for no reason a
     user can see.
@@ -315,6 +334,91 @@ def _release_claims(harness: Harness, name: str) -> None:
             existing = _BINARIES.get(key)
             if existing is not None and existing[0] == name:
                 del _BINARIES[key]
+    for key in _observation_keys_for(harness.binary):
+        existing = _OBSERVATION_KEYS.get(key)
+        if existing is not None and existing[0] == name:
+            del _OBSERVATION_KEYS[key]
+    for extra in harness.binaries:
+        for key in _observation_keys_for(extra):
+            existing = _OBSERVATION_KEYS.get(key)
+            if existing is not None and existing[0] == name:
+                del _OBSERVATION_KEYS[key]
+
+
+def _observation_keys_for(binary: str) -> set[str]:
+    """Every 15-character observation key tmux could report for ``binary``.
+
+    tmux truncates ``pane_current_command`` to 15 characters.  For each spelling
+    the matcher would accept (the raw binary, its basename, the unwrapped
+    basename, and the implicit makeWrapper spellings ``name-wrapped`` and
+    ``.name-wrapped``), if that spelling is longer than 15 characters, its first
+    15 characters are a potential tmux observation.  An exact 15-character
+    spelling is also a key — it is what tmux would report unchanged.
+
+    The makeWrapper spellings are derived because a plugin declares only the
+    primary ``binary`` (e.g. ``opencode``), never the wrapper names; the wrapper
+    is a nixpkgs convention that adds ``.`` prefix and ``-wrapped`` suffix
+    outside the plugin's knowledge.
+    """
+    basename = binary.rsplit("/", 1)[-1]
+    unwrapped = _unwrap_binary(binary)
+    # All spellings the matcher would accept, INCLUDING the implicit
+    # makeWrapper forms that a plugin never declares but nixpkgs generates.
+    spellings: set[str] = {binary, basename, unwrapped}
+    spellings.add(f"{unwrapped}-wrapped")
+    spellings.add(f".{unwrapped}-wrapped")
+    keys: set[str] = set()
+    for spelling in spellings:
+        base = spelling.rsplit("/", 1)[-1]  # tmux reports the basename, not a path
+        if len(base) >= _TMUX_TRUNCATION:
+            keys.add(base[:_TMUX_TRUNCATION])
+    keys.discard("")
+    return keys
+
+
+def _claim_observation_keys(binary: str, owner: str, claimant: str) -> None:
+    """Claim every 15-character observation key for ``owner``.
+
+    Two different harnesses whose binaries truncate to the same 15-character
+    form would be silently resolved by iteration order in the pane matcher —
+    refused at load time with both files named, the same shape as
+    ``_claim_binary``.  An exact 15-character binary name colliding with
+    another harness's truncated form is also refused: a 15-character tmux
+    observation is genuinely ambiguous and preferring one silently misidentifies
+    the other.
+    """
+    for key in _observation_keys_for(binary):
+        existing = _OBSERVATION_KEYS.get(key)
+        if existing is not None and existing[0] != owner:
+            prev_owner, prev_path = existing
+            raise ConfigError(
+                f"{claimant} claims observation key {key!r} for harness {owner!r} "
+                f"(truncated from {binary!r}), which is already claimed by harness "
+                f"{prev_owner!r} ({prev_path}) — tmux truncates pane_current_command "
+                f"to 15 characters, so both binaries would appear identical in tmux"
+            )
+        _OBSERVATION_KEYS[key] = (owner, claimant)
+
+
+def observation_lookup(key: str) -> str | None:
+    """Resolve a 15-character observation to a harness name, or None.
+
+    Called by ``match_binary`` when the observed basename is exactly 15
+    characters long — the truncation length shared by tmux's
+    ``pane_current_command`` and Linux's ``/proc/<pid>/comm``
+    (``TASK_COMM_LEN``).  Both channels can deliver a truncated name:
+    tmux truncates the pane command, and ``ps -o comm=`` on Linux reads the
+    kernel's 15-character comm value.  So the lookup applies to pane
+    commands, root ``ps`` comms, and descendant ``ps`` comms alike.
+
+    The lookup is exact: the key must match a pre-claimed 15-character
+    observation key — not a prefix scan.  A false positive requires an
+    unrelated process whose (possibly truncated) name is exactly a claimed
+    key.  That is narrow but not impossible, and the descendant walk
+    examines many processes, widening the exposure.
+    """
+    entry = _OBSERVATION_KEYS.get(key)
+    return entry[0] if entry is not None else None
 
 
 def normalize(name: str) -> str:
@@ -560,6 +664,7 @@ __all__ = [
     "known_binaries",
     "last_screen_line",
     "normalize",
+    "observation_lookup",
     "plan_launch",
     "status_after",
     "supports_model",

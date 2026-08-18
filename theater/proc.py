@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -48,15 +49,17 @@ class ProcessSnapshot:
     A caller that needs the ancestry of several pids — the daemon's unmanaged
     sweep, one candidate pane at a time — pays for one `ps` instead of one per
     pid by capturing a snapshot up front and walking it repeatedly. `capture()`
-    is the only place that shells out; `descendants()` here never does.
+    is the only place that shells out; `descendants()` and `comm()` here never do.
     """
 
     _children: dict[int, list[tuple[int, str]]] = field(default_factory=dict)
+    _comms: dict[int, str] = field(default_factory=dict)
 
     @classmethod
     def capture(cls) -> ProcessSnapshot:
         """Parse the whole machine's process table exactly once."""
-        return cls(_process_table())
+        children, comms = _process_table()
+        return cls(_children=children, _comms=comms)
 
     def descendants(self, root_pid: int) -> list[tuple[int, str]]:
         """`(pid, comm)` for every descendant of *root_pid* in this snapshot, breadth-first.
@@ -64,10 +67,10 @@ class ProcessSnapshot:
         The root itself is excluded — callers that care about it already have it.
         """
         found: list[tuple[int, str]] = []
-        queue = [root_pid]
+        queue = deque([root_pid])
         seen = {root_pid}
         while queue:
-            pid = queue.pop(0)
+            pid = queue.popleft()
             for child_pid, comm in self._children.get(pid, []):
                 if child_pid in seen:
                     # A cycle is impossible in a real process table, but this
@@ -78,6 +81,15 @@ class ProcessSnapshot:
                 found.append((child_pid, comm))
                 queue.append(child_pid)
         return found
+
+    def comm(self, pid: int) -> str:
+        """The command name of one process from this snapshot, or "" if unknown.
+
+        Unlike the module-level ``comm`` function, this reads from the already
+        parsed table and never shells out. A caller that captured a snapshot
+        for a descendant walk can also read root comms from it for free.
+        """
+        return self._comms.get(pid, "")
 
 
 def descendants(root_pid: int) -> list[tuple[int, str]]:
@@ -116,8 +128,13 @@ def open_files(pid: int) -> list[Path]:
 # ---- internals ----------------------------------------------------------
 
 
-def _process_table() -> dict[int, list[tuple[int, str]]]:
-    """Parent pid -> its children, as `(pid, comm)`."""
+def _process_table() -> tuple[dict[int, list[tuple[int, str]]], dict[int, str]]:
+    """Parent pid → its children as `(pid, comm)`, and pid → its own comm.
+
+    Both maps are parsed from the same ``ps`` output in one pass, each line
+    contributing to both indexes. The comm string is shared by reference so
+    neither index copies it.
+    """
     try:
         with timing.span("proc.ps-table", slow_ms=timing.PROC_MS):
             out = subprocess.check_output(
@@ -126,8 +143,9 @@ def _process_table() -> dict[int, list[tuple[int, str]]]:
                 timeout=_TIMEOUT,
             )
     except (OSError, subprocess.SubprocessError):
-        return {}
+        return {}, {}
     children: dict[int, list[tuple[int, str]]] = {}
+    comms: dict[int, str] = {}
     for line in out.strip().splitlines()[1:]:
         parts = line.split(None, 2)
         if len(parts) < 3:
@@ -137,8 +155,10 @@ def _process_table() -> dict[int, list[tuple[int, str]]]:
             ppid = int(parts[1])
         except ValueError:
             continue
-        children.setdefault(ppid, []).append((pid, parts[2]))
-    return children
+        comm = parts[2]
+        children.setdefault(ppid, []).append((pid, comm))
+        comms[pid] = comm
+    return children, comms
 
 
 def _comm(pid: int) -> str:

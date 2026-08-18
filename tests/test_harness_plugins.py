@@ -972,6 +972,62 @@ def test_binary_collision_error_names_both_files(local_dir, shipped_dir):
     assert "a.py" in msg
 
 
+# ---- observation key collisions (tmux 15-char truncation) -----------------
+
+
+def test_two_long_binaries_sharing_first_15_chars_are_refused(local_dir, shipped_dir):
+    """Two harnesses whose binary names are longer than 15 characters but
+    share their first 15 characters would appear identical in tmux's
+    ``pane_current_command``.  Refused at load time — preferring one would
+    silently misidentify the other."""
+    # "very-long-binary" (17 chars) and "very-long-binary2" (18 chars) both
+    # truncate to "very-long-binary" (15 chars) in tmux.
+    plugin(shipped_dir, "a.py", cls="First", name="first", binary="very-long-binary")
+    plugin(local_dir, "b.py", cls="Second", name="second", binary="very-long-binary2")
+    with pytest.raises(harness_registry.ConfigError) as exc:
+        install(local_dir, shipped_dir=shipped_dir)
+    msg = str(exc.value)
+    assert "observation key" in msg
+    assert "a.py" in msg
+    assert "b.py" in msg
+    assert "very-long-binary" in msg  # the ambiguous 15-char key
+
+
+def test_exact_15_char_binary_collides_with_truncated_form(local_dir, shipped_dir):
+    """A harness whose binary is exactly 15 characters collides with another
+    harness whose longer binary truncates to the same 15 characters.  Both
+    would appear identical in tmux — refused, not 'prefer exact'."""
+    plugin(shipped_dir, "a.py", cls="First", name="first", binary="exactly15chars")
+    # "exactly15chars2" (16 chars) truncates to "exactly15chars" (15 chars)
+    plugin(local_dir, "b.py", cls="Second", name="second", binary="exactly15chars2")
+    with pytest.raises(harness_registry.ConfigError) as exc:
+        install(local_dir, shipped_dir=shipped_dir)
+    msg = str(exc.value)
+    assert "observation key" in msg
+    assert "a.py" in msg
+    assert "b.py" in msg
+    assert "exactly15chars" in msg
+
+
+def test_two_truncated_spellings_of_same_harness_are_accepted(local_dir, shipped_dir):
+    """Multiple spellings claimed by the SAME harness are not a collision —
+    the same harness's primary binary and ``binaries`` entry may both produce
+    the same truncated observation key."""
+    plugin(shipped_dir, "a.py", cls="Solo", name="solo", binary="very-long-binary")
+    # The same harness also declares an extra binary that truncates to the
+    # same 15 chars — same owner, so not a collision.
+    (local_dir / "a.py").write_text(
+        BODY.format(
+            cls="Solo", name="solo", binary="very-long-binary", icon=repr("@"), aliases="()"
+        ).replace(
+            "class Solo(Harness):",
+            "class Solo(Harness):\n    binaries = frozenset({'very-long-binary2'})",
+        )
+    )
+    result = install(local_dir, shipped_dir=shipped_dir)
+    assert "solo" in result
+
+
 # ---- disabling ----------------------------------------------------------
 
 

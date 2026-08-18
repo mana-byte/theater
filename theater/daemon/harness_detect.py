@@ -15,7 +15,7 @@ from __future__ import annotations
 from enum import StrEnum
 
 from theater import proc
-from theater.harness import HARNESSES
+from theater.harness import HARNESSES, observation_lookup
 
 
 class PaneHarnessVerdict(StrEnum):
@@ -68,16 +68,13 @@ def detect_harness(
     # where the foreground is a tool subprocess (not the harness, not a
     # descendant) and detection would otherwise return "unknown".
     #
-    # ``ProcessSnapshot._children`` is keyed parent → [(child, comm)], so a
-    # root pid's OWN comm is not derivable from the snapshot.  The root check
-    # therefore still costs ``proc.comm`` — one ``ps`` — even when a snapshot
-    # is supplied.  Widening ``ProcessSnapshot`` to carry root comms would
-    # mean touching a data structure main just landed, from a branch main
-    # has not seen — a second conflict.  The one ``ps`` is cheap and runs
-    # off the event loop when the caller captures the snapshot via
-    # ``asyncio.to_thread``.
+    # When a snapshot is supplied, the root comm is read from the already
+    # parsed process table — no ``ps`` of its own.  Without one, the single-
+    # pane callers (``adopt``, creator-restore preflight, the delivery gate)
+    # get a fresh ``proc.comm`` fork so the root check is as current as the
+    # pane facts it is compared against.
     if pane_pid > 0:
-        root_comm = proc.comm(pane_pid)
+        root_comm = snapshot.comm(pane_pid) if snapshot is not None else proc.comm(pane_pid)
         if root_comm:
             name = match_binary(root_comm, HARNESSES)
             if name:
@@ -176,6 +173,24 @@ def match_binary(command: str, harnesses) -> str | None:
     the wrapper convention is shared. A plugin may also declare additional
     binary names via the ``binaries`` class attribute; the primary ``binary``
     is always included regardless of what ``binaries`` contains.
+
+    Truncated names: both tmux and Linux truncate process names to 15
+    characters — tmux in ``pane_current_command``, Linux in
+    ``/proc/<pid>/comm`` (``TASK_COMM_LEN`` is 16 bytes including the NUL,
+    so the visible name is 15 characters).  ``ps -o comm=`` reads the same
+    truncated value on Linux.  So ``.opencode-wrapped`` (17 chars) arrives as
+    ``.opencode-wrapp`` not only from tmux but also from ``ps`` root and
+    descendant comms, and the unwrap convention cannot recover it.
+
+    When the observed basename is exactly 15 characters long, the matcher
+    consults a pre-built observation-key index (``observation_lookup``) to
+    resolve the truncated form to the right harness.  This applies to all
+    three call sites in ``detect_harness`` — pane command, root ``ps`` comm,
+    and descendant ``ps`` comms — because all three can deliver a truncated
+    name.  The lookup is exact against pre-claimed keys, not a prefix scan,
+    so a false positive requires an unrelated process whose (possibly
+    truncated) name is exactly a claimed key — narrow, but not impossible,
+    and the descendant walk examines many processes rather than one.
     """
     basename = command.rsplit("/", 1)[-1]
     normalised = _unwrap(basename)
@@ -183,6 +198,17 @@ def match_binary(command: str, harnesses) -> str | None:
         names = {harness.binary} | harness.binaries
         if basename in names or normalised in names or command in names:
             return harness.name
+    # tmux truncates pane_current_command at 15 characters.  A pane basename
+    # of exactly that length may be a truncated form of a longer binary name
+    # (e.g. ``.opencode-wrapp`` ← ``.opencode-wrapped``).  The observation-
+    # key index, built at registration time, maps each harness's truncated
+    # forms so this resolves without process evidence.  The resolved name
+    # must be in the injected ``harnesses`` dict — the caller may pass a
+    # restricted set, and the global index is broader than that.
+    if len(basename) == 15:
+        obs = observation_lookup(basename)
+        if obs is not None and obs in harnesses:
+            return obs
     return None
 
 
