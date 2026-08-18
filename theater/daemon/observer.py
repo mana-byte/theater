@@ -708,8 +708,13 @@ class Observer:
         the caller to enter quarantine. Returns ``False`` to keep accumulating.
         """
         pending = self._identity_loss_pending.get(pid)
-        count = pending[1] + 1 if pending is not None and pending[0] == evidence.location else 1
-        self._identity_loss_pending[pid] = (evidence.location, count)
+        canonical = canonical_location(evidence.location)
+        count = (
+            pending[1] + 1
+            if pending is not None and same_location(pending[0], evidence.location)
+            else 1
+        )
+        self._identity_loss_pending[pid] = (canonical, count)
         return count >= IDENTITY_LOSS_CONFIRMATIONS
 
     def _reset_identity_loss_confirmation(self, pid: str) -> None:
@@ -796,11 +801,15 @@ class Observer:
         if source is None:
             return
         self._restore_transcript_identity_loss(pid)
-        self._register_source(pid, source)
         clock = QuietClock()
         turns = TurnAccumulator()
 
         try:
+            # _register_source calls _stage_pending_receipt, which can raise
+            # SourceContractError from the ReceiptAdmission validation added
+            # in D2.  It must be inside the try so the finally closes the
+            # source and removes it from _sources rather than leaking both.
+            self._register_source(pid, source)
             while not self._stopping.is_set():
                 try:
                     if pid in self._reset_watch_state:
@@ -1633,7 +1642,14 @@ class Observer:
         session_id = attached.session_id
         if p is not None:
             changed = False
-            if not same_location(p.transcript_location, loc):
+            # Converge opportunistically: even when same_location says the
+            # stored and incoming paths name the same file, the stored
+            # spelling may carry a ``..`` segment or un-expanded symlink that
+            # reaches plugins verbatim (observer known_location, methods
+            # read_transcript, recall_read, spawner resume). Rewriting to
+            # the canonical form here is one cheap write that closes all
+            # four sites at once, without a migration.
+            if p.transcript_location != loc:
                 p.transcript_location = loc
                 changed = True
             prior = normalize_provenance(p.session_correlation)

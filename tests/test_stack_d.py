@@ -626,3 +626,236 @@ def test_transcript_receipt_bus_kind_constant_exists():
     from theater.daemon.methods import TRANSCRIPT_RECEIPT_BUS_KIND
 
     assert TRANSCRIPT_RECEIPT_BUS_KIND == "agent.transcript_receipt"
+
+
+# ---- E1: _register_source must be inside the try/finally --------------------
+
+
+class _RaisingAdmitSource(Source):
+    """A source whose admit_exact_location returns garbage, with aclose tracking."""
+
+    def __init__(self):
+        self.closed = False
+
+    async def read(self) -> Batch:
+        return Batch()
+
+    def admit_exact_location(self, *, location: str, session_id: str) -> ReceiptAdmission:
+        return "bogus"  # type: ignore[return-value]
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class _RaisingAdmitObserver:
+    """An observer that returns the raising source."""
+
+    has_transcript = True
+
+    def __init__(self, source):
+        self.source = source
+
+    def open_source(self, *, cwd, session_id=None, after=None):
+        return self.source
+
+    def is_idle_screen(self, capture: str) -> bool:
+        return False
+
+
+class _RaisingAdmitHarness:
+    """Harness shell that carries the observer."""
+
+    binary = "raising"
+
+    def __init__(self, observer):
+        self.observer = observer
+
+
+async def test_register_source_inside_try_closes_source_on_raise(registry: Registry):
+    """E1: a SourceContractError from _register_source must not leak the source.
+
+    _register_source calls _stage_pending_receipt, which calls
+    _stage_receipt_source, which raises SourceContractError when
+    admit_exact_location returns garbage. Before E1 the registration was
+    outside the try/finally, so the source stayed in _sources and was never
+    closed.
+
+    Mutation: move _register_source back outside the try in _watch. This
+    test fails because the source is still in _sources and closed is False.
+    """
+    source = _RaisingAdmitSource()
+    harness = _RaisingAdmitHarness(_RaisingAdmitObserver(source))
+    observer = Observer(registry, {"raising": harness}, poll=0.01, search=0.01, sync=0.01)
+    p = registry.register(harness="raising", pane=None, cwd="/tmp")
+    # Plant a pending receipt so _stage_pending_receipt fires inside _register_source
+    observer._receipt_candidates[p.id] = ("/tmp/sess-1.jsonl", "sess-1")
+
+    with pytest.raises(SourceContractError):
+        await observer._watch(p.id, "raising")
+
+    # The finally must have removed the source and closed it.
+    assert p.id not in observer._sources
+    assert source.closed
+
+
+# ---- E2: convergence guard narrowed ----------------------------------------
+
+
+def test_alias_converges_on_reconnect_with_narrow_guard(registry: Registry):
+    """E2: an alias still converges after narrowing the guard.
+
+    Mutation: revert to ``if existing.harness != harness:``. This test still
+    passes for an alias (both guards agree). The narrow guard's value is
+    tested by the *next* test.
+    """
+    p = _alias_predecessor(
+        registry, alias="claude-code", canonical="claude", session_id="sess-1", live=True
+    )
+    registry.register(
+        harness="claude",
+        pane=None,
+        cwd="/tmp",
+        session_id="sess-1",
+        claimed_id=p.id,
+    )
+    stored = registry.store.get_participant(p.id)
+    assert stored.harness == "claude"
+
+
+def test_different_harness_does_not_overwrite(registry: Registry):
+    """E2: a genuinely different harness must not overwrite the stored harness.
+
+    Mutation: revert to ``if existing.harness != harness:`` (the wide guard).
+    This test fails because "codex" != "claude" is True, so the row is
+    overwritten with "codex" and the assertion fails.
+    """
+    p = registry.register(harness="claude", pane=None, cwd="/tmp", session_id="sess-1")
+    # Reconnect claiming a different harness
+    registry.register(
+        harness="codex",
+        pane=None,
+        cwd="/tmp",
+        session_id="sess-1",
+        claimed_id=p.id,
+    )
+    stored = registry.store.get_participant(p.id)
+    assert stored.harness == "claude", (
+        f"different harness overwrote the row; got {stored.harness!r}"
+    )
+
+
+def test_unknown_harness_does_not_overwrite(registry: Registry):
+    """E2: an unrecognised harness name must not overwrite the stored harness.
+
+    normalize returns an unknown name unchanged, so the narrow guard
+    ``normalize(existing.harness) == harness`` is ``"claude" == "typo"``
+    → False → the row keeps its harness. The wide guard would overwrite.
+
+    Mutation: revert to ``if existing.harness != harness:``. This test
+    fails because "typo" != "claude" → True → row overwritten.
+    """
+    p = registry.register(harness="claude", pane=None, cwd="/tmp", session_id="sess-1")
+    registry.register(
+        harness="typo-harness",
+        pane=None,
+        cwd="/tmp",
+        session_id="sess-1",
+        claimed_id=p.id,
+    )
+    stored = registry.store.get_participant(p.id)
+    assert stored.harness == "claude"
+
+
+# ---- E3: _confirm_identity_loss uses canonical comparison -------------------
+
+
+def test_confirm_identity_loss_counts_path_alias_as_same(registry: Registry, tmp_path):
+    """E3: two spellings of the same evidence location must accumulate.
+
+    _confirm_identity_loss tracks consecutive relocate windows reporting
+    the same evidence location. Before E3 it compared with raw ==, so a
+    source alternating /x/t and /x/./t never reached the confirmation
+    threshold. After E3 it stores the canonical location and compares with
+    same_location.
+
+    IDENTITY_LOSS_CONFIRMATIONS is 2, so the second call (with a different
+    spelling of the same file) must confirm. With the old raw == it would
+    reset to count=1 and return False.
+
+    Mutation: revert to ``pending[0] == evidence.location`` and store
+    ``evidence.location``. This test fails because the two spellings are
+    raw-!= so the count resets to 1 and the second call returns False.
+    """
+    from theater.daemon.observer import IDENTITY_LOSS_CONFIRMATIONS
+    from theater.harness.source import IdentityLossEvidence
+
+    observer = _make_observer(registry)
+    f = tmp_path / "t.jsonl"
+    f.write_text("[]")
+    canonical = str(f.resolve())
+    alias = f"{tmp_path}/sub/../t.jsonl"
+
+    # First call with the canonical spelling — count=1, not yet confirmed
+    assert not observer._confirm_identity_loss("p1", IdentityLossEvidence(location=canonical))
+    # Second call with the alias spelling — must accumulate to count=2
+    # and confirm. With raw == it would reset to 1 and return False.
+    assert IDENTITY_LOSS_CONFIRMATIONS == 2
+    assert observer._confirm_identity_loss("p1", IdentityLossEvidence(location=alias))
+
+
+def test_confirm_identity_loss_different_locations_reset(registry: Registry, tmp_path):
+    """E3: genuinely different evidence locations must still reset the count."""
+    from theater.daemon.observer import IDENTITY_LOSS_CONFIRMATIONS
+    from theater.harness.source import IdentityLossEvidence
+
+    observer = _make_observer(registry)
+    a = tmp_path / "a.jsonl"
+    a.write_text("[]")
+    b = tmp_path / "b.jsonl"
+    b.write_text("[]")
+
+    observer._confirm_identity_loss("p1", IdentityLossEvidence(location=str(a)))
+    # A genuinely different file must reset the count to 1
+    if IDENTITY_LOSS_CONFIRMATIONS > 1:
+        assert not observer._confirm_identity_loss("p1", IdentityLossEvidence(location=str(b)))
+
+
+# ---- E4: opportunistic convergence of transcript_location --------------------
+
+
+def test_on_attach_converges_non_canonical_stored_location(registry: Registry, tmp_path):
+    """E4: even when same_location says the paths match, a non-canonical
+    stored spelling is rewritten to the canonical one.
+
+    Before E4 the guard was ``not same_location(p.transcript_location, loc)``
+    which is False when the paths name the same file, so the non-canonical
+    spelling survived and reached plugins. After E4 the guard is
+    ``p.transcript_location != loc`` which is True for any spelling
+    difference, so the canonical form is persisted.
+
+    Mutation: revert to ``not same_location(p.transcript_location, loc)``.
+    This test fails because the stored path keeps its .. segment.
+    """
+    observer = _make_observer(registry)
+    f = tmp_path / "t.jsonl"
+    f.write_text("[]")
+    canonical = str(f.resolve())
+    alias = f"{tmp_path}/sub/../t.jsonl"
+
+    # Plant a participant with a non-canonical stored location
+    p = _register_participant(registry, pid="p1")
+    p.transcript_location = alias
+    registry.store.upsert_participant(p)
+
+    # same_location(alias, canonical) is True, so the old guard would skip
+    attached = Attachment(
+        location=canonical,
+        session_id="sess-1",
+        correlation=str(TranscriptProvenance.OPERATOR),
+    )
+    observer._on_attach(p.id, attached)
+
+    stored = registry.store.get_participant(p.id)
+    assert stored.transcript_location == canonical, (
+        f"non-canonical spelling survived; got {stored.transcript_location!r}"
+    )
