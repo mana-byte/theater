@@ -82,6 +82,12 @@ _ALIASES: dict[str, str] = {}
 #: SOURCE column of `theater harnesses`.
 _PLUGINS: dict[str, Plugin] = {}
 
+#: Binary names claimed by registered harnesses, mapped to a (harness name,
+#: claimant path) pair. Two adapters claiming the same binary is silently
+#: resolved by iteration order in ``match_binary`` — refusing at load names
+#: both files, the same shape as the alias collision guard.
+_BINARIES: dict[str, tuple[str, str]] = {}
+
 #: Local plugins that would not load. Listed by `theater harnesses` as broken —
 #: a plugin the user believes they installed and cannot find is the failure this
 #: release exists to remove.
@@ -99,7 +105,11 @@ def install(
     Called once per process that needs it. Rebuilt rather than extended, so
     calling it twice is the same as calling it once — which is what test
     isolation needs, and what makes `theater restart` a complete answer to a
-    config change.
+    config change. Plugin modules are re-executed on every call; ``_``-prefixed
+    helper modules are cached in ``sys.modules`` under mangled names for the
+    life of the process, so a rescan reuses the first call's helpers rather
+    than re-executing them. Each call site runs once per process, so this is a
+    documentation-honesty note rather than an observable difference.
 
     Local beats shipped. Someone who has written their own `vibe.py` has said
     which one they want, and refusing the collision would leave them no way to
@@ -121,6 +131,7 @@ def install(
     HARNESSES.clear()
     _ALIASES.clear()
     _PLUGINS.clear()
+    _BINARIES.clear()
     _BROKEN.clear()
 
     shipped = plugins.scan(
@@ -154,10 +165,16 @@ def install(
                 previous.source,
                 previous.path,
             )
+            if previous.harness is not None:
+                _release_claims(previous.harness, previous.name)
+        _claim_name(found.name, str(found.path))
         HARNESSES[found.name] = found.harness
         _PLUGINS[found.name] = found
         for alias in found.harness.aliases:
             _claim_alias(alias, found.name, str(found.path))
+        _claim_binary(found.harness.binary, found.name, str(found.path))
+        for extra in found.harness.binaries:
+            _claim_binary(extra, found.name, str(found.path))
 
     return sorted(HARNESSES)
 
@@ -181,18 +198,123 @@ def _claim_alias(alias: str, owner: str, claimant: str) -> None:
     An alias that shadows another harness makes that harness unreachable at
     registration, and the symptom — an agent observed as the wrong harness, or
     not observed at all — points nowhere near the file that caused it. So a
-    collision is refused rather than resolved by load order.
+    collision is refused rather than resolved by load order. The error names
+    both files so the user can find the conflict.
     """
     target = _ALIASES.get(alias)
     if target is not None and target != owner:
+        prev_plugin = _PLUGINS.get(target)
+        prev_path = str(prev_plugin.path) if prev_plugin is not None else "(unknown)"
         raise ConfigError(
-            f"{claimant} claims alias {alias!r}, which already resolves to {target!r}"
+            f"{claimant} claims alias {alias!r}, which already resolves to {target!r} ({prev_path})"
         )
     if alias in HARNESSES and alias != owner:
+        prev_plugin = _PLUGINS.get(alias)
+        prev_path = str(prev_plugin.path) if prev_plugin is not None else "(unknown)"
         raise ConfigError(
-            f"{claimant} claims alias {alias!r}, which is the name of another harness"
+            f"{claimant} claims alias {alias!r}, which is the name of another harness ({prev_path})"
         )
     _ALIASES[alias] = owner
+
+
+def _claim_name(name: str, claimant: str) -> None:
+    """Guard a primary name against an alias some earlier plugin already claimed.
+
+    The mirror of ``_claim_alias``'s second guard: an alias that shadows a
+    harness name is caught there, but a harness *name* that shadows an
+    already-claimed alias is caught here. Without it, ``HARNESSES`` gains the
+    key but ``normalize`` still routes to the alias owner — registration and
+    adoption disagree, and load order silently decides which wins.
+    """
+    owner = _ALIASES.get(name)
+    if owner is not None and owner != name:
+        raise ConfigError(
+            f"{claimant} registers harness {name!r}, which is already an alias of {owner!r}"
+        )
+
+
+def _unwrap_binary(binary: str) -> str:
+    """Strip nixpkgs makeWrapper affixes, matching ``harness_detect._unwrap``.
+
+    Duplicated rather than imported to avoid a circular dependency:
+    ``harness_detect`` imports ``HARNESSES`` from this module. The function is
+    four lines and stable — drift here would mean the claim guard and the
+    matcher disagree, which is the exact bug R5-2 exists to close.
+    """
+    name = binary.rsplit("/", 1)[-1]
+    if name.startswith("."):
+        name = name[1:]
+    if name.endswith("-wrapped"):
+        name = name[: -len("-wrapped")]
+    return name
+
+
+def _claim_binary(binary: str, owner: str, claimant: str) -> None:
+    """Claim a binary name for ``owner``, unless another harness already owns it.
+
+    The same class of bug as an alias collision: ``match_binary`` walks
+    ``harnesses.values()`` and returns the first adapter whose binary set
+    contains the name, so two adapters claiming the same binary are silently
+    resolved by iteration order — adoption records the wrong harness, and
+    stale-pane verification can report a false match. Refused at load time
+    with both files named, the same shape as the alias guard.
+
+    The claim key is the same key the matcher uses: the raw binary, the
+    unwrapped basename (leading ``.`` stripped, trailing ``-wrapped``
+    stripped), and the basename of a path-shaped declaration. Two harnesses
+    whose binaries normalise to the same name collide here, not at match
+    time.
+    """
+    for key in _binary_claim_keys(binary):
+        existing = _BINARIES.get(key)
+        if existing is not None and existing[0] != owner:
+            prev_owner, prev_path = existing
+            raise ConfigError(
+                f"{claimant} claims binary {key!r} for harness {owner!r}, which is "
+                f"already claimed by harness {prev_owner!r} ({prev_path})"
+            )
+        _BINARIES[key] = (owner, claimant)
+
+
+def _binary_claim_keys(binary: str) -> set[str]:
+    """Every key ``match_binary`` could match ``binary`` under.
+
+    ``match_binary`` tests three forms of the command: the basename, the
+    unwrapped basename, and the raw command. A declared binary can be
+    matched under any of those, so the claim must cover all of them. This
+    is the set of keys that, if any other harness also produces one, means
+    ``match_binary`` could return either harness for the same pane.
+    """
+    basename = binary.rsplit("/", 1)[-1]
+    unwrapped = _unwrap_binary(binary)
+    keys = {binary, basename, unwrapped}
+    keys.discard("")
+    return keys
+
+
+def _release_claims(harness: Harness, name: str) -> None:
+    """Remove a superseded harness's binary claims from ``_BINARIES``.
+
+    When a local plugin overrides a shipped one of the same name, the shipped
+    harness's binary claims must be released before the new ones are recorded.
+    Otherwise a binary the override drops stays claimed by a harness that no
+    longer wants it, and a later plugin claiming it is refused for no reason a
+    user can see.
+
+    Alias claims are not released: an alias resolves to a harness *name*, and
+    the override has the same name, so the alias still resolves correctly. The
+    override re-claims its own aliases via ``_claim_alias``, which allows
+    re-claiming an alias that already points to the same owner.
+    """
+    for key in _binary_claim_keys(harness.binary):
+        existing = _BINARIES.get(key)
+        if existing is not None and existing[0] == name:
+            del _BINARIES[key]
+    for extra in harness.binaries:
+        for key in _binary_claim_keys(extra):
+            existing = _BINARIES.get(key)
+            if existing is not None and existing[0] == name:
+                del _BINARIES[key]
 
 
 def normalize(name: str) -> str:

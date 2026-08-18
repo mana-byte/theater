@@ -508,7 +508,7 @@ Lists every participant Theater knows about — id, session id, harness, status,
 Starts a new agent in a child tmux window. Returns the child's id, session id, and a handle for `await_sessions`. A cold spawn normally returns `session_id: null` because the observer learns the harness session id only after attaching to its transcript; use `list_participants` to retrieve it later.
 
 ```
-harness:     "claude" | "codex" | "opencode" | "vibe"
+harness:     registered harness name (see `list_harnesses`; `theater harnesses` for what this machine has)
 prompt:      task delivered on the child's command line; optional for a plain CLI
 approval:    "manual" | "edits" | "yolo"
 cwd:         working directory (defaults to caller's cwd)
