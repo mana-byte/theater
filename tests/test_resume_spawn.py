@@ -15,6 +15,7 @@ import pytest
 
 from theater.daemon.spawner import Spawner, SpawnRequest
 from theater.harness import HARNESSES, Harness, LaunchPlan
+from theater.harness.base import ResumeLaunchOverlay
 from theater.harness.builtin.plugins.vibe import ISOLATION_MARKER, isolation_marker_text
 from theater.models import BadRequest
 
@@ -80,6 +81,10 @@ class _ResumeHarness(Harness):
         if prompt:
             argv += ["--prompt", prompt]
         return LaunchPlan(argv=argv)
+
+    def resume_launch_overlay(self, *, predecessor, trusted_session_owners):
+        # Test harness: accepts any predecessor domain unconditionally.
+        return ResumeLaunchOverlay()
 
 
 class _NoResumeHarness(Harness):

@@ -522,9 +522,11 @@ Live resume is refused even for exact/proven/operator session ids. A live
 participant should receive work through `send`; resuming is for continuing a
 session after its previous owner is dead. If the trusted owner row was already
 garbage-collected, Theater has no tombstone yet: resume outside Theater, then
-adopt and bind that pane, or wait for tombstone support. Vibe resumes reuse Theater's
-signed isolated transcript domain marker, so repeat resumes work through dead
-successor rows without returning to the user's shared Vibe history.
+adopt and bind that pane, or wait for tombstone support. Harness-specific
+resume validation runs after the generic identity gates: the Vibe plugin
+validates the signed isolated transcript domain marker, and the other shipped
+plugins validate the predecessor's transcript domain against their own
+observation namespace.
 
 ### `list_models`
 The models `spawn_session` will accept for each spawnable harness. Answered by the daemon, which is what enforces the list — `theater models` reads the file on disk, and the two differ until a `theater restart`.

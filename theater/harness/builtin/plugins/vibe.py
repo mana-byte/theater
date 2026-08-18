@@ -45,8 +45,9 @@ import os
 import secrets
 import stat
 import tomllib
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from theater import paths
 from theater.harness.base import (
@@ -59,6 +60,7 @@ from theater.harness.base import (
     Harness,
     LaunchPlan,
     NativeChild,
+    ResumeLaunchOverlay,
     clipper,
     last_screen_line,
     theater_binary,
@@ -72,6 +74,9 @@ from theater.harness.observation import (
 from theater.harness.source import TranscriptCandidate
 from theater.models import BadRequest
 from theater.provenance import TranscriptProvenance
+
+if TYPE_CHECKING:
+    from theater.models import Participant
 
 logger = logging.getLogger("theater.harness.vibe")
 
@@ -146,7 +151,7 @@ def _canonical(path: Path) -> Path:
 
 
 def _marker_key() -> bytes:
-    """Daemon-local signing key for Vibe domain markers.
+    """Daemon-local signing key for Vibe domain markers (create-on-write).
 
     This is a tamper-evidence boundary for Theater's own bookkeeping, not a
     same-UID security boundary: agents run as the same OS user and can usually
@@ -165,9 +170,33 @@ def _marker_key() -> bytes:
         return key
 
 
+def _marker_key_readonly() -> bytes | None:
+    """Read the signing key without creating it.
+
+    Validation must not create the key as a side effect: a validation call on
+    a fresh daemon should return invalid, not bootstrap a key that subsequent
+    signing would then trust. Returns ``None`` when the key does not exist,
+    which the caller treats as "no valid marker can exist".
+    """
+    key_path = paths.home() / _MARKER_KEY
+    try:
+        return key_path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
 def _marker_mac(payload: dict[str, object]) -> str:
     body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hmac.new(_marker_key(), body, hashlib.sha256).hexdigest()
+
+
+def _marker_mac_readonly(payload: dict[str, object]) -> str | None:
+    """Verify a MAC without creating the key. Returns None if no key exists."""
+    key = _marker_key_readonly()
+    if key is None:
+        return None
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hmac.new(key, body, hashlib.sha256).hexdigest()
 
 
 def isolation_marker_text(*, participant_id: str, transcript_domain: Path) -> str:
@@ -215,7 +244,12 @@ def validate_isolated_domain(
     if not isinstance(data, dict):
         return None
     mac = data.pop("mac", None)
-    if not isinstance(mac, str) or not hmac.compare_digest(mac, _marker_mac(data)):
+    expected_mac = _marker_mac_readonly(data)
+    if (
+        expected_mac is None
+        or not isinstance(mac, str)
+        or not hmac.compare_digest(mac, expected_mac)
+    ):
         return None
     if data.get("version") != _MARKER_VERSION or data.get("harness") != "vibe":
         return None
@@ -324,12 +358,9 @@ class VibeHarness(Harness):
         approval: str,
         model: str | None = None,
         resume: str | None = None,
-        isolate_transcript: bool = False,
     ) -> LaunchPlan:
         if approval not in APPROVALS:
             raise BadRequest(f"approval must be one of {', '.join(APPROVALS)}, got {approval!r}")
-        # Kept for the generic launch funnel; Vibe now isolates every cold spawn.
-        _ = isolate_transcript
         servers = [
             {
                 "name": SERVER_NAME,
@@ -383,6 +414,76 @@ class VibeHarness(Harness):
             session_id=resume,
             transcript_domain=str(transcript_domain) if transcript_domain is not None else None,
         )
+
+    def resume_launch_overlay(
+        self,
+        *,
+        predecessor: Participant,
+        trusted_session_owners: Sequence[Participant],
+    ) -> ResumeLaunchOverlay:
+        """Validate and reuse a trusted predecessor's isolated transcript domain.
+
+        Sits behind core's ``_validate_resume_identity``, which has already
+        selected the newest dead trusted predecessor and pre-filtered the
+        trusted matching set. This check is about whether the predecessor's
+        transcript namespace is safe to reuse; it is not a second session-id
+        validator and does not require exact-only provenance.
+        """
+        if predecessor.transcript_domain is None:
+            raise BadRequest(
+                "cannot resume Vibe session safely: predecessor has no isolated "
+                "transcript domain. Rebind or migrate the session into a Theater "
+                "isolated Vibe domain, then retry."
+            )
+        domain = Path(predecessor.transcript_domain).expanduser().resolve(strict=False)
+        marker = validate_isolated_domain(domain)
+        if marker is None:
+            raise BadRequest(
+                "cannot resume Vibe session safely: predecessor uses a legacy or "
+                "untrusted transcript root. Rebind or migrate it into a Theater "
+                "isolated Vibe domain, then retry."
+            )
+        marker_owner = marker.get("participant_id")
+        if not isinstance(marker_owner, str) or not self._domain_owner_in_trusted_set(
+            owner_id=marker_owner,
+            domain=domain,
+            trusted_owners=trusted_session_owners,
+        ):
+            raise BadRequest(
+                "cannot resume Vibe session safely: isolated transcript domain "
+                "belongs to a different Theater session lineage. Rebind or "
+                "migrate the session into its own isolated Vibe domain, then retry."
+            )
+        if predecessor.transcript_location is not None:
+            location = Path(predecessor.transcript_location)
+            try:
+                location.resolve().relative_to(domain)
+            except (OSError, ValueError) as exc:
+                raise BadRequest(
+                    "cannot resume Vibe session safely: predecessor transcript "
+                    "location is outside its isolated transcript domain"
+                ) from exc
+        return ResumeLaunchOverlay(
+            env={"VIBE_SESSION_LOGGING__SAVE_DIR": str(domain)},
+            transcript_domain=str(domain),
+        )
+
+    @staticmethod
+    def _domain_owner_in_trusted_set(
+        *,
+        owner_id: str,
+        domain: Path,
+        trusted_owners: Sequence[Participant],
+    ) -> bool:
+        """Whether the signed domain owner anchors a trusted resume chain."""
+        for p in trusted_owners:
+            if (
+                p.id == owner_id
+                and p.transcript_domain is not None
+                and Path(p.transcript_domain).expanduser().resolve(strict=False) == domain
+            ):
+                return True
+        return False
 
     def discover_models(self) -> list[str]:
         """Read `[[models]]` out of vibe's own config.

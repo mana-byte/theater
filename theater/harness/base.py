@@ -50,16 +50,17 @@ from __future__ import annotations
 import shutil
 import sys
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from theater.models import Status
+from theater.models import BadRequest, Status
 
 if TYPE_CHECKING:
     from theater.harness.observation import HarnessObserver
+    from theater.models import Participant
 
 #: Name the theater MCP server is registered under inside each harness.
 SERVER_NAME = "theater"
@@ -240,6 +241,28 @@ class LaunchPlan:
     transcript_domain: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ResumeLaunchOverlay:
+    """Harness-specific overrides to merge into a launch plan on resume.
+
+    Returned by ``Harness.resume_launch_overlay`` when core resumes a session.
+    The two fields are the only things a plugin may influence after
+    ``plan_launch`` has run:
+
+    - ``env``: extra environment variables (or overrides for plan env) that
+      the successor process needs. Merged as ``{**plan.env, **overlay.env}``,
+      so the overlay wins on conflict.
+    - ``transcript_domain``: the namespace to persist on the successor row.
+      ``None`` means *no override* — core keeps whatever ``plan_launch``
+      returned. It does **not** mean "clear it"; that would let a declared
+      predecessor domain silently disappear on a resume plan that returns
+      ``transcript_domain=None``.
+    """
+
+    env: Mapping[str, str] = field(default_factory=dict)
+    transcript_domain: str | None = None
+
+
 class Harness(ABC):
     #: Key used on the wire and in `theater spawn <name>`.
     name: str
@@ -297,6 +320,56 @@ class Harness(ABC):
         forwards it only to adapters whose `plan_launch` accepts it. A plugin
         that cannot select a reasoning effort simply omits the parameter.
         """
+
+    def resume_launch_overlay(
+        self,
+        *,
+        predecessor: Participant,
+        trusted_session_owners: Sequence[Participant],
+    ) -> ResumeLaunchOverlay:
+        """Harness-specific overrides to apply when resuming a predecessor session.
+
+        Core calls this only when ``req.resume`` is set, after
+        ``_validate_resume_identity`` has selected the trusted dead predecessor
+        and pre-filtered the trusted matching set. The hook decides whether
+        the predecessor's transcript namespace is safe for the successor to
+        reuse, and returns the env / domain overrides core merges into the
+        launch plan.
+
+        The base implementation is **conditionally fail-closed**:
+
+        - ``predecessor.transcript_domain is None`` → return an empty overlay.
+          This is the normal case for a harness with no isolated namespace;
+          forcing every such harness to write a boilerplate override would
+          be noise.
+        - ``predecessor.transcript_domain is not None`` → refuse, naming the
+          harness and saying the plugin must implement the hook to resume a
+          session that has a transcript domain, or the session must be
+          resumed outside Theater and then adopted and bound.
+
+        A universally permissive base is unsafe because
+        ``transcript_domain=None`` in the overlay means *no override* and
+        preserves the *plan's* domain, not the predecessor's. A resume plan
+        commonly returns no domain, so a permissive base would let a declared
+        predecessor domain silently disappear.
+
+        ``trusted_session_owners`` is the complete trusted matching set
+        (same canonical harness, same requested native session id, trusted
+        provenance), **including** the selected predecessor itself. The Vibe
+        marker commonly names that very row, so excluding it would break the
+        lineage check. These owners are normally dead:
+        ``_validate_resume_identity`` refuses live trusted matches before
+        the hook runs.
+        """
+        if predecessor.transcript_domain is None:
+            return ResumeLaunchOverlay()
+        raise BadRequest(
+            f"harness {self.name!r} does not implement resume_launch_overlay "
+            "but the predecessor has a transcript domain. The plugin must "
+            "implement the hook to resume a session that has a transcript "
+            "domain, or the session must be resumed outside Theater and then "
+            "adopted and bound."
+        )
 
     def discover_models(self) -> list[str]:
         """Model names this CLI reports it can run, for `theater models`.
