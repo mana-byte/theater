@@ -22,6 +22,7 @@ from theater.harness.observation import HarnessObserver, TranscriptObserver
 from theater.harness.source import TranscriptCandidate
 from theater.models import BadRequest
 from theater.protocol import RemoteError
+from theater.transcript_identity import is_opaque_location
 
 # -- A fake non-Claude harness that implements the receipt hook ---------------
 
@@ -64,6 +65,8 @@ class FakeObserver(TranscriptObserver):
             raise ValueError("fake receipt payload missing session_id")
         if not isinstance(raw_path, str) or not raw_path:
             raise ValueError("fake receipt payload missing path")
+        if is_opaque_location(raw_path):
+            return TranscriptCandidate(location=raw_path, session_id=session_id)
         path = Path(raw_path)
         if not path.is_absolute():
             raise ValueError("fake receipt path must be absolute")
@@ -363,3 +366,72 @@ def test_receipt_token_deleted_on_death(registry, tmp_path):
 
     assert not token_path.exists()
     assert registry.store.get_meta(f"receipt_token:{p.id}") is None
+
+
+# -- 7. Re-receipt of already-owned opaque location with a live sibling -------
+
+
+async def test_rereceipt_of_already_owned_location_allows_with_sibling(
+    fake_daemon, fake_client, tmp_path
+):
+    """A re-receipt of a location the participant already owns is allowed
+    even when a live same-cwd sibling exists.
+
+    The allow/early-return branch in `_reject_unbound_same_cwd_receipt` must
+    use `_same_location` (not raw `==`) so a path location stored in
+    canonical form is reconciled with a receipt that names the same path
+    through a different string. Without the fix, the raw `==` fails because
+    the strings differ and the receipt is wrongly refused with
+    "shares its cwd".
+    """
+    daemon, root = fake_daemon
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    _spawn_fake(daemon, cwd, pid="first", token="one")
+    _spawn_fake(daemon, cwd, pid="second", token="two")
+
+    # Create a transcript reachable through two different path strings:
+    # the canonical form (stored by the daemon) and a symlinked form
+    # (what a hook might name). Both resolve to the same file.
+    session = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    real_project = root / "real-project"
+    real_project.mkdir(parents=True, exist_ok=True)
+    transcript = real_project / f"{session}.jsonl"
+    transcript.write_text("")
+    # Symlink "project" -> "real-project" so the hook names a different path
+    # that resolves to the same file.
+    link_project = root / "project"
+    link_project.symlink_to(real_project, target_is_directory=True)
+    via_link = link_project / f"{session}.jsonl"
+
+    # Give "first" the canonical path as its transcript_location, with a
+    # different session id so the session-id early-return does not fire —
+    # the _same_location check is what must allow the re-receipt.
+    canonical = str(transcript.resolve())
+    first = daemon.store.get_participant("first")
+    first.transcript_location = canonical
+    first.session_id = "old-session"
+    daemon.store.upsert_participant(first)
+    daemon.store.record_transcript_receipt(
+        "first", session_id="old-session", transcript_location=canonical
+    )
+
+    # Monkeypatch the fake observer to return the symlinked path unresolved,
+    # so the candidate's location string differs from the stored canonical
+    # form. `_same_location` resolves both and reconciles; raw `==` does not.
+    def returning_via_link(*, payload, cwd, expected_session_id):
+        return TranscriptCandidate(location=str(via_link), session_id=session)
+
+    daemon.observer.harnesses["fake"].observer.validate_transcript_receipt = returning_via_link
+
+    # The re-receipt should be allowed even though "second" is a live
+    # same-cwd sibling, because _same_location reconciles the two paths.
+    # If the raw `==` were used instead, this call would raise
+    # "shares its cwd".
+    result = await fake_client.call(
+        "transcript.receipt",
+        id="first",
+        token="one",
+        payload={"session_id": session, "path": str(via_link)},
+    )
+    assert result["ok"] is True

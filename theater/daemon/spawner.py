@@ -306,6 +306,13 @@ class Spawner:
         # receipt_token_path against an inheriting default would write a token
         # file that can never be used — core would refuse the receipt at
         # runtime because the base raises ValueError.
+        # Resolve through the global registry, not daemon.observer.harnesses:
+        # _build_plan calls the global plan_launch, so the plan was produced
+        # by this same registry's harness — checking a different one would be
+        # incoherent. The receipt RPC later resolves through the daemon's
+        # harnesses because it handles a live participant the daemon owns; a
+        # daemon constructed with injected harnesses could not have spawned
+        # through the global registry anyway.
         harness = get_harness(participant.harness)
         observer = getattr(harness, "observer", None)
         if observer is None:
