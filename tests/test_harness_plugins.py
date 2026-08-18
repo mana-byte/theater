@@ -161,6 +161,43 @@ def test_underscored_files_are_skipped(local_dir):
     assert "acme" in install(local_dir)
 
 
+def test_a_shared_helper_module_is_importable(local_dir):
+    """C4: a ``_``-prefixed helper beside a plugin can be imported by it.
+
+    The plugin's directory is on ``sys.path`` only for the duration of the
+    plugin's import, so ``import _shared`` resolves without the directory
+    leaking into the process-wide import path afterward.
+    """
+    (local_dir / "_shared.py").write_text("VALUE = 42\n")
+    (local_dir / "acme.py").write_text(
+        BODY.format(
+            cls="AcmeHarness", name="acme", binary="acme", icon=repr("@"), aliases="()"
+        ).replace(
+            "class AcmeHarness(Harness):",
+            "import _shared\nclass AcmeHarness(Harness):\n    _shared_value = _shared.VALUE",
+        )
+    )
+    assert "acme" in install(local_dir)
+    assert harness_registry.get("acme")._shared_value == 42
+
+
+def test_a_shared_helper_does_not_leak_onto_sys_path(local_dir):
+    """C4: the plugin directory must not remain on sys.path after loading."""
+    import sys
+
+    (local_dir / "_shared.py").write_text("VALUE = 42\n")
+    (local_dir / "acme.py").write_text(
+        BODY.format(
+            cls="AcmeHarness", name="acme", binary="acme", icon=repr("@"), aliases="()"
+        ).replace(
+            "class AcmeHarness(Harness):",
+            "import _shared\nclass AcmeHarness(Harness):",
+        )
+    )
+    install(local_dir)
+    assert str(local_dir) not in sys.path
+
+
 def test_non_python_files_are_ignored(local_dir):
     (local_dir / "notes.txt").write_text("not a plugin")
     (local_dir / "acme.py.bak").write_text("also not")
@@ -402,6 +439,69 @@ def test_a_broken_shipped_plugin_names_the_escape_hatch(local_dir, shipped_dir):
     assert 'disabled = ["acme"]' in str(exc.value)
 
 
+def test_a_local_plugin_that_calls_sys_exit_does_not_stop_start_up(local_dir):
+    """C2: ``sys.exit()`` at import raises ``SystemExit`` (a ``BaseException``),
+    not ``Exception`` — without catching it, the daemon dies."""
+    (local_dir / "quitter.py").write_text("import sys; sys.exit(1)")
+    plugin(local_dir)
+    assert install(local_dir) == ["acme", "claude", "codex", "opencode", "vibe"]
+
+
+def test_a_local_plugin_that_calls_sys_exit_is_listed_as_broken(local_dir):
+    (local_dir / "quitter.py").write_text("import sys; sys.exit(1)")
+    install(local_dir)
+    rows = {r["name"]: r for r in harness_registry.describe()}
+    assert rows["quitter"]["source"] == "local"
+    assert rows["quitter"]["installed"] is False
+
+
+def test_a_local_plugin_with_none_aliases_does_not_stop_start_up(local_dir):
+    """C2: ``aliases = None`` would raise ``TypeError`` outside any handler."""
+    body = BODY.format(
+        cls="AcmeHarness", name="acme", binary="acme", icon=repr("@"), aliases="()"
+    ).replace("aliases = ()", "aliases = None")
+    (local_dir / "bad.py").write_text(body)
+    assert install(local_dir) == ["claude", "codex", "opencode", "vibe"]
+
+
+def test_a_local_plugin_with_none_aliases_is_listed_as_broken(local_dir):
+    body = BODY.format(
+        cls="AcmeHarness", name="acme", binary="acme", icon=repr("@"), aliases="()"
+    ).replace("aliases = ()", "aliases = None")
+    (local_dir / "bad.py").write_text(body)
+    install(local_dir)
+    rows = {r["name"]: r for r in harness_registry.describe()}
+    assert rows["bad"]["source"] == "local"
+    assert "tuple" in rows["bad"]["error"]
+
+
+def test_a_local_plugin_with_list_binaries_does_not_stop_start_up(local_dir):
+    """C2: ``binaries = ["nova"]`` (list, not frozenset) survives loading and
+    detonates later in ``harness_detect`` at ``{harness.binary} | harness.binaries``."""
+    body = BODY.format(
+        cls="AcmeHarness", name="acme", binary="acme", icon=repr("@"), aliases="()"
+    ).replace(
+        "class AcmeHarness(Harness):",
+        "class AcmeHarness(Harness):\n    binaries = ['nova']",
+    )
+    (local_dir / "bad.py").write_text(body)
+    assert install(local_dir) == ["claude", "codex", "opencode", "vibe"]
+
+
+def test_a_local_plugin_with_list_binaries_is_listed_as_broken(local_dir):
+    body = BODY.format(
+        cls="AcmeHarness", name="acme", binary="acme", icon=repr("@"), aliases="()"
+    ).replace(
+        "class AcmeHarness(Harness):",
+        "class AcmeHarness(Harness):\n    binaries = ['nova']",
+    )
+    (local_dir / "bad.py").write_text(body)
+    install(local_dir)
+    rows = {r["name"]: r for r in harness_registry.describe()}
+    assert rows["bad"]["source"] == "local"
+    assert "frozenset" in rows["bad"]["error"]
+
+
 def test_disabling_a_plugin_stops_it_being_imported(local_dir, shipped_dir):
     """The escape hatch has to work when importing is exactly what breaks."""
     (shipped_dir / "acme.py").write_text("raise ValueError('boom')")
@@ -444,6 +544,61 @@ def test_a_plugin_alias_cannot_be_another_harness_name(local_dir):
     plugin(local_dir, aliases=("claude",))
     with pytest.raises(harness_registry.ConfigError, match="name of another"):
         install(local_dir)
+
+
+def test_a_plugin_name_cannot_shadow_an_existing_alias(local_dir, shipped_dir):
+    """C1: a primary name colliding with an already-claimed alias is refused.
+
+    Alias registered first, then the colliding name: ``a.py`` claims
+    ``mistral-vibe`` as an alias of ``vibe``, then ``b.py`` tries to register
+    under the primary name ``mistral-vibe``. Without the guard, the name lands
+    in ``HARNESSES`` but ``normalize("mistral-vibe")`` still returns ``"vibe"``
+    — registration and adoption route to the wrong adapter.
+    """
+    plugin(shipped_dir, "a.py", cls="Vibe2", name="vibe", binary="vibe", aliases=("mistral-vibe",))
+    plugin(local_dir, "b.py", cls="Mv", name="mistral-vibe", binary="mv")
+    with pytest.raises(harness_registry.ConfigError, match="already an alias of"):
+        install(local_dir, shipped_dir=shipped_dir)
+
+
+def test_a_plugin_alias_cannot_shadow_an_existing_name(local_dir, shipped_dir):
+    """C1 mirror: name registered first, then the colliding alias.
+
+    The reverse interleaving: ``a.py`` registers as ``mistral-vibe``, then
+    ``b.py`` claims ``mistral-vibe`` as an alias of ``vibe``. The existing
+    ``_claim_alias`` guard catches this, and the test pins both orderings to
+    the same outcome.
+    """
+    plugin(shipped_dir, "a.py", cls="Mv", name="mistral-vibe", binary="mv")
+    plugin(local_dir, "b.py", cls="Vibe2", name="vibe", binary="vibe", aliases=("mistral-vibe",))
+    with pytest.raises(harness_registry.ConfigError, match="name of another"):
+        install(local_dir, shipped_dir=shipped_dir)
+
+
+def test_two_plugins_cannot_claim_the_same_binary(local_dir, shipped_dir):
+    """C3: two adapters claiming the same binary are silently resolved by
+    iteration order in ``match_binary``. Refused at load time with both
+    files named, the same shape as the alias collision guard."""
+    plugin(shipped_dir, "a.py", cls="First", name="first", binary="nova")
+    plugin(local_dir, "b.py", cls="Second", name="second", binary="nova")
+    with pytest.raises(harness_registry.ConfigError, match="already claimed by"):
+        install(local_dir, shipped_dir=shipped_dir)
+
+
+def test_two_plugins_cannot_claim_the_same_extra_binary(local_dir, shipped_dir):
+    """C3: a ``binaries`` entry colliding with another harness's primary
+    ``binary`` is also refused."""
+    plugin(shipped_dir, "a.py", cls="First", name="first", binary="nova")
+    (local_dir / "b.py").write_text(
+        BODY.format(
+            cls="Second", name="second", binary="other", icon=repr("#"), aliases="()"
+        ).replace(
+            "class Second(Harness):",
+            "class Second(Harness):\n    binaries = frozenset({'nova'})",
+        )
+    )
+    with pytest.raises(harness_registry.ConfigError, match="already claimed by"):
+        install(local_dir, shipped_dir=shipped_dir)
 
 
 # ---- disabling ----------------------------------------------------------

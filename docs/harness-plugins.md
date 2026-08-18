@@ -53,8 +53,11 @@ $THEATER_HOME/harnesses/
 ```
 
 Every `*.py` in that directory, in filename order, must export a `Harness`
-instance named `HARNESS`. Files beginning with `_` or `.` are skipped, which is
-what makes a shared helper module possible next to the plugins that import it.
+instance named `HARNESS`. Files beginning with `_` or `.` are skipped. A
+`_`-prefixed file is importable as a shared helper: the plugin's directory is
+on `sys.path` only for the duration of the plugin's import, so `import _shared`
+resolves without the directory leaking into the process-wide import path
+afterward.
 
 Loading is by path under a synthetic module name
 (`theater_harness_plugin_local_nova` for a local plugin,

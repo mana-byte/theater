@@ -86,8 +86,11 @@ def scan(directory: Path, *, source: str, skip: Iterable[str] = ()) -> list[Plug
     """Every plugin in `directory`, in filename order. Never raises.
 
     A missing directory is not an error: the common case is a user who has
-    never written one. Files starting with `_` or `.` are skipped, which is
-    what makes a shared helper module possible next to the plugins that use it.
+    never written one. Files starting with `_` or `.` are skipped, which keeps
+    a shared helper module from being mistaken for a plugin. The plugin's
+    directory is on ``sys.path`` only for the duration of its import, so a
+    ``_``-prefixed helper beside it is importable (``import _shared``) without
+    the directory leaking into the process-wide import path afterward.
 
     `skip` holds file stems to not even import — disabling a plugin has to work
     when the reason for disabling it is that importing it is what breaks.
@@ -102,7 +105,7 @@ def scan(directory: Path, *, source: str, skip: Iterable[str] = ()) -> list[Plug
             continue
         try:
             harness = _load_one(path, source)
-        except PluginError as exc:
+        except (PluginError, SystemExit) as exc:
             found.append(Plugin(path=path, source=source, name=path.stem, error=str(exc)))
             continue
         logger.info("loaded %s harness plugin %r from %s", source, harness.name, path)
@@ -121,11 +124,21 @@ def _load_one(path: Path, source: str) -> Harness:
     # resolve annotations via sys.modules, and a plugin using either would fail
     # on its own import line otherwise.
     sys.modules[module_name] = module
+    # The plugin's directory is on sys.path only for the duration of exec_module,
+    # so a ``_``-prefixed helper beside the plugin is importable (``import _shared``)
+    # without leaking the directory into the process-wide import path afterward.
+    parent = str(path.parent)
+    added = parent not in sys.path
+    if added:
+        sys.path.insert(0, parent)
     try:
         spec.loader.exec_module(module)
-    except Exception as exc:
+    except (Exception, SystemExit) as exc:
         sys.modules.pop(module_name, None)
         raise PluginError(f"{path}: failed to import: {exc!r}") from exc
+    finally:
+        if added:
+            sys.path.remove(parent)
 
     harness = getattr(module, "HARNESS", None)
     if harness is None:
@@ -211,6 +224,18 @@ def _check_identity(path: Path, harness: Harness) -> None:
             "cell so every column of `theater harnesses` lines up. Use a narrow "
             "glyph (one cell wide), not a wide emoji or a multi-character string."
         )
-    for alias in harness.aliases:
+    aliases = getattr(harness, "aliases", None)
+    if not isinstance(aliases, tuple):
+        raise PluginError(
+            f"{path}: harness {name!r} has aliases of type "
+            f"{type(aliases).__name__}, not a tuple. Use `aliases = (...)`"
+        )
+    for alias in aliases:
         if not isinstance(alias, str) or not alias:
             raise PluginError(f"{path}: harness {name!r} has an empty alias")
+    binaries: frozenset[str] = getattr(harness, "binaries", frozenset())
+    if not isinstance(binaries, frozenset):
+        raise PluginError(
+            f"{path}: harness {name!r} has binaries of type "
+            f"{type(binaries).__name__}, not a frozenset. Use `binaries = frozenset(...)`"
+        )

@@ -81,6 +81,12 @@ _ALIASES: dict[str, str] = {}
 #: SOURCE column of `theater harnesses`.
 _PLUGINS: dict[str, Plugin] = {}
 
+#: Binary names claimed by registered harnesses, mapped to the harness name.
+#: Two adapters claiming the same binary is silently resolved by iteration
+#: order in ``match_binary`` — refusing at load names both files, the same
+#: shape as the alias collision guard.
+_BINARIES: dict[str, str] = {}
+
 #: Local plugins that would not load. Listed by `theater harnesses` as broken —
 #: a plugin the user believes they installed and cannot find is the failure this
 #: release exists to remove.
@@ -120,6 +126,7 @@ def install(
     HARNESSES.clear()
     _ALIASES.clear()
     _PLUGINS.clear()
+    _BINARIES.clear()
     _BROKEN.clear()
 
     shipped = plugins.scan(
@@ -153,10 +160,14 @@ def install(
                 previous.source,
                 previous.path,
             )
+        _claim_name(found.name, str(found.path))
         HARNESSES[found.name] = found.harness
         _PLUGINS[found.name] = found
         for alias in found.harness.aliases:
             _claim_alias(alias, found.name, str(found.path))
+        _claim_binary(found.harness.binary, found.name, str(found.path))
+        for extra in found.harness.binaries:
+            _claim_binary(extra, found.name, str(found.path))
 
     return sorted(HARNESSES)
 
@@ -192,6 +203,41 @@ def _claim_alias(alias: str, owner: str, claimant: str) -> None:
             f"{claimant} claims alias {alias!r}, which is the name of another harness"
         )
     _ALIASES[alias] = owner
+
+
+def _claim_name(name: str, claimant: str) -> None:
+    """Guard a primary name against an alias some earlier plugin already claimed.
+
+    The mirror of ``_claim_alias``'s second guard: an alias that shadows a
+    harness name is caught there, but a harness *name* that shadows an
+    already-claimed alias is caught here. Without it, ``HARNESSES`` gains the
+    key but ``normalize`` still routes to the alias owner — registration and
+    adoption disagree, and load order silently decides which wins.
+    """
+    owner = _ALIASES.get(name)
+    if owner is not None and owner != name:
+        raise ConfigError(
+            f"{claimant} registers harness {name!r}, which is already an alias of {owner!r}"
+        )
+
+
+def _claim_binary(binary: str, owner: str, claimant: str) -> None:
+    """Claim a binary name for ``owner``, unless another harness already owns it.
+
+    The same class of bug as an alias collision: ``match_binary`` walks
+    ``harnesses.values()`` and returns the first adapter whose binary set
+    contains the name, so two adapters claiming the same binary are silently
+    resolved by iteration order — adoption records the wrong harness, and
+    stale-pane verification can report a false match. Refused at load time
+    with both files named, the same shape as the alias guard.
+    """
+    previous = _BINARIES.get(binary)
+    if previous is not None and previous != owner:
+        raise ConfigError(
+            f"{claimant} claims binary {binary!r} for harness {owner!r}, which is "
+            f"already claimed by harness {previous!r}"
+        )
+    _BINARIES[binary] = owner
 
 
 def normalize(name: str) -> str:
