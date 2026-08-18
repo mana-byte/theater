@@ -91,42 +91,55 @@ def is_shell(command: str) -> bool:
     return command.rsplit("/", 1)[-1] in SHELLS
 
 
+def compare_detected_harness(
+    recorded_harness: str,
+    detected: str,
+    pane_current_command: str,
+) -> PaneHarnessVerdict:
+    """Judge whether a pane still runs the recorded harness, given the
+    ALREADY-DETECTED harness name.
+
+    This is "job 2 — decide what it means" (AGENTS.md): the pure judgement
+    with no I/O.  Callers that already have a detected name (e.g. from
+    ``_get_pane_info``) call this directly, avoiding a redundant
+    ``detect_harness`` call — which is a subprocess spawn on the fallback
+    path and stalls the daemon event loop.
+
+    Semantics:
+
+    - ``recorded_harness == "unknown"`` → ``MATCH`` (nothing to compare).
+    - detected equals recorded → ``MATCH``.
+    - detected is a positively identified DIFFERENT harness → ``CONFLICT``.
+    - detected is ``"unknown"`` AND foreground is a shell → ``HARNESS_GONE``.
+    - detected is ``"unknown"`` and NOT a shell → ``UNDETERMINED``
+      (absence of evidence, not evidence of a foreign harness).
+    """
+    if recorded_harness == "unknown":
+        return PaneHarnessVerdict.MATCH
+    if detected == recorded_harness:
+        return PaneHarnessVerdict.MATCH
+    if detected != "unknown":
+        return PaneHarnessVerdict.CONFLICT
+    if is_shell(pane_current_command):
+        return PaneHarnessVerdict.HARNESS_GONE
+    return PaneHarnessVerdict.UNDETERMINED
+
+
 def compare_pane_harness(
     recorded_harness: str,
     pane_current_command: str,
     pane_pid: int,
 ) -> PaneHarnessVerdict:
-    """Judge whether a pane still runs the recorded harness.
+    """One-call convenience: detect then judge.
 
-    ONE decision function shared by all three callers that need this
-    judgement — the send path (``methods._check_pane_harness``), the restore
-    preflight (``methods._verify_creator_pane_harness``), and the restore
-    classifier (``recovery.classify_node``).  Per AGENTS.md this is "job 2 —
-    decide what it means" and is explicitly NOT a per-caller seam: each
-    caller decides what to DO with the verdict (send refuses, preflight
-    raises ``BadRequest``, ``classify_node`` maps to live / stale_live /
-    live_harness_conflict) but none re-encodes the judgement.
-
-    Semantics, matching the send-path reference (``methods.py`` lines
-    1746-1769 at time of writing):
-
-    - ``recorded_harness == "unknown"`` → ``MATCH`` (nothing to compare).
-    - detected harness equals recorded → ``MATCH``.
-    - detected harness is a positively identified DIFFERENT harness → ``CONFLICT``.
-    - detected harness is ``"unknown"`` AND foreground is a shell → ``HARNESS_GONE``.
-    - detected harness is ``"unknown"`` and NOT a shell → ``UNDETERMINED``
-      (absence of evidence, not evidence of a foreign harness).
+    Calls ``detect_harness`` once and delegates to
+    ``compare_detected_harness``.  Use this when you have a pane but no
+    pre-detected name; use ``compare_detected_harness`` directly when the
+    detection has already been done (e.g. ``pane_info["harness"]`` from
+    ``_get_pane_info``) to avoid a redundant subprocess spawn.
     """
-    if recorded_harness == "unknown":
-        return PaneHarnessVerdict.MATCH
-    found = detect_harness(pane_current_command, pane_pid)
-    if found == recorded_harness:
-        return PaneHarnessVerdict.MATCH
-    if found != "unknown":
-        return PaneHarnessVerdict.CONFLICT
-    if is_shell(pane_current_command):
-        return PaneHarnessVerdict.HARNESS_GONE
-    return PaneHarnessVerdict.UNDETERMINED
+    detected = detect_harness(pane_current_command, pane_pid)
+    return compare_detected_harness(recorded_harness, detected, pane_current_command)
 
 
 def match_binary(command: str, harnesses) -> str | None:

@@ -171,12 +171,12 @@ async def test_a_shell_with_the_harness_still_below_it_delivers(
     rather than staged, because the tree walk is a real `ps` call and the
     point here is the gate's logic, not the walk's.
     """
-    import theater.daemon.harness_detect as harness_detect_mod
+    import theater.daemon.methods as methods_mod
 
     target = await _target(client, fake_tmux, daemon, command="vibe")
     fake_tmux.add_pane("%1", command="zsh", pid=4242)
-    # compare_pane_harness calls detect_harness from harness_detect, not methods.
-    monkeypatch.setattr(harness_detect_mod, "detect_harness", lambda cmd, pid: "vibe")
+    # The send path calls detect_harness by its imported name in methods.py.
+    monkeypatch.setattr(methods_mod, "detect_harness", lambda cmd, pid: "vibe")
 
     await client.call("send", target=target["id"], prompt="hi")
 

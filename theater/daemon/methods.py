@@ -25,7 +25,7 @@ from theater import paths, protocol
 from theater.daemon import lineage, worktree
 from theater.daemon.harness_detect import (
     PaneHarnessVerdict,
-    compare_pane_harness,
+    compare_detected_harness,
     detect_harness,
 )
 from theater.daemon.rails import (
@@ -1487,7 +1487,7 @@ async def _checkpoint_restore(daemon, params: dict) -> dict:
 async def _verify_creator_pane_harness(daemon, checkpoint_id: int, creator: Participant) -> None:
     """Verify the live creator's pane harness before the atomic claim.
 
-    Uses ``compare_pane_harness`` (the shared decision function in
+    Uses ``compare_detected_harness`` (the shared decision function in
     ``harness_detect``) so this site and the send path never drift.  A
     ``CONFLICT`` or ``HARNESS_GONE`` verdict raises ``BadRequest`` so the
     checkpoint stays ``ready`` and retryable.  A missing pane
@@ -1509,9 +1509,9 @@ async def _verify_creator_pane_harness(daemon, checkpoint_id: int, creator: Part
         # Pane gone — restore_tree marks the row dead and reclassifies.
         # Not a preflight refusal: this is a recoverable condition.
         return
-    verdict = compare_pane_harness(creator.harness, pane.current_command, pane.pane_pid)
+    found = detect_harness(pane.current_command, pane.pane_pid)
+    verdict = compare_detected_harness(creator.harness, found, pane.current_command)
     if verdict is PaneHarnessVerdict.CONFLICT:
-        found = detect_harness(pane.current_command, pane.pane_pid)
         raise BadRequest(
             f"checkpoint {checkpoint_id!r}: creator {creator.id!r} pane "
             f"{creator.tmux_pane!r} runs {found!r}, not {creator.harness!r}; "
@@ -1744,11 +1744,11 @@ async def _check_pane_identity(daemon, target, refuse: Callable[..., NoReturn]) 
             reason="pane_replaced",
         )
 
-    verdict = compare_pane_harness(target.harness, pane.current_command, pane.pane_pid)
+    found = detect_harness(pane.current_command, pane.pane_pid)
+    verdict = compare_detected_harness(target.harness, found, pane.current_command)
     if verdict is PaneHarnessVerdict.MATCH:
         return
     if verdict is PaneHarnessVerdict.CONFLICT:
-        found = detect_harness(pane.current_command, pane.pane_pid)
         refuse(
             StaleTarget(
                 f"pane {target.tmux_pane} is running {found!r}, "

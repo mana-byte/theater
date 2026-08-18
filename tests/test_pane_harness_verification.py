@@ -476,3 +476,63 @@ async def test_live_creator_harness_race_children_reconciled(
     assert result["restore_state"] == "partial", (
         f"Expected partial (one success, one failure), got {result['restore_state']!r}"
     )
+
+
+# ---- detect_harness call-count regression guard -----------------------------
+
+
+async def test_detect_harness_called_once_per_pane(client, daemon, fake_tmux, monkeypatch):
+    """detect_harness must be called exactly once per pane during a restore,
+    not twice.  _get_pane_info already runs detection; classify_node must
+    consume that result rather than re-detecting — each detection is a
+    subprocess spawn on the fallback path, and doubling it stalls the
+    daemon event loop.
+    """
+    import theater.daemon.harness_detect as hd
+
+    fake_tmux.add_pane("%10", command="vibe", pid=10001)
+    fake_tmux.add_pane("%11", command="vibe", pid=10002)
+
+    _make_participant(daemon, pid="creator", harness="vibe", pane="%10")
+    _make_participant(daemon, pid="child", harness="vibe", pane="%11", parent_id="creator")
+
+    created = await client.call("checkpoint.create", caller_id="creator", name="cp")
+
+    # Count calls to detect_harness from _get_pane_info (the restore path).
+    # _verify_creator_pane_harness (preflight) also calls detect_harness for
+    # the creator, so the total is: 1 (preflight creator) + 1 (restore creator)
+    # + 1 (restore child) = 3, one per pane queried.
+    call_count = 0
+    real_detect = hd.detect_harness
+
+    def _counting_detect(cmd, pid):
+        nonlocal call_count
+        call_count += 1
+        return real_detect(cmd, pid)
+
+    # Patch at the harness_detect module level so _get_pane_info (which
+    # imports detect_harness lazily) sees the counter.  Also patch methods.py
+    # so the preflight's _verify_creator_pane_harness sees it too.
+    monkeypatch.setattr(hd, "detect_harness", _counting_detect)
+    import theater.daemon.methods as methods_mod
+
+    monkeypatch.setattr(methods_mod, "detect_harness", _counting_detect)
+
+    result = await client.call(
+        "checkpoint.restore",
+        checkpoint_id=created["checkpoint_id"],
+        approval="yolo",
+        caller_id="creator",
+    )
+
+    assert result["restore_state"] == "restored"
+    # 2 panes queried (creator + child), each detected exactly once:
+    #   - preflight: creator pane → 1 call
+    #   - restore_tree: creator pane via _get_pane_info → 1 call
+    #   - restore_tree: child pane via _get_pane_info → 1 call
+    # Total = 3, not 4 (which it would be if classify_node re-detected).
+    assert call_count == 3, (
+        f"detect_harness called {call_count} times, expected 3 "
+        f"(1 preflight + 2 restore); a count of 4 means classify_node is "
+        f"re-detecting instead of consuming pane_info['harness']"
+    )

@@ -728,21 +728,28 @@ def classify_node(  # noqa: PLR0912
                     f"confirmed gone by tmux"
                 )
             assert isinstance(pane_info, dict)
-            # Use the shared decision function so this site, the send path,
-            # and the preflight never drift.  Each caller decides what to DO
-            # with the verdict; none re-encodes the judgement.
-            from theater.daemon.harness_detect import PaneHarnessVerdict, compare_pane_harness
+            # Consume the pre-detected harness from pane_info directly —
+            # _get_pane_info already ran detect_harness, so re-detecting
+            # here would spend up to two subprocess spawns (proc.comm +
+            # proc.descendants) on the "unknown" fallback path, twice per
+            # node, stalling the daemon event loop.  compare_detected_harness
+            # is the pure judgement with no I/O.
+            from theater.daemon.harness_detect import (
+                PaneHarnessVerdict,
+                compare_detected_harness,
+            )
 
             raw_command = pane_info.get("command", "")
-            pane_pid = pane_info.get("pane_pid", 0)
-            verdict = compare_pane_harness(live_participant.harness, raw_command, pane_pid)
+            detected_harness = pane_info.get("harness", "unknown")
+            verdict = compare_detected_harness(
+                live_participant.harness, detected_harness, raw_command
+            )
             if verdict is PaneHarnessVerdict.MATCH:
                 return "live", "participant is live with tmux-verified pane"
             if verdict is PaneHarnessVerdict.CONFLICT:
-                pane_harness = pane_info.get("harness", "unknown")
                 return "live_harness_conflict", (
                     f"participant {orig_id!r}: pane {live_participant.tmux_pane!r} "
-                    f"runs {pane_harness!r} not {live_participant.harness!r}"
+                    f"runs {detected_harness!r} not {live_participant.harness!r}"
                 )
             if verdict is PaneHarnessVerdict.HARNESS_GONE:
                 return "stale_live", (
