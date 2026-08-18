@@ -43,13 +43,13 @@ def mcp_config_path(participant_id: str) -> Path:
 
 
 def claude_settings_path(participant_id: str) -> Path:
-    """Launch-specific Claude settings for receipt hooks."""
+    """Launch-specific Claude settings for receipt hooks.
+
+    Lives under the shared Claude settings namespace, not the per-participant
+    observation dir, because ``--settings`` is a single file the CLI reads at
+    startup and its hooks reference the token path inside it.
+    """
     return home() / "claude" / f"{participant_id}.settings.json"
-
-
-def claude_receipt_token_path(participant_id: str) -> Path:
-    """Private token read by Claude lifecycle hooks."""
-    return home() / "claude" / f"{participant_id}.receipt-token"
 
 
 def observation_dir(harness: str, participant_id: str) -> Path:
@@ -76,9 +76,6 @@ def ensure_home() -> Path:
     root = home()
     root.mkdir(parents=True, exist_ok=True)
     mcp_config_dir().mkdir(parents=True, exist_ok=True)
-    claude = root / "claude"
-    claude.mkdir(parents=True, exist_ok=True)
-    claude.chmod(0o700)
     (root / "observations").mkdir(parents=True, exist_ok=True)
     harnesses_dir().mkdir(parents=True, exist_ok=True)
     return root

@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import inspect
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -288,6 +289,39 @@ class HarnessObserver(ABC):
     ) -> list[TranscriptCandidate]:
         """Operator recovery candidates, explicitly not participant-attributed content."""
         return []
+
+    def validate_transcript_receipt(
+        self,
+        *,
+        payload: Mapping[str, object],
+        cwd: str | None,
+        expected_session_id: str | None,
+    ) -> TranscriptCandidate:
+        """Validate an opaque lifecycle-hook receipt into a transcript candidate.
+
+        ``payload`` is the decoded JSON object the harness's lifecycle hook
+        sent. Core never inspects it — the plugin owns every field name,
+        path rule, and record-format check. A Claude receipt carries
+        ``session_id``/``sessionId`` and ``transcript_path``/``transcriptPath``;
+        a different harness may carry anything at all, and core treats it
+        as an opaque blob so the mechanism is generic.
+
+        The return value must carry a non-empty ``location`` and a non-empty
+        ``session_id``; core rejects a candidate that does not. Rejection is
+        an exception, never a candidate carrying ``rejection_reason``: raise
+        ``ValueError`` with prose telling the caller what to fix, and core
+        will map it to a ``BadRequest``.
+
+        The base implementation refuses. A plugin that wants to use
+        receipts must override this method. Not abstract, because making it
+        abstract would break every existing plugin that does not use
+        receipts — and most do not.
+        """
+        raise ValueError(
+            f"harness {type(self).__name__} does not implement "
+            "validate_transcript_receipt; a plugin must implement this hook "
+            "to use transcript receipts. See docs/harness-plugins.md"
+        )
 
     def admit_operator_candidate(
         self,

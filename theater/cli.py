@@ -158,10 +158,25 @@ def _add_gc_parser(sub) -> None:
 
 
 def _add_receipt_parser(sub) -> None:
-    """Register the hidden Claude hook ingestion command."""
-    receipt = sub.add_parser("claude-receipt", help=argparse.SUPPRESS)
+    """Register the hidden hook ingestion commands.
+
+    ``transcript-receipt`` is the generic entry point: it reads a token file,
+    parses JSON from stdin, and forwards ``id``/``token``/``payload`` to the
+    ``transcript.receipt`` RPC with the payload untouched.
+
+    ``claude-receipt`` is the backward-compatible alias shipped in v3.2.0.
+    Live Claude sessions have ``settings.json`` on disk invoking it by that
+    exact name, so it must keep working: it extracts ``session_id`` and
+    ``transcript_path`` from the stdin JSON and wraps them into a payload
+    before forwarding to ``transcript.receipt``.
+    """
+    receipt = sub.add_parser("transcript-receipt", help=argparse.SUPPRESS)
     receipt.add_argument("--id", required=True)
     receipt.add_argument("--token-file", required=True)
+
+    alias = sub.add_parser("claude-receipt", help=argparse.SUPPRESS)
+    alias.add_argument("--id", required=True)
+    alias.add_argument("--token-file", required=True)
 
 
 def _add_process_parsers(sub) -> None:
@@ -385,19 +400,18 @@ def _hook_string(data: dict, *names: str) -> str | None:
     return None
 
 
-async def _send_claude_receipt(args, *, token: str, session_id: str, transcript_path: str) -> None:
+async def _send_transcript_receipt(args, *, token: str, payload: dict) -> None:
     async with DaemonClient(autostart=False) as client:
         await client.call(
-            "claude.receipt",
+            "transcript.receipt",
             id=args.id,
             token=token,
-            session_id=session_id,
-            transcript_path=transcript_path,
+            payload=payload,
         )
 
 
-def cmd_claude_receipt(args) -> int:
-    """Ingest a Claude lifecycle hook receipt.
+def cmd_transcript_receipt(args) -> int:
+    """Ingest a lifecycle hook receipt and forward the payload untouched.
 
     Hidden from normal CLI help. The hook provides JSON on stdin; the launch
     token lives in a daemon-written file so it is not exposed in participant
@@ -410,19 +424,35 @@ def cmd_claude_receipt(args) -> int:
         return 0
     if not isinstance(payload, dict):
         return 0
+    try:
+        asyncio.run(_send_transcript_receipt(args, token=token, payload=payload))
+    except (RemoteError, ConnectionError, OSError):
+        return 0
+    return 0
+
+
+def cmd_claude_receipt(args) -> int:
+    """Backward-compatible alias for the Claude-specific hook command.
+
+    Shipped in v3.2.0; live Claude sessions have settings.json invoking
+    ``claude-receipt`` by that exact name. Extracts ``session_id`` and
+    ``transcript_path`` from stdin JSON and wraps them into a payload before
+    forwarding to the generic ``transcript.receipt`` RPC.
+    """
+    try:
+        token = Path(args.token_file).read_text().strip()
+        payload = json.load(sys.stdin)
+    except (OSError, ValueError):
+        return 0
+    if not isinstance(payload, dict):
+        return 0
     session_id = _hook_string(payload, "session_id", "sessionId")
     transcript_path = _hook_string(payload, "transcript_path", "transcriptPath")
     if session_id is None or transcript_path is None:
         return 0
+    forwarded = {"session_id": session_id, "transcript_path": transcript_path}
     try:
-        asyncio.run(
-            _send_claude_receipt(
-                args,
-                token=token,
-                session_id=session_id,
-                transcript_path=transcript_path,
-            )
-        )
+        asyncio.run(_send_transcript_receipt(args, token=token, payload=forwarded))
     except (RemoteError, ConnectionError, OSError):
         return 0
     return 0
@@ -1160,6 +1190,7 @@ def cmd_regie(args) -> int:
 _COMMANDS = {
     "daemon": cmd_daemon,
     "mcp": cmd_mcp,
+    "transcript-receipt": cmd_transcript_receipt,
     "claude-receipt": cmd_claude_receipt,
     "ls": cmd_ls,
     "bus": cmd_bus,

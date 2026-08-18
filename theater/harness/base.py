@@ -225,6 +225,11 @@ class LaunchPlan:
     session_id: str | None = None
     #: Unguessable token accepted only for this participant's launch receipts.
     receipt_token: str | None = None
+    #: Where the daemon writes ``receipt_token`` (mode 0600) and deletes on
+    #: death. Core owns this file; the plugin must NOT also put it in
+    #: ``private_files`` or the two writers collide. None means no receipt
+    #: token is written — the plugin does not use receipts.
+    receipt_token_path: Path | None = None
     #: Resolved namespace searched by heuristic transcript discovery, when a
     #: harness has more than one. Persisted before launch so collision policy
     #: does not depend on watcher scheduling.
