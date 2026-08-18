@@ -41,7 +41,7 @@ _TIMEOUT = 5
 _LSOF_NAME = "n"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ProcessSnapshot:
     """One parsed `ps` table, reusable across many `descendants()` calls.
 
