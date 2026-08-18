@@ -30,12 +30,12 @@ from __future__ import annotations
 import importlib.util
 import logging
 import sys
-import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 from theater.config import HARNESS_NAME, ConfigError
+from theater.formatting import display_width as _display_width
 from theater.harness.base import Harness
 from theater.harness.observation import HarnessObserver
 
@@ -178,39 +178,6 @@ def _check_observer(path: Path, harness: Harness) -> None:
             f"{type(observer).__name__} observer, which does not subclass "
             "theater.harness.HarnessObserver"
         )
-
-
-def _display_width(text: str) -> int:
-    """Conservative estimate of the terminal cell width of *text*.
-
-    ``W`` and ``F`` characters take two cells; combining marks and other
-    zero-width codepoints take none; everything else takes one.
-
-    This is an estimate, not a measurement.  It does not model emoji
-    presentation sequences, variation selectors (U+FE0F), ZWJ ligatures, or
-    locale-dependent Ambiguous-width characters.  That is acceptable because
-    the check is cosmetic column alignment in ``theater harnesses``, not a
-    layout engine: a wide glyph that slips through shears one column, which
-    is the failure the check exists to catch.  The shipped icons ``◇``
-    (opencode) and ``▤`` (vibe) are East Asian Ambiguous — one cell here,
-    two under a CJK locale, where ``theater harnesses`` shears their rows.
-    Theater accepts this because the consequence is a misaligned column in
-    one listing, not incorrect behaviour.
-
-    Control characters are counted as one by this function — the caller
-    rejects them separately, because a control character that is also one
-    cell wide is a different bug from a printable glyph that is two cells
-    wide.
-    """
-    width = 0
-    for ch in text:
-        if unicodedata.category(ch) in ("Mn", "Me"):
-            continue
-        if unicodedata.east_asian_width(ch) in ("W", "F"):
-            width += 2
-        else:
-            width += 1
-    return width
 
 
 def _check_identity(path: Path, harness: Harness) -> None:

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import time
+import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 
@@ -62,6 +63,48 @@ def clip_name(name: str | None, width: int = 12) -> str:
     shear every column after it.
     """
     return (name or "-")[:width]
+
+
+def display_width(text: str) -> int:
+    """Conservative estimate of the terminal cell width of *text*.
+
+    ``W`` and ``F`` characters take two cells; category ``Mn``/``Me``
+    codepoints (nonspacing and enclosing marks — including variation
+    selectors and the combining grapheme joiner, which have combining
+    class 0) take none; everything else takes one.
+
+    This is an estimate, not a measurement.  It does not model emoji
+    presentation sequences, ZWJ ligatures, or locale-dependent
+    Ambiguous-width characters.  That is acceptable because the consumers
+    are cosmetic column alignment in ``theater harnesses`` and the loader's
+    icon gate, not a layout engine.  The shipped icons ``◇`` (opencode)
+    and ``▤`` (vibe) are East Asian Ambiguous — one cell here, two under a
+    CJK locale, where ``theater harnesses`` shears their rows.  Theater
+    accepts this because the consequence is a misaligned column in one
+    listing, not incorrect behaviour.
+    """
+    width = 0
+    for ch in text:
+        if unicodedata.category(ch) in ("Mn", "Me"):
+            continue
+        if unicodedata.east_asian_width(ch) in ("W", "F"):
+            width += 2
+        else:
+            width += 1
+    return width
+
+
+def pad_to_width(text: str, column: int) -> str:
+    """Left-justify *text* to *column* terminal cells, padding with spaces.
+
+    Unlike ``str.ljust`` (which counts codepoints), this pads by display
+    width so a base-plus-comining icon that occupies one cell but two
+    codepoints gets the same padding as a single-codepoint icon.
+    """
+    cells = display_width(text)
+    if cells >= column:
+        return text
+    return text + " " * (column - cells)
 
 
 def event_stamp(ts: float | None) -> str:

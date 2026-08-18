@@ -340,6 +340,70 @@ def test_harnesses_prefers_the_running_daemons_answer(monkeypatch, capsys):
     assert "vibe" not in out
 
 
+def test_harnesses_icon_column_pads_by_display_width(monkeypatch, capsys):
+    """An icon of base-plus-combining (2 codepoints, 1 cell) must produce the
+    same column offset as a single-codepoint icon (1 cell).  Padding by
+    codepoint count — ``f"{icon:<2}"`` — pads the combining sequence to 2
+    codepoints (no spaces), shifting every column after it left by one."""
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def call(self, method, **params):
+            assert method == "harnesses"
+            return [
+                {
+                    "name": "aaa",
+                    "icon": "\u273b",
+                    "binary": "aaa",
+                    "installed": True,
+                    "path": "/usr/bin/aaa",
+                    "source": "shipped",
+                },
+                {
+                    "name": "bbb",
+                    "icon": "e\u0301",
+                    "binary": "bbb",
+                    "installed": True,
+                    "path": "/usr/bin/bbb",
+                    "source": "shipped",
+                },
+            ]
+
+    from theater.formatting import pad_to_width
+
+    monkeypatch.setattr(cli, "DaemonClient", FakeClient)
+    assert cli.cmd_harnesses(parse("harnesses")) == 0
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    row_aaa = lines[1]
+    row_bbb = lines[2]
+    # Both rows must start with the icon padded to 2 display cells + " ".
+    # "✻" is 1 cell → 1 padding space; "e\u0301" is 1 cell → 1 padding space.
+    assert row_aaa.startswith(pad_to_width("\u273b", 2) + " ")
+    assert row_bbb.startswith(pad_to_width("e\u0301", 2) + " ")
+    # The NAME column must start at the same codepoint offset in both rows
+    # *after* removing the icon prefix, i.e. the name appears immediately
+    # after the padded icon + separator in both rows.
+    prefix_len_aaa = len(pad_to_width("\u273b", 2) + " ")
+    prefix_len_bbb = len(pad_to_width("e\u0301", 2) + " ")
+    assert row_aaa[prefix_len_aaa:][:3] == "aaa"
+    assert row_bbb[prefix_len_bbb:][:3] == "bbb"
+    # The SOURCE column must also align: same content at the same codepoint
+    # offset relative to the end of the NAME column.
+    source_start_aaa = prefix_len_aaa + 10 + 1  # 10-cell NAME + 1 separator
+    source_start_bbb = prefix_len_bbb + 10 + 1
+    assert row_aaa[source_start_aaa : source_start_aaa + 7] == "shipped"
+    assert row_bbb[source_start_bbb : source_start_bbb + 7] == "shipped"
+
+
 def test_the_harness_column_lines_up_across_header_rows_and_unmanaged():
     """The icon added a column; every row type has to shift by the same amount."""
     out = cli._format_ls(
