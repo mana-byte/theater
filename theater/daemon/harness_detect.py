@@ -16,7 +16,9 @@ from theater import proc
 from theater.harness import HARNESSES
 
 
-def detect_harness(pane_command: str, pane_pid: int) -> str:
+def detect_harness(
+    pane_command: str, pane_pid: int, snapshot: proc.ProcessSnapshot | None = None
+) -> str:
     """Map a pane to a canonical harness name, or 'unknown'.
 
     `pane_current_command` is the instantaneous foreground process — which,
@@ -29,11 +31,21 @@ def detect_harness(pane_command: str, pane_pid: int) -> str:
     The pane's shell spawned `vibe`, which spawned the bash tool running
     `theater adopt` — so `vibe` is in the tree even though it is not the
     foreground leaf.
+
+    A caller checking several panes in one pass (the unmanaged sweep) may
+    pass a `snapshot` captured once up front, so this walk costs no `ps` of
+    its own. Omit it — the default — and a descendant walk here captures a
+    fresh one, which is what single-pane callers like `adopt` and the
+    delivery gate's stale-target check need.
     """
     name = match_binary(pane_command, HARNESSES)
     if name:
         return name
-    for comm in descendant_comms(pane_pid):
+    if snapshot is not None:
+        comms = descendant_comms(pane_pid, snapshot)
+    else:
+        comms = descendant_comms(pane_pid)
+    for comm in comms:
         name = match_binary(comm, HARNESSES)
         if name:
             return name
@@ -68,11 +80,15 @@ def match_binary(command: str, harnesses) -> str | None:
     return None
 
 
-def descendant_comms(root_pid: int) -> list[str]:
+def descendant_comms(root_pid: int, snapshot: proc.ProcessSnapshot | None = None) -> list[str]:
     """Process names of root_pid's descendants, breadth-first.
 
     Uses `ps` rather than /proc or psutil to stay dependency-free. The pane's
     shell spawned `vibe`, which spawned the bash tool running `theater adopt`
     — so `vibe` is in the tree even though it is not the foreground leaf.
+
+    Walks a supplied `snapshot` if given, rather than capturing a fresh one —
+    the caller already paid for the `ps` and this walk is nearly free.
     """
-    return [comm for _pid, comm in proc.descendants(root_pid)]
+    pairs = snapshot.descendants(root_pid) if snapshot is not None else proc.descendants(root_pid)
+    return [comm for _pid, comm in pairs]
