@@ -181,13 +181,23 @@ def _check_observer(path: Path, harness: Harness) -> None:
 
 
 def _display_width(text: str) -> int:
-    """Terminal cell width of *text* using stdlib only.
+    """Conservative estimate of the terminal cell width of *text*.
 
     ``W`` and ``F`` characters take two cells; combining marks and other
-    zero-width codepoints take none; everything else takes one.  Control
-    characters are counted as one by this function — the caller rejects them
-    separately, because a control character that is also one cell wide is a
-    different bug from a printable glyph that is two cells wide.
+    zero-width codepoints take none; everything else takes one.
+
+    This is an estimate, not a measurement.  It does not model emoji
+    presentation sequences, variation selectors (U+FE0F), ZWJ ligatures, or
+    locale-dependent Ambiguous-width characters.  That is acceptable because
+    the check is cosmetic column alignment in ``theater harnesses``, not a
+    layout engine: a wide glyph that slips through shears one column, which
+    is the failure the check exists to catch, and the four shipped icons are
+    all single-cell under this estimate.
+
+    Control characters are counted as one by this function — the caller
+    rejects them separately, because a control character that is also one
+    cell wide is a different bug from a printable glyph that is two cells
+    wide.
     """
     width = 0
     for ch in text:
@@ -226,11 +236,10 @@ def _check_identity(path: Path, harness: Harness) -> None:
     width = _display_width(icon)
     if width != 1:
         raise PluginError(
-            f"{path}: harness {name!r} has icon {icon!r} with a display width of "
-            f"{width} terminal cell{'s' if width != 1 else ''}; an icon must "
-            "occupy exactly one cell so every column of `theater harnesses` "
-            "lines up. Use a narrow glyph (one cell wide), not a wide emoji "
-            "or a multi-character string."
+            f"{path}: harness {name!r} has icon {icon!r} with an estimated display "
+            f"width of {width} terminal cells; an icon must occupy exactly one "
+            "cell so every column of `theater harnesses` lines up. Use a narrow "
+            "glyph (one cell wide), not a wide emoji or a multi-character string."
         )
     for alias in harness.aliases:
         if not isinstance(alias, str) or not alias:
