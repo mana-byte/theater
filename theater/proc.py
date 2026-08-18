@@ -25,6 +25,8 @@ import logging
 import subprocess
 from pathlib import Path
 
+from theater import timing
+
 logger = logging.getLogger("theater.proc")
 
 #: Both probes are read-only interrogations of local kernel state and should
@@ -94,11 +96,12 @@ def open_files(pid: int) -> list[Path]:
 def _process_table() -> dict[int, list[tuple[int, str]]]:
     """Parent pid -> its children, as `(pid, comm)`."""
     try:
-        out = subprocess.check_output(
-            ["ps", "-eo", "pid,ppid,comm"],
-            text=True,
-            timeout=_TIMEOUT,
-        )
+        with timing.span("proc.ps-table", slow_ms=timing.PROC_MS):
+            out = subprocess.check_output(
+                ["ps", "-eo", "pid,ppid,comm"],
+                text=True,
+                timeout=_TIMEOUT,
+            )
     except (OSError, subprocess.SubprocessError):
         return {}
     children: dict[int, list[tuple[int, str]]] = {}
@@ -118,11 +121,12 @@ def _process_table() -> dict[int, list[tuple[int, str]]]:
 def _comm(pid: int) -> str:
     """The command name of one process, or the empty string if it is gone."""
     try:
-        out = subprocess.check_output(
-            ["ps", "-p", str(pid), "-o", "comm="],
-            text=True,
-            timeout=_TIMEOUT,
-        )
+        with timing.span("proc.ps-comm", slow_ms=timing.PROC_MS, pid=pid):
+            out = subprocess.check_output(
+                ["ps", "-p", str(pid), "-o", "comm="],
+                text=True,
+                timeout=_TIMEOUT,
+            )
     except (OSError, subprocess.SubprocessError):
         return ""
     return out.strip()
@@ -162,13 +166,14 @@ def _lsof_open_files(pid: int) -> list[Path]:
     files it did examine are still on stdout.
     """
     try:
-        completed = subprocess.run(
-            ["lsof", "-n", "-P", "-p", str(pid), "-F", "n"],
-            capture_output=True,
-            text=True,
-            timeout=_TIMEOUT,
-            check=False,
-        )
+        with timing.span("proc.lsof", slow_ms=timing.PROC_MS, pid=pid):
+            completed = subprocess.run(
+                ["lsof", "-n", "-P", "-p", str(pid), "-F", "n"],
+                capture_output=True,
+                text=True,
+                timeout=_TIMEOUT,
+                check=False,
+            )
     except (OSError, subprocess.SubprocessError):
         return []
     found: list[Path] = []

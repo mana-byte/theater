@@ -32,6 +32,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
+from theater import timing
 from theater.models import TheaterError
 
 #: U+241E (SYMBOL FOR RECORD SEPARATOR) — no tmux field value can contain it,
@@ -214,17 +215,18 @@ def run_sync(*args: str, check: bool = True) -> str:
 
 async def run(*args: str, check: bool = True) -> str:
     _require()
-    proc = await asyncio.create_subprocess_exec(
-        "tmux",
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=RUN_TIMEOUT)
-    except TimeoutError:
-        proc.kill()
-        raise TmuxError(f"tmux {' '.join(args)} timed out") from None
+    with timing.span(f"tmux.{args[0]}", slow_ms=timing.TMUX_MS):
+        proc = await asyncio.create_subprocess_exec(
+            "tmux",
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=RUN_TIMEOUT)
+        except TimeoutError:
+            proc.kill()
+            raise TmuxError(f"tmux {' '.join(args)} timed out") from None
     if check and proc.returncode != 0:
         # errors="backslashreplace" so a pane emitting invalid UTF-8 in its
         # stderr does not raise UnicodeDecodeError here.
