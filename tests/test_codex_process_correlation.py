@@ -863,6 +863,71 @@ def test_a_process_table_we_cannot_read_yields_no_descendants(monkeypatch):
     assert proc.descendants(PID_A) == []
 
 
+# ---- theater.proc.ProcessSnapshot: one `ps`, reused across roots ----------
+
+_PS_TABLE = (
+    f"  PID  PPID COMM\n{PID_A} 1 zsh\n{PID_B} {PID_A} vibe\n9001 {PID_B} node\n9002 1 unrelated\n"
+)
+
+
+def test_process_snapshot_captures_once_and_serves_multiple_roots(monkeypatch):
+    """The whole point of the snapshot: one `ps`, walked for two different roots."""
+    calls = []
+
+    def check_output(argv, **kwargs):
+        calls.append(argv)
+        return _PS_TABLE
+
+    monkeypatch.setattr(subprocess, "check_output", check_output)
+
+    snapshot = proc.ProcessSnapshot.capture()
+    assert len(calls) == 1
+
+    assert snapshot.descendants(PID_A) == [(PID_B, "vibe"), (9001, "node")]
+    assert snapshot.descendants(9002) == []
+    # Still one `ps` call: the same parsed table served both roots.
+    assert len(calls) == 1
+
+
+def test_process_snapshot_walk_is_breadth_first_with_cycle_protection(monkeypatch):
+    """A malformed table that cycles back must not hang the walk."""
+    table = "  PID  PPID COMM\n100 200 a\n200 100 b\n"
+    monkeypatch.setattr(subprocess, "check_output", lambda argv, **kwargs: table)
+
+    snapshot = proc.ProcessSnapshot.capture()
+
+    assert snapshot.descendants(100) == [(200, "b")]
+
+
+def test_process_snapshot_capture_failure_is_no_evidence(monkeypatch):
+    """An unreadable `ps` yields an empty snapshot, not an exception."""
+
+    def check_output(argv, **kwargs):
+        raise OSError("ps is not available")
+
+    monkeypatch.setattr(subprocess, "check_output", check_output)
+
+    snapshot = proc.ProcessSnapshot.capture()
+
+    assert snapshot.descendants(PID_A) == []
+
+
+def test_descendants_still_captures_a_fresh_snapshot_per_call(monkeypatch):
+    """`proc.descendants` must keep capturing fresh state — no hidden cache."""
+    calls = []
+
+    def check_output(argv, **kwargs):
+        calls.append(argv)
+        return _PS_TABLE
+
+    monkeypatch.setattr(subprocess, "check_output", check_output)
+
+    proc.descendants(PID_A)
+    proc.descendants(PID_A)
+
+    assert len(calls) == 2
+
+
 # ---- IdentityLossEvidence carries the session_id the source already knows ---
 
 

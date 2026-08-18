@@ -1129,22 +1129,41 @@ async def test_adopt_missing_pane_is_an_error(client, fake_tmux, monkeypatch):
 # ---- unmanaged panes -----------------------------------------------------
 
 
+class _FakeSnapshot:
+    """A stand-in `ProcessSnapshot` for tests that must not shell out to `ps`."""
+
+    def __init__(self, by_pid: dict[int, list[tuple[int, str]]]):
+        self._by_pid = by_pid
+
+    def descendants(self, pid: int) -> list[tuple[int, str]]:
+        return self._by_pid.get(pid, [])
+
+
 async def test_unmanaged_finds_harness_panes_with_no_participant(client, fake_tmux, monkeypatch):
-    """The sweep walks the process tree, not just the foreground command."""
-    import theater.daemon.harness_detect as harness_detect_mod
+    """The sweep walks the process tree, not just the foreground command.
+
+    Also proves the one-capture invariant: three unresolved panes and exactly
+    one `ProcessSnapshot.capture()` call, reused for every `detect_harness`.
+    """
+    capture_calls = 0
 
     # Pane %10's foreground is "python3" but its tree contains "vibe";
     # pane %12 is just "zsh" with no harness in its tree.
-    def fake_descendants(pid):
-        return {"12345": ["vibe"], "12346": ["claude"], "12347": ["zsh"]}.get(str(pid), [])
+    snapshot = _FakeSnapshot({12345: [(1, "vibe")], 12346: [(2, "claude")], 12347: []})
 
-    monkeypatch.setattr(harness_detect_mod, "descendant_comms", fake_descendants)
+    def fake_capture():
+        nonlocal capture_calls
+        capture_calls += 1
+        return snapshot
+
+    monkeypatch.setattr(methods.proc.ProcessSnapshot, "capture", staticmethod(fake_capture))
     fake_tmux.visible_panes = [
         _make_pane("%10", command="python3", cwd="/tmp/a", pane_pid=12345),
         _make_pane("%11", command="python3", cwd="/tmp/b", pane_pid=12346),
         _make_pane("%12", command="zsh", cwd="/tmp/c", pane_pid=12347),
     ]
     rows = await client.call("participants.unmanaged")
+    assert capture_calls == 1
     assert len(rows) == 2
     assert {r["pane"] for r in rows} == {"%10", "%11"}
     harnesses = {r["pane"]: r["harness"] for r in rows}
@@ -1153,10 +1172,6 @@ async def test_unmanaged_finds_harness_panes_with_no_participant(client, fake_tm
 
 
 async def test_unmanaged_excludes_registered_panes(client, fake_tmux, monkeypatch):
-    import theater.daemon.harness_detect as harness_detect_mod
-
-    monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid: ["vibe"])
-
     fake_tmux.visible_panes = [
         _make_pane("%20", command="vibe", cwd="/tmp/a"),
         _make_pane("%21", command="claude", cwd="/tmp/b"),
@@ -1165,6 +1180,63 @@ async def test_unmanaged_excludes_registered_panes(client, fake_tmux, monkeypatc
     rows = await client.call("participants.unmanaged")
     assert len(rows) == 1
     assert rows[0]["pane"] == "%21"
+
+
+async def test_unmanaged_skips_capture_when_there_are_no_candidates(client, fake_tmux, monkeypatch):
+    """No panes at all, or every pane already registered: no `ps` at all."""
+
+    def fail_capture():
+        raise AssertionError("must not capture a process table with no candidate panes")
+
+    monkeypatch.setattr(methods.proc.ProcessSnapshot, "capture", staticmethod(fail_capture))
+
+    fake_tmux.visible_panes = []
+    assert await client.call("participants.unmanaged") == []
+
+    fake_tmux.visible_panes = [_make_pane("%30", command="vibe", cwd="/tmp/a")]
+    await client.call("hello", harness="vibe", pane="%30", cwd="/tmp/a")
+    assert await client.call("participants.unmanaged") == []
+
+
+async def test_unmanaged_skips_capture_when_foreground_directly_matches(
+    client, fake_tmux, monkeypatch
+):
+    """Every candidate's foreground command IS a harness binary: no walk needed."""
+
+    def fail_capture():
+        raise AssertionError("must not capture a process table when foreground already resolves")
+
+    monkeypatch.setattr(methods.proc.ProcessSnapshot, "capture", staticmethod(fail_capture))
+
+    fake_tmux.visible_panes = [
+        _make_pane("%31", command="vibe", cwd="/tmp/a"),
+        _make_pane("%32", command="claude", cwd="/tmp/b"),
+    ]
+    rows = await client.call("participants.unmanaged")
+    assert {r["pane"] for r in rows} == {"%31", "%32"}
+
+
+async def test_unmanaged_dispatches_the_capture_through_to_thread(client, fake_tmux, monkeypatch):
+    """The one `ps` for an unresolved pane must run off the event loop."""
+    to_thread_calls = []
+    real_to_thread = asyncio.to_thread
+
+    async def spy_to_thread(func, /, *args, **kwargs):
+        to_thread_calls.append(func)
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(methods.asyncio, "to_thread", spy_to_thread)
+    monkeypatch.setattr(
+        methods.proc.ProcessSnapshot,
+        "capture",
+        staticmethod(lambda: _FakeSnapshot({})),
+    )
+
+    fake_tmux.visible_panes = [_make_pane("%33", command="python3", cwd="/tmp/a", pane_pid=999)]
+    rows = await client.call("participants.unmanaged")
+
+    assert rows == []
+    assert to_thread_calls == [methods.proc.ProcessSnapshot.capture]
 
 
 # ---- the harness list --------------------------------------------------
