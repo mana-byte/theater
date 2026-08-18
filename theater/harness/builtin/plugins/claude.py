@@ -45,10 +45,10 @@ import json
 import logging
 import shlex
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from theater import paths
 from theater.harness.base import (
@@ -60,6 +60,7 @@ from theater.harness.base import (
     Harness,
     LaunchPlan,
     NativeChild,
+    ResumeLaunchOverlay,
     clipper,
     last_screen_line,
     theater_binary,
@@ -72,6 +73,9 @@ from theater.harness.observation import (
 )
 from theater.harness.source import TranscriptCandidate
 from theater.models import BadRequest
+
+if TYPE_CHECKING:
+    from theater.models import Participant
 
 logger = logging.getLogger("theater.harness.claude")
 CLAUDE_RECEIPT_COMMAND = "claude-receipt"
@@ -331,6 +335,30 @@ class ClaudeCodeHarness(Harness):
             session_id=native_session_id,
             receipt_token_path=token_path,
         )
+
+    def resume_launch_overlay(
+        self,
+        *,
+        predecessor: Participant,
+        trusted_session_owners: Sequence[Participant],
+    ) -> ResumeLaunchOverlay:
+        """Validate a predecessor's transcript domain against the observer root.
+
+        Conditional: a predecessor with no domain is the normal case for Claude
+        and returns an empty overlay. A predecessor with a domain is a new
+        explicit constraint — Claude does not enforce this at bind time, so
+        this is a new check, not a reuse of an existing one.
+        """
+        if predecessor.transcript_domain is None:
+            return ResumeLaunchOverlay()
+        root = self.observer.root.resolve()  # type: ignore[attr-defined]
+        declared = Path(predecessor.transcript_domain).resolve(strict=False)
+        if declared != root:
+            raise BadRequest(
+                f"cannot resume Claude session: predecessor transcript domain "
+                f"{declared!r} does not match the Claude observation root {root!r}"
+            )
+        return ResumeLaunchOverlay(transcript_domain=str(root))
 
 
 class ClaudeCodeObserver(TranscriptObserver):

@@ -156,8 +156,7 @@ class Plugin:
 
     The path travels with the harness because the registry needs it for the
     collision messages: "two definitions of `codex`" is only actionable if it
-    says which two files. `source` travels with it for the same reason —
-    "which two" is usually one shipped and one local.
+    says which two files. `source` travels with it for the same reason.
 
     `name` is the harness's own name once it loads, and the file stem before
     that. A file that raises on import cannot be asked what it is called, and

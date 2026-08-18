@@ -115,8 +115,10 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from theater import proc
 from theater.harness.base import (
@@ -128,6 +130,7 @@ from theater.harness.base import (
     Harness,
     LaunchPlan,
     NativeChild,
+    ResumeLaunchOverlay,
     clipper,
     theater_binary,
 )
@@ -140,6 +143,9 @@ from theater.harness.observation import (
 from theater.harness.source import Source, TranscriptCandidate, TranscriptSource
 from theater.models import BadRequest
 from theater.provenance import TranscriptProvenance, normalize_provenance
+
+if TYPE_CHECKING:
+    from theater.models import Participant
 
 logger = logging.getLogger("theater.harness.codex")
 
@@ -361,6 +367,30 @@ class CodexHarness(Harness):
         if prompt:
             argv.append(prompt)
         return LaunchPlan(argv=argv, session_id=resume)
+
+    def resume_launch_overlay(
+        self,
+        *,
+        predecessor: Participant,
+        trusted_session_owners: Sequence[Participant],
+    ) -> ResumeLaunchOverlay:
+        """Validate a predecessor's transcript domain against the observer root.
+
+        Conditional: a predecessor with no domain is the normal case for Codex
+        and returns an empty overlay. A predecessor with a domain is a new
+        explicit constraint — Codex does not enforce this at bind time, so
+        this is a new check, not a reuse of an existing one.
+        """
+        if predecessor.transcript_domain is None:
+            return ResumeLaunchOverlay()
+        root = self.observer.root.resolve()  # type: ignore[attr-defined]
+        declared = Path(predecessor.transcript_domain).resolve(strict=False)
+        if declared != root:
+            raise BadRequest(
+                f"cannot resume Codex session: predecessor transcript domain "
+                f"{declared!r} does not match the Codex observation root {root!r}"
+            )
+        return ResumeLaunchOverlay(transcript_domain=str(root))
 
 
 class _CodexSource(TranscriptSource):

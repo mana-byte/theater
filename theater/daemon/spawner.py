@@ -26,15 +26,16 @@ import logging
 import os
 import secrets
 import shutil
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from pathlib import Path
 
 from theater import paths, timing
 from theater.daemon import worktree as worktree_mod
 from theater.daemon.registry import Registry
 from theater.harness import check_model, check_reasoning, check_resume, plan_launch
 from theater.harness import get as get_harness
-from theater.harness.base import LaunchPlan
+from theater.harness import normalize as normalize_harness
+from theater.harness.base import LaunchPlan, ResumeLaunchOverlay
 from theater.harness.observation import HarnessObserver
 from theater.models import BadRequest, Participant, Status, TheaterError
 from theater.provenance import TranscriptProvenance, is_trusted_provenance
@@ -119,7 +120,7 @@ class Spawner:
         if shutil.which(harness.binary) is None:
             raise BadRequest(f"{harness.binary!r} is not on PATH")
         req = self._resolve_resume_reference(req)
-        resume_predecessor, resume_domain = self._validate_before_create(req, harness)
+        resume_predecessor, resume_overlay = self._validate_before_create(req, harness)
         participant = self.registry.create_spawned(
             harness=req.harness,
             cwd=req.cwd,
@@ -128,12 +129,12 @@ class Spawner:
         )
 
         try:
-            with timing.span("spawn.worktree", id=participant.id, kind=req.worktree or None):
-                child_cwd = self._prepare_worktree(req, participant)
-            plan = self._build_plan(req, participant, resume_domain)
+            plan = self._build_plan(req, participant, resume_overlay)
             minted_token = self._validate_receipt_plan(plan, participant)
             if minted_token is not None:
                 plan = replace(plan, receipt_token=minted_token)
+            with timing.span("spawn.worktree", id=participant.id, kind=req.worktree or None):
+                child_cwd = self._prepare_worktree(req, participant)
             with timing.span("spawn.provenance", id=participant.id):
                 self._record_launch_provenance(req, participant)
             self._record_launch_identity(participant, plan)
@@ -270,9 +271,9 @@ class Spawner:
         self,
         req: SpawnRequest,
         participant: Participant,
-        resume_domain: Path | None,
+        overlay: ResumeLaunchOverlay | None,
     ) -> LaunchPlan:
-        """Construct the launch plan and apply resume-domain overrides."""
+        """Construct the launch plan and merge the resume overlay, if any."""
         config_path = paths.mcp_config_path(participant.id)
         plan = plan_launch(
             req.harness,
@@ -283,12 +284,14 @@ class Spawner:
             model=req.model,
             reasoning_effort=req.reasoning_effort,
             resume=req.resume,
-            isolate_transcript=self._has_live_cwd_sibling(participant),
         )
-        if resume_domain is not None:
-            plan.env["VIBE_SESSION_LOGGING__SAVE_DIR"] = str(resume_domain)
-            plan = replace(plan, transcript_domain=str(resume_domain))
-        return plan
+        if overlay is None:
+            return plan
+        env = {**plan.env, **overlay.env}
+        transcript_domain = plan.transcript_domain
+        if overlay.transcript_domain is not None:
+            transcript_domain = overlay.transcript_domain
+        return replace(plan, env=env, transcript_domain=transcript_domain)
 
     def _validate_receipt_plan(self, plan: LaunchPlan, participant: Participant) -> str | None:
         """Pre-flight: validate a receipt plan and mint the token.
@@ -301,21 +304,9 @@ class Spawner:
         would faithfully write and trust it.
 
         Runs after ``_build_plan`` returns and before ``_write_plan_files``.
-        The participant row and any requested worktree are already created by
-        this point; the honest claim is "before any launch-plan or token file
-        is written and before tmux".
-
-        Known limitation: a plan rejected here can leave a newly created
-        *named* worktree's ``theater/named/<name>`` branch behind, because
-        named-worktree cleanup retains the branch by design (an AGENTS.md
-        invariant — other participants may have work on it), so that name
-        cannot be reused until a human deletes the branch. This requires a
-        malformed launch plan to trigger and cannot be improved while
-        ``_build_plan`` calls ``_has_live_cwd_sibling``, which reads
-        ``participant.cwd`` set by ``_prepare_worktree`` — moving the plan
-        build before the worktree would compute the ``isolate_transcript``
-        hint against the wrong cwd. The follow-up stack removes that hint
-        and will reorder then.
+        The participant row has been created but no worktree or launch-plan
+        file exists yet — plan construction and receipt pre-flight run before
+        ``_prepare_worktree``, so a rejected plan leaves nothing behind.
         """
         if plan.receipt_token_path is None:
             return None
@@ -560,7 +551,7 @@ class Spawner:
         participant = self.registry.store.get_participant(req.resume)
         if participant is None:
             return req
-        if participant.harness != req.harness:
+        if normalize_harness(participant.harness) != normalize_harness(req.harness):
             raise BadRequest(
                 f"participant {participant.id!r} belongs to harness "
                 f"{participant.harness!r}, not {req.harness!r}"
@@ -576,15 +567,20 @@ class Spawner:
 
     def _validate_before_create(
         self, req: SpawnRequest, harness
-    ) -> tuple[Participant | None, Path | None]:
+    ) -> tuple[Participant | None, ResumeLaunchOverlay | None]:
         """Refuse unsafe launches before a participant or worktree exists."""
         check_model(req.harness, req.model)
         check_reasoning(req.harness, req.reasoning_effort)
         check_resume(req.harness, req.resume)
         self._reject_unsafe_resume_shape(req, harness)
-        resume_predecessor = self._validate_resume_identity(req)
-        resume_domain = self._validate_vibe_resume_domain(req, resume_predecessor)
-        return resume_predecessor, resume_domain
+        predecessor, trusted_owners = self._validate_resume_identity(req)
+        overlay: ResumeLaunchOverlay | None = None
+        if predecessor is not None:
+            overlay = harness.resume_launch_overlay(
+                predecessor=predecessor,
+                trusted_session_owners=trusted_owners,
+            )
+        return predecessor, overlay
 
     @staticmethod
     def _reject_unsafe_resume_shape(req: SpawnRequest, harness) -> None:
@@ -613,7 +609,9 @@ class Spawner:
                 "describes files that are not the worktree's files"
             )
 
-    def _validate_resume_identity(self, req: SpawnRequest) -> Participant | None:
+    def _validate_resume_identity(
+        self, req: SpawnRequest
+    ) -> tuple[Participant | None, Sequence[Participant]]:
         """Resume only daemon-validated trusted session ids.
 
         A raw session id is just a string. Without a participant row whose
@@ -623,14 +621,21 @@ class Spawner:
         for arbitrary externally supplied ids; recall remains the safe source
         of resume ids because it reports only recorded rows and marks
         heuristic ids as non-resumable.
+
+        Returns ``(predecessor, trusted_owners)``: the selected newest dead
+        predecessor, and the complete trusted matching set (same canonical
+        harness, same session id, trusted provenance) including the
+        predecessor itself. The hook needs the whole set because the Vibe
+        marker commonly names the selected predecessor row.
         """
         if req.resume is None:
-            return None
+            return None, ()
+        canonical = normalize_harness(req.harness)
         live_matches = []
         dead_matches = []
         for participant in self.registry.list(include_dead=True):
             if (
-                participant.harness == req.harness
+                normalize_harness(participant.harness) == canonical
                 and participant.session_id == req.resume
                 and is_trusted_provenance(participant.session_correlation)
             ):
@@ -646,79 +651,14 @@ class Spawner:
                 "to die before resuming the session."
             )
         if dead_matches:
-            return max(dead_matches, key=lambda p: (p.last_activity, p.created_at))
+            predecessor = max(dead_matches, key=lambda p: (p.last_activity, p.created_at))
+            return predecessor, dead_matches
         raise BadRequest(
             f"cannot resume session {req.resume!r}: Theater has no trusted "
             "dead operator/proven/exact binding for that session id. If its owner row "
             "was garbage-collected, resume the session outside Theater, then adopt and "
             "bind that pane, or wait for tombstone support."
         )
-
-    def _validate_vibe_resume_domain(
-        self, req: SpawnRequest, predecessor: Participant | None
-    ) -> Path | None:
-        """Return the isolated root a Vibe resume may reuse, or refuse.
-
-        This deliberately sits behind ``_validate_resume_identity``. The Vibe
-        check is about whether a trusted predecessor's transcript namespace is
-        safe to reuse; it is not a second session-id validator and does not
-        require exact-only provenance.
-        """
-        if req.resume is None or req.harness != "vibe":
-            return None
-        if predecessor is None or predecessor.transcript_domain is None:
-            raise BadRequest(
-                "cannot resume Vibe session safely: predecessor has no isolated "
-                "transcript domain. Rebind or migrate the session into a Theater "
-                "isolated Vibe domain, then retry."
-            )
-        from theater.harness.builtin.plugins.vibe import validate_isolated_domain
-
-        domain = Path(predecessor.transcript_domain).expanduser().resolve(strict=False)
-        marker = validate_isolated_domain(domain)
-        if marker is None:
-            raise BadRequest(
-                "cannot resume Vibe session safely: predecessor uses a legacy or "
-                "untrusted transcript root. Rebind or migrate it into a Theater "
-                "isolated Vibe domain, then retry."
-            )
-        marker_owner = marker.get("participant_id")
-        if not isinstance(marker_owner, str) or not self._vibe_domain_owner_matches_session(
-            owner_id=marker_owner,
-            session_id=req.resume,
-            domain=domain,
-        ):
-            raise BadRequest(
-                "cannot resume Vibe session safely: isolated transcript domain "
-                "belongs to a different Theater session lineage. Rebind or "
-                "migrate the session into its own isolated Vibe domain, then retry."
-            )
-        if predecessor.transcript_location is not None:
-            location = Path(predecessor.transcript_location)
-            try:
-                location.resolve().relative_to(domain)
-            except (OSError, ValueError) as exc:
-                raise BadRequest(
-                    "cannot resume Vibe session safely: predecessor transcript "
-                    "location is outside its isolated transcript domain"
-                ) from exc
-        return domain
-
-    def _vibe_domain_owner_matches_session(
-        self, *, owner_id: str, session_id: str, domain: Path
-    ) -> bool:
-        """Whether the signed domain owner anchors this trusted resume chain."""
-        for participant in self.registry.list(include_dead=True):
-            if (
-                participant.id == owner_id
-                and participant.harness == "vibe"
-                and participant.session_id == session_id
-                and is_trusted_provenance(participant.session_correlation)
-                and participant.transcript_domain is not None
-                and Path(participant.transcript_domain).expanduser().resolve(strict=False) == domain
-            ):
-                return True
-        return False
 
     @staticmethod
     def _capture_resume_floor(harness, predecessor: Participant) -> str:
@@ -736,27 +676,6 @@ class Spawner:
             return UNKNOWN_FLOOR
         point = harness.observer.stream_floor(location)
         return encode_floor(point)
-
-    def _has_live_cwd_sibling(self, participant: Participant) -> bool:
-        """Whether heuristic transcript discovery would share a collision key.
-
-        Called after worktree selection, because the child runs and writes its
-        transcript from that final cwd. Spawn setup is synchronous until the
-        first tmux await, so concurrent daemon requests cannot both observe
-        themselves as the first same-cwd participant.
-        """
-        if participant.cwd is None:
-            return False
-        cwd = Path(participant.cwd).resolve()
-        for other in self.registry.list():
-            if (
-                other.id != participant.id
-                and other.harness == participant.harness
-                and other.cwd is not None
-                and Path(other.cwd).resolve() == cwd
-            ):
-                return True
-        return False
 
     async def _resolve_session(self, requested: str | None, cwd: str) -> str:
         """Adopt the caller's session when there is one; never nest a server."""

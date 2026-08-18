@@ -57,48 +57,6 @@ def test_vibe_cold_spawn_always_gets_an_isolated_transcript_domain(tmp_path, mon
     assert marker["transcript_domain"] == str(save_dir.resolve())
 
 
-def test_vibe_cold_spawn_ignores_the_legacy_isolation_hint(tmp_path):
-    ordinary = plan_launch(
-        "vibe",
-        participant_id="first",
-        prompt="",
-        config_path=tmp_path / "first.json",
-        approval="manual",
-    )
-    hinted = plan_launch(
-        "vibe",
-        participant_id="second",
-        prompt="",
-        config_path=tmp_path / "second.json",
-        approval="manual",
-        isolate_transcript=True,
-    )
-
-    assert "VIBE_SESSION_LOGGING__SAVE_DIR" in ordinary.env
-    assert "VIBE_SESSION_LOGGING__SAVE_DIR" in hinted.env
-    assert Path(ordinary.env["VIBE_SESSION_LOGGING__SAVE_DIR"]).name == "first"
-    assert Path(hinted.env["VIBE_SESSION_LOGGING__SAVE_DIR"]).name == "second"
-
-
-def test_spawn_collision_hint_is_same_harness_and_resolved_cwd_only(registry, tmp_path):
-    from theater.daemon.spawner import Spawner
-
-    project = tmp_path / "project"
-    project.mkdir()
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    spawner = Spawner(registry)
-
-    registry.create_spawned(harness="vibe", cwd=str(project))
-    same = registry.create_spawned(harness="vibe", cwd=str(project / "."))
-    different_cwd = registry.create_spawned(harness="vibe", cwd=str(elsewhere))
-    different_harness = registry.create_spawned(harness="codex", cwd=str(project))
-
-    assert spawner._has_live_cwd_sibling(same)
-    assert not spawner._has_live_cwd_sibling(different_cwd)
-    assert not spawner._has_live_cwd_sibling(different_harness)
-
-
 def test_vibe_outlasts_a_full_length_await(tmp_path):
     """The MCP tool timeout must exceed the daemon's own await ceiling.
 

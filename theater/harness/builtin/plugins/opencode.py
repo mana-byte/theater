@@ -82,9 +82,10 @@ import os
 import sqlite3
 import subprocess
 import time
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from theater import paths
 from theater.harness.base import (
@@ -95,6 +96,7 @@ from theater.harness.base import (
     EventPath,
     Harness,
     LaunchPlan,
+    ResumeLaunchOverlay,
     clip,
     theater_binary,
     whole,
@@ -107,6 +109,9 @@ from theater.harness.observation import (
 )
 from theater.harness.source import Attachment, Batch, History, Source, TranscriptCandidate
 from theater.models import BadRequest, Status
+
+if TYPE_CHECKING:
+    from theater.models import Participant
 from theater.provenance import (
     TranscriptProvenance,
     is_trusted_provenance,
@@ -470,6 +475,30 @@ class OpenCodeHarness(Harness):
             files=files,
             session_id=resume,
         )
+
+    def resume_launch_overlay(
+        self,
+        *,
+        predecessor: Participant,
+        trusted_session_owners: Sequence[Participant],
+    ) -> ResumeLaunchOverlay:
+        """Validate a predecessor's transcript domain against the OpenCode db.
+
+        Conditional: a predecessor with no domain is the normal case for
+        OpenCode and returns an empty overlay. A predecessor with a domain is
+        validated against the expected ``opencode://`` URI, reusing the same
+        exact-equality check the bind path already enforces.
+        """
+        if predecessor.transcript_domain is None:
+            return ResumeLaunchOverlay()
+        expected = f"opencode://{self.observer.db.resolve()}"  # type: ignore[attr-defined]
+        if predecessor.transcript_domain != expected:
+            raise BadRequest(
+                f"cannot resume OpenCode session: predecessor transcript domain "
+                f"{predecessor.transcript_domain!r} does not match the OpenCode "
+                f"observation domain {expected!r}"
+            )
+        return ResumeLaunchOverlay(transcript_domain=expected)
 
     def discover_models(self) -> list[str]:
         """`opencode models`, which prints one `provider/model` per line.

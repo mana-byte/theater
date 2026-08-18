@@ -1002,6 +1002,35 @@ refuses a resume-with-prompt for a harness where `resume_takes_prompt` is
 `False`, telling the caller to resume without a prompt and use `send` to
 deliver the task. The same refusal covers `response_format`.
 
+### `Harness.resume_launch_overlay`
+
+When core resumes a session, it selects a trusted dead predecessor and
+then calls `resume_launch_overlay` on the harness. The hook returns a
+`ResumeLaunchOverlay` with two fields:
+
+- `env` — environment overrides merged into the launch plan (overlay wins
+  on conflict).
+- `transcript_domain` — the namespace persisted on the successor. `None`
+  means *no override* (core keeps what `plan_launch` returned), not "clear
+  it".
+
+The base implementation is **conditionally fail-closed**:
+
+- A predecessor with `transcript_domain is None` returns an empty overlay.
+  This is the normal case for a harness with no isolated namespace.
+- A predecessor with a domain is refused, naming the harness. A plugin that
+  wants to resume a session with a transcript domain must implement the
+  hook and validate the domain itself.
+
+The three shipped non-Vibe harnesses (claude, codex, opencode) each
+implement a conditional override: `None` domain returns an empty overlay;
+a non-`None` domain is validated against the harness's own observation
+namespace and refused on mismatch. Vibe's override validates the signed
+isolation marker and lineage before returning the domain.
+
+`trusted_session_owners` is the complete trusted matching set including
+the selected predecessor — the Vibe marker commonly names that very row.
+
 ### Operator recovery for adopted sessions
 
 Two methods on `HarnessObserver` support the `theater candidates` / `theater

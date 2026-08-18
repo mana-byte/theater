@@ -362,7 +362,15 @@ def _transcript_identity_lost(daemon, pid: str) -> bool:
 def _resume_state(p: Participant, live_peers: list[Participant]) -> str:
     """Derive the resume verdict for one participant without extra DB queries.
 
-    Precedence mirrors exactly the order spawn_session hits each gate:
+    Covers the generic identity and capability gates spawn_session checks before
+    delegating to the harness-specific ``resume_launch_overlay`` hook. It does
+    **not** cover harness-specific resume validation: a markerless trusted dead
+    Vibe row reports ``resumable`` here while the spawner would refuse it, and a
+    predecessor with a mismatched transcript domain may pass here and fail in
+    the hook. The verdict is an honest pre-flight, not a guarantee that spawn
+    would succeed.
+
+    The gates, in the order spawn_session hits them:
 
     1. ``live``                  — _resolve_resume_reference refuses if the
                                    named participant is still alive.
@@ -375,16 +383,12 @@ def _resume_state(p: Participant, live_peers: list[Participant]) -> str:
                                    participants filtered to (harness match AND
                                    session_id match AND trusted provenance).
                                    If any such participant is live, it raises
-                                   immediately.  The subject row's own
-                                   provenance is irrelevant to this gate — an
-                                   untrusted dead row with a trusted live peer
-                                   hits owned_by_live, not untrusted, because
-                                   the spawner refuses at 442 before it ever
-                                   reaches 451.
-    5. ``untrusted``             — _validate_resume_identity then raises at 451
-                                   when no trusted dead match exists.  This
-                                   is the "no trusted binding" refusal.
-    6. ``resumable``             — all gates passed; spawn would succeed.
+                                   immediately.
+    5. ``untrusted``             — _validate_resume_identity then raises
+                                   when no trusted dead match exists.
+    6. ``resumable``             — all generic gates passed; harness-specific
+                                   validation in resume_launch_overlay may
+                                   still refuse.
 
     ``live_peers`` must be the set of currently live participants so that the
     owned_by_live check can find peers sharing a session id.  Dead rows are
@@ -416,7 +420,7 @@ def _resume_state(p: Participant, live_peers: list[Participant]) -> str:
     # Checking owned_by_live first here matches that order exactly.
     for other in live_peers:
         if (
-            other.harness == p.harness
+            normalize(other.harness) == normalize(p.harness)
             and other.session_id == p.session_id
             and is_trusted_provenance(other.session_correlation)
         ):

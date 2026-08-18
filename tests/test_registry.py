@@ -217,10 +217,15 @@ def test_resolve_returns_participant_with_name(registry):
 def test_rename_changes_the_name(registry):
     p = registry.register(harness="vibe", pane="%1", cwd="/tmp")
     old_name = p.name
-    renamed = registry.rename(p.id, "Truffaldino")
-    assert renamed.name == "Truffaldino"
+    # Choose a target guaranteed to differ from the randomly assigned mask.
+    # "Truffaldino" is itself in the pool, so if the draw hands us that mask
+    # the rename is a no-op and the old-name-resolves assertion below fails.
+    # Derive a name that cannot collide with any mask in the pool.
+    target = "Renamed-" + p.id[:4]
+    renamed = registry.rename(p.id, target)
+    assert renamed.name == target
     # The old name is freed and the new one resolves.
-    assert registry.resolve("Truffaldino").id == p.id
+    assert registry.resolve(target).id == p.id
     # Old name no longer resolves to this participant.
     with pytest.raises(NotFound):
         registry.resolve(old_name)
@@ -228,9 +233,14 @@ def test_rename_changes_the_name(registry):
 
 def test_rename_by_current_name(registry):
     p = registry.register(harness="vibe", pane="%1", cwd="/tmp")
-    renamed = registry.rename(p.name, "Scapino")
+    # Choose a target guaranteed to differ from the randomly assigned mask,
+    # so the rename is a genuine change, not a no-op rename to the same name.
+    target = "Scapino"
+    if p.name == target:
+        target = "Scapin"
+    renamed = registry.rename(p.name, target)
     assert renamed.id == p.id
-    assert renamed.name == "Scapino"
+    assert renamed.name == target
 
 
 # ---- live-only participant names -------------------------------------------
