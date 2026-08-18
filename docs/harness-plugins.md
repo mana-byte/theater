@@ -874,7 +874,7 @@ nothing anywhere saying so — is the defect this design exists to prevent.
 | `name = "My Nova"` | `…/nova.py: harness name 'My Nova' must be lowercase letters, digits, '-' or '_'` |
 | `binary = ""` | `…/nova.py: harness 'nova' sets no binary to look for` |
 | `icon = "<>"` | ``…/nova.py: harness 'nova' has icon '<>' with an estimated display width of 2 terminal cells; an icon must occupy exactly one cell so every column of `theater harnesses` lines up. Use a narrow glyph (one cell wide), not a wide emoji or a multi-character string.`` |
-| `icon = ""` | `…/nova.py: harness 'nova' has icon ''; it must be a single printable character, since listings align on it` |
+| `icon = ""` | `…/nova.py: harness 'nova' has icon ''; it must contain only printable codepoints, since listings align on it` |
 | an alias another harness owns | `…/nova.py claims alias 'mistral-vibe', which already resolves to 'vibe'` |
 
 These surface wherever the registry is built: `theater daemon`, and every CLI
