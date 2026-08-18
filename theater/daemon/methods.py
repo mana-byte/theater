@@ -90,6 +90,7 @@ from theater.tmux.presence import human_present
 from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
     TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
+    is_opaque_location,
     transcript_identity_recovery_message,
 )
 
@@ -2106,7 +2107,7 @@ _READABLE = ("assistant", "user", "tool_call", "tool_result")
 
 
 def _canonical_location(value: str) -> str:
-    if value.startswith("opencode://"):
+    if is_opaque_location(value):
         return value
     return str(Path(value).expanduser().resolve())
 
@@ -2114,7 +2115,7 @@ def _canonical_location(value: str) -> str:
 def _same_location(a: str | None, b: str) -> bool:
     if a is None:
         return False
-    if a.startswith("opencode://") or b.startswith("opencode://"):
+    if is_opaque_location(a) or is_opaque_location(b):
         return a == b
     try:
         return str(Path(a).resolve()) == str(Path(b).resolve())

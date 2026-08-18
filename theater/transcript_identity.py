@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import re
 import stat
 from pathlib import Path
 
@@ -10,6 +11,22 @@ from theater.provenance import is_trusted_provenance
 
 TRANSCRIPT_IDENTITY_LOST_CODE = "transcript_identity_lost"
 TRANSCRIPT_SOURCE_UNAVAILABLE_CODE = "transcript_source_unavailable"
+
+#: RFC 3986 scheme grammar followed by ``://``. A POSIX path cannot contain
+#: ``://``, so this cannot misfire on a real path — but it catches every
+#: scheme a source adapter might use to address a session that is not a file
+#: (``opencode://``, ``nova://``, ``file://``, …).
+_OPAQUE_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
+
+
+def is_opaque_location(value: str) -> bool:
+    """True for a location a source addresses by scheme rather than by path.
+
+    Such locations are opaque tokens — compare them literally, never
+    ``expanduser``/``resolve``/``stat`` them. Only path-shaped locations
+    get filesystem treatment.
+    """
+    return bool(_OPAQUE_SCHEME_RE.match(value))
 
 
 def transcript_identity_recovery_message(pid: str, detail: str | None = None) -> str:
@@ -37,12 +54,13 @@ def trusted_location_unavailable_reason(
     """Why a trusted file-backed transcript pin is no longer safe to read.
 
     ``None`` means either the location is not a trusted pin or it still looks
-    readable. Non-file locations such as ``opencode://...`` are left to their
-    source adapter because their liveness is not represented by the filesystem.
+    readable. Locations addressed by URI scheme (e.g. ``opencode://...``,
+    ``nova://...``) are opaque tokens whose liveness is not represented by the
+    filesystem, so they are left to their source adapter.
     """
     if not location or not is_trusted_provenance(provenance):
         return None
-    if location.startswith("opencode://"):
+    if is_opaque_location(location):
         return None
     path = Path(location).expanduser()
     if domain is not None:
