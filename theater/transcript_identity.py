@@ -1,4 +1,4 @@
-"""Shared transcript identity quarantine helpers."""
+"""Shared transcript identity and location-canonicalisation helpers."""
 
 from __future__ import annotations
 
@@ -28,6 +28,43 @@ def is_opaque_location(value: str) -> bool:
     get filesystem treatment.
     """
     return bool(_OPAQUE_SCHEME_RE.match(value))
+
+
+def canonical_location(value: str) -> str:
+    """Normalise a transcript location to its canonical spelling.
+
+    A file-backed location is ``expanduser``-ed then ``resolve``-d to an
+    absolute path with no ``..`` segments or symlinks, so two spellings of
+    the same file compare equal. A ``scheme://`` location is opaque and
+    returned unchanged — never ``expanduser``, ``resolve``, or ``stat`` it.
+
+    On ``OSError`` (the path does not exist or the filesystem is
+    unreachable) the original value is returned, so a comparison can still
+    succeed against a row that was persisted before the file disappeared.
+    """
+    if is_opaque_location(value):
+        return value
+    try:
+        return str(Path(value).expanduser().resolve())
+    except OSError:
+        return value
+
+
+def same_location(a: str | None, b: str) -> bool:
+    """Whether two location strings name the same transcript.
+
+    ``None`` is never the same as anything. Opaque locations are compared
+    literally (byte-for-byte) without filesystem treatment. File-backed
+    locations are canonicalised via :func:`canonical_location` first, so
+    ``~/t.jsonl`` and ``/Users/me/t.jsonl`` agree. On ``OSError`` the
+    fallback is literal comparison, matching the contract that a row
+    persisted by an older daemon may hold a non-canonical string.
+    """
+    if a is None:
+        return False
+    if is_opaque_location(a) or is_opaque_location(b):
+        return a == b
+    return canonical_location(a) == canonical_location(b)
 
 
 def transcript_identity_recovery_message(pid: str, detail: str | None = None) -> str:

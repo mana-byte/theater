@@ -248,6 +248,16 @@ class Registry:
                 existing.cwd = cwd or existing.cwd
                 if pane:
                     self._claim_pane(existing, pane)
+                # Converge an alias-stored harness on a trustworthy reconnect:
+                # the incoming harness was normalised above, and a claimed_id
+                # match means the same agent is calling back with the id we
+                # gave it — so the canonical spelling it reports now is
+                # authoritative. Without this, a row first written with an
+                # alias (e.g. "claude-code") keeps the alias forever while
+                # every fresh registration stores "claude", and comparison
+                # sites that match on harness miss that row.
+                if existing.harness != harness:
+                    existing.harness = harness
                 existing.last_activity = now()
                 self.store.upsert_participant(existing)
                 self.store.bus_append("participant.hello", to_id=existing.id)

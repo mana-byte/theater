@@ -160,6 +160,12 @@ class Attachment:
     published as the `path` field of the `agent.transcript` event, which
     predates this module and is what the régie renders.
 
+    A file-backed `location` is canonicalised by the core to an absolute
+    resolved path (``expanduser`` + ``resolve``) when it enters the observer,
+    so ``~/t.jsonl`` and ``/Users/me/t.jsonl`` are the same transcript. A
+    source that names a non-filesystem identity must scheme-qualify it
+    (``scheme://...``) or it will be treated as a path and resolved.
+
     `last_event` is the final event of the last record skipped at attach, and
     it is the reason a spawned agent that finished before we found it does not
     keep the wrong status. It is deliberately not put on the bus: attaching

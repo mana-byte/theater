@@ -132,6 +132,7 @@ from theater.daemon.rails import (
     check_model_allowed,
     check_reasoning_allowed,
 )
+from theater.harness import normalize as normalize_harness
 from theater.models import BadRequest, Participant, Status, Tier
 from theater.provenance import is_trusted_provenance
 
@@ -743,7 +744,7 @@ def classify_node(  # noqa: PLR0912
             raw_command = pane_info.get("command", "")
             detected_harness = pane_info.get("harness", "unknown")
             verdict = compare_detected_harness(
-                live_participant.harness, detected_harness, raw_command
+                normalize_harness(live_participant.harness), detected_harness, raw_command
             )
             if verdict is PaneHarnessVerdict.MATCH:
                 return "live", "participant is live with tmux-verified pane"

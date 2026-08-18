@@ -35,6 +35,7 @@ from theater.daemon.blob import blob_sha
 from theater.daemon.schema import jobs, participants, touch
 from theater.daemon.store import Store
 from theater.harness import HARNESSES, supports_resume
+from theater.harness import normalize as normalize_harness
 from theater.provenance import is_trusted_provenance
 
 #: Ceiling on ``task`` and ``result`` text in the timeline. Full text lives
@@ -92,7 +93,7 @@ def _resume_info(
     time — a spawn that fails after the participant exists leaves work
     behind. See ``docs/v2_recall.md`` §"resume is a capability".
     """
-    harness = HARNESSES.get(harness_name)
+    harness = HARNESSES.get(normalize_harness(harness_name))
     if harness is None:
         return False, "harness not registered"
     if not supports_resume(harness):

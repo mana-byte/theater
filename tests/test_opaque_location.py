@@ -13,8 +13,12 @@ is opaque, and path-shaped locations keep their existing behaviour byte-for-byte
 
 from __future__ import annotations
 
-from theater.daemon.methods import _canonical_location, _same_location
-from theater.transcript_identity import is_opaque_location, trusted_location_unavailable_reason
+from theater.transcript_identity import (
+    canonical_location,
+    is_opaque_location,
+    same_location,
+    trusted_location_unavailable_reason,
+)
 
 # --- is_opaque_location ------------------------------------------------------
 
@@ -56,18 +60,18 @@ def test_is_opaque_location_colon_suffixed_relative_path_is_accepted_false_posit
     assert is_opaque_location("a://b")
 
 
-# --- _canonical_location -----------------------------------------------------
+# --- canonical_location -----------------------------------------------------
 
 
 def test_canonical_location_returns_opaque_verbatim():
-    assert _canonical_location("nova://abc123") == "nova://abc123"
-    assert _canonical_location("opencode://ses-xyz") == "opencode://ses-xyz"
+    assert canonical_location("nova://abc123") == "nova://abc123"
+    assert canonical_location("opencode://ses-xyz") == "opencode://ses-xyz"
 
 
 def test_canonical_location_resolves_path(tmp_path):
     f = tmp_path / "transcript.jsonl"
     f.write_text("[]")
-    resolved = _canonical_location(str(f))
+    resolved = canonical_location(str(f))
     assert resolved == str(f.resolve())
 
 
@@ -75,7 +79,7 @@ def test_canonical_location_path_with_colon_not_treated_as_opaque(tmp_path):
     # A colon in a path segment must not trigger the opaque shortcut.
     f = tmp_path / "weird:name.jsonl"
     f.write_text("[]")
-    resolved = _canonical_location(str(f))
+    resolved = canonical_location(str(f))
     assert resolved == str(f.resolve())
 
 
@@ -83,37 +87,37 @@ def test_canonical_location_file_scheme_is_opaque_verbatim():
     # file:// names a file but is deliberately opaque — core interprets no
     # scheme. If file-URI support is ever wanted, conversion happens in the
     # adapter, not here.
-    assert _canonical_location("file:///tmp/transcript.jsonl") == "file:///tmp/transcript.jsonl"
+    assert canonical_location("file:///tmp/transcript.jsonl") == "file:///tmp/transcript.jsonl"
 
 
-# --- _same_location ----------------------------------------------------------
+# --- same_location ----------------------------------------------------------
 
 
 def test_same_location_opaque_matches_itself():
-    assert _same_location("nova://abc123", "nova://abc123")
+    assert same_location("nova://abc123", "nova://abc123")
 
 
 def test_same_location_opaque_does_not_match_different_session():
-    assert not _same_location("nova://abc123", "nova://def456")
+    assert not same_location("nova://abc123", "nova://def456")
 
 
 def test_same_location_opaque_does_not_match_path():
-    assert not _same_location("nova://abc123", "/tmp/transcript.jsonl")
-    assert not _same_location("/tmp/transcript.jsonl", "nova://abc123")
+    assert not same_location("nova://abc123", "/tmp/transcript.jsonl")
+    assert not same_location("/tmp/transcript.jsonl", "nova://abc123")
 
 
 def test_same_location_file_scheme_does_not_match_equivalent_path():
     # file:// is deliberately opaque like any other scheme; core interprets no
     # scheme, so a file URI and the path it names are different locations.
     # This is the assertion that blocks the tempting special-case.
-    assert not _same_location("file:///tmp/x.jsonl", "/tmp/x.jsonl")
-    assert not _same_location("/tmp/x.jsonl", "file:///tmp/x.jsonl")
+    assert not same_location("file:///tmp/x.jsonl", "/tmp/x.jsonl")
+    assert not same_location("/tmp/x.jsonl", "file:///tmp/x.jsonl")
 
 
 def test_same_location_opencode_regression_guard():
     # opencode:// must keep working exactly as before.
-    assert _same_location("opencode://ses-1", "opencode://ses-1")
-    assert not _same_location("opencode://ses-1", "opencode://ses-2")
+    assert same_location("opencode://ses-1", "opencode://ses-1")
+    assert not same_location("opencode://ses-1", "opencode://ses-2")
 
 
 def test_same_location_paths_resolve(tmp_path):
@@ -123,12 +127,56 @@ def test_same_location_paths_resolve(tmp_path):
     # it away during construction, which would make this a tautology.
     other = f"{tmp_path}/./a.jsonl"
     assert str(a) != other
-    assert _same_location(str(a), other)
+    assert same_location(str(a), other)
 
 
 def test_same_location_none_is_false():
-    assert not _same_location(None, "nova://abc123")
-    assert not _same_location(None, "/tmp/transcript.jsonl")
+    assert not same_location(None, "nova://abc123")
+    assert not same_location(None, "/tmp/transcript.jsonl")
+
+
+def test_same_location_expanduser_matches_resolved(tmp_path, monkeypatch):
+    """same_location must expanduser before resolving, matching canonical_location.
+
+    Bug: the old _same_location called Path(a).resolve() without expanduser(),
+    so ~/t.jsonl resolved to <cwd>/~/t.jsonl instead of the home directory.
+    canonical_location did expanduser, so the two helpers disagreed about what
+    the same string meant. This test fails if same_location skips expanduser.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    f = tmp_path / "t.jsonl"
+    f.write_text("[]")
+    tilde_path = "~/t.jsonl"
+    resolved = str(f.resolve())
+    # The tilde spelling must match the resolved absolute path.
+    assert same_location(tilde_path, resolved)
+    assert same_location(resolved, tilde_path)
+
+
+def test_canonical_location_expanduser(tmp_path, monkeypatch):
+    """canonical_location must expanduser before resolving."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    f = tmp_path / "t.jsonl"
+    f.write_text("[]")
+    assert canonical_location("~/t.jsonl") == str(f.resolve())
+
+
+def test_same_location_legacy_non_canonical_store_row(tmp_path):
+    """A legacy non-canonical transcript_location in the store must still
+    match a canonical incoming location via same_location.
+
+    Rows persisted by an older daemon may hold a non-canonical string (with ..
+    segments or un-expanded symlinks). same_location must still return True
+    because it canonicalises both sides before comparing.
+    """
+    f = tmp_path / "a.jsonl"
+    f.write_text("[]")
+    canonical = str(f.resolve())
+    # Simulate a legacy store row with a .. segment
+    legacy = f"{tmp_path}/../{tmp_path.name}/a.jsonl"
+    assert legacy != canonical
+    assert same_location(legacy, canonical)
+    assert same_location(canonical, legacy)
 
 
 # --- trusted_location_unavailable_reason -------------------------------------
