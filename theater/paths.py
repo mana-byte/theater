@@ -42,16 +42,6 @@ def mcp_config_path(participant_id: str) -> Path:
     return mcp_config_dir() / f"{participant_id}.json"
 
 
-def claude_settings_path(participant_id: str) -> Path:
-    """Launch-specific Claude settings for receipt hooks.
-
-    Lives under the shared Claude settings namespace, not the per-participant
-    observation dir, because ``--settings`` is a single file the CLI reads at
-    startup and its hooks reference the token path inside it.
-    """
-    return home() / "claude" / f"{participant_id}.settings.json"
-
-
 def observation_dir(harness: str, participant_id: str) -> Path:
     """Process-correlation state owned by one launched harness instance."""
     return home() / "observations" / harness / participant_id

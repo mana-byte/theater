@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import json
 import logging
-import secrets
 import shlex
 import uuid
 from collections.abc import Mapping
@@ -150,6 +149,16 @@ _WRITE_TOOLS: dict[str, str] = {
 _READ_TOOLS: dict[str, str] = {
     "Read": "file_path",
 }
+
+
+def _claude_settings_path(participant_id: str) -> Path:
+    """Launch-specific Claude settings for receipt hooks.
+
+    Lives under the shared Claude settings namespace, not the per-participant
+    observation dir, because ``--settings`` is a single file the CLI reads at
+    startup and its hooks reference the token path inside it.
+    """
+    return paths.home() / "claude" / f"{participant_id}.settings.json"
 
 
 def _receipt_hook_command(participant_id: str, token_path: Path) -> str:
@@ -278,9 +287,8 @@ class ClaudeCodeHarness(Harness):
                 }
             }
         }
-        settings_path = paths.claude_settings_path(participant_id)
+        settings_path = _claude_settings_path(participant_id)
         token_path = paths.observation_dir("claude", participant_id) / "receipt-token"
-        receipt_token = secrets.token_urlsafe(32)
         # `=` form: `--mcp-config` is variadic and space-separated in Claude
         # Code 2.x, so the space form greedily consumes the prompt positional
         # as a second config path and claude exits before the observer attaches.
@@ -321,7 +329,6 @@ class ClaudeCodeHarness(Harness):
             },
             private_files={},
             session_id=native_session_id,
-            receipt_token=receipt_token,
             receipt_token_path=token_path,
         )
 

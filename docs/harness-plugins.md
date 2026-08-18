@@ -854,28 +854,35 @@ HarnessObserver.validate_transcript_receipt(
 
 `payload` is the decoded JSON object the hook sent, opaque to core.
 Override this method to extract the fields your hook provides and validate
-them against your harness's own format rules. The return value must carry
-a non-empty `location` and a non-empty `session_id`; core rejects a
-candidate that does not. Rejection is an exception, never a candidate
-carrying `rejection_reason`: raise `ValueError` with prose telling the
-caller what to fix, and core maps it to a `BadRequest`. Core catches only
-`ValueError`; any other exception propagates.
+them against your harness's own format rules. The return value must be a
+`TranscriptCandidate` whose `location` and `session_id` are non-empty
+strings; core rejects anything else. Rejection is an exception, never a
+candidate carrying `rejection_reason`: raise `ValueError` with prose
+telling the caller what to fix, and core maps it to a `BadRequest`. Core
+catches only `ValueError`; any other exception propagates.
 
 The base implementation refuses, so a plugin that does not override the
 method cannot use receipts. This is concrete rather than abstract so
 existing plugins that do not use receipts keep working unchanged.
 
+A plugin's validator is the **proof authority** for its harness. A
+successful receipt promotes the binding to exact correlation, so a
+validator that accepts a plausible-looking location manufactures trust
+that core cannot audit afterwards. Core's ownership-conflict checks
+prevent one participant from stealing another's transcript, but they do
+not prove a location is authentic — that is the validator's job.
+
 ### `LaunchPlan.receipt_token_path`
 
-Core owns the token file: it generates the token, writes it mode 0600 in a
-parent directory chmod 0700, and deletes it on death. The plugin must NOT
-also list the path in `files` or `private_files` — core and the plugin
-would both own the same file.
+Core owns the token file: it mints the secret, writes it mode 0600 in a
+parent directory chmod 0700, and deletes it on death. The plugin sets
+only `receipt_token_path`; it must NOT set `receipt_token` (core mints
+that) and must NOT list the path in `files` or `private_files` — core and
+the plugin would both own the same file.
 
 The path must resolve under `paths.observation_dir(harness,
 participant_id)`. An existing symlink at the path is refused before
 writing, because the writer uses `O_TRUNC` which follows symlinks.
-Setting `receipt_token_path` without `receipt_token` is refused.
 
 ### Pre-flight
 

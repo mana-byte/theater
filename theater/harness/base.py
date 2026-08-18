@@ -223,12 +223,16 @@ class LaunchPlan:
     #: Exact native session id known before launch. Persisted before tmux starts
     #: so an observer never has to guess from cwd during the creation race.
     session_id: str | None = None
-    #: Unguessable token accepted only for this participant's launch receipts.
+    #: Core-populated output, not plugin input. Core mints the token when
+    #: ``receipt_token_path`` is set; a plugin that sets ``receipt_token``
+    #: itself is refused in pre-flight. Left ``None`` by the plugin and filled
+    #: in by the spawner before any file is written.
     receipt_token: str | None = None
     #: Where the daemon writes ``receipt_token`` (mode 0600) and deletes on
-    #: death. Core owns this file; the plugin must NOT also put it in
-    #: ``private_files`` or the two writers collide. None means no receipt
-    #: token is written — the plugin does not use receipts.
+    #: death. Core owns this file: it generates the token, writes it, and
+    #: deletes it on death. The plugin must NOT also put it in
+    #: ``files`` or ``private_files`` or the two writers collide. None means
+    #: no receipt token is written — the plugin does not use receipts.
     receipt_token_path: Path | None = None
     #: Resolved namespace searched by heuristic transcript discovery, when a
     #: harness has more than one. Persisted before launch so collision policy

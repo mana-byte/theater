@@ -24,6 +24,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import secrets
 import shutil
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -130,7 +131,9 @@ class Spawner:
             with timing.span("spawn.worktree", id=participant.id, kind=req.worktree or None):
                 child_cwd = self._prepare_worktree(req, participant)
             plan = self._build_plan(req, participant, resume_domain)
-            self._validate_receipt_plan(plan, participant)
+            minted_token = self._validate_receipt_plan(plan, participant)
+            if minted_token is not None:
+                plan = replace(plan, receipt_token=minted_token)
             with timing.span("spawn.provenance", id=participant.id):
                 self._record_launch_provenance(req, participant)
             self._record_launch_identity(participant, plan)
@@ -287,8 +290,15 @@ class Spawner:
             plan = replace(plan, transcript_domain=str(resume_domain))
         return plan
 
-    def _validate_receipt_plan(self, plan: LaunchPlan, participant: Participant) -> None:
-        """Pre-flight: reject a receipt plan before any file is written or tmux touched.
+    def _validate_receipt_plan(self, plan: LaunchPlan, participant: Participant) -> str | None:
+        """Pre-flight: validate a receipt plan and mint the token.
+
+        Returns the minted token string, or ``None`` when the plan does not
+        use receipts (``receipt_token_path is None``). Core owns the secret:
+        the plugin sets only ``receipt_token_path``, and core mints the token
+        here. A plugin that sets ``receipt_token`` itself is refused, because
+        a third-party plugin could ship a constant or weak token and core
+        would faithfully write and trust it.
 
         Runs after ``_build_plan`` returns and before ``_write_plan_files``.
         The participant row and any requested worktree are already created by
@@ -296,11 +306,12 @@ class Spawner:
         is written and before tmux".
         """
         if plan.receipt_token_path is None:
-            return
-        if plan.receipt_token is None:
+            return None
+        if plan.receipt_token is not None:
             raise BadRequest(
-                "launch plan has receipt_token_path but no receipt_token; "
-                "the harness plugin must set both or neither"
+                "launch plan sets receipt_token; core owns the receipt secret "
+                "and mints it from receipt_token_path. The plugin should set "
+                "only receipt_token_path, not receipt_token."
             )
         # The observer must actually implement the hook. A plan declaring
         # receipt_token_path against an inheriting default would write a token
@@ -359,6 +370,7 @@ class Spawner:
                     f"receipt_token_path {plan.receipt_token_path!r} collides "
                     f"with a launch-plan file {existing!r}"
                 )
+        return secrets.token_urlsafe(32)
 
     def cleanup_reservation(self, participant: Participant) -> None:
         """Idempotent cleanup for a failed spawn's participant and worktree.

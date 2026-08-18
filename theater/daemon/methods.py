@@ -54,6 +54,7 @@ from theater.harness.observation import (
     enumerate_transcript_candidates,
     open_participant_source,
 )
+from theater.harness.source import TranscriptCandidate
 from theater.models import (
     AwaitingDecision,
     BadRequest,
@@ -283,7 +284,9 @@ def _reject_unbound_same_cwd_receipt(
             or Path(other.cwd).resolve() != cwd
         ):
             continue
-        if session_id == participant_session_id or transcript_location == participant_location:
+        if session_id == participant_session_id or _same_location(
+            participant_location, transcript_location
+        ):
             return
         raise BadRequest(
             "transcript receipt cannot claim a new unbound transcript while "
@@ -565,9 +568,14 @@ async def _transcript_receipt(daemon, params: dict) -> dict:
 
     # Core validates the returned candidate. A plugin returning junk must get
     # a clean error, not an obscure failure downstream.
-    if not candidate.location:
+    if not isinstance(candidate, TranscriptCandidate):
+        raise BadRequest(
+            f"transcript receipt validator must return a TranscriptCandidate, "
+            f"got {type(candidate).__name__}"
+        )
+    if not isinstance(candidate.location, str) or not candidate.location:
         raise BadRequest("transcript receipt validator returned an empty location")
-    if not candidate.session_id:
+    if not isinstance(candidate.session_id, str) or not candidate.session_id:
         raise BadRequest("transcript receipt validator returned an empty session_id")
     if candidate.rejection_reason:
         raise BadRequest(
