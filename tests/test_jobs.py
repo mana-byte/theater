@@ -123,7 +123,7 @@ async def test_reaper_crashes_running_jobs(client, fake_tmux, daemon, monkeypatc
 
     # Simulate the pane vanishing
     monkeypatch.setattr(server_mod.tmux, "available", lambda: True)
-    monkeypatch.setattr(server_mod.tmux, "run", _fake_list_panes(""))
+    monkeypatch.setattr(server_mod.tmux, "run", _fake_list_panes("%other"))
     await daemon._reap_once()
 
     job = await client.call("jobs.status", handle=handle)

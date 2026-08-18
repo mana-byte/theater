@@ -69,8 +69,8 @@ async def test_restart_marks_dead_participants_whose_panes_vanished(theater_home
         await c.call("hello", harness="vibe", pane="%1", cwd="/tmp")
     await d1.aclose()
 
-    # Simulate the pane vanishing: clear visible_panes before restart.
-    fake_tmux.visible_panes = []
+    # Simulate this pane vanishing while tmux still returns a healthy inventory.
+    fake_tmux.visible_panes = [p for p in fake_tmux.visible_panes if p.pane_id != "%1"]
 
     d2 = Daemon(harnesses={})
     await d2.start()
@@ -93,8 +93,10 @@ async def test_restart_crashes_orphaned_jobs(theater_home, fake_tmux):
         assert job["state"] == "running"
     await d1.aclose()
 
-    # Simulate the pane vanishing during restart.
-    fake_tmux.visible_panes = []
+    # Simulate this pane vanishing while tmux still returns a healthy inventory.
+    fake_tmux.visible_panes = [
+        p for p in fake_tmux.visible_panes if p.pane_id != record["tmux_pane"]
+    ]
 
     d2 = Daemon(harnesses={})
     await d2.start()

@@ -224,11 +224,18 @@ class Daemon:
         if not tmux.available():
             logger.info("tmux unavailable; skipping reconciliation")
             return
+        tracked = [p for p in self.registry.list() if p.tmux_pane]
         try:
-            out = await tmux.run("list-panes", "-a", "-F", "#{pane_id}", check=False)
+            out = await tmux.run("list-panes", "-a", "-F", "#{pane_id}", check=True)
             alive_panes = set(out.split())
         except Exception as exc:
             logger.warning("reconcile: could not list panes: %s", exc)
+            return
+        if not alive_panes and tracked:
+            logger.warning(
+                "reconcile: empty pane inventory with %d tracked panes; skipping",
+                len(tracked),
+            )
             return
 
         for p in self.registry.list():
@@ -409,8 +416,18 @@ class Daemon:
             return
         if not tmux.available():
             return
-        out = await tmux.run("list-panes", "-a", "-F", "#{pane_id}", check=False)
+        try:
+            out = await tmux.run("list-panes", "-a", "-F", "#{pane_id}", check=True)
+        except Exception as exc:
+            logger.warning("reaper: could not list panes: %s", exc)
+            return
         alive = set(out.split())
+        if not alive:
+            logger.warning(
+                "reaper: empty pane inventory with %d tracked panes; skipping",
+                len(tracked),
+            )
+            return
         for p in tracked:
             if p.tmux_pane not in alive:
                 # An explicit kill owns this participant's whole teardown —

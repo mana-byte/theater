@@ -670,7 +670,7 @@ async def test_a_child_that_loses_its_pane_without_explicit_kill_crashes(
     import theater.daemon.server as server_mod
 
     monkeypatch.setattr(server_mod.tmux, "available", lambda: True)
-    monkeypatch.setattr(server_mod.tmux, "run", _fake_list_panes(""))
+    monkeypatch.setattr(server_mod.tmux, "run", _fake_list_panes("%other"))
     await daemon._reap_once()
 
     job = await client.call("jobs.status", handle=handle)
@@ -684,7 +684,7 @@ async def test_the_reaper_notices_a_vanished_pane(daemon, client, fake_tmux, mon
     from theater.tmux import client as tmux_client
 
     monkeypatch.setattr(tmux_client, "available", lambda: True)
-    monkeypatch.setattr(tmux_client, "run", _fake_list_panes(""))
+    monkeypatch.setattr(tmux_client, "run", _fake_list_panes("%other"))
     await daemon._reap_once()
 
     dead = await client.call("participants.get", id=record["id"])
@@ -702,6 +702,61 @@ async def test_the_reaper_leaves_live_panes_alone(daemon, client, fake_tmux, mon
 
     alive = await client.call("participants.get", id=record["id"])
     assert alive["status"] != "dead"
+
+
+async def test_the_reaper_ignores_an_empty_pane_inventory(daemon, client, fake_tmux, monkeypatch):
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+
+    from theater.tmux import client as tmux_client
+
+    calls = []
+
+    async def empty_inventory(*args, **kwargs):
+        calls.append((args, kwargs))
+        return ""
+
+    monkeypatch.setattr(tmux_client, "available", lambda: True)
+    monkeypatch.setattr(tmux_client, "run", empty_inventory)
+    await daemon._reap_once()
+
+    alive = await client.call("participants.get", id=record["id"])
+    job = await client.call("jobs.status", handle=record["handle"])
+    assert alive["status"] != "dead"
+    assert job["state"] == "running"
+    assert calls == [(("list-panes", "-a", "-F", "#{pane_id}"), {"check": True})]
+
+
+async def test_the_reaper_ignores_a_failed_pane_inventory(daemon, client, fake_tmux, monkeypatch):
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+
+    from theater.tmux import client as tmux_client
+
+    async def failed_inventory(*args, **kwargs):
+        raise tmux_client.TmuxError("socket busy")
+
+    monkeypatch.setattr(tmux_client, "available", lambda: True)
+    monkeypatch.setattr(tmux_client, "run", failed_inventory)
+    await daemon._reap_once()
+
+    alive = await client.call("participants.get", id=record["id"])
+    job = await client.call("jobs.status", handle=record["handle"])
+    assert alive["status"] != "dead"
+    assert job["state"] == "running"
+
+
+async def test_reconcile_ignores_an_empty_pane_inventory(daemon, client, fake_tmux, monkeypatch):
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+
+    from theater.tmux import client as tmux_client
+
+    monkeypatch.setattr(tmux_client, "available", lambda: True)
+    monkeypatch.setattr(tmux_client, "run", _fake_list_panes(""))
+    await daemon._reconcile()
+
+    alive = await client.call("participants.get", id=record["id"])
+    job = await client.call("jobs.status", handle=record["handle"])
+    assert alive["status"] != "dead"
+    assert job["state"] == "running"
 
 
 def _fake_list_panes(output: str):
