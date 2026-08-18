@@ -38,9 +38,12 @@ def canonical_location(value: str) -> str:
     the same file compare equal. A ``scheme://`` location is opaque and
     returned unchanged — never ``expanduser``, ``resolve``, or ``stat`` it.
 
-    On ``OSError`` (the path does not exist or the filesystem is
-    unreachable) the original value is returned, so a comparison can still
-    succeed against a row that was persisted before the file disappeared.
+    On ``OSError`` (the filesystem is unreachable or a path component
+    lacks permission) the original value is returned, so a comparison can
+    still succeed against a row that was persisted before the file
+    disappeared. Note that ``Path.resolve()`` defaults to
+    ``strict=False``, so a nonexistent path does not normally raise; the
+    fallback really covers filesystem-level and permission failures.
     """
     if is_opaque_location(value):
         return value

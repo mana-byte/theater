@@ -256,7 +256,11 @@ class Registry:
                 # alias (e.g. "claude-code") keeps the alias forever while
                 # every fresh registration stores "claude", and comparison
                 # sites that match on harness miss that row.
-                if existing.harness != harness:
+                # The guard is ``normalize(existing.harness) == harness``: only
+                # an alias of the same harness converges. A genuinely different
+                # harness, a typo, or an unknown name is retained — overwriting
+                # the row with an unrecognised name would make it unobservable.
+                if normalize(existing.harness) == harness and existing.harness != harness:
                     existing.harness = harness
                 existing.last_activity = now()
                 self.store.upsert_participant(existing)
