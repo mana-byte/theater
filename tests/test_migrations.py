@@ -72,6 +72,11 @@ def test_migrations_created_the_alembic_version_table(store):
     col_names = {row[1] for row in col_info}
     assert "resume_floor" in col_names
 
+    # Migration 0011 added restore_claimed_by to checkpoints.
+    ckpt_col_info = store.conn.exec_driver_sql("PRAGMA table_info(checkpoints)").fetchall()
+    ckpt_col_names = {row[1] for row in ckpt_col_info}
+    assert "restore_claimed_by" in ckpt_col_names
+
 
 def test_bus_ids_are_never_reused(store):
     """AUTOINCREMENT, not bare rowid: `bus_tail(after_id=)` is a cursor."""

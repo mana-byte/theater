@@ -175,6 +175,7 @@ checkpoints = Table(
     Column("restored_by", Text),
     Column("restore_error", Text),
     Column("restore_result", Text),
+    Column("restore_claimed_by", Text),
     sqlite_autoincrement=True,
 )
 
@@ -183,6 +184,9 @@ Index(
     checkpoints.c.participant_id,
     checkpoints.c.name,
 )
+
+# Global list is now the default path: ORDER BY created_at DESC LIMIT <=100.
+Index("idx_checkpoints_created_at", checkpoints.c.created_at)
 
 # Named shared worktrees: multiple live children can share one linked
 # worktree (same directory, same branch, same index/HEAD). The key is

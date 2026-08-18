@@ -478,7 +478,7 @@ def test_checkpoint_list_newest_first(store):
     assert [r["name"] for r in rows] == ["plan-2", "plan-1", "plan-0"]
 
 
-def test_checkpoint_list_isolated_by_participant(store):
+def test_checkpoint_list_filters_by_participant_when_given(store):
     store.create_checkpoint(participant_id="p1", name="a", jobs_snapshot="[]")
     store.create_checkpoint(participant_id="p2", name="b", jobs_snapshot="[]")
     rows = store.list_checkpoints(participant_id="p1")
@@ -486,8 +486,69 @@ def test_checkpoint_list_isolated_by_participant(store):
     assert rows[0]["name"] == "a"
 
 
+def test_checkpoint_list_global_returns_all_participants(store):
+    store.create_checkpoint(participant_id="p1", name="a", jobs_snapshot="[]")
+    store.create_checkpoint(participant_id="p2", name="b", jobs_snapshot="[]")
+    rows = store.list_checkpoints()
+    names = {r["name"] for r in rows}
+    assert names == {"a", "b"}
+
+
 def test_checkpoint_notes_are_optional(store):
     cid = store.create_checkpoint(participant_id="p1", name="plan", jobs_snapshot="[]")
     row = store.get_checkpoint(cid)
     assert row is not None
     assert row["notes"] is None
+
+
+def test_checkpoint_list_global_newest_first_across_creators(store):
+    from sqlalchemy import update as sa_update
+
+    from theater.daemon.schema import checkpoints as ckpt_table
+
+    cid1 = store.create_checkpoint(participant_id="p1", name="alpha", jobs_snapshot="[]")
+    cid2 = store.create_checkpoint(participant_id="p2", name="beta", jobs_snapshot="[]")
+    store.conn.execute(sa_update(ckpt_table).where(ckpt_table.c.id == cid1).values(created_at=1.0))
+    store.conn.execute(sa_update(ckpt_table).where(ckpt_table.c.id == cid2).values(created_at=2.0))
+    rows = store.list_checkpoints()
+    assert [r["name"] for r in rows] == ["beta", "alpha"]
+
+
+def test_checkpoint_list_limit_applies_across_creators(store):
+    for i in range(4):
+        store.create_checkpoint(participant_id=f"p{i % 2}", name=f"cp-{i}", jobs_snapshot="[]")
+    rows = store.list_checkpoints(limit=2)
+    assert len(rows) == 2
+
+
+def test_checkpoint_finalize_restore_failure_records_restored_by(store):
+    cid = store.create_checkpoint(participant_id="p1", name="cp", jobs_snapshot="[]")
+    token = store.claim_checkpoint_restore(cid, "restorer-x")
+    assert token is not None
+    ok = store.finalize_checkpoint_restore(
+        cid, token=token, restored_by="restorer-x", error="exploded"
+    )
+    assert ok is True
+    row = store.get_checkpoint(cid)
+    assert row["restore_state"] == "failed"
+    assert row["restored_by"] == "restorer-x"
+    assert row["restore_error"] == "exploded"
+
+
+def test_checkpoint_claim_records_restore_claimed_by(store):
+    cid = store.create_checkpoint(participant_id="p1", name="cp", jobs_snapshot="[]")
+    token = store.claim_checkpoint_restore(cid, "claimer-1")
+    assert token is not None
+    row = store.get_checkpoint(cid)
+    assert row["restore_claimed_by"] == "claimer-1"
+
+
+def test_checkpoint_release_clears_restore_claimed_by(store):
+    cid = store.create_checkpoint(participant_id="p1", name="cp", jobs_snapshot="[]")
+    token = store.claim_checkpoint_restore(cid, "claimer-1")
+    assert token is not None
+    ok = store.release_checkpoint_restore(cid, token=token)
+    assert ok is True
+    row = store.get_checkpoint(cid)
+    assert row["restore_claimed_by"] is None
+    assert row["restore_state"] == "ready"

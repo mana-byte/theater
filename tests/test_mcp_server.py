@@ -126,6 +126,25 @@ async def test_new_feature_descriptions_reach_their_tools(daemon):
     assert "pruned handles" in tools["recovery_read"]
 
 
+async def test_checkpoint_global_visibility_described_in_tools(daemon):
+    """Agents must know checkpoints are not private before creating them."""
+    tool_descs = {t.name: (t.description or "") for t in await build("p1", "vibe").list_tools()}
+
+    # The checkpoint tool must say the snapshot is visible to every participant.
+    assert "every participant" in tool_descs["checkpoint"].lower()
+    # list_checkpoints must say it is machine-global and explain why.
+    assert "machine-global" in tool_descs["list_checkpoints"].lower()
+    assert "dead" in tool_descs["list_checkpoints"].lower()
+    # recovery_read and recovery_restore must say they work on any participant's checkpoint.
+    assert "any participant" in tool_descs["recovery_read"].lower()
+    assert "any participant" in tool_descs["recovery_restore"].lower()
+    # recovery_restore must keep saying self-restore is refused.
+    assert (
+        "self-restore" in tool_descs["recovery_restore"].lower()
+        or "your own" in tool_descs["recovery_restore"].lower()
+    )
+
+
 async def test_await_description_communicates_first_any_completion(daemon):
     """The await_sessions description must say it returns on the FIRST terminal
     handle, not after all handles finish.

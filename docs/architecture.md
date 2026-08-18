@@ -288,6 +288,28 @@ the TUI renders as one line. What the harness itself wrote stays the full record
 — which is exactly what `read_transcript` reaches for, through the same `Source`
 the observer uses, when a caller needs the untruncated text.
 
+### Checkpoints
+
+Checkpoints are machine-global, not per-agent. Any participant may list, read,
+or restore any checkpoint — including one whose creator is dead. That is the
+point: a live sibling must be able to discover and restore a dead creator's
+checkpoint without knowing who made it.
+
+`checkpoint.list` is unscoped by default; it returns every checkpoint on the
+machine ordered by `created_at DESC`. An optional `participant_id` filter narrows
+to one creator; an optional `restorable_only` flag excludes checkpoints already
+consumed or in-progress. The caller is still validated as an existing participant
+— the verb is available to any real participant, not unauthenticated callers.
+
+`checkpoint.restore` requires explicit approval (`manual` / `edits` / `yolo`),
+uses a single-use atomic claim (`restore_claimed_by` in the `checkpoints` row),
+and records both creator (`participant_id`) and restorer (`restored_by`) in the
+same row. A creator cannot restore its own checkpoint — self-restore would have
+the caller await its own MCP turn, which deadlocks.
+
+`checkpoint.read` has always been global (no caller filter); this is documented
+here so a future reader does not mistake it for an oversight and add a scope.
+
 ---
 
 ## 6. Observation

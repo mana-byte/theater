@@ -397,6 +397,10 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         results, errors, and times. It does not snapshot repo files, tmux panes,
         transcripts, child memory, worktrees, or any filesystem state.
 
+        Checkpoints are visible to every participant on this machine — they are
+        not private per-agent state. The snapshot includes job prompts and
+        results. Do not assume a checkpoint is private.
+
         Good moments to create one: before spawning or awaiting a batch of
         children, before context compaction or handoff to another agent, before
         a merge/recovery step, or before leaving long-running delegations
@@ -410,6 +414,8 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
     @mcp.tool()
     async def recovery_read(checkpoint_id: int) -> dict:
         """Read a checkpoint and compare it with live state now.
+
+        Operates on any participant's checkpoint — not only your own.
 
         Returns checkpoint metadata plus the recorded snapshot, current live state,
         and any pruned handles. Use it to see what changed since an
@@ -429,20 +435,38 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         return await tools.recovery_read(session, checkpoint_id=checkpoint_id)
 
     @mcp.tool()
-    async def list_checkpoints(limit: int = 100) -> list[dict]:
-        """List your retained checkpoints, newest first.
+    async def list_checkpoints(
+        limit: int = 100,
+        participant_id: str | None = None,
+        restorable_only: bool = False,
+    ) -> list[dict]:
+        """List checkpoints across all participants on this machine, newest first.
 
-        Returns id, name, created_at, and a truncated notes preview for each
-        checkpoint. Call recovery_read with a checkpoint id for the full
-        snapshot and live comparison.
+        Checkpoints are machine-global by design: a dead creator's checkpoint must
+        be discoverable by a live sibling that will restore it.
 
-        limit: maximum number of checkpoints to return (1-100, default 100).
+        Returns id, participant_id, creator_name, creator_present, name, created_at,
+        restore_state, and a truncated notes preview for each checkpoint. Call
+        recovery_read with a checkpoint id for the full snapshot and live comparison.
+
+        limit:           maximum number of checkpoints to return (1-100, default 100).
+        participant_id:  optional — filter to one creator's checkpoints.
+        restorable_only: optional — when true, exclude checkpoints whose
+                         restore_state is not 'ready'.
         """
-        return await tools.list_checkpoints(session, limit=limit)
+        return await tools.list_checkpoints(
+            session,
+            limit=limit,
+            participant_id=participant_id,
+            restorable_only=restorable_only,
+        )
 
     @mcp.tool()
     async def recovery_restore(checkpoint_id: int, approval: str) -> dict:
         """Prepare the checkpoint creator for restoration.
+
+        Operates on any participant's checkpoint — not only your own. You cannot
+        restore your own checkpoint (self-restore would deadlock the MCP call).
 
         For a dead parent: spawns or resumes it as a child of the caller.
         For a live parent: reuses it in place and retains its existing
@@ -461,9 +485,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         checkpoint_id: the id returned by ``checkpoint``.
         approval:       ``manual``, ``edits``, or ``yolo`` — no default.
         """
-        return await tools.recovery_restore(
-            session, checkpoint_id=checkpoint_id, approval=approval
-        )
+        return await tools.recovery_restore(session, checkpoint_id=checkpoint_id, approval=approval)
 
     @mcp.tool()
     async def read_transcript(target_id: str, last_n: int = 5) -> dict:

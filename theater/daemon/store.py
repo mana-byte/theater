@@ -56,7 +56,7 @@ BASELINE = "0001"
 #: The latest revision. A legacy database is stamped at BASELINE and then
 #: upgraded to this; a fresh database lands here directly. Tests assert
 #: against this rather than hardcoding a revision string.
-HEAD = "0010"
+HEAD = "0011"
 RECEIPT_TOKEN_PREFIX = "receipt_token:"
 
 
@@ -608,19 +608,39 @@ class Store:
         ).first()
         return dict(row._mapping) if row else None
 
-    def list_checkpoints(self, *, participant_id: str, limit: int = 100) -> list[dict]:
-        rows = self.conn.execute(
+    def list_checkpoints(
+        self, *, participant_id: str | None = None, limit: int = 100
+    ) -> list[dict]:
+        """List checkpoints, globally or filtered by creator.
+
+        When ``participant_id`` is None, returns all checkpoints across every
+        participant — the default path for discovery by a live sibling whose
+        creator may be dead. When given, narrows to that creator only.
+
+        The LEFT JOIN resolves the creator's status in the same query so callers
+        can surface ``creator_present`` without N+1 store calls. Participant
+        names are not persisted (they are in-memory in the registry), so
+        ``creator_name`` must be resolved by the caller from the registry.
+        """
+        stmt = (
             select(
                 checkpoints.c.id,
                 checkpoints.c.participant_id,
                 checkpoints.c.name,
                 checkpoints.c.notes,
                 checkpoints.c.created_at,
+                checkpoints.c.restore_state,
+                checkpoints.c.restored_at,
+                checkpoints.c.restored_by,
+                participants.c.status.label("creator_status"),
             )
-            .where(checkpoints.c.participant_id == participant_id)
+            .outerjoin(participants, checkpoints.c.participant_id == participants.c.id)
             .order_by(checkpoints.c.created_at.desc(), checkpoints.c.id.desc())
             .limit(limit)
-        ).fetchall()
+        )
+        if participant_id is not None:
+            stmt = stmt.where(checkpoints.c.participant_id == participant_id)
+        rows = self.conn.execute(stmt).fetchall()
         return [dict(r._mapping) for r in rows]
 
     def claim_checkpoint_restore(self, checkpoint_id: int, restored_by: str) -> str | None:
@@ -628,8 +648,8 @@ class Store:
 
         Returns a token on success, or None if the checkpoint is not in the
         ``ready`` state. The caller uses the token to finalize or release
-        the restore. ``restored_by`` is set on successful finalization, not
-        here.
+        the restore. ``restore_claimed_by`` is set here so concurrent callers
+        can see who holds the claim while the restore is in progress.
         """
         token = new_id()
         result = self.conn.execute(
@@ -641,6 +661,7 @@ class Store:
                 restore_started_at=now(),
                 restore_token=token,
                 restore_error=None,
+                restore_claimed_by=restored_by,
             )
         )
         if result.rowcount == 0:
@@ -669,9 +690,15 @@ class Store:
                 "restored_at": now(),
                 "restored_by": restored_by,
                 "restore_result": result,
+                "restore_claimed_by": None,
             }
         else:
-            values = {"restore_state": "failed", "restore_error": error}
+            values = {
+                "restore_state": "failed",
+                "restore_error": error,
+                "restored_by": restored_by,
+                "restore_claimed_by": None,
+            }
         result_clause = (
             update(checkpoints)
             .where(checkpoints.c.id == checkpoint_id)
@@ -698,6 +725,7 @@ class Store:
                 restore_token=None,
                 restore_started_at=None,
                 restore_error=None,
+                restore_claimed_by=None,
             )
         )
         return result.rowcount > 0

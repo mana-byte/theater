@@ -54,6 +54,7 @@ from theater.models import (
     JobState,
     NoSelfKill,
     NotAddressable,
+    NotFound,
     NotYourChild,
     StaleTarget,
     Status,
@@ -957,6 +958,7 @@ async def _checkpoint_read(daemon, params: dict) -> dict:
             "restore_started_at": row.get("restore_started_at"),
             "restored_at": row.get("restored_at"),
             "restored_by": row.get("restored_by"),
+            "restore_claimed_by": row.get("restore_claimed_by"),
             "restore_error": row.get("restore_error"),
             "restore_result": restore_result,
         },
@@ -980,42 +982,69 @@ def _checkpoint_limit(params: dict) -> int:
     return raw
 
 
-def _checkpoint_summary(row: dict) -> dict:
+def _checkpoint_summary(row: dict, registry=None) -> dict:
     notes = row.get("notes")
-    if notes is not None and len(notes) > CHECKPOINT_NOTES_PREVIEW_CHARS:
-        return {
-            "id": row["id"],
-            "name": row["name"],
-            "created_at": row["created_at"],
-            "notes": notes[:CHECKPOINT_NOTES_PREVIEW_CHARS],
-            "notes_truncated": True,
-        }
-    return {
+    creator_status = row.get("creator_status")
+    creator_name: str | None = None
+    if registry is not None:
+        try:
+            creator_name = registry.get(row["participant_id"]).name
+        except NotFound:
+            creator_name = None
+    base: dict = {
         "id": row["id"],
+        "participant_id": row["participant_id"],
+        "creator_name": creator_name,
+        "creator_status": creator_status,
+        # False when the creator row has been pruned by GC — the checkpoint is
+        # still visible for discovery, but restore will refuse a pruned parent.
+        "creator_present": creator_status is not None,
         "name": row["name"],
         "created_at": row["created_at"],
-        "notes": notes,
-        "notes_truncated": False,
+        "restore_state": row.get("restore_state") or "ready",
+        "restored_by": row.get("restored_by"),
+        "restored_at": row.get("restored_at"),
     }
+    if notes is not None and len(notes) > CHECKPOINT_NOTES_PREVIEW_CHARS:
+        return {**base, "notes": notes[:CHECKPOINT_NOTES_PREVIEW_CHARS], "notes_truncated": True}
+    return {**base, "notes": notes, "notes_truncated": False}
 
 
 @method("checkpoint.list")
 async def _checkpoint_list(daemon, params: dict) -> list[dict]:
-    """List the caller's checkpoints, newest first.
+    """List checkpoints, machine-global by default, newest first.
+
+    Checkpoints are visible to every participant — a dead creator's checkpoint
+    must be discoverable by a live sibling that will restore it. Pass
+    ``participant_id`` to narrow to one creator's checkpoints. Pass
+    ``restorable_only=true`` to exclude rows whose ``restore_state`` is not
+    ``ready``. The caller is still validated as an existing participant.
 
     Returns summaries only — ``recovery_read(id)`` is the detailed endpoint.
     Notes are truncated to a preview length; ``notes_truncated`` flags it.
     """
-    caller = _caller_participant(daemon, params, method_name="checkpoint.list")
+    _caller_participant(daemon, params, method_name="checkpoint.list")
     limit = _checkpoint_limit(params)
-    rows = daemon.store.list_checkpoints(participant_id=caller.id, limit=limit)
-    return [_checkpoint_summary(row) for row in rows]
+    raw_pid = params.get("participant_id")
+    if raw_pid is not None and not isinstance(raw_pid, str):
+        raise BadRequest("participant_id must be a string")
+    restorable_only = params.get("restorable_only", False)
+    if not isinstance(restorable_only, bool):
+        raise BadRequest("restorable_only must be a boolean")
+    rows = daemon.store.list_checkpoints(participant_id=raw_pid or None, limit=limit)
+    if restorable_only:
+        rows = [r for r in rows if (r.get("restore_state") or "ready") == "ready"]
+    return [_checkpoint_summary(row, daemon.registry) for row in rows]
 
 
-def _restore_state_error(state: str, checkpoint_id: int) -> TheaterError:
+def _restore_state_error(
+    state: str, checkpoint_id: int, claimed_by: str | None = None
+) -> TheaterError:
     if state == "restoring":
+        holder = f" (held by {claimed_by!r})" if claimed_by else ""
         return CheckpointRestoreInProgress(
-            f"checkpoint {checkpoint_id!r} is currently being restored by another caller"
+            f"checkpoint {checkpoint_id!r} is currently being restored{holder}; "
+            f"wait for the in-progress restore to complete or fail before retrying"
         )
     if state == "restored":
         return CheckpointAlreadyRestored(
@@ -1032,17 +1061,13 @@ def _restore_state_error(state: str, checkpoint_id: int) -> TheaterError:
     )
 
 
-def _validate_restore_request(
-    daemon, params: dict, *, method_name: str
-) -> tuple:
+def _validate_restore_request(daemon, params: dict, *, method_name: str) -> tuple:
     """Extract and validate restore parameters. Returns (caller, checkpoint_id, approval, row)."""
     caller = _caller_participant(daemon, params, method_name=method_name)
     checkpoint_id = _checkpoint_id(params)
     approval = _string_param(params, "approval", method_name=method_name)
     if approval not in APPROVALS:
-        raise BadRequest(
-            f"approval must be one of 'manual', 'edits', 'yolo'; got {approval!r}"
-        )
+        raise BadRequest(f"approval must be one of 'manual', 'edits', 'yolo'; got {approval!r}")
     row = daemon.store.get_checkpoint(checkpoint_id)
     if row is None:
         raise BadRequest(f"no checkpoint {checkpoint_id!r}")
@@ -1117,8 +1142,10 @@ async def _checkpoint_restore(daemon, params: dict) -> dict:
 
     token = daemon.store.claim_checkpoint_restore(checkpoint_id, caller.id)
     if token is None:
-        state = row.get("restore_state") or "ready"
-        raise _restore_state_error(state, checkpoint_id)
+        # Re-read the row so we can report who holds the claim.
+        fresh = daemon.store.get_checkpoint(checkpoint_id) or row
+        state = fresh.get("restore_state") or "ready"
+        raise _restore_state_error(state, checkpoint_id, fresh.get("restore_claimed_by"))
 
     side_effect_possible = False
     try:
@@ -1130,27 +1157,35 @@ async def _checkpoint_restore(daemon, params: dict) -> dict:
             restored_parent = parent.to_dict()
         elif parent.session_id is not None:
             side_effect_possible = True
-            restored_parent = await _spawn(daemon, {
-                "harness": parent.harness,
-                "cwd": parent.cwd,
-                "approval": approval,
-                "parent_id": caller.id,
-                "resume": parent.session_id,
-            })
+            restored_parent = await _spawn(
+                daemon,
+                {
+                    "harness": parent.harness,
+                    "cwd": parent.cwd,
+                    "approval": approval,
+                    "parent_id": caller.id,
+                    "resume": parent.session_id,
+                },
+            )
             action = "resumed"
         else:
             side_effect_possible = True
-            restored_parent = await _spawn(daemon, {
-                "harness": parent.harness,
-                "cwd": parent.cwd,
-                "approval": approval,
-                "parent_id": caller.id,
-            })
+            restored_parent = await _spawn(
+                daemon,
+                {
+                    "harness": parent.harness,
+                    "cwd": parent.cwd,
+                    "approval": approval,
+                    "parent_id": caller.id,
+                },
+            )
             action = "respawned"
     except asyncio.CancelledError:
         if side_effect_possible:
             daemon.store.finalize_checkpoint_restore(
-                checkpoint_id, token=token, restored_by=caller.id,
+                checkpoint_id,
+                token=token,
+                restored_by=caller.id,
                 error="cancelled during restore",
             )
         else:
@@ -1165,14 +1200,18 @@ async def _checkpoint_restore(daemon, params: dict) -> dict:
             daemon.store.release_checkpoint_restore(checkpoint_id, token=token)
         raise
 
-    restore_result = json.dumps({
-        "participant_id": restored_parent["id"],
-        "harness": restored_parent["harness"],
-        "status": restored_parent["status"],
-        "session_id": restored_parent.get("session_id"),
-        "action": action,
-        "handoff_required": True,
-    }, sort_keys=True, separators=(",", ":"))
+    restore_result = json.dumps(
+        {
+            "participant_id": restored_parent["id"],
+            "harness": restored_parent["harness"],
+            "status": restored_parent["status"],
+            "session_id": restored_parent.get("session_id"),
+            "action": action,
+            "handoff_required": True,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
     if not daemon.store.finalize_checkpoint_restore(
         checkpoint_id, token=token, restored_by=caller.id, result=restore_result

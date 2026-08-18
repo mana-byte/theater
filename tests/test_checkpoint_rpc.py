@@ -196,17 +196,20 @@ async def test_checkpoint_list_empty_when_none(client):
     assert rows == []
 
 
-async def test_checkpoint_list_isolates_by_caller(client, daemon):
+async def test_checkpoint_list_returns_all_participants_checkpoints(client, daemon):
     a = await client.call("hello", id="a", harness="vibe", cwd="/tmp")
     b = await client.call("hello", id="b", harness="vibe", cwd="/tmp")
     await client.call("checkpoint.create", caller_id=a["id"], name="a-checkpoint")
     await client.call("checkpoint.create", caller_id=b["id"], name="b-checkpoint")
 
-    rows_a = await client.call("checkpoint.list", caller_id=a["id"])
-    rows_b = await client.call("checkpoint.list", caller_id=b["id"])
+    # Any caller can see all checkpoints.
+    rows_from_a = await client.call("checkpoint.list", caller_id=a["id"])
+    names = {r["name"] for r in rows_from_a}
+    assert names == {"a-checkpoint", "b-checkpoint"}
 
-    assert [r["name"] for r in rows_a] == ["a-checkpoint"]
-    assert [r["name"] for r in rows_b] == ["b-checkpoint"]
+    # participant_id filter still narrows correctly.
+    rows_filtered = await client.call("checkpoint.list", caller_id=a["id"], participant_id=a["id"])
+    assert [r["name"] for r in rows_filtered] == ["a-checkpoint"]
 
 
 async def test_checkpoint_list_response_shape(client):
@@ -216,10 +219,26 @@ async def test_checkpoint_list_response_shape(client):
     )
 
     rows = await client.call("checkpoint.list", caller_id=caller["id"])
-    assert set(rows[0]) == {"id", "name", "created_at", "notes", "notes_truncated"}
+    assert set(rows[0]) == {
+        "id",
+        "participant_id",
+        "creator_name",
+        "creator_status",
+        "creator_present",
+        "name",
+        "created_at",
+        "restore_state",
+        "restored_by",
+        "restored_at",
+        "notes",
+        "notes_truncated",
+    }
     assert rows[0]["id"] == created["checkpoint_id"]
     assert rows[0]["notes"] == "short"
     assert rows[0]["notes_truncated"] is False
+    assert rows[0]["participant_id"] == caller["id"]
+    assert rows[0]["creator_present"] is True
+    assert rows[0]["restore_state"] == "ready"
 
 
 async def test_checkpoint_list_truncates_long_notes(client):
@@ -263,6 +282,156 @@ async def test_checkpoint_list_requires_existing_caller(client):
         await client.call("checkpoint.list", caller_id="ghost")
     assert exc.value.code == "bad_request"
     assert "existing participant" in str(exc.value)
+
+
+async def test_checkpoint_list_participant_b_sees_participant_a_checkpoint(client, daemon):
+    a = await client.call("hello", id="a", harness="vibe", cwd="/tmp")
+    b = await client.call("hello", id="b", harness="vibe", cwd="/tmp")
+    created = await client.call("checkpoint.create", caller_id=a["id"], name="a-cp")
+
+    rows = await client.call("checkpoint.list", caller_id=b["id"])
+    assert len(rows) == 1
+    assert rows[0]["id"] == created["checkpoint_id"]
+    assert rows[0]["participant_id"] == a["id"]
+
+
+async def test_checkpoint_list_restorable_only_excludes_non_ready(client, daemon):
+    from theater.models import Participant, Tier
+
+    parent = Participant(id="parent", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%1")
+    daemon.store.upsert_participant(parent)
+    caller = Participant(id="caller", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%2")
+    daemon.store.upsert_participant(caller)
+    await client.call("hello", id="caller", harness="vibe", cwd="/tmp")
+
+    ready_cp = await client.call("checkpoint.create", caller_id="parent", name="ready")
+    restored_cp = await client.call("checkpoint.create", caller_id="parent", name="restored")
+
+    # restore the second checkpoint so it transitions to 'restored'
+    await client.call(
+        "checkpoint.restore",
+        checkpoint_id=restored_cp["checkpoint_id"],
+        approval="yolo",
+        caller_id="caller",
+    )
+
+    all_rows = await client.call("checkpoint.list", caller_id="caller")
+    assert len(all_rows) == 2
+
+    restorable = await client.call("checkpoint.list", caller_id="caller", restorable_only=True)
+    assert len(restorable) == 1
+    assert restorable[0]["id"] == ready_cp["checkpoint_id"]
+
+
+async def test_checkpoint_list_creator_pruned_shows_creator_present_false(client, daemon):
+    parent = await client.call("hello", id="parent", harness="vibe", cwd="/tmp")
+    created = await client.call("checkpoint.create", caller_id=parent["id"], name="cp")
+
+    # Prune the creator participant from the store.
+    import sqlalchemy
+
+    from theater.daemon.schema import participants as part_table
+
+    daemon.store.conn.execute(sqlalchemy.delete(part_table).where(part_table.c.id == parent["id"]))
+
+    caller = await client.call("hello", id="caller2", harness="vibe", cwd="/tmp")
+    rows = await client.call("checkpoint.list", caller_id=caller["id"])
+    assert len(rows) == 1
+    assert rows[0]["id"] == created["checkpoint_id"]
+    assert rows[0]["creator_present"] is False
+
+
+async def test_checkpoint_read_on_another_participants_checkpoint(client, daemon):
+    creator = await client.call("hello", id="creator", harness="vibe", cwd="/tmp")
+    created = await client.call("checkpoint.create", caller_id=creator["id"], name="cp")
+
+    reader = await client.call("hello", id="reader", harness="vibe", cwd="/tmp")
+    read = await client.call(
+        "checkpoint.read", checkpoint_id=created["checkpoint_id"], caller_id=reader["id"]
+    )
+    assert read["checkpoint"]["id"] == created["checkpoint_id"]
+    assert read["checkpoint"]["participant_id"] == creator["id"]
+
+
+async def test_checkpoint_creator_cannot_self_restore_after_global_list(client, daemon):
+    caller = await client.call("hello", id="caller", harness="vibe", cwd="/tmp")
+    created = await client.call("checkpoint.create", caller_id=caller["id"], name="cp")
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "checkpoint.restore",
+            checkpoint_id=created["checkpoint_id"],
+            approval="yolo",
+            caller_id=caller["id"],
+        )
+    assert exc.value.code == "bad_request"
+    assert "self-restore" in str(exc.value)
+
+
+async def test_checkpoint_full_loop_a_creates_a_dies_b_lists_b_restores(client, daemon):
+    from theater.models import Participant, Tier
+
+    a = Participant(id="a", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%1")
+    daemon.store.upsert_participant(a)
+    created = await client.call("checkpoint.create", caller_id="a", name="handoff")
+
+    b = Participant(id="b", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%2")
+    daemon.store.upsert_participant(b)
+    await client.call("hello", id="b", harness="vibe", cwd="/tmp")
+
+    # B lists and finds A's checkpoint.
+    rows = await client.call("checkpoint.list", caller_id="b")
+    assert any(r["id"] == created["checkpoint_id"] for r in rows)
+
+    # B reads the checkpoint.
+    read = await client.call("checkpoint.read", checkpoint_id=created["checkpoint_id"])
+    assert read["checkpoint"]["participant_id"] == "a"
+
+    # B restores A's checkpoint (A is live so action='live').
+    result = await client.call(
+        "checkpoint.restore",
+        checkpoint_id=created["checkpoint_id"],
+        approval="yolo",
+        caller_id="b",
+    )
+    assert result["restored_parent"]["action"] == "live"
+
+    # restored_by recorded.
+    read2 = await client.call("checkpoint.read", checkpoint_id=created["checkpoint_id"])
+    assert read2["checkpoint"]["restored_by"] == "b"
+    assert read2["checkpoint"]["restore_state"] == "restored"
+
+
+async def test_checkpoint_concurrent_restore_names_the_holder(client, daemon):
+    from theater.models import Participant, Status, Tier
+
+    parent = Participant(
+        id="parent-cc", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%10"
+    )
+    daemon.store.upsert_participant(parent)
+    daemon.store.set_status(parent.id, Status.DEAD)
+    created = await client.call("checkpoint.create", caller_id="parent-cc", name="cp")
+
+    b = Participant(id="b-cc", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%11")
+    daemon.store.upsert_participant(b)
+    c = Participant(id="c-cc", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%12")
+    daemon.store.upsert_participant(c)
+    await client.call("hello", id="b-cc", harness="vibe", cwd="/tmp")
+    await client.call("hello", id="c-cc", harness="vibe", cwd="/tmp")
+
+    # Manually claim the restore as B so it's in 'restoring' state.
+    token = daemon.store.claim_checkpoint_restore(created["checkpoint_id"], "b-cc")
+    assert token is not None
+
+    # C tries to restore and should get checkpoint_restore_in_progress naming B.
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "checkpoint.restore",
+            checkpoint_id=created["checkpoint_id"],
+            approval="yolo",
+            caller_id="c-cc",
+        )
+    assert exc.value.code == "checkpoint_restore_in_progress"
+    assert "b-cc" in str(exc.value)
 
 
 # ---- checkpoint.restore ---------------------------------------------------
@@ -324,9 +493,9 @@ async def test_checkpoint_restore_rejects_pruned_parent(client, daemon):
     parent = await client.call("hello", id="parent", harness="vibe", cwd="/tmp")
     created = await client.call("checkpoint.create", caller_id=parent["id"], name="cp")
     daemon.store.conn.execute(
-        __import__("sqlalchemy").delete(
-            __import__("theater.daemon.schema", fromlist=["participants"]).participants
-        ).where(
+        __import__("sqlalchemy")
+        .delete(__import__("theater.daemon.schema", fromlist=["participants"]).participants)
+        .where(
             __import__("theater.daemon.schema", fromlist=["participants"]).participants.c.id
             == parent["id"]
         )
@@ -353,9 +522,7 @@ async def test_checkpoint_restore_exposes_state_in_read(client, daemon):
 
 
 async def test_checkpoint_restore_state_machine_claim_and_finalize(store):
-    cid = store.create_checkpoint(
-        participant_id="p1", name="cp", jobs_snapshot="[]"
-    )
+    cid = store.create_checkpoint(participant_id="p1", name="cp", jobs_snapshot="[]")
     token = store.claim_checkpoint_restore(cid, "caller1")
     assert token is not None
 
@@ -374,9 +541,7 @@ async def test_checkpoint_restore_state_machine_claim_and_finalize(store):
 
 
 async def test_checkpoint_restore_concurrent_claim_fails(store):
-    cid = store.create_checkpoint(
-        participant_id="p1", name="cp", jobs_snapshot="[]"
-    )
+    cid = store.create_checkpoint(participant_id="p1", name="cp", jobs_snapshot="[]")
     token1 = store.claim_checkpoint_restore(cid, "caller1")
     assert token1 is not None
     token2 = store.claim_checkpoint_restore(cid, "caller2")
@@ -384,9 +549,7 @@ async def test_checkpoint_restore_concurrent_claim_fails(store):
 
 
 async def test_checkpoint_restore_wrong_token_cannot_finalize(store):
-    cid = store.create_checkpoint(
-        participant_id="p1", name="cp", jobs_snapshot="[]"
-    )
+    cid = store.create_checkpoint(participant_id="p1", name="cp", jobs_snapshot="[]")
     token = store.claim_checkpoint_restore(cid, "caller1")
     assert token is not None
     ok = store.finalize_checkpoint_restore(cid, token="wrong-token", restored_by="caller1")
@@ -396,9 +559,7 @@ async def test_checkpoint_restore_wrong_token_cannot_finalize(store):
 
 
 async def test_checkpoint_restore_failure_sets_failed_state(store):
-    cid = store.create_checkpoint(
-        participant_id="p1", name="cp", jobs_snapshot="[]"
-    )
+    cid = store.create_checkpoint(participant_id="p1", name="cp", jobs_snapshot="[]")
     token = store.claim_checkpoint_restore(cid, "caller1")
     assert token is not None
     ok = store.finalize_checkpoint_restore(
@@ -411,9 +572,7 @@ async def test_checkpoint_restore_failure_sets_failed_state(store):
 
 
 async def test_checkpoint_restore_recover_stranded(store):
-    cid = store.create_checkpoint(
-        participant_id="p1", name="cp", jobs_snapshot="[]"
-    )
+    cid = store.create_checkpoint(participant_id="p1", name="cp", jobs_snapshot="[]")
     token = store.claim_checkpoint_restore(cid, "caller1")
     assert token is not None
 
@@ -425,9 +584,7 @@ async def test_checkpoint_restore_recover_stranded(store):
 
 
 async def test_checkpoint_restore_release_returns_to_ready(store):
-    cid = store.create_checkpoint(
-        participant_id="p1", name="cp", jobs_snapshot="[]"
-    )
+    cid = store.create_checkpoint(participant_id="p1", name="cp", jobs_snapshot="[]")
     token = store.claim_checkpoint_restore(cid, "caller1")
     assert token is not None
 
@@ -442,9 +599,7 @@ async def test_checkpoint_restore_release_returns_to_ready(store):
 
 
 async def test_checkpoint_restore_wrong_token_cannot_release(store):
-    cid = store.create_checkpoint(
-        participant_id="p1", name="cp", jobs_snapshot="[]"
-    )
+    cid = store.create_checkpoint(participant_id="p1", name="cp", jobs_snapshot="[]")
     token = store.claim_checkpoint_restore(cid, "caller1")
     assert token is not None
     ok = store.release_checkpoint_restore(cid, token="wrong-token")
@@ -468,9 +623,7 @@ async def test_checkpoint_restore_live_parent_rejected_when_ancestor(client, dae
     daemon.store.upsert_participant(ancestor)
     daemon.store.upsert_participant(descendant)
     daemon.store.conn.execute(
-        sa_update(part_table)
-        .where(part_table.c.id == descendant.id)
-        .values(parent_id=ancestor.id)
+        sa_update(part_table).where(part_table.c.id == descendant.id).values(parent_id=ancestor.id)
     )
     created = await client.call("checkpoint.create", caller_id="ancestor", name="cp")
     with pytest.raises(RemoteError) as exc:
@@ -487,14 +640,10 @@ async def test_checkpoint_restore_live_parent_rejected_when_ancestor(client, dae
 async def test_checkpoint_restore_live_parent_succeeds(client, daemon):
     from theater.models import Participant, Tier
 
-    parent = Participant(
-        id="parent", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%1"
-    )
+    parent = Participant(id="parent", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%1")
     daemon.store.upsert_participant(parent)
     created = await client.call("checkpoint.create", caller_id="parent", name="cp")
-    caller = Participant(
-        id="caller", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%2"
-    )
+    caller = Participant(id="caller", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%2")
     daemon.store.upsert_participant(caller)
     result = await client.call(
         "checkpoint.restore",
@@ -510,14 +659,10 @@ async def test_checkpoint_restore_live_parent_succeeds(client, daemon):
 async def test_checkpoint_restore_live_parent_without_pane_rejected(client, daemon):
     from theater.models import Participant, Tier
 
-    parent = Participant(
-        id="parent", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane=None
-    )
+    parent = Participant(id="parent", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane=None)
     daemon.store.upsert_participant(parent)
     created = await client.call("checkpoint.create", caller_id="parent", name="cp")
-    caller = Participant(
-        id="caller", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%2"
-    )
+    caller = Participant(id="caller", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%2")
     daemon.store.upsert_participant(caller)
     with pytest.raises(RemoteError) as exc:
         await client.call(
@@ -533,14 +678,10 @@ async def test_checkpoint_restore_live_parent_without_pane_rejected(client, daem
 async def test_checkpoint_restore_result_durable_in_read(client, daemon):
     from theater.models import Participant, Tier
 
-    parent = Participant(
-        id="parent", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%1"
-    )
+    parent = Participant(id="parent", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%1")
     daemon.store.upsert_participant(parent)
     created = await client.call("checkpoint.create", caller_id="parent", name="cp")
-    caller = Participant(
-        id="caller", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%2"
-    )
+    caller = Participant(id="caller", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%2")
     daemon.store.upsert_participant(caller)
     await client.call(
         "checkpoint.restore",
@@ -561,14 +702,10 @@ async def test_checkpoint_restore_result_durable_in_read(client, daemon):
 async def test_checkpoint_restore_second_attempt_refused(client, daemon):
     from theater.models import Participant, Tier
 
-    parent = Participant(
-        id="parent", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%1"
-    )
+    parent = Participant(id="parent", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%1")
     daemon.store.upsert_participant(parent)
     created = await client.call("checkpoint.create", caller_id="parent", name="cp")
-    caller = Participant(
-        id="caller", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%2"
-    )
+    caller = Participant(id="caller", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%2")
     daemon.store.upsert_participant(caller)
     await client.call(
         "checkpoint.restore",
@@ -590,15 +727,11 @@ async def test_checkpoint_restore_spawn_failure_marks_failed(client, daemon, mon
     import theater.daemon.methods as methods_mod
     from theater.models import Participant, Status, Tier
 
-    parent = Participant(
-        id="parent", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%1"
-    )
+    parent = Participant(id="parent", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%1")
     daemon.store.upsert_participant(parent)
     daemon.store.set_status(parent.id, Status.DEAD)
     created = await client.call("checkpoint.create", caller_id="parent", name="cp")
-    caller = Participant(
-        id="caller", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%2"
-    )
+    caller = Participant(id="caller", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%2")
     daemon.store.upsert_participant(caller)
 
     async def _fake_spawn(daemon, params):
@@ -626,15 +759,11 @@ async def test_checkpoint_restore_spawn_cancelled_marks_failed(client, daemon, m
     import theater.daemon.methods as methods_mod
     from theater.models import Participant, Status, Tier
 
-    parent = Participant(
-        id="parent", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%1"
-    )
+    parent = Participant(id="parent", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%1")
     daemon.store.upsert_participant(parent)
     daemon.store.set_status(parent.id, Status.DEAD)
     created = await client.call("checkpoint.create", caller_id="parent", name="cp")
-    caller = Participant(
-        id="caller", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%2"
-    )
+    caller = Participant(id="caller", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%2")
     daemon.store.upsert_participant(caller)
 
     async def _fake_spawn(daemon, params):

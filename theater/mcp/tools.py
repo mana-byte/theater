@@ -371,12 +371,17 @@ async def store_get(session: Session, *, namespace: str, key: str) -> dict:
 
 
 async def checkpoint(session: Session, *, name: str, notes: str | None = None) -> dict:
-    """Create an explicit cumulative snapshot for this participant's delegations.
+    """Create an explicit cumulative snapshot of your delegated jobs.
 
     A checkpoint is agent-initiated, not an automatic execution checkpoint.
     The daemon records every job delegated by this participant up to this
     point so a later recovery read can compare the recorded snapshot with live
     current state.
+
+    Checkpoints are visible to every participant on this machine — they are
+    not private per-agent state. The snapshot includes job handles, targets,
+    prompts, states, results, errors, and times. Do not assume a checkpoint
+    is private.
     """
     if not session._resolved:
         await session.identify()
@@ -391,11 +396,12 @@ async def checkpoint(session: Session, *, name: str, notes: str | None = None) -
 
 
 async def recovery_read(session: Session, *, checkpoint_id: int) -> dict:
-    """Read a checkpoint plus the live state now visible to the caller.
+    """Read a checkpoint and compare it with live state now.
 
-    Returns the checkpoint metadata, recorded snapshot, current live state, and
-    any pruned handles so the caller can see what changed since the explicit
-    checkpoint was created.
+    Operates on any participant's checkpoint — not only your own. Returns the
+    checkpoint metadata, recorded snapshot, current live state, and any pruned
+    handles so the caller can see what changed since the explicit checkpoint
+    was created.
     """
     if not session._resolved:
         await session.identify()
@@ -408,8 +414,20 @@ async def recovery_read(session: Session, *, checkpoint_id: int) -> dict:
     return result
 
 
-async def list_checkpoints(session: Session, *, limit: int = 100) -> list[dict]:
-    """List the caller's checkpoints, newest first.
+async def list_checkpoints(
+    session: Session,
+    *,
+    limit: int = 100,
+    participant_id: str | None = None,
+    restorable_only: bool = False,
+) -> list[dict]:
+    """List checkpoints across all participants on this machine, newest first.
+
+    Checkpoints are machine-global by design: a dead creator's checkpoint must
+    be discoverable by a live sibling that will restore it. Pass
+    ``participant_id`` to narrow to one creator's checkpoints. Pass
+    ``restorable_only=True`` to exclude rows whose ``restore_state`` is not
+    ``ready``.
 
     Returns summaries only — call ``recovery_read`` with a checkpoint id for
     the full snapshot and live comparison. Notes are truncated to a preview;
@@ -421,15 +439,18 @@ async def list_checkpoints(session: Session, *, limit: int = 100) -> list[dict]:
         "checkpoint.list",
         caller_id=session.participant_id,
         limit=limit,
+        participant_id=participant_id,
+        restorable_only=restorable_only,
     )
     assert isinstance(result, list)
     return result
 
 
-async def recovery_restore(
-    session: Session, *, checkpoint_id: int, approval: str
-) -> dict:
+async def recovery_restore(session: Session, *, checkpoint_id: int, approval: str) -> dict:
     """Prepare the checkpoint creator for restoration.
+
+    Operates on any participant's checkpoint — not only your own. You cannot
+    restore your own checkpoint (self-restore would deadlock the MCP call).
 
     For a dead parent: spawns or resumes it as a child of the caller.
     For a live parent: reuses it in place (lineage is not changed).
