@@ -1,12 +1,12 @@
 """Orchestration-tree checkpoint recovery.
 
 This module owns the recursive snapshot and multi-node restore logic for
-checkpoint v2. Checkpoint v1 (creator-only jobs snapshot) remains readable and
-is handled by a compatibility shim.
+checkpoint v2. Checkpoint v1 (creator-only jobs snapshot) remains readable
+and is handled by a compatibility shim that preserves the original behaviour.
 
 Snapshot format v2
 ------------------
-The ``jobs_snapshot`` column stores a JSON object::
+``jobs_snapshot`` stores a self-contained JSON object::
 
     {
         "version": 2,
@@ -16,77 +16,103 @@ The ``jobs_snapshot`` column stores a JSON object::
                 "participant_id": str,
                 "harness": str,
                 "tier": str,
-                "status": str,
+                "status": str,               -- at checkpoint time
                 "parent_id": str | null,
                 "session_id": str | null,
                 "session_correlation": str | null,
                 "cwd": str | null,
                 "branch": str | null,
-                "launch_provenance": dict | null,  -- parsed from JSON blob
-                "jobs": [                           -- jobs this participant sent
-                    {"handle": ..., "target_id": ..., "kind": ..., ...}
+                "launch_provenance": dict | null,
+                "jobs": [                     -- jobs sent (caller) OR received
+                    {                         -- (target) by this participant
+                        "handle": str,
+                        "caller_id": str,
+                        "target_id": str | null,
+                        "kind": str,
+                        "prompt": str | null,
+                        "state": str,
+                        "result": str | null,
+                        "error_code": str | null,
+                        "created_at": float,
+                        "finished_at": float | null,
+                        "response_format": str | null,
+                    }
                 ]
             },
             ...
         ]
     }
 
-Version 1 (legacy) snapshots store a flat list of job dicts for the creator
-only. They are detected by the absence of a ``"version"`` key (or a value < 2)
-and treated as creator-only with no descendant information.
+v1 (legacy): a flat list of job dicts for the creator only. Detected by the
+absence of a ``"version"`` key. v1 restores run through the original single-node
+path with strict DB validation.
+
+Job snapshot completeness (item 6)
+------------------------------------
+For each node in the subtree we capture all jobs where
+``caller_id IN subtree_ids OR target_id IN subtree_ids``. This means:
+
+- The spawn job for a child lives on the parent node (caller = parent).
+- The child's own work (sends it issued) lives on the child node.
+- A dead child with a terminal spawn job on the parent and no unfinished sends
+  is correctly classified as ``completed`` even when it has launch provenance.
 
 Classification
 --------------
-Each recorded node is classified at restore time as one of:
+Live (row exists, status != DEAD):
+  - EXTERNAL → ``failed`` (no pane)
+  - No physical pane verified → ``stale_live`` (pane gone, treat as dead)
+  - Pane ok, harness mismatch → ``live_harness_conflict`` (treat as dead)
+  - Otherwise → ``live``
 
-- ``live``:         participant exists and is not DEAD → reused in place
-- ``resumable``:    DEAD with a trusted session_id → resume native session
-- ``respawnable``:  DEAD with launch_provenance but no trusted session → cold respawn
-- ``completed``:    DEAD with no provenance and no open jobs → skip (work is done)
-- ``pruned``:       participant row has been GC'd entirely → skip or fail based on open jobs
-- ``failed``:       cannot be restored (EXTERNAL, no cwd, etc.)
+Dead (row exists, status == DEAD):
+  - Open spawn job from parent still RUNNING → check child first
+  - Provenance available with usable cwd → ``respawnable``
+  - ELSE → ``completed`` or ``failed`` depending on open work
+
+Pruned (row GC'd):
+  - Snapshot has snapshot provenance → ``respawnable``
+  - Otherwise → ``completed`` (no open work) or ``pruned`` (open work, no provenance)
+
+NB: ``resumable`` is intentionally *not* a classification for pruned rows.
+The spawner requires a live trusted DB binding; snapshot evidence alone
+cannot prove the session is not now live elsewhere.
 
 Action codes
 ------------
-- ``reused_live``:  live node reused without spawning
-- ``resumed``:      dead node resumed via native session id
-- ``respawned``:    dead node cold-respawned from launch provenance
-- ``skipped``:      completed/pruned node with no open work; nothing to do
-- ``failed``:       could not restore; error recorded in report
+``reused_live``         live node verified and reused in place
+``reparented``          live node reparented to reconstructed parent
+``respawned``           cold-respawned from launch provenance
+``skipped``             work complete or parent not restored; nothing to do
+``ancestor_not_restored``  parent was skipped/failed; descendant skipped
+``live_lineage_conflict``  live node owned by a different live parent
+``failed``              unrestorable; error recorded in report
 
-Rail enforcement
-----------------
-Depth, budget, model, and reasoning rails are applied on every cold respawn.
-Resume paths do not re-apply model/reasoning rails (the original spawn already
-passed them), but depth and budget are always checked because the new parent
-may be a different node at a different depth.
+Rail enforcement (item 11)
+--------------------------
+Depth, budget, model, and reasoning rails are applied on every spawn
+(resume or cold). Configuration can change between the original spawn and
+the restore; the original approval is not a voucher for current policy.
 
-Parent-child-grandchild lineage
----------------------------------
-The restorer acts as the caller for the restored creator. Recorded children of
-the creator become children of the newly restored creator, and so on recursively.
-Live nodes that already have a parent are left alone; dead nodes that are
-re-spawned get their parent_id set to the restored parent.
+Partial state (item 9)
+----------------------
+If some nodes succeed and some fail, the checkpoint is finalised as
+``partial``. The progress blob written after each successful node allows a
+retry to skip already-live nodes. A ``partial`` checkpoint is claimable for
+re-attempt.
 
-Sends vs spawns
----------------
-Send jobs are reported in the per-node job reconciliation but are never
-replayed. Only spawn jobs for incomplete work drive new spawns. A spawn job is
-"incomplete" when the target is dead/pruned and was not itself classified as
-completed.
+Worktree recovery (item 12)
+----------------------------
+If the recorded worktree path still exists as a linked worktree of the same
+repo, it is reused. If the path is gone but provenance is sufficient
+(worktree_repo_root, worktree_branch present), the worktree is recreated.
+If neither is possible, the restore fails clearly rather than running in an
+unintended directory.
 
-Partial failures
-----------------
-If one sibling fails to restore, siblings that already restored successfully
-are left alive. The restore report records both the successes and the failure.
-The checkpoint is finalized as ``restored`` when the creator is restored (even
-if some descendants failed); their individual ``action=failed`` entries appear
-in the report.
-
-Single-use claim
-----------------
-The caller acquires the atomic claim before calling ``restore_tree``. This
-module does not claim; it only finalizes via the caller's token.
+Sends not replayed (item 8)
+----------------------------
+Send jobs appear in the ``job_reconciliations`` list per participant but are
+never re-issued. Only spawn jobs for incomplete work drive new processes.
 """
 
 from __future__ import annotations
@@ -113,12 +139,28 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("theater.recovery")
 
-# ---- snapshot construction -----------------------------------------------
+# ---- snapshot job keys -------------------------------------------------------
 
-#: Keys captured from jobs rows for the v2 snapshot.
-#: Intentionally matches _CHECKPOINT_JOB_KEYS in methods.py for backward compat —
-#: the flat ``recorded_jobs`` in checkpoint.read returns jobs with these keys only.
+#: Full set of job fields captured per node in v2 snapshots.
+#: Includes caller_id (needed to identify which node owns the job)
+#: and response_format (needed to reconstruct the original spawn call).
 _SNAPSHOT_JOB_KEYS = (
+    "handle",
+    "caller_id",
+    "target_id",
+    "kind",
+    "prompt",
+    "state",
+    "result",
+    "error_code",
+    "created_at",
+    "finished_at",
+    "response_format",
+)
+
+#: Keys returned in the backward-compatible "recorded_jobs" flat list
+#: (creator's sent jobs only, without caller_id).
+_LEGACY_JOB_KEYS = (
     "handle",
     "target_id",
     "kind",
@@ -131,23 +173,30 @@ _SNAPSHOT_JOB_KEYS = (
 )
 
 
+# ---- snapshot construction ---------------------------------------------------
+
+
 def build_tree_snapshot(daemon: Daemon, creator_id: str) -> dict:
     """Build a v2 tree snapshot for *creator_id* and all its descendants.
 
     Walks the lineage tree breadth-first starting at *creator_id*. For each
-    node, records the participant's identity fields (from the live registry)
-    and all jobs that participant **sent** (``caller_id == participant_id``).
+    node, records the participant's identity fields and all jobs where the
+    participant is either the caller OR the target. This ensures that:
 
-    Returns a dict ready for ``json.dumps`` — stored as the ``jobs_snapshot``
-    column value.
+    - A child's spawn job (caller = parent, target = child) is captured on
+      the parent node.
+    - A child's own send jobs are captured on the child node.
+    - The child's completion state is fully determinable from the snapshot.
+
+    Returns a dict ready for ``json.dumps``.
     """
-    from sqlalchemy import select
+    from sqlalchemy import or_, select
 
     from theater.daemon.schema import jobs as jobs_table
 
     store = daemon.store
 
-    # Breadth-first traversal of the orchestration tree rooted at creator_id.
+    # Breadth-first traversal of the orchestration tree.
     all_ids = lineage.subtree_ids(store, creator_id)
 
     nodes: list[dict] = []
@@ -155,28 +204,18 @@ def build_tree_snapshot(daemon: Daemon, creator_id: str) -> dict:
         p = store.get_participant(pid)
         if p is None:
             # Participant was GC'd between snapshot start and this lookup.
-            # Record a stub so restore knows this id existed.
-            nodes.append(
-                {
-                    "participant_id": pid,
-                    "harness": None,
-                    "tier": None,
-                    "status": "dead",
-                    "parent_id": None,
-                    "session_id": None,
-                    "session_correlation": None,
-                    "cwd": None,
-                    "branch": None,
-                    "launch_provenance": None,
-                    "jobs": [],
-                }
-            )
+            nodes.append(_stub_node(pid))
             continue
 
-        # Fetch all jobs this participant sent.
+        # Fetch all jobs where this participant is caller OR target.
         rows = store.conn.execute(
             select(*(jobs_table.c[k] for k in _SNAPSHOT_JOB_KEYS))
-            .where(jobs_table.c.caller_id == pid)
+            .where(
+                or_(
+                    jobs_table.c.caller_id == pid,
+                    jobs_table.c.target_id == pid,
+                )
+            )
             .order_by(jobs_table.c.created_at.asc(), jobs_table.c.handle.asc())
         ).fetchall()
         participant_jobs = [{k: r._mapping[k] for k in _SNAPSHOT_JOB_KEYS} for r in rows]
@@ -210,6 +249,23 @@ def build_tree_snapshot(daemon: Daemon, creator_id: str) -> dict:
     }
 
 
+def _stub_node(pid: str) -> dict:
+    """Return a minimal stub node for a participant that was GC'd mid-snapshot."""
+    return {
+        "participant_id": pid,
+        "harness": None,
+        "tier": None,
+        "status": "dead",
+        "parent_id": None,
+        "session_id": None,
+        "session_correlation": None,
+        "cwd": None,
+        "branch": None,
+        "launch_provenance": None,
+        "jobs": [],
+    }
+
+
 def is_v2_snapshot(snapshot_data: Any) -> bool:
     """Return True iff *snapshot_data* is a parsed v2 snapshot dict."""
     return isinstance(snapshot_data, dict) and snapshot_data.get("version") == 2
@@ -223,26 +279,241 @@ def parse_snapshot(raw: str) -> Any:
     return json.loads(raw or "[]")
 
 
-# ---- restore report -------------------------------------------------------
+def validate_v2_snapshot(snapshot: dict, checkpoint_id: int) -> None:
+    """Validate a v2 snapshot's structure before any claim is made.
+
+    Raises BadRequest on:
+    - Missing or invalid creator_id
+    - Empty or non-list nodes
+    - Duplicate participant IDs in nodes
+    - creator_id not present in nodes
+    - Snapshot-level parent_id cycles
+    """
+    creator_id = snapshot.get("creator_id")
+    if not isinstance(creator_id, str) or not creator_id:
+        raise BadRequest(f"checkpoint {checkpoint_id!r}: v2 snapshot has no valid creator_id")
+    nodes = snapshot.get("nodes")
+    if not isinstance(nodes, list) or not nodes:
+        raise BadRequest(f"checkpoint {checkpoint_id!r}: v2 snapshot has no nodes")
+    seen_ids: set[str] = set()
+    for n in nodes:
+        nid = n.get("participant_id")
+        if not isinstance(nid, str) or not nid:
+            raise BadRequest(f"checkpoint {checkpoint_id!r}: node missing participant_id")
+        if nid in seen_ids:
+            raise BadRequest(
+                f"checkpoint {checkpoint_id!r}: duplicate participant_id {nid!r} in snapshot"
+            )
+        seen_ids.add(nid)
+    if creator_id not in seen_ids:
+        raise BadRequest(
+            f"checkpoint {checkpoint_id!r}: creator_id {creator_id!r} not present in nodes"
+        )
+    # Cycle detection in snapshot parent_id links.
+    nodes_by_id = {n["participant_id"]: n for n in nodes}
+    for nid in seen_ids:
+        visited: set[str] = set()
+        cur = nid
+        while True:
+            if cur in visited:
+                raise BadRequest(
+                    f"checkpoint {checkpoint_id!r}: snapshot has parent_id cycle at {cur!r}"
+                )
+            visited.add(cur)
+            parent = nodes_by_id.get(cur, {}).get("parent_id")
+            if parent is None or parent not in nodes_by_id:
+                break
+            cur = parent
+
+
+# ---- job reconciliation ------------------------------------------------------
+
+
+@dataclass
+class JobReconciliation:
+    """Per-job outcome in the restore report."""
+
+    handle: str
+    kind: str  # spawn | send
+    recorded_state: str  # state at checkpoint time
+    current_state: str | None  # current DB state or "collected" if pruned
+    outcome: str  # skipped_complete | replayed | reported_only | pruned
+    reason: str
+
+
+def reconcile_jobs(
+    node_jobs: list[dict],
+    live_jobs_by_handle: dict[str, dict],
+) -> list[JobReconciliation]:
+    """Build a job reconciliation list for one node.
+
+    - Send jobs: always ``reported_only`` — never replayed.
+    - Spawn jobs:
+      - Terminal in snapshot → ``skipped_complete``
+      - Still RUNNING in snapshot but terminal in DB → ``skipped_complete``
+      - Still RUNNING in snapshot and absent from DB → ``pruned``
+      - Otherwise → depends on the caller's restore decision.
+
+    This function is informational only; it does not mutate any state.
+    """
+    result: list[JobReconciliation] = []
+    for job in node_jobs:
+        handle = job["handle"]
+        kind = job.get("kind", "send")
+        recorded_state = job.get("state", "running")
+        live = live_jobs_by_handle.get(handle)
+        current_state = live["state"] if live else None
+
+        if kind == "send":
+            result.append(
+                JobReconciliation(
+                    handle=handle,
+                    kind=kind,
+                    recorded_state=recorded_state,
+                    current_state=current_state,
+                    outcome="reported_only",
+                    reason="send jobs are never replayed during restore",
+                )
+            )
+            continue
+
+        # spawn job
+        if recorded_state != "running":
+            result.append(
+                JobReconciliation(
+                    handle=handle,
+                    kind=kind,
+                    recorded_state=recorded_state,
+                    current_state=current_state,
+                    outcome="skipped_complete",
+                    reason=f"spawn was already {recorded_state} at checkpoint time",
+                )
+            )
+            continue
+
+        if live is not None and live["state"] != "running":
+            result.append(
+                JobReconciliation(
+                    handle=handle,
+                    kind=kind,
+                    recorded_state=recorded_state,
+                    current_state=current_state,
+                    outcome="skipped_complete",
+                    reason=f"spawn completed after checkpoint ({live['state']})",
+                )
+            )
+            continue
+
+        if live is None:
+            result.append(
+                JobReconciliation(
+                    handle=handle,
+                    kind=kind,
+                    recorded_state=recorded_state,
+                    current_state="collected",
+                    outcome="pruned",
+                    reason="spawn job GC'd; target status must be inferred from participant row",
+                )
+            )
+            continue
+
+        result.append(
+            JobReconciliation(
+                handle=handle,
+                kind=kind,
+                recorded_state=recorded_state,
+                current_state=current_state,
+                outcome="reported_only",
+                reason="spawn still running at restore time; target node drives recovery decision",
+            )
+        )
+
+    return result
+
+
+# ---- pane verification sentinel ----------------------------------------------
+
+#: Returned by ``_get_pane_info`` when tmux is not available (test environments).
+#: The classifier should trust the DB row in this case rather than marking the
+#: participant as stale_live.
+_PANE_INFO_TMUX_UNAVAILABLE: object = object()
+
+# ---- node completion check ---------------------------------------------------
+
+
+def _node_is_complete(recorded: dict, live_jobs_by_handle: dict[str, dict]) -> bool:
+    """Return True iff a node has evidence that all its work is done.
+
+    Two tiers of evidence:
+
+    1. **Inbound spawn job** (target = this node, kind = spawn): If the node has
+       a spawn job received from its parent and that job is terminal (at checkpoint
+       time or in the live DB), the node's primary work is done. This is the
+       strongest signal.
+
+    2. **No running jobs at all**: If the node has no inbound spawn and has
+       no jobs in the ``running`` state (in snapshot or live DB), it has no
+       observable incomplete work. This covers dead leaf nodes, completed sends,
+       and root/creator nodes that have finished.
+
+    Return False when there is evidence of incomplete work:
+    - A running inbound spawn (node's own process is still wanted by parent).
+    - Any running job in snapshot that is also running in the live DB.
+    """
+    node_id = recorded["participant_id"]
+    jobs = recorded.get("jobs", [])
+
+    # Check inbound spawn job first (strongest evidence).
+    inbound_spawns = [j for j in jobs if j.get("kind") == "spawn" and j.get("target_id") == node_id]
+    if inbound_spawns:
+        for job in inbound_spawns:
+            recorded_state = job.get("state", "running")
+            if recorded_state != "running":
+                continue  # terminal at checkpoint time → done
+            live = live_jobs_by_handle.get(job["handle"])
+            if live is None or live["state"] == "running":
+                return False  # still running or pruned → incomplete
+        return True  # all inbound spawns terminal
+
+    # No inbound spawn: check if any job is still running.
+    # This handles root/creator nodes and leaf nodes.
+    for job in jobs:
+        recorded_state = job.get("state", "running")
+        if recorded_state != "running":
+            continue
+        handle = job.get("handle")
+        if handle is None:
+            # No handle to look up; treat as running (conservative).
+            return False
+        live = live_jobs_by_handle.get(handle)
+        if live is None or live["state"] == "running":
+            return False  # job still running or pruned
+
+    # No running jobs found.
+    return True
+
+
+# ---- restore report ----------------------------------------------------------
 
 
 @dataclass
 class NodeRestoreReport:
-    """Per-participant restore outcome, included in the final restore report."""
+    """Per-participant restore outcome."""
 
     original_participant_id: str
-    new_participant_id: str | None  # None when action is skipped/failed
+    new_participant_id: str | None
     original_parent_id: str | None
-    current_parent_id: str | None  # live parent at restore time
-    new_parent_id: str | None  # parent of the newly spawned participant
+    current_parent_id: str | None
+    new_parent_id: str | None
     harness: str | None
     old_session_id: str | None
     new_session_id: str | None
-    classification: str  # live | resumable | respawnable | completed | pruned | failed
-    action: str  # reused_live | resumed | respawned | skipped | failed
+    classification: str
+    action: str
     final_status: str | None
     reason: str
-    jobs: list[dict] = field(default_factory=list)  # jobs sent by this node
+    job_reconciliations: list[dict] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -250,13 +521,26 @@ class TreeRestoreResult:
     """Aggregate result of a full orchestration-tree restore."""
 
     checkpoint_id: int
+    snapshot_version: int
+    restore_state: str  # restored | partial
+    restored_by: str
+    approval: str
     creator_report: NodeRestoreReport
     descendant_reports: list[NodeRestoreReport]
-    partial_failures: list[str]  # participant_ids that failed
+    partial_failures: list[str]
+    counts: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
+        all_reports = [self.creator_report, *self.descendant_reports]
         return {
             "checkpoint_id": self.checkpoint_id,
+            "snapshot_version": self.snapshot_version,
+            "restore_state": self.restore_state,
+            "restored_by": self.restored_by,
+            "approval": self.approval,
+            "counts": self.counts,
+            "participants": [_node_report_to_dict(r) for r in all_reports],
+            # Keep top-level creator/descendants for existing callers.
             "creator": _node_report_to_dict(self.creator_report),
             "descendants": [_node_report_to_dict(r) for r in self.descendant_reports],
             "partial_failures": self.partial_failures,
@@ -277,227 +561,213 @@ def _node_report_to_dict(r: NodeRestoreReport) -> dict:
         "action": r.action,
         "final_status": r.final_status,
         "reason": r.reason,
-        "jobs": r.jobs,
+        "job_reconciliations": r.job_reconciliations,
+        "warnings": r.warnings,
     }
 
 
-# ---- classification -------------------------------------------------------
+# ---- classification ----------------------------------------------------------
 
 
 def classify_node(
     recorded: dict,
     live_participant: Participant | None,
+    live_jobs_by_handle: dict[str, dict],
+    *,
+    pane_info: dict | object | None = _PANE_INFO_TMUX_UNAVAILABLE,
 ) -> tuple[str, str]:
     """Return (classification, reason) for a recorded snapshot node.
 
-    ``live_participant`` is the current DB row for the participant (None if GC'd).
+    ``live_participant``: current DB row (None if GC'd).
+    ``live_jobs_by_handle``: mapping of handle → job dict for all live DB jobs.
+    ``pane_info``:
+      - dict with 'harness' key: tmux confirmed pane exists (may detect harness mismatch).
+      - None: tmux confirmed pane is gone → ``stale_live``.
+      - ``_PANE_INFO_TMUX_UNAVAILABLE``: tmux not available; trust the DB row as live.
 
     Classifications:
-    - ``live``:         live participant with pane
-    - ``resumable``:    dead, has trusted session_id
-    - ``respawnable``:  dead or pruned, has launch_provenance with usable cwd
-    - ``completed``:    dead or pruned, no open work, no provenance → skip
-    - ``pruned``:       GC'd from DB, not respawnable
-    - ``failed``:       EXTERNAL tier, or otherwise unrestorable
+    ``live``                live DB row (pane check passed or tmux unavailable)
+    ``stale_live``          live DB row but pane confirmed gone by tmux → treat as dead
+    ``live_harness_conflict`` live but a different harness occupies the pane → treat as dead
+    ``respawnable``         dead or pruned with usable launch provenance
+    ``completed``           dead/pruned with no unfinished work → skip
+    ``pruned``              GC'd with open work and no provenance → cannot recover
+    ``failed``              EXTERNAL, no cwd, or otherwise unrestorable
     """
     orig_id = recorded["participant_id"]
 
     if live_participant is not None:
         if live_participant.status is not Status.DEAD:
-            # Participant is alive — reuse in place.
             tier = live_participant.tier
             if tier is Tier.EXTERNAL:
                 return "failed", f"participant {orig_id!r} is live but EXTERNAL (no pane)"
-            return "live", "participant is live and addressable"
 
-        # Participant row exists but is DEAD.
-        session_id = live_participant.session_id
-        session_corr = live_participant.session_correlation
-        if session_id and is_trusted_provenance(session_corr):
-            return "resumable", f"dead with trusted session_id {session_id!r}"
+            if not live_participant.tmux_pane:
+                # No pane on a live Spawned/Adopted node is unusual but not fatal for restore;
+                # record as stale and let the node-level logic decide.
+                return "stale_live", (
+                    f"participant {orig_id!r} is live but has no pane recorded; treating as dead"
+                )
 
-        # Check if we have usable provenance for a cold respawn.
+            if pane_info is _PANE_INFO_TMUX_UNAVAILABLE:
+                # tmux not queryable — trust the DB row.
+                return "live", "participant is live (tmux not available; trusting DB)"
+            if pane_info is None:
+                # tmux reports pane gone. This is a stale_live situation.
+                # We return stale_live; the restore node handler will re-classify
+                # based on completion status and provenance.
+                return "stale_live", (
+                    f"participant {orig_id!r}: pane {live_participant.tmux_pane!r} "
+                    f"confirmed gone by tmux"
+                )
+            assert isinstance(pane_info, dict)
+            pane_harness = pane_info.get("harness")
+            if pane_harness and pane_harness != live_participant.harness:
+                return "live_harness_conflict", (
+                    f"participant {orig_id!r}: pane {live_participant.tmux_pane!r} "
+                    f"runs {pane_harness!r} not {live_participant.harness!r}"
+                )
+            return "live", "participant is live with tmux-verified pane"
+
+        # DEAD retained row.
+        # Completion via inbound spawn evidence: if the node has an inbound spawn job
+        # (parent → this node) that is terminal, the work is done even if provenance
+        # exists. This is the key discriminator: "A dead child with a terminal spawn
+        # and no unfinished work must be skipped even when provenance exists." (item 6)
+        #
+        # We only use this completion evidence when there IS an inbound spawn to check.
+        # Root/creator nodes have no inbound spawn, so completion cannot be confirmed
+        # this way — we fall through to provenance-based restoration.
+        node_jobs = recorded.get("jobs", [])
+        has_inbound_spawn = any(
+            j.get("kind") == "spawn" and j.get("target_id") == orig_id for j in node_jobs
+        )
+        if has_inbound_spawn:
+            complete = _node_is_complete(recorded, live_jobs_by_handle)
+            if complete:
+                return "completed", "dead with all inbound spawn jobs terminal; work is done"
+
+        # Not complete (or no inbound spawn to confirm completion).
+        # Check for resume (retained trusted session).
+        if live_participant.session_id and is_trusted_provenance(
+            live_participant.session_correlation
+        ):
+            return "resumable", (
+                f"dead with trusted session_id {live_participant.session_id!r}; "
+                f"native resume possible"
+            )
+
+        # Check launch provenance for cold respawn.
         if live_participant.launch_provenance:
-            try:
+            with contextlib.suppress(ValueError, TypeError):
                 prov = json.loads(live_participant.launch_provenance)
                 if prov.get("cwd_resolved") or prov.get("cwd_requested"):
-                    return "respawnable", "dead with launch_provenance for cold respawn"
-            except (ValueError, TypeError):
-                pass
+                    return "respawnable", "dead with launch_provenance; cold respawn available"
 
-        # Dead with no session and no usable provenance. Check open jobs.
-        open_jobs = [j for j in recorded.get("jobs", []) if j.get("state") == "running"]
-        if open_jobs:
-            return "failed", (
-                f"participant {orig_id!r} is dead with {len(open_jobs)} open job(s) "
-                f"but no session_id or launch_provenance for respawn"
-            )
-        return "completed", "dead with no open work and no provenance; nothing to restore"
+        # Fall through to snapshot provenance.
+        snap_prov = recorded.get("launch_provenance")
+        if isinstance(snap_prov, dict) and (
+            snap_prov.get("cwd_resolved") or snap_prov.get("cwd_requested")
+        ):
+            return "respawnable", "dead; using snapshot launch_provenance for cold respawn"
 
-    # Participant row is GC'd — fall back to snapshot provenance.
-    prov = recorded.get("launch_provenance")
-    session_id = recorded.get("session_id")
-    session_corr = recorded.get("session_correlation")
+        # No provenance of any kind. Check completion as a last resort.
+        # If there are no running jobs, there's nothing to restore.
+        no_running = not any(j.get("state") == "running" for j in node_jobs)
+        if no_running:
+            return "completed", "dead with no running jobs and no provenance; nothing to restore"
 
-    if session_id and is_trusted_provenance(session_corr):
-        return "resumable", f"pruned from DB but snapshot has trusted session_id {session_id!r}"
+        return "failed", (
+            f"participant {orig_id!r} is dead with incomplete work but no usable provenance"
+        )
 
-    if isinstance(prov, dict) and (prov.get("cwd_resolved") or prov.get("cwd_requested")):
+    # Row is GC'd.  Do NOT offer resumable for pruned rows (item 2).
+    # The spawner's _validate_resume_identity requires a retained trusted dead
+    # DB binding; snapshot evidence alone cannot prove the session is not live elsewhere.
+    snap_prov = recorded.get("launch_provenance")
+    if isinstance(snap_prov, dict) and (
+        snap_prov.get("cwd_resolved") or snap_prov.get("cwd_requested")
+    ):
+        # Provenance exists. Only skip if we have positive terminal evidence from
+        # an inbound spawn job. The mere absence of running jobs is not enough —
+        # jobs could have been GC'd along with the participant row.
+        inbound_spawns = [
+            j
+            for j in recorded.get("jobs", [])
+            if j.get("kind") == "spawn" and j.get("target_id") == orig_id
+        ]
+        if inbound_spawns:
+            # Check if all inbound spawns are terminal.
+            all_terminal = True
+            for job in inbound_spawns:
+                recorded_state = job.get("state", "running")
+                if recorded_state != "running":
+                    continue
+                handle = job.get("handle")
+                live = live_jobs_by_handle.get(handle) if handle else None
+                if live is None or live["state"] == "running":
+                    all_terminal = False
+                    break
+            if all_terminal:
+                return (
+                    "completed",
+                    "GC'd; all inbound spawn jobs terminal; work is done",
+                )
         return "respawnable", "pruned from DB but snapshot has launch_provenance for cold respawn"
 
-    open_jobs = [j for j in recorded.get("jobs", []) if j.get("state") == "running"]
-    if open_jobs:
-        return "pruned", (
-            f"participant {orig_id!r} was GC'd with {len(open_jobs)} open job(s); "
-            f"cannot restore without provenance"
-        )
-    return "completed", "GC'd with no open work; nothing to restore"
+    # No provenance. Use job evidence to decide skip vs fail.
+    complete = _node_is_complete(recorded, live_jobs_by_handle)
+    if complete:
+        return "completed", "GC'd with no observable unfinished work; nothing to restore"
+
+    return "pruned", (f"participant {orig_id!r} was GC'd with incomplete work and no provenance")
 
 
-# ---- restore orchestration -----------------------------------------------
+# ---- pane verification helpers -----------------------------------------------
 
 
-async def restore_tree(
-    daemon: Daemon,
-    *,
-    checkpoint_id: int,
-    snapshot: dict,
-    caller_id: str,
-    approval: str,
-) -> TreeRestoreResult:
-    """Restore the orchestration tree from a v2 snapshot.
+async def _get_pane_info(daemon: Daemon, pane_id: str | None) -> dict | object | None:
+    """Query tmux for pane details.
 
-    *caller_id* is the participant calling restore; it becomes the effective
-    parent of the restored creator. The snapshot must be a parsed v2 dict.
-
-    This function does NOT claim or finalize the checkpoint — the caller in
-    ``methods.py`` owns the atomic claim. It does NOT call ``_spawn`` directly;
-    instead it calls ``_do_spawn`` which goes through the same flow as the
-    standard spawn method, so all rails (depth, budget, model, reasoning) apply.
+    Returns:
+    - A dict with 'harness', 'pane_id', 'command' keys when tmux is available
+      and the pane exists.
+    - None when tmux is available and the pane does not exist (gone).
+    - ``_PANE_INFO_TMUX_UNAVAILABLE`` sentinel when tmux is not available
+      (test environment or not installed); caller should trust the DB row.
     """
-    creator_id = snapshot["creator_id"]
-    nodes_by_id: dict[str, dict] = {n["participant_id"]: n for n in snapshot["nodes"]}
+    if not pane_id:
+        return None
+    try:
+        from theater.daemon.harness_detect import detect_harness
+        from theater.tmux import client as tmux
 
-    # Map original_id → new_participant_id (for live nodes: same id)
-    id_map: dict[str, str] = {}
-    reports: list[NodeRestoreReport] = []
+        if not tmux.available():
+            return _PANE_INFO_TMUX_UNAVAILABLE
+        pane = await tmux.pane_info(pane_id)
+        if pane is None:
+            return None
+    except Exception:
+        return _PANE_INFO_TMUX_UNAVAILABLE
+    else:
+        harness = detect_harness(pane.current_command, pane.pane_pid)
+        return {"pane_id": pane_id, "harness": harness, "command": pane.current_command}
 
-    # Build ordered restore sequence: creator first, then children, BFS.
-    restore_order = _bfs_order(creator_id, nodes_by_id)
 
-    creator_report: NodeRestoreReport | None = None
-
-    for orig_id in restore_order:
-        recorded = nodes_by_id.get(orig_id)
-        if recorded is None:
-            # Referenced in lineage but not captured — treat as pruned.
-            recorded = {
-                "participant_id": orig_id,
-                "harness": None,
-                "tier": None,
-                "status": "dead",
-                "parent_id": None,
-                "session_id": None,
-                "session_correlation": None,
-                "cwd": None,
-                "branch": None,
-                "launch_provenance": None,
-                "jobs": [],
-            }
-
-        live_participant = daemon.store.get_participant(orig_id)
-        classification, reason = classify_node(recorded, live_participant)
-
-        # Determine the effective new parent id for this node.
-        original_parent_id = recorded.get("parent_id")
-        if orig_id == creator_id:
-            # Creator's parent in the restored tree is the caller.
-            new_parent_id = caller_id
-        else:
-            # For descendants: use the already-restored parent id from the map,
-            # or the original parent if it wasn't in the snapshot (shouldn't happen).
-            new_parent_id = id_map.get(original_parent_id or "", original_parent_id or "")
-
-        # Current live state of the recorded parent (for reporting).
-        current_parent_id: str | None = None
-        if live_participant is not None:
-            current_parent_id = live_participant.parent_id
-
-        if orig_id == creator_id:
-            # Creator restoration errors propagate — the caller expects a failure
-            # to be signalled so the checkpoint can be marked 'failed' in the DB.
-            report = await _restore_node(
-                daemon=daemon,
-                orig_id=orig_id,
-                recorded=recorded,
-                live_participant=live_participant,
-                classification=classification,
-                reason=reason,
-                new_parent_id=new_parent_id,
-                original_parent_id=original_parent_id,
-                current_parent_id=current_parent_id,
-                approval=approval,
-                caller_id=caller_id,
-            )
-            if report.action == "failed":
-                raise BadRequest(
-                    f"checkpoint {checkpoint_id!r}: creator restoration failed: {report.reason}"
-                )
-        else:
-            # Descendant restoration errors are caught and reported, never raised.
-            report = await _restore_node(
-                daemon=daemon,
-                orig_id=orig_id,
-                recorded=recorded,
-                live_participant=live_participant,
-                classification=classification,
-                reason=reason,
-                new_parent_id=new_parent_id,
-                original_parent_id=original_parent_id,
-                current_parent_id=current_parent_id,
-                approval=approval,
-                caller_id=caller_id,
-            )
-
-        # Update the id map so descendants know the new id.
-        if report.new_participant_id is not None:
-            id_map[orig_id] = report.new_participant_id
-        else:
-            id_map[orig_id] = orig_id  # skipped/failed: keep original for lineage tracking
-
-        reports.append(report)
-        if orig_id == creator_id:
-            creator_report = report
-
-    assert creator_report is not None, "creator node was not in restore_order"
-
-    descendant_reports = [r for r in reports if r.original_participant_id != creator_id]
-    partial_failures = [
-        r.original_participant_id for r in descendant_reports if r.action == "failed"
-    ]
-
-    return TreeRestoreResult(
-        checkpoint_id=checkpoint_id,
-        creator_report=creator_report,
-        descendant_reports=descendant_reports,
-        partial_failures=partial_failures,
-    )
+# ---- BFS order ---------------------------------------------------------------
 
 
 def _bfs_order(creator_id: str, nodes_by_id: dict[str, dict]) -> list[str]:
     """Return node ids in BFS order starting from creator_id.
 
-    Children are determined from the ``parent_id`` field in the snapshot.
-    Any nodes whose parent is not in the snapshot are attached to the creator.
+    Orphan nodes (parent not in snapshot) are attached to the creator.
     """
-    # Build parent→children mapping from snapshot.
     children_of: dict[str, list[str]] = {nid: [] for nid in nodes_by_id}
     for nid, node in nodes_by_id.items():
         parent = node.get("parent_id")
         if parent and parent in children_of:
             children_of[parent].append(nid)
         elif nid != creator_id and creator_id in children_of:
-            # Orphan relative to snapshot — treat as child of creator.
             children_of[creator_id].append(nid)
 
     order: list[str] = []
@@ -513,6 +783,355 @@ def _bfs_order(creator_id: str, nodes_by_id: dict[str, dict]) -> list[str]:
     return order
 
 
+# ---- reparenting -------------------------------------------------------------
+
+
+def _reparent_live(
+    daemon: Daemon,
+    pid: str,
+    *,
+    new_parent_id: str,
+    checkpoint_id: int,
+) -> None:
+    """Reparent a live participant to a newly reconstructed parent.
+
+    Validates:
+    - No cycle: new_parent_id must not be a descendant of pid.
+    - Depth/budget rails for the new topology.
+    - The participant is not already owned by a *different* live parent
+      (live_lineage_conflict guard).
+
+    The store write goes through the daemon-owned SQLite path.
+    """
+    # Cycle check.
+    if pid == new_parent_id:
+        raise BadRequest(
+            f"checkpoint {checkpoint_id!r}: reparent would create a self-loop for {pid!r}"
+        )
+    desc_ids = set(lineage.subtree_ids(daemon.store, pid))
+    if new_parent_id in desc_ids:
+        raise BadRequest(
+            f"checkpoint {checkpoint_id!r}: reparenting {pid!r} under {new_parent_id!r} "
+            f"would create a lineage cycle"
+        )
+
+    # Rail checks on the new topology.
+    rails = daemon.config.rails
+    check_depth(daemon.store, new_parent_id, cap=rails.depth_cap)
+    check_budget(daemon.store, new_parent_id, limit=rails.budget)
+
+    daemon.store.reparent_participant(pid, new_parent_id=new_parent_id)
+
+
+# ---- worktree recovery -------------------------------------------------------
+
+
+def _resolve_worktree_cwd(
+    prov: dict,
+    recorded: dict,
+    *,
+    new_participant_id: str,
+) -> tuple[str | None, str | bool | None, list[str]]:
+    """Determine the effective cwd and worktree params for a cold respawn.
+
+    Returns (cwd, worktree_param, warnings).
+
+    - If the worktree still exists and belongs to the right repo → reuse (cwd = path).
+    - If the worktree is gone but provenance is sufficient → request recreation.
+    - Otherwise → fall back to cwd_resolved/cwd_requested without worktree.
+
+    worktree_param is the value to pass to spawn (True / "name" / False).
+    """
+    warnings: list[str] = []
+    worktree_type = prov.get("worktree_type")
+    worktree_branch = prov.get("worktree_branch")
+    worktree_repo_root = prov.get("worktree_repo_root")
+    worktree_name = prov.get("worktree_name")
+    worktree_recorded_path = prov.get("cwd_resolved")  # was the worktree path at spawn time
+
+    if worktree_type is None:
+        # No worktree was requested; use cwd_resolved / cwd_requested directly.
+        cwd = prov.get("cwd_resolved") or prov.get("cwd_requested") or recorded.get("cwd")
+        return cwd, False, warnings
+
+    # Check if the recorded worktree path still exists.
+    from pathlib import Path as _Path
+
+    if worktree_recorded_path and _Path(worktree_recorded_path).is_dir():
+        # Path exists — verify it is still a git worktree of the same repo.
+        try:
+            import subprocess
+
+            r = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=worktree_recorded_path,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            if r.returncode == 0:
+                # Worktree exists and is valid — reuse it.
+                worktree_param: str | bool
+                if worktree_type == "named" and worktree_name:
+                    worktree_param = worktree_name
+                else:
+                    worktree_param = True
+                return worktree_recorded_path, worktree_param, warnings
+        except Exception as exc:
+            warnings.append(f"could not verify worktree {worktree_recorded_path!r}: {exc}")
+
+    # Worktree path is gone or invalid.
+    if worktree_repo_root and worktree_branch:
+        # Sufficient provenance to recreate.
+        warnings.append(
+            f"worktree {worktree_recorded_path!r} no longer exists; "
+            f"requesting recreation from {worktree_repo_root!r} branch {worktree_branch!r}"
+        )
+        if worktree_type == "named" and worktree_name:
+            return worktree_repo_root, worktree_name, warnings
+        return worktree_repo_root, True, warnings
+
+    # Cannot restore worktree — run without one.
+    cwd = prov.get("cwd_resolved") or prov.get("cwd_requested") or recorded.get("cwd")
+    if worktree_type:
+        warnings.append(
+            f"worktree {worktree_recorded_path!r} is gone and provenance is insufficient "
+            f"to recreate it; running in {cwd!r} without worktree isolation"
+        )
+    return cwd, False, warnings
+
+
+# ---- restore orchestration ---------------------------------------------------
+
+
+async def restore_tree(
+    daemon: Daemon,
+    *,
+    checkpoint_id: int,
+    snapshot: dict,
+    caller_id: str,
+    approval: str,
+    token: str,
+    prior_progress: dict | None = None,
+) -> dict:
+    """Restore the orchestration tree from a v2 snapshot.
+
+    ``prior_progress``: from a partial/stranded checkpoint, maps original_id →
+    {new_participant_id, action} for nodes that already completed. These are
+    short-circuited: the node is reported as the prior result.
+
+    Progress is persisted to the DB after every successfully restored node
+    so that a daemon restart or cancellation preserves the work already done.
+    """
+    from sqlalchemy import select
+
+    from theater.daemon.schema import jobs as jobs_table
+
+    creator_id = snapshot["creator_id"]
+    nodes_by_id: dict[str, dict] = {n["participant_id"]: n for n in snapshot["nodes"]}
+
+    # Build live jobs lookup for the entire subtree.
+    all_ids = list(nodes_by_id.keys())
+    live_rows = daemon.store.conn.execute(
+        select(*(jobs_table.c[k] for k in _SNAPSHOT_JOB_KEYS)).where(
+            jobs_table.c.caller_id.in_(all_ids) | jobs_table.c.target_id.in_(all_ids)
+        )
+    ).fetchall()
+    live_jobs_by_handle: dict[str, dict] = {
+        r._mapping["handle"]: {k: r._mapping[k] for k in _SNAPSHOT_JOB_KEYS} for r in live_rows
+    }
+
+    id_map: dict[str, str] = {}  # original_id → new_participant_id
+    reports: list[NodeRestoreReport] = []
+    restore_order = _bfs_order(creator_id, nodes_by_id)
+    creator_report: NodeRestoreReport | None = None
+
+    progress = dict(prior_progress or {})
+
+    for orig_id in restore_order:
+        recorded = nodes_by_id.get(orig_id)
+        if recorded is None:
+            recorded = _stub_node(orig_id)
+
+        # Short-circuit for nodes already restored in a prior partial attempt.
+        if orig_id in progress:
+            prior = progress[orig_id]
+            id_map[orig_id] = prior.get("new_participant_id") or orig_id
+            report = NodeRestoreReport(
+                original_participant_id=orig_id,
+                new_participant_id=prior.get("new_participant_id"),
+                original_parent_id=recorded.get("parent_id"),
+                current_parent_id=None,
+                new_parent_id=prior.get("new_parent_id"),
+                harness=recorded.get("harness"),
+                old_session_id=recorded.get("session_id"),
+                new_session_id=prior.get("new_session_id"),
+                classification=prior.get("classification", "unknown"),
+                action=prior.get("action", "skipped"),
+                final_status=prior.get("final_status"),
+                reason=prior.get("reason", "previously restored in partial attempt"),
+            )
+            reports.append(report)
+            if orig_id == creator_id:
+                creator_report = report
+            continue
+
+        live_participant = daemon.store.get_participant(orig_id)
+        pane_info_result: dict | object | None = _PANE_INFO_TMUX_UNAVAILABLE
+        if live_participant is not None and live_participant.tmux_pane:
+            pane_info_result = await _get_pane_info(daemon, live_participant.tmux_pane)
+
+        classification, reason = classify_node(
+            recorded, live_participant, live_jobs_by_handle, pane_info=pane_info_result
+        )
+
+        # Determine effective parent ID for this node.
+        original_parent_id = recorded.get("parent_id")
+        if orig_id == creator_id:
+            # Live creator: retain its current parent (the caller is the restore initiator,
+            # not a new structural parent). Dead creator: the caller becomes the parent.
+            live_creator_row = daemon.store.get_participant(orig_id)
+            if live_creator_row is not None and live_creator_row.status is not Status.DEAD:
+                new_parent_id: str | None = live_creator_row.parent_id  # unchanged
+            else:
+                new_parent_id = caller_id  # dead creator becomes child of caller
+        else:
+            # Use the reconstructed parent's new ID if it was respawned.
+            mapped_parent = id_map.get(original_parent_id or "")
+            if mapped_parent is None and original_parent_id:
+                # Parent not yet processed or was skipped/failed.
+                parent_report = next(
+                    (r for r in reports if r.original_participant_id == original_parent_id),
+                    None,
+                )
+                skip_actions = ("skipped", "ancestor_not_restored", "failed")
+                if parent_report and parent_report.action in skip_actions:
+                    # Parent was not restored; skip this descendant too.
+                    report = _make_skip_report(
+                        orig_id=orig_id,
+                        recorded=recorded,
+                        live_participant=live_participant,
+                        original_parent_id=original_parent_id,
+                        reason=(
+                            f"ancestor {original_parent_id!r} was not restored "
+                            f"({parent_report.action}); descendant skipped"
+                        ),
+                    )
+                    id_map[orig_id] = orig_id
+                    reports.append(report)
+                    continue
+            new_parent_id = mapped_parent or original_parent_id
+
+        current_parent_id: str | None = None
+        if live_participant is not None:
+            current_parent_id = live_participant.parent_id
+
+        report = await _restore_node(
+            daemon=daemon,
+            orig_id=orig_id,
+            recorded=recorded,
+            live_participant=live_participant,
+            classification=classification,
+            reason=reason,
+            new_parent_id=new_parent_id,
+            original_parent_id=original_parent_id,
+            current_parent_id=current_parent_id,
+            approval=approval,
+            caller_id=caller_id,
+            checkpoint_id=checkpoint_id,
+            live_jobs_by_handle=live_jobs_by_handle,
+        )
+
+        if report.new_participant_id is not None:
+            id_map[orig_id] = report.new_participant_id
+        else:
+            id_map[orig_id] = orig_id
+
+        reports.append(report)
+        if orig_id == creator_id:
+            creator_report = report
+            # Creator failure or skip is fatal for v2 — the whole restore depends on it.
+            if report.action in ("failed", "skipped", "ancestor_not_restored"):
+                raise BadRequest(
+                    f"checkpoint {checkpoint_id!r}: creator restoration failed: {report.reason}"
+                )
+
+        # Persist progress after each successful (non-failed, non-skipped) node.
+        if report.action not in ("failed", "skipped", "ancestor_not_restored"):
+            progress[orig_id] = {
+                "new_participant_id": report.new_participant_id,
+                "new_parent_id": report.new_parent_id,
+                "new_session_id": report.new_session_id,
+                "classification": report.classification,
+                "action": report.action,
+                "final_status": report.final_status,
+                "reason": report.reason,
+            }
+            daemon.store.persist_restore_progress(
+                checkpoint_id,
+                token=token,
+                progress=json.dumps(progress, sort_keys=True, separators=(",", ":")),
+            )
+
+    assert creator_report is not None, "creator node not in restore_order"
+
+    descendant_reports = [r for r in reports if r.original_participant_id != creator_id]
+    partial_failures = [
+        r.original_participant_id for r in descendant_reports if r.action in ("failed",)
+    ]
+
+    # Determine final state.
+    some_success = any(r.action in ("reused_live", "reparented", "respawned") for r in reports)
+    any_failure = bool(partial_failures)
+    restore_state = "partial" if (some_success and any_failure) else "restored"
+
+    # Compute summary counts.
+    action_counts: dict[str, int] = {}
+    for r in reports:
+        action_counts[r.action] = action_counts.get(r.action, 0) + 1
+
+    result = TreeRestoreResult(
+        checkpoint_id=checkpoint_id,
+        snapshot_version=2,
+        restore_state=restore_state,
+        restored_by=caller_id,
+        approval=approval,
+        creator_report=creator_report,
+        descendant_reports=descendant_reports,
+        partial_failures=partial_failures,
+        counts={
+            "total": len(reports),
+            "by_action": action_counts,
+        },
+    )
+    return result.to_dict()
+
+
+def _make_skip_report(
+    *,
+    orig_id: str,
+    recorded: dict,
+    live_participant: Participant | None,
+    original_parent_id: str | None,
+    reason: str,
+) -> NodeRestoreReport:
+    return NodeRestoreReport(
+        original_participant_id=orig_id,
+        new_participant_id=None,
+        original_parent_id=original_parent_id,
+        current_parent_id=live_participant.parent_id if live_participant else None,
+        new_parent_id=None,
+        harness=recorded.get("harness") or (live_participant.harness if live_participant else None),
+        old_session_id=recorded.get("session_id"),
+        new_session_id=None,
+        classification="skipped",
+        action="ancestor_not_restored",
+        final_status=str(live_participant.status) if live_participant else "dead",
+        reason=reason,
+    )
+
+
 async def _restore_node(
     *,
     daemon: Daemon,
@@ -526,148 +1145,224 @@ async def _restore_node(
     current_parent_id: str | None,
     approval: str,
     caller_id: str,
+    checkpoint_id: int,
+    live_jobs_by_handle: dict[str, dict],
 ) -> NodeRestoreReport:
     """Restore a single node and return its report."""
-    jobs = recorded.get("jobs", [])
     harness = recorded.get("harness") or (live_participant.harness if live_participant else None)
     old_session_id = recorded.get("session_id") or (
         live_participant.session_id if live_participant else None
     )
+    node_jobs = recorded.get("jobs", [])
 
-    if classification == "live":
-        assert live_participant is not None
-        # Live node: reuse in place without spawning. Do not reparent.
+    # Build job reconciliation for this node.
+    job_recs = [
+        {
+            "handle": jr.handle,
+            "kind": jr.kind,
+            "recorded_state": jr.recorded_state,
+            "current_state": jr.current_state,
+            "outcome": jr.outcome,
+            "reason": jr.reason,
+        }
+        for jr in reconcile_jobs(node_jobs, live_jobs_by_handle)
+    ]
+
+    def _report(
+        *,
+        new_participant_id: str | None,
+        new_parent_id_out: str | None,
+        new_session_id: str | None,
+        action: str,
+        final_status: str | None,
+        reason_out: str,
+        warnings: list[str] | None = None,
+    ) -> NodeRestoreReport:
         return NodeRestoreReport(
             original_participant_id=orig_id,
-            new_participant_id=orig_id,
+            new_participant_id=new_participant_id,
             original_parent_id=original_parent_id,
             current_parent_id=current_parent_id,
-            new_parent_id=current_parent_id,  # unchanged
+            new_parent_id=new_parent_id_out,
             harness=harness,
             old_session_id=old_session_id,
-            new_session_id=live_participant.session_id,
+            new_session_id=new_session_id,
             classification=classification,
-            action="reused_live",
-            final_status=str(live_participant.status),
-            reason=reason,
-            jobs=jobs,
+            action=action,
+            final_status=final_status,
+            reason=reason_out,
+            job_reconciliations=job_recs,
+            warnings=warnings or [],
         )
 
-    if classification in ("completed", "pruned") and _has_no_open_work(recorded):
-        return NodeRestoreReport(
-            original_participant_id=orig_id,
+    # stale_live / live_harness_conflict: live DB row but pane gone or different harness.
+    # Restore does not inject text, so we can still return the participant as
+    # reused_live with a warning. The caller can verify and send separately.
+    # If no live_participant (shouldn't happen for stale_live but be safe), treat as dead.
+    effective_classification = classification
+    extra_warnings: list[str] = []
+    if classification in ("stale_live", "live_harness_conflict"):
+        if live_participant is not None:
+            # Return reused_live with a staleness warning. The node is alive in the DB;
+            # the caller must verify the pane before sending. We note the stale condition.
+            extra_warnings.append(
+                f"participant {orig_id!r}: {classification} — "
+                f"pane {live_participant.tmux_pane!r} may be stale or occupied by a "
+                f"different harness; verify before sending"
+            )
+            effective_classification = "live"  # treat as live for restore (no injection)
+        else:
+            # live_participant is None despite live classification — defensive fallback.
+            extra_warnings.append(
+                f"participant {orig_id!r}: {classification} with no DB row; treating as dead"
+            )
+            complete = _node_is_complete(recorded, live_jobs_by_handle)
+            if complete:
+                effective_classification = "completed"
+            elif _has_usable_provenance(recorded, None):
+                effective_classification = "respawnable"
+            else:
+                effective_classification = "failed"
+
+    if effective_classification == "live":
+        assert live_participant is not None
+        # Reparent if needed (descendant whose recorded parent was respawned).
+        action = "reused_live"
+        if new_parent_id is not None and live_participant.parent_id != new_parent_id:
+            # Check live_lineage_conflict: is the current parent a different live node?
+            if live_participant.parent_id is not None:
+                current_parent = daemon.store.get_participant(live_participant.parent_id)
+                if (
+                    current_parent is not None
+                    and current_parent.status is not Status.DEAD
+                    and live_participant.parent_id != new_parent_id
+                ):
+                    return _report(
+                        new_participant_id=orig_id,
+                        new_parent_id_out=live_participant.parent_id,
+                        new_session_id=live_participant.session_id,
+                        action="live_lineage_conflict",
+                        final_status=str(live_participant.status),
+                        reason_out=(
+                            f"participant {orig_id!r} is live and owned by a different "
+                            f"live parent {live_participant.parent_id!r}; "
+                            f"cannot steal from a live parent"
+                        ),
+                        warnings=extra_warnings,
+                    )
+            # Safe to reparent.
+            try:
+                _reparent_live(
+                    daemon, orig_id, new_parent_id=new_parent_id, checkpoint_id=checkpoint_id
+                )
+                action = "reparented"
+            except Exception as exc:
+                extra_warnings.append(f"reparent failed: {exc}; parent unchanged")
+        return _report(
+            new_participant_id=orig_id,
+            new_parent_id_out=(
+                new_parent_id if action == "reparented" else live_participant.parent_id
+            ),
+            new_session_id=live_participant.session_id,
+            action=action,
+            final_status=str(live_participant.status),
+            reason_out=reason,
+            warnings=extra_warnings,
+        )
+
+    if effective_classification in ("completed",):
+        return _report(
             new_participant_id=None,
-            original_parent_id=original_parent_id,
-            current_parent_id=current_parent_id,
-            new_parent_id=None,
-            harness=harness,
-            old_session_id=old_session_id,
+            new_parent_id_out=None,
             new_session_id=None,
-            classification=classification,
             action="skipped",
             final_status="dead",
-            reason=reason,
-            jobs=jobs,
+            reason_out=reason,
+            warnings=extra_warnings,
         )
 
-    if classification == "pruned" and not _has_no_open_work(recorded):
-        # Pruned with open work — we already reported this as pruned/failed in classify.
-        return NodeRestoreReport(
-            original_participant_id=orig_id,
+    if effective_classification == "pruned":
+        return _report(
             new_participant_id=None,
-            original_parent_id=original_parent_id,
-            current_parent_id=current_parent_id,
-            new_parent_id=None,
-            harness=harness,
-            old_session_id=old_session_id,
+            new_parent_id_out=None,
             new_session_id=None,
-            classification=classification,
             action="failed",
             final_status="dead",
-            reason=reason,
-            jobs=jobs,
+            reason_out=reason,
+            warnings=extra_warnings,
         )
 
-    if classification == "failed":
-        return NodeRestoreReport(
-            original_participant_id=orig_id,
+    if effective_classification == "failed":
+        return _report(
             new_participant_id=None,
-            original_parent_id=original_parent_id,
-            current_parent_id=current_parent_id,
-            new_parent_id=None,
-            harness=harness,
-            old_session_id=old_session_id,
+            new_parent_id_out=None,
             new_session_id=None,
-            classification=classification,
             action="failed",
             final_status=str(live_participant.status) if live_participant else "dead",
-            reason=reason,
-            jobs=jobs,
+            reason_out=reason,
+            warnings=extra_warnings,
         )
 
-    # resumable or respawnable — need to spawn.
+    # respawnable → cold respawn.
     if not harness:
-        return NodeRestoreReport(
-            original_participant_id=orig_id,
+        return _report(
             new_participant_id=None,
-            original_parent_id=original_parent_id,
-            current_parent_id=current_parent_id,
-            new_parent_id=None,
-            harness=harness,
-            old_session_id=old_session_id,
+            new_parent_id_out=None,
             new_session_id=None,
-            classification=classification,
             action="failed",
             final_status="dead",
-            reason=f"cannot spawn: harness is unknown for participant {orig_id!r}",
-            jobs=jobs,
+            reason_out=f"cannot spawn: harness unknown for {orig_id!r}",
+            warnings=extra_warnings,
         )
 
+    spawn_warnings: list[str] = []
     try:
-        new_participant, action = await _spawn_node(
+        new_participant, spawn_action, spawn_warnings = await _spawn_node(
             daemon=daemon,
             orig_id=orig_id,
             recorded=recorded,
             live_participant=live_participant,
-            classification=classification,
             harness=harness,
             new_parent_id=new_parent_id,
             approval=approval,
+            live_jobs_by_handle=live_jobs_by_handle,
+            classification=effective_classification,
         )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         logger.warning("failed to restore node %s: %s", orig_id, exc, exc_info=True)
-        return NodeRestoreReport(
-            original_participant_id=orig_id,
+        return _report(
             new_participant_id=None,
-            original_parent_id=original_parent_id,
-            current_parent_id=current_parent_id,
-            new_parent_id=new_parent_id,
-            harness=harness,
-            old_session_id=old_session_id,
+            new_parent_id_out=new_parent_id,
             new_session_id=None,
-            classification=classification,
             action="failed",
             final_status="dead",
-            reason=str(exc),
-            jobs=jobs,
+            reason_out=str(exc),
+            warnings=extra_warnings + spawn_warnings,
         )
 
-    return NodeRestoreReport(
-        original_participant_id=orig_id,
+    return _report(
         new_participant_id=new_participant.id,
-        original_parent_id=original_parent_id,
-        current_parent_id=current_parent_id,
-        new_parent_id=new_parent_id,
-        harness=harness,
-        old_session_id=old_session_id,
+        new_parent_id_out=new_parent_id,
         new_session_id=new_participant.session_id,
-        classification=classification,
-        action=action,
+        action=spawn_action,
         final_status=str(new_participant.status),
-        reason=reason,
-        jobs=jobs,
+        reason_out=reason,
+        warnings=extra_warnings + spawn_warnings,
+    )
+
+
+def _has_usable_provenance(recorded: dict, live: Participant | None) -> bool:
+    """Return True iff there is usable cwd provenance for a cold respawn."""
+    if live is not None and live.launch_provenance:
+        with contextlib.suppress(ValueError, TypeError):
+            prov = json.loads(live.launch_provenance)
+            if prov.get("cwd_resolved") or prov.get("cwd_requested"):
+                return True
+    snap_prov = recorded.get("launch_provenance")
+    return isinstance(snap_prov, dict) and bool(
+        snap_prov.get("cwd_resolved") or snap_prov.get("cwd_requested")
     )
 
 
@@ -677,24 +1372,29 @@ async def _spawn_node(
     orig_id: str,
     recorded: dict,
     live_participant: Participant | None,
-    classification: str,
     harness: str,
     new_parent_id: str | None,
     approval: str,
-) -> tuple[Participant, str]:
-    """Spawn (resume or cold-respawn) a node and return (participant, action).
+    live_jobs_by_handle: dict[str, dict],
+    classification: str = "respawnable",
+) -> tuple[Participant, str, list[str]]:
+    """Resume or cold-respawn a node. Returns (participant, action, warnings).
 
-    Applies depth, budget, model, and reasoning rails. Resume paths skip
-    model/reasoning rails (already applied at original spawn time), but still
-    enforce depth and budget.
+    For ``resumable``: attempts to resume the native harness session via the
+    trusted session_id stored in the live DB row. Applies all current rails.
+
+    For ``respawnable``: cold-respawns using launch provenance. Uses the
+    recorded original prompt and response_format. Applies all current rails.
+
+    Worktree: verifies or recreates based on provenance (item 12).
     """
     import theater.daemon.methods as _methods_mod
 
     _methods_spawn = _methods_mod._spawn
-
     rails = daemon.config.rails
+    warnings: list[str] = []
 
-    # Get provenance from the live row if present, else from snapshot.
+    # Get provenance from the live row first, then snapshot.
     prov: dict = {}
     if live_participant is not None and live_participant.launch_provenance:
         with contextlib.suppress(ValueError, TypeError):
@@ -702,83 +1402,108 @@ async def _spawn_node(
     if not prov and isinstance(recorded.get("launch_provenance"), dict):
         prov = recorded["launch_provenance"]
 
-    # Resolve cwd: prefer resolved, fall back to requested.
-    cwd = prov.get("cwd_resolved") or prov.get("cwd_requested") or recorded.get("cwd")
+    # Resolve worktree and cwd (item 12).
+    cwd, worktree_param, wt_warnings = _resolve_worktree_cwd(
+        prov, recorded, new_participant_id=orig_id
+    )
+    warnings.extend(wt_warnings)
+
     if not cwd:
         raise BadRequest(
             f"cannot restore participant {orig_id!r}: no cwd available in provenance or snapshot"
         )
 
-    # Rail checks (depth + budget always; model/reasoning only for cold respawn).
+    # Determine prompt: use the recorded original spawn prompt for incomplete nodes.
+    # The spawn job for this node lives on the parent's job list.
+    prompt = _find_original_prompt(recorded, orig_id, live_jobs_by_handle, prov)
+
+    model = prov.get("model")
+    reasoning_effort = prov.get("reasoning_effort")
+    response_format_str = prov.get("response_format")
+
+    # Rail checks — always apply current policy (item 11).
     check_depth(daemon.store, new_parent_id, cap=rails.depth_cap)
     check_budget(daemon.store, new_parent_id, limit=rails.budget)
+    check_model_allowed(harness, model, daemon.config.models_for(harness))
+    check_reasoning_allowed(harness, reasoning_effort, daemon.config.reasoning_for(harness))
 
-    if classification == "resumable":
-        # Resume the native session. Use session_id from live row first, snapshot second.
-        session_id = (live_participant.session_id if live_participant else None) or recorded.get(
-            "session_id"
-        )
-        params: dict = {
+    # For resumable (retained dead row with trusted session_id), attempt native resume.
+    if (
+        classification == "resumable"
+        and live_participant is not None
+        and live_participant.session_id
+    ):
+        resume_params: dict = {
             "harness": harness,
             "cwd": cwd,
             "approval": approval,
             "parent_id": new_parent_id,
-            "resume": session_id,
+            "resume": live_participant.session_id,
         }
-        # Prompt and response_format cannot be passed to resume-only harnesses;
-        # _spawn will raise if the harness does not support prompt-at-resume.
-        # We send an empty prompt so the harness starts the session view.
-        result = await _methods_spawn(daemon, params)
+        result = await _methods_spawn(daemon, resume_params)
         p = daemon.store.get_participant(result["id"])
         assert p is not None
-        return p, "resumed"
+        return p, "resumed", warnings
 
-    # Cold respawn from provenance.
-    model = prov.get("model")
-    reasoning_effort = prov.get("reasoning_effort")
-    # We do NOT restore worktrees during cold respawn — the worktree directory
-    # may no longer exist and we have no way to verify it. The child will run
-    # in the cwd_resolved directory directly (which may be the worktree path).
-    # response_format is not included in a cold respawn prompt — sends handle that.
-
-    # Apply model/reasoning rails for cold respawn.
-    check_model_allowed(harness, model, daemon.config.models_for(harness))
-    check_reasoning_allowed(harness, reasoning_effort, daemon.config.reasoning_for(harness))
-
-    params = {
+    # Cold respawn.
+    params: dict = {
         "harness": harness,
         "cwd": cwd,
         "approval": approval,
         "parent_id": new_parent_id,
-        "prompt": "",  # No prompt: the restorer sends recovery instructions via send
+        "prompt": prompt or "",
     }
     if model:
         params["model"] = model
     if reasoning_effort:
         params["reasoning_effort"] = reasoning_effort
+    if response_format_str:
+        with contextlib.suppress(ValueError, TypeError):
+            params["response_format"] = json.loads(response_format_str)
+    if worktree_param is not False:
+        params["worktree"] = worktree_param
+        if prov.get("base_branch"):
+            params["base_branch"] = prov["base_branch"]
 
     result = await _methods_spawn(daemon, params)
     p = daemon.store.get_participant(result["id"])
     assert p is not None
-    return p, "respawned"
+    return p, "respawned", warnings
+
+
+def _find_original_prompt(
+    recorded: dict,
+    node_id: str,
+    live_jobs_by_handle: dict[str, dict],
+    prov: dict,
+) -> str:
+    """Find the original spawn prompt for a node from its recorded jobs.
+
+    The spawn job for this node has kind='spawn' and target_id == node_id.
+    We look in the node's own job list (which includes jobs where it is the target).
+    Falls back to prov["prompt"] if no spawn job is found.
+    """
+    for job in recorded.get("jobs", []):
+        if job.get("kind") == "spawn" and job.get("target_id") == node_id:
+            return job.get("prompt") or prov.get("prompt") or ""
+    return prov.get("prompt") or ""
 
 
 def _has_no_open_work(recorded: dict) -> bool:
-    """Return True iff the recorded node has no running jobs."""
+    """Return True iff the recorded node has no running jobs (legacy helper)."""
     return not any(j.get("state") == "running" for j in recorded.get("jobs", []))
 
 
-# ---- v1 compatibility ---------------------------------------------------
+# ---- v1 compatibility --------------------------------------------------------
 
 
 def upgrade_v1_snapshot_for_read(snapshot_data: Any, creator_id: str) -> dict:
-    """Wrap a v1 jobs list into a v2-shaped dict for uniform handling.
+    """Wrap a v1 jobs list into a display-only v1-shaped dict.
 
     Used only for reading/reporting — never written back to the database.
     The returned dict has ``version=1`` (not 2) to signal degraded mode.
     """
     if isinstance(snapshot_data, list):
-        # Classic v1: flat list of job dicts for the creator only.
         return {
             "version": 1,
             "creator_id": creator_id,
@@ -801,7 +1526,7 @@ def upgrade_v1_snapshot_for_read(snapshot_data: Any, creator_id: str) -> dict:
     return snapshot_data
 
 
-# ---- restore entry point (called from methods.py) -----------------------
+# ---- restore entry point (called from methods.py) ----------------------------
 
 
 async def restore_checkpoint(
@@ -811,37 +1536,36 @@ async def restore_checkpoint(
     row: dict,
     caller_id: str,
     approval: str,
+    token: str,
+    snapshot_data: Any,
 ) -> dict:
     """Entry point called from ``checkpoint.restore`` after the claim is acquired.
 
-    Handles both v1 (legacy, creator-only) and v2 (full-tree) snapshots.
-    Returns the result dict to be serialized into ``restore_result``.
+    ``snapshot_data`` is already parsed (passed in from methods.py to avoid
+    double-parsing).
 
-    For v1 snapshots: falls back to the original single-node restore logic
-    (creator only, no descendants), returning a legacy-shaped result dict.
-
-    For v2 snapshots: orchestrates the full tree restore and returns the
-    structured ``TreeRestoreResult`` dict.
-
-    Raises any exception that should mark the checkpoint as ``failed``.
+    For v2 snapshots: orchestrates the full tree restore.
+    For v1 snapshots: falls back to the original single-node logic.
     """
-    raw = row.get("jobs_snapshot") or "[]"
-    try:
-        snapshot_data = parse_snapshot(raw)
-    except (ValueError, TypeError) as exc:
-        raise BadRequest(f"checkpoint {checkpoint_id!r} has malformed snapshot: {exc}") from exc
-
     if is_v2_snapshot(snapshot_data):
-        result = await restore_tree(
+        # Read prior progress if this is a partial retry.
+        prior_progress: dict | None = None
+        raw_progress = row.get("restore_progress")
+        if raw_progress:
+            with contextlib.suppress(ValueError, TypeError):
+                prior_progress = json.loads(raw_progress)
+
+        return await restore_tree(
             daemon,
             checkpoint_id=checkpoint_id,
             snapshot=snapshot_data,
             caller_id=caller_id,
             approval=approval,
+            token=token,
+            prior_progress=prior_progress,
         )
-        return result.to_dict()
 
-    # v1 fallback: restore creator only (original behaviour).
+    # v1 fallback.
     return await _restore_v1(
         daemon=daemon,
         checkpoint_id=checkpoint_id,
@@ -863,18 +1587,15 @@ async def _restore_v1(
 ) -> dict:
     """Restore a v1 (creator-only) checkpoint using the original single-node logic.
 
-    Returns a dict shaped identically to the v1 restore result so existing
-    callers (MCP tools, tests) continue to work unchanged.
+    Returns the legacy ``restored_parent`` shape unchanged.
     """
     import theater.daemon.methods as _methods_mod
 
     _methods_spawn = _methods_mod._spawn
-    from theater.models import Status
 
     parent_id = row["participant_id"]
     parent = daemon.store.get_participant(parent_id)
 
-    # Validate the parent (may have been externally modified since we last checked).
     if parent is None:
         raise BadRequest(
             f"checkpoint {checkpoint_id!r}: creator participant {parent_id!r} has been "
@@ -918,6 +1639,8 @@ async def _restore_v1(
 
     return {
         "checkpoint_id": checkpoint_id,
+        "snapshot_version": 1,
+        "restore_state": "restored",
         "restored_parent": {
             "participant_id": restored["id"],
             "harness": restored["harness"],
@@ -927,6 +1650,5 @@ async def _restore_v1(
             "handoff_required": True,
         },
         "recorded_jobs": recorded_jobs,
-        # Marker so callers can tell this was a v1 restore.
         "_snapshot_version": 1,
     }

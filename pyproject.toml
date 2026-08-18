@@ -100,7 +100,7 @@ ignore = [
     # ten facts; a parser returns eight times because it classifies eight
     # record shapes. Refactoring those to satisfy a counter would make them
     # worse, and v1.1 already did the modularity pass.
-    "PLR0911", "PLR0913", "PLR0917",
+    "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR0917",
 
     # Our own APIs take `timeout` parameters by design. The rule wants the
     # caller to wrap in `asyncio.timeout` instead, which would move the

@@ -56,6 +56,7 @@ from theater.models import (
     CheckpointAlreadyRestored,
     CheckpointRestoreFailed,
     CheckpointRestoreInProgress,
+    CheckpointRestorePartial,
     HumanPresent,
     Job,
     JobState,
@@ -1125,6 +1126,9 @@ async def _checkpoint_read(daemon, params: dict) -> dict:
             "restore_claimed_by": row.get("restore_claimed_by"),
             "restore_error": row.get("restore_error"),
             "restore_result": restore_result,
+            "restore_progress": (
+                json.loads(row["restore_progress"]) if row.get("restore_progress") else None
+            ),
             "snapshot_version": snapshot_version,
             "snapshot_node_count": snapshot_node_count,
         },
@@ -1242,6 +1246,11 @@ def _restore_state_error(
             f"checkpoint {checkpoint_id!r} previously failed restoration; "
             f"create a fresh checkpoint if you need a new restore point"
         )
+    if state == "partial":
+        return CheckpointRestorePartial(
+            f"checkpoint {checkpoint_id!r} has a partial restore; "
+            f"read restore_progress to see completed nodes, then retry to finish"
+        )
     return CheckpointAlreadyRestored(
         f"checkpoint {checkpoint_id!r} is not in a restorable state (state={state!r})"
     )
@@ -1312,32 +1321,44 @@ async def _checkpoint_restore(daemon, params: dict) -> dict:
     For v2 checkpoints (full tree): restores the creator and all recorded
     descendants, reconciling each node as live, resumable, respawnable,
     completed, pruned, or failed. Returns a structured per-participant report.
+    Preflight validation uses snapshot provenance, not DB row state, so a
+    pruned or cwd-less creator can still be restored when the snapshot has
+    sufficient provenance. The caller must not be anywhere in the recorded
+    subtree (not just the creator).
 
-    For v1 checkpoints (creator-only, legacy): falls back to the original
-    single-node restore logic for backward compatibility.
+    For v1 checkpoints (creator-only, legacy): applies strict DB validation
+    (_validate_restore_parent) for backward compatibility.
 
-    For a dead creator: spawns or resumes it as a child of the recovery
-    caller. For a live creator: reuses it in place (its lineage is not
-    changed). The caller then delivers recovery instructions via ``send``.
-
-    The checkpoint is atomically claimed before any side effect and marked
-    ``restored`` on success or ``failed`` on creator-level errors. Partial
-    descendant failures do not mark the checkpoint as failed — they are
-    reported in the per-participant report with ``action=failed``.
+    The checkpoint is atomically claimed before any side effect. On partial
+    completion (some nodes succeeded, some failed) the state is set to
+    'partial' and the checkpoint may be re-attempted. A second restore on a
+    'partial' checkpoint is refused with checkpoint_restore_partial unless the
+    caller retries explicitly.
 
     A second restore is refused with a state-specific error code.
     """
-    from theater.daemon.recovery import restore_checkpoint
+    from theater.daemon.recovery import is_v2_snapshot, parse_snapshot, restore_checkpoint
 
     caller, checkpoint_id, approval, row = _validate_restore_request(
         daemon, params, method_name="checkpoint.restore"
     )
     parent_id = row["participant_id"]
 
-    # Validate creator (the creator is always the first node to restore).
-    # For v1, we do the same full validation as before.
-    # For v2, we also validate the creator here before claiming.
-    _validate_restore_parent(daemon, checkpoint_id, parent_id, caller.id)
+    # Detect snapshot version before claiming, so we can apply different
+    # preflight rules without consuming the single-use claim.
+    raw = row.get("jobs_snapshot") or "[]"
+    try:
+        snapshot_data = parse_snapshot(raw)
+    except (ValueError, TypeError) as exc:
+        raise BadRequest(f"checkpoint {checkpoint_id!r} has malformed snapshot: {exc}") from exc
+
+    if is_v2_snapshot(snapshot_data):
+        # V2 preflight: snapshot-based, not DB-row-based.
+        # Reject caller if they appear anywhere in the recorded subtree.
+        _v2_preflight(daemon, checkpoint_id, snapshot_data, caller.id)
+    else:
+        # V1 strict validation: creator must be a live/retrievable DB row.
+        _validate_restore_parent(daemon, checkpoint_id, parent_id, caller.id)
 
     token = daemon.store.claim_checkpoint_restore(checkpoint_id, caller.id)
     if token is None:
@@ -1346,7 +1367,7 @@ async def _checkpoint_restore(daemon, params: dict) -> dict:
         state = fresh.get("restore_state") or "ready"
         raise _restore_state_error(state, checkpoint_id, fresh.get("restore_claimed_by"))
 
-    # All side effects go through restore_checkpoint; always finalize as failed on error.
+    # All side effects go through restore_checkpoint; finalize as partial/failed on error.
     try:
         restore_result_data = await restore_checkpoint(
             daemon,
@@ -1354,6 +1375,8 @@ async def _checkpoint_restore(daemon, params: dict) -> dict:
             row=row,
             caller_id=caller.id,
             approval=approval,
+            token=token,
+            snapshot_data=snapshot_data,
         )
     except asyncio.CancelledError:
         daemon.store.finalize_checkpoint_restore(
@@ -1375,8 +1398,16 @@ async def _checkpoint_restore(daemon, params: dict) -> dict:
         separators=(",", ":"),
     )
 
+    # Determine final state: partial when some descendants failed.
+    restore_state_final = restore_result_data.get("restore_state", "restored")
+    is_partial = restore_state_final == "partial"
+
     if not daemon.store.finalize_checkpoint_restore(
-        checkpoint_id, token=token, restored_by=caller.id, result=restore_result_json
+        checkpoint_id,
+        token=token,
+        restored_by=caller.id,
+        result=restore_result_json,
+        partial=is_partial,
     ):
         raise BadRequest(
             f"checkpoint {checkpoint_id!r} could not be finalized; "
@@ -1384,6 +1415,65 @@ async def _checkpoint_restore(daemon, params: dict) -> dict:
         )
 
     return restore_result_data
+
+
+def _v2_preflight(daemon, checkpoint_id: int, snapshot_data: dict, caller_id: str) -> None:
+    """Validate a v2 snapshot before claiming. Raises BadRequest on any violation.
+
+    Checks performed before side effects:
+    1. Snapshot structure is well-formed (creator_id, nodes list, unique IDs, root reachable).
+    2. No snapshot cycles in parent_id links.
+    3. Caller is not in the recorded subtree (would create a deadlock).
+    4. Self-restore guard: caller is not the creator.
+
+    Preflight does NOT require the creator DB row to exist — the snapshot
+    is the self-contained source of truth for v2.
+    """
+    from theater.daemon.recovery import _bfs_order, validate_v2_snapshot
+
+    # Basic structural validation.
+    validate_v2_snapshot(snapshot_data, checkpoint_id)
+
+    creator_id = snapshot_data["creator_id"]
+    nodes_by_id: dict[str, dict] = {n["participant_id"]: n for n in snapshot_data["nodes"]}
+
+    # Self-restore: caller is creator.
+    if caller_id == creator_id:
+        raise BadRequest(
+            f"cannot restore checkpoint {checkpoint_id!r}: the caller is the "
+            f"checkpoint creator; self-restore would deadlock the MCP call"
+        )
+
+    # Caller anywhere in the subtree.
+    all_ids = set(_bfs_order(creator_id, nodes_by_id))
+    if caller_id in all_ids:
+        raise BadRequest(
+            f"cannot restore checkpoint {checkpoint_id!r}: caller {caller_id!r} "
+            f"is a member of the recorded subtree; restore would close an await cycle"
+        )
+
+    # Live creator with pane check: if the creator is alive and live, it must
+    # have a pane (no-pane live is unaddressable).
+    live_creator = daemon.store.get_participant(creator_id)
+    if live_creator is not None and live_creator.status is not Status.DEAD:
+        if live_creator.tier is Tier.EXTERNAL:
+            raise BadRequest(
+                f"checkpoint {checkpoint_id!r}: creator {creator_id!r} is live and EXTERNAL "
+                f"(no pane); restore only works on addressable participants"
+            )
+        if not live_creator.tmux_pane:
+            raise BadRequest(
+                f"checkpoint {checkpoint_id!r}: creator {creator_id!r} is live but "
+                f"has no pane; cannot restore without an addressable pane"
+            )
+        # Cycle check: a live creator that is an ancestor of the caller would deadlock.
+        ancestor_ids = set(lineage.ancestor_ids(daemon.store, caller_id))
+        if creator_id in ancestor_ids:
+            raise BadRequest(
+                f"cannot restore checkpoint {checkpoint_id!r}: the live creator "
+                f"{creator_id!r} is an ancestor of the caller {caller_id!r}; "
+                f"awaiting its response would close a cycle"
+            )
 
 
 @method("bus.tail")

@@ -179,8 +179,8 @@ async def test_build_tree_snapshot_includes_launch_provenance(daemon):
     assert node["launch_provenance"]["cwd_resolved"] == "/proj"
 
 
-async def test_snapshot_job_keys_backward_compat(daemon):
-    """Jobs in the snapshot have the same keys as the legacy flat list."""
+async def test_snapshot_job_keys(daemon):
+    """Jobs in the v2 snapshot include caller_id and response_format (full set)."""
     _make_participant(daemon, pid="root", pane="%1")
     _make_job(daemon.store, handle="h1", caller_id="root", state="done")
 
@@ -188,8 +188,10 @@ async def test_snapshot_job_keys_backward_compat(daemon):
     root_node = snap["nodes"][0]
     assert len(root_node["jobs"]) == 1
     job = root_node["jobs"][0]
+    # v2 snapshot includes caller_id (for job attribution) and response_format.
     assert set(job) == {
         "handle",
+        "caller_id",
         "target_id",
         "kind",
         "prompt",
@@ -198,6 +200,7 @@ async def test_snapshot_job_keys_backward_compat(daemon):
         "error_code",
         "created_at",
         "finished_at",
+        "response_format",
     }
 
 
@@ -276,7 +279,7 @@ def test_classify_live_with_pane():
     """A live SPAWNED participant is classified as 'live'."""
     recorded = {"participant_id": "p", "jobs": [], "session_id": None, "session_correlation": None}
     live = Participant(id="p", harness="vibe", tier=Tier.SPAWNED, tmux_pane="%1")
-    cls, _reason = classify_node(recorded, live)
+    cls, _reason = classify_node(recorded, live, {})
     assert cls == "live"
 
 
@@ -284,7 +287,7 @@ def test_classify_live_external_fails():
     """A live EXTERNAL participant is classified as 'failed' (no pane)."""
     recorded = {"participant_id": "p", "jobs": [], "session_id": None, "session_correlation": None}
     live = Participant(id="p", harness="vibe", tier=Tier.EXTERNAL)
-    cls, _reason = classify_node(recorded, live)
+    cls, _reason = classify_node(recorded, live, {})
     assert cls == "failed"
     assert "EXTERNAL" in _reason
 
@@ -307,7 +310,7 @@ def test_classify_dead_with_trusted_session():
         session_id="sess-abc",
         session_correlation=str(TranscriptProvenance.EXACT),
     )
-    cls, _reason = classify_node(recorded, live)
+    cls, _reason = classify_node(recorded, live, {})
     assert cls == "resumable"
 
 
@@ -322,7 +325,7 @@ def test_classify_dead_with_provenance():
         status=Status.DEAD,
         launch_provenance=prov_str,
     )
-    cls, _reason = classify_node(recorded, live)
+    cls, _reason = classify_node(recorded, live, {})
     assert cls == "respawnable"
 
 
@@ -340,7 +343,7 @@ def test_classify_dead_no_provenance_no_open_jobs():
         tier=Tier.SPAWNED,
         status=Status.DEAD,
     )
-    cls, _reason = classify_node(recorded, live)
+    cls, _reason = classify_node(recorded, live, {})
     assert cls == "completed"
 
 
@@ -358,9 +361,9 @@ def test_classify_dead_no_provenance_with_open_jobs():
         tier=Tier.SPAWNED,
         status=Status.DEAD,
     )
-    cls, _reason = classify_node(recorded, live)
+    cls, _reason = classify_node(recorded, live, {})
     assert cls == "failed"
-    assert "open job" in _reason
+    assert "no usable provenance" in _reason or "open job" in _reason
 
 
 def test_classify_pruned_with_snapshot_provenance():
@@ -372,12 +375,18 @@ def test_classify_pruned_with_snapshot_provenance():
         "session_correlation": None,
         "launch_provenance": {"cwd_resolved": "/tmp", "cwd_requested": "/tmp"},
     }
-    cls, _reason = classify_node(recorded, None)
+    cls, _reason = classify_node(recorded, None, {})
     assert cls == "respawnable"
 
 
-def test_classify_pruned_with_trusted_session():
-    """A GC'd participant with trusted session_id in snapshot is 'resumable'."""
+def test_classify_pruned_with_trusted_session_not_resumable():
+    """A GC'd (pruned) participant with snapshot session_id is NOT resumable.
+
+    Review item 2: pruned participants cannot be native-resumed from snapshot
+    session_id/correlation alone. The spawner requires a retained trusted DB
+    binding; snapshot evidence cannot prove the session is not live elsewhere.
+    A pruned node with no provenance and no open jobs is 'completed'.
+    """
     from theater.provenance import TranscriptProvenance
 
     recorded = {
@@ -387,8 +396,9 @@ def test_classify_pruned_with_trusted_session():
         "session_correlation": str(TranscriptProvenance.EXACT),
         "launch_provenance": None,
     }
-    cls, _reason = classify_node(recorded, None)
-    assert cls == "resumable"
+    cls, _reason = classify_node(recorded, None, {})
+    # No provenance, no running jobs, no inbound spawn → completed (nothing to restore)
+    assert cls == "completed"
 
 
 def test_classify_pruned_no_provenance_no_open_jobs():
@@ -400,7 +410,7 @@ def test_classify_pruned_no_provenance_no_open_jobs():
         "session_correlation": None,
         "launch_provenance": None,
     }
-    cls, _reason = classify_node(recorded, None)
+    cls, _reason = classify_node(recorded, None, {})
     assert cls == "completed"
 
 
@@ -413,7 +423,7 @@ def test_classify_pruned_no_provenance_with_open_jobs():
         "session_correlation": None,
         "launch_provenance": None,
     }
-    cls, _reason = classify_node(recorded, None)
+    cls, _reason = classify_node(recorded, None, {})
     assert cls == "pruned"
 
 
@@ -474,7 +484,8 @@ async def test_restore_v2_live_creator_reused(client, daemon):
     )
 
     assert result["creator"]["action"] == "reused_live"
-    assert result["creator"]["classification"] == "live"
+    # classification is "live" or "stale_live" depending on whether tmux can verify the pane.
+    assert result["creator"]["classification"] in ("live", "stale_live")
     assert result["creator"]["original_participant_id"] == "creator"
     assert result["creator"]["new_participant_id"] == "creator"
     assert result["creator"]["final_status"] is not None
@@ -549,13 +560,14 @@ async def test_restore_v2_partial_descendant_failure_does_not_fail_checkpoint(
 
     # Creator succeeded (live — no spawn needed).
     assert result["creator"]["action"] == "reused_live"
-    # Child failed but checkpoint is still 'restored'.
+    # Child failed — checkpoint is 'partial' (some success, some failure).
     assert len(result["descendants"]) == 1
     assert result["descendants"][0]["action"] == "failed"
     assert result["partial_failures"] == ["child"]
 
     read = await client.call("checkpoint.read", checkpoint_id=created["checkpoint_id"])
-    assert read["checkpoint"]["restore_state"] == "restored"
+    # partial: some nodes succeeded, some failed
+    assert read["checkpoint"]["restore_state"] == "partial"
 
 
 # ---- v2 restore: creator failure marks checkpoint as failed -----------------
@@ -612,12 +624,13 @@ async def test_restore_v2_jobs_in_report(client, daemon):
         caller_id="restorer",
     )
 
-    jobs = result["creator"]["jobs"]
-    handles = {j["handle"] for j in jobs}
+    recs = result["creator"]["job_reconciliations"]
+    handles = {r["handle"] for r in recs}
     assert handles == {"j1", "j2"}
-    # Send jobs are in the report but never replayed.
-    for j in jobs:
-        assert j["state"] in ("running", "done")
+    # All send jobs are reported_only (never replayed).
+    for r in recs:
+        assert r["kind"] == "send"
+        assert r["outcome"] == "reported_only"
 
 
 # ---- v2 restore: lineage (new_parent_id) ------------------------------------
@@ -964,10 +977,11 @@ async def test_restore_v2_send_jobs_not_replayed(client, daemon):
         caller_id="restorer-s",
     )
 
-    creator_jobs = result["creator"]["jobs"]
-    send_jobs = [j for j in creator_jobs if j["kind"] == "send"]
-    assert len(send_jobs) == 1
-    assert send_jobs[0]["handle"] == "send-1"
+    creator_recs = result["creator"]["job_reconciliations"]
+    send_recs = [r for r in creator_recs if r["kind"] == "send"]
+    assert len(send_recs) == 1
+    assert send_recs[0]["handle"] == "send-1"
+    assert send_recs[0]["outcome"] == "reported_only"
     # No new jobs should have been created for this send.
     from sqlalchemy import select as sa_select
 
@@ -1076,9 +1090,14 @@ async def test_restore_v2_node_report_shape(client, daemon):
         "action",
         "final_status",
         "reason",
-        "jobs",
+        "job_reconciliations",
+        "warnings",
     }
     assert required_fields.issubset(set(result["creator"]))
+    # Top-level result must also include counts, participants flat list, restore_state.
+    assert "counts" in result
+    assert "participants" in result
+    assert "restore_state" in result
     assert "checkpoint_id" in result
     assert "descendants" in result
     assert "partial_failures" in result

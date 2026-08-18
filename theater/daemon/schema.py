@@ -185,6 +185,13 @@ checkpoints = Table(
     Column("restore_error", Text),
     Column("restore_result", Text),
     Column("restore_claimed_by", Text),
+    # Durable incremental progress written after every successfully restored node.
+    # Survives daemon restart / CancelledError so already-spawned processes are
+    # not duplicated on retry.  Null until the first node is processed.
+    # restore_state == 'partial' means at least one node succeeded and at least
+    # one failed; the restore can be re-attempted but callers must read
+    # restore_progress to avoid re-spawning nodes that already completed.
+    Column("restore_progress", Text),
     sqlite_autoincrement=True,
 )
 

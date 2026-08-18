@@ -321,16 +321,64 @@ class Spawner:
         The blob is written once and never updated: it is the ground-truth for
         cold-respawning a dead participant when the checkpoint restorer cannot
         resume its native session.
+
+        Worktree facts recorded:
+        - ``worktree_type``: "unique" | "named" | null
+        - ``worktree_name``: name string for named worktrees
+        - ``worktree_branch``: the git branch (theater/<id> or theater/named/<name>)
+        - ``worktree_repo_root``: canonical main repo root (the shared root, not a
+          linked-worktree root) so recovery can verify or recreate the worktree.
+        - ``worktree_base_commit``: the HEAD commit the worktree was branched from,
+          captured at spawn time for safe verification/recreation.
         """
         import json
+        import subprocess
 
         worktree_type: str | None = None
         worktree_name: str | None = None
+        worktree_repo_root: str | None = None
+        worktree_base_commit: str | None = None
+
         if req.worktree is True:
             worktree_type = "unique"
         elif isinstance(req.worktree, str) and req.worktree:
             worktree_type = "named"
             worktree_name = req.worktree
+
+        # Capture git repo root and the base commit for worktree-aware spawns.
+        # For non-worktree spawns this is also useful for provenance but is
+        # best-effort only — if the cwd is not a git repo we skip it silently.
+        effective_cwd = participant.cwd or req.cwd
+        if worktree_type is not None and effective_cwd:
+            # For a worktree, determine the canonical main repo root.
+            try:
+                r = subprocess.run(
+                    ["git", "rev-parse", "--show-toplevel"],
+                    cwd=effective_cwd,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                if r.returncode == 0:
+                    worktree_repo_root = r.stdout.strip() or None
+            except Exception:
+                pass
+            # Capture the HEAD commit of the branch to verify/recreate later.
+            if participant.branch:
+                try:
+                    r2 = subprocess.run(
+                        ["git", "rev-parse", participant.branch],
+                        cwd=effective_cwd,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        check=False,
+                    )
+                    if r2.returncode == 0:
+                        worktree_base_commit = r2.stdout.strip() or None
+                except Exception:
+                    pass
 
         provenance: dict = {
             "prompt": req.prompt,
@@ -343,6 +391,8 @@ class Spawner:
             "worktree_type": worktree_type,
             "worktree_name": worktree_name,
             "worktree_branch": participant.branch,
+            "worktree_repo_root": worktree_repo_root,
+            "worktree_base_commit": worktree_base_commit,
             "base_branch": req.base_branch,
             "response_format": req.response_format,
             "resume_session_id": req.resume,
