@@ -145,8 +145,11 @@ theater/
   scoped only by `limit` and the optional `participant_id` filter; it never
   filters by caller. The creator and restorer identities are persisted in the
   row (`participant_id`, `restored_by`). Restore still requires explicit
-  approval and uses a single-use atomic claim; a creator cannot restore its
-  own checkpoint (deadlock guard, not a permission check).
+  approval and uses a single-use atomic claim; a creator CAN restore its own
+  checkpoint (reused live in place, never spawned/resumed) as long as it is
+  actually live and addressable. What's still refused is a *descendant* of
+  the creator restoring the creator's checkpoint (deadlock guard, not a
+  permission check) — that caller would await a job sent to its own ancestor.
 - **Rows are deletable, handles are not.** The send-sequence counter lives in the
   `meta` table because it used to be re-seeded from `MAX(jobs)`; once the GC can
   delete old jobs, that regresses the counter and re-mints handles pruned jobs

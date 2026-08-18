@@ -306,8 +306,16 @@ so callers can tell at a glance whether a checkpoint covers the full tree.
 `checkpoint.restore` requires explicit approval (`manual` / `edits` / `yolo`),
 uses a single-use atomic claim (`restore_claimed_by` in the `checkpoints` row),
 and records both creator (`participant_id`) and restorer (`restored_by`) in the
-same row. A creator cannot restore its own checkpoint — self-restore would have
-the caller await its own MCP turn, which deadlocks.
+same row. A creator may restore its own checkpoint: when it is genuinely live
+and addressable, its node comes back `reused_live` (it is already live,
+mid-call, so it is never actually spawned/resumed), and its recorded
+descendants are restored normally. Self-restore is refused if the caller
+claiming to be the creator is not actually live (`caller_id` naming an
+existing-but-dead row is not enough), or if the live creator is unaddressable
+(EXTERNAL tier, or no tmux pane) — the same addressability rule every live
+creator restore is already held to. What remains blocked unconditionally is a
+*descendant* of the creator restoring the creator's checkpoint — that caller
+would have to await a job sent to its own ancestor, which deadlocks.
 
 `checkpoint.read` has always been global (no caller filter); this is documented
 here so a future reader does not mistake it for an oversight and add a scope.
@@ -348,7 +356,7 @@ Each recorded node is classified at restore time:
 
 | Classification | Condition                                              | Action        |
 |----------------|--------------------------------------------------------|---------------|
-| `live`         | Participant exists, not DEAD                           | `reused_live` |
+| `live`         | Live and addressable (SPAWNED/ADOPTED with a recorded pane, verified when tmux is queryable) | `reused_live` |
 | `resumable`    | DEAD, has trusted `session_id`                         | `resumed`     |
 | `respawnable`  | DEAD or pruned, has `launch_provenance` with usable cwd| `respawned`   |
 | `completed`    | DEAD or pruned, no open jobs, no provenance            | `skipped`     |

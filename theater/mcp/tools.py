@@ -453,13 +453,21 @@ async def list_checkpoints(
     return result
 
 
-async def recovery_restore(session: Session, *, checkpoint_id: int, approval: str) -> dict:
+async def recovery_restore(
+    session: Session, *, checkpoint_id: int, approval: str, revive_completed: bool = False
+) -> dict:
     """Restore the orchestration tree from a checkpoint.
 
-    Operates on any checkpoint — not only your own. You cannot restore a
-    checkpoint you appear in (self-restore would deadlock the MCP call).
-    Only ``ready`` checkpoints are claimable; ``partial`` and ``failed``
-    are terminal states and cannot be re-attempted.
+    Operates on any checkpoint, including your own: when you are live and
+    addressable, your own node comes back ``reused_live`` (never actually
+    respawned/resumed) and its recorded descendants are restored normally.
+    Self-restore is refused if you are not actually live right now, or if
+    you are unaddressable (EXTERNAL tier, or no tmux pane) — the same
+    addressability rule that applies to any live creator. A caller that is
+    a *descendant* of the checkpoint's creator — but not the creator itself
+    — is also refused, since awaiting a job sent to its own ancestor would
+    close a cycle. Only ``ready`` checkpoints are claimable; ``partial`` and
+    ``failed`` are terminal states and cannot be re-attempted.
 
     For v2 checkpoints (full tree): each recorded node is reconciled with
     one of five public actions — ``reused_live`` (live node verified in place),
@@ -473,6 +481,15 @@ async def recovery_restore(session: Session, *, checkpoint_id: int, approval: st
 
     For v1 checkpoints (degraded mode): creator-only restore, no descendants.
     Result contains ``_degraded: true`` and ``restored_parent`` (legacy shape).
+
+    ``revive_completed`` (default False) switches restore from crash recovery to
+    reviving a settled tree for iteration: when True, dead nodes whose recorded
+    work is already finished are NOT skipped — they resume (trusted session, no
+    prompt replay) or cold-respawn (launch provenance, which replays the original
+    prompt). Leave it False to keep the default behaviour of not relaunching
+    finished work. Applies to v2 tree restores only — the value is echoed back
+    as ``revive_completed`` in the result for the audit trail; v1 (degraded,
+    creator-only) restores ignore it and have no such field.
 
     No text is injected during restore. Delivery of recovery instructions to
     live participants is a separate ``send`` call after restore returns.
@@ -490,6 +507,7 @@ async def recovery_restore(session: Session, *, checkpoint_id: int, approval: st
         "checkpoint.restore",
         checkpoint_id=checkpoint_id,
         approval=approval,
+        revive_completed=revive_completed,
         caller_id=session.participant_id,
     )
     assert isinstance(result, dict)

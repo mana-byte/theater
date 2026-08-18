@@ -1258,30 +1258,53 @@ def _restore_state_error(
 
 
 def _validate_restore_request(daemon, params: dict, *, method_name: str) -> tuple:
-    """Extract and validate restore parameters. Returns (caller, checkpoint_id, approval, row)."""
+    """Extract and validate restore parameters.
+
+    Returns (caller, checkpoint_id, approval, revive_completed, row).
+    """
     caller = _caller_participant(daemon, params, method_name=method_name)
     checkpoint_id = _checkpoint_id(params)
     approval = _string_param(params, "approval", method_name=method_name)
     if approval not in APPROVALS:
         raise BadRequest(f"approval must be one of 'manual', 'edits', 'yolo'; got {approval!r}")
+    # Strictly validated (not coerced): this flag spawns processes and replays
+    # prompts, so a truthy "false" string must not silently enable revival.
+    if "revive_completed" in params and not isinstance(params["revive_completed"], bool):
+        raise BadRequest(
+            f"revive_completed must be a boolean; got {type(params['revive_completed']).__name__}"
+        )
+    revive_completed = bool(params.get("revive_completed", False))
     row = daemon.store.get_checkpoint(checkpoint_id)
     if row is None:
         raise BadRequest(f"no checkpoint {checkpoint_id!r}")
-    return caller, checkpoint_id, approval, row
+    return caller, checkpoint_id, approval, revive_completed, row
 
 
 def _validate_restore_parent(daemon, checkpoint_id: int, parent_id: str, caller_id: str):
-    """Validate the checkpoint's parent participant. Returns the parent."""
-    if parent_id == caller_id:
-        raise BadRequest(
-            f"cannot restore checkpoint {checkpoint_id!r}: the caller is the "
-            f"checkpoint creator; self-restore would deadlock the MCP call"
-        )
+    """Validate the checkpoint's parent participant. Returns the parent.
+
+    ``parent_id == caller_id`` (the creator restoring its own checkpoint) is
+    allowed, provided the parent is genuinely live: ``_caller_participant``
+    only checks that ``caller_id`` names an existing row, not that it is
+    live, so a stale/dead creator id passed as the caller is explicitly
+    rejected below rather than silently reused. A live self-restoring parent
+    needs no spawn/resume — it is reused in place — so there is no deadlock.
+    Only a genuine descendant of the parent restoring it is refused, via the
+    ancestor-cycle check below. EXTERNAL/pane requirements apply the same to
+    self-restore as to any other restore of this parent, for consistency.
+    """
+    self_restore = parent_id == caller_id
     parent = daemon.store.get_participant(parent_id)
     if parent is None:
         raise BadRequest(
             f"checkpoint {checkpoint_id!r}: parent participant {parent_id!r} has been "
             f"pruned from retention and cannot be restored"
+        )
+    if self_restore and parent.status == str(Status.DEAD):
+        raise BadRequest(
+            f"cannot restore checkpoint {checkpoint_id!r}: caller {caller_id!r} claims "
+            f"to be the checkpoint creator but is not currently live; self-restore is "
+            f"only valid when the creator itself is the one making this call"
         )
     if parent.tier == str(Tier.EXTERNAL):
         raise BadRequest(
@@ -1306,7 +1329,7 @@ def _validate_restore_parent(daemon, checkpoint_id: int, parent_id: str, caller_
     # cycle: the caller cannot await a job sent to its own ancestor.
     if parent.status != str(Status.DEAD):
         ancestor_ids = set(lineage.ancestor_ids(daemon.store, caller_id))
-        if parent_id in ancestor_ids or parent_id == caller_id:
+        if parent_id in ancestor_ids:
             raise BadRequest(
                 f"cannot restore checkpoint {checkpoint_id!r}: the live parent "
                 f"{parent_id!r} is an ancestor of the caller {caller_id!r}; "
@@ -1326,6 +1349,16 @@ async def _checkpoint_restore(daemon, params: dict) -> dict:
 
     For v1 checkpoints (degraded mode): creator-only, no descendants.
 
+    The creator may restore its own checkpoint: when it is live and
+    addressable, its own node comes back ``reused_live`` (it is already
+    live, mid-call — never spawned/resumed), so this is a no-op for the
+    creator and simply proceeds to restore its descendants. Self-restore is
+    refused if the caller is not actually live, or is unaddressable
+    (EXTERNAL tier / no tmux pane) — the same rule any live creator restore
+    is held to. A caller that is a *descendant* of the creator (in the
+    recorded subtree, but not the creator itself) is refused — awaiting a
+    job sent to its own ancestor would close a cycle.
+
     Claim semantics: only ``ready`` checkpoints can be claimed. The atomic
     claim happens after preflight, so predictable failures do not consume it.
     """
@@ -1336,7 +1369,7 @@ async def _checkpoint_restore(daemon, params: dict) -> dict:
         restore_checkpoint,
     )
 
-    caller, checkpoint_id, approval, row = _validate_restore_request(
+    caller, checkpoint_id, approval, revive_completed, row = _validate_restore_request(
         daemon, params, method_name="checkpoint.restore"
     )
     parent_id = row["participant_id"]
@@ -1352,7 +1385,11 @@ async def _checkpoint_restore(daemon, params: dict) -> dict:
         _v2_preflight(daemon, checkpoint_id, snapshot_data, caller.id)
         # Topology/rail preflight before claim (item 10).
         preflight_topology(
-            daemon, checkpoint_id=checkpoint_id, snapshot=snapshot_data, caller_id=caller.id
+            daemon,
+            checkpoint_id=checkpoint_id,
+            snapshot=snapshot_data,
+            caller_id=caller.id,
+            revive_completed=revive_completed,
         )
     else:
         # V1 strict validation.
@@ -1378,6 +1415,7 @@ async def _checkpoint_restore(daemon, params: dict) -> dict:
             approval=approval,
             token=token,
             snapshot_data=snapshot_data,
+            revive_completed=revive_completed,
         )
     except asyncio.CancelledError:
         # Persist whatever partial result exists (item 7).
@@ -1448,9 +1486,23 @@ def _v2_preflight(daemon, checkpoint_id: int, snapshot_data: dict, caller_id: st
     Checks (all before the claim):
     1. Snapshot structure well-formed (creator_id, nodes list, unique IDs, no dangling parents).
     2. No snapshot parent_id cycles.
-    3. Caller not in the recorded subtree (would close an await cycle).
-    4. Self-restore guard: caller is not the creator.
-    5. Live creator addressability check (if creator is live).
+    3. Caller not a *descendant* member of the recorded subtree (would close an
+       await cycle). The creator itself is exempt: restoring your own
+       checkpoint is allowed — the creator node is never actually
+       spawned/resumed by restore_tree (it is already live, mid-call), so
+       there is no deadlock there. Only a distinct caller inside the subtree
+       (a child, grandchild, ...) is refused.
+    4. Self-restore liveness check: a caller claiming ``caller_id == creator_id``
+       must actually be a live participant right now. ``_caller_participant``
+       only checks that the row exists, not that it is live, so nothing else
+       stops a stale/dead creator id from being passed as the caller. Without
+       this check, restore_tree would run its "live creator keeps its own
+       parent" branch against a DEAD row and set the node's parent to itself.
+    5. Live creator addressability check (if creator is live) — this applies
+       to self-restore too: an EXTERNAL or pane-less "live" creator still
+       misclassifies inside restore_tree (stale_live/failed), which would
+       wrongly skip or fail the whole restore, so it is refused up front with
+       a clear error instead of silently producing a broken result.
 
     Topology/rail simulation (preflight_topology) is called separately in the
     checkpoint.restore handler after this returns.
@@ -1462,17 +1514,14 @@ def _v2_preflight(daemon, checkpoint_id: int, snapshot_data: dict, caller_id: st
 
     creator_id = snapshot_data["creator_id"]
     nodes_by_id: dict[str, dict] = {n["participant_id"]: n for n in snapshot_data["nodes"]}
+    self_restore = caller_id == creator_id
 
-    # Self-restore: caller is creator.
-    if caller_id == creator_id:
-        raise BadRequest(
-            f"cannot restore checkpoint {checkpoint_id!r}: the caller is the "
-            f"checkpoint creator; self-restore would deadlock the MCP call"
-        )
-
-    # Caller anywhere in the subtree.
+    # Caller anywhere in the subtree, except the creator restoring its own
+    # checkpoint: that node is reused live in place (never spawned/resumed),
+    # so it cannot deadlock. A descendant restoring an ancestor's checkpoint
+    # still would (it would await a job sent to its own ancestor).
     all_ids = set(_bfs_order(creator_id, nodes_by_id))
-    if caller_id in all_ids:
+    if caller_id in all_ids and not self_restore:
         raise BadRequest(
             f"cannot restore checkpoint {checkpoint_id!r}: caller {caller_id!r} "
             f"is a member of the recorded subtree; restore would close an await cycle"
@@ -1481,6 +1530,12 @@ def _v2_preflight(daemon, checkpoint_id: int, snapshot_data: dict, caller_id: st
     # Live creator with pane check: if the creator is alive and live, it must
     # have a pane (no-pane live is unaddressable).
     live_creator = daemon.store.get_participant(creator_id)
+    if self_restore and (live_creator is None or live_creator.status is Status.DEAD):
+        raise BadRequest(
+            f"cannot restore checkpoint {checkpoint_id!r}: caller {caller_id!r} claims "
+            f"to be the checkpoint creator but is not currently live; self-restore is "
+            f"only valid when the creator itself is the one making this call"
+        )
     if live_creator is not None and live_creator.status is not Status.DEAD:
         if live_creator.tier is Tier.EXTERNAL:
             raise BadRequest(

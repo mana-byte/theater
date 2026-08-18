@@ -483,13 +483,22 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         )
 
     @mcp.tool()
-    async def recovery_restore(checkpoint_id: int, approval: str) -> dict:
+    async def recovery_restore(
+        checkpoint_id: int, approval: str, revive_completed: bool = False
+    ) -> dict:
         """Restore the orchestration tree from a checkpoint.
 
-        Operates on any participant's checkpoint — not only your own. You cannot
-        restore your own checkpoint or any checkpoint you appear in (self-restore
-        would deadlock the MCP call). Only ``ready`` checkpoints can be claimed;
-        ``partial`` and ``failed`` are terminal and cannot be re-attempted.
+        Operates on any participant's checkpoint, including your own: when
+        you are live and addressable, your own node comes back
+        ``reused_live`` (never actually respawned/resumed) and its recorded
+        descendants are restored normally. Self-restore is refused if you
+        are not actually live right now, or if you are unaddressable
+        (EXTERNAL tier, or no tmux pane) — the same addressability rule that
+        applies to any live creator. A caller that is a *descendant* of the
+        checkpoint's creator — but not the creator itself — is also refused,
+        since awaiting a job sent to its own ancestor would close a cycle.
+        Only ``ready`` checkpoints can be claimed; ``partial`` and ``failed``
+        are terminal and cannot be re-attempted.
 
         For v2 checkpoints (full tree): reconciles each recorded node as one of
         the five public actions: ``reused_live`` (live verified in place),
@@ -516,8 +525,24 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
 
         checkpoint_id: the id returned by ``checkpoint``.
         approval:       ``manual``, ``edits``, or ``yolo`` — no default.
+        revive_completed: default False. Normally a dead node whose recorded
+                     work is terminal is ``skipped`` — restore recovers
+                     interrupted work, not liveness. Set True to instead revive
+                     a settled/finished tree so you can iterate on it again:
+                     such nodes are ``resumed`` (when a trusted session exists;
+                     no prompt replay) or ``respawned`` (cold, from launch
+                     provenance — a node that had a prompt replays it; a
+                     promptless child comes up idle). Nodes with no usable
+                     session or provenance stay ``skipped``. Does not override
+                     the stale-live safety guard, and has no effect on v1
+                     checkpoints (creator-only restore never skips).
         """
-        return await tools.recovery_restore(session, checkpoint_id=checkpoint_id, approval=approval)
+        return await tools.recovery_restore(
+            session,
+            checkpoint_id=checkpoint_id,
+            approval=approval,
+            revive_completed=revive_completed,
+        )
 
     @mcp.tool()
     async def read_transcript(target_id: str, last_n: int = 5) -> dict:

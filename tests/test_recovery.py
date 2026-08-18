@@ -427,6 +427,113 @@ def test_classify_pruned_no_provenance_with_open_jobs():
     assert cls == "pruned"
 
 
+# ---- revive_completed flag --------------------------------------------------
+
+
+def _terminal_inbound_spawn(node_id: str) -> list[dict]:
+    """A recorded inbound spawn job that is terminal (work is 'done')."""
+    return [{"kind": "spawn", "target_id": node_id, "state": "done", "handle": "h1"}]
+
+
+def test_classify_revive_dead_completed_with_session_resumes():
+    """revive_completed bypasses the 'work is done' gate → trusted session resumes."""
+    from theater.provenance import TranscriptProvenance
+
+    recorded = {
+        "participant_id": "p",
+        "jobs": _terminal_inbound_spawn("p"),
+        "session_id": "sess-abc",
+        "session_correlation": str(TranscriptProvenance.EXACT),
+    }
+    live = Participant(
+        id="p",
+        harness="vibe",
+        tier=Tier.SPAWNED,
+        status=Status.DEAD,
+        session_id="sess-abc",
+        session_correlation=str(TranscriptProvenance.EXACT),
+    )
+    # Default: settled tree is left alone.
+    assert classify_node(recorded, live, {})[0] == "completed"
+    # Revive: fall through to native resume.
+    assert classify_node(recorded, live, {}, revive_completed=True)[0] == "resumable"
+
+
+def test_classify_revive_dead_completed_with_provenance_respawns():
+    """revive_completed on a settled dead node with provenance → respawnable."""
+    recorded = {
+        "participant_id": "p",
+        "jobs": _terminal_inbound_spawn("p"),
+        "session_id": None,
+        "session_correlation": None,
+    }
+    live = Participant(
+        id="p",
+        harness="vibe",
+        tier=Tier.SPAWNED,
+        status=Status.DEAD,
+        launch_provenance=_prov(),
+    )
+    assert classify_node(recorded, live, {})[0] == "completed"
+    assert classify_node(recorded, live, {}, revive_completed=True)[0] == "respawnable"
+
+
+def test_classify_revive_dead_completed_no_revive_path_stays_completed():
+    """revive_completed with neither session nor provenance stays 'completed'."""
+    recorded = {
+        "participant_id": "p",
+        "jobs": _terminal_inbound_spawn("p"),
+        "session_id": None,
+        "session_correlation": None,
+    }
+    live = Participant(
+        id="p",
+        harness="vibe",
+        tier=Tier.SPAWNED,
+        status=Status.DEAD,
+    )
+    assert classify_node(recorded, live, {})[0] == "completed"
+    # Nothing to revive with → still completed even under the flag.
+    assert classify_node(recorded, live, {}, revive_completed=True)[0] == "completed"
+
+
+def test_classify_revive_gcd_completed_with_provenance_respawns():
+    """revive_completed on a GC'd settled node with snapshot provenance → respawnable."""
+    recorded = {
+        "participant_id": "p",
+        "jobs": _terminal_inbound_spawn("p"),
+        "session_id": None,
+        "session_correlation": None,
+        "launch_provenance": {"cwd_resolved": "/tmp", "cwd_requested": "/tmp"},
+    }
+    # Default: GC'd + terminal inbound spawn → completed.
+    assert classify_node(recorded, None, {})[0] == "completed"
+    # Revive: fall through to snapshot-provenance respawn.
+    assert classify_node(recorded, None, {}, revive_completed=True)[0] == "respawnable"
+
+
+def test_classify_revive_default_flag_is_noop():
+    """revive_completed=False is byte-for-byte the current behavior."""
+    from theater.provenance import TranscriptProvenance
+
+    recorded = {
+        "participant_id": "p",
+        "jobs": _terminal_inbound_spawn("p"),
+        "session_id": "sess-abc",
+        "session_correlation": str(TranscriptProvenance.EXACT),
+    }
+    live = Participant(
+        id="p",
+        harness="vibe",
+        tier=Tier.SPAWNED,
+        status=Status.DEAD,
+        session_id="sess-abc",
+        session_correlation=str(TranscriptProvenance.EXACT),
+        launch_provenance=_prov(),
+    )
+    assert classify_node(recorded, live, {}, revive_completed=False)[0] == "completed"
+
+
 # ---- BFS order --------------------------------------------------------------
 
 
@@ -515,6 +622,191 @@ async def test_restore_v2_dead_child_no_provenance_skipped(client, daemon, fake_
     assert child_report["original_participant_id"] == "child"
     assert child_report["action"] == "skipped"
     assert child_report["classification"] == "completed"
+
+
+# ---- v2 restore: revive_completed flag (settled-tree iteration) --------------
+
+
+def _make_spawn_job(store, *, target_id: str, caller_id: str, state: str = "done") -> None:
+    """Record a terminal inbound spawn job (parent spawned target; work done).
+
+    A terminal inbound spawn job is the 'work is done' signal that makes a
+    settled dead node classify as ``completed`` (skipped) by default.
+    """
+    store.create_job(
+        Job(
+            handle=f"spawn-{target_id}",
+            caller_id=caller_id,
+            target_id=target_id,
+            kind="spawn",
+            prompt="",
+            state=state,
+            result=None,
+            error_code=None,
+            created_at=1.0,
+            finished_at=2.0,
+        )
+    )
+
+
+async def test_restore_v2_settled_tree_skipped_by_default(client, daemon, fake_tmux):
+    """Reproduce checkpoint #10: a settled tree of dead children is a no-op by default.
+
+    Each child was fully spawned (terminal inbound spawn job) and is now dead but
+    holds usable launch provenance. Default restore leaves them skipped: crash
+    recovery does not relaunch finished work.
+    """
+    _make_participant(daemon, pid="creator", pane="%1")
+    _make_participant(
+        daemon, pid="kid-a", pane="%2", parent_id="creator", dead=True, launch_provenance=_prov()
+    )
+    _make_participant(
+        daemon, pid="kid-b", pane="%3", parent_id="creator", dead=True, launch_provenance=_prov()
+    )
+    _make_participant(daemon, pid="restorer", pane="%4")
+    _make_spawn_job(daemon.store, target_id="kid-a", caller_id="creator")
+    _make_spawn_job(daemon.store, target_id="kid-b", caller_id="creator")
+
+    created = await client.call("checkpoint.create", caller_id="creator", name="cp")
+    result = await client.call(
+        "checkpoint.restore",
+        checkpoint_id=created["checkpoint_id"],
+        approval="yolo",
+        caller_id="restorer",
+    )
+
+    assert result["creator"]["action"] == "reused_live"
+    actions = {r["original_participant_id"]: r["action"] for r in result["descendants"]}
+    assert actions == {"kid-a": "skipped", "kid-b": "skipped"}
+    for r in result["descendants"]:
+        assert r["classification"] == "completed"
+
+
+async def test_restore_v2_settled_tree_revived_with_flag(client, daemon, fake_tmux):
+    """revive_completed=True brings a settled dead tree back to life for iteration.
+
+    Same tree as the default twin above, but with the flag the children fall
+    through the 'work is done' gate to cold respawn via launch provenance.
+    """
+    _make_participant(daemon, pid="creator", pane="%1")
+    _make_participant(
+        daemon, pid="kid-a", pane="%2", parent_id="creator", dead=True, launch_provenance=_prov()
+    )
+    _make_participant(
+        daemon, pid="kid-b", pane="%3", parent_id="creator", dead=True, launch_provenance=_prov()
+    )
+    _make_participant(daemon, pid="restorer", pane="%4")
+    _make_spawn_job(daemon.store, target_id="kid-a", caller_id="creator")
+    _make_spawn_job(daemon.store, target_id="kid-b", caller_id="creator")
+
+    created = await client.call("checkpoint.create", caller_id="creator", name="cp")
+    result = await client.call(
+        "checkpoint.restore",
+        checkpoint_id=created["checkpoint_id"],
+        approval="yolo",
+        caller_id="restorer",
+        revive_completed=True,
+    )
+
+    assert result["creator"]["action"] == "reused_live"
+    actions = {r["original_participant_id"]: r["action"] for r in result["descendants"]}
+    assert actions == {"kid-a": "respawned", "kid-b": "respawned"}
+    for r in result["descendants"]:
+        assert r["classification"] == "respawnable"
+        assert r["new_participant_id"] is not None
+    # The audit record distinguishes revive from crash recovery.
+    assert result["revive_completed"] is True
+
+
+async def test_restore_v2_revive_over_budget_rejected_before_claim(client, daemon, fake_tmux):
+    """B1: reviving a settled tree that would blow the budget fails BEFORE the claim.
+
+    Default restore skips the settled children (they never enter the projected
+    graph), so the budget rail is silent. Under revive_completed the children DO
+    spawn, so preflight must count them and reject the restore before the atomic
+    claim — leaving the checkpoint 'ready' and retryable, not consumed 'partial'.
+    """
+    # Default budget is 20. creator + 10 dead children (kept) + 10 revived spawns
+    # = 21 projected participants > 20.
+    _make_participant(daemon, pid="creator", pane="%1")
+    for i in range(10):
+        _make_participant(
+            daemon,
+            pid=f"kid-{i}",
+            pane=f"%{i + 10}",
+            parent_id="creator",
+            dead=True,
+            launch_provenance=_prov(),
+        )
+        _make_spawn_job(daemon.store, target_id=f"kid-{i}", caller_id="creator")
+    _make_participant(daemon, pid="restorer", pane="%99")
+
+    created = await client.call("checkpoint.create", caller_id="creator", name="cp")
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "checkpoint.restore",
+            checkpoint_id=created["checkpoint_id"],
+            approval="yolo",
+            caller_id="restorer",
+            revive_completed=True,
+        )
+    assert exc.value.code == "bad_request"
+    assert "budget" in str(exc.value)
+
+    # The claim was never taken: the checkpoint is still restorable.
+    read = await client.call("checkpoint.read", checkpoint_id=created["checkpoint_id"])
+    assert read["checkpoint"]["restore_state"] == "ready"
+
+
+async def test_restore_v2_revive_mixed_tree_leaf_revived_through_anchorless_mid(
+    client, daemon, fake_tmux
+):
+    """B2: a revivable leaf under a settled, revive-less intermediate is not dropped.
+
+    Tree: creator (live) → mid (dead, settled, NO provenance/session) → leaf
+    (dead, settled, HAS provenance). Before the fix, the lineage-anchor check
+    classified the subtree with the flag off, saw 'mid' complete, skipped it, and
+    the leaf became ancestor_skipped. With the flag threaded, 'mid' is promoted
+    to a lineage anchor (or fails legibly) and the leaf is respawned.
+    """
+    _make_participant(daemon, pid="creator", pane="%1")
+    _make_participant(daemon, pid="mid", pane="%2", parent_id="creator", dead=True)
+    _make_participant(
+        daemon, pid="leaf", pane="%3", parent_id="mid", dead=True, launch_provenance=_prov()
+    )
+    _make_participant(daemon, pid="restorer", pane="%4")
+    _make_spawn_job(daemon.store, target_id="mid", caller_id="creator")
+    _make_spawn_job(daemon.store, target_id="leaf", caller_id="mid")
+
+    created = await client.call("checkpoint.create", caller_id="creator", name="cp")
+    result = await client.call(
+        "checkpoint.restore",
+        checkpoint_id=created["checkpoint_id"],
+        approval="yolo",
+        caller_id="restorer",
+        revive_completed=True,
+    )
+
+    reports = {r["original_participant_id"]: r for r in result["descendants"]}
+    # 'mid' has no revive path of its own, but its subtree needs it → it must NOT
+    # be a plain skip. It respawns as a lineage anchor if it has provenance, else
+    # fails legibly (its reason names the real cause, not the ancestor).
+    assert reports["mid"]["action"] in ("respawned", "failed")
+    if reports["mid"]["action"] == "failed":
+        # The leaf then can't be attached, but the reason blames mid's own lack
+        # of provenance — never a misleading ancestor_skipped on the leaf.
+        assert "provenance" in reports["mid"]["reason"]
+    else:
+        # mid became a lineage anchor → the leaf is genuinely revived.
+        assert reports["leaf"]["action"] == "respawned"
+    # In no case is the leaf silently dropped as ancestor_skipped while the flag
+    # is set and it has a usable revive path — the pre-fix bug.
+    assert not (
+        reports["leaf"]["action"] == "skipped"
+        and reports["leaf"]["classification"] == "ancestor_skipped"
+        and reports["mid"]["action"] == "skipped"
+    )
 
 
 # ---- v2 restore: partial failure in descendant does not fail checkpoint ----
@@ -728,12 +1020,96 @@ async def test_restore_v2_concurrent_claim_refused(client, daemon, fake_tmux):
     assert "restorer-a" in str(exc.value)
 
 
-# ---- v2 restore: self-restore rejected (deadlock guard) ---------------------
+# ---- v2 restore: self-restore allowed (creator node is reused_live) ---------
 
 
-async def test_restore_v2_self_restore_rejected(client, daemon, fake_tmux):
-    """A creator cannot restore its own checkpoint (deadlock guard)."""
+async def test_restore_v2_self_restore_reuses_creator_and_restores_descendants(
+    client, daemon, fake_tmux
+):
+    """A creator restoring its own checkpoint is a no-op for itself.
+
+    The creator's own node is never spawned/resumed (it is already live, mid-
+    call) — it comes back reused_live — and its dead child is still restored
+    normally, exactly as if a distinct live participant had restored it.
+    """
     _make_participant(daemon, pid="creator", pane="%1")
+    _make_participant(
+        daemon, pid="child", pane="%2", parent_id="creator", dead=True, launch_provenance=_prov()
+    )
+    created = await client.call("checkpoint.create", caller_id="creator", name="cp")
+
+    result = await client.call(
+        "checkpoint.restore",
+        checkpoint_id=created["checkpoint_id"],
+        approval="yolo",
+        caller_id="creator",
+    )
+
+    assert result["creator"]["action"] == "reused_live"
+    assert result["creator"]["original_participant_id"] == "creator"
+    assert result["creator"]["new_participant_id"] == "creator"
+    assert len(result["descendants"]) == 1
+    child_report = result["descendants"][0]
+    assert child_report["original_participant_id"] == "child"
+    assert child_report["action"] == "respawned"
+    assert result["restore_state"] == "restored"
+
+
+async def test_restore_v2_descendant_of_creator_still_rejected(client, daemon, fake_tmux):
+    """A child of the creator restoring the creator's checkpoint is still blocked.
+
+    Unlike the creator itself, a distinct descendant caller would have to
+    await a job sent to its own ancestor — that's the real deadlock.
+    """
+    _make_participant(daemon, pid="creator", pane="%1")
+    _make_participant(daemon, pid="child", pane="%2", parent_id="creator")
+    created = await client.call("checkpoint.create", caller_id="creator", name="cp")
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "checkpoint.restore",
+            checkpoint_id=created["checkpoint_id"],
+            approval="yolo",
+            caller_id="child",
+        )
+    assert exc.value.code == "bad_request"
+    assert "cycle" in str(exc.value)
+
+
+async def test_restore_v2_dead_self_claim_rejected(client, daemon, fake_tmux):
+    """A caller_id that names the creator but is not actually live is refused.
+
+    `_caller_participant` only checks that the row exists, not that it is
+    live, so nothing else stops a stale/dead creator id from being passed as
+    caller_id. Without this guard, restore_tree's "live creator keeps its own
+    parent" branch would run against a DEAD row and set the node's parent to
+    itself.
+    """
+    _make_participant(daemon, pid="creator", pane="%1")
+    created = await client.call("checkpoint.create", caller_id="creator", name="cp")
+    daemon.store.set_status("creator", Status.DEAD)
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "checkpoint.restore",
+            checkpoint_id=created["checkpoint_id"],
+            approval="yolo",
+            caller_id="creator",
+        )
+    assert exc.value.code == "bad_request"
+    assert "not currently live" in str(exc.value)
+
+
+async def test_restore_v2_external_self_restore_still_rejected(client, daemon, fake_tmux):
+    """Self-restore does not bypass the live-creator addressability rule.
+
+    An EXTERNAL (paneless) live creator misclassifies inside restore_tree
+    (stale_live/failed) regardless of who calls restore, so self-restore must
+    still be refused up front rather than produce a broken partial/failed
+    result.
+    """
+    creator = Participant(id="creator", harness="vibe", tier=Tier.EXTERNAL, cwd="/tmp")
+    daemon.store.upsert_participant(creator)
     created = await client.call("checkpoint.create", caller_id="creator", name="cp")
 
     with pytest.raises(RemoteError) as exc:
@@ -744,7 +1120,74 @@ async def test_restore_v2_self_restore_rejected(client, daemon, fake_tmux):
             caller_id="creator",
         )
     assert exc.value.code == "bad_request"
-    assert "self-restore" in str(exc.value)
+    assert "EXTERNAL" in str(exc.value)
+
+
+async def test_restore_v2_no_pane_self_restore_still_rejected(client, daemon, fake_tmux):
+    """Self-restore of a live-but-paneless creator is still refused."""
+    creator = Participant(id="creator", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp")
+    daemon.store.upsert_participant(creator)
+    created = await client.call("checkpoint.create", caller_id="creator", name="cp")
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "checkpoint.restore",
+            checkpoint_id=created["checkpoint_id"],
+            approval="yolo",
+            caller_id="creator",
+        )
+    assert exc.value.code == "bad_request"
+    assert "no pane" in str(exc.value)
+
+
+async def test_restore_v2_self_restore_creator_dies_during_pane_check(
+    client, daemon, fake_tmux, monkeypatch
+):
+    """TOCTOU: the self-restoring creator dies between preflight and its pane check.
+
+    The preflight liveness check only proves the creator was live at claim
+    time. Simulates it dying in the window inside restore_tree's own
+    processing of the creator node (during the pane-info lookup) and asserts
+    this does NOT produce a self-referential parent (new_parent_id == orig_id)
+    or a resumed/respawned node — it must report `failed` and cascade to
+    ancestor-skipped descendants, exactly like any other creator failure.
+    """
+    import theater.daemon.recovery as recovery_mod
+
+    _make_participant(daemon, pid="creator", pane="%1")
+    _make_participant(
+        daemon, pid="child", pane="%2", parent_id="creator", dead=True, launch_provenance=_prov()
+    )
+    created = await client.call("checkpoint.create", caller_id="creator", name="cp")
+
+    real_get_pane_info = recovery_mod._get_pane_info
+
+    async def _die_during_pane_check(daemon, pane_id):
+        daemon.store.set_status("creator", Status.DEAD)
+        return await real_get_pane_info(daemon, pane_id)
+
+    monkeypatch.setattr(recovery_mod, "_get_pane_info", _die_during_pane_check)
+
+    result = await client.call(
+        "checkpoint.restore",
+        checkpoint_id=created["checkpoint_id"],
+        approval="yolo",
+        caller_id="creator",
+    )
+
+    assert result["creator"]["action"] == "failed"
+    assert result["creator"]["new_parent_id"] != "creator"
+    assert "self-referential" in result["creator"]["reason"]
+    # The report must reflect the freshly re-fetched dead row, not the stale
+    # live snapshot captured before the race — otherwise it would misreport
+    # a dead node as still live.
+    assert result["creator"]["status"] == "dead"
+    assert result["restore_state"] == "failed"
+    child_report = next(
+        r for r in result["descendants"] if r["original_participant_id"] == "child"
+    )
+    assert child_report["action"] == "skipped"
+    assert child_report["classification"] == "ancestor_skipped"
 
 
 # ---- v2 restore: cycle guard -----------------------------------------------
@@ -921,6 +1364,55 @@ async def test_checkpoint_restore_v1_live_creator(client, daemon, fake_tmux):
     assert "restored_parent" in result
     assert result["restored_parent"]["action"] == "reused_live"
     assert result["restored_parent"]["participant_id"] == "v1-creator"
+
+
+async def test_checkpoint_restore_v1_self_restore_allowed(client, daemon, fake_tmux):
+    """A v1 (legacy) checkpoint's creator may restore its own checkpoint."""
+    _make_participant(daemon, pid="v1-creator", pane="%1")
+
+    v1_snapshot = json.dumps([])
+    cid = daemon.store.create_checkpoint(
+        participant_id="v1-creator",
+        name="v1-self",
+        jobs_snapshot=v1_snapshot,
+    )
+
+    result = await client.call(
+        "checkpoint.restore",
+        checkpoint_id=cid,
+        approval="yolo",
+        caller_id="v1-creator",
+    )
+
+    assert result["restored_parent"]["action"] == "reused_live"
+    assert result["restored_parent"]["participant_id"] == "v1-creator"
+
+
+async def test_checkpoint_restore_v1_dead_self_claim_rejected(client, daemon, fake_tmux):
+    """A caller_id naming a v1 checkpoint's creator, who is not actually live, is refused.
+
+    Mirrors the v2 guard: `_caller_participant` only checks the row exists,
+    not that it is live, so a stale/dead creator id passed as caller_id must
+    be rejected explicitly rather than treated as a live self-restore.
+    """
+    _make_participant(daemon, pid="v1-creator", pane="%1", dead=True)
+
+    v1_snapshot = json.dumps([])
+    cid = daemon.store.create_checkpoint(
+        participant_id="v1-creator",
+        name="v1-dead-self",
+        jobs_snapshot=v1_snapshot,
+    )
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "checkpoint.restore",
+            checkpoint_id=cid,
+            approval="yolo",
+            caller_id="v1-creator",
+        )
+    assert exc.value.code == "bad_request"
+    assert "not currently live" in str(exc.value)
 
 
 # ---- launch_provenance in spawner -------------------------------------------

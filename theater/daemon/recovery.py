@@ -482,12 +482,19 @@ def _subtree_needs_participant(
     node_id: str,
     nodes_by_id: dict[str, dict],
     live_jobs_by_handle: dict[str, dict],
+    *,
+    revive_completed: bool = False,
 ) -> bool:
     """Whether a completed node is still required as a lineage anchor.
 
     A descendant that is live, resumable, respawnable, or observably incomplete
     still needs its recorded parent to exist. Looking only for a ``running`` job
     misses idle live descendants and retained sessions whose job row aged out.
+
+    ``revive_completed`` must be forwarded so a settled descendant with a revive
+    path (trusted session or launch provenance) counts as "needs its parent":
+    otherwise the lineage-anchor check classifies it ``completed`` and the whole
+    subtree the flag is meant to revive is dropped as ``ancestor_skipped``.
     """
     for desc_id in _snapshot_descendant_ids(node_id, nodes_by_id):
         desc_recorded = nodes_by_id[desc_id]
@@ -500,6 +507,7 @@ def _subtree_needs_participant(
             desc_live,
             live_jobs_by_handle,
             pane_info=_PANE_INFO_TMUX_UNAVAILABLE,
+            revive_completed=revive_completed,
         )
         if classification != "completed":
             return True
@@ -598,6 +606,10 @@ class TreeRestoreResult:
     descendant_reports: list[NodeRestoreReport]
     counts: dict = field(default_factory=dict)
     system_warnings: list[str] = field(default_factory=list)
+    #: Whether this restore ran in revive mode (settled work relaunched for
+    #: iteration). Recorded so the audit trail distinguishes a revived node from
+    #: a crash-recovered one — their per-node reasons are otherwise identical.
+    revive_completed: bool = False
 
     @property
     def all_reports(self) -> list[NodeRestoreReport]:
@@ -626,6 +638,7 @@ class TreeRestoreResult:
             "restore_state": self.restore_state,
             "restored_by": self.restored_by,
             "approval": self.approval,
+            "revive_completed": self.revive_completed,
             "summary": {
                 "total": self.counts.get("total", 0),
                 "successful": self.counts.get("successful", 0),
@@ -675,6 +688,7 @@ def classify_node(  # noqa: PLR0912
     live_jobs_by_handle: dict[str, dict],
     *,
     pane_info: dict | object | None = _PANE_INFO_TMUX_UNAVAILABLE,
+    revive_completed: bool = False,
 ) -> tuple[str, str]:
     """Return (classification, reason) for a recorded snapshot node.
 
@@ -682,6 +696,13 @@ def classify_node(  # noqa: PLR0912
       - dict with 'harness' key: tmux confirmed pane exists.
       - None: tmux confirmed pane is gone → ``stale_live``.
       - ``_PANE_INFO_TMUX_UNAVAILABLE``: tmux not queryable; trust DB row.
+
+    ``revive_completed``: when True, a dead/GC'd node whose recorded work is
+    terminal is NOT short-circuited to ``completed``. Instead it falls through
+    to the resume (trusted session) / respawn (launch provenance) branches so a
+    settled tree can be brought back to life for iteration. It only stays
+    ``completed`` when there is no usable revive path. Default False preserves
+    crash-recovery semantics (finished work is not relaunched).
 
     stale_live and live_harness_conflict are never reused as live; they are
     treated as dead and classified further using provenance/session rules.
@@ -722,7 +743,11 @@ def classify_node(  # noqa: PLR0912
         has_inbound_spawn = any(
             j.get("kind") == "spawn" and j.get("target_id") == orig_id for j in node_jobs
         )
-        if has_inbound_spawn and _node_is_complete(recorded, live_jobs_by_handle):
+        if (
+            not revive_completed
+            and has_inbound_spawn
+            and _node_is_complete(recorded, live_jobs_by_handle)
+        ):
             return "completed", "dead with all inbound spawn jobs terminal; work is done"
 
         # Check for native resume (retained trusted session).
@@ -772,7 +797,7 @@ def classify_node(  # noqa: PLR0912
                 if live is None or live["state"] == "running":
                     all_terminal = False
                     break
-            if all_terminal:
+            if all_terminal and not revive_completed:
                 return "completed", "GC'd; all inbound spawn jobs terminal; work is done"
         return "respawnable", "pruned from DB but snapshot has launch_provenance"
 
@@ -1147,6 +1172,7 @@ def preflight_topology(  # noqa: PLR0912, PLR0915
     checkpoint_id: int,
     snapshot: dict,
     caller_id: str,
+    revive_completed: bool = False,
 ) -> None:
     """Project the complete post-restore lineage before the atomic claim.
 
@@ -1155,6 +1181,13 @@ def preflight_topology(  # noqa: PLR0912, PLR0915
     resumable/respawnable node a virtual id, applies eligible live reparenting,
     carries post-checkpoint descendants with their live ancestor, and then
     evaluates cycles, final depths, and per-root counts on that graph.
+
+    ``revive_completed`` MUST match the value passed to ``restore_tree``: under
+    the flag, settled nodes that would otherwise classify ``completed`` become
+    respawnable/resumable and DO spawn, so they must be counted here (depth,
+    per-root budget, cycles) before the claim. Omitting it lets a predictable
+    rail violation slip past preflight and surface post-claim as a per-node
+    failure, which finalises the checkpoint ``partial`` (terminal) — burning it.
     """
     from sqlalchemy import select
 
@@ -1240,9 +1273,10 @@ def preflight_topology(  # noqa: PLR0912, PLR0915
             live_p,
             live_jobs,
             pane_info=_PANE_INFO_TMUX_UNAVAILABLE,
+            revive_completed=revive_completed,
         )
         if classification == "completed" and _subtree_needs_participant(
-            daemon, orig_id, nodes_by_id, live_jobs
+            daemon, orig_id, nodes_by_id, live_jobs, revive_completed=revive_completed
         ):
             if (
                 live_p is not None
@@ -1303,6 +1337,7 @@ async def restore_tree(  # noqa: PLR0912, PLR0915
     caller_id: str,
     approval: str,
     token: str,
+    revive_completed: bool = False,
 ) -> dict:
     """Restore the orchestration tree from a v2 snapshot.
 
@@ -1311,6 +1346,11 @@ async def restore_tree(  # noqa: PLR0912, PLR0915
 
     ``partial`` is a terminal state — this function never reads prior_progress
     to retry. The progress blob is audit-only.
+
+    ``revive_completed``: opt-in. When True, dead nodes whose recorded work is
+    terminal are resumed/respawned instead of skipped, so a settled tree can be
+    brought back for iteration. See ``classify_node``. The stale-live safety
+    path (``_classify_as_dead``) is intentionally not overridden.
     """
     from sqlalchemy import select
 
@@ -1353,7 +1393,11 @@ async def restore_tree(  # noqa: PLR0912, PLR0915
             pane_info_result = await _get_pane_info(daemon, live_participant.tmux_pane)
 
         classification, reason = classify_node(
-            recorded, live_participant, live_jobs_by_handle, pane_info=pane_info_result
+            recorded,
+            live_participant,
+            live_jobs_by_handle,
+            pane_info=pane_info_result,
+            revive_completed=revive_completed,
         )
 
         # A pane that tmux conclusively says is gone can be transitioned through
@@ -1373,6 +1417,7 @@ async def restore_tree(  # noqa: PLR0912, PLR0915
                 live_participant,
                 live_jobs_by_handle,
                 pane_info=_PANE_INFO_TMUX_UNAVAILABLE,
+                revive_completed=revive_completed,
             )
         elif classification == "live_harness_conflict":
             classification = "failed"
@@ -1390,7 +1435,7 @@ async def restore_tree(  # noqa: PLR0912, PLR0915
         # nodes with open work, it must be a lineage anchor — not silently skipped.
         # Force to respawnable (if provenance) or failed so descendants can proceed.
         if classification == "completed" and _subtree_needs_participant(
-            daemon, orig_id, nodes_by_id, live_jobs_by_handle
+            daemon, orig_id, nodes_by_id, live_jobs_by_handle, revive_completed=revive_completed
         ):
             if (
                 live_participant is not None
@@ -1421,6 +1466,28 @@ async def restore_tree(  # noqa: PLR0912, PLR0915
             live_cr = daemon.store.get_participant(orig_id)
             if live_cr is not None and live_cr.status is not Status.DEAD:
                 new_parent_id: str | None = live_cr.parent_id  # live creator keeps its parent
+            elif caller_id == creator_id:
+                # Self-restore: the caller (== creator) was live at preflight
+                # but died in the window since (e.g. during the _get_pane_info
+                # await above). Falling through to `new_parent_id = caller_id`
+                # below would self-parent this node (caller_id == orig_id) —
+                # either directly, or by attaching a freshly resumed/respawned
+                # participant under its own now-dead predecessor id. There is
+                # no other legitimate parent to fall back to, so fail this
+                # node explicitly instead of producing a cyclic or
+                # misattributed lineage; the creator-failure path below then
+                # marks descendants ancestor-skipped.
+                classification = "failed"
+                reason = (
+                    f"self-restoring creator {orig_id!r} died between preflight and "
+                    f"restore; refusing to resume/respawn it under a self-referential parent"
+                )
+                new_parent_id = None
+                # Use the freshly re-fetched (dead/missing) row for the report,
+                # not the stale live snapshot from the top of the loop — the
+                # report's final_status/session must reflect that the node is
+                # actually dead now, not the live state it had a moment ago.
+                live_participant = live_cr
             else:
                 new_parent_id = caller_id
         else:
@@ -1611,6 +1678,7 @@ async def restore_tree(  # noqa: PLR0912, PLR0915
             "by_action": action_counts,
         },
         system_warnings=[halt_reason] if halt_reason else [],
+        revive_completed=revive_completed,
     )
 
     # Build deduplicated top-level jobs list.
@@ -2107,8 +2175,13 @@ async def restore_checkpoint(
     approval: str,
     token: str,
     snapshot_data: Any,
+    revive_completed: bool = False,
 ) -> dict:
-    """Dispatch to v2 or v1 restore. Called after the claim is acquired."""
+    """Dispatch to v2 or v1 restore. Called after the claim is acquired.
+
+    ``revive_completed`` applies only to v2 tree restores; v1 (creator-only)
+    restore never skips, so the flag has no effect there.
+    """
     if is_v2_snapshot(snapshot_data):
         return await restore_tree(
             daemon,
@@ -2117,6 +2190,7 @@ async def restore_checkpoint(
             caller_id=caller_id,
             approval=approval,
             token=token,
+            revive_completed=revive_completed,
         )
 
     return await _restore_v1(

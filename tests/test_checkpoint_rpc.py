@@ -445,18 +445,17 @@ async def test_checkpoint_read_on_another_participants_checkpoint(client, daemon
     assert read["checkpoint"]["participant_id"] == creator["id"]
 
 
-async def test_checkpoint_creator_cannot_self_restore_after_global_list(client, daemon):
-    caller = await client.call("hello", id="caller", harness="vibe", cwd="/tmp")
+async def test_checkpoint_creator_can_self_restore_after_global_list(client, daemon, fake_tmux):
+    caller = await client.call("hello", id="caller", harness="vibe", cwd="/tmp", pane="%1")
     created = await client.call("checkpoint.create", caller_id=caller["id"], name="cp")
-    with pytest.raises(RemoteError) as exc:
-        await client.call(
-            "checkpoint.restore",
-            checkpoint_id=created["checkpoint_id"],
-            approval="yolo",
-            caller_id=caller["id"],
-        )
-    assert exc.value.code == "bad_request"
-    assert "self-restore" in str(exc.value)
+    result = await client.call(
+        "checkpoint.restore",
+        checkpoint_id=created["checkpoint_id"],
+        approval="yolo",
+        caller_id=caller["id"],
+    )
+    assert result["creator"]["action"] == "reused_live"
+    assert result["creator"]["original_participant_id"] == caller["id"]
 
 
 async def test_checkpoint_full_loop_a_creates_a_dies_b_lists_b_restores(client, daemon):
@@ -552,18 +551,16 @@ async def test_checkpoint_restore_rejects_invalid_approval(client, daemon):
     assert exc.value.code == "bad_request"
 
 
-async def test_checkpoint_restore_rejects_self_restore(client, daemon):
-    caller = await client.call("hello", id="caller", harness="vibe", cwd="/tmp")
+async def test_checkpoint_restore_allows_self_restore(client, daemon, fake_tmux):
+    caller = await client.call("hello", id="caller", harness="vibe", cwd="/tmp", pane="%1")
     created = await client.call("checkpoint.create", caller_id=caller["id"], name="cp")
-    with pytest.raises(RemoteError) as exc:
-        await client.call(
-            "checkpoint.restore",
-            checkpoint_id=created["checkpoint_id"],
-            approval="yolo",
-            caller_id=caller["id"],
-        )
-    assert exc.value.code == "bad_request"
-    assert "self-restore" in str(exc.value)
+    result = await client.call(
+        "checkpoint.restore",
+        checkpoint_id=created["checkpoint_id"],
+        approval="yolo",
+        caller_id=caller["id"],
+    )
+    assert result["creator"]["action"] == "reused_live"
 
 
 async def test_checkpoint_restore_rejects_missing_checkpoint(client):
@@ -589,6 +586,98 @@ async def test_checkpoint_restore_rejects_external_parent(client, daemon):
         )
     assert exc.value.code == "bad_request"
     assert "EXTERNAL" in str(exc.value)
+
+
+async def test_checkpoint_restore_accepts_revive_completed(client, daemon, fake_tmux):
+    """checkpoint.restore accepts revive_completed; it revives a settled dead tree.
+
+    Omitting the flag defaults to false (settled work stays skipped); passing
+    true respawns a dead child that has usable launch provenance.
+    """
+    import json
+
+    from theater.models import Participant, Status, Tier
+
+    prov = json.dumps({"cwd_resolved": "/tmp", "cwd_requested": "/tmp", "approval": "yolo"})
+
+    def _tree():
+        daemon.store.upsert_participant(
+            Participant(id="cr", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%1")
+        )
+        daemon.store.upsert_participant(
+            Participant(
+                id="kid",
+                harness="vibe",
+                tier=Tier.SPAWNED,
+                cwd="/tmp",
+                tmux_pane="%2",
+                parent_id="cr",
+                launch_provenance=prov,
+            )
+        )
+        daemon.store.set_status("kid", Status.DEAD)
+        daemon.store.create_job(
+            Job(
+                handle="spawn-kid",
+                caller_id="cr",
+                target_id="kid",
+                kind="spawn",
+                prompt="",
+                state=JobState.DONE,
+                result=None,
+                error_code=None,
+                created_at=1.0,
+                finished_at=2.0,
+            )
+        )
+
+    _tree()
+    await client.call("hello", id="restorer", harness="vibe", cwd="/tmp")
+    # Two checkpoints of the same settled tree: a restore is terminal, so each
+    # variant needs its own checkpoint. The default restore is a no-op (skip),
+    # so it leaves the tree dead for the revive restore to act on.
+    cp_default = await client.call("checkpoint.create", caller_id="cr", name="cp-default")
+    cp_revive = await client.call("checkpoint.create", caller_id="cr", name="cp-revive")
+
+    # Default (omitted) → settled child skipped.
+    default_result = await client.call(
+        "checkpoint.restore",
+        checkpoint_id=cp_default["checkpoint_id"],
+        approval="yolo",
+        caller_id="restorer",
+    )
+    assert default_result["descendants"][0]["action"] == "skipped"
+
+    # Explicit revive_completed=True → child respawned.
+    revive_result = await client.call(
+        "checkpoint.restore",
+        checkpoint_id=cp_revive["checkpoint_id"],
+        approval="yolo",
+        caller_id="restorer",
+        revive_completed=True,
+    )
+    assert revive_result["descendants"][0]["action"] == "respawned"
+
+
+async def test_checkpoint_restore_rejects_non_bool_revive_completed(client, daemon):
+    """revive_completed is strictly validated: a truthy 'false' string is rejected.
+
+    The flag spawns processes and replays prompts, so it must not be coerced the
+    way read-only flags are — 'false' would otherwise become True.
+    """
+    caller = await client.call("hello", id="caller", harness="vibe", cwd="/tmp")
+    created = await client.call("checkpoint.create", caller_id=caller["id"], name="cp")
+    restorer = await client.call("hello", id="restorer", harness="vibe", cwd="/tmp")
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "checkpoint.restore",
+            checkpoint_id=created["checkpoint_id"],
+            approval="yolo",
+            caller_id=restorer["id"],
+            revive_completed="false",
+        )
+    assert exc.value.code == "bad_request"
+    assert "revive_completed must be a boolean" in str(exc.value)
 
 
 async def test_checkpoint_restore_pruned_parent_returns_failed_result(client, daemon):
