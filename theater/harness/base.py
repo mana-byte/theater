@@ -250,7 +250,7 @@ class ResumeLaunchOverlay:
     ``plan_launch`` has run:
 
     - ``env``: extra environment variables (or overrides for plan env) that
-      the successor process needs. Merged as ``{**plan.env, **overlay.env}```,
+      the successor process needs. Merged as ``{**plan.env, **overlay.env}``,
       so the overlay wins on conflict.
     - ``transcript_domain``: the namespace to persist on the successor row.
       ``None`` means *no override* — core keeps whatever ``plan_launch``

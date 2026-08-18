@@ -361,21 +361,45 @@ async def test_opencode_refuses_mismatched_domain(registry, monkeypatch):
 # ---- point 6: alias-stored harness resolves at all three canonical sites ----
 
 
-async def test_alias_resolves_at_validate_resume_identity(registry, monkeypatch, fake_tmux):
-    """Point 6: an alias-stored harness row resolves at _validate_resume_identity."""
+def _alias_predecessor(registry, *, alias, canonical, session_id, live=False, pane=None):
+    """Create a participant whose stored harness is an alias spelling.
 
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
-    # Register a predecessor stored under the alias "claude-code".
+    ``registry.register`` normalizes the harness at line 243, so calling it
+    with ``harness="claude-code"`` stores ``"claude"`` and defeats the test.
+    To get a genuinely alias-stored row we register under the canonical name,
+    then mutate ``p.harness`` to the alias and re-upsert — bypassing the
+    normalizer. Assert the stored spelling is the alias before returning.
+    """
     p = registry.register(
-        harness="claude-code",
-        pane=None,
+        harness=canonical,
+        pane=pane,
         cwd="/tmp",
-        session_id="sess-alias-1",
+        session_id=session_id,
     )
+    p.harness = alias
     p.session_correlation = "exact"
     registry.store.upsert_participant(p)
-    registry.mark_dead(p.id)
-    # Resume with the canonical name "claude" — must still find the row.
+    # Verify the alias spelling survived in the store.
+    stored = registry.store.get_participant(p.id)
+    assert stored.harness == alias, (
+        f"expected alias {alias!r} in store, got {stored.harness!r}; "
+        "registry.register normalized the harness and the test is hollow"
+    )
+    if not live:
+        registry.mark_dead(p.id)
+    return p
+
+
+async def test_alias_resolves_at_validate_resume_identity(registry, monkeypatch, fake_tmux):
+    """Point 6: an alias-stored harness row resolves at _validate_resume_identity.
+
+    Mutation: revert ``normalize_harness(participant.harness) == canonical`` to
+    ``participant.harness == req.harness`` in ``_validate_resume_identity``.
+    This test dies with ``BadRequest: no trusted dead ... binding`` because
+    the alias-stored row is not found by raw comparison.
+    """
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    _alias_predecessor(registry, alias="claude-code", canonical="claude", session_id="sess-alias-1")
     spawner = Spawner(registry)
     req = SpawnRequest(
         harness="claude",
@@ -384,32 +408,42 @@ async def test_alias_resolves_at_validate_resume_identity(registry, monkeypatch,
         approval="manual",
         resume="sess-alias-1",
     )
-    # Should not raise "no trusted" — the alias-stored row is found.
-    # (Claude may raise for other reasons, but not "no trusted".)
+    # The spawn must NOT raise "no trusted" — the alias-stored row must be
+    # found by canonical comparison. A raw comparison would miss it.
+    # Claude's resume_launch_overlay may raise for a domainless predecessor,
+    # but that is a *different* error than "no trusted". We assert positively:
+    # the identity gate passed, meaning the predecessor was found.
     try:
         await spawner.spawn(req)
     except BadRequest as exc:
-        assert "no trusted" not in str(exc), (
-            "alias-stored row was not found by canonical name at _validate_resume_identity"
-        )
+        if "no trusted" in str(exc):
+            pytest.fail("alias-stored row was not found at _validate_resume_identity: " + str(exc))
+        # Any other BadRequest means identity validation passed and a later
+        # gate refused — the canonical filter worked.
 
 
 async def test_alias_resolves_at_resume_state_peer_scan(registry, monkeypatch):
     """Point 6: an alias-stored harness row resolves at the methods.py
-    _resume_state peer scan."""
+    _resume_state peer scan.
+
+    Mutation: revert ``normalize(other.harness) == normalize(p.harness)`` to
+    ``other.harness == p.harness`` in the ``_resume_state`` peer loop.
+    This test dies with ``state == "resumable"`` instead of
+    ``"owned_by_live"`` because the alias-stored live peer is not found.
+    """
     from theater.daemon.methods import _resume_state
 
     # A live peer stored under alias "claude-code" should be found when
-    # checking a row stored under canonical "claude".
-    live = registry.register(
-        harness="claude-code",
-        pane="%99",
-        cwd="/tmp",
+    # checking a dead row stored under canonical "claude".
+    _alias_predecessor(
+        registry,
+        alias="claude-code",
+        canonical="claude",
         session_id="sess-peer-1",
+        live=True,
+        pane="%99",
     )
-    live.session_correlation = "exact"
-    registry.store.upsert_participant(live)
-    # The subject row is dead, stored under "claude".
+    # The subject row is dead, stored under canonical "claude".
     dead = registry.register(
         harness="claude",
         pane=None,
@@ -422,23 +456,26 @@ async def test_alias_resolves_at_resume_state_peer_scan(registry, monkeypatch):
     live_peers = registry.list(include_dead=False)
     dead = registry.get(dead.id)
     state = _resume_state(dead, live_peers)
-    assert state == "owned_by_live", f"alias-stored live peer was not found; got {state!r}"
+    assert state == "owned_by_live", (
+        f"alias-stored live peer was not found; got {state!r}. "
+        "The peer scan must use normalize() to match an alias-stored row."
+    )
 
 
 async def test_alias_resolves_at_resolve_resume_reference(registry, monkeypatch, fake_tmux):
     """Point 6: an alias-stored harness row resolves at _resolve_resume_reference
-    (resume=<participant-id>)."""
+    (resume=<participant-id>).
+
+    Mutation: revert
+    ``normalize_harness(participant.harness) != normalize_harness(req.harness)``
+    to ``participant.harness != req.harness`` in ``_resolve_resume_reference``.
+    This test dies with ``BadRequest: belongs to harness`` because the
+    alias-stored row's harness does not match the request by raw comparison.
+    """
     monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
-    # Register a predecessor stored under the alias "claude-code".
-    p = registry.register(
-        harness="claude-code",
-        pane=None,
-        cwd="/tmp",
-        session_id="sess-alias-pid",
+    p = _alias_predecessor(
+        registry, alias="claude-code", canonical="claude", session_id="sess-alias-pid"
     )
-    p.session_correlation = "exact"
-    registry.store.upsert_participant(p)
-    registry.mark_dead(p.id)
     # Resume by participant id with the canonical name "claude".
     spawner = Spawner(registry)
     req = SpawnRequest(
@@ -448,13 +485,15 @@ async def test_alias_resolves_at_resolve_resume_reference(registry, monkeypatch,
         approval="manual",
         resume=p.id,
     )
-    # Should not raise "belongs to harness" — the alias is canonically "claude".
+    # The spawn must NOT raise "belongs to harness" — the alias is
+    # canonically "claude" and _resolve_resume_reference must accept it.
     try:
         await spawner.spawn(req)
     except BadRequest as exc:
-        assert "belongs to harness" not in str(exc), (
-            "alias-stored row was rejected at _resolve_resume_reference"
-        )
+        if "belongs to harness" in str(exc):
+            pytest.fail("alias-stored row was rejected at _resolve_resume_reference: " + str(exc))
+        # Any other BadRequest means the reference resolved and a later gate
+        # refused — the canonical filter worked.
 
 
 # ---- point 7: marker key file absent after validation ----
