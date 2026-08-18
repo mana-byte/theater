@@ -71,6 +71,13 @@ def test_canonical_location_path_with_colon_not_treated_as_opaque(tmp_path):
     assert resolved == str(f.resolve())
 
 
+def test_canonical_location_file_scheme_is_opaque_verbatim():
+    # file:// names a file but is deliberately opaque — core interprets no
+    # scheme. If file-URI support is ever wanted, conversion happens in the
+    # adapter, not here.
+    assert _canonical_location("file:///tmp/transcript.jsonl") == "file:///tmp/transcript.jsonl"
+
+
 # --- _same_location ----------------------------------------------------------
 
 
@@ -85,6 +92,14 @@ def test_same_location_opaque_does_not_match_different_session():
 def test_same_location_opaque_does_not_match_path():
     assert not _same_location("nova://abc123", "/tmp/transcript.jsonl")
     assert not _same_location("/tmp/transcript.jsonl", "nova://abc123")
+
+
+def test_same_location_file_scheme_does_not_match_equivalent_path():
+    # file:// is deliberately opaque like any other scheme; core interprets no
+    # scheme, so a file URI and the path it names are different locations.
+    # This is the assertion that blocks the tempting special-case.
+    assert not _same_location("file:///tmp/x.jsonl", "/tmp/x.jsonl")
+    assert not _same_location("/tmp/x.jsonl", "file:///tmp/x.jsonl")
 
 
 def test_same_location_opencode_regression_guard():
