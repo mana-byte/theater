@@ -91,7 +91,8 @@ from theater.tmux.presence import human_present
 from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
     TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
-    is_opaque_location,
+    canonical_location,
+    same_location,
     transcript_identity_recovery_message,
 )
 
@@ -171,7 +172,7 @@ _CHECKPOINT_JOB_KEYS = (
 )
 CLAUDE_RECEIPT_RPC = "claude.receipt"
 TRANSCRIPT_RECEIPT_RPC = "transcript.receipt"
-CLAUDE_RECEIPT_BUS_KIND = "agent.transcript_receipt"
+TRANSCRIPT_RECEIPT_BUS_KIND = "agent.transcript_receipt"
 
 
 def method(name: str) -> Callable[[Handler], Handler]:
@@ -237,12 +238,13 @@ def _reject_cross_participant_receipt(
     session_id: str,
     transcript_location: str,
 ) -> None:
+    canonical_harness = normalize(harness)
     for other in daemon.registry.list(include_dead=True):
         if other.id == participant_id:
             continue
-        if other.harness != harness:
+        if normalize(other.harness) != canonical_harness:
             continue
-        if _same_location(other.transcript_location, transcript_location):
+        if same_location(other.transcript_location, transcript_location):
             raise BadRequest("transcript receipt location is already owned by another participant")
         if other.session_id == session_id and provenance_at_least(
             other.session_correlation, TranscriptProvenance.OPERATOR
@@ -275,16 +277,17 @@ def _reject_unbound_same_cwd_receipt(
     # competitor, the remaining trust boundary is the local Unix user that
     # can read Theater's private token.
     cwd = Path(participant.cwd).resolve()
+    canonical_harness = normalize(harness)
     for other in daemon.registry.list():
         if (
             other.id == participant_id
             or other.status is Status.DEAD
-            or other.harness != harness
+            or normalize(other.harness) != canonical_harness
             or not other.cwd
             or Path(other.cwd).resolve() != cwd
         ):
             continue
-        if session_id == participant_session_id or _same_location(
+        if session_id == participant_session_id or same_location(
             participant_location, transcript_location
         ):
             return
@@ -551,7 +554,7 @@ async def _transcript_receipt(daemon, params: dict) -> dict:
 
     # Resolve the observer through the daemon's harness registry, not the
     # global HARNESSES — tests inject a daemon-local observer.
-    harness = daemon.observer.harnesses.get(participant.harness)
+    harness = daemon.observer.harnesses.get(normalize(participant.harness))
     observer = getattr(harness, "observer", None) if harness is not None else None
     if observer is None:
         raise BadRequest(
@@ -607,7 +610,7 @@ async def _transcript_receipt(daemon, params: dict) -> dict:
     admission = daemon.observer.transcript_receipt(pid, location=location, session_id=session_id)
     daemon.store.renew_receipt_token(pid)
     daemon.store.bus_append(
-        CLAUDE_RECEIPT_BUS_KIND,
+        TRANSCRIPT_RECEIPT_BUS_KIND,
         to_id=pid,
         payload={"location": location, "session_id": session_id, "admission": admission},
     )
@@ -1529,7 +1532,7 @@ async def _verify_creator_pane_harness(daemon, checkpoint_id: int, creator: Part
         # Not a preflight refusal: this is a recoverable condition.
         return
     found = detect_harness(pane.current_command, pane.pane_pid)
-    verdict = compare_detected_harness(creator.harness, found, pane.current_command)
+    verdict = compare_detected_harness(normalize(creator.harness), found, pane.current_command)
     if verdict is PaneHarnessVerdict.CONFLICT:
         raise BadRequest(
             f"checkpoint {checkpoint_id!r}: creator {creator.id!r} pane "
@@ -1764,7 +1767,7 @@ async def _check_pane_identity(daemon, target, refuse: Callable[..., NoReturn]) 
         )
 
     found = detect_harness(pane.current_command, pane.pane_pid)
-    verdict = compare_detected_harness(target.harness, found, pane.current_command)
+    verdict = compare_detected_harness(normalize(target.harness), found, pane.current_command)
     if verdict is PaneHarnessVerdict.MATCH:
         return
     if verdict is PaneHarnessVerdict.CONFLICT:
@@ -2116,32 +2119,15 @@ async def _shutdown(daemon, params: dict) -> dict:
 _READABLE = ("assistant", "user", "tool_call", "tool_result")
 
 
-def _canonical_location(value: str) -> str:
-    if is_opaque_location(value):
-        return value
-    return str(Path(value).expanduser().resolve())
-
-
-def _same_location(a: str | None, b: str) -> bool:
-    if a is None:
-        return False
-    if is_opaque_location(a) or is_opaque_location(b):
-        return a == b
-    try:
-        return str(Path(a).resolve()) == str(Path(b).resolve())
-    except OSError:
-        return a == b
-
-
 def _candidate_owner(daemon, location: str, *, exclude: str | None = None):
     for other in daemon.registry.list(include_dead=True):
-        if other.id != exclude and _same_location(other.transcript_location, location):
+        if other.id != exclude and same_location(other.transcript_location, location):
             return other
     return None
 
 
 def _candidate_to_dict(daemon, candidate) -> dict:
-    location = _canonical_location(candidate.location)
+    location = canonical_location(candidate.location)
     owner = _candidate_owner(daemon, location)
     return {
         "location": location,
@@ -2200,7 +2186,7 @@ async def _transcript_bind(daemon, params: dict) -> dict:
         )
     except ValueError as exc:
         raise BadRequest(f"cannot bind transcript: {exc}") from None
-    location = _canonical_location(admitted.location)
+    location = canonical_location(admitted.location)
     owner = _candidate_owner(daemon, location, exclude=pid)
     prior_owner = None
     if owner is not None:

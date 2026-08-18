@@ -83,6 +83,9 @@ from theater.harness import (
     clip,
     status_after,
 )
+from theater.harness import (
+    normalize as normalize_harness,
+)
 from theater.harness.observation import open_participant_source
 from theater.harness.source import (
     Attachment,
@@ -107,6 +110,8 @@ from theater.resume_floor import (
 )
 from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
+    canonical_location,
+    same_location,
     transcript_identity_recovery_message,
 )
 
@@ -257,7 +262,7 @@ def history_correlation_is_ambiguous(registry: Registry, pid: str, history: Hist
     for other in registry.list(include_dead=True):
         if (
             other.id == pid
-            or other.harness != participant.harness
+            or normalize_harness(other.harness) != normalize_harness(participant.harness)
             or not other.cwd
             or Path(other.cwd).resolve() != cwd
         ):
@@ -269,7 +274,9 @@ def history_correlation_is_ambiguous(registry: Registry, pid: str, history: Hist
         ):
             continue
         if other.transcript_location is not None:
-            if history.location is not None and other.transcript_location != history.location:
+            if history.location is not None and not same_location(
+                other.transcript_location, history.location
+            ):
                 continue
             return True
         if (
@@ -552,14 +559,15 @@ class Observer:
         prior_owner: str | None = None,
     ) -> None:
         """Mirror an accepted operator binding in the live collision table."""
+        loc = canonical_location(location)
         if prior_owner is not None:
             self._release_transcript(prior_owner)
             self._clear_source_errors(prior_owner, include_identity_lost=True)
             self._identity_loss_replayed.discard(prior_owner)
         self._release_transcript(pid)
-        self._bound_transcripts[location] = pid
-        self._binding_correlation[location] = str(TranscriptProvenance.OPERATOR)
-        self._binding_sessions[location] = session_id
+        self._bound_transcripts[loc] = pid
+        self._binding_correlation[loc] = str(TranscriptProvenance.OPERATOR)
+        self._binding_sessions[loc] = session_id
 
     def transcript_identity_lost(self, pid: str) -> bool:
         """Pure cached predicate; only the watch path may enter quarantine."""
@@ -654,7 +662,7 @@ class Observer:
 
     def _location_bound_to_another_live(self, pid: str, location: str) -> bool:
         """Whether *location* is claimed by a different live participant."""
-        owner = self._bound_transcripts.get(location)
+        owner = self._bound_transcripts.get(canonical_location(location))
         if owner is not None and owner != pid:
             holder = self.store.get_participant(owner)
             if holder is not None and holder.status is not Status.DEAD:
@@ -662,7 +670,7 @@ class Observer:
         for other in self.registry.list():
             if other.id == pid or other.status is Status.DEAD:
                 continue
-            if location == other.transcript_location:
+            if same_location(other.transcript_location, location):
                 return True
         return False
 
@@ -750,7 +758,7 @@ class Observer:
         for pid, p in live.items():
             if pid in self._tasks or pid in self._retired:
                 continue
-            harness = self.harnesses.get(p.harness)
+            harness = self.harnesses.get(normalize_harness(p.harness))
             if harness is None:
                 self._warn_unobservable(pid, p)
                 continue
@@ -765,13 +773,13 @@ class Observer:
             if observer.has_transcript:
                 self._restore_transcript_identity_loss(pid)
             timing.ready_lag("observer.watch", pid, p.created_at, harness=p.harness)
-            self._tasks[pid] = asyncio.create_task(watch(pid, p.harness))
+            self._tasks[pid] = asyncio.create_task(watch(pid, normalize_harness(p.harness)))
 
     def _warn_unobservable(self, pid: str, p) -> None:
         if pid in self._unobservable:
             return
         self._unobservable.add(pid)
-        if p.harness not in self.harnesses:
+        if normalize_harness(p.harness) not in self.harnesses:
             known = ", ".join(sorted(self.harnesses)) or "none"
             reason = f"harness {p.harness!r} is not one we can read (known: {known})"
         else:
@@ -1347,7 +1355,7 @@ class Observer:
         return (
             participant is not None
             and participant.transcript_location is not None
-            and attached.location != participant.transcript_location
+            and not same_location(participant.transcript_location, attached.location)
             and is_trusted_provenance(participant.session_correlation)
             and not is_trusted_provenance(attached.correlation)
         )
@@ -1412,12 +1420,13 @@ class Observer:
                 decided = True
                 self._handle_attachment_ambiguity(pid, attached)
                 return False
-            owner = self._bound_transcripts.get(attached.location)
+            owner = self._bound_transcripts.get(canonical_location(attached.location))
             if owner is not None and owner != pid:
                 holder = self.store.get_participant(owner)
                 if holder is not None and holder.status is not Status.DEAD:
+                    bound_loc = canonical_location(attached.location)
                     prior = self._binding_correlation.get(
-                        attached.location, str(TranscriptProvenance.EXACT)
+                        bound_loc, str(TranscriptProvenance.EXACT)
                     )
                     if is_trusted_provenance(attached.correlation) and not (
                         is_trusted_provenance(prior)
@@ -1475,8 +1484,9 @@ class Observer:
             )
         source.revoke_attachment()
         self._reset_watch_state.add(owner)
+        loc = canonical_location(location)
         participant = self.store.get_participant(owner)
-        bound_session = self._binding_sessions.get(location)
+        bound_session = self._binding_sessions.get(loc)
         if participant is not None:
             if participant.session_id == bound_session:
                 participant.session_id = None
@@ -1485,9 +1495,9 @@ class Observer:
             # rotation changed the participant's recorded session id.
             participant.transcript_location = None
             self.store.upsert_participant(participant)
-        self._bound_transcripts.pop(location, None)
-        self._binding_correlation.pop(location, None)
-        self._binding_sessions.pop(location, None)
+        self._bound_transcripts.pop(loc, None)
+        self._binding_correlation.pop(loc, None)
+        self._binding_sessions.pop(loc, None)
         self.store.bus_append(
             "agent.observation_error",
             to_id=owner,
@@ -1509,7 +1519,7 @@ class Observer:
             if (
                 other.id == pid
                 or other.status is Status.DEAD
-                or other.harness != participant.harness
+                or normalize_harness(other.harness) != normalize_harness(participant.harness)
                 or not other.cwd
                 or Path(other.cwd).resolve() != cwd
             ):
@@ -1535,7 +1545,7 @@ class Observer:
             if (
                 other.id == pid
                 or other.status is not Status.DEAD
-                or other.transcript_location != attached.location
+                or not same_location(other.transcript_location, attached.location)
                 or not is_trusted_provenance(other.session_correlation)
             ):
                 continue
@@ -1580,14 +1590,23 @@ class Observer:
         self, pid: str, source: Source, *, location: str, session_id: str
     ) -> str:
         result = source.admit_exact_location(location=location, session_id=session_id)
+        if result not in ("accepted", "staged"):
+            raise SourceContractError(
+                f"{type(source).__name__}.admit_exact_location() must return 'accepted' or "
+                f"'staged' (the ReceiptAdmission literal), got {result!r}. A source that "
+                "cannot admit a receipt should raise rather than return None or another value, "
+                "because a silent non-admission tells the caller the receipt worked while "
+                "nothing is persisted."
+            )
         if result == "accepted":
+            loc = canonical_location(location)
             self.store.record_transcript_receipt(
                 pid,
                 session_id=session_id,
-                transcript_location=location,
+                transcript_location=loc,
             )
-            self._binding_correlation[location] = str(TranscriptProvenance.EXACT)
-            self._binding_sessions[location] = session_id
+            self._binding_correlation[loc] = str(TranscriptProvenance.EXACT)
+            self._binding_sessions[loc] = session_id
         if result in {"accepted", "staged"}:
             # A staged exact receipt deliberately has not persisted ownership
             # yet, but it must re-arm the watcher so the reducer can inspect
@@ -1601,15 +1620,21 @@ class Observer:
         # (vibe opens a new session directory every turn) frees the old path
         # before claiming the new one.
         self._release_transcript(pid)
-        self._bound_transcripts[attached.location] = pid
-        self._binding_correlation[attached.location] = attached.correlation
-        self._binding_sessions[attached.location] = attached.session_id
+        # Canonicalise once at the source boundary: every downstream dict key
+        # and persisted field uses the canonical spelling so two sources that
+        # report ``~/t.jsonl`` and ``/Users/me/t.jsonl`` for the same file do
+        # not read as different transcripts. Opaque ``scheme://`` locations
+        # pass through unchanged.
+        loc = canonical_location(attached.location)
+        self._bound_transcripts[loc] = pid
+        self._binding_correlation[loc] = attached.correlation
+        self._binding_sessions[loc] = attached.session_id
         p = self.store.get_participant(pid)
         session_id = attached.session_id
         if p is not None:
             changed = False
-            if p.transcript_location != attached.location:
-                p.transcript_location = attached.location
+            if not same_location(p.transcript_location, loc):
+                p.transcript_location = loc
                 changed = True
             prior = normalize_provenance(p.session_correlation)
             incoming = normalize_provenance(attached.correlation)
