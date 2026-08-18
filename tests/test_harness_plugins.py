@@ -232,6 +232,45 @@ def test_two_shared_helpers_in_two_sources_do_not_collide(local_dir, shipped_dir
     assert harness_registry.get("beta")._shared_origin == "local"
 
 
+def test_a_shared_helper_executes_once_and_is_shared_between_plugins(local_dir):
+    """C4: the mangled name caches the helper in ``sys.modules``, so two
+    plugins in the same directory that import the same helper get the same
+    module object and the helper's import-time code runs exactly once.
+
+    Without mangling (``_helper_module_name`` returning the bare stem), each
+    plugin would re-execute the helper and get a distinct module object —
+    silently duplicating any state the helper holds (a client, a cache, a
+    counter). This test pins the caching property the mangling provides.
+    """
+    (local_dir / "_counter.py").write_text("executions = [0]\nexecutions[0] += 1\n")
+    (local_dir / "alpha.py").write_text(
+        BODY.format(
+            cls="AlphaHarness", name="alpha", binary="alpha", icon=repr("@"), aliases="()"
+        ).replace(
+            "class AlphaHarness(Harness):",
+            "import _counter\nclass AlphaHarness(Harness):\n    "
+            "_counter_executions = _counter.executions\n    "
+            "_counter_module = _counter",
+        )
+    )
+    (local_dir / "beta.py").write_text(
+        BODY.format(
+            cls="BetaHarness", name="beta", binary="beta", icon=repr("#"), aliases="()"
+        ).replace(
+            "class BetaHarness(Harness):",
+            "import _counter\nclass BetaHarness(Harness):\n    "
+            "_counter_executions = _counter.executions\n    "
+            "_counter_module = _counter",
+        )
+    )
+    install(local_dir)
+    alpha = harness_registry.get("alpha")
+    beta = harness_registry.get("beta")
+    assert alpha._counter_executions == [1]
+    assert beta._counter_executions == [1]
+    assert alpha._counter_module is beta._counter_module
+
+
 def test_a_broken_helper_names_the_helper_file_and_real_cause(local_dir):
     """C4: a helper with a syntax error must report the helper file and the
     real exception, not a misleading ``ModuleNotFoundError``.
@@ -283,6 +322,60 @@ def test_a_nested_helper_import_works(local_dir):
     assert harness_registry.get("acme")._derived_value == "base+derived"
     assert "_base" not in sys.modules
     assert "_derived" not in sys.modules
+
+
+def test_a_helper_that_calls_sys_exit_does_not_poison_the_cache(local_dir):
+    """R5-4: a helper calling ``sys.exit()`` raises ``SystemExit`` (a
+    ``BaseException``), which ``except Exception`` does not catch. The
+    half-executed helper would survive in ``sys.modules`` under its mangled
+    name and a later scan would reuse it as if it had loaded successfully."""
+    import sys
+
+    (local_dir / "_bye.py").write_text("VALUE = 'partial'\nimport sys; sys.exit(1)\n")
+    (local_dir / "acme.py").write_text(
+        BODY.format(
+            cls="AcmeHarness", name="acme", binary="acme", icon=repr("@"), aliases="()"
+        ).replace(
+            "class AcmeHarness(Harness):",
+            "import _bye\nclass AcmeHarness(Harness):",
+        )
+    )
+    install(local_dir)
+    rows = {r["name"]: r for r in harness_registry.describe()}
+    assert rows["acme"]["error"] is not None
+    assert "_bye" in rows["acme"]["error"]
+    # The mangled helper must not survive in sys.modules.
+    leaked = [k for k in sys.modules if k.startswith(plugins.HELPER_PREFIX) and k.endswith("_bye")]
+    assert leaked == [], f"half-executed helper survived: {leaked}"
+
+
+def test_a_helper_shadowing_a_stdlib_module_is_refused(local_dir):
+    """R5-1: a ``_``-prefixed helper whose bare name is already in
+    ``sys.modules`` (e.g. ``_json``, ``_thread``) would silently be replaced
+    by the pre-loaded module — the finder is never consulted because
+    ``sys.modules`` is checked before ``sys.meta_path``. The loader must
+    refuse the helper at scan time, naming the file and the collision.
+    """
+    import sys
+
+    # _json is a CPython built-in module, always in sys.modules.
+    assert "_json" in sys.modules
+    (local_dir / "_json.py").write_text("VALUE = 'helper'\n")
+    (local_dir / "acme.py").write_text(
+        BODY.format(
+            cls="AcmeHarness", name="acme", binary="acme", icon=repr("@"), aliases="()"
+        ).replace(
+            "class AcmeHarness(Harness):",
+            "import _json\nclass AcmeHarness(Harness):",
+        )
+    )
+    install(local_dir)
+    rows = {r["name"]: r for r in harness_registry.describe()}
+    assert rows["acme"]["error"] is not None
+    error = rows["acme"]["error"]
+    assert "_json.py" in error
+    assert "already loaded" in error
+    assert "rename" in error
 
 
 def test_non_python_files_are_ignored(local_dir):
@@ -614,6 +707,110 @@ def test_a_local_plugin_with_string_binaries_is_listed_as_broken(local_dir):
     assert "iterable of characters" in rows["bad"]["error"]
 
 
+def test_a_local_plugin_with_empty_binary_element_is_listed_as_broken(local_dir):
+    """R5-5: ``binaries = frozenset({None, ""})`` is accepted by
+    ``frozenset()`` but the elements are invalid."""
+    (local_dir / "bad.py").write_text(
+        "from theater.harness import Harness, LaunchPlan, TranscriptObserver\n"
+        "class BadObserver(TranscriptObserver):\n"
+        "    def find_transcript(self, *, cwd, session_id=None, after=None): return None\n"
+        "    def session_id(self, transcript): return None\n"
+        "    def parse(self, line, index, *, clip_text=True): return []\n"
+        "    def is_idle_screen(self, capture): return capture.endswith('> ')\n"
+        "class BadHarness(Harness):\n"
+        "    name = 'acme'; binary = 'acme'; icon = '@'\n"
+        "    binaries = frozenset({None, ''})\n"
+        "    def __init__(self): self.observer = BadObserver()\n"
+        "    def plan_launch(self, *, participant_id, prompt, config_path, approval):\n"
+        "        return LaunchPlan(argv=[self.binary, prompt], env={'ID': participant_id})\n"
+        "HARNESS = BadHarness()\n"
+    )
+    install(local_dir)
+    rows = {r["name"]: r for r in harness_registry.describe()}
+    assert rows["bad"]["source"] == "local"
+    assert "empty binary name" in rows["bad"]["error"]
+
+
+def test_a_local_plugin_with_unhashable_binary_element_gets_correct_diagnosis(local_dir):
+    """R5-5: ``binaries = [[]]`` is iterable but ``frozenset([[]])`` fails
+    with ``TypeError: unhashable type``. The error must say "not hashable",
+    not "not iterable" — a list IS iterable."""
+    (local_dir / "bad.py").write_text(
+        "from theater.harness import Harness, LaunchPlan, TranscriptObserver\n"
+        "class BadObserver(TranscriptObserver):\n"
+        "    def find_transcript(self, *, cwd, session_id=None, after=None): return None\n"
+        "    def session_id(self, transcript): return None\n"
+        "    def parse(self, line, index, *, clip_text=True): return []\n"
+        "    def is_idle_screen(self, capture): return capture.endswith('> ')\n"
+        "class BadHarness(Harness):\n"
+        "    name = 'acme'; binary = 'acme'; icon = '@'\n"
+        "    binaries = [[]]\n"
+        "    def __init__(self): self.observer = BadObserver()\n"
+        "    def plan_launch(self, *, participant_id, prompt, config_path, approval):\n"
+        "        return LaunchPlan(argv=[self.binary, prompt], env={'ID': participant_id})\n"
+        "HARNESS = BadHarness()\n"
+    )
+    install(local_dir)
+    rows = {r["name"]: r for r in harness_registry.describe()}
+    assert rows["bad"]["source"] == "local"
+    assert "not hashable" in rows["bad"]["error"]
+    assert "not iterable" not in rows["bad"]["error"]
+
+
+def test_a_local_plugin_with_a_runtime_error_raising_iterable_is_broken(local_dir):
+    """R5-3: an iterable that raises ``RuntimeError`` while being consumed
+    must become a broken plugin, not escape ``scan`` and kill the daemon."""
+    (local_dir / "bad.py").write_text(
+        "from theater.harness import Harness, LaunchPlan, TranscriptObserver\n"
+        "class _BoomIter:\n"
+        "    def __iter__(self): return self\n"
+        "    def __next__(self): raise RuntimeError('boom during consumption')\n"
+        "class BadObserver(TranscriptObserver):\n"
+        "    def find_transcript(self, *, cwd, session_id=None, after=None): return None\n"
+        "    def session_id(self, transcript): return None\n"
+        "    def parse(self, line, index, *, clip_text=True): return []\n"
+        "    def is_idle_screen(self, capture): return capture.endswith('> ')\n"
+        "class BadHarness(Harness):\n"
+        "    name = 'acme'; binary = 'acme'; icon = '@'\n"
+        "    aliases = _BoomIter()\n"
+        "    def __init__(self): self.observer = BadObserver()\n"
+        "    def plan_launch(self, *, participant_id, prompt, config_path, approval):\n"
+        "        return LaunchPlan(argv=[self.binary, prompt], env={'ID': participant_id})\n"
+        "HARNESS = BadHarness()\n"
+    )
+    assert install(local_dir) == ["claude", "codex", "opencode", "vibe"]
+    rows = {r["name"]: r for r in harness_registry.describe()}
+    assert rows["bad"]["source"] == "local"
+    assert "could not be consumed" in rows["bad"]["error"]
+
+
+def test_a_local_plugin_with_a_read_only_aliases_property_is_broken(local_dir):
+    """R5-3: a harness whose ``aliases`` setter raises ``AttributeError``
+    must become a broken plugin, not escape ``scan``."""
+    (local_dir / "bad.py").write_text(
+        "from theater.harness import Harness, LaunchPlan, TranscriptObserver\n"
+        "class BadObserver(TranscriptObserver):\n"
+        "    def find_transcript(self, *, cwd, session_id=None, after=None): return None\n"
+        "    def session_id(self, transcript): return None\n"
+        "    def parse(self, line, index, *, clip_text=True): return []\n"
+        "    def is_idle_screen(self, capture): return capture.endswith('> ')\n"
+        "class BadHarness(Harness):\n"
+        "    name = 'acme'; binary = 'acme'; icon = '@'\n"
+        "    @property\n"
+        "    def aliases(self): return ()\n"
+        "    @aliases.setter\n"
+        "    def aliases(self, value): raise AttributeError('read-only')\n"
+        "    def __init__(self): self.observer = BadObserver()\n"
+        "    def plan_launch(self, *, participant_id, prompt, config_path, approval):\n"
+        "        return LaunchPlan(argv=[self.binary, prompt], env={'ID': participant_id})\n"
+        "HARNESS = BadHarness()\n"
+    )
+    assert install(local_dir) == ["claude", "codex", "opencode", "vibe"]
+    rows = {r["name"]: r for r in harness_registry.describe()}
+    assert rows["bad"]["source"] == "local"
+    assert "could not be set" in rows["bad"]["error"]
+
+
 def test_disabling_a_plugin_stops_it_being_imported(local_dir, shipped_dir):
     """The escape hatch has to work when importing is exactly what breaks."""
     (shipped_dir / "acme.py").write_text("raise ValueError('boom')")
@@ -711,6 +908,68 @@ def test_two_plugins_cannot_claim_the_same_extra_binary(local_dir, shipped_dir):
     )
     with pytest.raises(harness_registry.ConfigError, match="already claimed by"):
         install(local_dir, shipped_dir=shipped_dir)
+
+
+def test_wrapped_binary_collides_with_unwrapped_primary(local_dir, shipped_dir):
+    """R5-2: ``_claim_binary`` must normalise the same way ``match_binary``
+    does. ``binary = "foo"`` and ``binaries = frozenset({".foo-wrapped"})``
+    are treated as distinct by a raw-string comparison but ``match_binary``
+    unwraps ``.foo-wrapped`` to ``foo`` and matches both. The guard must
+    catch this at load time."""
+    plugin(shipped_dir, "a.py", cls="Aaa", name="aaa", binary="foo")
+    (local_dir / "b.py").write_text(
+        BODY.format(cls="Bbb", name="bbb", binary="bar", icon=repr("#"), aliases="()").replace(
+            "class Bbb(Harness):",
+            "class Bbb(Harness):\n    binaries = frozenset({'.foo-wrapped'})",
+        )
+    )
+    with pytest.raises(harness_registry.ConfigError, match="already claimed by"):
+        install(local_dir, shipped_dir=shipped_dir)
+
+
+def test_path_shaped_binary_collides_with_basename(local_dir, shipped_dir):
+    """R5-2: ``match_binary`` tests ``command in names``, so a path-shaped
+    binary declaration collides with the bare basename. The guard must catch
+    this too."""
+    plugin(shipped_dir, "a.py", cls="Aaa", name="aaa", binary="/opt/foo")
+    plugin(local_dir, "b.py", cls="Bbb", name="bbb", binary="foo")
+    with pytest.raises(harness_registry.ConfigError, match="already claimed by"):
+        install(local_dir, shipped_dir=shipped_dir)
+
+
+def test_a_local_override_releases_the_shipped_binary_claims(local_dir, shipped_dir):
+    """R5-6: when a local plugin overrides a shipped one of the same name,
+    the shipped harness's binary and alias claims must be released. Otherwise
+    a binary the override drops stays claimed by the shipped harness, and a
+    later plugin claiming it is refused for no reason a user can see."""
+    # Shipped harness "acme" claims binary "foo" and alias "foo-cli".
+    plugin(
+        shipped_dir, "acme.py", cls="ShippedAcme", name="acme", binary="foo", aliases=("foo-cli",)
+    )
+    # Local override "acme" claims binary "bar" instead, dropping "foo" and "foo-cli".
+    plugin(local_dir, "acme.py", cls="LocalAcme", name="acme", binary="bar")
+    # A third plugin claiming "foo" should succeed — the shipped claim was released.
+    plugin(local_dir, "zzz.py", cls="Zzz", name="zzz", binary="foo")
+    result = install(local_dir, shipped_dir=shipped_dir)
+    assert "acme" in result
+    assert "zzz" in result
+    assert harness_registry.get("acme").binary == "bar"
+    assert harness_registry.get("zzz").binary == "foo"
+    # The alias "foo-cli" still resolves to "acme" because the override has the
+    # same name — aliases resolve to a harness name, not a file.
+    assert harness_registry.normalize("foo-cli") == "acme"
+
+
+def test_binary_collision_error_names_both_files(local_dir, shipped_dir):
+    """R5-7: the binary collision error must name both the claimant's file
+    and the previous owner's file, not just the previous harness name."""
+    plugin(shipped_dir, "a.py", cls="First", name="first", binary="nova")
+    plugin(local_dir, "b.py", cls="Second", name="second", binary="nova")
+    with pytest.raises(harness_registry.ConfigError) as exc:
+        install(local_dir, shipped_dir=shipped_dir)
+    msg = str(exc.value)
+    assert "b.py" in msg
+    assert "a.py" in msg
 
 
 # ---- disabling ----------------------------------------------------------

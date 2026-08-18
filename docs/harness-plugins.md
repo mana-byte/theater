@@ -62,6 +62,9 @@ loads, so two same-named helpers in two scanned directories (shipped and
 local) cannot collide — each plugin sees its own. A helper is loaded only
 when a plugin or another helper imports it, so a helper nobody imports is
 never executed. A helper may import another helper in the same directory.
+Helper modules are cached in `sys.modules` under their mangled names for the
+life of the process, so editing a helper and re-scanning does not re-execute
+it — restart the daemon to pick up the change.
 
 Loading is by path under a synthetic module name
 (`theater_harness_plugin_local_nova` for a local plugin,
