@@ -40,6 +40,7 @@ from theater.harness.base import (
     Harness,
     LaunchPlan,
     NativeChild,
+    ResumeLaunchOverlay,
     clip,
     clipper,
     last_screen_line,
@@ -287,21 +288,16 @@ def plan_launch(
     model: str | None = None,
     reasoning_effort: str | None = None,
     resume: str | None = None,
-    isolate_transcript: bool = False,
 ) -> LaunchPlan:
     """The one funnel every spawn goes through, and so the one compat seam.
 
     `model`, `reasoning_effort`, and `resume` are each forwarded only when the
-    caller named one. `isolate_transcript` is a daemon-computed launch hint and
-    is forwarded only to adapters whose signature explicitly accepts it. That
-    keeps older and third-party adapters compatible without making isolation a
-    generic harness requirement.
-    That is what keeps a third-party adapter written against the older
-    signature working: it is never called with a keyword it does not accept,
-    and the only launches it cannot serve are the ones that ask for something
-    it has no way to deliver. Those are refused here, with a message that
-    names the harness, rather than surfacing as a `TypeError` from inside the
-    plugin or — far worse — as a child that silently came up on the wrong
+    caller named one. That is what keeps a third-party adapter written against
+    the older signature working: it is never called with a keyword it does not
+    accept, and the only launches it cannot serve are the ones that ask for
+    something it has no way to deliver. Those are refused here, with a message
+    that names the harness, rather than surfacing as a `TypeError` from inside
+    the plugin or — far worse — as a child that silently came up on the wrong
     model or dropped the prompt.
     """
     found = get(harness)
@@ -315,8 +311,6 @@ def plan_launch(
         extra["reasoning_effort"] = reasoning_effort
     if resume is not None:
         extra["resume"] = resume
-    if "isolate_transcript" in inspect.signature(found.plan_launch).parameters:
-        extra["isolate_transcript"] = isolate_transcript
     return found.plan_launch(
         participant_id=participant_id,
         prompt=prompt,
@@ -424,6 +418,7 @@ __all__ = [
     "NativeChild",
     "Plugin",
     "PluginError",
+    "ResumeLaunchOverlay",
     "ScreenConfidence",
     "ScreenKind",
     "ScreenReading",

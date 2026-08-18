@@ -491,6 +491,15 @@ only through a trusted dead predecessor row whose session lineage matches the
 marker. This keeps repeat Vibe resumes out of the user's shared history without
 allowing an unrelated trusted row to claim the marker.
 
+Harness-specific resume validation lives behind the
+`Harness.resume_launch_overlay` hook. Core selects the trusted dead
+predecessor and pre-filters the trusted matching set; the hook decides
+whether the predecessor's transcript domain is safe to reuse and returns
+the env/domain overrides core merges into the launch plan. The base
+implementation is conditionally fail-closed: a domainless predecessor
+returns an empty overlay, while a predecessor with a domain is refused
+unless the plugin implements the hook.
+
 ### Status derivation — three signals, three failure policies
 
 This is the subtlest part of the system and the source of most v1 bugs.

@@ -199,14 +199,16 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         a dead participant is only returned when `include_dead=True`, even when
         its id is listed explicitly.
 
-        Each row includes `resume_state`, which exposes the verdict
-        `spawn_session(resume=...)` would return for that participant without
-        actually attempting the spawn. Values: `resumable` (spawn would work),
-        `live` (participant is still running), `no_session_id` (Theater has not
-        recorded the harness session id), `harness_cannot_resume` (the harness
-        adapter does not support resume), `untrusted` (session id present but
-        transcript provenance is below operator-level), `owned_by_live` (a live
-        participant already holds a trusted binding for the same session id).
+        Each row includes `resume_state`, which exposes the verdict from the
+        generic identity and capability gates that `spawn_session(resume=...)`
+        checks before delegating to harness-specific resume validation. Values:
+        `resumable` (generic gates passed; harness-specific validation in
+        `resume_launch_overlay` may still refuse), `live` (participant is still
+        running), `no_session_id` (Theater has not recorded the harness session
+        id), `harness_cannot_resume` (the harness adapter does not support
+        resume), `untrusted` (session id present but transcript provenance is
+        below operator-level), `owned_by_live` (a live participant already holds
+        a trusted binding for the same session id).
         """
         return await tools.list_participants(session, include_dead=include_dead, ids=ids)
 
