@@ -1843,6 +1843,37 @@ async def test_list_resume_state_owned_by_live(client, daemon):
     assert live_row["resume_state"] == "live"
 
 
+async def test_list_resume_state_owned_by_live_beats_untrusted(client, daemon):
+    """An untrusted dead row with a trusted live peer reports owned_by_live, not untrusted.
+
+    The spawner's _validate_resume_identity filters to trusted participants only,
+    so the untrusted dead row is invisible to it.  The live trusted peer triggers
+    the live-owner gate regardless of the subject row's own provenance.  This
+    test is the key regression guard for the precedence inversion bug.
+    """
+    # Dead participant with UNTRUSTED provenance.
+    dead_p = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    dead_id = dead_p["id"]
+    dead_part = daemon.registry.get(dead_id)
+    dead_part.session_id = "sess-mixed"
+    dead_part.session_correlation = "heuristic"  # untrusted
+    daemon.store.upsert_participant(dead_part)
+    daemon.registry.mark_dead(dead_id)
+
+    # Live participant with the same harness + session_id at TRUSTED provenance.
+    live_p = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    live_id = live_p["id"]
+    live_part = daemon.registry.get(live_id)
+    live_part.session_id = "sess-mixed"
+    live_part.session_correlation = "operator"
+    daemon.store.upsert_participant(live_part)
+
+    rows = await client.call("participants.list", include_dead=True)
+    dead_row = next(r for r in rows if r["id"] == dead_id)
+    # Must be owned_by_live, not untrusted.
+    assert dead_row["resume_state"] == "owned_by_live"
+
+
 async def test_list_no_internal_fields_exposed(client):
     """session_correlation, transcript_domain, transcript_location, resume_floor
     must not appear in any row returned by participants.list."""

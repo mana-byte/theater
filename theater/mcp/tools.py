@@ -95,8 +95,7 @@ async def list_participants(
     assert isinstance(rows, list)
     me = session.participant_id
     return [
-        {**_summarise(p), "is_self": p["id"] == me, "resume_state": p.get("resume_state")}
-        for p in rows
+        {**_summarise(p), "is_self": p["id"] == me, "resume_state": p["resume_state"]} for p in rows
     ]
 
 

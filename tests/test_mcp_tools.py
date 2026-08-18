@@ -23,6 +23,7 @@ RECORD = {
     "addressable": True,
     "tmux_pane": "%3",
     "pid": 4321,
+    "resume_state": "live",
 }
 
 

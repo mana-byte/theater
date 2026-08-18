@@ -410,47 +410,70 @@ def _transcript_identity_lost(daemon, pid: str) -> bool:
     return bool(checker(pid)) if callable(checker) else False
 
 
-def _resume_state(p: Participant, all_participants: list[Participant]) -> str:
+def _resume_state(p: Participant, live_peers: list[Participant]) -> str:
     """Derive the resume verdict for one participant without extra DB queries.
 
     Precedence mirrors exactly the order spawn_session hits each gate:
 
-    1. ``live``               — spawner:369 refuses before anything else.
-    2. ``no_session_id``      — spawner:371-375 refuses next (dead, no session recorded).
-    3. ``harness_cannot_resume`` — check_resume at spawner:384 is the first
-                                validation gate; it runs before identity checks.
-    4. ``untrusted``          — _validate_resume_identity:451-455 refuses when
-                                provenance is below OPERATOR.
-    5. ``owned_by_live``      — _validate_resume_identity:442-448 refuses when a
-                                live trusted owner shares the same session id;
-                                checked after untrusted so we never misclassify an
-                                untrusted dead row as owned by a live one.
-    6. ``resumable``          — all gates passed; spawn would succeed.
+    1. ``live``                  — _resolve_resume_reference refuses if the
+                                   named participant is still alive.
+    2. ``no_session_id``         — _resolve_resume_reference refuses next when
+                                   no harness session id has been recorded.
+    3. ``harness_cannot_resume`` — check_resume (called from
+                                   _validate_before_create) refuses before any
+                                   identity check runs.
+    4. ``owned_by_live``         — _validate_resume_identity scans all
+                                   participants filtered to (harness match AND
+                                   session_id match AND trusted provenance).
+                                   If any such participant is live, it raises
+                                   immediately.  The subject row's own
+                                   provenance is irrelevant to this gate — an
+                                   untrusted dead row with a trusted live peer
+                                   hits owned_by_live, not untrusted, because
+                                   the spawner refuses at 442 before it ever
+                                   reaches 451.
+    5. ``untrusted``             — _validate_resume_identity then raises at 451
+                                   when no trusted dead match exists.  This
+                                   is the "no trusted binding" refusal.
+    6. ``resumable``             — all gates passed; spawn would succeed.
 
-    ``all_participants`` must include dead rows (include_dead=True) so the
-    owned_by_live check can find live peers sharing the same session id.  This
-    is free because _list already fetches every row it is going to return.
+    ``live_peers`` must be the set of currently live participants so that the
+    owned_by_live check can find peers sharing a session id.  Dead rows are
+    never needed here: the spawner's live-peer check discards dead participants
+    by construction (only non-dead rows enter live_matches).
     """
     if p.status is not Status.DEAD:
         return "live"
     if not p.session_id:
         return "no_session_id"
-    harness = HARNESSES.get(p.harness)
+    # normalize(p.harness) mirrors every other callsite in this module that
+    # looks up a harness by name (e.g. methods.py:1519, :1857).  Without it a
+    # stored alias (e.g. "claude-code") would miss the registry entry and
+    # falsely report harness_cannot_resume.
+    harness = HARNESSES.get(normalize(p.harness))
+    # harness is None means an unrecognised harness name — the adapter is gone
+    # or the row predates it.  We fold this into harness_cannot_resume rather
+    # than inventing a separate state: the caller cannot resume either way, and
+    # the remedy (install/re-register the adapter) is the same.  This is a
+    # deliberate conflation, kept because a new state would widen the protocol
+    # without adding actionable information.
     if harness is None or not supports_resume(harness):
         return "harness_cannot_resume"
-    if not is_trusted_provenance(p.session_correlation):
-        return "untrusted"
-    # Check whether any live participant shares the same harness + session id
-    # at trusted provenance — that is the owned_by_live condition.
-    for other in all_participants:
+    # owned_by_live must be checked BEFORE untrusted.  _validate_resume_identity
+    # filters to (harness match AND session_id match AND trusted provenance)
+    # before splitting into live_matches / dead_matches.  An untrusted subject
+    # row with a trusted live peer: the peer enters live_matches, the subject
+    # enters neither list; live_matches fires first (gate 442), not 451.
+    # Checking owned_by_live first here matches that order exactly.
+    for other in live_peers:
         if (
-            other.id != p.id
-            and other.status is not Status.DEAD
-            and other.harness == p.harness
+            other.harness == p.harness
             and other.session_id == p.session_id
             and is_trusted_provenance(other.session_correlation)
         ):
             return "owned_by_live"
+    if not is_trusted_provenance(p.session_correlation):
+        return "untrusted"
     return "resumable"
 
 
@@ -493,16 +516,23 @@ async def _list(daemon, params: dict) -> list[dict]:
             raise BadRequest("ids list is capped at 200 entries")
         ids = raw_ids
 
-    # For resume_state we always need the full participant set so that
-    # owned_by_live can find live peers sharing a session id — zero extra queries.
-    all_participants = daemon.registry.list(include_dead=True)
-    # Now fetch the filtered page (may be identical to all_participants when ids=None).
+    # Fetch the requested page first.
     page = daemon.registry.list(include_dead=include_dead, ids=ids)
+
+    # owned_by_live needs the live participant set — not dead rows, because the
+    # spawner's live-peer scan only ever considers non-dead participants.  This
+    # is a single query regardless of whether ids was set, and it is strictly
+    # smaller than the full table.  When include_dead=False and ids=None, page
+    # already IS the live set, so we reuse it directly to avoid a second query.
+    if not include_dead and ids is None:
+        live_peers = page
+    else:
+        live_peers = daemon.registry.list(include_dead=False)
 
     result = []
     for p in page:
         d = p.to_dict()
-        d["resume_state"] = _resume_state(p, all_participants)
+        d["resume_state"] = _resume_state(p, live_peers)
         result.append(d)
     return result
 

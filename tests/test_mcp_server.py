@@ -536,7 +536,7 @@ def pin_harnesses(monkeypatch):
 
 
 async def test_resume_state_live_spawn_refuses(daemon, pin_harnesses):
-    """live => spawn(resume=id) refuses because participant is still alive."""
+    """live => spawn(resume=id) refuses with _resolve_resume_reference's 'still live' message."""
     async with DaemonClient(autostart=False) as c:
         me = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
         pid = me["id"]
@@ -553,10 +553,11 @@ async def test_resume_state_live_spawn_refuses(daemon, pin_harnesses):
                 resume=pid,
             )
         assert exc.value.code == "bad_request"
+        assert "still live" in exc.value.message
 
 
 async def test_resume_state_no_session_id_spawn_refuses(daemon, pin_harnesses):
-    """no_session_id => spawn(resume=id) refuses because no session recorded."""
+    """no_session_id => spawn(resume=id) refuses with 'not recorded' message."""
     async with DaemonClient(autostart=False) as c:
         me = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
         pid = me["id"]
@@ -574,10 +575,11 @@ async def test_resume_state_no_session_id_spawn_refuses(daemon, pin_harnesses):
                 resume=pid,
             )
         assert exc.value.code == "bad_request"
+        assert "harness session id" in exc.value.message
 
 
 async def test_resume_state_harness_cannot_resume_spawn_refuses(daemon, pin_harnesses):
-    """harness_cannot_resume => spawn(resume=session_id) refuses."""
+    """harness_cannot_resume => spawn(resume=session_id) refuses with 'does not support' message."""
     async with DaemonClient(autostart=False) as c:
         p = await c.call("hello", harness="no-resume-pin-test", cwd="/tmp")
         pid = p["id"]
@@ -599,10 +601,11 @@ async def test_resume_state_harness_cannot_resume_spawn_refuses(daemon, pin_harn
                 resume="sess-noresume",
             )
         assert exc.value.code == "bad_request"
+        assert "does not support resume" in exc.value.message
 
 
 async def test_resume_state_untrusted_spawn_refuses(daemon, pin_harnesses):
-    """untrusted => spawn(resume=session_id) refuses because provenance is heuristic."""
+    """untrusted => spawn(resume=session_id) refuses with 'no trusted ... binding' message."""
     async with DaemonClient(autostart=False) as c:
         p = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
         pid = p["id"]
@@ -624,10 +627,12 @@ async def test_resume_state_untrusted_spawn_refuses(daemon, pin_harnesses):
                 resume="sess-untrusted",
             )
         assert exc.value.code == "bad_request"
+        # The spawner reaches the "no trusted dead binding" gate, not the live-owner gate.
+        assert "no trusted" in exc.value.message
 
 
 async def test_resume_state_resumable_spawn_succeeds(daemon, pin_harnesses):
-    """resumable => spawn(resume=session_id) succeeds."""
+    """resumable => spawn(resume=session_id) succeeds (no refusal)."""
     async with DaemonClient(autostart=False) as c:
         p = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
         pid = p["id"]
@@ -650,8 +655,8 @@ async def test_resume_state_resumable_spawn_succeeds(daemon, pin_harnesses):
         assert result["id"] is not None
 
 
-async def test_resume_state_owned_by_live_spawn_refuses(daemon, pin_harnesses):
-    """owned_by_live => spawn(resume=session_id) refuses: a live owner exists."""
+async def test_resume_state_owned_by_live_trusted_dead_spawn_refuses(daemon, pin_harnesses):
+    """owned_by_live, trusted dead + trusted live => 'trusted owner is still live' message."""
     async with DaemonClient(autostart=False) as c:
         # Live owner with trusted binding.
         live_p = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
@@ -661,7 +666,7 @@ async def test_resume_state_owned_by_live_spawn_refuses(daemon, pin_harnesses):
         live_part.session_correlation = "operator"
         daemon.store.upsert_participant(live_part)
 
-        # Dead predecessor sharing the same session id.
+        # Dead predecessor sharing the same session id (trusted provenance).
         dead_p = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
         dp_id = dead_p["id"]
         dead_part = daemon.registry.get(dp_id)
@@ -684,3 +689,53 @@ async def test_resume_state_owned_by_live_spawn_refuses(daemon, pin_harnesses):
                 resume="sess-owned",
             )
         assert exc.value.code == "bad_request"
+        assert "still live" in exc.value.message
+        assert lo_id in exc.value.message
+
+
+async def test_resume_state_owned_by_live_untrusted_dead_spawn_refuses(daemon, pin_harnesses):
+    """owned_by_live wins even when the subject dead row is untrusted.
+
+    An untrusted dead row and a trusted live peer sharing a session id: the
+    spawner's _validate_resume_identity filters to trusted rows only, so the
+    untrusted dead row enters neither list and the live trusted peer triggers
+    the 'trusted owner is still live' gate.  resume_state must report
+    owned_by_live (not untrusted), and the spawner must refuse with the
+    'still live' message — proving the two implementations agree.
+    """
+    async with DaemonClient(autostart=False) as c:
+        # Live owner with trusted binding.
+        live_p = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
+        lo_id = live_p["id"]
+        live_part = daemon.registry.get(lo_id)
+        live_part.session_id = "sess-mixed"
+        live_part.session_correlation = "operator"
+        daemon.store.upsert_participant(live_part)
+
+        # Dead row sharing the session id but with UNTRUSTED provenance.
+        dead_p = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
+        dp_id = dead_p["id"]
+        dead_part = daemon.registry.get(dp_id)
+        dead_part.session_id = "sess-mixed"
+        dead_part.session_correlation = "heuristic"  # untrusted
+        daemon.store.upsert_participant(dead_part)
+        daemon.registry.mark_dead(dp_id)
+
+        rows = await c.call("participants.list", include_dead=True)
+        dp_row = next(r for r in rows if r["id"] == dp_id)
+        # Must be owned_by_live, not untrusted — the live peer dominates.
+        assert dp_row["resume_state"] == "owned_by_live"
+
+        with pytest.raises(RemoteError) as exc:
+            await c.call(
+                "spawn",
+                harness="resume-pin-test",
+                prompt="",
+                approval="manual",
+                cwd="/tmp",
+                resume="sess-mixed",
+            )
+        assert exc.value.code == "bad_request"
+        # Must hit the live-owner gate, not the untrusted gate.
+        assert "still live" in exc.value.message
+        assert lo_id in exc.value.message
