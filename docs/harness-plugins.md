@@ -56,7 +56,10 @@ Every `*.py` in that directory, in filename order, must export a `Harness`
 instance named `HARNESS`. Files beginning with `_` or `.` are skipped, which is
 what makes a shared helper module possible next to the plugins that import it.
 
-Loading is by path under a synthetic module name (`theater_harness_plugin_nova`),
+Loading is by path under a synthetic module name
+(`theater_harness_plugin_local_nova` for a local plugin,
+`theater_harness_plugin_shipped_nova` for a shipped one — the source is
+part of the name so a local override does not evict the shipped one),
 not by putting the directory on `sys.path`. The difference matters: on
 `sys.path`, a file you called `json.py` would shadow the standard library for
 the whole daemon process, and the resulting failure would name neither your file
@@ -324,9 +327,12 @@ is allowlisted and then rejected by the CLI.
 Four methods you will usually write and three that have defaults.
 `find_transcript`, `session_id` and `parse` are abstract on
 `TranscriptObserver`; `is_idle_screen` is abstract on every observer, because
-the daemon needs it for two things reading cannot do — telling "blocked on a
-permission prompt" apart from "thinking", and confirming a pane looks idle
-before rescuing a job whose turn end was never seen. `native_children` defaults
+the daemon needs it for two things reading cannot do — confirming a pane
+looks idle before rescuing a job whose turn end was never seen, and feeding
+the screen-reading shim. The shim (`screen_reading` on `HarnessObserver`)
+maps the boolean to `ScreenKind.PROMPT` or `UNKNOWN`, never to `APPROVAL` or
+`TRUST`; only `APPROVAL` and `TRUST` settle `AWAITING_INPUT`, so a
+boolean-only plugin cannot produce that status. `native_children` defaults
 to none. `open_source` defaults to tailing a file, and only a harness whose
 output is not a file replaces it — see "When the output is not a file" below.
 
@@ -449,10 +455,12 @@ expect sub-agents to appear in the tree yet.
 Given `tmux capture-pane -p` output — the rendered pane as plain text — does the
 screen show a bare prompt?
 
-For a plugin with a working `parse`, this is a display hint: it produces the
-AWAITING_INPUT status that tells a human "this agent is blocked on a permission
-prompt". Tune it to accept false negatives and return `False` when unsure. A
-false positive marks a working agent idle and hides activity from the régie.
+For a plugin with a working `parse`, this is a display hint. The
+`screen_reading` shim maps `True` to `ScreenKind.PROMPT`, which settles
+`IDLE` — not `AWAITING_INPUT`, which requires `APPROVAL` or `TRUST` and so
+requires overriding `screen_reading` directly. Tune the boolean to accept
+false negatives and return `False` when unsure. A false positive marks a
+working agent idle and hides activity from the régie.
 
 The helper `last_screen_line(capture)` gives the bottom-most non-empty line,
 stripped. Match it *exactly* against your prompt strings, not as a prefix:
@@ -480,10 +488,12 @@ source is built, and a plugin supplying its own source has no reason to mention
 them. Before v1.6 they were abstract on every adapter and this plugin had to
 define three stubs to say so; deleting those stubs is what the split bought.
 
-What it is not is the whole observer. Attachment trust, operator recovery, and
-history provenance are the three things a source that returns `Batch.attached`
-or `History` must also handle, and they are what the rest of this section
-covers.
+What it is not is the whole observer. Attachment trust and history
+provenance are the two things a source that returns `Batch.attached` or
+`History` must also handle, and they are what the rest of this section
+covers. Operator recovery (`transcript_candidates` /
+`admit_operator_candidate`) is a separate concern that lives on the
+observer, not the source; it is documented in the advanced section below.
 
 A `Source` is a live view of one participant's output. Unlike the rest of the
 interface it is an object with a lifetime, so it is the right place for a
@@ -572,8 +582,9 @@ async def history(self, *, last_n: int) -> History:
 `read` is a tail — it answers "what happened since I last looked". `history`
 answers "what has this session said, from the beginning", and it is what backs
 the `read_transcript` tool, which exists because the bus clips long replies and
-an agent sometimes needs the whole thing. The default implementation re-reads
-the file with clipping off; a source over a database has to write its own.
+an agent sometimes needs the whole thing. `TranscriptSource.history`
+re-reads the file with clipping off; the base `Source.history` returns an
+empty `History()` — which is what a source over a database has to replace.
 Skip it and the default `Source.history` returns `History()` with
 `location=None`, which `read_transcript` rejects as
 `BadRequest("cannot read transcript: transcript no longer exists on disk")`
@@ -797,16 +808,20 @@ What that means in practice:
 - The first failure also emits an `agent.observation_error` bus event.
 
 The guide warned earlier that heuristic evidence is insufficient and named
-isolated storage, receipts, and process proof. Of those three, the one
-mechanism that is public and works today is **`LaunchPlan.session_id`**: when
-the CLI lets Theater choose or learn the native session id at launch,
-returning it on the launch plan is what enables exact correlation. The
-spawner persists `session_correlation = exact` before the process starts,
-so the observer's source never has to guess from cwd during the creation
-race. Exact correlation holds when the transcript's own reported session
-id matches the one Theater recorded at launch; the field alone is
-necessary but not sufficient — the match is what makes the attachment
-trusted.
+isolated storage, receipts, and process proof. Two public mechanisms work
+today. **`LaunchPlan.session_id`** is one: when the CLI lets Theater choose
+or learn the native session id at launch, returning it on the launch plan
+enables exact correlation. The spawner persists `session_correlation =
+exact` before the process starts, so the observer's source never has to
+guess from cwd during the creation race. Exact correlation holds when the
+transcript's own reported session id matches the one Theater recorded at
+launch; the field alone is necessary but not sufficient — the match is
+what makes the attachment trusted. **`proves_ownership` /
+`proven_transcript`** is the other: a `TranscriptObserver` that can show
+a transcript is its own process's overrides both, and the source records
+the result as `proven` — trusted. The codex adapter uses this channel;
+see `proven_transcript` in `codex.py` and `correlation_for` in
+`source.py`.
 
 `LaunchPlan.private_files` is like `files` but written mode 0600 by the
 daemon in a parent directory chmod 0700. Use it for launch secrets —
@@ -847,7 +862,10 @@ imported. A local plugin that will not import is skipped with a warning and
 shown as rejected by `theater harnesses`, because a file in your own directory
 is yours to break and should not take the daemon down with it.
 
-Two plugins defining the same name is an error naming both files. An alias
+Two plugins from the *same* source defining the same name is an error
+naming both files — two shipped or two local, not one of each. A local
+plugin overriding a shipped one is supported and logged, not an error;
+that is how a user fixes or extends a built-in locally. An alias
 collision is an error naming the claimant and the current owner. Nothing here
 resolves a conflict by load order, because "whichever file sorts first wins" is
 not something anyone can debug from the symptom.
