@@ -918,8 +918,17 @@ async def _checkpoint_create(daemon, params: dict) -> dict:
     name = _string_param(params, "name", method_name="checkpoint.create")
     notes = _optional_string_param(params, "notes", method_name="checkpoint.create")
     snapshot = _checkpoint_jobs(daemon, caller.id)
+    # Names are live-only and not persisted in the store row, so read from the
+    # registry (one lookup on a write path). Guarded because an external caller
+    # or one registered between the store write and the registry sync may be
+    # nameless; the name is informational, not load-bearing.
+    try:
+        creator_name: str | None = daemon.registry.get(caller.id).name
+    except NotFound:
+        creator_name = None
     checkpoint_id = daemon.store.create_checkpoint(
         participant_id=caller.id,
+        creator_name=creator_name,
         name=name,
         notes=notes,
         jobs_snapshot=json.dumps(snapshot, sort_keys=True, separators=(",", ":")),
@@ -982,19 +991,13 @@ def _checkpoint_limit(params: dict) -> int:
     return raw
 
 
-def _checkpoint_summary(row: dict, registry=None) -> dict:
+def _checkpoint_summary(row: dict) -> dict:
     notes = row.get("notes")
     creator_status = row.get("creator_status")
-    creator_name: str | None = None
-    if registry is not None:
-        try:
-            creator_name = registry.get(row["participant_id"]).name
-        except NotFound:
-            creator_name = None
     base: dict = {
         "id": row["id"],
         "participant_id": row["participant_id"],
-        "creator_name": creator_name,
+        "creator_name": row.get("creator_name"),
         "creator_status": creator_status,
         # False when the creator row has been pruned by GC — the checkpoint is
         # still visible for discovery, but restore will refuse a pruned parent.
@@ -1028,13 +1031,15 @@ async def _checkpoint_list(daemon, params: dict) -> list[dict]:
     raw_pid = params.get("participant_id")
     if raw_pid is not None and not isinstance(raw_pid, str):
         raise BadRequest("participant_id must be a string")
+    if isinstance(raw_pid, str) and raw_pid == "":
+        raise BadRequest("participant_id must not be empty")
     restorable_only = params.get("restorable_only", False)
     if not isinstance(restorable_only, bool):
         raise BadRequest("restorable_only must be a boolean")
-    rows = daemon.store.list_checkpoints(participant_id=raw_pid or None, limit=limit)
-    if restorable_only:
-        rows = [r for r in rows if (r.get("restore_state") or "ready") == "ready"]
-    return [_checkpoint_summary(row, daemon.registry) for row in rows]
+    rows = daemon.store.list_checkpoints(
+        participant_id=raw_pid, restorable_only=restorable_only, limit=limit
+    )
+    return [_checkpoint_summary(row) for row in rows]
 
 
 def _restore_state_error(

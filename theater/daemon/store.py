@@ -588,10 +588,12 @@ class Store:
         name: str,
         jobs_snapshot: str,
         notes: str | None = None,
+        creator_name: str | None = None,
     ) -> int:
         result = self.conn.execute(
             insert(checkpoints).values(
                 participant_id=participant_id,
+                creator_name=creator_name,
                 name=name,
                 notes=notes,
                 jobs_snapshot=jobs_snapshot,
@@ -609,7 +611,7 @@ class Store:
         return dict(row._mapping) if row else None
 
     def list_checkpoints(
-        self, *, participant_id: str | None = None, limit: int = 100
+        self, *, participant_id: str | None = None, restorable_only: bool = False, limit: int = 100
     ) -> list[dict]:
         """List checkpoints, globally or filtered by creator.
 
@@ -617,15 +619,19 @@ class Store:
         participant — the default path for discovery by a live sibling whose
         creator may be dead. When given, narrows to that creator only.
 
+        ``restorable_only=True`` adds a SQL ``WHERE restore_state = 'ready'``
+        predicate *before* the LIMIT. Filtering in Python after the LIMIT is
+        wrong: if every row inside the limit is non-ready, the caller gets an
+        empty list while restorable rows sit just past the cutoff.
+
         The LEFT JOIN resolves the creator's status in the same query so callers
-        can surface ``creator_present`` without N+1 store calls. Participant
-        names are not persisted (they are in-memory in the registry), so
-        ``creator_name`` must be resolved by the caller from the registry.
+        can surface ``creator_present`` without N+1 store calls.
         """
         stmt = (
             select(
                 checkpoints.c.id,
                 checkpoints.c.participant_id,
+                checkpoints.c.creator_name,
                 checkpoints.c.name,
                 checkpoints.c.notes,
                 checkpoints.c.created_at,
@@ -640,6 +646,10 @@ class Store:
         )
         if participant_id is not None:
             stmt = stmt.where(checkpoints.c.participant_id == participant_id)
+        if restorable_only:
+            stmt = stmt.where(
+                (checkpoints.c.restore_state == "ready") | checkpoints.c.restore_state.is_(None)
+            )
         rows = self.conn.execute(stmt).fetchall()
         return [dict(r._mapping) for r in rows]
 

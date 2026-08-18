@@ -284,6 +284,14 @@ async def test_checkpoint_list_requires_existing_caller(client):
     assert "existing participant" in str(exc.value)
 
 
+async def test_checkpoint_list_rejects_empty_participant_id(client):
+    caller = await client.call("hello", id="caller", harness="vibe", cwd="/tmp")
+    with pytest.raises(RemoteError) as exc:
+        await client.call("checkpoint.list", caller_id=caller["id"], participant_id="")
+    assert exc.value.code == "bad_request"
+    assert "empty" in str(exc.value)
+
+
 async def test_checkpoint_list_participant_b_sees_participant_a_checkpoint(client, daemon):
     a = await client.call("hello", id="a", harness="vibe", cwd="/tmp")
     b = await client.call("hello", id="b", harness="vibe", cwd="/tmp")
@@ -293,6 +301,76 @@ async def test_checkpoint_list_participant_b_sees_participant_a_checkpoint(clien
     assert len(rows) == 1
     assert rows[0]["id"] == created["checkpoint_id"]
     assert rows[0]["participant_id"] == a["id"]
+
+
+async def test_checkpoint_list_restorable_only_respects_limit_not_filter_then_limit(client, daemon):
+    """restorable_only must filter inside SQL (before LIMIT), not after.
+
+    If the newest `limit` rows are all non-ready, limit-then-filter returns [].
+    This test creates `limit` restored checkpoints (newest) then one ready
+    checkpoint (oldest), and asserts that restorable_only=True with that same
+    limit still returns the ready one.
+    """
+    from theater.models import Participant, Tier
+
+    parent = Participant(
+        id="parent-limit", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%91"
+    )
+    daemon.store.upsert_participant(parent)
+    restorer = Participant(
+        id="restorer-limit", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%92"
+    )
+    daemon.store.upsert_participant(restorer)
+    await client.call("hello", id="restorer-limit", harness="vibe", cwd="/tmp")
+
+    # Create 3 checkpoints that will be restored (they will be made newer via
+    # created_at manipulation, so they sort first).
+    from sqlalchemy import update as sa_update
+
+    from theater.daemon.schema import checkpoints as ckpt_table
+
+    # Use a very large base timestamp so these are definitively newest.
+    far_future = 9_999_999_999.0
+    for i in range(3):
+        cp = await client.call(
+            "checkpoint.create", caller_id="parent-limit", name=f"to-restore-{i}"
+        )
+        daemon.store.conn.execute(
+            sa_update(ckpt_table)
+            .where(ckpt_table.c.id == cp["checkpoint_id"])
+            .values(created_at=far_future + i)
+        )
+        await client.call(
+            "checkpoint.restore",
+            checkpoint_id=cp["checkpoint_id"],
+            approval="yolo",
+            caller_id="restorer-limit",
+        )
+
+    # Create the ready checkpoint AFTER the restores, but pin its created_at
+    # to a very small value so it sorts last (oldest).
+    ready_cp = await client.call("checkpoint.create", caller_id="parent-limit", name="ready-one")
+    daemon.store.conn.execute(
+        sa_update(ckpt_table)
+        .where(ckpt_table.c.id == ready_cp["checkpoint_id"])
+        .values(created_at=1.0)
+    )
+
+    # With limit=3, the 3 newest rows are all restored; the ready one is row 4.
+    # restorable_only=True with limit=3 must still return the ready one —
+    # SQL WHERE must be applied before LIMIT, not after.
+    restorable = await client.call(
+        "checkpoint.list",
+        caller_id="restorer-limit",
+        participant_id="parent-limit",
+        limit=3,
+        restorable_only=True,
+    )
+    assert len(restorable) == 1, (
+        "restorable_only with limit must filter in SQL; got empty list because "
+        "the limit was applied before the filter"
+    )
+    assert restorable[0]["id"] == ready_cp["checkpoint_id"]
 
 
 async def test_checkpoint_list_restorable_only_excludes_non_ready(client, daemon):
@@ -327,6 +405,10 @@ async def test_checkpoint_list_creator_pruned_shows_creator_present_false(client
     parent = await client.call("hello", id="parent", harness="vibe", cwd="/tmp")
     created = await client.call("checkpoint.create", caller_id=parent["id"], name="cp")
 
+    # Record the name before pruning — it should survive as creator_name.
+    rows_before = await client.call("checkpoint.list", caller_id=parent["id"])
+    name_before = rows_before[0]["creator_name"]
+
     # Prune the creator participant from the store.
     import sqlalchemy
 
@@ -339,6 +421,8 @@ async def test_checkpoint_list_creator_pruned_shows_creator_present_false(client
     assert len(rows) == 1
     assert rows[0]["id"] == created["checkpoint_id"]
     assert rows[0]["creator_present"] is False
+    # creator_name is snapshotted at creation time and survives the creator's death.
+    assert rows[0]["creator_name"] == name_before
 
 
 async def test_checkpoint_read_on_another_participants_checkpoint(client, daemon):

@@ -164,6 +164,7 @@ checkpoints = Table(
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("participant_id", Text, nullable=False),
+    Column("creator_name", Text),
     Column("name", Text, nullable=False),
     Column("notes", Text),
     Column("jobs_snapshot", Text, nullable=False),
