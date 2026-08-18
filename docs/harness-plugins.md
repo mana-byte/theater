@@ -942,11 +942,22 @@ not something anyone can debug from the symptom.
 
 ## When it goes wrong
 
-Every failure below is reported with the file path in the message. For a
-shipped plugin it stops start-up; for one of yours it is a warning, the harness
-is absent from the registry, and `theater harnesses` lists it under rejected. A
-plugin the user believes they installed but which is quietly absent — with
-nothing anywhere saying so — is the defect this design exists to prevent.
+Every failure below is reported with the file path in the message. There are
+two failure modes with different severity:
+
+- A plugin that fails to **load** — bad `HARNESS`, missing observer, a property
+  getter that raises, a syntax error — is a **warning** for one of yours (the
+  harness is absent from the registry and `theater harnesses` lists it under
+  rejected) and **fatal** for one Theater ships. A plugin the user believes they
+  installed but which is quietly absent — with nothing anywhere saying so — is
+  the defect this design exists to prevent.
+
+- A plugin that **collides** with another harness's name, alias, or binary is
+  **always fatal**, local or shipped. A shadowed alias makes a harness silently
+  unreachable, and refusing is better than resolving by load order — "whichever
+  file sorts first wins" is not something anyone can debug from the symptom.
+
+### Load failures (warning for local, fatal for shipped)
 
 | What you wrote | What you get |
 |---|---|
@@ -963,10 +974,17 @@ nothing anywhere saying so — is the defect this design exists to prevent.
 | `binary = ""` | `…/nova.py: harness 'nova' sets no binary to look for` |
 | `icon = "<>"` | ``…/nova.py: harness 'nova' has icon '<>' with an estimated display width of 2 terminal cells; an icon must occupy exactly one cell so every column of `theater harnesses` lines up. Use a narrow glyph (one cell wide), not a wide emoji or a multi-character string.`` |
 | `icon = ""` | `…/nova.py: harness 'nova' has icon ''; it must contain only printable codepoints, since listings align on it` |
+
+### Collisions (always fatal, local or shipped)
+
+| What you wrote | What you get |
+|---|---|
 | an alias another harness owns | `…/nova.py claims alias 'mistral-vibe', which already resolves to 'vibe'` |
 
-These surface wherever the registry is built: `theater daemon`, and every CLI
-command including `theater config`. Check your plugin with the cheapest one:
+Load failures and collisions surface wherever the registry is built: `theater
+daemon` and `theater harnesses`. (Commands that do not install plugins, like
+`theater config`, read only the TOML file and never reach the loader.) Check
+your plugin with the cheapest one:
 
 ```
 theater harnesses

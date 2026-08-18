@@ -260,6 +260,16 @@ class Registry:
                 # an alias of the same harness converges. A genuinely different
                 # harness, a typo, or an unknown name is retained — overwriting
                 # the row with an unrecognised name would make it unobservable.
+                # Residual limitation: if an alias is *reassigned* to a different
+                # harness in the config between two daemon lifetimes, a surviving
+                # row storing the old alias normalises to the new owner and is
+                # rewritten on reconnect — so a still-running participant of the
+                # old harness is recorded, and then observed, as the new one.
+                # Closing that needs historical alias ownership, which we do not
+                # persist; the alias table carries no history. We accept the gap
+                # because it requires alias reassignment across a restart while an
+                # old participant survives, and inventing the history is out of
+                # proportion here.
                 if normalize(existing.harness) == harness and existing.harness != harness:
                     existing.harness = harness
                 existing.last_activity = now()

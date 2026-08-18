@@ -167,6 +167,64 @@ def test_detect_harness_plain_name_still_works():
     assert detect_harness("claude", 999_999) == "claude"
 
 
+# ---- F6: generic _unwrap path isolated from redundant explicit names ---------
+#
+# The built-in plugins list their wrapped spellings explicitly in ``binaries``,
+# so every existing detection test passes through the explicit-name branch and
+# never exercises ``_unwrap``.  A third-party plugin declares only ``binary``
+# with an empty ``binaries`` and relies entirely on the generic affix-stripping.
+# These tests isolate that path: a harness with ``binaries = frozenset()`` whose
+# ``.binary-wrapped`` and path-qualified spellings must still resolve.
+
+
+def _bare_harness(name: str, binary: str):
+    """A harness-shaped object with only ``binary`` and an empty ``binaries``.
+
+    The real ``Harness`` dataclass is not needed — ``match_binary`` reads only
+    ``.name``, ``.binary`` and ``.binaries``, so a ``SimpleNamespace`` suffices
+    and avoids the ABC / observer machinery.
+    """
+    from types import SimpleNamespace
+
+    return SimpleNamespace(name=name, binary=binary, binaries=frozenset())
+
+
+def test_unwrap_generic_dot_prefix_stripped():
+    """A leading ``.`` is stripped by _unwrap, not by an explicit binaries entry.
+
+    Mutation: remove ``if name.startswith("."): name = name[1:]`` from _unwrap.
+    This test fails because ``.mytool`` is no longer stripped to ``mytool``.
+    """
+    harnesses = {"mytool": _bare_harness("mytool", "mytool")}
+    assert match_binary(".mytool", harnesses) == "mytool"
+
+
+def test_unwrap_generic_wrapped_suffix_stripped():
+    """A trailing ``-wrapped`` is stripped by _unwrap, not by an explicit entry.
+
+    Mutation: remove ``if name.endswith("-wrapped"): name = name[: -len("-wrapped")]``
+    from _unwrap.  This test fails because ``mytool-wrapped`` is no longer stripped.
+    """
+    harnesses = {"mytool": _bare_harness("mytool", "mytool")}
+    assert match_binary("mytool-wrapped", harnesses) == "mytool"
+
+
+def test_unwrap_generic_both_affixes_with_path():
+    """Both affixes plus a path prefix still resolve through _unwrap alone.
+
+    Mutation: break either half of _unwrap.  This test fails because the
+    ``.mytool-wrapped`` basename is not reduced to ``mytool``.
+    """
+    harnesses = {"mytool": _bare_harness("mytool", "mytool")}
+    assert match_binary("/nix/store/x/bin/.mytool-wrapped", harnesses) == "mytool"
+
+
+def test_unwrap_generic_plain_name_still_matches():
+    """The plain binary name still matches when binaries is empty."""
+    harnesses = {"mytool": _bare_harness("mytool", "mytool")}
+    assert match_binary("mytool", harnesses) == "mytool"
+
+
 def test_known_binaries_includes_wrapper_names():
     """known_binaries includes plugin-declared wrapper aliases."""
     from theater.harness import known_binaries

@@ -149,11 +149,20 @@ class _HelperFinder(importlib.abc.MetaPathFinder):
             sys.modules[mangled] = mod
             try:
                 spec.loader.exec_module(mod)
-            except BaseException as exc:
+            except (Exception, SystemExit) as exc:
+                # Match the plugin import path (line 283): catch everything
+                # except KeyboardInterrupt, which is a user interrupt, not a
+                # broken plugin. Pop the half-executed module so a later
+                # rescan does not find it cached and skip exec_module.
                 sys.modules.pop(mangled, None)
                 raise PluginError(
                     f"{helper_path}: failed to import helper {fullname!r}: {exc!r}"
                 ) from exc
+            except KeyboardInterrupt:
+                # The user pressed ctrl-C; clean up the half-executed helper
+                # so it is not reused by a later rescan, then propagate.
+                sys.modules.pop(mangled, None)
+                raise
         self.resolved.add(fullname)
         return importlib.machinery.ModuleSpec(
             fullname, _AliasLoader(sys.modules[mangled]), origin=str(helper_path)
@@ -247,8 +256,13 @@ def scan(directory: Path, *, source: str, skip: Iterable[str] = ()) -> list[Plug
             continue
         try:
             harness = _load_one(path, source)
-        except (PluginError, SystemExit) as exc:
-            found.append(Plugin(path=path, source=source, name=path.stem, error=str(exc)))
+        except (Exception, SystemExit) as exc:
+            # PluginError messages already start with the file path (every
+            # raise in _load_one formats it in). A bare exception from a
+            # property getter or similar does not, so prefix it here to
+            # keep every rejected-plugin message readable in `theater harnesses`.
+            msg = str(exc) if isinstance(exc, PluginError) else f"{path}: {exc!r}"
+            found.append(Plugin(path=path, source=source, name=path.stem, error=msg))
             continue
         logger.info("loaded %s harness plugin %r from %s", source, harness.name, path)
         found.append(Plugin(path=path, source=source, name=harness.name, harness=harness))

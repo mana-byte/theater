@@ -682,6 +682,10 @@ async def test_register_source_inside_try_closes_source_on_raise(registry: Regis
 
     Mutation: move _register_source back outside the try in _watch. This
     test fails because the source is still in _sources and closed is False.
+
+    Updated for F4: _watch now catches SourceContractError at registration and
+    retires the watcher (returns normally) rather than letting it propagate.
+    The assertions about cleanup are unchanged.
     """
     source = _RaisingAdmitSource()
     harness = _RaisingAdmitHarness(_RaisingAdmitObserver(source))
@@ -690,10 +694,45 @@ async def test_register_source_inside_try_closes_source_on_raise(registry: Regis
     # Plant a pending receipt so _stage_pending_receipt fires inside _register_source
     observer._receipt_candidates[p.id] = ("/tmp/sess-1.jsonl", "sess-1")
 
-    with pytest.raises(SourceContractError):
-        await observer._watch(p.id, "raising")
+    # F4: _watch retires the watcher instead of propagating the exception.
+    await observer._watch(p.id, "raising")
 
     # The finally must have removed the source and closed it.
+    assert p.id not in observer._sources
+    assert source.closed
+
+
+async def test_register_source_contract_error_logs_retirement(registry: Registry, caplog):
+    """F4: a SourceContractError from registration produces the retirement log,
+    not an unretrieved task exception.
+
+    Before F4 the SourceContractError escaped _watch, and the reconciler
+    cancelled the task without retrieving its exception — asyncio logged
+    "Task exception was never retrieved" instead of the deliberate
+    retirement message. After F4 _watch catches the error at registration
+    and logs the same message as the in-loop handler.
+
+    Mutation: remove the ``except SourceContractError`` around _register_source
+    in _watch. This test fails because the exception propagates out of
+    _watch instead of being logged.
+    """
+    import logging
+
+    source = _RaisingAdmitSource()
+    harness = _RaisingAdmitHarness(_RaisingAdmitObserver(source))
+    observer = Observer(registry, {"raising": harness}, poll=0.01, search=0.01, sync=0.01)
+    p = registry.register(harness="raising", pane=None, cwd="/tmp")
+    observer._receipt_candidates[p.id] = ("/tmp/sess-1.jsonl", "sess-1")
+
+    with caplog.at_level(logging.ERROR, logger="theater.observer"):
+        await observer._watch(p.id, "raising")
+
+    # The retirement message must have been logged
+    assert any(
+        "source contract failed" in record.message and "retiring" in record.message
+        for record in caplog.records
+    ), [r.message for r in caplog.records]
+    # Source still cleaned up
     assert p.id not in observer._sources
     assert source.closed
 

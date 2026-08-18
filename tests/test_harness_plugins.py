@@ -1057,3 +1057,116 @@ def test_a_plugin_is_observable_from_its_transcript(local_dir):
     observer = harness_registry.get("acme").observer
     assert observer.has_transcript is True
     assert observer.is_idle_screen("something\n> ") is True
+
+
+# ---- F1: scan() never raises, even for non-PluginError exceptions -------------
+
+
+def test_scan_rejects_plugin_with_raising_property_getter(local_dir):
+    """F1: a plugin whose property getter raises RuntimeError is rejected,
+    not fatal to the daemon.
+
+    Mutation: revert scan() to ``except (PluginError, SystemExit)``. This
+    test fails because RuntimeError escapes scan() instead of producing a
+    rejected Plugin.
+    """
+    bad = local_dir / "evil.py"
+    bad.write_text(
+        """
+from theater.harness import Harness, LaunchPlan, TranscriptObserver
+
+
+class EvilObserver(TranscriptObserver):
+    def find_transcript(self, *, cwd, session_id=None, after=None):
+        return None
+    def session_id(self, transcript):
+        return None
+    def parse(self, line, index, *, clip_text=True):
+        return []
+    def is_idle_screen(self, capture):
+        return capture.endswith("> ")
+
+
+class Evil(Harness):
+    binary = "evil"
+    icon = "E"
+    aliases = ()
+    def __init__(self):
+        self.observer = EvilObserver()
+    @property
+    def name(self):
+        raise RuntimeError("a property getter that raises something else")
+    def plan_launch(self, *, participant_id, prompt, config_path, approval):
+        return LaunchPlan(argv=[self.binary, prompt], env={"ID": participant_id})
+
+
+HARNESS = Evil()
+""",
+        encoding="utf-8",
+    )
+    # A valid plugin in the same directory — it must still load
+    plugin(local_dir, name="acme", binary="acme")
+
+    found = plugins.scan(local_dir, source=plugins.LOCAL)
+    by_name = {p.name: p for p in found}
+
+    # The broken plugin is rejected, not fatal
+    assert "evil" in by_name
+    assert by_name["evil"].harness is None
+    assert by_name["evil"].error is not None
+    assert "evil.py" in by_name["evil"].error
+    assert "RuntimeError" in by_name["evil"].error
+
+    # The valid plugin still loaded
+    assert by_name["acme"].harness is not None
+    assert by_name["acme"].error is None
+
+
+# ---- F5: helper import does not swallow KeyboardInterrupt ---------------------
+
+
+def test_helper_import_does_not_swallow_keyboard_interrupt(local_dir):
+    """F5: a KeyboardInterrupt during helper import propagates out of scan(),
+    it is not reported as a broken plugin.
+
+    Mutation: revert the helper except to ``except BaseException``. This
+    test fails because KeyboardInterrupt is caught and re-raised as
+    PluginError, so scan() does NOT raise and the plugin is listed as
+    rejected instead.
+    """
+    # A helper that raises KeyboardInterrupt when imported
+    helper = local_dir / "_helper.py"
+    helper.write_text(
+        "raise KeyboardInterrupt('ctrl-C during helper import')\n",
+        encoding="utf-8",
+    )
+    main = local_dir / "needs_helper.py"
+    main.write_text(
+        "import _helper  # noqa: F401\n"
+        "from theater.harness import Harness, LaunchPlan, TranscriptObserver\n\n"
+        "class O(TranscriptObserver):\n"
+        "    def find_transcript(self, *, cwd, session_id=None, after=None):\n"
+        "        return None\n"
+        "    def session_id(self, transcript):\n"
+        "        return None\n"
+        "    def parse(self, line, index, *, clip_text=True):\n"
+        "        return []\n"
+        "    def is_idle_screen(self, capture):\n"
+        "        return False\n\n"
+        "class H(Harness):\n"
+        "    name = 'h'\n"
+        "    binary = 'h'\n"
+        "    icon = 'H'\n"
+        "    aliases = ()\n"
+        "    def __init__(self):\n"
+        "        self.observer = O()\n"
+        "    def plan_launch(self, *, participant_id, prompt, config_path, approval):\n"
+        "        return LaunchPlan(argv=[self.binary, prompt])\n\n"
+        "HARNESS = H()\n",
+        encoding="utf-8",
+    )
+
+    # With the fix, KeyboardInterrupt propagates out of scan() — it is not
+    # caught and reported as a broken plugin.
+    with pytest.raises(KeyboardInterrupt):
+        plugins.scan(local_dir, source=plugins.LOCAL)

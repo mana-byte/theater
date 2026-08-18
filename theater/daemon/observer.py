@@ -138,6 +138,10 @@ RESCUE_CODE = "turn_end_unseen"
 #: one frame mid-work. Finishing there hands the caller a partial answer.
 IDLE_CONFIRMATIONS = 2
 
+#: Log format for a watcher retired by a source contract failure. Used from
+#: both the registration and the in-loop handler so the message is in one place.
+_SOURCE_CONTRACT_FAILED = "source contract failed for %s; retiring watcher"
+
 
 def screen_result(capture: str) -> str:
     """What a screen-derived turn end can offer a waiting caller as a result.
@@ -809,7 +813,14 @@ class Observer:
             # SourceContractError from the ReceiptAdmission validation added
             # in D2.  It must be inside the try so the finally closes the
             # source and removes it from _sources rather than leaking both.
-            self._register_source(pid, source)
+            # A SourceContractError here retires the watcher by the same path
+            # as the in-loop handler below, producing the deliberate log line
+            # rather than an unretrieved task exception.
+            try:
+                self._register_source(pid, source)
+            except SourceContractError:
+                logger.exception(_SOURCE_CONTRACT_FAILED, pid)
+                return
             while not self._stopping.is_set():
                 try:
                     if pid in self._reset_watch_state:
@@ -862,7 +873,7 @@ class Observer:
                     # Retrying cannot repair an adapter that does not implement
                     # the attachment protocol. Stop this watcher instead of
                     # logging the same traceback at poll cadence forever.
-                    logger.exception("source contract failed for %s; retiring watcher", pid)
+                    logger.exception(_SOURCE_CONTRACT_FAILED, pid)
                     return
                 except Exception:
                     logger.exception("observing %s failed", pid)
