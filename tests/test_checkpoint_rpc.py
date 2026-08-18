@@ -233,6 +233,8 @@ async def test_checkpoint_list_response_shape(client):
         "restored_at",
         "notes",
         "notes_truncated",
+        "snapshot_version",
+        "snapshot_node_count",
     }
     assert rows[0]["id"] == created["checkpoint_id"]
     assert rows[0]["notes"] == "short"
@@ -471,14 +473,16 @@ async def test_checkpoint_full_loop_a_creates_a_dies_b_lists_b_restores(client, 
     read = await client.call("checkpoint.read", checkpoint_id=created["checkpoint_id"])
     assert read["checkpoint"]["participant_id"] == "a"
 
-    # B restores A's checkpoint (A is live so action='live').
+    # B restores A's checkpoint (A is live so action='reused_live').
     result = await client.call(
         "checkpoint.restore",
         checkpoint_id=created["checkpoint_id"],
         approval="yolo",
         caller_id="b",
     )
-    assert result["restored_parent"]["action"] == "live"
+    # v2 result format: creator node report
+    assert result["creator"]["action"] == "reused_live"
+    assert result["creator"]["original_participant_id"] == "a"
 
     # restored_by recorded.
     read2 = await client.call("checkpoint.read", checkpoint_id=created["checkpoint_id"])
@@ -736,9 +740,11 @@ async def test_checkpoint_restore_live_parent_succeeds(client, daemon):
         approval="yolo",
         caller_id="caller",
     )
-    assert result["restored_parent"]["action"] == "live"
-    assert result["restored_parent"]["participant_id"] == "parent"
-    assert result["restored_parent"]["handoff_required"] is True
+    # v2 result format: structured per-participant report
+    assert result["creator"]["action"] == "reused_live"
+    assert result["creator"]["original_participant_id"] == "parent"
+    assert result["creator"]["new_participant_id"] == "parent"
+    assert result["creator"]["classification"] == "live"
 
 
 async def test_checkpoint_restore_live_parent_without_pane_rejected(client, daemon):
@@ -780,8 +786,9 @@ async def test_checkpoint_restore_result_durable_in_read(client, daemon):
     assert read["checkpoint"]["restored_by"] == "caller"
     result = read["checkpoint"]["restore_result"]
     assert result is not None
-    assert result["action"] == "live"
-    assert result["handoff_required"] is True
+    # v2 restore result: structured per-participant report
+    assert result["creator"]["action"] == "reused_live"
+    assert result["creator"]["classification"] == "live"
 
 
 async def test_checkpoint_restore_second_attempt_refused(client, daemon):
@@ -809,10 +816,16 @@ async def test_checkpoint_restore_second_attempt_refused(client, daemon):
 
 
 async def test_checkpoint_restore_spawn_failure_marks_failed(client, daemon, monkeypatch):
+    import json
+
     import theater.daemon.methods as methods_mod
     from theater.models import Participant, Status, Tier
 
     parent = Participant(id="parent", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%1")
+    # Give the parent launch_provenance so it is classified as respawnable when dead.
+    parent.launch_provenance = json.dumps(
+        {"prompt": "", "approval": "yolo", "cwd_requested": "/tmp", "cwd_resolved": "/tmp"}
+    )
     daemon.store.upsert_participant(parent)
     daemon.store.set_status(parent.id, Status.DEAD)
     created = await client.call("checkpoint.create", caller_id="parent", name="cp")
@@ -840,11 +853,16 @@ async def test_checkpoint_restore_spawn_failure_marks_failed(client, daemon, mon
 
 async def test_checkpoint_restore_spawn_cancelled_marks_failed(client, daemon, monkeypatch):
     import asyncio as _asyncio
+    import json
 
     import theater.daemon.methods as methods_mod
     from theater.models import Participant, Status, Tier
 
     parent = Participant(id="parent", harness="vibe", tier=Tier.SPAWNED, cwd="/tmp", tmux_pane="%1")
+    # Give the parent launch_provenance so it is classified as respawnable when dead.
+    parent.launch_provenance = json.dumps(
+        {"prompt": "", "approval": "yolo", "cwd_requested": "/tmp", "cwd_resolved": "/tmp"}
+    )
     daemon.store.upsert_participant(parent)
     daemon.store.set_status(parent.id, Status.DEAD)
     created = await client.call("checkpoint.create", caller_id="parent", name="cp")

@@ -57,7 +57,7 @@ BASELINE = "0001"
 #: The latest revision. A legacy database is stamped at BASELINE and then
 #: upgraded to this; a fresh database lands here directly. Tests assert
 #: against this rather than hardcoding a revision string.
-HEAD = "0011"
+HEAD = "0012"
 RECEIPT_TOKEN_PREFIX = "receipt_token:"
 
 
@@ -169,6 +169,7 @@ class Store:
             "status": str(p.status),
             "last_activity": p.last_activity,
             "created_at": p.created_at,
+            "launch_provenance": p.launch_provenance,
         }
 
     def bind_operator_transcript(
@@ -648,6 +649,9 @@ class Store:
                 checkpoints.c.restore_state,
                 checkpoints.c.restored_at,
                 checkpoints.c.restored_by,
+                # jobs_snapshot is included so callers can detect snapshot version
+                # without a second query (checkpoint.list summaries show version/count).
+                checkpoints.c.jobs_snapshot,
                 participants.c.status.label("creator_status"),
             )
             .outerjoin(participants, checkpoints.c.participant_id == participants.c.id)

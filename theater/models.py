@@ -67,6 +67,9 @@ class Participant:
     status: Status = Status.IDLE
     last_activity: float = field(default_factory=now)
     created_at: float = field(default_factory=now)
+    # Durable launch provenance (JSON blob), persisted at spawn time.
+    # Null for EXTERNAL, ADOPTED, and pre-0012 SPAWNED participants.
+    launch_provenance: str | None = None
     # Live-only: populated by the Registry for participants that are alive,
     # None for dead ones. Never persisted — the name is regenerated when the
     # daemon restarts, and a dead participant's name is released so a later
@@ -127,6 +130,7 @@ class Participant:
         d.pop("transcript_domain", None)
         d.pop("transcript_location", None)
         d.pop("resume_floor", None)
+        d.pop("launch_provenance", None)
         d["tier"] = str(self.tier)
         d["status"] = str(self.status)
         d["addressable"] = self.addressable
@@ -139,23 +143,25 @@ class Participant:
         # left 'starting' was functionally idle.
         raw_status = row["status"]
         status = Status.IDLE if raw_status == "starting" else Status(raw_status)
+        mapping = row._mapping if hasattr(row, "_mapping") else row
         return cls(
-            id=row["id"],
-            harness=row["harness"],
-            tier=Tier(row["tier"]),
-            tmux_pane=row["tmux_pane"],
-            cwd=row["cwd"],
-            branch=row["branch"],
-            session_id=row["session_id"],
-            session_correlation=row["session_correlation"],
-            transcript_domain=row["transcript_domain"],
-            transcript_location=row["transcript_location"],
-            resume_floor=row["resume_floor"],
-            parent_id=row["parent_id"],
-            pid=row["pid"],
+            id=mapping["id"],
+            harness=mapping["harness"],
+            tier=Tier(mapping["tier"]),
+            tmux_pane=mapping["tmux_pane"],
+            cwd=mapping["cwd"],
+            branch=mapping["branch"],
+            session_id=mapping["session_id"],
+            session_correlation=mapping["session_correlation"],
+            transcript_domain=mapping["transcript_domain"],
+            transcript_location=mapping["transcript_location"],
+            resume_floor=mapping["resume_floor"],
+            parent_id=mapping["parent_id"],
+            pid=mapping["pid"],
             status=status,
-            last_activity=row["last_activity"],
-            created_at=row["created_at"],
+            last_activity=mapping["last_activity"],
+            created_at=mapping["created_at"],
+            launch_provenance=mapping.get("launch_provenance"),
         )
 
 

@@ -300,6 +300,8 @@ machine ordered by `created_at DESC`. An optional `participant_id` filter narrow
 to one creator; an optional `restorable_only` flag excludes checkpoints already
 consumed or in-progress. The caller is still validated as an existing participant
 — the verb is available to any real participant, not unauthenticated callers.
+Each summary row carries `snapshot_version` (1 or 2) and `snapshot_node_count`
+so callers can tell at a glance whether a checkpoint covers the full tree.
 
 `checkpoint.restore` requires explicit approval (`manual` / `edits` / `yolo`),
 uses a single-use atomic claim (`restore_claimed_by` in the `checkpoints` row),
@@ -309,6 +311,72 @@ the caller await its own MCP turn, which deadlocks.
 
 `checkpoint.read` has always been global (no caller filter); this is documented
 here so a future reader does not mistake it for an oversight and add a scope.
+
+#### Snapshot format versions
+
+**v1 (legacy):** `jobs_snapshot` is a flat JSON list of jobs sent by the creator
+only. Created by any checkpoint made before v2 was shipped. `checkpoint.restore`
+falls back to the original single-node restore for these (creator only, no
+descendant recovery).
+
+**v2:** `jobs_snapshot` is a JSON object `{"version": 2, "creator_id": "...",
+"nodes": [...]}`. Each node record contains the participant's identity, the parsed
+`launch_provenance` blob, and all jobs that participant sent. Created by
+`checkpoint.create` starting with release 0.12.
+
+#### Launch provenance
+
+Every `SPAWNED` participant now carries a `launch_provenance` column (added in
+migration 0012): a compact JSON blob written once at spawn time, recording
+`prompt`, `approval`, `cwd_requested`, `cwd_resolved`, `model`,
+`reasoning_effort`, `worktree`, `worktree_type`, `worktree_name`,
+`worktree_branch`, `base_branch`, `response_format`, and `resume_session_id`.
+
+This blob is the ground-truth for cold-respawning a dead participant when the
+restorer cannot resume its native session. It is immutable once written —
+recovery reads from the v2 snapshot (which captures provenance at checkpoint
+time) and falls back to the live `launch_provenance` column when the row still
+exists.
+
+#### Orchestration-tree recovery (v2)
+
+`checkpoint.restore` with a v2 snapshot restores the full orchestration tree,
+not just the creator. The `theater/daemon/recovery.py` module owns this logic.
+
+Each recorded node is classified at restore time:
+
+| Classification | Condition                                              | Action        |
+|----------------|--------------------------------------------------------|---------------|
+| `live`         | Participant exists, not DEAD                           | `reused_live` |
+| `resumable`    | DEAD, has trusted `session_id`                         | `resumed`     |
+| `respawnable`  | DEAD or pruned, has `launch_provenance` with usable cwd| `respawned`   |
+| `completed`    | DEAD or pruned, no open jobs, no provenance            | `skipped`     |
+| `pruned`       | GC'd, no provenance, has open jobs                     | `failed`      |
+| `failed`       | EXTERNAL, no cwd, or other unrestorable state          | `failed`      |
+
+Restore processes nodes BFS order (creator first, then children, then
+grandchildren). Creator failures are re-raised (checkpoint marked `failed`).
+Descendant failures are captured in the per-participant report with
+`action=failed` and the checkpoint is still marked `restored`.
+
+The result of `checkpoint.restore` is a structured `TreeRestoreResult` dict with
+`creator` (one `NodeRestoreReport`) and `descendants` (a list of them). Each
+report contains:
+
+- `original_participant_id`, `new_participant_id` (same for live, different for
+  resumed/respawned)
+- `original_parent_id`, `current_parent_id`, `new_parent_id`
+- `harness`, `old_session_id`, `new_session_id`
+- `classification`, `action`, `final_status`, `reason`
+- `jobs` — all jobs the node sent (reported, never replayed)
+
+All rails apply: depth, budget, model, and reasoning are enforced on every cold
+respawn. Send jobs are never replayed; only spawn jobs for incomplete work drive
+new processes.
+
+**v1 checkpoints** produced before this release restore in legacy mode: creator
+only, single-node result with the original `restored_parent` shape. No historical
+descendants are invented.
 
 ---
 

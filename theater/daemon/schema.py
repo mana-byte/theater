@@ -37,6 +37,14 @@ participants = Table(
     Column("status", Text, nullable=False),
     Column("last_activity", REAL, nullable=False),
     Column("created_at", REAL, nullable=False),
+    # Durable launch provenance persisted at spawn time so the orchestration
+    # tree can be reconstructed after the participant dies or the daemon
+    # restarts. Stored as a compact JSON blob; null for participants created
+    # before this column existed (EXTERNAL, ADOPTED, or pre-0012 SPAWNED).
+    # Fields: prompt, approval, cwd_requested, cwd_resolved, model,
+    # reasoning_effort, worktree, worktree_type, worktree_name,
+    # worktree_branch, base_branch, response_format, resume_session_id.
+    Column("launch_provenance", Text),
 )
 
 Index("idx_participants_pane", participants.c.tmux_pane)

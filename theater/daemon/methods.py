@@ -1029,10 +1029,17 @@ async def _store_get(daemon, params: dict) -> dict:
 
 @method("checkpoint.create")
 async def _checkpoint_create(daemon, params: dict) -> dict:
+    from theater.daemon.recovery import build_tree_snapshot
+
     caller = _caller_participant(daemon, params, method_name="checkpoint.create")
     name = _string_param(params, "name", method_name="checkpoint.create")
     notes = _optional_string_param(params, "notes", method_name="checkpoint.create")
-    snapshot = _checkpoint_jobs(daemon, caller.id)
+
+    # v2: snapshot the full orchestration tree rooted at the caller.
+    tree_snapshot = build_tree_snapshot(daemon, caller.id)
+    # Also compute the flat creator-only jobs list for backward-compatible "jobs" field.
+    legacy_jobs = _checkpoint_jobs(daemon, caller.id)
+
     # Names are live-only and not persisted in the store row, so read from the
     # registry (one lookup on a write path). Guarded because an external caller
     # or one registered between the store write and the registry sync may be
@@ -1046,9 +1053,14 @@ async def _checkpoint_create(daemon, params: dict) -> dict:
         creator_name=creator_name,
         name=name,
         notes=notes,
-        jobs_snapshot=json.dumps(snapshot, sort_keys=True, separators=(",", ":")),
+        jobs_snapshot=json.dumps(tree_snapshot, sort_keys=True, separators=(",", ":")),
     )
-    return {"checkpoint_id": checkpoint_id, "jobs": snapshot}
+    # Return backward-compatible "jobs" list (creator's jobs) plus new "snapshot" field.
+    return {
+        "checkpoint_id": checkpoint_id,
+        "jobs": legacy_jobs,
+        "snapshot": tree_snapshot,
+    }
 
 
 def _checkpoint_id(params: dict) -> int:
@@ -1062,15 +1074,42 @@ def _checkpoint_id(params: dict) -> int:
 
 @method("checkpoint.read")
 async def _checkpoint_read(daemon, params: dict) -> dict:
+    from theater.daemon.recovery import is_v2_snapshot, parse_snapshot
+
     checkpoint_id = _checkpoint_id(params)
     row = daemon.store.get_checkpoint(checkpoint_id)
     if row is None:
         raise BadRequest(f"no checkpoint {checkpoint_id!r}")
-    recorded = json.loads(row["jobs_snapshot"] or "[]")
-    live = _checkpoint_jobs(daemon, row["participant_id"])
-    live_handles = {job["handle"] for job in live}
+
+    raw_snapshot = row.get("jobs_snapshot") or "[]"
+    try:
+        snapshot_data = parse_snapshot(raw_snapshot)
+    except (ValueError, TypeError):
+        snapshot_data = []
+
     restore_result_raw = row.get("restore_result")
     restore_result = json.loads(restore_result_raw) if restore_result_raw else None
+
+    # Determine snapshot version and extract backward-compatible fields.
+    if is_v2_snapshot(snapshot_data):
+        snapshot_version = 2
+        snapshot_node_count = len(snapshot_data.get("nodes", []))
+        # For backward compat: flat job list = all jobs from creator node.
+        creator_id = snapshot_data.get("creator_id", row["participant_id"])
+        creator_node = next(
+            (n for n in snapshot_data.get("nodes", []) if n["participant_id"] == creator_id),
+            None,
+        )
+        recorded_jobs_flat: list = creator_node["jobs"] if creator_node else []
+    else:
+        snapshot_version = 1
+        snapshot_node_count = 1
+        creator_id = row["participant_id"]
+        recorded_jobs_flat = snapshot_data if isinstance(snapshot_data, list) else []
+
+    live = _checkpoint_jobs(daemon, row["participant_id"])
+    live_handles = {job["handle"] for job in live}
+
     return {
         "checkpoint": {
             "id": row["id"],
@@ -1086,10 +1125,17 @@ async def _checkpoint_read(daemon, params: dict) -> dict:
             "restore_claimed_by": row.get("restore_claimed_by"),
             "restore_error": row.get("restore_error"),
             "restore_result": restore_result,
+            "snapshot_version": snapshot_version,
+            "snapshot_node_count": snapshot_node_count,
         },
-        "recorded_jobs": recorded,
+        # Backward-compatible flat job list (creator's sent jobs only).
+        "recorded_jobs": recorded_jobs_flat,
+        # Full tree snapshot (v2) or None (v1).
+        "tree_snapshot": snapshot_data if is_v2_snapshot(snapshot_data) else None,
         "live_jobs": live,
-        "pruned_handles": [job["handle"] for job in recorded if job["handle"] not in live_handles],
+        "pruned_handles": [
+            job["handle"] for job in recorded_jobs_flat if job["handle"] not in live_handles
+        ],
     }
 
 
@@ -1108,8 +1154,25 @@ def _checkpoint_limit(params: dict) -> int:
 
 
 def _checkpoint_summary(row: dict) -> dict:
+    from theater.daemon.recovery import is_v2_snapshot, parse_snapshot
+
     notes = row.get("notes")
     creator_status = row.get("creator_status")
+
+    # Determine snapshot version and node count without fully parsing the snapshot.
+    snapshot_version = 1
+    snapshot_node_count: int | None = None
+    raw_snapshot = row.get("jobs_snapshot") or "[]"
+    try:
+        snap = parse_snapshot(raw_snapshot)
+        if is_v2_snapshot(snap):
+            snapshot_version = 2
+            snapshot_node_count = len(snap.get("nodes", []))
+        else:
+            snapshot_node_count = 1
+    except (ValueError, TypeError):
+        pass
+
     base: dict = {
         "id": row["id"],
         "participant_id": row["participant_id"],
@@ -1123,6 +1186,8 @@ def _checkpoint_summary(row: dict) -> dict:
         "restore_state": row.get("restore_state") or "ready",
         "restored_by": row.get("restored_by"),
         "restored_at": row.get("restored_at"),
+        "snapshot_version": snapshot_version,
+        "snapshot_node_count": snapshot_node_count,
     }
     if notes is not None and len(notes) > CHECKPOINT_NOTES_PREVIEW_CHARS:
         return {**base, "notes": notes[:CHECKPOINT_NOTES_PREVIEW_CHARS], "notes_truncated": True}
@@ -1242,24 +1307,37 @@ def _validate_restore_parent(daemon, checkpoint_id: int, parent_id: str, caller_
 
 @method("checkpoint.restore")
 async def _checkpoint_restore(daemon, params: dict) -> dict:
-    """Prepare the checkpoint creator for restoration.
+    """Restore the orchestration tree from a checkpoint.
 
-    For a dead parent: spawns or resumes it as a child of the recovery
-    caller. For a live parent: reuses it in place (its lineage is not
-    changed). In both cases, returns the recorded jobs so the caller can
-    ``send`` the parent a recovery prompt. This is a two-step handoff:
-    the parent is prepared, then the caller delivers recovery instructions
-    via ``send``.
+    For v2 checkpoints (full tree): restores the creator and all recorded
+    descendants, reconciling each node as live, resumable, respawnable,
+    completed, pruned, or failed. Returns a structured per-participant report.
+
+    For v1 checkpoints (creator-only, legacy): falls back to the original
+    single-node restore logic for backward compatibility.
+
+    For a dead creator: spawns or resumes it as a child of the recovery
+    caller. For a live creator: reuses it in place (its lineage is not
+    changed). The caller then delivers recovery instructions via ``send``.
 
     The checkpoint is atomically claimed before any side effect and marked
-    ``restored`` on success or ``failed`` on error. A second restore is
-    refused with a state-specific error code.
+    ``restored`` on success or ``failed`` on creator-level errors. Partial
+    descendant failures do not mark the checkpoint as failed — they are
+    reported in the per-participant report with ``action=failed``.
+
+    A second restore is refused with a state-specific error code.
     """
+    from theater.daemon.recovery import restore_checkpoint
+
     caller, checkpoint_id, approval, row = _validate_restore_request(
         daemon, params, method_name="checkpoint.restore"
     )
     parent_id = row["participant_id"]
-    parent = _validate_restore_parent(daemon, checkpoint_id, parent_id, caller.id)
+
+    # Validate creator (the creator is always the first node to restore).
+    # For v1, we do the same full validation as before.
+    # For v2, we also validate the creator here before claiming.
+    _validate_restore_parent(daemon, checkpoint_id, parent_id, caller.id)
 
     token = daemon.store.claim_checkpoint_restore(checkpoint_id, caller.id)
     if token is None:
@@ -1268,92 +1346,44 @@ async def _checkpoint_restore(daemon, params: dict) -> dict:
         state = fresh.get("restore_state") or "ready"
         raise _restore_state_error(state, checkpoint_id, fresh.get("restore_claimed_by"))
 
-    side_effect_possible = False
+    # All side effects go through restore_checkpoint; always finalize as failed on error.
     try:
-        recorded_jobs = json.loads(row["jobs_snapshot"] or "[]")
-        parent_is_live = parent.status != str(Status.DEAD)
-
-        if parent_is_live:
-            action = "live"
-            restored_parent = parent.to_dict()
-        elif parent.session_id is not None:
-            side_effect_possible = True
-            restored_parent = await _spawn(
-                daemon,
-                {
-                    "harness": parent.harness,
-                    "cwd": parent.cwd,
-                    "approval": approval,
-                    "parent_id": caller.id,
-                    "resume": parent.session_id,
-                },
-            )
-            action = "resumed"
-        else:
-            side_effect_possible = True
-            restored_parent = await _spawn(
-                daemon,
-                {
-                    "harness": parent.harness,
-                    "cwd": parent.cwd,
-                    "approval": approval,
-                    "parent_id": caller.id,
-                },
-            )
-            action = "respawned"
+        restore_result_data = await restore_checkpoint(
+            daemon,
+            checkpoint_id=checkpoint_id,
+            row=row,
+            caller_id=caller.id,
+            approval=approval,
+        )
     except asyncio.CancelledError:
-        if side_effect_possible:
-            daemon.store.finalize_checkpoint_restore(
-                checkpoint_id,
-                token=token,
-                restored_by=caller.id,
-                error="cancelled during restore",
-            )
-        else:
-            daemon.store.release_checkpoint_restore(checkpoint_id, token=token)
+        daemon.store.finalize_checkpoint_restore(
+            checkpoint_id,
+            token=token,
+            restored_by=caller.id,
+            error="cancelled during restore",
+        )
         raise
     except Exception as exc:
-        if side_effect_possible:
-            daemon.store.finalize_checkpoint_restore(
-                checkpoint_id, token=token, restored_by=caller.id, error=str(exc)
-            )
-        else:
-            daemon.store.release_checkpoint_restore(checkpoint_id, token=token)
+        daemon.store.finalize_checkpoint_restore(
+            checkpoint_id, token=token, restored_by=caller.id, error=str(exc)
+        )
         raise
 
-    restore_result = json.dumps(
-        {
-            "participant_id": restored_parent["id"],
-            "harness": restored_parent["harness"],
-            "status": restored_parent["status"],
-            "session_id": restored_parent.get("session_id"),
-            "action": action,
-            "handoff_required": True,
-        },
+    restore_result_json = json.dumps(
+        restore_result_data,
         sort_keys=True,
         separators=(",", ":"),
     )
 
     if not daemon.store.finalize_checkpoint_restore(
-        checkpoint_id, token=token, restored_by=caller.id, result=restore_result
+        checkpoint_id, token=token, restored_by=caller.id, result=restore_result_json
     ):
         raise BadRequest(
             f"checkpoint {checkpoint_id!r} could not be finalized; "
             f"it may have been deleted by GC during restore"
         )
 
-    return {
-        "checkpoint_id": checkpoint_id,
-        "restored_parent": {
-            "participant_id": restored_parent["id"],
-            "harness": restored_parent["harness"],
-            "status": restored_parent["status"],
-            "session_id": restored_parent.get("session_id"),
-            "action": action,
-            "handoff_required": True,
-        },
-        "recorded_jobs": recorded_jobs,
-    }
+    return restore_result_data
 
 
 @method("bus.tail")

@@ -127,6 +127,7 @@ class Spawner:
         try:
             child_cwd = self._prepare_worktree(req, participant)
             plan = self._build_plan(req, participant, resume_domain)
+            self._record_launch_provenance(req, participant)
             self._record_launch_identity(participant, plan)
 
             # Capture the predecessor's transcript stream floor at the last
@@ -309,6 +310,49 @@ class Spawner:
                 exc_info=True,
             )
         self.registry.mark_dead(participant.id)
+
+    def _record_launch_provenance(self, req: SpawnRequest, participant: Participant) -> None:
+        """Persist immutable launch provenance for orchestration-tree recovery.
+
+        Called after worktree creation so ``participant.cwd`` is already the
+        resolved child cwd (worktree path or requested cwd). The requested cwd
+        from ``req.cwd`` is recorded separately as ``cwd_requested``.
+
+        The blob is written once and never updated: it is the ground-truth for
+        cold-respawning a dead participant when the checkpoint restorer cannot
+        resume its native session.
+        """
+        import json
+
+        worktree_type: str | None = None
+        worktree_name: str | None = None
+        if req.worktree is True:
+            worktree_type = "unique"
+        elif isinstance(req.worktree, str) and req.worktree:
+            worktree_type = "named"
+            worktree_name = req.worktree
+
+        provenance: dict = {
+            "prompt": req.prompt,
+            "approval": req.approval,
+            "cwd_requested": req.cwd,
+            "cwd_resolved": participant.cwd,
+            "model": req.model,
+            "reasoning_effort": req.reasoning_effort,
+            "worktree": req.worktree,
+            "worktree_type": worktree_type,
+            "worktree_name": worktree_name,
+            "worktree_branch": participant.branch,
+            "base_branch": req.base_branch,
+            "response_format": req.response_format,
+            "resume_session_id": req.resume,
+            "tmux_session": req.tmux_session,
+            "window_name": req.window_name,
+        }
+        participant.launch_provenance = json.dumps(
+            provenance, sort_keys=True, separators=(",", ":")
+        )
+        self.registry.store.upsert_participant(participant)
 
     def _record_launch_identity(self, participant: Participant, plan) -> None:
         """Persist exact launch facts before the process can write output."""
