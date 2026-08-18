@@ -75,8 +75,15 @@ class Registry:
 
     # `builtins.` because this class defines a method named `list`, which
     # shadows the builtin for every annotation written after it.
-    def list(self, *, include_dead: bool = False) -> builtins.list[Participant]:
-        return [self._named(p) for p in self.store.list_participants(include_dead=include_dead)]
+    def list(
+        self,
+        *,
+        include_dead: bool = False,
+        ids: builtins.list[str] | None = None,
+    ) -> builtins.list[Participant]:
+        return [
+            self._named(p) for p in self.store.list_participants(include_dead=include_dead, ids=ids)
+        ]
 
     def tree(self) -> builtins.list[dict]:
         """Participants as a forest, each node carrying its children inline."""

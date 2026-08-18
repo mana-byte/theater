@@ -34,7 +34,14 @@ from theater.daemon.rails import (
 )
 from theater.daemon.schema import bus, jobs
 from theater.daemon.spawner import SpawnRequest
-from theater.harness import HARNESSES, describe, normalize, supports_model, supports_reasoning
+from theater.harness import (
+    HARNESSES,
+    describe,
+    normalize,
+    supports_model,
+    supports_reasoning,
+    supports_resume,
+)
 from theater.harness.base import APPROVALS
 from theater.harness.observation import (
     ScreenConfidence,
@@ -56,6 +63,7 @@ from theater.models import (
     NotAddressable,
     NotFound,
     NotYourChild,
+    Participant,
     StaleTarget,
     Status,
     TheaterError,
@@ -402,6 +410,50 @@ def _transcript_identity_lost(daemon, pid: str) -> bool:
     return bool(checker(pid)) if callable(checker) else False
 
 
+def _resume_state(p: Participant, all_participants: list[Participant]) -> str:
+    """Derive the resume verdict for one participant without extra DB queries.
+
+    Precedence mirrors exactly the order spawn_session hits each gate:
+
+    1. ``live``               — spawner:369 refuses before anything else.
+    2. ``no_session_id``      — spawner:371-375 refuses next (dead, no session recorded).
+    3. ``harness_cannot_resume`` — check_resume at spawner:384 is the first
+                                validation gate; it runs before identity checks.
+    4. ``untrusted``          — _validate_resume_identity:451-455 refuses when
+                                provenance is below OPERATOR.
+    5. ``owned_by_live``      — _validate_resume_identity:442-448 refuses when a
+                                live trusted owner shares the same session id;
+                                checked after untrusted so we never misclassify an
+                                untrusted dead row as owned by a live one.
+    6. ``resumable``          — all gates passed; spawn would succeed.
+
+    ``all_participants`` must include dead rows (include_dead=True) so the
+    owned_by_live check can find live peers sharing the same session id.  This
+    is free because _list already fetches every row it is going to return.
+    """
+    if p.status is not Status.DEAD:
+        return "live"
+    if not p.session_id:
+        return "no_session_id"
+    harness = HARNESSES.get(p.harness)
+    if harness is None or not supports_resume(harness):
+        return "harness_cannot_resume"
+    if not is_trusted_provenance(p.session_correlation):
+        return "untrusted"
+    # Check whether any live participant shares the same harness + session id
+    # at trusted provenance — that is the owned_by_live condition.
+    for other in all_participants:
+        if (
+            other.id != p.id
+            and other.status is not Status.DEAD
+            and other.harness == p.harness
+            and other.session_id == p.session_id
+            and is_trusted_provenance(other.session_correlation)
+        ):
+            return "owned_by_live"
+    return "resumable"
+
+
 @method("ping")
 async def _ping(daemon, params: dict) -> dict:
     return {"pong": True, "protocol": protocol.PROTOCOL_VERSION}
@@ -423,7 +475,36 @@ async def _hello(daemon, params: dict) -> dict:
 @method("participants.list")
 async def _list(daemon, params: dict) -> list[dict]:
     include_dead = bool(params.get("include_dead"))
-    return [p.to_dict() for p in daemon.registry.list(include_dead=include_dead)]
+
+    # Validate the optional ids filter — follow the pattern from _recall.
+    raw_ids = params.get("ids")
+    if raw_ids is None:
+        ids: list[str] | None = None
+    else:
+        if not isinstance(raw_ids, list):
+            raise BadRequest("ids must be a list of non-empty strings, or absent")
+        for item in raw_ids:
+            if not isinstance(item, str) or not item:
+                raise BadRequest(
+                    "ids must be a list of non-empty strings; "
+                    "an empty string would widen the query to all rows"
+                )
+        if len(raw_ids) > 200:
+            raise BadRequest("ids list is capped at 200 entries")
+        ids = raw_ids
+
+    # For resume_state we always need the full participant set so that
+    # owned_by_live can find live peers sharing a session id — zero extra queries.
+    all_participants = daemon.registry.list(include_dead=True)
+    # Now fetch the filtered page (may be identical to all_participants when ids=None).
+    page = daemon.registry.list(include_dead=include_dead, ids=ids)
+
+    result = []
+    for p in page:
+        d = p.to_dict()
+        d["resume_state"] = _resume_state(p, all_participants)
+        result.append(d)
+    return result
 
 
 @method("participants.tree")

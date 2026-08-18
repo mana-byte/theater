@@ -168,7 +168,10 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         return await tools.whoami(session)
 
     @mcp.tool()
-    async def list_participants(include_dead: bool = False) -> list[dict]:
+    async def list_participants(
+        include_dead: bool = False,
+        ids: list[str] | None = None,
+    ) -> list[dict]:
         """List every agent on this machine that Theater knows about.
 
         Each entry says who they are (harness, id, session_id), where they are
@@ -186,8 +189,26 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         by retention GC, so historical access is retention-bounded). Use it,
         not the name, for any targeting that spans time or has destructive
         consequences, because a recycled name can identify a successor.
+
+        `ids` is an optional list of participant ids to fetch — real ids only,
+        not names (names are live-only, recyclable aliases). Pass it when you
+        need a small number of rows and do not want to pay for the whole table.
+        An empty list returns an empty result immediately. Unknown ids are
+        silently omitted; diff the requested list against the returned rows if
+        you need to know which were absent. `ids` composes with `include_dead`:
+        a dead participant is only returned when `include_dead=True`, even when
+        its id is listed explicitly.
+
+        Each row includes `resume_state`, which exposes the verdict
+        `spawn_session(resume=...)` would return for that participant without
+        actually attempting the spawn. Values: `resumable` (spawn would work),
+        `live` (participant is still running), `no_session_id` (Theater has not
+        recorded the harness session id), `harness_cannot_resume` (the harness
+        adapter does not support resume), `untrusted` (session id present but
+        transcript provenance is below operator-level), `owned_by_live` (a live
+        participant already holds a trusted binding for the same session id).
         """
-        return await tools.list_participants(session, include_dead=include_dead)
+        return await tools.list_participants(session, include_dead=include_dead, ids=ids)
 
     @mcp.tool()
     async def list_harnesses() -> list[dict]:

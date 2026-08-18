@@ -1682,3 +1682,174 @@ async def test_jobs_create_persists_then_raises_leaves_dead_and_crashed(
     assert job is not None, "job must exist (create_job persisted before the raise)"
     assert job.state == "crashed", "persisted RUNNING job must be CRASHED on create failure"
     assert job.error_code == "spawn_failed"
+
+
+# ---- participants.list: ids filter (RPC level) ----------------------------
+
+
+async def test_list_ids_omitted_returns_all(client):
+    """ids omitted => response identical to today (all live rows)."""
+    a = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    b = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    rows = await client.call("participants.list")
+    ids = [r["id"] for r in rows]
+    assert a["id"] in ids
+    assert b["id"] in ids
+
+
+async def test_list_ids_subset_returns_exact_rows(client):
+    """ids=[a, c] out of several participants => exactly those rows."""
+    a = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    c = await client.call("hello", harness="vibe", pane="%3", cwd="/tmp")
+    rows = await client.call("participants.list", ids=[a["id"], c["id"]])
+    assert [r["id"] for r in rows] == [a["id"], c["id"]]
+
+
+async def test_list_ids_empty_returns_nothing(client):
+    """ids=[] is the trap: must return [] not everything."""
+    await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    rows = await client.call("participants.list", ids=[])
+    assert rows == []
+
+
+async def test_list_ids_unknown_silently_omitted(client):
+    """Unknown ids are dropped, no error."""
+    rows = await client.call("participants.list", ids=["ghost-123"])
+    assert rows == []
+
+
+async def test_list_ids_not_a_list_is_bad_request(client):
+    """ids must be a list."""
+    with pytest.raises(RemoteError) as exc:
+        await client.call("participants.list", ids="abc")
+    assert exc.value.code == "bad_request"
+
+
+async def test_list_ids_element_not_string_is_bad_request(client):
+    """Any non-string element is rejected."""
+    with pytest.raises(RemoteError) as exc:
+        await client.call("participants.list", ids=[1])
+    assert exc.value.code == "bad_request"
+
+
+async def test_list_ids_empty_string_element_is_bad_request(client):
+    """An empty string element must not silently widen the query."""
+    with pytest.raises(RemoteError) as exc:
+        await client.call("participants.list", ids=[""])
+    assert exc.value.code == "bad_request"
+
+
+async def test_list_ids_over_200_is_bad_request(client):
+    """More than 200 ids at once is refused."""
+    with pytest.raises(RemoteError) as exc:
+        await client.call("participants.list", ids=[f"x-{i}" for i in range(201)])
+    assert exc.value.code == "bad_request"
+
+
+async def test_list_ids_dead_excluded_without_include_dead(client, fake_tmux):
+    """A dead id is omitted when include_dead=False, even when named explicitly."""
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+    await client.call("participant.kill", id=record["id"])
+    rows = await client.call("participants.list", ids=[record["id"]])
+    assert rows == []
+
+
+async def test_list_ids_dead_returned_with_include_dead(client, fake_tmux):
+    """A dead id is returned when include_dead=True."""
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+    await client.call("participant.kill", id=record["id"])
+    rows = await client.call("participants.list", ids=[record["id"]], include_dead=True)
+    assert len(rows) == 1
+    assert rows[0]["id"] == record["id"]
+    assert rows[0]["status"] == "dead"
+
+
+# ---- participants.list: resume_state (RPC level) --------------------------
+
+
+async def test_list_resume_state_live(client):
+    """A live participant reports resume_state == 'live'."""
+    me = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    rows = await client.call("participants.list")
+    row = next(r for r in rows if r["id"] == me["id"])
+    assert row["resume_state"] == "live"
+
+
+async def test_list_resume_state_no_session_id(client, fake_tmux):
+    """Dead participant with no session_id => no_session_id."""
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+    pid = record["id"]
+    await client.call("participant.kill", id=pid)
+    rows = await client.call("participants.list", include_dead=True)
+    row = next(r for r in rows if r["id"] == pid)
+    # session_id is not set by the fake tmux observer, so it remains None.
+    assert row["resume_state"] == "no_session_id"
+
+
+async def test_list_resume_state_untrusted(client, daemon):
+    """Dead, has session_id, but heuristic provenance => untrusted."""
+    p = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    pid = p["id"]
+    participant = daemon.registry.get(pid)
+    participant.session_id = "sess-heuristic"
+    participant.session_correlation = "heuristic"
+    daemon.store.upsert_participant(participant)
+    daemon.registry.mark_dead(pid)
+
+    rows = await client.call("participants.list", include_dead=True)
+    row = next(r for r in rows if r["id"] == pid)
+    assert row["resume_state"] == "untrusted"
+
+
+async def test_list_resume_state_resumable(client, daemon):
+    """Dead, has session_id, trusted provenance, no live owner => resumable."""
+    p = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    pid = p["id"]
+    participant = daemon.registry.get(pid)
+    participant.session_id = "sess-trusted"
+    participant.session_correlation = "operator"
+    daemon.store.upsert_participant(participant)
+    daemon.registry.mark_dead(pid)
+
+    rows = await client.call("participants.list", include_dead=True)
+    row = next(r for r in rows if r["id"] == pid)
+    assert row["resume_state"] == "resumable"
+
+
+async def test_list_resume_state_owned_by_live(client, daemon):
+    """Dead trusted row AND live trusted row sharing session id => owned_by_live."""
+    # Dead participant with trusted binding.
+    dead_p = await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    dead_id = dead_p["id"]
+    dead_part = daemon.registry.get(dead_id)
+    dead_part.session_id = "sess-shared"
+    dead_part.session_correlation = "operator"
+    daemon.store.upsert_participant(dead_part)
+    daemon.registry.mark_dead(dead_id)
+
+    # Live participant with the same harness + session_id at trusted provenance.
+    live_p = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+    live_id = live_p["id"]
+    live_part = daemon.registry.get(live_id)
+    live_part.session_id = "sess-shared"
+    live_part.session_correlation = "operator"
+    daemon.store.upsert_participant(live_part)
+
+    rows = await client.call("participants.list", include_dead=True)
+    dead_row = next(r for r in rows if r["id"] == dead_id)
+    live_row = next(r for r in rows if r["id"] == live_id)
+    assert dead_row["resume_state"] == "owned_by_live"
+    assert live_row["resume_state"] == "live"
+
+
+async def test_list_no_internal_fields_exposed(client):
+    """session_correlation, transcript_domain, transcript_location, resume_floor
+    must not appear in any row returned by participants.list."""
+    await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
+    rows = await client.call("participants.list")
+    for row in rows:
+        assert "session_correlation" not in row
+        assert "transcript_domain" not in row
+        assert "transcript_location" not in row
+        assert "resume_floor" not in row

@@ -403,3 +403,62 @@ async def test_recall_read_identifies_first():
     s = session(recall_read={})
     await tools.recall_read(s, segment_id="codex-a41f")
     assert s.client.methods == ["hello", "recall_read"]
+
+
+# ---- list_participants: ids + resume_state projection ---------------------
+
+_RECORD_WITH_RESUME = {
+    **RECORD,
+    "resume_state": "live",
+}
+
+
+async def test_list_participants_forwards_ids_to_daemon():
+    """ids parameter is forwarded to the RPC unchanged."""
+    rows = [{**_RECORD_WITH_RESUME, "id": "p-me"}]
+    s = resolved(**{"participants.list": rows})
+    await tools.list_participants(s, ids=["p-me", "p-other"])
+    params = s.client.params("participants.list")
+    assert params["ids"] == ["p-me", "p-other"]
+
+
+async def test_list_participants_forwards_ids_none():
+    """ids=None is forwarded (daemon treats it as absent)."""
+    rows = [{**_RECORD_WITH_RESUME, "id": "p-me"}]
+    s = resolved(**{"participants.list": rows})
+    await tools.list_participants(s, ids=None)
+    params = s.client.params("participants.list")
+    assert params["ids"] is None
+
+
+async def test_list_participants_resume_state_in_projection():
+    """resume_state appears in each returned row."""
+    rows = [
+        {**_RECORD_WITH_RESUME, "id": "p-me", "resume_state": "live"},
+        {**_RECORD_WITH_RESUME, "id": "p-other", "resume_state": "resumable"},
+    ]
+    s = resolved(**{"participants.list": rows})
+    got = await tools.list_participants(s)
+    assert got[0]["resume_state"] == "live"
+    assert got[1]["resume_state"] == "resumable"
+
+
+async def test_list_participants_no_internal_fields_in_projection():
+    """Internal fields must not bleed through _summarise even if the daemon returned them."""
+    row = {
+        **_RECORD_WITH_RESUME,
+        "session_correlation": "operator",
+        "transcript_domain": "/tmp/d",
+        "transcript_location": "/tmp/d/m.jsonl",
+        "resume_floor": "abc",
+    }
+    s = resolved(**{"participants.list": [row]})
+    got = await tools.list_participants(s)
+    assert len(got) == 1
+    for field in (
+        "session_correlation",
+        "transcript_domain",
+        "transcript_location",
+        "resume_floor",
+    ):
+        assert field not in got[0], f"internal field {field!r} leaked through"

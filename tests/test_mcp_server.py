@@ -419,3 +419,268 @@ async def test_a_failing_tool_reports_the_daemon_error(daemon, monkeypatch):
             {"harness": "cursor", "prompt": "hi", "approval": "manual"},
         )
     assert "bad_request" in str(exc.value)
+
+
+# ---- list_participants: docstring contract ---------------------------------
+
+
+async def test_list_participants_docstring_describes_resume_state(daemon):
+    """The list_participants docstring must describe resume_state and its values."""
+    tools = {t.name: t.description or "" for t in await build("p1", "vibe").list_tools()}
+    desc = tools["list_participants"].lower()
+    assert "resume_state" in desc
+    # Each value must be documented.
+    for value in (
+        "resumable",
+        "live",
+        "no_session_id",
+        "harness_cannot_resume",
+        "untrusted",
+        "owned_by_live",
+    ):
+        assert value in desc, f"resume_state value {value!r} missing from docstring"
+
+
+async def test_list_participants_docstring_describes_ids_semantics(daemon):
+    """The list_participants docstring must describe the ids filter and its trap."""
+    tools = {t.name: t.description or "" for t in await build("p1", "vibe").list_tools()}
+    desc = tools["list_participants"].lower()
+    assert "ids" in desc
+    # Must warn that unknown ids are silently omitted.
+    assert "unknown" in desc or "absent" in desc or "omit" in desc
+
+
+# ---- list_participants: resume_state pinned to spawner (test 15) ----------
+#
+# Each case asserts the resume_state value and then calls spawn(resume=...)
+# to verify it refuses if and only if the state is not 'resumable'.  The
+# harness fixtures are module-level to keep individual tests short.
+
+from pathlib import Path  # noqa: E402  (import after module body — only for fixtures below)
+
+from theater.harness import HARNESSES, Harness, LaunchPlan  # noqa: E402
+from theater.harness.observation import TranscriptObserver  # noqa: E402
+from theater.protocol import RemoteError  # noqa: E402
+
+
+class _ResumeObs(TranscriptObserver):
+    """Minimal observer for test harnesses."""
+
+    has_transcript = True
+
+    def find_transcript(self, *, cwd, session_id=None, after=None):
+        return None
+
+    def session_id(self, transcript):
+        return None
+
+    def parse(self, line, index, *, clip_text=True):
+        return []
+
+    def is_idle_screen(self, capture):
+        return False
+
+
+class _PinResumeHarness(Harness):
+    """Harness that supports resume — used by most resume_state cases."""
+
+    name = "resume-pin-test"
+    binary = "resume-pin-test"
+    icon = "P"
+
+    def __init__(self):
+        self.observer = _ResumeObs()
+
+    def plan_launch(
+        self,
+        *,
+        participant_id: str,
+        prompt: str,
+        config_path: Path,
+        approval: str,
+        resume: str | None = None,
+    ) -> LaunchPlan:
+        argv = ["resume-pin-test"]
+        if resume:
+            argv += ["--resume", resume]
+        return LaunchPlan(argv=argv)
+
+
+class _PinNoResumeHarness(Harness):
+    """Harness whose plan_launch predates the resume parameter."""
+
+    name = "no-resume-pin-test"
+    binary = "no-resume-pin-test"
+    icon = "Q"
+
+    def __init__(self):
+        self.observer = _ResumeObs()
+
+    def plan_launch(
+        self,
+        *,
+        participant_id: str,
+        prompt: str,
+        config_path: Path,
+        approval: str,
+    ) -> LaunchPlan:
+        return LaunchPlan(argv=["no-resume-pin-test"])
+
+
+@pytest.fixture
+def pin_harnesses(monkeypatch):
+    """Install the two test harnesses and stub shutil.which."""
+    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setitem(HARNESSES, "resume-pin-test", _PinResumeHarness())
+    monkeypatch.setitem(HARNESSES, "no-resume-pin-test", _PinNoResumeHarness())
+
+
+async def test_resume_state_live_spawn_refuses(daemon, pin_harnesses):
+    """live => spawn(resume=id) refuses because participant is still alive."""
+    async with DaemonClient(autostart=False) as c:
+        me = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
+        pid = me["id"]
+        rows = await c.call("participants.list")
+        row = next(r for r in rows if r["id"] == pid)
+        assert row["resume_state"] == "live"
+        with pytest.raises(RemoteError) as exc:
+            await c.call(
+                "spawn",
+                harness="resume-pin-test",
+                prompt="",
+                approval="manual",
+                cwd="/tmp",
+                resume=pid,
+            )
+        assert exc.value.code == "bad_request"
+
+
+async def test_resume_state_no_session_id_spawn_refuses(daemon, pin_harnesses):
+    """no_session_id => spawn(resume=id) refuses because no session recorded."""
+    async with DaemonClient(autostart=False) as c:
+        me = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
+        pid = me["id"]
+        daemon.registry.mark_dead(pid)
+        rows = await c.call("participants.list", include_dead=True)
+        row = next(r for r in rows if r["id"] == pid)
+        assert row["resume_state"] == "no_session_id"
+        with pytest.raises(RemoteError) as exc:
+            await c.call(
+                "spawn",
+                harness="resume-pin-test",
+                prompt="",
+                approval="manual",
+                cwd="/tmp",
+                resume=pid,
+            )
+        assert exc.value.code == "bad_request"
+
+
+async def test_resume_state_harness_cannot_resume_spawn_refuses(daemon, pin_harnesses):
+    """harness_cannot_resume => spawn(resume=session_id) refuses."""
+    async with DaemonClient(autostart=False) as c:
+        p = await c.call("hello", harness="no-resume-pin-test", cwd="/tmp")
+        pid = p["id"]
+        part = daemon.registry.get(pid)
+        part.session_id = "sess-noresume"
+        part.session_correlation = "operator"
+        daemon.store.upsert_participant(part)
+        daemon.registry.mark_dead(pid)
+        rows = await c.call("participants.list", include_dead=True)
+        row = next(r for r in rows if r["id"] == pid)
+        assert row["resume_state"] == "harness_cannot_resume"
+        with pytest.raises(RemoteError) as exc:
+            await c.call(
+                "spawn",
+                harness="no-resume-pin-test",
+                prompt="",
+                approval="manual",
+                cwd="/tmp",
+                resume="sess-noresume",
+            )
+        assert exc.value.code == "bad_request"
+
+
+async def test_resume_state_untrusted_spawn_refuses(daemon, pin_harnesses):
+    """untrusted => spawn(resume=session_id) refuses because provenance is heuristic."""
+    async with DaemonClient(autostart=False) as c:
+        p = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
+        pid = p["id"]
+        part = daemon.registry.get(pid)
+        part.session_id = "sess-untrusted"
+        part.session_correlation = "heuristic"
+        daemon.store.upsert_participant(part)
+        daemon.registry.mark_dead(pid)
+        rows = await c.call("participants.list", include_dead=True)
+        row = next(r for r in rows if r["id"] == pid)
+        assert row["resume_state"] == "untrusted"
+        with pytest.raises(RemoteError) as exc:
+            await c.call(
+                "spawn",
+                harness="resume-pin-test",
+                prompt="",
+                approval="manual",
+                cwd="/tmp",
+                resume="sess-untrusted",
+            )
+        assert exc.value.code == "bad_request"
+
+
+async def test_resume_state_resumable_spawn_succeeds(daemon, pin_harnesses):
+    """resumable => spawn(resume=session_id) succeeds."""
+    async with DaemonClient(autostart=False) as c:
+        p = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
+        pid = p["id"]
+        part = daemon.registry.get(pid)
+        part.session_id = "sess-resumable"
+        part.session_correlation = "operator"
+        daemon.store.upsert_participant(part)
+        daemon.registry.mark_dead(pid)
+        rows = await c.call("participants.list", include_dead=True)
+        row = next(r for r in rows if r["id"] == pid)
+        assert row["resume_state"] == "resumable"
+        result = await c.call(
+            "spawn",
+            harness="resume-pin-test",
+            prompt="",
+            approval="manual",
+            cwd="/tmp",
+            resume="sess-resumable",
+        )
+        assert result["id"] is not None
+
+
+async def test_resume_state_owned_by_live_spawn_refuses(daemon, pin_harnesses):
+    """owned_by_live => spawn(resume=session_id) refuses: a live owner exists."""
+    async with DaemonClient(autostart=False) as c:
+        # Live owner with trusted binding.
+        live_p = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
+        lo_id = live_p["id"]
+        live_part = daemon.registry.get(lo_id)
+        live_part.session_id = "sess-owned"
+        live_part.session_correlation = "operator"
+        daemon.store.upsert_participant(live_part)
+
+        # Dead predecessor sharing the same session id.
+        dead_p = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
+        dp_id = dead_p["id"]
+        dead_part = daemon.registry.get(dp_id)
+        dead_part.session_id = "sess-owned"
+        dead_part.session_correlation = "operator"
+        daemon.store.upsert_participant(dead_part)
+        daemon.registry.mark_dead(dp_id)
+
+        rows = await c.call("participants.list", include_dead=True)
+        dp_row = next(r for r in rows if r["id"] == dp_id)
+        assert dp_row["resume_state"] == "owned_by_live"
+
+        with pytest.raises(RemoteError) as exc:
+            await c.call(
+                "spawn",
+                harness="resume-pin-test",
+                prompt="",
+                approval="manual",
+                cwd="/tmp",
+                resume="sess-owned",
+            )
+        assert exc.value.code == "bad_request"

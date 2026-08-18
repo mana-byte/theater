@@ -83,13 +83,21 @@ async def whoami(session: Session) -> dict:
     return _summarise(await session.me())
 
 
-async def list_participants(session: Session, *, include_dead: bool = False) -> list[dict]:
+async def list_participants(
+    session: Session,
+    *,
+    include_dead: bool = False,
+    ids: list[str] | None = None,
+) -> list[dict]:
     if not session._resolved:
         await session.identify()
-    rows = await session.client.call("participants.list", include_dead=include_dead)
+    rows = await session.client.call("participants.list", include_dead=include_dead, ids=ids)
     assert isinstance(rows, list)
     me = session.participant_id
-    return [{**_summarise(p), "is_self": p["id"] == me} for p in rows]
+    return [
+        {**_summarise(p), "is_self": p["id"] == me, "resume_state": p.get("resume_state")}
+        for p in rows
+    ]
 
 
 async def harnesses(session: Session) -> list[dict]:

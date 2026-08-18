@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 from alembic import command
@@ -241,10 +242,19 @@ class Store:
         ).first()
         return Participant.from_row(row._mapping) if row else None
 
-    def list_participants(self, *, include_dead: bool = False) -> list[Participant]:
+    def list_participants(
+        self,
+        *,
+        include_dead: bool = False,
+        ids: Sequence[str] | None = None,
+    ) -> list[Participant]:
         stmt = select(participants)
         if not include_dead:
             stmt = stmt.where(participants.c.status != str(Status.DEAD))
+        if ids is not None:
+            if not ids:
+                return []
+            stmt = stmt.where(participants.c.id.in_(ids))
         stmt = stmt.order_by(participants.c.created_at.asc())
         return [Participant.from_row(r._mapping) for r in self.conn.execute(stmt)]
 

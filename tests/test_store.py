@@ -576,3 +576,64 @@ def test_recover_stranded_restores_promotes_claimed_by_to_restored_by(store):
     assert row["restored_by"] == "crash-restorer"
     # restore_claimed_by must be cleared — same shape as finalize(error=...).
     assert row["restore_claimed_by"] is None
+
+
+# ---- list_participants ids filter -----------------------------------------
+
+
+def _five_participants(store) -> list[Participant]:
+    """Create five participants in order and return them."""
+    ps = []
+    for i in range(5):
+        p = Participant(harness="vibe", cwd=f"/tmp/{i}")
+        store.upsert_participant(p)
+        ps.append(p)
+    return ps
+
+
+def test_list_participants_ids_omitted_returns_all(store):
+    """ids=None (absent) behaves identically to today — every live row."""
+    ps = _five_participants(store)
+    rows = store.list_participants()
+    assert [r.id for r in rows] == [p.id for p in ps]
+
+
+def test_list_participants_ids_subset_preserves_creation_order(store):
+    """ids=[a, c] out of 5 returns exactly 2, in creation order."""
+    ps = _five_participants(store)
+    ids = [ps[0].id, ps[2].id]
+    rows = store.list_participants(ids=ids)
+    # Creation order (ASC by created_at) must be preserved, not the order of ids.
+    assert [r.id for r in rows] == [ps[0].id, ps[2].id]
+
+
+def test_list_participants_ids_empty_returns_nothing(store):
+    """ids=[] is the trap: it must return [] not everything."""
+    _five_participants(store)
+    rows = store.list_participants(ids=[])
+    assert rows == []
+
+
+def test_list_participants_ids_unknown_silently_omitted(store):
+    """Unknown ids are dropped with no error."""
+    rows = store.list_participants(ids=["ghost-id"])
+    assert rows == []
+
+
+def test_list_participants_ids_dead_excluded_without_include_dead(store):
+    """A dead participant named in ids is omitted when include_dead=False."""
+    p = Participant(harness="vibe")
+    store.upsert_participant(p)
+    store.set_status(p.id, Status.DEAD)
+    rows = store.list_participants(ids=[p.id])
+    assert rows == []
+
+
+def test_list_participants_ids_dead_included_with_include_dead(store):
+    """A dead participant named in ids is returned when include_dead=True."""
+    p = Participant(harness="vibe")
+    store.upsert_participant(p)
+    store.set_status(p.id, Status.DEAD)
+    rows = store.list_participants(ids=[p.id], include_dead=True)
+    assert len(rows) == 1
+    assert rows[0].id == p.id
