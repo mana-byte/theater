@@ -204,7 +204,7 @@ def _display_width(text: str) -> int:
     """
     width = 0
     for ch in text:
-        if unicodedata.combining(ch):
+        if unicodedata.category(ch) in ("Mn", "Me"):
             continue
         if unicodedata.east_asian_width(ch) in ("W", "F"):
             width += 2
@@ -233,8 +233,8 @@ def _check_identity(path: Path, harness: Harness) -> None:
     icon = getattr(harness, "icon", "")
     if not isinstance(icon, str) or not icon or not icon.isprintable():
         raise PluginError(
-            f"{path}: harness {name!r} has icon {icon!r}; it must be a single "
-            "printable character, since listings align on it"
+            f"{path}: harness {name!r} has icon {icon!r}; it must contain only "
+            "printable codepoints, since listings align on it"
         )
     width = _display_width(icon)
     if width != 1:

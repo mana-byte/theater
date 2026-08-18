@@ -330,6 +330,37 @@ def test_a_single_cell_non_ascii_icon_is_accepted(local_dir):
     assert "acme" in install(local_dir)
 
 
+def test_a_variation_selector_icon_is_caught(local_dir):
+    """U+FE0F is category Mn (zero-width) but combining class 0, so the old
+    combining-class test let it through.  It totals zero cells and must be
+    rejected by the width branch."""
+    plugin(local_dir, icon="\ufe0f")
+    assert "display width" in error_in(local_dir)
+
+
+def test_a_combining_grapheme_joiner_icon_is_caught(local_dir):
+    """U+034F is category Mn (zero-width) but combining class 0.  Same hole."""
+    plugin(local_dir, icon="\u034f")
+    assert "display width" in error_in(local_dir)
+
+
+def test_a_base_plus_combining_icon_is_accepted(local_dir):
+    """A base character plus a combining acute is one display cell."""
+    plugin(local_dir, icon="e\u0301")
+    assert "acme" in install(local_dir)
+
+
+def test_shipped_icons_still_pass():
+    """All four shipped icons are category So — the Mn/Me predicate must not
+    touch them.  This is the regression guard for the algorithm change."""
+    harness_registry.install(cfg.Config())
+    for name in ("claude", "codex", "opencode", "vibe"):
+        harness = harness_registry.get(name)
+        assert harness.icon, f"{name} has no icon"
+        # The loader's own check must accept it.
+        plugins._check_identity(harness_registry._PLUGINS[name].path, harness)
+
+
 def test_two_plugins_with_one_name_name_both_files(local_dir):
     plugin(local_dir, "one.py", cls="One")
     plugin(local_dir, "two.py", cls="Two")
