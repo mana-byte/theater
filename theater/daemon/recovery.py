@@ -126,7 +126,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from theater.daemon import lineage
-from theater.daemon.harness_detect import is_shell
 from theater.daemon.rails import (
     check_budget,
     check_depth,
@@ -729,36 +728,33 @@ def classify_node(  # noqa: PLR0912
                     f"confirmed gone by tmux"
                 )
             assert isinstance(pane_info, dict)
-            pane_harness = pane_info.get("harness")
-            # "unknown" means detection could not identify the harness — it is
-            # absence of evidence, NOT evidence of a foreign harness. The send
-            # path (methods.py) already handles this correctly; this mirrors
-            # its semantics so a wrapper-renamed binary (e.g. .claude-wrapped)
-            # does not cause a live creator to be misclassified as a conflict.
-            if live_participant.harness == "unknown":
-                # Nothing to compare against; trust the DB row.
-                return "live", "participant is live (recorded harness is 'unknown')"
-            if pane_harness == live_participant.harness:
+            # Use the shared decision function so this site, the send path,
+            # and the preflight never drift.  Each caller decides what to DO
+            # with the verdict; none re-encodes the judgement.
+            from theater.daemon.harness_detect import PaneHarnessVerdict, compare_pane_harness
+
+            raw_command = pane_info.get("command", "")
+            pane_pid = pane_info.get("pane_pid", 0)
+            verdict = compare_pane_harness(live_participant.harness, raw_command, pane_pid)
+            if verdict is PaneHarnessVerdict.MATCH:
                 return "live", "participant is live with tmux-verified pane"
-            if pane_harness == "unknown":
-                # Detection failed. If the pane's foreground is a shell, the
-                # CLI has exited and left a prompt — classify stale_live so
-                # the restore path transitions it through death handling.
-                # Otherwise trust the DB row (wrapper rename, etc.).
-                raw_command = pane_info.get("command", "")
-                if is_shell(raw_command):
-                    return "stale_live", (
-                        f"participant {orig_id!r}: pane {live_participant.tmux_pane!r} "
-                        f"shows a shell ({raw_command!r}); harness likely exited"
-                    )
-                return "live", (
-                    f"participant {orig_id!r}: pane harness detection returned 'unknown' "
-                    f"(command {raw_command!r}); trusting DB row"
+            if verdict is PaneHarnessVerdict.CONFLICT:
+                pane_harness = pane_info.get("harness", "unknown")
+                return "live_harness_conflict", (
+                    f"participant {orig_id!r}: pane {live_participant.tmux_pane!r} "
+                    f"runs {pane_harness!r} not {live_participant.harness!r}"
                 )
-            # A positively identified DIFFERENT harness — real conflict.
-            return "live_harness_conflict", (
-                f"participant {orig_id!r}: pane {live_participant.tmux_pane!r} "
-                f"runs {pane_harness!r} not {live_participant.harness!r}"
+            if verdict is PaneHarnessVerdict.HARNESS_GONE:
+                return "stale_live", (
+                    f"participant {orig_id!r}: pane {live_participant.tmux_pane!r} "
+                    f"shows a shell ({raw_command!r}); harness likely exited"
+                )
+            # UNDETERMINED: detection returned "unknown" with a non-shell
+            # command.  Absence of evidence, not evidence of a foreign
+            # harness — trust the DB row (wrapper rename, etc.).
+            return "live", (
+                f"participant {orig_id!r}: pane harness detection returned 'unknown' "
+                f"(command {raw_command!r}); trusting DB row"
             )
 
         # DEAD retained row.
@@ -893,8 +889,12 @@ async def _get_pane_info(daemon: Daemon, pane_id: str | None) -> dict | object |
     except Exception:
         return _PANE_INFO_TMUX_UNAVAILABLE
     else:
-        harness = detect_harness(pane.current_command, pane.pane_pid)
-        return {"pane_id": pane_id, "harness": harness, "command": pane.current_command}
+        return {
+            "pane_id": pane_id,
+            "harness": detect_harness(pane.current_command, pane.pane_pid),
+            "command": pane.current_command,
+            "pane_pid": pane.pane_pid,
+        }
 
 
 # ---- BFS order ---------------------------------------------------------------
@@ -1400,6 +1400,11 @@ async def restore_tree(  # noqa: PLR0912, PLR0915
     creator_report: NodeRestoreReport | None = None
     progress: dict[str, dict] = {}
     halt_reason: str | None = None
+    #: Tracks whether the creator's failure was a harness-verification rejection
+    #: (live_harness_conflict → failed) rather than a reconstruction failure.
+    #: Set in the loop body when classify_node returns live_harness_conflict;
+    #: read by the cascade gate and the id_map block.
+    _creator_harness_conflict = False
 
     def _persist_progress() -> bool:
         """Persist progress blob. Returns False if the token-gated write fails."""
@@ -1445,6 +1450,11 @@ async def restore_tree(  # noqa: PLR0912, PLR0915
                 revive_completed=revive_completed,
             )
         elif classification == "live_harness_conflict":
+            # Preserve the original classification for the cascade gate below.
+            # The report will carry ``failed`` as its classification (the node
+            # is unrestorable), but the non-cascade branch needs to know the
+            # failure was a verification rejection, not a reconstruction failure.
+            _creator_harness_conflict = True
             classification = "failed"
             reason = f"{reason}; refusing to touch or duplicate a mismatched live pane"
         elif classification == "stale_live":
@@ -1578,11 +1588,15 @@ async def restore_tree(  # noqa: PLR0912, PLR0915
 
         if report.new_participant_id is not None:
             id_map[orig_id] = report.new_participant_id
-        elif orig_id == creator_id and report.action == "failed":
-            # Creator failed verification but its DB row may still be live.
-            # If so, children can still find their real parent — map to the
-            # creator's original ID so descendants reconcile independently
-            # rather than being blind-skipped by the cascade.
+        elif orig_id == creator_id and _creator_harness_conflict:
+            # Creator failed harness verification but its DB row is still
+            # live (live_harness_conflict → failed, without touching the row).
+            # Children still have their real parent — map to the creator's
+            # original ID so descendants reconcile independently rather than
+            # being blind-skipped by the cascade.  Other failure classifications
+            # (live_lineage_conflict, reparent failure, stale_live → dead)
+            # do NOT keep the creator's row usable, so they fall through to
+            # ``id_map = None``.
             creator_live = daemon.store.get_participant(orig_id)
             if creator_live is not None and creator_live.status is not Status.DEAD:
                 id_map[orig_id] = orig_id
@@ -1609,20 +1623,34 @@ async def restore_tree(  # noqa: PLR0912, PLR0915
         # Creator failure: mark remaining nodes as ancestor-skipped then return failed.
         # Narrow the cascade: only skip descendants when the creator genuinely
         # needed reconstruction (was dead / needed resume / respawn) and that
-        # failed. When the creator's DB row is still LIVE and it merely failed
-        # verification (e.g. harness conflict), its children still have their
-        # real parent — reconcile each descendant independently instead of
-        # blind-skipping them.
+        # failed, OR when the creator was skipped (work already done).  When
+        # the creator's DB row is still LIVE and it merely failed harness
+        # verification (``live_harness_conflict``), its children still have
+        # their real parent — reconcile each descendant independently instead
+        # of blind-skipping them.
+        #
+        # Reachability note: the only live-creator failure classification that
+        # keeps the DB row alive is ``live_harness_conflict`` (turned into
+        # ``failed`` in restore_tree without touching the row).  Other
+        # live-creator failures — ``live_lineage_conflict`` (different live
+        # parent) and reparent failure — are unreachable for the creator
+        # specifically: its ``new_parent_id`` is set to ``live_cr.parent_id``
+        # at the top of the loop, so the reparent block's
+        # ``new_parent_id not in (live_participant.parent_id, orig_id)`` guard
+        # is always False.  ``stale_live`` transitions the row to DEAD before
+        # failing, so it falls into the dead-creator branch below.  We gate
+        # explicitly on ``live_harness_conflict`` rather than on "any failed
+        # + live" so an edit that makes one of the unreachable paths reachable
+        # does not silently swallow it into the non-cascade branch.
         if orig_id == creator_id and (
             report.action == "failed"
             or (report.action == "skipped" and report.classification != "completed")
         ):
-            creator_live = daemon.store.get_participant(creator_id)
-            creator_is_live = creator_live is not None and creator_live.status is not Status.DEAD
-            if report.action == "failed" and creator_is_live:
-                # Creator is still live (failed verification, not reconstruction).
-                # Children still have their real parent; let the loop reconcile
-                # each descendant independently. Do NOT cascade-skip.
+            if _creator_harness_conflict:
+                # Creator is still live (failed harness verification, not
+                # reconstruction).  Children still have their real parent; let
+                # the loop reconcile each descendant independently.  Do NOT
+                # cascade-skip.
                 pass
             else:
                 # Creator genuinely needed reconstruction and failed, or was

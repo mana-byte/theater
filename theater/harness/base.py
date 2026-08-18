@@ -238,9 +238,9 @@ class Harness(ABC):
     binary: str
     #: Binary basenames this harness can be recognised under, including
     #: wrapper-renamed variants (e.g. nixpkgs ``makeWrapper`` produces
-    #: ``.claude-wrapped``). Defaults to ``{binary}`` when empty; a plugin
-    #: extends it by setting the class attribute. Per AGENTS.md, per-harness
-    #: knowledge belongs in the plugin, not in the daemon.
+    #: ``.claude-wrapped``). The primary ``binary`` is ALWAYS included
+    #: regardless of what this set contains; this is for additional names only.
+    #: Per AGENTS.md, per-harness knowledge belongs in the plugin, not the daemon.
     binaries: frozenset[str] = frozenset()
     #: A single glyph: terminal image protocols do not survive tmux. Kept to
     #: width 1 so no listing reflows, and from symbols a default font has rather

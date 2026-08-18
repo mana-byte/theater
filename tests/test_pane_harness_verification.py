@@ -1,10 +1,9 @@
-"""Tests for the wrapper-renamed-binary and unknown-harness recovery fixes.
+"""Pane-harness verification across detection, classification, and restore.
 
-Covers:
-- Fix 1: classify_node treats "unknown" as absence of evidence, not conflict.
-- Fix 2: preflight verifies the creator's pane before the atomic claim.
-- Fix 3: detect_harness / match_binary handle wrapper-renamed binaries.
-- Fix 4: a still-live creator that fails verification does not blind-skip descendants.
+Covers the shared ``compare_pane_harness`` decision function, the wrapper-
+renamed-binary detection that motivated it, the preflight creator-pane check,
+and the narrowed cascade that reconciles children of a still-live creator
+that failed harness verification.
 """
 
 from __future__ import annotations
@@ -82,13 +81,12 @@ def _make_participant(
 def test_classify_unknown_non_shell_is_live():
     """Unknown harness detection with a non-shell command → live (trust DB).
 
-    A wrapper-renamed binary (.claude-wrapped) produces "unknown" from
-    detect_harness, but the participant is still running — absence of
-    evidence is not evidence of a foreign harness.
+    Detection could not identify the harness and the foreground is not a
+    shell — absence of evidence is not evidence of a foreign harness.
     """
     recorded = {"participant_id": "p", "jobs": [], "session_id": None, "session_correlation": None}
-    live = Participant(id="p", harness="claude", tier=Tier.SPAWNED, tmux_pane="%1")
-    pane_info = {"pane_id": "%1", "harness": "unknown", "command": ".claude-wrapped"}
+    live = Participant(id="p", harness="vibe", tier=Tier.SPAWNED, tmux_pane="%1")
+    pane_info = {"pane_id": "%1", "harness": "unknown", "command": "some-tool", "pane_pid": 0}
     cls, reason = classify_node(recorded, live, {}, pane_info=pane_info)
     assert cls == "live", f"unknown + non-shell → live; got {cls!r}"
     assert "trusting DB" in reason
@@ -102,7 +100,7 @@ def test_classify_unknown_shell_is_stale_live():
     """
     recorded = {"participant_id": "p", "jobs": [], "session_id": None, "session_correlation": None}
     live = Participant(id="p", harness="claude", tier=Tier.SPAWNED, tmux_pane="%1")
-    pane_info = {"pane_id": "%1", "harness": "unknown", "command": "bash"}
+    pane_info = {"pane_id": "%1", "harness": "unknown", "command": "bash", "pane_pid": 0}
     cls, reason = classify_node(recorded, live, {}, pane_info=pane_info)
     assert cls == "stale_live", f"unknown + shell → stale_live; got {cls!r}"
     assert "shell" in reason
@@ -113,7 +111,7 @@ def test_classify_recorded_harness_unknown_is_live():
     compare against — trust the DB row."""
     recorded = {"participant_id": "p", "jobs": [], "session_id": None, "session_correlation": None}
     live = Participant(id="p", harness="unknown", tier=Tier.SPAWNED, tmux_pane="%1")
-    pane_info = {"pane_id": "%1", "harness": "claude", "command": "claude"}
+    pane_info = {"pane_id": "%1", "harness": "claude", "command": "claude", "pane_pid": 0}
     cls, _reason = classify_node(recorded, live, {}, pane_info=pane_info)
     assert cls == "live", f"recorded harness unknown → live; got {cls!r}"
 
@@ -122,7 +120,7 @@ def test_classify_genuine_harness_conflict_still_conflict():
     """A positively identified DIFFERENT harness → live_harness_conflict."""
     recorded = {"participant_id": "p", "jobs": [], "session_id": None, "session_correlation": None}
     live = Participant(id="p", harness="vibe", tier=Tier.SPAWNED, tmux_pane="%1")
-    pane_info = {"pane_id": "%1", "harness": "claude", "command": "claude"}
+    pane_info = {"pane_id": "%1", "harness": "claude", "command": "claude", "pane_pid": 0}
     cls, _reason = classify_node(recorded, live, {}, pane_info=pane_info)
     assert cls == "live_harness_conflict", f"genuine mismatch → live_harness_conflict; got {cls!r}"
 
@@ -368,3 +366,113 @@ async def test_dead_creator_failure_cascades_to_skip(client, daemon, fake_tmux):
     )
     assert descendants["child"]["classification"] == "ancestor_skipped"
     assert result["restore_state"] == "failed"
+
+
+# ---- compare_pane_harness unit tests ----------------------------------------
+
+
+def test_compare_pane_harness_match():
+    """Same harness (via wrapper normalisation) → match."""
+    from theater.daemon.harness_detect import PaneHarnessVerdict, compare_pane_harness
+
+    assert compare_pane_harness("claude", ".claude-wrapped", 999999) is PaneHarnessVerdict.MATCH
+
+
+def test_compare_pane_harness_conflict():
+    """Different positively-identified harness → conflict."""
+    from theater.daemon.harness_detect import PaneHarnessVerdict, compare_pane_harness
+
+    assert compare_pane_harness("vibe", "claude", 999999) is PaneHarnessVerdict.CONFLICT
+
+
+def test_compare_pane_harness_harness_gone():
+    """Unknown detection + shell foreground → harness_gone."""
+    from theater.daemon.harness_detect import PaneHarnessVerdict, compare_pane_harness
+
+    assert compare_pane_harness("vibe", "bash", 999999) is PaneHarnessVerdict.HARNESS_GONE
+
+
+def test_compare_pane_harness_undetermined():
+    """Unknown detection + non-shell foreground → undetermined."""
+    from theater.daemon.harness_detect import PaneHarnessVerdict, compare_pane_harness
+
+    assert compare_pane_harness("vibe", "some-tool", 999999) is PaneHarnessVerdict.UNDETERMINED
+
+
+def test_compare_pane_harness_recorded_unknown_is_match():
+    """When recorded harness is 'unknown', nothing to compare → match."""
+    from theater.daemon.harness_detect import PaneHarnessVerdict, compare_pane_harness
+
+    assert compare_pane_harness("unknown", "claude", 999999) is PaneHarnessVerdict.MATCH
+
+
+# ---- Non-cascade race: creator fails verification inside restore_tree --------
+
+
+async def test_live_creator_harness_race_children_reconciled(
+    client, daemon, fake_tmux, monkeypatch
+):
+    """Children of a still-live creator that fails verification inside
+    restore_tree are reconciled independently, not blind-skipped.
+
+    This exercises the non-cascade ``pass`` branch: preflight sees a clean
+    pane, but by the time ``restore_tree`` runs ``_get_pane_info`` the pane
+    has changed to a conflicting harness — the race that branch exists for.
+    We simulate it by making ``_get_pane_info`` return a conflict for the
+    creator only.
+    """
+    import theater.daemon.recovery as recovery_mod
+
+    fake_tmux.add_pane("%10", command="vibe", pid=10001)
+    fake_tmux.add_pane("%11", command="vibe", pid=10002)
+
+    _make_participant(daemon, pid="creator", harness="vibe", pane="%10")
+    _make_participant(daemon, pid="child", harness="vibe", pane="%11", parent_id="creator")
+
+    created = await client.call("checkpoint.create", caller_id="creator", name="cp")
+
+    # Preflight calls _verify_creator_pane_harness which calls tmux.pane_info
+    # directly (not _get_pane_info), so it sees the clean "vibe" pane.
+    # But _get_pane_info (called by restore_tree) returns a conflict for the
+    # creator only, simulating the pane changing between preflight and restore.
+    real_get_pane_info = recovery_mod._get_pane_info
+
+    async def _race_pane_info(daemon_arg, pane_id):
+        if pane_id == "%10":
+            return {"pane_id": "%10", "harness": "claude", "command": "claude", "pane_pid": 10001}
+        return await real_get_pane_info(daemon_arg, pane_id)
+
+    monkeypatch.setattr(recovery_mod, "_get_pane_info", _race_pane_info)
+
+    result = await client.call(
+        "checkpoint.restore",
+        checkpoint_id=created["checkpoint_id"],
+        approval="yolo",
+        caller_id="creator",
+    )
+
+    # Creator failed harness verification inside restore_tree (the race).
+    assert result["creator"]["action"] == "failed", (
+        f"Creator should be failed (harness conflict), got {result['creator']['action']!r}"
+    )
+    assert (
+        "live_harness_conflict" in result["creator"]["reason"]
+        or "mismatched" in (result["creator"]["reason"])
+    )
+
+    # Child was reconciled independently, NOT ancestor-skipped.
+    descendants = {r["original_participant_id"]: r for r in result["descendants"]}
+    assert descendants["child"]["action"] == "reused_live", (
+        f"Child should be reused_live (reconciled independently), "
+        f"got {descendants['child']['action']!r}"
+    )
+    assert descendants["child"]["classification"] != "ancestor_skipped"
+
+    # The creator's row must NOT have been marked dead.
+    creator = daemon.store.get_participant("creator")
+    assert creator is not None and creator.status is not Status.DEAD
+
+    # One node succeeded (child), one failed (creator) → partial.
+    assert result["restore_state"] == "partial", (
+        f"Expected partial (one success, one failure), got {result['restore_state']!r}"
+    )

@@ -23,7 +23,11 @@ from sqlalchemy import func, select
 
 from theater import paths, protocol
 from theater.daemon import lineage, worktree
-from theater.daemon.harness_detect import detect_harness, is_shell
+from theater.daemon.harness_detect import (
+    PaneHarnessVerdict,
+    compare_pane_harness,
+    detect_harness,
+)
 from theater.daemon.rails import (
     check_budget,
     check_cycle,
@@ -1483,14 +1487,14 @@ async def _checkpoint_restore(daemon, params: dict) -> dict:
 async def _verify_creator_pane_harness(daemon, checkpoint_id: int, creator: Participant) -> None:
     """Verify the live creator's pane harness before the atomic claim.
 
-    Mirrors the send path (``_check_pane_harness``, lines 1691-1707): ``"unknown"``
-    detection is absence of evidence, not evidence of a foreign harness, so it
-    only refuses when a DIFFERENT harness is positively identified or a shell is
-    at the prompt. A missing pane (stale_live) is deliberately NOT refused
-    here: ``restore_tree`` handles that gracefully by marking the row dead
-    and reclassifying, so refusing it in preflight would burn a checkpoint
-    that could otherwise self-heal. Raises ``BadRequest`` on a predictable
-    refusal so the checkpoint stays ``ready`` and retryable.
+    Uses ``compare_pane_harness`` (the shared decision function in
+    ``harness_detect``) so this site and the send path never drift.  A
+    ``CONFLICT`` or ``HARNESS_GONE`` verdict raises ``BadRequest`` so the
+    checkpoint stays ``ready`` and retryable.  A missing pane
+    (stale_live) is deliberately NOT refused: ``restore_tree`` handles
+    that gracefully by marking the row dead and reclassifying, so
+    refusing it in preflight would burn a checkpoint that could
+    otherwise self-heal.
     """
     from theater.tmux import client as tmux
 
@@ -1505,18 +1509,15 @@ async def _verify_creator_pane_harness(daemon, checkpoint_id: int, creator: Part
         # Pane gone — restore_tree marks the row dead and reclassifies.
         # Not a preflight refusal: this is a recoverable condition.
         return
-    if creator.harness == "unknown":
-        return  # nothing to compare against
-    found = detect_harness(pane.current_command, pane.pane_pid)
-    if found == creator.harness:
-        return
-    if found != "unknown":
+    verdict = compare_pane_harness(creator.harness, pane.current_command, pane.pane_pid)
+    if verdict is PaneHarnessVerdict.CONFLICT:
+        found = detect_harness(pane.current_command, pane.pane_pid)
         raise BadRequest(
             f"checkpoint {checkpoint_id!r}: creator {creator.id!r} pane "
             f"{creator.tmux_pane!r} runs {found!r}, not {creator.harness!r}; "
             f"refusing to restore a mismatched live pane"
         )
-    if is_shell(pane.current_command):
+    if verdict is PaneHarnessVerdict.HARNESS_GONE:
         raise BadRequest(
             f"checkpoint {checkpoint_id!r}: creator {creator.id!r} harness "
             f"{creator.harness!r} has exited in pane {creator.tmux_pane!r}; "
@@ -1743,15 +1744,11 @@ async def _check_pane_identity(daemon, target, refuse: Callable[..., NoReturn]) 
             reason="pane_replaced",
         )
 
-    if target.harness == "unknown":
-        # Nothing to compare against. Refusing an adopted participant whose
-        # harness could not be identified would be a regression, not a fix.
+    verdict = compare_pane_harness(target.harness, pane.current_command, pane.pane_pid)
+    if verdict is PaneHarnessVerdict.MATCH:
         return
-
-    found = detect_harness(pane.current_command, pane.pane_pid)
-    if found == target.harness:
-        return
-    if found != "unknown":
+    if verdict is PaneHarnessVerdict.CONFLICT:
+        found = detect_harness(pane.current_command, pane.pane_pid)
         refuse(
             StaleTarget(
                 f"pane {target.tmux_pane} is running {found!r}, "
@@ -1759,7 +1756,7 @@ async def _check_pane_identity(daemon, target, refuse: Callable[..., NoReturn]) 
             ),
             reason="harness_changed",
         )
-    if is_shell(pane.current_command):
+    if verdict is PaneHarnessVerdict.HARNESS_GONE:
         refuse(
             StaleTarget(
                 f"{target.harness} has exited in pane {target.tmux_pane}; "

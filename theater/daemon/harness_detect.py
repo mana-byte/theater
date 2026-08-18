@@ -12,8 +12,27 @@ not import from the daemon to do it.
 
 from __future__ import annotations
 
+from enum import StrEnum
+
 from theater import proc
 from theater.harness import HARNESSES
+
+
+class PaneHarnessVerdict(StrEnum):
+    """The result of comparing a pane's foreground to a recorded harness.
+
+    ``match``         — the pane positively identifies the same harness.
+    ``undetermined``  — detection could not identify the harness (``"unknown"``)
+                        and the foreground is NOT a shell.  Absence of evidence.
+    ``conflict``      — detection positively identified a DIFFERENT harness.
+    ``harness_gone``  — detection returned ``"unknown"`` AND the foreground is a
+                        shell, meaning the CLI exited and left a prompt.
+    """
+
+    MATCH = "match"
+    UNDETERMINED = "undetermined"
+    CONFLICT = "conflict"
+    HARNESS_GONE = "harness_gone"
 
 
 def detect_harness(pane_command: str, pane_pid: int) -> str:
@@ -24,19 +43,32 @@ def detect_harness(pane_command: str, pane_pid: int) -> str:
     not the harness session that is its ancestor in the process tree.
 
     So we first check the foreground command (the common case when no adopt
-    is in flight), then walk the process tree from the pane's shell pid
-    looking for any descendant whose name matches a known harness binary.
-    The pane's shell spawned `vibe`, which spawned the bash tool running
-    `theater adopt` — so `vibe` is in the tree even though it is not the
-    foreground leaf.
+    is in flight), then the pane root's own comm (the harness process IS the
+    root for a Theater-spawned or wrapper-launched session, and
+    ``proc.descendants`` excludes it), then walk the process tree from the
+    pane's shell pid looking for any descendant whose name matches a known
+    harness binary. The pane's shell spawned `vibe`, which spawned the bash
+    tool running `theater adopt` — so `vibe` is in the tree even though it
+    is not the foreground leaf.
     """
     name = match_binary(pane_command, HARNESSES)
     if name:
         return name
-    for comm in descendant_comms(pane_pid):
-        name = match_binary(comm, HARNESSES)
-        if name:
-            return name
+    # The pane root is the harness process for a Theater-spawned or
+    # wrapper-launched session.  ``proc.descendants`` excludes it, so consult
+    # it directly before the descendant walk.  This closes the false-negative
+    # where the foreground is a tool subprocess (not the harness, not a
+    # descendant) and detection would otherwise return "unknown".
+    if pane_pid > 0:
+        root_comm = proc.comm(pane_pid)
+        if root_comm:
+            name = match_binary(root_comm, HARNESSES)
+            if name:
+                return name
+        for comm in descendant_comms(pane_pid):
+            name = match_binary(comm, HARNESSES)
+            if name:
+                return name
     return "unknown"
 
 
@@ -59,6 +91,44 @@ def is_shell(command: str) -> bool:
     return command.rsplit("/", 1)[-1] in SHELLS
 
 
+def compare_pane_harness(
+    recorded_harness: str,
+    pane_current_command: str,
+    pane_pid: int,
+) -> PaneHarnessVerdict:
+    """Judge whether a pane still runs the recorded harness.
+
+    ONE decision function shared by all three callers that need this
+    judgement — the send path (``methods._check_pane_harness``), the restore
+    preflight (``methods._verify_creator_pane_harness``), and the restore
+    classifier (``recovery.classify_node``).  Per AGENTS.md this is "job 2 —
+    decide what it means" and is explicitly NOT a per-caller seam: each
+    caller decides what to DO with the verdict (send refuses, preflight
+    raises ``BadRequest``, ``classify_node`` maps to live / stale_live /
+    live_harness_conflict) but none re-encodes the judgement.
+
+    Semantics, matching the send-path reference (``methods.py`` lines
+    1746-1769 at time of writing):
+
+    - ``recorded_harness == "unknown"`` → ``MATCH`` (nothing to compare).
+    - detected harness equals recorded → ``MATCH``.
+    - detected harness is a positively identified DIFFERENT harness → ``CONFLICT``.
+    - detected harness is ``"unknown"`` AND foreground is a shell → ``HARNESS_GONE``.
+    - detected harness is ``"unknown"`` and NOT a shell → ``UNDETERMINED``
+      (absence of evidence, not evidence of a foreign harness).
+    """
+    if recorded_harness == "unknown":
+        return PaneHarnessVerdict.MATCH
+    found = detect_harness(pane_current_command, pane_pid)
+    if found == recorded_harness:
+        return PaneHarnessVerdict.MATCH
+    if found != "unknown":
+        return PaneHarnessVerdict.CONFLICT
+    if is_shell(pane_current_command):
+        return PaneHarnessVerdict.HARNESS_GONE
+    return PaneHarnessVerdict.UNDETERMINED
+
+
 def match_binary(command: str, harnesses) -> str | None:
     """Return the harness name if a command basename matches a harness binary.
 
@@ -69,12 +139,13 @@ def match_binary(command: str, harnesses) -> str | None:
 
     These are generic across harnesses — not special-cased per name — because
     the wrapper convention is shared. A plugin may also declare additional
-    binary names via the ``binaries`` class attribute.
+    binary names via the ``binaries`` class attribute; the primary ``binary``
+    is always included regardless of what ``binaries`` contains.
     """
     basename = command.rsplit("/", 1)[-1]
     normalised = _unwrap(basename)
     for harness in harnesses.values():
-        names = harness.binaries or {harness.binary}
+        names = {harness.binary} | harness.binaries
         if basename in names or normalised in names or command in names:
             return harness.name
     return None
