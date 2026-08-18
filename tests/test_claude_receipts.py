@@ -108,6 +108,43 @@ async def test_claude_initial_receipt_records_exact_location(
     assert got.transcript_domain is None
 
 
+async def test_claude_initial_receipt_waits_for_first_message(
+    claude_daemon, claude_client, tmp_path
+):
+    daemon, root = claude_daemon
+    daemon.observer.search = 0.01
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    participant = _spawn_claude(daemon, cwd, pid="p-claude", token="secret")
+    session_id = "11111111-1111-4111-8111-111111111111"
+    participant.session_id = session_id
+    participant.session_correlation = str(TranscriptProvenance.EXACT)
+    daemon.store.upsert_participant(participant)
+    path = root / "project" / f"{session_id}.jsonl"
+
+    result = await _receipt(
+        client=claude_client,
+        pid=participant.id,
+        token="secret",
+        session_id=session_id,
+        transcript_path=str(path),
+    )
+
+    assert result["admission"] == "staged"
+    assert await _until(lambda: participant.id in daemon.observer._sources)
+    await asyncio.sleep(0.1)
+    assert not daemon.observer.transcript_identity_lost(participant.id)
+    assert daemon.store.get_participant(participant.id).transcript_location is None
+
+    _transcript(root, session_id, cwd)
+    assert await _until(
+        lambda: (
+            daemon.store.get_participant(participant.id).transcript_location == str(path.resolve())
+        )
+    )
+    assert not daemon.observer.transcript_identity_lost(participant.id)
+
+
 async def test_claude_receipt_updates_after_compaction_rotation(
     claude_daemon, claude_client, tmp_path
 ):
@@ -382,6 +419,41 @@ async def test_receipt_nudges_transcript_source_to_reattach(tmp_path):
     assert batch.attached is not None
     assert batch.attached.location == str(second)
     assert batch.attached.correlation == str(TranscriptProvenance.EXACT)
+
+
+async def test_missing_claude_receipt_waits_until_materialized_then_becomes_strict(tmp_path):
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    root = tmp_path / "claude" / "projects"
+    root.mkdir(parents=True)
+    session_id = "11111111-1111-4111-8111-111111111111"
+    path = root / "project" / f"{session_id}.jsonl"
+    source = ClaudeCodeObserver(root=root).open_source_for(
+        participant_id="p-claude",
+        cwd=str(cwd),
+        session_id=session_id,
+        session_provenance=TranscriptProvenance.EXACT,
+    )
+
+    assert source.admit_exact_location(location=str(path), session_id=session_id) == "staged"
+    for _ in range(3):
+        batch = await source.read()
+        assert batch.waiting is True
+        assert batch.error_code is None
+
+    _transcript(root, session_id, cwd)
+    attached = await source.read()
+    assert attached.attached is not None
+    assert attached.attached.location == str(path)
+    assert attached.attached.correlation == str(TranscriptProvenance.EXACT)
+    source.commit_attachment()
+
+    path.unlink()
+    first_missing = await source.read()
+    confirmed_missing = await source.read()
+    assert first_missing.waiting is True
+    assert first_missing.error_code is None
+    assert confirmed_missing.error_code == "transcript_identity_lost"
 
 
 async def test_current_path_receipt_does_not_detach_or_reset_mid_turn(registry, tmp_path):

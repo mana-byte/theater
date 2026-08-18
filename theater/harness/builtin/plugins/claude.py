@@ -71,8 +71,9 @@ from theater.harness.observation import (
     ScreenReading,
     TranscriptObserver,
 )
-from theater.harness.source import TranscriptCandidate
+from theater.harness.source import Batch, ReceiptAdmission, TranscriptCandidate, TranscriptSource
 from theater.models import BadRequest
+from theater.provenance import TranscriptProvenance
 
 if TYPE_CHECKING:
     from theater.models import Participant
@@ -361,6 +362,71 @@ class ClaudeCodeHarness(Harness):
         return ResumeLaunchOverlay(transcript_domain=str(root))
 
 
+class _ClaudeSource(TranscriptSource):
+    """Keep a SessionStart receipt pending until Claude creates its JSONL.
+
+    Claude announces the exact path before the first user message materializes
+    it.  A generic ``TranscriptSource`` quite reasonably treats an exact known
+    location as a file that used to exist, so two absent reads mean identity
+    loss.  Here the receipt is instead an expectation until one successful
+    ``stat`` proves the file has existed.  From that point on the generic
+    trusted-pin policy applies unchanged, including quarantine if it later
+    disappears.
+    """
+
+    def __init__(self, observer: TranscriptObserver, **kwargs) -> None:
+        super().__init__(observer, **kwargs)
+        self._expected_location: Path | None = None
+
+    async def read(self) -> Batch:
+        self._require_decision()
+        path = self._expected_location
+        if path is None:
+            return await super().read()
+        try:
+            path.stat()
+        except FileNotFoundError:
+            return Batch(waiting=True)
+        except OSError as exc:
+            return self._source_unavailable_batch(exc)
+
+        # Materialization is the boundary between "expected" and "trusted".
+        # Promote before attaching so a deletion racing this read is handled as
+        # disappearance of a file we positively observed, not as cold-start
+        # waiting.
+        self._expected_location = None
+        self._known_location = path
+        self._known_location_provenance = TranscriptProvenance.EXACT
+        self._proven[path] = TranscriptProvenance.EXACT
+        return await super().read()
+
+    def admit_exact_location(self, *, location: str, session_id: str) -> ReceiptAdmission:
+        path = Path(location)
+        self._pending = None
+        self._session_id = session_id
+        self._session_provenance = TranscriptProvenance.EXACT
+        self._proven[path] = TranscriptProvenance.EXACT
+        if self.path == path:
+            self._expected_location = None
+            self._known_location = path
+            self._known_location_provenance = TranscriptProvenance.EXACT
+            return "accepted"
+
+        # Do not install a trusted known-location until the receipt's future
+        # path has materialized.  Detaching here is still required for
+        # SessionStart rotations: text from the preceding transcript must not
+        # be attributed after Claude has announced a new exact identity.
+        self._expected_location = path
+        self._known_location = None
+        self._known_location_provenance = TranscriptProvenance.HEURISTIC
+        self._detach()
+        return "staged"
+
+    def revoke_attachment(self) -> None:
+        self._expected_location = None
+        super().revoke_attachment()
+
+
 class ClaudeCodeObserver(TranscriptObserver):
     """Read `~/.claude/projects/<cwd-slug>/<session-uuid>.jsonl`.
 
@@ -373,6 +439,41 @@ class ClaudeCodeObserver(TranscriptObserver):
     def __init__(self, root: Path | None = None):
         #: Injectable so tests never touch the real ~/.claude.
         self.root = root or Path.home() / ".claude" / "projects"
+
+    def open_source(
+        self,
+        *,
+        cwd: str | None,
+        session_id: str | None = None,
+        after: float | None = None,
+    ) -> _ClaudeSource:
+        return _ClaudeSource(
+            self,
+            cwd=cwd,
+            session_id=session_id,
+            after=after,
+            allow_refresh=self.relocate_by_cwd,
+        )
+
+    def open_source_for(
+        self,
+        *,
+        participant_id: str,
+        cwd: str | None,
+        session_id: str | None = None,
+        after: float | None = None,
+        session_provenance: str | TranscriptProvenance | None = None,
+        known_location: str | None = None,
+    ) -> _ClaudeSource:
+        return _ClaudeSource(
+            self,
+            cwd=cwd,
+            session_id=session_id,
+            after=after,
+            allow_refresh=self.relocate_by_cwd,
+            session_provenance=session_provenance,
+            known_location=known_location,
+        )
 
     def find_transcript(
         self,
