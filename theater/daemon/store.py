@@ -661,10 +661,9 @@ class Store:
         if participant_id is not None:
             stmt = stmt.where(checkpoints.c.participant_id == participant_id)
         if restorable_only:
-            # Only 'ready' is claimable. 'partial' and 'failed' are terminal.
-            stmt = stmt.where(
-                (checkpoints.c.restore_state == "ready") | checkpoints.c.restore_state.is_(None)
-            )
+            # The non-null column was introduced with server_default='ready';
+            # no legacy NULL alias exists. Discovery exactly matches claiming.
+            stmt = stmt.where(checkpoints.c.restore_state == "ready")
         rows = self.conn.execute(stmt).fetchall()
         return [dict(r._mapping) for r in rows]
 
@@ -768,7 +767,7 @@ class Store:
         token: str,
         progress: str,
     ) -> bool:
-        """Write incremental progress after each successfully restored node.
+        """Write the cumulative audit report after each node outcome.
 
         Token-gated: only the current restoring holder may write progress.
         The restore_state remains 'restoring'; only restore_progress is updated.

@@ -36,7 +36,7 @@ from theater.daemon.recovery import (
     upgrade_v1_snapshot_for_read,
 )
 from theater.daemon.schema import jobs as jobs_table
-from theater.models import Job, Participant, Status, Tier
+from theater.models import BadRequest, Job, Participant, Status, Tier
 from theater.protocol import RemoteError
 
 # ---- helpers ----------------------------------------------------------------
@@ -456,15 +456,14 @@ def test_bfs_order_grandchild():
     assert order.index("root") < order.index("child") < order.index("grand")
 
 
-def test_bfs_order_orphan_attached_to_creator():
-    """Nodes whose parent is not in the snapshot are attached to the creator."""
+def test_bfs_order_rejects_orphan():
+    """The traversal independently refuses orphan grafting."""
     nodes = {
         "root": {"participant_id": "root", "parent_id": None},
         "orphan": {"participant_id": "orphan", "parent_id": "missing"},
     }
-    order = _bfs_order("root", nodes)
-    assert "orphan" in order
-    assert order.index("root") < order.index("orphan")
+    with pytest.raises(BadRequest, match="not attached"):
+        _bfs_order("root", nodes)
 
 
 # ---- v2 restore: live creator -----------------------------------------------
@@ -593,14 +592,15 @@ async def test_restore_v2_creator_failure_marks_failed(client, daemon, fake_tmux
 
     monkeypatch.setattr(methods_mod, "_spawn", _fail_spawn)
 
-    with pytest.raises(RemoteError) as exc:
-        await client.call(
-            "checkpoint.restore",
-            checkpoint_id=created["checkpoint_id"],
-            approval="yolo",
-            caller_id="restorer",
-        )
-    assert "daemon crashed mid-restore" in str(exc.value)
+    # Creator spawn failure → returns structured failed result (not raises).
+    result = await client.call(
+        "checkpoint.restore",
+        checkpoint_id=created["checkpoint_id"],
+        approval="yolo",
+        caller_id="restorer",
+    )
+    assert result["restore_state"] == "failed"
+    assert "daemon crashed mid-restore" in result["creator"]["reason"]
 
     read = await client.call("checkpoint.read", checkpoint_id=created["checkpoint_id"])
     assert read["checkpoint"]["restore_state"] == "failed"

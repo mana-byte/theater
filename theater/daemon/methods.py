@@ -1364,9 +1364,10 @@ async def _checkpoint_restore(daemon, params: dict) -> dict:
         state = fresh.get("restore_state") or "ready"
         raise _restore_state_error(state, checkpoint_id, fresh.get("restore_claimed_by"))
 
-    # After claim: all side effects go through restore_checkpoint.
-    # On any exception, finalize as failed. Progress blob is written per-node
-    # inside restore_checkpoint for audit purposes.
+    # After claim: restore_checkpoint returns a structured result for all
+    # expected outcomes (creator failure, partial success, full success).
+    # It only raises for truly unexpected failures (CancelledError, DB/tmux errors).
+    # The except blocks handle those unexpected cases.
     restore_result_data: dict | None = None
     try:
         restore_result_data = await restore_checkpoint(
@@ -1409,15 +1410,29 @@ async def _checkpoint_restore(daemon, params: dict) -> dict:
     )
 
     restore_state_final = restore_result_data.get("restore_state", "restored")
-    is_partial = restore_state_final == "partial"
-    is_failed = restore_state_final == "failed"
+    # Map the result restore_state to the finalize arguments precisely:
+    # restore_state=restored  → error=None, partial=False  → DB state 'restored'
+    # restore_state=partial   → error=None, partial=True   → DB state 'partial'
+    # restore_state=failed    → error=<msg>, partial=False → DB state 'failed'
+    finalize_error: str | None = None
+    finalize_partial = False
+    if restore_state_final == "partial":
+        finalize_partial = True
+    elif restore_state_final == "failed":
+        creator_result = restore_result_data.get("creator") or {}
+        finalize_error = creator_result.get("reason") or (
+            "restore completed with no successful nodes"
+        )
+    elif restore_state_final != "restored":
+        finalize_error = f"restore returned invalid state {restore_state_final!r}"
 
     if not daemon.store.finalize_checkpoint_restore(
         checkpoint_id,
         token=token,
         restored_by=caller.id,
         result=restore_result_json,
-        partial=is_partial or is_failed,
+        partial=finalize_partial,
+        error=finalize_error,
     ):
         raise BadRequest(
             f"checkpoint {checkpoint_id!r} could not be finalized; "

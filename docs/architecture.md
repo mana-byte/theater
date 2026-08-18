@@ -330,7 +330,8 @@ Every `SPAWNED` participant now carries a `launch_provenance` column (added in
 migration 0012): a compact JSON blob written once at spawn time, recording
 `prompt`, `approval`, `cwd_requested`, `cwd_resolved`, `model`,
 `reasoning_effort`, `worktree`, `worktree_type`, `worktree_name`,
-`worktree_branch`, `base_branch`, `response_format`, and `resume_session_id`.
+`worktree_branch`, `worktree_repo_root`, `worktree_base_commit`, `base_branch`,
+`response_format`, and `resume_session_id`.
 
 This blob is the ground-truth for cold-respawning a dead participant when the
 restorer cannot resume its native session. It is immutable once written —
@@ -352,27 +353,36 @@ Each recorded node is classified at restore time:
 | `respawnable`  | DEAD or pruned, has `launch_provenance` with usable cwd| `respawned`   |
 | `completed`    | DEAD or pruned, no open jobs, no provenance            | `skipped`     |
 | `pruned`       | GC'd, no provenance, has open jobs                     | `failed`      |
-| `failed`       | EXTERNAL, no cwd, or other unrestorable state          | `failed`      |
+| `lineage_anchor` | Completed parent with descendants still needing recovery | `respawned` |
+| `failed`       | EXTERNAL, no cwd, unsafe pane, or unrestorable state   | `failed`      |
 
 Restore processes nodes BFS order (creator first, then children, then
-grandchildren). Creator failures are re-raised (checkpoint marked `failed`).
-Descendant failures are captured in the per-participant report with
-`action=failed` and the checkpoint is still marked `restored`.
+grandchildren). Expected creator or descendant failures are returned in the
+structured report: no successful nodes yields `failed`; mixed success/failure
+yields `partial`. Both are terminal, as is `restored`. The atomic claim is
+single-use and `restore_progress` is an audit record, never a retry mechanism.
 
 The result of `checkpoint.restore` is a structured `TreeRestoreResult` dict with
 `creator` (one `NodeRestoreReport`) and `descendants` (a list of them). Each
 report contains:
 
-- `original_participant_id`, `new_participant_id` (same for live, different for
-  resumed/respawned)
+- `original_participant_id`, `current_participant_id`, `new_participant_id`
 - `original_parent_id`, `current_parent_id`, `new_parent_id`
-- `harness`, `old_session_id`, `new_session_id`
-- `classification`, `action`, `final_status`, `reason`
-- `jobs` — all jobs the node sent (reported, never replayed)
+- `harness`, `original_session_id`, `current_session_id`
+- `classification`, one of five public `action` values, `status`, and `reason`
+- owned `job_reconciliations` and per-node warnings
 
-All rails apply: depth, budget, model, and reasoning are enforced on every cold
-respawn. Send jobs are never replayed; only spawn jobs for incomplete work drive
-new processes.
+The top level adds `summary`, counts, aggregated warnings, partial failures, and
+a handle-deduplicated jobs list. Sends are reported but never replayed. A
+completed intermediate participant is reconstructed only when an unfinished
+descendant requires it as a lineage anchor, and its completed prompt is not
+replayed.
+
+All rails apply both to a pre-claim projected topology and immediately before
+mutation. Projection includes reconstructed parents, live reparented subtrees,
+and post-checkpoint descendants. A tmux-confirmed missing pane may be marked
+dead through the registry before recovery; a mismatched live pane is never
+touched or duplicated.
 
 **v1 checkpoints** produced before this release restore in legacy mode: creator
 only, single-node result with the original `restored_parent` shape. No historical

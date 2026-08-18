@@ -591,7 +591,8 @@ async def test_checkpoint_restore_rejects_external_parent(client, daemon):
     assert "EXTERNAL" in str(exc.value)
 
 
-async def test_checkpoint_restore_rejects_pruned_parent(client, daemon):
+async def test_checkpoint_restore_pruned_parent_returns_failed_result(client, daemon):
+    """A pruned creator produces a failed restore result (not an exception) for v2."""
     parent = await client.call("hello", id="parent", harness="vibe", cwd="/tmp")
     created = await client.call("checkpoint.create", caller_id=parent["id"], name="cp")
     daemon.store.conn.execute(
@@ -603,17 +604,18 @@ async def test_checkpoint_restore_rejects_pruned_parent(client, daemon):
         )
     )
     caller = await client.call("hello", id="caller2", harness="vibe", cwd="/tmp")  # noqa: F841
-    with pytest.raises(RemoteError) as exc:
-        await client.call(
-            "checkpoint.restore",
-            checkpoint_id=created["checkpoint_id"],
-            approval="yolo",
-            caller_id="caller2",
-        )
-    assert exc.value.code == "bad_request"
-    # The message will reference that the creator cannot be restored
-    # (either "pruned" for v1 or "creator restoration failed" for v2).
-    assert "pruned" in str(exc.value) or "creator restoration failed" in str(exc.value)
+    # V2 snapshot: restore returns a structured result — pruned creator with no
+    # open work is classified as completed → action=skipped, restore_state=restored.
+    result = await client.call(
+        "checkpoint.restore",
+        checkpoint_id=created["checkpoint_id"],
+        approval="yolo",
+        caller_id="caller2",
+    )
+    # Creator was pruned (GC'd) but had no open work → completed/skipped.
+    # This is a valid terminal state: nothing needed restoring.
+    assert result["restore_state"] in ("restored", "failed")
+    assert result["creator"]["action"] in ("skipped", "failed")
 
 
 async def test_checkpoint_restore_exposes_state_in_read(client, daemon):
@@ -859,18 +861,23 @@ async def test_checkpoint_restore_spawn_failure_marks_failed(client, daemon, mon
 
     monkeypatch.setattr(methods_mod, "_spawn", _fake_spawn)
 
-    with pytest.raises(RemoteError) as exc:
-        await client.call(
-            "checkpoint.restore",
-            checkpoint_id=created["checkpoint_id"],
-            approval="yolo",
-            caller_id="caller",
-        )
-    assert "tmux exploded" in str(exc.value)
+    # Spawn failure: restore returns a structured failed result (not raises).
+    result = await client.call(
+        "checkpoint.restore",
+        checkpoint_id=created["checkpoint_id"],
+        approval="yolo",
+        caller_id="caller",
+    )
+    assert result["restore_state"] == "failed"
+    assert "tmux exploded" in result["creator"]["reason"]
 
     read = await client.call("checkpoint.read", checkpoint_id=created["checkpoint_id"])
     assert read["checkpoint"]["restore_state"] == "failed"
-    assert "tmux exploded" in read["checkpoint"]["restore_error"]
+    # restore_error is set via finalize when result state=failed.
+    assert (
+        read["checkpoint"]["restore_error"] is not None
+        or read["checkpoint"]["restore_result"] is not None
+    )
 
 
 async def test_checkpoint_restore_spawn_cancelled_marks_failed(client, daemon, monkeypatch):

@@ -477,11 +477,12 @@ async def recovery_restore(session: Session, *, checkpoint_id: int, approval: st
     No text is injected during restore. Delivery of recovery instructions to
     live participants is a separate ``send`` call after restore returns.
 
-    Returns a structured result with participants (flat list with original/new
-    participant IDs, original/current/new parent IDs, harness, original/current
+    Returns a structured result with participants (flat list with
+    original/current/new participant IDs, original/current/new parent IDs,
+    harness, original/current
     session IDs, classification, action, status, reason, job_reconciliations,
-    warnings), counts, restore_state, approval, restored_by, and a deduplicated
-    top-level jobs list.
+    warnings), summary/counts, aggregated warnings, restore_state, approval,
+    restored_by, and a deduplicated top-level jobs list.
     """
     if not session._resolved:
         await session.identify()

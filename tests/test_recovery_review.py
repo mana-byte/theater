@@ -139,19 +139,19 @@ async def test_item1_v2_preflight_allows_pruned_creator_with_provenance(
 
     monkeypatch.setattr(methods_mod, "_spawn", _capture_spawn)
 
-    # V2 preflight should NOT raise "pruned" for the creator.
-    # The snapshot has provenance — it should reach the spawn attempt.
-    with pytest.raises(RemoteError) as exc:
-        await client.call(
-            "checkpoint.restore",
-            checkpoint_id=created["checkpoint_id"],
-            approval="yolo",
-            caller_id="restorer-p1",
-        )
-    # Error should be about spawn failure, not about "pruned from retention".
-    assert "pruned from retention" not in str(exc.value), (
+    # V2: restore returns a structured failed result (not raises).
+    # The snapshot has provenance — it must reach the spawn attempt.
+    result = await client.call(
+        "checkpoint.restore",
+        checkpoint_id=created["checkpoint_id"],
+        approval="yolo",
+        caller_id="restorer-p1",
+    )
+    # Result must be failed (spawn failed) not "pruned from retention" rejection.
+    assert result["restore_state"] == "failed"
+    assert "pruned from retention" not in result["creator"]["reason"], (
         "V2 restore must not reject pruned creator before trying snapshot provenance; "
-        f"got: {exc.value}"
+        f"got: {result['creator']['reason']}"
     )
     # The spawn must have been attempted (reached the spawn layer).
     assert len(spawn_calls) > 0, (
@@ -305,29 +305,25 @@ async def test_item3_stale_live_never_reused_live(client, daemon):
 
     created = await client.call("checkpoint.create", caller_id="stale-p", name="cp")
 
-    # The creator's stale pane makes it completed/skipped → creator failure.
-    from theater.protocol import RemoteError
-
-    with pytest.raises(RemoteError) as exc:
-        await client.call(
-            "checkpoint.restore",
-            checkpoint_id=created["checkpoint_id"],
-            approval="yolo",
-            caller_id="stale-restorer",
-        )
-    # Must fail with creator restoration failed (stale pane, no provenance to recover).
-    assert "creator restoration failed" in str(exc.value)
-    assert "stale" in str(exc.value)
+    # Tmux conclusively proves the pane is gone, so the daemon marks the row
+    # dead. With no unfinished work the participant is collected/skipped.
+    result = await client.call(
+        "checkpoint.restore",
+        checkpoint_id=created["checkpoint_id"],
+        approval="yolo",
+        caller_id="stale-restorer",
+    )
+    assert result["restore_state"] == "restored"
+    assert result["creator"]["action"] == "skipped"
+    assert result["creator"]["classification"] == "completed"
 
 
-async def test_item3_stale_live_with_provenance_is_respawned(client, daemon, monkeypatch):
-    """Item 3: stale_live with provenance → reclassify as respawnable → respawned.
+async def test_item3_stale_live_with_provenance_recovers_after_death(client, daemon):
+    """A tmux-confirmed missing pane transitions dead before cold recovery.
 
-    A stale pane does not block restoration if the node has launch_provenance.
-    The new process is spawned (not reused_live).
+    Recovery never duplicates the live row: the registry first records the
+    conclusive pane death, then the retained provenance can cold-respawn it.
     """
-    import theater.daemon.methods as methods_mod
-
     prov = json.dumps(
         {
             "prompt": "do work",
@@ -338,17 +334,8 @@ async def test_item3_stale_live_with_provenance_is_respawned(client, daemon, mon
     )
     _make_p(daemon, pid="stale-prov", pane="%1", launch_provenance=prov)
     _make_p(daemon, pid="stale-prov-restorer", pane="%2")
-    _make_p(daemon, pid="new-stale-prov-p", pane="%3")  # fake new participant
 
     created = await client.call("checkpoint.create", caller_id="stale-prov", name="cp")
-
-    async def _fake_spawn(daemon, params):
-        p = daemon.store.get_participant("new-stale-prov-p")
-        d = p.to_dict()
-        d["handle"] = "new-stale-prov-p"
-        return d
-
-    monkeypatch.setattr(methods_mod, "_spawn", _fake_spawn)
 
     result = await client.call(
         "checkpoint.restore",
@@ -356,10 +343,9 @@ async def test_item3_stale_live_with_provenance_is_respawned(client, daemon, mon
         approval="yolo",
         caller_id="stale-prov-restorer",
     )
-    # Creator was respawned (not reused_live).
-    assert result["creator"]["action"] == "respawned", (
-        f"Stale pane with provenance must be respawned; got {result['creator']['action']!r}"
-    )
+    assert result["creator"]["action"] == "respawned"
+    original = daemon.store.get_participant("stale-prov")
+    assert original is not None and original.status is Status.DEAD
 
 
 # ---- Item 4: Reparenting -----------------------------------------------
@@ -465,22 +451,42 @@ async def test_item5_descendant_skipped_when_parent_failed(client, daemon, fake_
 
     A failed creator means all its descendants get ancestor_not_restored.
     """
-    # Creator is dead with no provenance (cannot be restored).
+    # Creator is dead with an OPEN job (running) and no provenance → classification=failed.
     _make_p(daemon, pid="dead-creator-r5", pane="%1", dead=True)
+    # Add a running send job so _node_is_complete returns False.
+    daemon.store.create_job(
+        __import__("theater.models", fromlist=["Job"]).Job(
+            handle="open-job-r5",
+            caller_id="dead-creator-r5",
+            target_id="some-target",
+            kind="send",
+            prompt="work",
+            state="running",
+            result=None,
+            error_code=None,
+            created_at=1.0,
+            finished_at=None,
+        )
+    )
     # Child is live (would normally be reused).
     _make_p(daemon, pid="child-r5", pane="%2", parent_id="dead-creator-r5")
     _make_p(daemon, pid="restorer-r5", pane="%3")
 
     created = await client.call("checkpoint.create", caller_id="dead-creator-r5", name="cp")
-    with pytest.raises(RemoteError) as exc:
-        await client.call(
-            "checkpoint.restore",
-            checkpoint_id=created["checkpoint_id"],
-            approval="yolo",
-            caller_id="restorer-r5",
-        )
-    # Creator failed → BadRequest raised.
-    assert "creator restoration failed" in str(exc.value)
+    # Creator fails → returns structured failed result.
+    result = await client.call(
+        "checkpoint.restore",
+        checkpoint_id=created["checkpoint_id"],
+        approval="yolo",
+        caller_id="restorer-r5",
+    )
+    # Creator failed (no provenance), descendants ancestor-skipped.
+    assert result["restore_state"] == "failed"
+    assert result["creator"]["action"] == "failed"
+    # Descendants should be ancestor-skipped.
+    for desc in result["descendants"]:
+        assert desc["action"] == "skipped"
+        assert desc["classification"] == "ancestor_skipped"
 
 
 # ---- Item 6: Job reconciliation ----------------------------------------
@@ -907,17 +913,18 @@ async def test_item11_model_rails_apply_on_respawn(client, daemon, fake_tmux, mo
     created = await client.call("checkpoint.create", caller_id="cr-r11", name="cp")
 
     # Model "gpt-4" is not in the current allowlist (allowlist is empty by default).
-    with pytest.raises(RemoteError) as exc:
-        await client.call(
-            "checkpoint.restore",
-            checkpoint_id=created["checkpoint_id"],
-            approval="yolo",
-            caller_id="re-r11",
-        )
-    # The error must reference model policy or spawn failure.
-    # (model_not_allowed OR spawn_failed from vibe not on PATH)
-    assert exc.value.code in ("bad_request", "model_not_allowed"), (
-        f"Expected model rail or spawn failure; got {exc.value.code!r}: {exc.value}"
+    # Restore returns structured failed result (not raises).
+    result = await client.call(
+        "checkpoint.restore",
+        checkpoint_id=created["checkpoint_id"],
+        approval="yolo",
+        caller_id="re-r11",
+    )
+    assert result["restore_state"] == "failed"
+    assert result["creator"]["action"] == "failed"
+    # Model rail must be referenced in the reason.
+    assert "model" in result["creator"]["reason"].lower() or "gpt" in result["creator"]["reason"], (
+        f"Expected model rail in reason; got: {result['creator']['reason']!r}"
     )
 
 
@@ -1107,14 +1114,13 @@ async def test_item9_stranded_without_progress_marks_failed(store):
 
 
 def test_bfs_order_with_orphan():
-    """Orphan nodes (parent outside snapshot) are placed under creator."""
+    """Orphan nodes are rejected rather than grafted under creator."""
     nodes = {
         "root": {"participant_id": "root", "parent_id": None},
         "orphan": {"participant_id": "orphan", "parent_id": "unknown"},
     }
-    order = _bfs_order("root", nodes)
-    assert order[0] == "root"
-    assert "orphan" in order
+    with pytest.raises(BadRequest, match="not attached"):
+        _bfs_order("root", nodes)
 
 
 # ---- Machine-global discovery (item 10) --------------------------------

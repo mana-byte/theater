@@ -510,9 +510,9 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         recovery instructions to live participants is a separate ``send`` call.
 
         Returns a structured report with participants (flat list with
-        original/new IDs, parent IDs, session IDs, action, classification,
-        status, reason, job reconciliations), counts, restore_state, and
-        a deduplicated top-level jobs list.
+        original/current/new IDs, parent IDs, session IDs, action,
+        classification, status, reason, and job reconciliations), summary,
+        counts, aggregated warnings, restore_state, and a deduplicated jobs list.
 
         checkpoint_id: the id returned by ``checkpoint``.
         approval:       ``manual``, ``edits``, or ``yolo`` — no default.

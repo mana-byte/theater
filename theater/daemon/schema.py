@@ -43,7 +43,8 @@ participants = Table(
     # before this column existed (EXTERNAL, ADOPTED, or pre-0012 SPAWNED).
     # Fields: prompt, approval, cwd_requested, cwd_resolved, model,
     # reasoning_effort, worktree, worktree_type, worktree_name,
-    # worktree_branch, base_branch, response_format, resume_session_id.
+    # worktree_branch, worktree_repo_root, worktree_base_commit, base_branch,
+    # response_format, resume_session_id.
     Column("launch_provenance", Text),
 )
 
@@ -185,12 +186,11 @@ checkpoints = Table(
     Column("restore_error", Text),
     Column("restore_result", Text),
     Column("restore_claimed_by", Text),
-    # Durable incremental progress written after every successfully restored node.
-    # Survives daemon restart / CancelledError so already-spawned processes are
-    # not duplicated on retry.  Null until the first node is processed.
+    # Durable audit progress written after every node outcome. Survives daemon
+    # restart / CancelledError so side effects remain attributable. Null until
+    # the first node is processed.
     # restore_state == 'partial' means at least one node succeeded and at least
-    # one failed; the restore can be re-attempted but callers must read
-    # restore_progress to avoid re-spawning nodes that already completed.
+    # one failed; like 'failed', it is terminal and cannot be re-claimed.
     Column("restore_progress", Text),
     sqlite_autoincrement=True,
 )

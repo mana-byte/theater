@@ -174,9 +174,11 @@ def test_item2_stale_live_pane_gone_classifies_as_stale():
     assert cls == "stale_live", f"Expected stale_live for confirmed-gone pane, got {cls!r}"
 
 
-def test_item2_stale_live_with_provenance_becomes_respawnable():
-    """Item 2: stale_live + provenance → reclassified as respawnable (not live)."""
-    # _classify_as_dead checks provenance.
+def test_item2_stale_live_with_provenance_still_fails():
+    """Item 2/6: stale_live + provenance → STILL failed (not respawnable).
+
+    Cannot cold-spawn when DB row says live — would create a duplicate participant.
+    """
     from theater.daemon.recovery import _classify_as_dead
 
     recorded = {
@@ -191,18 +193,23 @@ def test_item2_stale_live_with_provenance_becomes_respawnable():
         tmux_pane="%1",
         launch_provenance=json.dumps({"cwd_resolved": "/tmp"}),
     )
-    cls, _ = _classify_as_dead(recorded, live, {})
-    assert cls == "respawnable", f"stale_live + provenance must be respawnable, got {cls!r}"
+    cls, reason = _classify_as_dead(recorded, live, {})
+    assert cls == "failed", f"stale_live must always fail (item 6), got {cls!r}"
+    assert "live" in reason.lower() or "duplicate" in reason.lower() or "stale" in reason.lower()
 
 
-def test_item2_live_harness_conflict_becomes_dead_completed():
-    """Item 2: live_harness_conflict + no open work → reclassified as completed."""
+def test_item2_live_harness_conflict_always_fails():
+    """Item 2/6: live_harness_conflict → ALWAYS fails (item 6 safety).
+
+    Cannot assume the pane is dead when harness is different — it could be a human.
+    Must fail rather than guessing.
+    """
     from theater.daemon.recovery import _classify_as_dead
 
     recorded = {"participant_id": "p", "jobs": [{"state": "done", "kind": "send"}]}
     live = Participant(id="p", harness="vibe", tier=Tier.SPAWNED, tmux_pane="%1")
-    cls, _ = _classify_as_dead(recorded, live, {})
-    assert cls == "completed", f"live_harness_conflict + done jobs → completed, got {cls!r}"
+    cls, _reason = _classify_as_dead(recorded, live, {}, stale_reason="live harness conflict")
+    assert cls == "failed", f"live_harness_conflict must always fail (item 6), got {cls!r}"
 
 
 # ---- Item 3: action enum exactly five values ---------------------------------
@@ -245,21 +252,27 @@ async def test_item3_action_enum_live_lineage_conflict_is_failed(client, daemon,
 
 
 async def test_item3_ancestor_not_restored_maps_to_skipped(client, daemon, fake_tmux):
-    """Item 3: ancestor_not_restored maps to action=skipped, classification=ancestor_skipped."""
-    _make_p(daemon, pid="dead-cr-3", pane=None, dead=True)  # no provenance → fails
+    """Item 3: creator failure → descendants get action=skipped, classification=ancestor_skipped."""
+    # Dead creator with running job (makes it failed, not completed).
+    _make_p(daemon, pid="dead-cr-3", pane=None, dead=True)
+    _make_job(daemon.store, handle="open-j-cr3", caller_id="dead-cr-3", state="running")
     _make_p(daemon, pid="child-cr-3", pane="%1", parent_id="dead-cr-3")
     _make_p(daemon, pid="restorer-cr-3", pane="%2")
 
     created = await client.call("checkpoint.create", caller_id="dead-cr-3", name="cp")
-    with pytest.raises(RemoteError) as exc:
-        await client.call(
-            "checkpoint.restore",
-            checkpoint_id=created["checkpoint_id"],
-            approval="yolo",
-            caller_id="restorer-cr-3",
-        )
-    # Creator fails; error must propagate.
-    assert "creator restoration failed" in str(exc.value)
+    # Restore returns structured failed result.
+    result = await client.call(
+        "checkpoint.restore",
+        checkpoint_id=created["checkpoint_id"],
+        approval="yolo",
+        caller_id="restorer-cr-3",
+    )
+    assert result["restore_state"] == "failed"
+    assert result["creator"]["action"] == "failed"
+    # Child should be ancestor-skipped.
+    for desc in result["descendants"]:
+        assert desc["action"] == "skipped"
+        assert desc["classification"] == "ancestor_skipped"
 
 
 # ---- Item 4: restore_state calc includes all unsuccessful -------------------
@@ -379,14 +392,15 @@ async def test_item7_creator_failure_marks_checkpoint_failed(client, daemon, mon
 
     monkeypatch.setattr(methods_mod, "_spawn", _fail)
 
-    with pytest.raises(RemoteError) as exc:
-        await client.call(
-            "checkpoint.restore",
-            checkpoint_id=created["checkpoint_id"],
-            approval="yolo",
-            caller_id="restorer-7",
-        )
-    assert "creator spawn failed" in str(exc.value)
+    # Creator failure → structured failed result, not raises.
+    result = await client.call(
+        "checkpoint.restore",
+        checkpoint_id=created["checkpoint_id"],
+        approval="yolo",
+        caller_id="restorer-7",
+    )
+    assert result["restore_state"] == "failed"
+    assert "creator spawn failed" in result["creator"]["reason"]
 
     # Checkpoint must be marked 'failed', not 'restoring' (no stranding).
     row = daemon.store.get_checkpoint(created["checkpoint_id"])

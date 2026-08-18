@@ -384,9 +384,9 @@ class CheckpointRestoreFailed(TheaterError):
 class CheckpointRestorePartial(TheaterError):
     """A restore was attempted on a checkpoint in the 'partial' state.
 
-    A previous restore succeeded for some nodes and failed for others.
-    Read the checkpoint's ``restore_progress`` field to see which nodes
-    already completed, then retry to restore the remaining nodes.
+    A previous restore succeeded for some nodes and failed for others. The
+    checkpoint is consumed: read ``restore_progress`` for the audit record and
+    create a new checkpoint if another restore point is required.
     """
 
     code = "checkpoint_restore_partial"
