@@ -121,6 +121,40 @@ installed, and what the unmanaged-pane sweep matches a pane's running command
 against. It is not automatically argv[0] — your `plan_launch` decides that — but
 it should be the same executable, or `theater harnesses` will lie.
 
+`binaries` is the declarative way to claim additional executable names for
+pane detection — a `frozenset[str]`, defaulting to empty. The primary `binary`
+is always included regardless of what `binaries` contains; this is for
+additional names only. A harness whose CLI can be installed under a
+nonstandard name (a wrapper, a versioned suffix) declares them here and the
+detection chain finds it without further configuration.
+
+### How a pane is matched to a harness
+
+When `theater adopt` runs, the foreground process is `theater` or `uv`, not
+the harness session that is its ancestor in the process tree. Detection walks
+three tiers, in order:
+
+1. **Exact match against `binary` plus `binaries`.** The pane's foreground
+   command basename is compared to the set `{harness.binary} | harness.binaries`
+   for every registered harness. Plugin-declared and free — no process listing
+   is needed.
+
+2. **An unwrap convention.** The basename is stripped of a leading `.` and a
+   trailing `-wrapped` before the same comparison. This is how Nix's
+   `makeWrapper` renames binaries: `.claude-wrapped` unwraps to `claude`. The
+   convention is generic, not per-harness.
+
+3. **Fallback to process-tree `comm`.** If the foreground does not match, the
+   pane's root process `comm` is checked, then its descendants breadth-first.
+   This needs no declaration but costs a `ps` listing.
+
+One caveat matters in practice: the kernel caps a process name at 15 usable
+characters, so a long wrapper name is truncated before the unwrap convention
+sees it. `.opencode-wrapped` appears as `.opencode-wrapp`, and stripping the
+leading dot and trailing `-wrapped` from that does not yield `opencode`. A
+plugin whose wrapper name is long enough to truncate should declare the
+truncated string in `binaries` so tier 1 catches it.
+
 `icon` is exactly one character. A single glyph, not an image: terminal image
 protocols do not survive tmux. Width 1 so no listing reflows when a harness is
 added, and preferably a codepoint a default font has — a Nerd Font private-use
@@ -325,7 +359,13 @@ directory. Recorded on the participant so harness-native identifiers — which i
 what sub-agent bookkeeping is written in — can be matched back to a Theater
 participant later.
 
-`None` is fine. It costs you native-child matching, nothing else.
+`None` is not free. It costs you native-child matching, and it also closes
+the exact-session correlation path: the source's `correlation_for` can return
+`exact` only when the id the transcript reports matches the id Theater already
+has, so a `session_id` that always returns `None` can never be trusted through
+that channel. A participant whose only evidence is a cwd/time match is
+`heuristic`, and `heuristic` is never enough to attribute text, complete a turn,
+or allow a send — see "Trust" below.
 
 ### `parse(line, index, *, clip_text=True) -> list[Event]`
 
@@ -394,6 +434,12 @@ difference between an accurate picture and a misleading one.
 sub-agents or does not record them — which is why it is the default and why you
 can leave the method out entirely.
 
+Note: `native_children` is currently inert. The built-in adapters implement
+it, but no production code calls it — the lineage display that would consume
+the result is not wired up. The method is part of the interface and the
+built-ins exercise it, so implementing it is not wasted effort, but do not
+expect sub-agents to appear in the tree yet.
+
 ### `is_idle_screen(capture) -> bool`
 
 Given `tmux capture-pane -p` output — the rendered pane as plain text — does the
@@ -424,11 +470,16 @@ class NovaObserver(HarnessObserver):
         return last_screen_line(capture) in IDLE_PROMPTS
 ```
 
-That is the whole observer. `find_transcript`, `session_id` and `parse` are not
-on this base class at all — they are how the *default* source is built, and a
-plugin supplying its own source has no reason to mention them. Before v1.6 they
-were abstract on every adapter and this plugin had to define three stubs to say
-so; deleting those stubs is what the split bought.
+That is the reading half of the observer. `find_transcript`, `session_id`
+and `parse` are not on this base class at all — they are how the *default*
+source is built, and a plugin supplying its own source has no reason to mention
+them. Before v1.6 they were abstract on every adapter and this plugin had to
+define three stubs to say so; deleting those stubs is what the split bought.
+
+What it is not is the whole observer. Attachment trust, operator recovery, and
+history provenance are the three things a source that returns `Batch.attached`
+or `History` must also handle, and they are what the rest of this section
+covers.
 
 A `Source` is a live view of one participant's output. Unlike the rest of the
 interface it is an object with a lifetime, so it is the right place for a
@@ -470,11 +521,43 @@ that everything behind it is final. A cursor into a table is only a watermark:
 rows behind it may still change. Emit a record when it is terminal, not while it
 is still being written — the bus has no retraction.
 
-What you do *not* implement is everything the observer does with a batch: status
-transitions, job completion, the rescue path, dead detection, the awaiting-input
-check. That policy is written once and it is where every observation bug in this
-project has been. A source reports facts; it must not touch the registry, the
-bus or the job manager.
+### The attachment staging protocol
+
+`Batch.attached` is not a declaration; it is a *staging* request. The source
+finds a candidate input location and reports it without changing its live
+cursor; the observer checks ownership and calls `commit_attachment` or
+`discard_attachment` before the next read. This handshake is what keeps one
+participant's rejected rotation from silently switching onto a sibling's
+transcript.
+
+Whenever your source can return `Batch(attached=...)`, it **must** also
+implement both halves of the handshake:
+
+```python
+def commit_attachment(self) -> None:   # adopt the staged candidate
+def discard_attachment(self) -> None:  # forget it, keep the live cursor
+```
+
+The base `Source` raises `SourceContractError` from both if you do not
+override them. The observer catches that error and **retires the watcher for
+the rest of the daemon's life** — the participant gets screen-only status and
+no further transcript attempts, because retrying cannot repair an adapter that
+does not implement the protocol.
+
+Staging must not move the source's live cursor. The candidate is held
+separately; `commit_attachment` is what makes it live, and `discard_attachment`
+is what drops it. A source that moves its cursor on staging will desync from
+the observer's bookkeeping.
+
+Two related methods are **not** required and live in the advanced section
+below: `revoke_attachment` (for a source that may later be displaced by
+stronger evidence) and `admit_exact_location` (a receipt capability).
+
+What you do *not* implement is everything the observer does with a batch:
+status transitions, job completion, the rescue path, dead detection, the
+awaiting-input check. That policy is written once and it is where every
+observation bug in this project has been. A source reports facts; it must not
+touch the registry, the bus or the job manager.
 
 One optional method is worth implementing: `history`.
 
@@ -493,6 +576,15 @@ source silently loses a feature.
 Two rules. Return the *newest* `last_n` events, `0` meaning all. And do not clip
 text: clipping is the caller's job, and this is the path a caller takes
 precisely because the clipped copy was not enough.
+
+A third rule is not about the events but about the `History` object itself:
+`History.correlation` defaults to `heuristic`. The `read_transcript` tool
+refuses a history whose correlation is not trusted, so a source that builds a
+`History` with the default and no override will have its transcript rejected
+as untrusted — the same trust gap that attachments face, applied to the
+history path. Set `correlation` to whatever the source can prove; if it cannot
+prove ownership, leave the default and know that `read_transcript` will refuse
+until the participant is bound by an operator or proven by the daemon.
 
 ## A complete plugin
 
@@ -675,15 +767,48 @@ class NovaObserver(TranscriptObserver):
 HARNESS = NovaHarness()
 ```
 
-If your harness writes no transcript file, you have two options, and both change
-only the observer — `NovaHarness` above is already finished either way. If it
-keeps its history somewhere else — a database, a socket — subclass
-`HarnessObserver`, implement `open_source`, and keep `has_transcript = True`;
-`opencode.py` is the worked example. If it keeps no history at all, subclass
-`HarnessObserver`, set `has_transcript = False`, and the entire observer is
-`is_idle_screen`: the daemon stops looking for a file and reads the screen
-instead, and that method becomes the signal that a turn ended rather than a hint
-about a stuck agent.
+### The trust gap, and why this example is not complete
+
+The `nova` above is a working launch-and-read adapter, but it is not a working
+*trusted* adapter. It returns no `LaunchPlan.session_id`, and its
+`TranscriptObserver` inherits the default `TranscriptSource`, which discovers
+its transcript by cwd and mtime — `heuristic` provenance. The observer refuses
+any attachment that is not trusted: a heuristic candidate is discarded, the
+source never commits, and the participant stays on screen-only status.
+
+What that means in practice:
+
+- No transcript is ever committed, so no parsed events reach the bus.
+- No turn is ever completed from the transcript, so `await_sessions` against
+  this participant hangs until the caller's timeout.
+- A running job is **crashed** after the 30-second observation-failure grace,
+  not rescued: the 60-second rescue path is deliberately excluded for a
+  source that has never attached, because rescuing with `clock.last_text`
+  from a participant nothing has ever been read from would hand the caller
+  an empty string as the answer.
+- The first failure also emits an `agent.observation_error` bus event.
+
+The guide warned earlier that heuristic evidence is insufficient and named
+isolation, receipts, and process proof. Of those three, the one mechanism
+that is public and works today is **`LaunchPlan.session_id`**: when the CLI
+lets Theater choose or learn the native session id at launch, returning it
+on the launch plan is what makes the resulting attachment trusted. The
+spawner persists `session_correlation = exact` before the process starts, so
+the observer's source never has to guess from cwd during the creation race.
+
+Receipt tokens and transcript isolation are internal daemon mechanisms
+currently being generalised for plugin use; they are not yet a supported
+extension point. Do not build a plugin that depends on them.
+
+If your harness writes no transcript file, you have two options, and both
+change only the observer — `NovaHarness` above is already finished either
+way. If it keeps its history somewhere else — a database, a socket —
+subclass `HarnessObserver`, implement `open_source`, and keep
+`has_transcript = True`; `opencode.py` is the worked example. If it keeps no
+history at all, subclass `HarnessObserver`, set `has_transcript = False`, and
+the entire observer is `is_idle_screen`: the daemon stops looking for a file
+and reads the screen instead, and that method becomes the signal that a turn
+ended rather than a hint about a stuck agent.
 
 ## Precedence
 
@@ -742,6 +867,98 @@ theater harnesses
 ```
 
 which either lists `nova` or tells you why it could not.
+
+## Advanced hooks
+
+The methods and attributes below are not needed by a plugin that launches a
+CLI and reads its transcript. They gate behaviour that is real but
+specialised — trusted identity for non-file sources, resume with a prompt,
+operator recovery for adopted sessions. Several have deliberate safe defaults
+that keep a simple plugin working without knowing about them. They are
+documented here so a plugin that needs one knows it exists, and so a plugin
+that does not knows it can safely ignore it.
+
+### `LaunchPlan.session_id` and `LaunchPlan.private_files`
+
+`session_id` is the exact native session id known before launch. Returning
+it is what makes the resulting attachment trusted — see the trust gap
+warning above. When the CLI lets Theater choose or learn the id at launch,
+this is the field that carries it.
+
+`private_files` is like `files` but written mode 0600 by the daemon in a
+parent directory chmod 0700. Use it for launch secrets — receipt tokens,
+authentication material — that should not be world-readable in `$THEATER_HOME`.
+
+### `plan_launch(resume=…)` and `plan_launch(reasoning_effort=…)`
+
+Both follow the same pattern as `model`: the funnel inspects your signature
+and forwards the keyword only when your `plan_launch` accepts it. Declaring
+the parameter is what opts you in; omitting it keeps an older adapter
+working. `resume` is the native session id to continue, and `reasoning_effort`
+is a thinking-effort level the CLI may support. Both are passed through
+untouched.
+
+### `Harness.resume_takes_prompt`
+
+This attribute defaults to **`True`**, and the default is a trap. It says
+"my resume path can carry a prompt and a `response_format`." A harness
+whose resume path *cannot* — opencode's `-s` routes to the session view
+and drops `--prompt` — must set this to `False`. If it does not, the
+spawner will hand it a prompt it silently swallows, and the caller's
+`await_sessions` will wait for a turn that never starts. The spawner
+refuses a resume-with-prompt for a harness where `resume_takes_prompt` is
+`False`, telling the caller to resume without a prompt and use `send` to
+deliver the task. The same refusal covers `response_format`.
+
+### Operator recovery for adopted sessions
+
+Two methods on `HarnessObserver` support the `theater candidates` / `theater
+bind` recovery workflow for adopted sessions whose transcript identity is not
+trusted:
+
+- `transcript_candidates(*, cwd, domain, after)` returns operator-visible
+  candidates — locations the operator can inspect and choose from. The
+  default returns `[]`.
+- `admit_operator_candidate(*, cwd, candidate, domain, after)` validates an
+  operator-named candidate before the daemon persists trust. The default
+  raises `ValueError`, meaning "no operator-bindable transcript."
+
+A `TranscriptObserver` that knows how to list transcripts in its root
+overrides `transcript_candidates`. The daemon calls `admit_operator_candidate`
+when an operator runs `theater bind` to verify the candidate is real before
+promoting it to trusted.
+
+### Other specialised hooks
+
+These have safe defaults and do not need attention from a simple plugin:
+
+- `open_source_for` — the participant-aware variant of `open_source` that
+  receives Theater identity (participant id, session provenance, known
+  location, transcript domain, pane pid). The default forwards to
+  `open_source`; a harness with a process-local correlation channel
+  overrides it.
+- `screen_reading` — the structured replacement for `is_idle_screen` that
+  distinguishes a prompt from an approval modal. The default derives a
+  `ScreenReading` from the boolean, so a plugin that only implements
+  `is_idle_screen` keeps working.
+- `stream_floor` — captures the stream position of a transcript at the
+  last safe pre-launch moment, so a resumed session does not attribute stale
+  records to the successor. `TranscriptObserver` overrides this for file
+  paths; the default returns `None`.
+- `relocate_by_cwd` — opts a `TranscriptObserver` into cwd-only relocation,
+  unsafe in a shared root. Default `False`.
+- `Source.collision_domain` — the namespace a heuristic source searches,
+  so two sources with different domains cannot collide. Default `None`
+  (conservative: same-harness/same-cwd sources are treated as competitors).
+- `proves_ownership` / `proven_transcript` — a proof channel for a
+  `TranscriptObserver` that can show a transcript is its own process's.
+  Default `False` / `None`.
+- `revoke_attachment` — drops an accepted heuristic attachment when exact
+  evidence displaces it. Not required; matters only for a source that may
+  be superseded.
+- `admit_exact_location` — moves discovery to a daemon-proven transcript
+  location via a receipt. A receipt capability, not required for normal
+  operation.
 
 ## Testing a plugin without spawning anything
 
