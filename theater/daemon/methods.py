@@ -54,6 +54,7 @@ from theater.harness.observation import (
     enumerate_transcript_candidates,
     open_participant_source,
 )
+from theater.harness.source import TranscriptCandidate
 from theater.models import (
     AwaitingDecision,
     BadRequest,
@@ -169,6 +170,7 @@ _CHECKPOINT_JOB_KEYS = (
     "finished_at",
 )
 CLAUDE_RECEIPT_RPC = "claude.receipt"
+TRANSCRIPT_RECEIPT_RPC = "transcript.receipt"
 CLAUDE_RECEIPT_BUS_KIND = "agent.transcript_receipt"
 
 
@@ -227,97 +229,34 @@ def _optional_string_param(params: dict, key: str, *, method_name: str) -> str |
     return value
 
 
-def _claude_transcript_root(daemon) -> Path:
-    harness = daemon.observer.harnesses.get("claude") or HARNESSES.get("claude")
-    observer = getattr(harness, "observer", None)
-    root = getattr(observer, "root", None)
-    if not isinstance(root, Path):
-        raise BadRequest("claude receipt cannot validate transcript root")
-    return root.resolve()
-
-
-def _canonical_claude_transcript(daemon, raw_path: str) -> Path:
-    root = _claude_transcript_root(daemon)
-    path = Path(raw_path).expanduser()
-    if not path.is_absolute():
-        raise BadRequest("claude receipt transcript_path must be absolute")
-    canonical = path.resolve(strict=False)
-    try:
-        rel = canonical.relative_to(root)
-    except ValueError:
-        raise BadRequest(
-            "claude receipt transcript_path is outside Claude's transcript root"
-        ) from None
-    if canonical.suffix != ".jsonl" or len(rel.parts) != 2:
-        raise BadRequest(
-            "claude receipt transcript_path must name a Claude project JSONL transcript"
-        )
-    return canonical
-
-
-def _validate_claude_transcript_records(path: Path, *, session_id: str, cwd: str | None) -> bool:
-    """Reject an existing transcript whose own records contradict the receipt."""
-    if not path.exists():
-        return False
-    wanted_cwd = str(Path(cwd).resolve()) if cwd else None
-    found_evidence = False
-    try:
-        with path.open(encoding="utf-8", errors="replace") as fh:
-            for i, line in enumerate(fh):
-                if i >= 20:
-                    return found_evidence
-                try:
-                    record = json.loads(line)
-                except ValueError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                found_session = record.get("session_id") or record.get("sessionId")
-                if isinstance(found_session, str) and found_session and found_session != session_id:
-                    raise BadRequest("claude receipt session_id contradicts transcript records")
-                if found_session == session_id:
-                    found_evidence = True
-                found_cwd = record.get("cwd")
-                if (
-                    wanted_cwd is not None
-                    and isinstance(found_cwd, str)
-                    and found_cwd
-                    and str(Path(found_cwd).resolve()) != wanted_cwd
-                ):
-                    raise BadRequest("claude receipt transcript cwd contradicts participant cwd")
-                if isinstance(found_cwd, str) and found_cwd:
-                    found_evidence = True
-    except OSError as exc:
-        raise BadRequest(f"claude receipt transcript_path is not readable: {exc}") from exc
-    return found_evidence
-
-
 def _reject_cross_participant_receipt(
     daemon,
     *,
     participant_id: str,
+    harness: str,
     session_id: str,
     transcript_location: str,
 ) -> None:
     for other in daemon.registry.list(include_dead=True):
         if other.id == participant_id:
             continue
-        if other.harness != "claude":
+        if other.harness != harness:
             continue
-        if other.transcript_location == transcript_location:
-            raise BadRequest(
-                "claude receipt transcript_path is already owned by another participant"
-            )
+        if _same_location(other.transcript_location, transcript_location):
+            raise BadRequest("transcript receipt location is already owned by another participant")
         if other.session_id == session_id and provenance_at_least(
             other.session_correlation, TranscriptProvenance.OPERATOR
         ):
-            raise BadRequest("claude receipt session_id is already owned by another participant")
+            raise BadRequest(
+                "transcript receipt session_id is already owned by another participant"
+            )
 
 
 def _reject_unbound_same_cwd_receipt(
     daemon,
     *,
     participant_id: str,
+    harness: str,
     participant_session_id: str | None,
     participant_location: str | None,
     session_id: str,
@@ -327,28 +266,31 @@ def _reject_unbound_same_cwd_receipt(
     if participant is None or not participant.cwd:
         return
     # The launch token proves this caller can read the hook's private file; it
-    # does not prove Claude's JSON is honest. A same-user process with that
-    # token can still name a plausible transcript. The checks above bind the
-    # claim to Claude's transcript root, the filename/session id, and records
-    # in the file. This additional guard refuses the dangerous ambiguous case:
-    # a brand-new transcript claim while another live Claude participant could
-    # plausibly own the same cwd. With no competitor, the remaining trust
-    # boundary is the local Unix user that can read Theater's private token.
+    # does not prove the harness's transcript is honest. A same-user process
+    # with that token can still name a plausible transcript. The checks in the
+    # plugin's validator bind the claim to the harness's own format rules and
+    # records in the file. This additional guard refuses the dangerous
+    # ambiguous case: a brand-new transcript claim while another live same-
+    # harness participant could plausibly own the same cwd. With no
+    # competitor, the remaining trust boundary is the local Unix user that
+    # can read Theater's private token.
     cwd = Path(participant.cwd).resolve()
     for other in daemon.registry.list():
         if (
             other.id == participant_id
             or other.status is Status.DEAD
-            or other.harness != "claude"
+            or other.harness != harness
             or not other.cwd
             or Path(other.cwd).resolve() != cwd
         ):
             continue
-        if session_id == participant_session_id or transcript_location == participant_location:
+        if session_id == participant_session_id or _same_location(
+            participant_location, transcript_location
+        ):
             return
         raise BadRequest(
-            "claude receipt cannot claim a new unbound transcript while another live "
-            "Claude participant shares its cwd"
+            "transcript receipt cannot claim a new unbound transcript while "
+            "another live participant of the same harness shares its cwd"
         )
 
 
@@ -578,56 +520,120 @@ async def _status(daemon, params: dict) -> dict:
     return daemon.registry.get(target.id).to_dict()
 
 
-@method(CLAUDE_RECEIPT_RPC)
-async def _claude_receipt(daemon, params: dict) -> dict:
-    """Authenticated receipt of Claude's current transcript identity."""
-    pid = _string_param(params, "id", method_name=CLAUDE_RECEIPT_RPC)
-    token = _string_param(params, "token", method_name=CLAUDE_RECEIPT_RPC)
-    session_id = _string_param(params, "session_id", method_name=CLAUDE_RECEIPT_RPC)
-    transcript_path = _string_param(params, "transcript_path", method_name=CLAUDE_RECEIPT_RPC)
+@method(TRANSCRIPT_RECEIPT_RPC)
+async def _transcript_receipt(daemon, params: dict) -> dict:
+    """Authenticated receipt of a harness's current transcript identity.
+
+    Generic: core handles token auth, liveness, ownership-conflict policy,
+    persistence, the bus audit event, watcher admission, and token renewal.
+    The harness plugin's ``validate_transcript_receipt`` hook handles every
+    format-specific concern (field names, path rules, record scans).
+    """
+    pid = _string_param(params, "id", method_name=TRANSCRIPT_RECEIPT_RPC)
+    token = _string_param(params, "token", method_name=TRANSCRIPT_RECEIPT_RPC)
+    raw_payload = params.get("payload")
+    if not isinstance(raw_payload, dict):
+        raise BadRequest(f"{TRANSCRIPT_RECEIPT_RPC} parameter 'payload' must be a JSON object")
 
     participant = daemon.store.get_participant(pid)
     if participant is None:
-        raise BadRequest("claude receipt id does not name an existing participant")
-    if participant.harness != "claude":
-        raise BadRequest("claude receipt id does not name a Claude participant")
+        raise BadRequest("transcript receipt id does not name an existing participant")
     if participant.status is Status.DEAD:
         daemon.store.delete_receipt_token(pid)
-        raise BadRequest("claude receipt id names a dead participant")
+        raise BadRequest("transcript receipt id names a dead participant")
     expected = daemon.store.get_receipt_token(pid)
     if expected is None or not hmac.compare_digest(token, expected):
-        raise BadRequest("claude receipt token is invalid")
+        raise BadRequest("transcript receipt token is invalid")
 
-    path = _canonical_claude_transcript(daemon, transcript_path)
-    if path.stem != session_id:
-        raise BadRequest("claude receipt session_id does not match transcript_path")
-    found_record = _validate_claude_transcript_records(
-        path, session_id=session_id, cwd=participant.cwd
-    )
-    if not found_record and session_id != participant.session_id:
-        raise BadRequest("claude receipt transcript does not yet contain matching evidence")
+    # Resolve the observer through the daemon's harness registry, not the
+    # global HARNESSES — tests inject a daemon-local observer.
+    harness = daemon.observer.harnesses.get(participant.harness)
+    observer = getattr(harness, "observer", None) if harness is not None else None
+    if observer is None:
+        raise BadRequest(
+            f"transcript receipt: no observer registered for harness {participant.harness!r}"
+        )
+
+    # The plugin validates the opaque payload. Rejection is an exception
+    # (ValueError), never a candidate carrying rejection_reason. Core catches
+    # only ValueError and maps it to BadRequest.
+    try:
+        candidate = observer.validate_transcript_receipt(
+            payload=raw_payload,
+            cwd=participant.cwd,
+            expected_session_id=participant.session_id,
+        )
+    except ValueError as exc:
+        raise BadRequest(str(exc)) from exc
+
+    # Core validates the returned candidate. A plugin returning junk must get
+    # a clean error, not an obscure failure downstream.
+    if not isinstance(candidate, TranscriptCandidate):
+        raise BadRequest(
+            f"transcript receipt validator must return a TranscriptCandidate, "
+            f"got {type(candidate).__name__}"
+        )
+    if not isinstance(candidate.location, str) or not candidate.location:
+        raise BadRequest("transcript receipt validator returned an empty location")
+    if not isinstance(candidate.session_id, str) or not candidate.session_id:
+        raise BadRequest("transcript receipt validator returned an empty session_id")
+    if candidate.rejection_reason:
+        raise BadRequest(
+            f"transcript receipt validator returned a rejection: {candidate.rejection_reason}"
+        )
+
+    location = candidate.location
+    session_id = candidate.session_id
     _reject_cross_participant_receipt(
         daemon,
         participant_id=pid,
+        harness=participant.harness,
         session_id=session_id,
-        transcript_location=str(path),
+        transcript_location=location,
     )
     _reject_unbound_same_cwd_receipt(
         daemon,
         participant_id=pid,
+        harness=participant.harness,
         participant_session_id=participant.session_id,
         participant_location=participant.transcript_location,
         session_id=session_id,
-        transcript_location=str(path),
+        transcript_location=location,
     )
-    admission = daemon.observer.transcript_receipt(pid, location=str(path), session_id=session_id)
+    admission = daemon.observer.transcript_receipt(pid, location=location, session_id=session_id)
     daemon.store.renew_receipt_token(pid)
     daemon.store.bus_append(
         CLAUDE_RECEIPT_BUS_KIND,
         to_id=pid,
-        payload={"path": str(path), "session_id": session_id, "admission": admission},
+        payload={"location": location, "session_id": session_id, "admission": admission},
     )
     return {"ok": True, "admission": admission}
+
+
+@method(CLAUDE_RECEIPT_RPC)
+async def _claude_receipt_alias(daemon, params: dict) -> dict:
+    """Backward-compatible alias: live Claude sessions invoke this name.
+
+    Shipped in v3.2.0 with settings.json on disk referencing
+    ``claude.receipt`` by that exact name. Forwards ``session_id`` and
+    ``transcript_path`` into the generic ``transcript.receipt`` payload.
+    """
+    session_id = params.get("session_id")
+    transcript_path = params.get("transcript_path")
+    if session_id is not None and not isinstance(session_id, str):
+        raise BadRequest("claude.receipt parameter 'session_id' must be a string")
+    if transcript_path is not None and not isinstance(transcript_path, str):
+        raise BadRequest("claude.receipt parameter 'transcript_path' must be a string")
+    forwarded = dict(params)
+    forwarded["payload"] = {
+        k: v
+        for k, v in (
+            ("session_id", session_id),
+            ("transcript_path", transcript_path),
+        )
+        if v is not None
+    }
+    return await _transcript_receipt(daemon, forwarded)
 
 
 @method("participant.kill")

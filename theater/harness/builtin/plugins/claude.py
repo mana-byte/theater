@@ -43,9 +43,9 @@ from __future__ import annotations
 
 import json
 import logging
-import secrets
 import shlex
 import uuid
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -151,6 +151,16 @@ _READ_TOOLS: dict[str, str] = {
 }
 
 
+def _claude_settings_path(participant_id: str) -> Path:
+    """Launch-specific Claude settings for receipt hooks.
+
+    Lives under the shared Claude settings namespace, not the per-participant
+    observation dir, because ``--settings`` is a single file the CLI reads at
+    startup and its hooks reference the token path inside it.
+    """
+    return paths.home() / "claude" / f"{participant_id}.settings.json"
+
+
 def _receipt_hook_command(participant_id: str, token_path: Path) -> str:
     """Command run by Claude lifecycle hooks.
 
@@ -168,6 +178,15 @@ def _receipt_hook_command(participant_id: str, token_path: Path) -> str:
             str(token_path),
         ]
     )
+
+
+def _hook_string(data: Mapping[str, object], *names: str) -> str | None:
+    """Extract the first non-empty string value for any of ``names``."""
+    for name in names:
+        value = data.get(name)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def _claude_receipt_settings(participant_id: str, token_path: Path) -> dict:
@@ -268,9 +287,8 @@ class ClaudeCodeHarness(Harness):
                 }
             }
         }
-        settings_path = paths.claude_settings_path(participant_id)
-        token_path = paths.claude_receipt_token_path(participant_id)
-        receipt_token = secrets.token_urlsafe(32)
+        settings_path = _claude_settings_path(participant_id)
+        token_path = paths.observation_dir("claude", participant_id) / "receipt-token"
         # `=` form: `--mcp-config` is variadic and space-separated in Claude
         # Code 2.x, so the space form greedily consumes the prompt positional
         # as a second config path and claude exits before the observer attaches.
@@ -309,9 +327,9 @@ class ClaudeCodeHarness(Harness):
                 )
                 + "\n",
             },
-            private_files={token_path: receipt_token + "\n"},
+            private_files={},
             session_id=native_session_id,
-            receipt_token=receipt_token,
+            receipt_token_path=token_path,
         )
 
 
@@ -505,6 +523,119 @@ class ClaudeCodeObserver(TranscriptObserver):
     def session_id(self, transcript: Path) -> str | None:
         """The filename is the session id. Verified, not assumed."""
         return transcript.stem or None
+
+    def validate_transcript_receipt(
+        self,
+        *,
+        payload: Mapping[str, object],
+        cwd: str | None,
+        expected_session_id: str | None,
+    ) -> TranscriptCandidate:
+        """Validate a Claude lifecycle-hook receipt into a candidate.
+
+        Extracts ``session_id``/``sessionId`` and
+        ``transcript_path``/``transcriptPath`` from the opaque payload, then
+        validates root containment, the ``.jsonl`` suffix, the
+        ``<project>/<session>.jsonl`` filename rule, cwd, and a bounded
+        20-record scan for contradicting evidence. Every failure raises
+        ``ValueError`` with actionable prose; core maps it to ``BadRequest``.
+        """
+        session_id = _hook_string(payload, "session_id", "sessionId")
+        transcript_path = _hook_string(payload, "transcript_path", "transcriptPath")
+        if session_id is None:
+            raise ValueError(
+                "claude receipt payload is missing session_id (or sessionId); "
+                "the lifecycle hook must provide it"
+            )
+        if transcript_path is None:
+            raise ValueError(
+                "claude receipt payload is missing transcript_path "
+                "(or transcriptPath); the lifecycle hook must provide it"
+            )
+        if not isinstance(self.root, Path):
+            raise ValueError(  # noqa: TRY004 – rejection is always ValueError per design
+                "claude receipt cannot validate transcript root: observer root is not a Path"
+            )
+        root = self.root.resolve()
+        path = Path(transcript_path).expanduser()
+        if not path.is_absolute():
+            raise ValueError(
+                f"claude receipt transcript_path must be absolute, got {transcript_path!r}"
+            )
+        canonical = path.resolve(strict=False)
+        try:
+            rel = canonical.relative_to(root)
+        except ValueError:
+            raise ValueError(
+                f"claude receipt transcript_path {transcript_path!r} is outside "
+                "Claude's transcript root"
+            ) from None
+        if canonical.suffix != ".jsonl" or len(rel.parts) != 2:
+            raise ValueError(
+                "claude receipt transcript_path must name a Claude project "
+                "JSONL transcript (<project>/<session>.jsonl)"
+            )
+        if canonical.stem != session_id:
+            raise ValueError(
+                f"claude receipt session_id {session_id!r} does not match "
+                f"transcript_path filename stem {canonical.stem!r}"
+            )
+        found_evidence = self._validate_transcript_records(
+            canonical, session_id=session_id, cwd=cwd
+        )
+        if not found_evidence and session_id != expected_session_id:
+            raise ValueError(
+                "claude receipt transcript does not yet contain matching "
+                "evidence (no record carries session_id and the id does not "
+                "match the launch session)"
+            )
+        return TranscriptCandidate(
+            location=str(canonical),
+            session_id=session_id,
+        )
+
+    @staticmethod
+    def _validate_transcript_records(path: Path, *, session_id: str, cwd: str | None) -> bool:
+        """Reject an existing transcript whose own records contradict the receipt."""
+        if not path.exists():
+            return False
+        wanted_cwd = str(Path(cwd).resolve()) if cwd else None
+        found_evidence = False
+        try:
+            with path.open(encoding="utf-8", errors="replace") as fh:
+                for i, line in enumerate(fh):
+                    if i >= 20:
+                        return found_evidence
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    found_session = record.get("session_id") or record.get("sessionId")
+                    if (
+                        isinstance(found_session, str)
+                        and found_session
+                        and found_session != session_id
+                    ):
+                        raise ValueError("claude receipt session_id contradicts transcript records")
+                    if found_session == session_id:
+                        found_evidence = True
+                    found_cwd = record.get("cwd")
+                    if (
+                        wanted_cwd is not None
+                        and isinstance(found_cwd, str)
+                        and found_cwd
+                        and str(Path(found_cwd).resolve()) != wanted_cwd
+                    ):
+                        raise ValueError(
+                            "claude receipt transcript cwd contradicts participant cwd"
+                        )
+                    if isinstance(found_cwd, str) and found_cwd:
+                        found_evidence = True
+        except OSError as exc:
+            raise ValueError(f"claude receipt transcript_path is not readable: {exc}") from exc
+        return found_evidence
 
     def parse(self, line: str, index: int, *, clip_text: bool = True) -> list[Event]:
         line = line.strip()

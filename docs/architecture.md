@@ -474,12 +474,16 @@ skipped. A session that has been running for an hour before adoption does not
 replay an hour of history onto the bus. `skipped_records` appears in the
 `agent.transcript` bus event so the gap is explicit rather than silent.
 
-Claude spawned sessions get launch-local `SessionStart` and `PreCompact` hooks
-that call `theater claude-receipt` with a private token file. The token is
-valid for the lifetime of the live participant, not for a wall-clock TTL; death
-and GC delete the token and token file. `SessionStart` covers cold starts and
-post-compaction locations, while `PreCompact` records the old transcript before
-Claude rotates.
+Spawned sessions get launch-local `SessionStart` and `PreCompact` hooks
+that call `theater transcript-receipt` (the generic entry point) with a
+private token file. The token is valid for the lifetime of the live
+participant, not for a wall-clock TTL; death and GC delete the token and
+token file. `SessionStart` covers cold starts and post-compaction
+locations, while `PreCompact` records the old transcript before the
+harness rotates. Live Claude sessions shipped in v3.2.0 have
+`settings.json` files on disk that invoke `theater claude-receipt` by that
+exact name; the old command name and `claude.receipt` RPC are kept as
+forwarding aliases so those sessions keep working.
 
 Vibe cold spawns get a Theater-owned isolated transcript save directory with a
 signed marker naming the original participant. Resumes may re-enter that domain

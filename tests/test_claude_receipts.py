@@ -44,6 +44,16 @@ def _spawn_claude(daemon, cwd: Path, *, pid: str, token: str = "tok"):
     return participant
 
 
+async def _receipt(client, *, pid: str, token: str, session_id: str, transcript_path: str):
+    """Call the generic transcript.receipt RPC with a Claude-shaped payload."""
+    return await client.call(
+        "transcript.receipt",
+        id=pid,
+        token=token,
+        payload={"session_id": session_id, "transcript_path": transcript_path},
+    )
+
+
 async def _until(predicate, timeout: float = 3.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -80,9 +90,9 @@ async def test_claude_initial_receipt_records_exact_location(
     _spawn_claude(daemon, cwd, pid="p-claude", token="secret")
     path = _transcript(root, "11111111-1111-4111-8111-111111111111", cwd)
 
-    await claude_client.call(
-        "claude.receipt",
-        id="p-claude",
+    await _receipt(
+        client=claude_client,
+        pid="p-claude",
         token="secret",
         session_id=path.stem,
         transcript_path=str(path),
@@ -109,9 +119,9 @@ async def test_claude_receipt_updates_after_compaction_rotation(
     second = _transcript(root, "22222222-2222-4222-8222-222222222222", cwd)
 
     for path in (first, second):
-        await claude_client.call(
-            "claude.receipt",
-            id="p-claude",
+        await _receipt(
+            client=claude_client,
+            pid="p-claude",
             token="secret",
             session_id=path.stem,
             transcript_path=str(path),
@@ -134,9 +144,9 @@ async def test_claude_duplicate_receipt_is_idempotent(claude_daemon, claude_clie
     path = _transcript(root, "11111111-1111-4111-8111-111111111111", cwd)
 
     for _ in range(2):
-        await claude_client.call(
-            "claude.receipt",
-            id="p-claude",
+        await _receipt(
+            client=claude_client,
+            pid="p-claude",
             token="secret",
             session_id=path.stem,
             transcript_path=str(path),
@@ -163,25 +173,28 @@ async def test_claude_receipt_rejects_invalid_token_path_and_harness(
     path = _transcript(root, "11111111-1111-4111-8111-111111111111", cwd)
 
     with pytest.raises(RemoteError, match="token"):
-        await claude_client.call(
-            "claude.receipt",
-            id="p-claude",
+        await _receipt(
+            client=claude_client,
+            pid="p-claude",
             token="wrong",
             session_id=path.stem,
             transcript_path=str(path),
         )
     with pytest.raises(RemoteError, match="match"):
-        await claude_client.call(
-            "claude.receipt",
-            id="p-claude",
+        await _receipt(
+            client=claude_client,
+            pid="p-claude",
             token="secret",
             session_id="22222222-2222-4222-8222-222222222222",
             transcript_path=str(path),
         )
-    with pytest.raises(RemoteError, match="Claude participant"):
-        await claude_client.call(
-            "claude.receipt",
-            id="p-vibe",
+    # A non-Claude participant's observer is not registered in this daemon's
+    # harnesses dict (only claude is injected), so core rejects before
+    # reaching the hook.
+    with pytest.raises(RemoteError, match="no observer registered"):
+        await _receipt(
+            client=claude_client,
+            pid="p-vibe",
             token="secret",
             session_id=path.stem,
             transcript_path=str(path),
@@ -198,9 +211,9 @@ async def test_claude_receipt_rejects_out_of_domain_path(claude_daemon, claude_c
     outside.write_text("")
 
     with pytest.raises(RemoteError, match="outside"):
-        await claude_client.call(
-            "claude.receipt",
-            id="p-claude",
+        await _receipt(
+            client=claude_client,
+            pid="p-claude",
             token="secret",
             session_id=outside.stem,
             transcript_path=str(outside),
@@ -216,9 +229,9 @@ async def test_claude_receipt_rejects_dead_participant(claude_daemon, claude_cli
     daemon.registry.mark_dead("p-claude")
 
     with pytest.raises(RemoteError, match="dead participant"):
-        await claude_client.call(
-            "claude.receipt",
-            id="p-claude",
+        await _receipt(
+            client=claude_client,
+            pid="p-claude",
             token="secret",
             session_id=path.stem,
             transcript_path=str(path),
@@ -238,9 +251,9 @@ async def test_claude_long_idle_live_receipt_accepts_and_renews_legacy_expired_t
     )
     path = _transcript(root, "11111111-1111-4111-8111-111111111111", cwd)
 
-    await claude_client.call(
-        "claude.receipt",
-        id="p-claude",
+    await _receipt(
+        client=claude_client,
+        pid="p-claude",
         token="secret",
         session_id=path.stem,
         transcript_path=str(path),
@@ -270,9 +283,9 @@ async def test_claude_receipt_rejects_dead_expired_token_and_cleans_it_up(
     path = _transcript(root, "11111111-1111-4111-8111-111111111111", cwd)
 
     with pytest.raises(RemoteError, match="dead participant"):
-        await claude_client.call(
-            "claude.receipt",
-            id="p-claude",
+        await _receipt(
+            client=claude_client,
+            pid="p-claude",
             token="secret",
             session_id=path.stem,
             transcript_path=str(path),
@@ -291,9 +304,9 @@ async def test_claude_receipt_rejects_cross_participant_location(
     _spawn_claude(daemon, cwd, pid="first", token="one")
     path = _transcript(root, "11111111-1111-4111-8111-111111111111", cwd)
 
-    await claude_client.call(
-        "claude.receipt",
-        id="first",
+    await _receipt(
+        client=claude_client,
+        pid="first",
         token="one",
         session_id=path.stem,
         transcript_path=str(path),
@@ -303,9 +316,9 @@ async def test_claude_receipt_rejects_cross_participant_location(
     )
     _spawn_claude(daemon, cwd, pid="second", token="two")
     with pytest.raises(RemoteError, match="another participant"):
-        await claude_client.call(
-            "claude.receipt",
-            id="second",
+        await _receipt(
+            client=claude_client,
+            pid="second",
             token="two",
             session_id=path.stem,
             transcript_path=str(path),
@@ -482,9 +495,9 @@ async def test_same_cwd_competitor_cannot_claim_unbound_foreign_receipt(
     path = _transcript(root, "33333333-3333-4333-8333-333333333333", cwd)
 
     with pytest.raises(RemoteError, match="shares its cwd"):
-        await claude_client.call(
-            "claude.receipt",
-            id="first",
+        await _receipt(
+            client=claude_client,
+            pid="first",
             token="one",
             session_id=path.stem,
             transcript_path=str(path),
@@ -558,13 +571,15 @@ def test_private_token_file_is_restricted_even_when_preexisting(registry, tmp_pa
     from theater.daemon.spawner import Spawner
     from theater.harness.base import LaunchPlan
 
-    token_file = paths.claude_receipt_token_path("p-claude")
+    token_file = paths.observation_dir("claude", "p-claude") / "receipt-token"
     token_file.parent.mkdir(parents=True, exist_ok=True)
     token_file.parent.chmod(0o755)
     token_file.write_text("old")
     token_file.chmod(0o644)
 
-    Spawner(registry)._write_plan_files(LaunchPlan(argv=[], private_files={token_file: "new\n"}))
+    Spawner(registry)._write_plan_files(
+        LaunchPlan(argv=[], receipt_token="new", receipt_token_path=token_file)
+    )
 
     assert stat.S_IMODE(token_file.parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
@@ -642,10 +657,35 @@ def test_claude_receipt_cli_is_quiet_when_daemon_cannot_accept(monkeypatch, caps
     async def reject(*args, **kwargs):
         raise exc
 
-    monkeypatch.setattr(cli, "_send_claude_receipt", reject)
+    monkeypatch.setattr(cli, "_send_transcript_receipt", reject)
     monkeypatch.setattr("sys.stdin", _receipt_stdin(transcript))
 
     assert cli.cmd_claude_receipt(_receipt_args(token_file)) == 0
     out = capsys.readouterr()
     assert out.out == ""
     assert out.err == ""
+
+
+async def test_claude_receipt_rpc_alias_still_works(claude_daemon, claude_client, tmp_path):
+    """The claude.receipt RPC alias forwards to transcript.receipt.
+
+    Live Claude sessions have settings.json on disk invoking
+    ``claude.receipt`` by that exact name. The alias must keep working.
+    """
+    daemon, root = claude_daemon
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    _spawn_claude(daemon, cwd, pid="p-claude", token="secret")
+    path = _transcript(root, "11111111-1111-4111-8111-111111111111", cwd)
+
+    await claude_client.call(
+        "claude.receipt",
+        id="p-claude",
+        token="secret",
+        session_id=path.stem,
+        transcript_path=str(path),
+    )
+
+    assert await _until(
+        lambda: daemon.store.get_participant("p-claude").transcript_location == str(path.resolve())
+    )

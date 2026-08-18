@@ -488,10 +488,13 @@ Each agent harness connects to Theater by running `theater mcp` as a stdio MCP s
 ```
 
 For Theater-spawned Claude sessions, the launch plan also layers local
-`SessionStart` and `PreCompact` hooks that call `theater claude-receipt` with a
-private token file. The token is not a seven-day lease; it is valid while the
-participant is live and is deleted when the participant dies or GC removes the
-orphaned credential.
+`SessionStart` and `PreCompact` hooks that call `theater transcript-receipt`
+(the generic entry point) with a private token file. The token is not a
+seven-day lease; it is valid while the participant is live and is deleted
+when the participant dies or GC removes the orphaned credential. Live
+Claude sessions shipped in v3.2.0 have `settings.json` files on disk that
+invoke `theater claude-receipt` by that exact name; the old command name is
+kept as a forwarding alias so those sessions keep working.
 
 Once connected, the agent has access to these tools:
 

@@ -24,6 +24,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import secrets
 import shutil
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -34,6 +35,7 @@ from theater.daemon.registry import Registry
 from theater.harness import check_model, check_reasoning, check_resume, plan_launch
 from theater.harness import get as get_harness
 from theater.harness.base import LaunchPlan
+from theater.harness.observation import HarnessObserver
 from theater.models import BadRequest, Participant, Status, TheaterError
 from theater.provenance import TranscriptProvenance, is_trusted_provenance
 from theater.resume_floor import UNKNOWN_FLOOR, encode_floor
@@ -129,6 +131,9 @@ class Spawner:
             with timing.span("spawn.worktree", id=participant.id, kind=req.worktree or None):
                 child_cwd = self._prepare_worktree(req, participant)
             plan = self._build_plan(req, participant, resume_domain)
+            minted_token = self._validate_receipt_plan(plan, participant)
+            if minted_token is not None:
+                plan = replace(plan, receipt_token=minted_token)
             with timing.span("spawn.provenance", id=participant.id):
                 self._record_launch_provenance(req, participant)
             self._record_launch_identity(participant, plan)
@@ -285,6 +290,100 @@ class Spawner:
             plan = replace(plan, transcript_domain=str(resume_domain))
         return plan
 
+    def _validate_receipt_plan(self, plan: LaunchPlan, participant: Participant) -> str | None:
+        """Pre-flight: validate a receipt plan and mint the token.
+
+        Returns the minted token string, or ``None`` when the plan does not
+        use receipts (``receipt_token_path is None``). Core owns the secret:
+        the plugin sets only ``receipt_token_path``, and core mints the token
+        here. A plugin that sets ``receipt_token`` itself is refused, because
+        a third-party plugin could ship a constant or weak token and core
+        would faithfully write and trust it.
+
+        Runs after ``_build_plan`` returns and before ``_write_plan_files``.
+        The participant row and any requested worktree are already created by
+        this point; the honest claim is "before any launch-plan or token file
+        is written and before tmux".
+
+        Known limitation: a plan rejected here can leave a newly created
+        *named* worktree's ``theater/named/<name>`` branch behind, because
+        named-worktree cleanup retains the branch by design (an AGENTS.md
+        invariant — other participants may have work on it), so that name
+        cannot be reused until a human deletes the branch. This requires a
+        malformed launch plan to trigger and cannot be improved while
+        ``_build_plan`` calls ``_has_live_cwd_sibling``, which reads
+        ``participant.cwd`` set by ``_prepare_worktree`` — moving the plan
+        build before the worktree would compute the ``isolate_transcript``
+        hint against the wrong cwd. The follow-up stack removes that hint
+        and will reorder then.
+        """
+        if plan.receipt_token_path is None:
+            return None
+        if plan.receipt_token is not None:
+            raise BadRequest(
+                "launch plan sets receipt_token; core owns the receipt secret "
+                "and mints it from receipt_token_path. The plugin should set "
+                "only receipt_token_path, not receipt_token."
+            )
+        # The observer must actually implement the hook. A plan declaring
+        # receipt_token_path against an inheriting default would write a token
+        # file that can never be used — core would refuse the receipt at
+        # runtime because the base raises ValueError.
+        # Resolve through the global registry, not daemon.observer.harnesses:
+        # _build_plan calls the global plan_launch, so the plan was produced
+        # by this same registry's harness — checking a different one would be
+        # incoherent. The receipt RPC later resolves through the daemon's
+        # harnesses because it handles a live participant the daemon owns; a
+        # daemon constructed with injected harnesses could not have spawned
+        # through the global registry anyway.
+        harness = get_harness(participant.harness)
+        observer = getattr(harness, "observer", None)
+        if observer is None:
+            raise BadRequest(
+                f"harness {participant.harness!r} has no observer; cannot use transcript receipts"
+            )
+        if (
+            type(observer).validate_transcript_receipt
+            is HarnessObserver.validate_transcript_receipt
+        ):
+            raise BadRequest(
+                f"harness {participant.harness!r} observer does not implement "
+                "validate_transcript_receipt; a plugin must implement this hook "
+                "to use transcript receipts. See docs/harness-plugins.md"
+            )
+        # Refuse an existing symlink first: the writer uses O_TRUNC which
+        # follows symlinks, so a symlink at the token path could write the
+        # token to an attacker-chosen location. Check before resolve() so a
+        # symlink pointing outside the observation dir is caught as a
+        # symlink, not as an out-of-dir path.
+        if plan.receipt_token_path.is_symlink():
+            raise BadRequest(
+                f"receipt_token_path {plan.receipt_token_path!r} is a symlink; "
+                "refusing to write a token through a symlink"
+            )
+        # The receipt token path must live under the harness's observation dir.
+        obs_dir = paths.observation_dir(participant.harness, participant.id)
+        try:
+            resolved_token = plan.receipt_token_path.resolve(strict=False)
+            resolved_obs = obs_dir.resolve(strict=False)
+            resolved_token.relative_to(resolved_obs)
+        except ValueError:
+            raise BadRequest(
+                f"receipt_token_path {plan.receipt_token_path!r} must resolve "
+                f"under the harness observation directory {obs_dir!r}"
+            ) from None
+        # No collision with public or private plan files: _write_plan_files
+        # writes public then private, so an identical private path silently
+        # overwrites the public one.
+        all_plan_paths = set(plan.files) | set(plan.private_files)
+        for existing in all_plan_paths:
+            if existing.resolve(strict=False) == resolved_token:
+                raise BadRequest(
+                    f"receipt_token_path {plan.receipt_token_path!r} collides "
+                    f"with a launch-plan file {existing!r}"
+                )
+        return secrets.token_urlsafe(32)
+
     def cleanup_reservation(self, participant: Participant) -> None:
         """Idempotent cleanup for a failed spawn's participant and worktree.
 
@@ -413,7 +512,7 @@ class Spawner:
         participant.transcript_domain = plan.transcript_domain
         self.registry.store.upsert_participant(participant)
         if plan.receipt_token is not None:
-            token_path = next(iter(plan.private_files), None)
+            token_path = plan.receipt_token_path
             self.registry.store.set_receipt_token(
                 participant.id,
                 plan.receipt_token,
@@ -422,7 +521,7 @@ class Spawner:
 
     @staticmethod
     def _write_plan_files(plan) -> None:
-        """Write public config files and private launch secrets."""
+        """Write public config files, private launch secrets, and the receipt token."""
         for path, contents in plan.files.items():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(contents)
@@ -433,6 +532,17 @@ class Spawner:
             os.fchmod(fd, 0o600)
             with os.fdopen(fd, "w") as fh:
                 fh.write(contents)
+        # Core owns the receipt token file: it generates the token, writes it
+        # mode 0600, and deletes it on death. The plugin must NOT also put it
+        # in private_files or the two writers collide.
+        if plan.receipt_token_path is not None and plan.receipt_token is not None:
+            token_path = plan.receipt_token_path
+            token_path.parent.mkdir(parents=True, exist_ok=True)
+            token_path.parent.chmod(0o700)
+            fd = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(plan.receipt_token + "\n")
 
     def _resolve_resume_reference(self, req: SpawnRequest) -> SpawnRequest:
         """If ``resume`` is a Theater participant id, resolve it to the harness

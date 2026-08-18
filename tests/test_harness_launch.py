@@ -255,21 +255,20 @@ def test_claude_launch_adds_receipt_hooks_without_editing_user_settings(tmp_path
 
     settings_arg = next(arg for arg in plan.argv if arg.startswith("--settings="))
     settings_path = Path(settings_arg.removeprefix("--settings="))
-    token_path = next(iter(plan.private_files))
     settings = json.loads(plan.files[settings_path])
 
     assert settings_path.name == "abc123.settings.json"
-    assert token_path.name == "abc123.receipt-token"
-    assert plan.receipt_token
-    assert plan.private_files[token_path] == plan.receipt_token + "\n"
+    assert plan.receipt_token_path is not None
+    assert plan.receipt_token_path.name == "receipt-token"
+    assert plan.receipt_token is None  # core mints the token, not the plugin
+    assert not plan.private_files  # core owns the token file, not the plugin
     assert set(settings["hooks"]) == {"SessionStart", "PreCompact"}
     assert "Stop" not in settings["hooks"]
     for entries in settings["hooks"].values():
         command = entries[0]["hooks"][0]["command"]
         assert "claude-receipt" in command
         assert "--id abc123" in command
-        assert str(token_path) in command
-        assert plan.receipt_token not in command
+        assert str(plan.receipt_token_path) in command
 
 
 def test_no_model_asked_means_no_model_flag(tmp_path):

@@ -42,16 +42,6 @@ def mcp_config_path(participant_id: str) -> Path:
     return mcp_config_dir() / f"{participant_id}.json"
 
 
-def claude_settings_path(participant_id: str) -> Path:
-    """Launch-specific Claude settings for receipt hooks."""
-    return home() / "claude" / f"{participant_id}.settings.json"
-
-
-def claude_receipt_token_path(participant_id: str) -> Path:
-    """Private token read by Claude lifecycle hooks."""
-    return home() / "claude" / f"{participant_id}.receipt-token"
-
-
 def observation_dir(harness: str, participant_id: str) -> Path:
     """Process-correlation state owned by one launched harness instance."""
     return home() / "observations" / harness / participant_id
@@ -76,9 +66,6 @@ def ensure_home() -> Path:
     root = home()
     root.mkdir(parents=True, exist_ok=True)
     mcp_config_dir().mkdir(parents=True, exist_ok=True)
-    claude = root / "claude"
-    claude.mkdir(parents=True, exist_ok=True)
-    claude.chmod(0o700)
     (root / "observations").mkdir(parents=True, exist_ok=True)
     harnesses_dir().mkdir(parents=True, exist_ok=True)
     return root

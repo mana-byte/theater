@@ -808,7 +808,7 @@ What that means in practice:
 - The first failure also emits an `agent.observation_error` bus event.
 
 The guide warned earlier that heuristic evidence is insufficient and named
-isolated storage, receipts, and process proof. Two public mechanisms work
+isolated storage, receipts, and process proof. Three public mechanisms work
 today. **`LaunchPlan.session_id`** is one: when the CLI lets Theater choose
 or learn the native session id at launch, returning it on the launch plan
 enables exact correlation. The spawner persists `session_correlation =
@@ -817,20 +817,80 @@ guess from cwd during the creation race. Exact correlation holds when the
 transcript's own reported session id matches the one Theater recorded at
 launch; the field alone is necessary but not sufficient — the match is
 what makes the attachment trusted. **`proves_ownership` /
-`proven_transcript`** is the other: a `TranscriptObserver` that can show
+`proven_transcript`** is another: a `TranscriptObserver` that can show
 a transcript is its own process's overrides both, and the source records
 the result as `proven` — trusted. The codex adapter uses this channel;
 see `proven_transcript` in `codex.py` and `correlation_for` in
-`source.py`.
+`source.py`. **Transcript receipts** are the third: a lifecycle hook
+calls back into Theater with an opaque JSON payload, and the plugin's
+`validate_transcript_receipt` turns it into trusted transcript identity.
+See the section below.
 
 `LaunchPlan.private_files` is like `files` but written mode 0600 by the
 daemon in a parent directory chmod 0700. Use it for launch secrets —
 authentication material — that should not be world-readable in
 `$THEATER_HOME`.
 
-Receipt tokens are an internal daemon mechanism not yet exposed as a
-supported plugin extension point. Do not build a plugin that depends on
-them.
+## Transcript receipts
+
+A receipt is a harness lifecycle hook calling back into Theater with a
+JSON payload that proves which transcript belongs to which participant.
+Core never inspects the payload — the plugin owns every field name, path
+rule, and record-format check. Core keeps everything that is a security or
+bookkeeping concern: token authentication, liveness, ownership-conflict
+policy, persistence, the bus audit event, watcher admission, and token
+renewal.
+
+### `validate_transcript_receipt`
+
+```
+HarnessObserver.validate_transcript_receipt(
+    *,
+    payload: Mapping[str, object],
+    cwd: str | None,
+    expected_session_id: str | None,
+) -> TranscriptCandidate
+```
+
+`payload` is the decoded JSON object the hook sent, opaque to core.
+Override this method to extract the fields your hook provides and validate
+them against your harness's own format rules. The return value must be a
+`TranscriptCandidate` whose `location` and `session_id` are non-empty
+strings; core rejects anything else. Rejection is an exception, never a
+candidate carrying `rejection_reason`: raise `ValueError` with prose
+telling the caller what to fix, and core maps it to a `BadRequest`. Core
+catches only `ValueError`; any other exception propagates.
+
+The base implementation refuses, so a plugin that does not override the
+method cannot use receipts. This is concrete rather than abstract so
+existing plugins that do not use receipts keep working unchanged.
+
+A plugin's validator is the **proof authority** for its harness. A
+successful receipt promotes the binding to exact correlation, so a
+validator that accepts a plausible-looking location manufactures trust
+that core cannot audit afterwards. Core's ownership-conflict checks
+prevent one participant from stealing another's transcript, but they do
+not prove a location is authentic — that is the validator's job.
+
+### `LaunchPlan.receipt_token_path`
+
+Core owns the token file: it mints the secret, writes it mode 0600 in a
+parent directory chmod 0700, and deletes it on death. The plugin sets
+only `receipt_token_path`; it must NOT set `receipt_token` (core mints
+that) and must NOT list the path in `files` or `private_files` — core and
+the plugin would both own the same file.
+
+The path must resolve under `paths.observation_dir(harness,
+participant_id)`. An existing symlink at the path is refused before
+writing, because the writer uses `O_TRUNC` which follows symlinks.
+
+### Pre-flight
+
+The pre-flight check runs at spawn time, after `_build_plan` returns and
+before any launch-plan or token file is written or tmux is touched. A
+plugin that declares `receipt_token_path` but inherits the base
+`validate_transcript_receipt` (the refusing default) fails the spawn
+rather than launching a session whose receipts can never be accepted.
 
 If your harness writes no transcript file, you have two options, and both
 change only the observer — `NovaHarness` above is already finished either
@@ -993,7 +1053,9 @@ These have safe defaults and do not need attention from a simple plugin:
   be superseded.
 - `admit_exact_location` — moves discovery to a daemon-proven transcript
   location via a receipt. A receipt capability, not required for normal
-  operation.
+  operation. See the "Transcript receipts" section above for the full
+  plugin surface (`validate_transcript_receipt`, `receipt_token_path`,
+  and the pre-flight check).
 
 ## Testing a plugin without spawning anything
 
