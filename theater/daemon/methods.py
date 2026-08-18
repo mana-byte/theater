@@ -519,15 +519,19 @@ async def _list(daemon, params: dict) -> list[dict]:
     # Fetch the requested page first.
     page = daemon.registry.list(include_dead=include_dead, ids=ids)
 
-    # owned_by_live needs the live participant set — not dead rows, because the
-    # spawner's live-peer scan only ever considers non-dead participants.  This
-    # is a single query regardless of whether ids was set, and it is strictly
-    # smaller than the full table.  When include_dead=False and ids=None, page
-    # already IS the live set, so we reuse it directly to avoid a second query.
-    if not include_dead and ids is None:
-        live_peers = page
-    else:
-        live_peers = daemon.registry.list(include_dead=False)
+    # live_peers is only needed when page can contain a dead row.  When
+    # include_dead=False every row in page satisfies status is not DEAD, so
+    # _resume_state returns "live" at its first check and never reaches the
+    # peer loop — live_peers would be dead weight.  Gate the query on
+    # include_dead so the flagship case (ids=[...], include_dead=False) costs
+    # exactly one query, not two.
+    #
+    # When include_dead=True and ids=None, page is already the full live+dead
+    # set; we still need the live-only subset for the peer loop, so one extra
+    # query is unavoidable.  When include_dead=True and ids is set, page is a
+    # subset and live_peers must be the unrestricted live set so that peers
+    # outside the requested ids are still found.
+    live_peers = daemon.registry.list(include_dead=False) if include_dead else []
 
     result = []
     for p in page:
