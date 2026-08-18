@@ -23,8 +23,10 @@ The first is that the two halves are not comparable. A declared harness ended a
 turn when its prompt reappeared on screen: a guess, confirmed across two polls,
 but still a rendering. A plugin ends a turn when the transcript says so. Only a
 plugin can put messages on the bus, answer `read_transcript`, or show native
-sub-agents. Offering the cheap path first steered people toward the weaker half
-of the system for harnesses that deserved the real one.
+sub-agents (though the sub-agent display is not wired up yet — see the note
+under `native_children` below). Offering the cheap path first steered people
+toward the weaker half of the system for harnesses that deserved the real
+one.
 
 The second is that nothing that shipped used the extension point. The built-in
 adapters were ordinary imports, so the plugin loader was exercised only by
@@ -571,9 +573,13 @@ async def history(self, *, last_n: int) -> History:
 answers "what has this session said, from the beginning", and it is what backs
 the `read_transcript` tool, which exists because the bus clips long replies and
 an agent sometimes needs the whole thing. The default implementation re-reads
-the file with clipping off; a source over a database has to write its own. Skip
-it and callers get an empty transcript with no error — the one place a custom
-source silently loses a feature.
+the file with clipping off; a source over a database has to write its own.
+Skip it and the default `Source.history` returns `History()` with
+`location=None`, which `read_transcript` rejects as
+`BadRequest("cannot read transcript: transcript no longer exists on disk")`
+— a misleading message that blames a missing file rather than an
+unimplemented method. A caller that searches for that string will not find
+the real cause, which is that the source never overrode `history`.
 
 Two rules. Return the *newest* `last_n` events, `0` meaning all. And do not clip
 text: clipping is the caller's job, and this is the path a caller takes
@@ -781,23 +787,31 @@ source never commits, and the participant stays on screen-only status.
 What that means in practice:
 
 - No transcript is ever committed, so no parsed events reach the bus.
-- No turn is ever completed from the transcript, so `await_sessions` against
-  this participant hangs until the caller's timeout.
-- A running job is **crashed** after the 30-second observation-failure grace,
-  not rescued: the 60-second rescue path is deliberately excluded for a
-  source that has never attached, because rescuing with `clock.last_text`
-  from a participant nothing has ever been read from would hand the caller
-  an empty string as the answer.
+- No turn is ever completed from the transcript. A running job is
+  **crashed** after the 30-second observation-failure grace, not rescued:
+  the 60-second rescue path is deliberately excluded for a source that has
+  never attached, because rescuing with `clock.last_text` from a
+  participant nothing has ever been read from would hand the caller an
+  empty string as the answer. A caller whose `await_sessions` timeout is
+  shorter than the grace sees a timeout instead.
 - The first failure also emits an `agent.observation_error` bus event.
 
 The guide warned earlier that heuristic evidence is insufficient and named
 isolated storage, receipts, and process proof. Of those three, the one
 mechanism that is public and works today is **`LaunchPlan.session_id`**: when
 the CLI lets Theater choose or learn the native session id at launch,
-returning it on the launch plan is what makes the resulting attachment
-trusted. The spawner persists `session_correlation = exact` before the
-process starts, so the observer's source never has to guess from cwd during
-the creation race.
+returning it on the launch plan is what enables exact correlation. The
+spawner persists `session_correlation = exact` before the process starts,
+so the observer's source never has to guess from cwd during the creation
+race. Exact correlation holds when the transcript's own reported session
+id matches the one Theater recorded at launch; the field alone is
+necessary but not sufficient — the match is what makes the attachment
+trusted.
+
+`LaunchPlan.private_files` is like `files` but written mode 0600 by the
+daemon in a parent directory chmod 0700. Use it for launch secrets —
+authentication material — that should not be world-readable in
+`$THEATER_HOME`.
 
 Receipt tokens are an internal daemon mechanism not yet exposed as a
 supported plugin extension point. Do not build a plugin that depends on
@@ -876,22 +890,11 @@ which either lists `nova` or tells you why it could not.
 
 The methods and attributes below are not needed by a plugin that launches a
 CLI and reads its transcript. They gate behaviour that is real but
-specialised — trusted identity for non-file sources, resume with a prompt,
-operator recovery for adopted sessions. Several have deliberate safe defaults
-that keep a simple plugin working without knowing about them. They are
-documented here so a plugin that needs one knows it exists, and so a plugin
-that does not knows it can safely ignore it.
-
-### `LaunchPlan.session_id` and `LaunchPlan.private_files`
-
-`session_id` is the exact native session id known before launch. Returning
-it is what makes the resulting attachment trusted — see the trust gap
-warning above. When the CLI lets Theater choose or learn the id at launch,
-this is the field that carries it.
-
-`private_files` is like `files` but written mode 0600 by the daemon in a
-parent directory chmod 0700. Use it for launch secrets — receipt tokens,
-authentication material — that should not be world-readable in `$THEATER_HOME`.
+specialised — resume with a prompt, operator recovery for adopted sessions.
+Several have deliberate safe defaults that keep a simple plugin working
+without knowing about them. They are documented here so a plugin that needs
+one knows it exists, and so a plugin that does not knows it can safely
+ignore it.
 
 ### `plan_launch(resume=…)` and `plan_launch(reasoning_effort=…)`
 
