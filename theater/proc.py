@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from theater import timing
@@ -40,31 +41,53 @@ _TIMEOUT = 5
 _LSOF_NAME = "n"
 
 
+@dataclass(frozen=True, slots=True)
+class ProcessSnapshot:
+    """One parsed `ps` table, reusable across many `descendants()` calls.
+
+    A caller that needs the ancestry of several pids — the daemon's unmanaged
+    sweep, one candidate pane at a time — pays for one `ps` instead of one per
+    pid by capturing a snapshot up front and walking it repeatedly. `capture()`
+    is the only place that shells out; `descendants()` here never does.
+    """
+
+    _children: dict[int, list[tuple[int, str]]] = field(default_factory=dict)
+
+    @classmethod
+    def capture(cls) -> ProcessSnapshot:
+        """Parse the whole machine's process table exactly once."""
+        return cls(_process_table())
+
+    def descendants(self, root_pid: int) -> list[tuple[int, str]]:
+        """`(pid, comm)` for every descendant of *root_pid* in this snapshot, breadth-first.
+
+        The root itself is excluded — callers that care about it already have it.
+        """
+        found: list[tuple[int, str]] = []
+        queue = [root_pid]
+        seen = {root_pid}
+        while queue:
+            pid = queue.pop(0)
+            for child_pid, comm in self._children.get(pid, []):
+                if child_pid in seen:
+                    # A cycle is impossible in a real process table, but this
+                    # walk runs on data we parsed from text and a loop here
+                    # would hang the daemon rather than mis-answer.
+                    continue
+                seen.add(child_pid)
+                found.append((child_pid, comm))
+                queue.append(child_pid)
+        return found
+
+
 def descendants(root_pid: int) -> list[tuple[int, str]]:
     """`(pid, comm)` for every descendant of *root_pid*, breadth-first.
 
-    The root itself is excluded — callers that care about it already have it.
-
-    One `ps` for the whole machine rather than one per level: the table is a
-    few hundred rows, and walking it in Python costs less than the process
-    spawns a recursive version would need.
+    Captures a fresh `ProcessSnapshot` for this one call. A caller that will
+    ask about several pids in the same pass should capture once and call
+    `ProcessSnapshot.descendants` directly instead.
     """
-    children = _process_table()
-    found: list[tuple[int, str]] = []
-    queue = [root_pid]
-    seen = {root_pid}
-    while queue:
-        pid = queue.pop(0)
-        for child_pid, comm in children.get(pid, []):
-            if child_pid in seen:
-                # A cycle is impossible in a real process table, but this walk
-                # runs on data we parsed from text and a loop here would hang
-                # the daemon rather than mis-answer.
-                continue
-            seen.add(child_pid)
-            found.append((child_pid, comm))
-            queue.append(child_pid)
-    return found
+    return ProcessSnapshot.capture().descendants(root_pid)
 
 
 def comm(pid: int) -> str:
