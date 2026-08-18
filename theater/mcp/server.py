@@ -484,24 +484,35 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
 
     @mcp.tool()
     async def recovery_restore(checkpoint_id: int, approval: str) -> dict:
-        """Prepare the checkpoint creator for restoration.
+        """Restore the orchestration tree from a checkpoint.
 
         Operates on any participant's checkpoint — not only your own. You cannot
-        restore your own checkpoint (self-restore would deadlock the MCP call).
+        restore your own checkpoint or any checkpoint you appear in (self-restore
+        would deadlock the MCP call). Only ``ready`` checkpoints can be claimed;
+        ``partial`` and ``failed`` are terminal and cannot be re-attempted.
 
-        For a dead parent: spawns or resumes it as a child of the caller.
-        For a live parent: reuses it in place and retains its existing
-        lineage — it does not become a child of the caller. In both cases,
-        returns the recorded jobs. This is a two-step handoff: the parent
-        is prepared, then the caller delivers recovery instructions via
-        ``send``. The checkpoint is atomically claimed before any side
-        effect and marked restored on success or failed on error. A
-        second restore is refused with a state-specific error code.
+        For v2 checkpoints (full tree): reconciles each recorded node as one of
+        the five public actions: ``reused_live`` (live verified in place),
+        ``resumed`` (dead with trusted session resumed), ``respawned`` (cold
+        respawn from launch provenance), ``skipped`` (completed work or ancestor
+        not restored), or ``failed`` (lineage conflict, no provenance, EXTERNAL).
 
-        Approval is required — there is no default, matching ``spawn_session``.
+        restore_state in the result is ``restored`` (all nodes succeeded),
+        ``partial`` (some succeeded, some failed), or ``failed`` (creator failed).
+        All three are terminal — no retry is possible.
 
-        Returns the restored parent's new participant id, the action taken
-        (``live``, ``resumed``, or ``respawned``), and the recorded jobs.
+        For v1 checkpoints (degraded mode): creator-only restore, no descendants
+        recorded or recovered. The result shape is different and contains
+        ``_degraded: true`` to signal the limitation.
+
+        The checkpoint is atomically claimed after preflight (structural, rail,
+        and cycle validation). No text is injected during restore; delivery of
+        recovery instructions to live participants is a separate ``send`` call.
+
+        Returns a structured report with participants (flat list with
+        original/new IDs, parent IDs, session IDs, action, classification,
+        status, reason, job reconciliations), counts, restore_state, and
+        a deduplicated top-level jobs list.
 
         checkpoint_id: the id returned by ``checkpoint``.
         approval:       ``manual``, ``edits``, or ``yolo`` — no default.

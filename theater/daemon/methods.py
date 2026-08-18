@@ -1248,8 +1248,9 @@ def _restore_state_error(
         )
     if state == "partial":
         return CheckpointRestorePartial(
-            f"checkpoint {checkpoint_id!r} has a partial restore; "
-            f"read restore_progress to see completed nodes, then retry to finish"
+            f"checkpoint {checkpoint_id!r} has a partial restore (terminal); "
+            f"read restore_progress to see what was attempted; create a fresh "
+            f"checkpoint if you need a new restore point"
         )
     return CheckpointAlreadyRestored(
         f"checkpoint {checkpoint_id!r} is not in a restorable state (state={state!r})"
@@ -1318,34 +1319,28 @@ def _validate_restore_parent(daemon, checkpoint_id: int, parent_id: str, caller_
 async def _checkpoint_restore(daemon, params: dict) -> dict:
     """Restore the orchestration tree from a checkpoint.
 
-    For v2 checkpoints (full tree): restores the creator and all recorded
-    descendants, reconciling each node as live, resumable, respawnable,
-    completed, pruned, or failed. Returns a structured per-participant report.
-    Preflight validation uses snapshot provenance, not DB row state, so a
-    pruned or cwd-less creator can still be restored when the snapshot has
-    sufficient provenance. The caller must not be anywhere in the recorded
-    subtree (not just the creator).
+    For v2 checkpoints: restores creator and all recorded descendants. Returns
+    a structured per-participant report with actions: reused_live | resumed |
+    respawned | skipped | failed. restore_state: restored | partial | failed.
+    partial and failed are terminal; neither can be re-attempted.
 
-    For v1 checkpoints (creator-only, legacy): applies strict DB validation
-    (_validate_restore_parent) for backward compatibility.
+    For v1 checkpoints (degraded mode): creator-only, no descendants.
 
-    The checkpoint is atomically claimed before any side effect. On partial
-    completion (some nodes succeeded, some failed) the state is set to
-    'partial' and the checkpoint may be re-attempted. A second restore on a
-    'partial' checkpoint is refused with checkpoint_restore_partial unless the
-    caller retries explicitly.
-
-    A second restore is refused with a state-specific error code.
+    Claim semantics: only ``ready`` checkpoints can be claimed. The atomic
+    claim happens after preflight, so predictable failures do not consume it.
     """
-    from theater.daemon.recovery import is_v2_snapshot, parse_snapshot, restore_checkpoint
+    from theater.daemon.recovery import (
+        is_v2_snapshot,
+        parse_snapshot,
+        preflight_topology,
+        restore_checkpoint,
+    )
 
     caller, checkpoint_id, approval, row = _validate_restore_request(
         daemon, params, method_name="checkpoint.restore"
     )
     parent_id = row["participant_id"]
 
-    # Detect snapshot version before claiming, so we can apply different
-    # preflight rules without consuming the single-use claim.
     raw = row.get("jobs_snapshot") or "[]"
     try:
         snapshot_data = parse_snapshot(raw)
@@ -1353,21 +1348,26 @@ async def _checkpoint_restore(daemon, params: dict) -> dict:
         raise BadRequest(f"checkpoint {checkpoint_id!r} has malformed snapshot: {exc}") from exc
 
     if is_v2_snapshot(snapshot_data):
-        # V2 preflight: snapshot-based, not DB-row-based.
-        # Reject caller if they appear anywhere in the recorded subtree.
+        # V2 preflight: snapshot-based, not DB-row-based. Also simulate topology rails.
         _v2_preflight(daemon, checkpoint_id, snapshot_data, caller.id)
+        # Topology/rail preflight before claim (item 10).
+        preflight_topology(
+            daemon, checkpoint_id=checkpoint_id, snapshot=snapshot_data, caller_id=caller.id
+        )
     else:
-        # V1 strict validation: creator must be a live/retrievable DB row.
+        # V1 strict validation.
         _validate_restore_parent(daemon, checkpoint_id, parent_id, caller.id)
 
     token = daemon.store.claim_checkpoint_restore(checkpoint_id, caller.id)
     if token is None:
-        # Re-read the row so we can report who holds the claim.
         fresh = daemon.store.get_checkpoint(checkpoint_id) or row
         state = fresh.get("restore_state") or "ready"
         raise _restore_state_error(state, checkpoint_id, fresh.get("restore_claimed_by"))
 
-    # All side effects go through restore_checkpoint; finalize as partial/failed on error.
+    # After claim: all side effects go through restore_checkpoint.
+    # On any exception, finalize as failed. Progress blob is written per-node
+    # inside restore_checkpoint for audit purposes.
+    restore_result_data: dict | None = None
     try:
         restore_result_data = await restore_checkpoint(
             daemon,
@@ -1379,16 +1379,26 @@ async def _checkpoint_restore(daemon, params: dict) -> dict:
             snapshot_data=snapshot_data,
         )
     except asyncio.CancelledError:
+        # Persist whatever partial result exists (item 7).
         daemon.store.finalize_checkpoint_restore(
             checkpoint_id,
             token=token,
             restored_by=caller.id,
             error="cancelled during restore",
+            result=json.dumps(restore_result_data, sort_keys=True, separators=(",", ":"))
+            if restore_result_data
+            else None,
         )
         raise
     except Exception as exc:
         daemon.store.finalize_checkpoint_restore(
-            checkpoint_id, token=token, restored_by=caller.id, error=str(exc)
+            checkpoint_id,
+            token=token,
+            restored_by=caller.id,
+            error=str(exc),
+            result=json.dumps(restore_result_data, sort_keys=True, separators=(",", ":"))
+            if restore_result_data
+            else None,
         )
         raise
 
@@ -1398,16 +1408,16 @@ async def _checkpoint_restore(daemon, params: dict) -> dict:
         separators=(",", ":"),
     )
 
-    # Determine final state: partial when some descendants failed.
     restore_state_final = restore_result_data.get("restore_state", "restored")
     is_partial = restore_state_final == "partial"
+    is_failed = restore_state_final == "failed"
 
     if not daemon.store.finalize_checkpoint_restore(
         checkpoint_id,
         token=token,
         restored_by=caller.id,
         result=restore_result_json,
-        partial=is_partial,
+        partial=is_partial or is_failed,
     ):
         raise BadRequest(
             f"checkpoint {checkpoint_id!r} could not be finalized; "
@@ -1420,14 +1430,15 @@ async def _checkpoint_restore(daemon, params: dict) -> dict:
 def _v2_preflight(daemon, checkpoint_id: int, snapshot_data: dict, caller_id: str) -> None:
     """Validate a v2 snapshot before claiming. Raises BadRequest on any violation.
 
-    Checks performed before side effects:
-    1. Snapshot structure is well-formed (creator_id, nodes list, unique IDs, root reachable).
-    2. No snapshot cycles in parent_id links.
-    3. Caller is not in the recorded subtree (would create a deadlock).
+    Checks (all before the claim):
+    1. Snapshot structure well-formed (creator_id, nodes list, unique IDs, no dangling parents).
+    2. No snapshot parent_id cycles.
+    3. Caller not in the recorded subtree (would close an await cycle).
     4. Self-restore guard: caller is not the creator.
+    5. Live creator addressability check (if creator is live).
 
-    Preflight does NOT require the creator DB row to exist — the snapshot
-    is the self-contained source of truth for v2.
+    Topology/rail simulation (preflight_topology) is called separately in the
+    checkpoint.restore handler after this returns.
     """
     from theater.daemon.recovery import _bfs_order, validate_v2_snapshot
 

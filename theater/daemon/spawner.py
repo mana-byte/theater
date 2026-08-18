@@ -21,6 +21,7 @@ left as a ghost that the régie would draw forever.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import shutil
@@ -346,27 +347,20 @@ class Spawner:
             worktree_name = req.worktree
 
         # Capture git repo root and the base commit for worktree-aware spawns.
-        # For non-worktree spawns this is also useful for provenance but is
-        # best-effort only — if the cwd is not a git repo we skip it silently.
+        # Must use main_repo_root (canonical shared root), NOT show-toplevel
+        # which returns the linked worktree's own top level when called from
+        # inside a linked worktree.
         effective_cwd = participant.cwd or req.cwd
         if worktree_type is not None and effective_cwd:
-            # For a worktree, determine the canonical main repo root.
-            try:
-                r = subprocess.run(
-                    ["git", "rev-parse", "--show-toplevel"],
-                    cwd=effective_cwd,
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                    check=False,
+            with contextlib.suppress(Exception):
+                worktree_repo_root = worktree_mod.main_repo_root(
+                    effective_cwd, child_id=participant.id
                 )
-                if r.returncode == 0:
-                    worktree_repo_root = r.stdout.strip() or None
-            except Exception:
-                pass
             # Capture the HEAD commit of the branch to verify/recreate later.
-            if participant.branch:
-                try:
+            if participant.branch and effective_cwd:
+                import subprocess
+
+                with contextlib.suppress(Exception):
                     r2 = subprocess.run(
                         ["git", "rev-parse", participant.branch],
                         cwd=effective_cwd,
@@ -377,8 +371,6 @@ class Spawner:
                     )
                     if r2.returncode == 0:
                         worktree_base_commit = r2.stdout.strip() or None
-                except Exception:
-                    pass
 
         provenance: dict = {
             "prompt": req.prompt,

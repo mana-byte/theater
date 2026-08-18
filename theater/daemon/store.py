@@ -661,11 +661,9 @@ class Store:
         if participant_id is not None:
             stmt = stmt.where(checkpoints.c.participant_id == participant_id)
         if restorable_only:
-            # Both 'ready' and 'partial' can be re-attempted.
+            # Only 'ready' is claimable. 'partial' and 'failed' are terminal.
             stmt = stmt.where(
-                (checkpoints.c.restore_state == "ready")
-                | (checkpoints.c.restore_state == "partial")
-                | checkpoints.c.restore_state.is_(None)
+                (checkpoints.c.restore_state == "ready") | checkpoints.c.restore_state.is_(None)
             )
         rows = self.conn.execute(stmt).fetchall()
         return [dict(r._mapping) for r in rows]
@@ -674,22 +672,18 @@ class Store:
         """Atomically claim a checkpoint for restoration.
 
         Returns a token on success, or None if the checkpoint is not in the
-        ``ready`` or ``partial`` state. The caller uses the token to finalize or
-        release the restore. ``restore_claimed_by`` is set here so concurrent
-        callers can see who holds the claim while the restore is in progress.
+        ``ready`` state. The caller uses the token to finalize or release
+        the restore. ``restore_claimed_by`` is set here so concurrent callers
+        can see who holds the claim while the restore is in progress.
 
-        Both ``ready`` and ``partial`` are claimable: ``partial`` means a
-        previous attempt succeeded for some nodes and failed for others; the
-        caller can re-attempt to finish the remaining nodes.
+        Only ``ready`` is claimable. ``partial`` and ``failed`` are terminal
+        states that cannot be re-claimed.
         """
         token = new_id()
         result = self.conn.execute(
             update(checkpoints)
             .where(checkpoints.c.id == checkpoint_id)
-            .where(
-                (checkpoints.c.restore_state == "ready")
-                | (checkpoints.c.restore_state == "partial")
-            )
+            .where(checkpoints.c.restore_state == "ready")
             .values(
                 restore_state="restoring",
                 restore_started_at=now(),
@@ -719,42 +713,44 @@ class Store:
         ``restore_state='restored'``, ``restored_at``, ``restored_by``, and
         ``restore_result`` (JSON).
 
-        On partial (``partial=True``): sets ``restore_state='partial'``,
-        ``restored_by``, ``restore_result``, ``restore_progress`` (JSON of
-        successfully completed nodes). The checkpoint is claimable again for
-        a retry.
-
-        On failure (``error is not None``): sets ``restore_state='failed'``
-        and ``restore_error``. If ``progress`` is supplied, ``restore_progress``
-        is written so that a stranded daemon restart can report partial state.
+        On partial/failed (``partial=True`` or ``error is not None``): both set
+        a terminal state. ``partial`` → ``restore_state='partial'``;
+        error → ``restore_state='failed'``. Neither can be re-claimed.
+        ``restore_result`` holds the structured result (when available) and
+        ``restore_progress`` holds the per-node audit record.
 
         The token must match the one returned by ``claim_checkpoint_restore``.
         """
         if error is None and not partial:
-            values = {
+            values: dict = {
                 "restore_state": "restored",
                 "restored_at": now(),
                 "restored_by": restored_by,
                 "restore_result": result,
                 "restore_claimed_by": None,
-                "restore_progress": progress,
             }
         elif partial:
+            # partial is terminal: some nodes succeeded, some failed.
             values = {
                 "restore_state": "partial",
+                "restored_at": now(),
                 "restored_by": restored_by,
                 "restore_result": result,
                 "restore_claimed_by": None,
-                "restore_progress": progress,
             }
         else:
             values = {
                 "restore_state": "failed",
                 "restore_error": error,
+                "restored_at": now(),
                 "restored_by": restored_by,
+                "restore_result": result,
                 "restore_claimed_by": None,
-                "restore_progress": progress,
             }
+        # Only overwrite restore_progress when explicitly provided; otherwise keep
+        # whatever persist_restore_progress wrote per-node (audit record).
+        if progress is not None:
+            values["restore_progress"] = progress
         result_clause = (
             update(checkpoints)
             .where(checkpoints.c.id == checkpoint_id)
@@ -809,42 +805,23 @@ class Store:
         return result.rowcount > 0
 
     def recover_stranded_restores(self) -> int:
-        """Convert any leftover 'restoring' checkpoints to 'partial' or 'failed'.
+        """Convert any leftover 'restoring' checkpoints to 'failed'.
 
         Called at daemon startup. No restore RPC survives a daemon restart,
         so any checkpoint left in 'restoring' was interrupted by a crash.
+        Both cases (with or without progress) move to 'failed' because the
+        final state is unknown — 'partial' is a deliberate terminal state
+        that requires the restore to have fully evaluated all nodes.
 
-        When ``restore_progress`` is non-null, the row had already committed
-        some nodes before the crash — it moves to ``partial`` so a retry can
-        read that progress and avoid re-spawning what is already live. When
-        there is no progress, there were no side effects yet, so it moves to
-        ``failed``.
+        ``restore_progress`` is preserved in the row so the audit record of
+        completed side effects is not lost. ``restore_error`` describes the
+        stranding event.
 
-        ``restore_claimed_by`` is promoted to ``restored_by`` (SQL evaluates
-        the right-hand side against the pre-update row, so both can be set in
-        the same statement) and then cleared. This converges the crash path
-        onto the same row shape as ``finalize_checkpoint_restore``:
-        ``restored_by`` names the claimant, ``restore_claimed_by`` is NULL.
+        ``restore_claimed_by`` is promoted to ``restored_by`` and cleared.
         """
-        # Two UPDATE passes: one for rows that have progress (→ partial),
-        # one for rows without progress (→ failed).  Both are WHERE-gated on
-        # 'restoring' and batched in-memory because the expected count is
-        # tiny (typically 0 or 1).
-        partial_result = self.conn.execute(
+        result = self.conn.execute(
             update(checkpoints)
             .where(checkpoints.c.restore_state == "restoring")
-            .where(checkpoints.c.restore_progress.isnot(None))
-            .values(
-                restore_state="partial",
-                restore_error="daemon restarted while restore was in progress",
-                restored_by=checkpoints.c.restore_claimed_by,
-                restore_claimed_by=None,
-            )
-        )
-        failed_result = self.conn.execute(
-            update(checkpoints)
-            .where(checkpoints.c.restore_state == "restoring")
-            .where(checkpoints.c.restore_progress.is_(None))
             .values(
                 restore_state="failed",
                 restore_error="daemon restarted while restore was in progress",
@@ -852,7 +829,7 @@ class Store:
                 restore_claimed_by=None,
             )
         )
-        return partial_result.rowcount + failed_result.rowcount
+        return result.rowcount
 
     def reparent_participant(self, pid: str, *, new_parent_id: str) -> None:
         """Set the parent_id of a participant.

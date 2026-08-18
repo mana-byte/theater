@@ -778,7 +778,7 @@ class Observer:
 
     # ---- one participant -----------------------------------------------
 
-    async def _watch(self, pid: str, harness_name: str) -> None:
+    async def _watch(self, pid: str, harness_name: str) -> None:  # noqa: PLR0912, PLR0915
         # Resolved by name on every start so a restarted watcher picks up a
         # registry that has since been reinstalled.
         observer = self.harnesses[harness_name].observer

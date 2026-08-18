@@ -470,7 +470,7 @@ def test_bfs_order_orphan_attached_to_creator():
 # ---- v2 restore: live creator -----------------------------------------------
 
 
-async def test_restore_v2_live_creator_reused(client, daemon):
+async def test_restore_v2_live_creator_reused(client, daemon, fake_tmux):
     """A live creator is reused in place (action=reused_live)."""
     _make_participant(daemon, pid="creator", pane="%1")
     _make_participant(daemon, pid="restorer", pane="%2")
@@ -496,7 +496,7 @@ async def test_restore_v2_live_creator_reused(client, daemon):
 # ---- v2 restore: completed/pruned descendants skipped -----------------------
 
 
-async def test_restore_v2_dead_child_no_provenance_skipped(client, daemon):
+async def test_restore_v2_dead_child_no_provenance_skipped(client, daemon, fake_tmux):
     """A dead child with no open work and no provenance is skipped."""
     _make_participant(daemon, pid="creator", pane="%1")
     _make_participant(daemon, pid="child", pane="%2", parent_id="creator", dead=True)
@@ -522,7 +522,7 @@ async def test_restore_v2_dead_child_no_provenance_skipped(client, daemon):
 
 
 async def test_restore_v2_partial_descendant_failure_does_not_fail_checkpoint(
-    client, daemon, monkeypatch
+    client, daemon, fake_tmux, monkeypatch
 ):
     """A descendant spawn failure is captured in the report, not raised."""
     import theater.daemon.methods as methods_mod
@@ -573,7 +573,7 @@ async def test_restore_v2_partial_descendant_failure_does_not_fail_checkpoint(
 # ---- v2 restore: creator failure marks checkpoint as failed -----------------
 
 
-async def test_restore_v2_creator_failure_marks_failed(client, daemon, monkeypatch):
+async def test_restore_v2_creator_failure_marks_failed(client, daemon, fake_tmux, monkeypatch):
     """A creator spawn failure marks the checkpoint as 'failed'."""
     import theater.daemon.methods as methods_mod
 
@@ -609,7 +609,7 @@ async def test_restore_v2_creator_failure_marks_failed(client, daemon, monkeypat
 # ---- v2 restore: job reconciliation in report -------------------------------
 
 
-async def test_restore_v2_jobs_in_report(client, daemon):
+async def test_restore_v2_jobs_in_report(client, daemon, fake_tmux):
     """Each node's jobs appear in the per-participant report."""
     _make_participant(daemon, pid="creator", pane="%1")
     _make_participant(daemon, pid="restorer", pane="%2")
@@ -636,7 +636,7 @@ async def test_restore_v2_jobs_in_report(client, daemon):
 # ---- v2 restore: lineage (new_parent_id) ------------------------------------
 
 
-async def test_restore_v2_creator_parent_is_caller(client, daemon):
+async def test_restore_v2_creator_parent_is_caller(client, daemon, fake_tmux):
     """The restored creator's new_parent_id is the restorer's id."""
     _make_participant(daemon, pid="creator", pane="%1")
     _make_participant(daemon, pid="restorer", pane="%2")
@@ -655,7 +655,7 @@ async def test_restore_v2_creator_parent_is_caller(client, daemon):
     # new_parent_id for a live node equals current_parent_id (not reparented).
 
 
-async def test_restore_v2_descendant_parent_id_in_report(client, daemon):
+async def test_restore_v2_descendant_parent_id_in_report(client, daemon, fake_tmux):
     """Descendant reports carry their original and new parent IDs."""
     _make_participant(daemon, pid="creator", pane="%1")
     _make_participant(daemon, pid="child", pane="%2", parent_id="creator", dead=True)
@@ -677,7 +677,7 @@ async def test_restore_v2_descendant_parent_id_in_report(client, daemon):
 # ---- v2 restore: machine-global discovery -----------------------------------
 
 
-async def test_restore_v2_machine_global_checkpoint_discoverable(client, daemon):
+async def test_restore_v2_machine_global_checkpoint_discoverable(client, daemon, fake_tmux):
     """Any participant can discover and restore any checkpoint (machine-global)."""
     _make_participant(daemon, pid="creator-x", pane="%1")
     _make_participant(daemon, pid="restorer-y", pane="%2")
@@ -705,7 +705,7 @@ async def test_restore_v2_machine_global_checkpoint_discoverable(client, daemon)
 # ---- v2 restore: single-use atomic claim ------------------------------------
 
 
-async def test_restore_v2_concurrent_claim_refused(client, daemon):
+async def test_restore_v2_concurrent_claim_refused(client, daemon, fake_tmux):
     """A second restore attempt on a claimed checkpoint is refused."""
     _make_participant(daemon, pid="creator", pane="%1")
     _make_participant(daemon, pid="restorer-a", pane="%2")
@@ -731,7 +731,7 @@ async def test_restore_v2_concurrent_claim_refused(client, daemon):
 # ---- v2 restore: self-restore rejected (deadlock guard) ---------------------
 
 
-async def test_restore_v2_self_restore_rejected(client, daemon):
+async def test_restore_v2_self_restore_rejected(client, daemon, fake_tmux):
     """A creator cannot restore its own checkpoint (deadlock guard)."""
     _make_participant(daemon, pid="creator", pane="%1")
     created = await client.call("checkpoint.create", caller_id="creator", name="cp")
@@ -750,7 +750,7 @@ async def test_restore_v2_self_restore_rejected(client, daemon):
 # ---- v2 restore: cycle guard -----------------------------------------------
 
 
-async def test_restore_v2_cycle_guard_on_live_ancestor(client, daemon):
+async def test_restore_v2_cycle_guard_on_live_ancestor(client, daemon, fake_tmux):
     """Restoring to a live ancestor of the caller is rejected (cycle)."""
     from sqlalchemy import update as sa_update
 
@@ -783,7 +783,7 @@ async def test_restore_v2_cycle_guard_on_live_ancestor(client, daemon):
 # ---- v2 restore: restore_result persisted -----------------------------------
 
 
-async def test_restore_v2_result_persisted_in_read(client, daemon):
+async def test_restore_v2_result_persisted_in_read(client, daemon, fake_tmux):
     """The full tree restore result is persisted and readable via checkpoint.read."""
     _make_participant(daemon, pid="creator-pr", pane="%1")
     _make_participant(daemon, pid="restorer-pr", pane="%2")
@@ -898,7 +898,7 @@ async def test_checkpoint_list_v1_checkpoint_shows_version_1(client, daemon):
     assert row["snapshot_version"] == 1
 
 
-async def test_checkpoint_restore_v1_live_creator(client, daemon):
+async def test_checkpoint_restore_v1_live_creator(client, daemon, fake_tmux):
     """Restoring a v1 checkpoint with a live creator returns legacy shape."""
     _make_participant(daemon, pid="v1-creator", pane="%1")
     _make_participant(daemon, pid="v1-restorer", pane="%2")
@@ -919,7 +919,7 @@ async def test_checkpoint_restore_v1_live_creator(client, daemon):
 
     # v1 restore returns the legacy shape with 'restored_parent'.
     assert "restored_parent" in result
-    assert result["restored_parent"]["action"] == "live"
+    assert result["restored_parent"]["action"] == "reused_live"
     assert result["restored_parent"]["participant_id"] == "v1-creator"
 
 
@@ -959,7 +959,7 @@ async def test_launch_provenance_recorded_at_spawn(client, daemon, fake_tmux):
 # ---- send jobs not replayed -------------------------------------------------
 
 
-async def test_restore_v2_send_jobs_not_replayed(client, daemon):
+async def test_restore_v2_send_jobs_not_replayed(client, daemon, fake_tmux):
     """Send jobs appear in the restore report but are never re-sent."""
     _make_participant(daemon, pid="creator-s", pane="%1")
     _make_participant(daemon, pid="restorer-s", pane="%2")
@@ -994,7 +994,7 @@ async def test_restore_v2_send_jobs_not_replayed(client, daemon):
 # ---- durable incremental progress (second-attempt refused) ------------------
 
 
-async def test_restore_v2_second_attempt_refused(client, daemon):
+async def test_restore_v2_second_attempt_refused(client, daemon, fake_tmux):
     """A second restore on an already-restored checkpoint is refused."""
     _make_participant(daemon, pid="creator-2a", pane="%1")
     _make_participant(daemon, pid="restorer-2a", pane="%2")
@@ -1020,7 +1020,7 @@ async def test_restore_v2_second_attempt_refused(client, daemon):
 # ---- no-live-pane guard (external / no-pane) --------------------------------
 
 
-async def test_restore_v2_live_creator_without_pane_rejected(client, daemon):
+async def test_restore_v2_live_creator_without_pane_rejected(client, daemon, fake_tmux):
     """A live creator without a tmux pane is rejected before claiming."""
     _make_participant(daemon, pid="creator-np", pane=None)  # no pane
     _make_participant(daemon, pid="restorer-np", pane="%2")
@@ -1041,7 +1041,7 @@ async def test_restore_v2_live_creator_without_pane_rejected(client, daemon):
 # ---- rails in restore -------------------------------------------------------
 
 
-async def test_restore_v2_creator_failed_classification_reported(client, daemon):
+async def test_restore_v2_creator_failed_classification_reported(client, daemon, fake_tmux):
     """A 'failed' classification for the creator raises from restore_tree."""
     # Creator is EXTERNAL — cannot be restored (failed classification).
     await client.call("hello", id="ext-cr", harness="vibe")  # no cwd → EXTERNAL
@@ -1064,7 +1064,7 @@ async def test_restore_v2_creator_failed_classification_reported(client, daemon)
 # ---- snapshot v2 node report shape ------------------------------------------
 
 
-async def test_restore_v2_node_report_shape(client, daemon):
+async def test_restore_v2_node_report_shape(client, daemon, fake_tmux):
     """Each node report has all required fields."""
     _make_participant(daemon, pid="shape-creator", pane="%1")
     _make_participant(daemon, pid="shape-restorer", pane="%2")
@@ -1084,8 +1084,8 @@ async def test_restore_v2_node_report_shape(client, daemon):
         "current_parent_id",
         "new_parent_id",
         "harness",
-        "old_session_id",
-        "new_session_id",
+        "original_session_id",
+        "current_session_id",
         "classification",
         "action",
         "final_status",

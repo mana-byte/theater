@@ -454,25 +454,34 @@ async def list_checkpoints(
 
 
 async def recovery_restore(session: Session, *, checkpoint_id: int, approval: str) -> dict:
-    """Prepare the checkpoint creator for restoration.
+    """Restore the orchestration tree from a checkpoint.
 
-    Operates on any participant's checkpoint — not only your own. You cannot
-    restore your own checkpoint (self-restore would deadlock the MCP call).
+    Operates on any checkpoint — not only your own. You cannot restore a
+    checkpoint you appear in (self-restore would deadlock the MCP call).
+    Only ``ready`` checkpoints are claimable; ``partial`` and ``failed``
+    are terminal states and cannot be re-attempted.
 
-    For a dead parent: spawns or resumes it as a child of the caller.
-    For a live parent: reuses it in place (lineage is not changed).
-    In both cases, returns the recorded jobs. This is a two-step
-    handoff: the parent is prepared, then the caller delivers recovery
-    instructions via ``send``.
+    For v2 checkpoints (full tree): each recorded node is reconciled with
+    one of five public actions — ``reused_live`` (live node verified in place),
+    ``resumed`` (dead retained row with trusted session resumed), ``respawned``
+    (cold respawn from launch provenance), ``skipped`` (work done or ancestor
+    not restored), ``failed`` (lineage conflict, no provenance, or EXTERNAL).
 
-    The checkpoint is atomically claimed before any side effect and marked
-    restored on success or failed on error. A second restore is refused
-    with a state-specific error code.
+    restore_state in the result: ``restored`` (all nodes succeeded),
+    ``partial`` (some succeeded, some failed), ``failed`` (creator failed).
+    All three are terminal; no retry is possible.
 
-    Approval is required — there is no default.
+    For v1 checkpoints (degraded mode): creator-only restore, no descendants.
+    Result contains ``_degraded: true`` and ``restored_parent`` (legacy shape).
 
-    Returns the restored parent's new participant id, the action taken
-    (``live``, ``resumed``, or ``respawned``), and the recorded jobs.
+    No text is injected during restore. Delivery of recovery instructions to
+    live participants is a separate ``send`` call after restore returns.
+
+    Returns a structured result with participants (flat list with original/new
+    participant IDs, original/current/new parent IDs, harness, original/current
+    session IDs, classification, action, status, reason, job_reconciliations,
+    warnings), counts, restore_state, approval, restored_by, and a deduplicated
+    top-level jobs list.
     """
     if not session._resolved:
         await session.identify()
