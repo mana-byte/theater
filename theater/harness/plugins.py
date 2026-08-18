@@ -27,9 +27,13 @@ sandbox it and does not pretend to.
 
 from __future__ import annotations
 
+import hashlib
+import importlib.abc
+import importlib.machinery
 import importlib.util
 import logging
 import sys
+import types
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,10 +49,96 @@ logger = logging.getLogger("theater.harness.plugins")
 #: source is in the name too, so a local override does not evict the shipped one.
 MODULE_PREFIX = "theater_harness_plugin_"
 
+#: Prefixed so a ``_``-helper module can never take the import slot of a real
+#: module. Keyed by source and a hash of the directory path, so two same-named
+#: helpers in two scanned directories cannot collide — each gets its own
+#: mangled name in ``sys.modules``.
+HELPER_PREFIX = "theater_harness_helper_"
+
 #: Where a plugin came from. "Why is this harness behaving unexpectedly" is
 #: usually answered by "not the file you think".
 SHIPPED = "shipped"
 LOCAL = "local"
+
+
+def _helper_module_name(directory: Path, source: str, stem: str) -> str:
+    """Mangled name for a ``_``-helper, keyed by source and directory.
+
+    Two same-named helpers in two scanned directories get distinct mangled
+    names, so neither evicts the other from ``sys.modules``.
+    """
+    digest = hashlib.md5(str(directory).encode()).hexdigest()[:8]
+    return f"{HELPER_PREFIX}{source}_{digest}_{stem}"
+
+
+class _HelperFinder(importlib.abc.MetaPathFinder):
+    """Resolve ``import _shared`` to a helper beside the plugin, lazily.
+
+    Sits on ``sys.meta_path`` only for the duration of a single plugin's
+    ``exec_module``. When the plugin (or a helper) imports a ``_``-prefixed
+    name that exists as a ``.py`` in the plugin's directory, the finder loads
+    it under a mangled name keyed by source and directory. The import system
+    then installs the module under the bare name in ``sys.modules``; the
+    ``finally`` block in ``_load_one`` removes those bare names afterward so
+    they do not leak across plugins or directories.
+
+    Helpers are loaded lazily — only when a plugin or another helper actually
+    imports them — so a helper nobody imports is never executed, and a broken
+    helper's error surfaces at the import that triggered it, naming the
+    helper file.
+    """
+
+    def __init__(self, directory: Path, source: str) -> None:
+        self._directory = directory
+        self._source = source
+        self._resolved: set[str] = set()
+
+    def find_spec(
+        self, fullname: str, path: object, target: object = None
+    ) -> importlib.machinery.ModuleSpec | None:
+        if not fullname.startswith("_") or fullname.startswith("__"):
+            return None
+        helper_path = self._directory / f"{fullname}.py"
+        if not helper_path.is_file():
+            return None
+        mangled = _helper_module_name(self._directory, self._source, fullname)
+        cached = sys.modules.get(mangled)
+        if cached is None:
+            spec = importlib.util.spec_from_file_location(mangled, helper_path)
+            if spec is None or spec.loader is None:
+                return None
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[mangled] = mod
+            try:
+                spec.loader.exec_module(mod)
+            except Exception as exc:
+                sys.modules.pop(mangled, None)
+                raise PluginError(
+                    f"{helper_path}: failed to import helper {fullname!r}: {exc!r}"
+                ) from exc
+        self._resolved.add(fullname)
+        return importlib.machinery.ModuleSpec(
+            fullname, _AliasLoader(sys.modules[mangled]), origin=str(helper_path)
+        )
+
+
+class _AliasLoader(importlib.abc.Loader):
+    """Return an already-loaded mangled helper for a bare import name.
+
+    ``exec_module`` is a no-op — the module is already fully loaded under its
+    mangled name. ``create_module`` returns the module so the import system
+    installs it in the importing module's namespace.
+    """
+
+    def __init__(self, module: object) -> None:
+        self._module = module
+
+    def create_module(self, spec: importlib.machinery.ModuleSpec) -> types.ModuleType:
+        assert isinstance(self._module, types.ModuleType)
+        return self._module
+
+    def exec_module(self, module: object) -> None:
+        pass
 
 
 class PluginError(ConfigError):
@@ -87,10 +177,14 @@ def scan(directory: Path, *, source: str, skip: Iterable[str] = ()) -> list[Plug
 
     A missing directory is not an error: the common case is a user who has
     never written one. Files starting with `_` or `.` are skipped, which keeps
-    a shared helper module from being mistaken for a plugin. The plugin's
-    directory is on ``sys.path`` only for the duration of its import, so a
-    ``_``-prefixed helper beside it is importable (``import _shared``) without
-    the directory leaking into the process-wide import path afterward.
+    a shared helper module from being mistaken for a plugin. A ``_``-prefixed
+    helper beside a plugin is importable (``import _shared``): while the
+    plugin loads, a meta path finder resolves ``_``-prefixed imports to
+    ``.py`` files in the plugin's directory, loading each under a mangled name
+    keyed by source and directory. Helpers are loaded lazily — a helper nobody
+    imports is never executed. After the plugin loads, the finder and any bare
+    helper names it resolved in ``sys.modules`` are removed, so two same-named
+    helpers in two scanned directories cannot collide.
 
     `skip` holds file stems to not even import — disabling a plugin has to work
     when the reason for disabling it is that importing it is what breaks.
@@ -124,21 +218,24 @@ def _load_one(path: Path, source: str) -> Harness:
     # resolve annotations via sys.modules, and a plugin using either would fail
     # on its own import line otherwise.
     sys.modules[module_name] = module
-    # The plugin's directory is on sys.path only for the duration of exec_module,
-    # so a ``_``-prefixed helper beside the plugin is importable (``import _shared``)
-    # without leaking the directory into the process-wide import path afterward.
-    parent = str(path.parent)
-    added = parent not in sys.path
-    if added:
-        sys.path.insert(0, parent)
+    # A ``_``-prefixed helper beside the plugin is importable (``import _shared``)
+    # via a meta path finder that loads it lazily under a mangled name keyed by
+    # source and directory. No bare helper name survives in ``sys.modules``
+    # after the plugin loads — the finder and any bare names it resolved are
+    # removed in the ``finally`` block. Helpers are loaded lazily: a helper
+    # nobody imports is never executed, and a broken helper's error names the
+    # helper file. A helper may import another helper in the same directory.
+    finder = _HelperFinder(path.parent, source)
+    sys.meta_path.insert(0, finder)
     try:
         spec.loader.exec_module(module)
     except (Exception, SystemExit) as exc:
         sys.modules.pop(module_name, None)
         raise PluginError(f"{path}: failed to import: {exc!r}") from exc
     finally:
-        if added:
-            sys.path.remove(parent)
+        sys.meta_path.remove(finder)
+        for name in finder._resolved:
+            sys.modules.pop(name, None)
 
     harness = getattr(module, "HARNESS", None)
     if harness is None:
@@ -224,18 +321,38 @@ def _check_identity(path: Path, harness: Harness) -> None:
             "cell so every column of `theater harnesses` lines up. Use a narrow "
             "glyph (one cell wide), not a wide emoji or a multi-character string."
         )
-    aliases = getattr(harness, "aliases", None)
-    if not isinstance(aliases, tuple):
+    aliases: object = getattr(harness, "aliases", None)
+    if isinstance(aliases, (str, bytes)):
+        raise PluginError(
+            f"{path}: harness {name!r} has aliases of type {type(aliases).__name__}; "
+            "a string is an iterable of characters, not a list of names. "
+            'Use `aliases = ("name", ...)`'
+        )
+    try:
+        normalised_aliases: tuple[str, ...] = tuple(aliases)  # type: ignore[arg-type]
+    except TypeError:
         raise PluginError(
             f"{path}: harness {name!r} has aliases of type "
-            f"{type(aliases).__name__}, not a tuple. Use `aliases = (...)`"
-        )
-    for alias in aliases:
+            f"{type(aliases).__name__}, which is not iterable. "
+            'Use `aliases = ("name", ...)`'
+        ) from None
+    for alias in normalised_aliases:
         if not isinstance(alias, str) or not alias:
             raise PluginError(f"{path}: harness {name!r} has an empty alias")
-    binaries: frozenset[str] = getattr(harness, "binaries", frozenset())
-    if not isinstance(binaries, frozenset):
+    harness.aliases = normalised_aliases
+    binaries: object = getattr(harness, "binaries", frozenset())
+    if isinstance(binaries, (str, bytes)):
+        raise PluginError(
+            f"{path}: harness {name!r} has binaries of type {type(binaries).__name__}; "
+            "a string is an iterable of characters, not a set of names. "
+            'Use `binaries = frozenset({"name", ...})`'
+        )
+    try:
+        normalised_binaries: frozenset[str] = frozenset(binaries)  # type: ignore[call-overload]
+    except TypeError:
         raise PluginError(
             f"{path}: harness {name!r} has binaries of type "
-            f"{type(binaries).__name__}, not a frozenset. Use `binaries = frozenset(...)`"
-        )
+            f"{type(binaries).__name__}, which is not iterable. "
+            'Use `binaries = frozenset({"name", ...})`'
+        ) from None
+    harness.binaries = normalised_binaries

@@ -164,9 +164,9 @@ def test_underscored_files_are_skipped(local_dir):
 def test_a_shared_helper_module_is_importable(local_dir):
     """C4: a ``_``-prefixed helper beside a plugin can be imported by it.
 
-    The plugin's directory is on ``sys.path`` only for the duration of the
-    plugin's import, so ``import _shared`` resolves without the directory
-    leaking into the process-wide import path afterward.
+    A meta path finder resolves ``import _shared`` to ``_shared.py`` in the
+    plugin's directory, loading it lazily under a mangled module name. No bare
+    helper name survives in ``sys.modules`` after the plugin loads.
     """
     (local_dir / "_shared.py").write_text("VALUE = 42\n")
     (local_dir / "acme.py").write_text(
@@ -181,8 +181,12 @@ def test_a_shared_helper_module_is_importable(local_dir):
     assert harness_registry.get("acme")._shared_value == 42
 
 
-def test_a_shared_helper_does_not_leak_onto_sys_path(local_dir):
-    """C4: the plugin directory must not remain on sys.path after loading."""
+def test_a_shared_helper_does_not_leak_into_sys_modules(local_dir):
+    """C4: the bare helper name must not remain in ``sys.modules`` after loading.
+
+    If it did, a later plugin with its own ``_shared.py`` would silently get
+    the first one's module.
+    """
     import sys
 
     (local_dir / "_shared.py").write_text("VALUE = 42\n")
@@ -195,7 +199,90 @@ def test_a_shared_helper_does_not_leak_onto_sys_path(local_dir):
         )
     )
     install(local_dir)
-    assert str(local_dir) not in sys.path
+    assert "_shared" not in sys.modules
+
+
+def test_two_shared_helpers_in_two_sources_do_not_collide(local_dir, shipped_dir):
+    """C4: each plugin sees its own helper, not the other source's.
+
+    Two ``_shared.py`` files in two scanned directories, each exporting a
+    different value. Without private-namespace loading, the first one wins for
+    the whole process and the second plugin silently gets the wrong file.
+    """
+    (shipped_dir / "_shared.py").write_text('ORIGIN = "shipped"\n')
+    (local_dir / "_shared.py").write_text('ORIGIN = "local"\n')
+    (shipped_dir / "alpha.py").write_text(
+        BODY.format(
+            cls="AlphaHarness", name="alpha", binary="alpha", icon=repr("@"), aliases="()"
+        ).replace(
+            "class AlphaHarness(Harness):",
+            "import _shared\nclass AlphaHarness(Harness):\n    _shared_origin = _shared.ORIGIN",
+        )
+    )
+    (local_dir / "beta.py").write_text(
+        BODY.format(
+            cls="BetaHarness", name="beta", binary="beta", icon=repr("#"), aliases="()"
+        ).replace(
+            "class BetaHarness(Harness):",
+            "import _shared\nclass BetaHarness(Harness):\n    _shared_origin = _shared.ORIGIN",
+        )
+    )
+    install(local_dir, shipped_dir=shipped_dir)
+    assert harness_registry.get("alpha")._shared_origin == "shipped"
+    assert harness_registry.get("beta")._shared_origin == "local"
+
+
+def test_a_broken_helper_names_the_helper_file_and_real_cause(local_dir):
+    """C4: a helper with a syntax error must report the helper file and the
+    real exception, not a misleading ``ModuleNotFoundError``.
+
+    Without the fix, the pre-load loop swallowed the helper's failure and left
+    the bare name uninjected, so the plugin's own ``import`` failed with
+    ``ModuleNotFoundError`` — a message that says the file is missing when it
+    is sitting right there with a syntax error.
+    """
+    (local_dir / "_broken.py").write_text("this is not valid python !!!\n")
+    (local_dir / "acme.py").write_text(
+        BODY.format(
+            cls="AcmeHarness", name="acme", binary="acme", icon=repr("@"), aliases="()"
+        ).replace(
+            "class AcmeHarness(Harness):",
+            "import _broken\nclass AcmeHarness(Harness):",
+        )
+    )
+    install(local_dir)
+    rows = {r["name"]: r for r in harness_registry.describe()}
+    assert rows["acme"]["error"] is not None
+    error = rows["acme"]["error"]
+    assert "_broken.py" in error
+    assert "SyntaxError" in error or "syntax" in error.lower()
+    assert "ModuleNotFoundError" not in error
+
+
+def test_a_nested_helper_import_works(local_dir):
+    """C4: a helper importing another helper in the same directory works.
+
+    ``_derived`` imports ``_base``. The meta path finder resolves both lazily:
+    when the plugin imports ``_derived``, the finder loads ``_derived``, which
+    triggers ``import _base``, which the finder also resolves. Neither bare
+    name survives in ``sys.modules`` afterward.
+    """
+    import sys
+
+    (local_dir / "_base.py").write_text('VALUE = "base"\n')
+    (local_dir / "_derived.py").write_text("import _base\nVALUE = _base.VALUE + '+derived'\n")
+    (local_dir / "acme.py").write_text(
+        BODY.format(
+            cls="AcmeHarness", name="acme", binary="acme", icon=repr("@"), aliases="()"
+        ).replace(
+            "class AcmeHarness(Harness):",
+            "import _derived\nclass AcmeHarness(Harness):\n    _derived_value = _derived.VALUE",
+        )
+    )
+    assert "acme" in install(local_dir)
+    assert harness_registry.get("acme")._derived_value == "base+derived"
+    assert "_base" not in sys.modules
+    assert "_derived" not in sys.modules
 
 
 def test_non_python_files_are_ignored(local_dir):
@@ -456,7 +543,8 @@ def test_a_local_plugin_that_calls_sys_exit_is_listed_as_broken(local_dir):
 
 
 def test_a_local_plugin_with_none_aliases_does_not_stop_start_up(local_dir):
-    """C2: ``aliases = None`` would raise ``TypeError`` outside any handler."""
+    """C2: ``aliases = None`` is not iterable and would raise ``TypeError``
+    outside any handler."""
     body = BODY.format(
         cls="AcmeHarness", name="acme", binary="acme", icon=repr("@"), aliases="()"
     ).replace("aliases = ()", "aliases = None")
@@ -472,34 +560,58 @@ def test_a_local_plugin_with_none_aliases_is_listed_as_broken(local_dir):
     install(local_dir)
     rows = {r["name"]: r for r in harness_registry.describe()}
     assert rows["bad"]["source"] == "local"
-    assert "tuple" in rows["bad"]["error"]
+    assert "not iterable" in rows["bad"]["error"]
 
 
-def test_a_local_plugin_with_list_binaries_does_not_stop_start_up(local_dir):
-    """C2: ``binaries = ["nova"]`` (list, not frozenset) survives loading and
-    detonates later in ``harness_detect`` at ``{harness.binary} | harness.binaries``."""
+def test_a_local_plugin_with_string_aliases_is_listed_as_broken(local_dir):
+    """C2: ``aliases = "nova"`` is the classic iterable-of-characters trap."""
+    body = BODY.format(
+        cls="AcmeHarness", name="acme", binary="acme", icon=repr("@"), aliases="()"
+    ).replace("aliases = ()", 'aliases = "nova"')
+    (local_dir / "bad.py").write_text(body)
+    install(local_dir)
+    rows = {r["name"]: r for r in harness_registry.describe()}
+    assert "iterable of characters" in rows["bad"]["error"]
+
+
+def test_a_local_plugin_with_list_binaries_is_accepted_and_normalised(local_dir):
+    """C2: ``binaries = ["nova"]`` (list, not frozenset) is accepted and
+    normalised to ``frozenset`` — the loader does not reject spellings that
+    work fine."""
     body = BODY.format(
         cls="AcmeHarness", name="acme", binary="acme", icon=repr("@"), aliases="()"
     ).replace(
         "class AcmeHarness(Harness):",
         "class AcmeHarness(Harness):\n    binaries = ['nova']",
     )
-    (local_dir / "bad.py").write_text(body)
-    assert install(local_dir) == ["claude", "codex", "opencode", "vibe"]
+    (local_dir / "acme.py").write_text(body)
+    assert "acme" in install(local_dir)
+    assert harness_registry.get("acme").binaries == frozenset({"nova"})
 
 
-def test_a_local_plugin_with_list_binaries_is_listed_as_broken(local_dir):
+def test_a_local_plugin_with_list_aliases_is_accepted_and_normalised(local_dir):
+    """C2: ``aliases = ["nova-cli"]`` (list, not tuple) is accepted and
+    normalised to ``tuple``."""
+    body = BODY.format(
+        cls="AcmeHarness", name="acme", binary="acme", icon=repr("@"), aliases="()"
+    ).replace("aliases = ()", 'aliases = ["nova-cli"]')
+    (local_dir / "acme.py").write_text(body)
+    assert "acme" in install(local_dir)
+    assert harness_registry.get("acme").aliases == ("nova-cli",)
+
+
+def test_a_local_plugin_with_string_binaries_is_listed_as_broken(local_dir):
+    """C2: ``binaries = "nova"`` is the iterable-of-characters trap."""
     body = BODY.format(
         cls="AcmeHarness", name="acme", binary="acme", icon=repr("@"), aliases="()"
     ).replace(
         "class AcmeHarness(Harness):",
-        "class AcmeHarness(Harness):\n    binaries = ['nova']",
+        'class AcmeHarness(Harness):\n    binaries = "nova"',
     )
     (local_dir / "bad.py").write_text(body)
     install(local_dir)
     rows = {r["name"]: r for r in harness_registry.describe()}
-    assert rows["bad"]["source"] == "local"
-    assert "frozenset" in rows["bad"]["error"]
+    assert "iterable of characters" in rows["bad"]["error"]
 
 
 def test_disabling_a_plugin_stops_it_being_imported(local_dir, shipped_dir):
