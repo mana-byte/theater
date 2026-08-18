@@ -30,6 +30,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import sys
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -179,6 +180,39 @@ def _check_observer(path: Path, harness: Harness) -> None:
         )
 
 
+def _display_width(text: str) -> int:
+    """Conservative estimate of the terminal cell width of *text*.
+
+    ``W`` and ``F`` characters take two cells; combining marks and other
+    zero-width codepoints take none; everything else takes one.
+
+    This is an estimate, not a measurement.  It does not model emoji
+    presentation sequences, variation selectors (U+FE0F), ZWJ ligatures, or
+    locale-dependent Ambiguous-width characters.  That is acceptable because
+    the check is cosmetic column alignment in ``theater harnesses``, not a
+    layout engine: a wide glyph that slips through shears one column, which
+    is the failure the check exists to catch.  The shipped icons ``◇``
+    (opencode) and ``▤`` (vibe) are East Asian Ambiguous — one cell here,
+    two under a CJK locale, where ``theater harnesses`` shears their rows.
+    Theater accepts this because the consequence is a misaligned column in
+    one listing, not incorrect behaviour.
+
+    Control characters are counted as one by this function — the caller
+    rejects them separately, because a control character that is also one
+    cell wide is a different bug from a printable glyph that is two cells
+    wide.
+    """
+    width = 0
+    for ch in text:
+        if unicodedata.category(ch) in ("Mn", "Me"):
+            continue
+        if unicodedata.east_asian_width(ch) in ("W", "F"):
+            width += 2
+        else:
+            width += 1
+    return width
+
+
 def _check_identity(path: Path, harness: Harness) -> None:
     """The three attributes every consumer reads without asking first.
 
@@ -197,10 +231,18 @@ def _check_identity(path: Path, harness: Harness) -> None:
     if not isinstance(binary, str) or not binary:
         raise PluginError(f"{path}: harness {name!r} sets no binary to look for")
     icon = getattr(harness, "icon", "")
-    if not isinstance(icon, str) or len(icon) != 1:
+    if not isinstance(icon, str) or not icon or not icon.isprintable():
         raise PluginError(
-            f"{path}: harness {name!r} has icon {icon!r}; it must be exactly "
-            "one character, since listings align on it"
+            f"{path}: harness {name!r} has icon {icon!r}; it must contain only "
+            "printable codepoints, since listings align on it"
+        )
+    width = _display_width(icon)
+    if width != 1:
+        raise PluginError(
+            f"{path}: harness {name!r} has icon {icon!r} with an estimated display "
+            f"width of {width} terminal cells; an icon must occupy exactly one "
+            "cell so every column of `theater harnesses` lines up. Use a narrow "
+            "glyph (one cell wide), not a wide emoji or a multi-character string."
         )
     for alias in harness.aliases:
         if not isinstance(alias, str) or not alias:
