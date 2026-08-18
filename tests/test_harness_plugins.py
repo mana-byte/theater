@@ -47,7 +47,7 @@ class {cls}Observer(TranscriptObserver):
 class {cls}(Harness):
     name = "{name}"
     binary = "{binary}"
-    icon = "{icon}"
+    icon = {icon}
     aliases = {aliases}
 
     def __init__(self):
@@ -73,7 +73,7 @@ def plugin(
 ) -> Path:
     path = dirpath / filename
     path.write_text(
-        BODY.format(cls=cls, name=name, binary=binary, icon=icon, aliases=repr(aliases)),
+        BODY.format(cls=cls, name=name, binary=binary, icon=repr(icon), aliases=repr(aliases)),
         encoding="utf-8",
     )
     return path
@@ -240,7 +240,7 @@ def test_a_plugin_with_no_harness_says_what_to_write(local_dir):
 def test_exporting_the_class_instead_of_an_instance_is_caught(local_dir):
     """The likeliest mistake, and the error tells you the fix verbatim."""
     body = BODY.format(
-        cls="AcmeHarness", name="acme", binary="acme", icon="@", aliases="()"
+        cls="AcmeHarness", name="acme", binary="acme", icon=repr("@"), aliases="()"
     ).replace("HARNESS = AcmeHarness()", "HARNESS = AcmeHarness")
     (local_dir / "acme.py").write_text(body)
     assert "AcmeHarness()" in error_in(local_dir)
@@ -260,7 +260,7 @@ def test_a_harness_with_no_observer_is_caught(local_dir):
     error has to say what to write.
     """
     body = BODY.format(
-        cls="AcmeHarness", name="acme", binary="acme", icon="@", aliases="()"
+        cls="AcmeHarness", name="acme", binary="acme", icon=repr("@"), aliases="()"
     ).replace("        self.observer = AcmeHarnessObserver()", "        pass")
     (local_dir / "acme.py").write_text(body)
     error = error_in(local_dir)
@@ -270,7 +270,7 @@ def test_a_harness_with_no_observer_is_caught(local_dir):
 
 def test_an_observer_that_is_not_an_observer_is_caught(local_dir):
     body = BODY.format(
-        cls="AcmeHarness", name="acme", binary="acme", icon="@", aliases="()"
+        cls="AcmeHarness", name="acme", binary="acme", icon=repr("@"), aliases="()"
     ).replace("        self.observer = AcmeHarnessObserver()", '        self.observer = "nope"')
     (local_dir / "acme.py").write_text(body)
     assert "does not subclass" in error_in(local_dir)
@@ -278,7 +278,7 @@ def test_an_observer_that_is_not_an_observer_is_caught(local_dir):
 
 def test_exporting_the_observer_class_instead_of_an_instance_is_caught(local_dir):
     body = BODY.format(
-        cls="AcmeHarness", name="acme", binary="acme", icon="@", aliases="()"
+        cls="AcmeHarness", name="acme", binary="acme", icon=repr("@"), aliases="()"
     ).replace(
         "        self.observer = AcmeHarnessObserver()",
         "        self.observer = AcmeHarnessObserver",
@@ -300,7 +300,34 @@ def test_a_missing_binary_is_caught(local_dir):
 def test_a_multi_character_icon_is_caught(local_dir):
     """Two columns wide would shift every row of every listing."""
     plugin(local_dir, icon="<>")
-    assert "one character" in error_in(local_dir)
+    assert "display width" in error_in(local_dir)
+
+
+def test_a_wide_emoji_icon_is_caught(local_dir):
+    """A single-codepoint wide emoji occupies two cells and shears every column."""
+    plugin(local_dir, icon="🚀")
+    assert "display width" in error_in(local_dir)
+
+
+def test_a_control_character_icon_is_caught(local_dir):
+    """A control character is not printable, so it must not pass."""
+    plugin(local_dir, icon="\n")
+    assert "printable" in error_in(local_dir)
+
+
+def test_an_empty_icon_is_caught(local_dir):
+    plugin(local_dir, icon="")
+    assert "printable" in error_in(local_dir)
+
+
+def test_a_plain_ascii_icon_is_accepted(local_dir):
+    plugin(local_dir, icon="@")
+    assert "acme" in install(local_dir)
+
+
+def test_a_single_cell_non_ascii_icon_is_accepted(local_dir):
+    plugin(local_dir, icon="\u25c7")
+    assert "acme" in install(local_dir)
 
 
 def test_two_plugins_with_one_name_name_both_files(local_dir):
