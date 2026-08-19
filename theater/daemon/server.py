@@ -193,9 +193,6 @@ class Daemon:
         # acquire() opens a second fd against itself.
         try:
             self._clear_stale_socket(sock)
-            stranded = self.store.recover_stranded_restores()
-            if stranded:
-                logger.warning("recovered %d stranded checkpoint restore(s)", stranded)
             self._server = await asyncio.start_unix_server(
                 self._handle, path=str(sock), limit=protocol.MAX_MESSAGE_BYTES
             )
@@ -493,19 +490,17 @@ class Daemon:
                     or result.participants
                     or result.running_marked
                     or result.scratchpad
-                    or result.checkpoints
                 ):
                     logger.info(
                         "gc sweep: %d bus, %d jobs, %d touch, "
                         "%d participants, %d running marked, "
-                        "%d scratchpad, %d checkpoints",
+                        "%d scratchpad",
                         result.bus,
                         result.jobs,
                         result.touch,
                         result.participants,
                         result.running_marked,
                         result.scratchpad,
-                        result.checkpoints,
                     )
             except Exception:
                 logger.exception("gc sweep failed")

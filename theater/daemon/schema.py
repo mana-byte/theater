@@ -37,15 +37,6 @@ participants = Table(
     Column("status", Text, nullable=False),
     Column("last_activity", REAL, nullable=False),
     Column("created_at", REAL, nullable=False),
-    # Durable launch provenance persisted at spawn time so the orchestration
-    # tree can be reconstructed after the participant dies or the daemon
-    # restarts. Stored as a compact JSON blob; null for participants created
-    # before this column existed (EXTERNAL, ADOPTED, or pre-0012 SPAWNED).
-    # Fields: prompt, approval, cwd_requested, cwd_resolved, model,
-    # reasoning_effort, worktree, worktree_type, worktree_name,
-    # worktree_branch, worktree_repo_root, worktree_base_commit, base_branch,
-    # response_format, resume_session_id.
-    Column("launch_provenance", Text),
 )
 
 Index("idx_participants_pane", participants.c.tmux_pane)
@@ -165,44 +156,6 @@ Index(
     tree_kv.c.tree_root_id,
     tree_kv.c.repo_root,
 )
-
-# Plan checkpoints: a snapshot of the jobs table at a point in time,
-# associated with a participant and a name.
-checkpoints = Table(
-    "checkpoints",
-    metadata,
-    Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("participant_id", Text, nullable=False),
-    Column("creator_name", Text),
-    Column("name", Text, nullable=False),
-    Column("notes", Text),
-    Column("jobs_snapshot", Text, nullable=False),
-    Column("created_at", REAL, nullable=False),
-    Column("restore_state", Text, nullable=False, server_default=text("'ready'")),
-    Column("restore_started_at", REAL),
-    Column("restore_token", Text),
-    Column("restored_at", REAL),
-    Column("restored_by", Text),
-    Column("restore_error", Text),
-    Column("restore_result", Text),
-    Column("restore_claimed_by", Text),
-    # Durable audit progress written after every node outcome. Survives daemon
-    # restart / CancelledError so side effects remain attributable. Null until
-    # the first node is processed.
-    # restore_state == 'partial' means at least one node succeeded and at least
-    # one failed; like 'failed', it is terminal and cannot be re-claimed.
-    Column("restore_progress", Text),
-    sqlite_autoincrement=True,
-)
-
-Index(
-    "idx_checkpoints_participant_name",
-    checkpoints.c.participant_id,
-    checkpoints.c.name,
-)
-
-# Global list is now the default path: ORDER BY created_at DESC LIMIT <=100.
-Index("idx_checkpoints_created_at", checkpoints.c.created_at)
 
 # Named shared worktrees: multiple live children can share one linked
 # worktree (same directory, same branch, same index/HEAD). The key is

@@ -53,10 +53,6 @@ async def test_tools_are_registered(daemon):
         "send",
         "scratchpad_write",
         "scratchpad_get",
-        "checkpoint",
-        "list_checkpoints",
-        "recovery_read",
-        "recovery_restore",
         "read_transcript",
         "put_child_back_in_the_wound",
         "recall",
@@ -112,33 +108,6 @@ async def test_new_feature_descriptions_reach_their_tools(daemon):
         assert "canonical main repo" in desc
         assert "outside a git repository" in desc
         assert "not durable" in desc
-
-    assert "explicit" in tools["checkpoint"]
-    assert "cumulative snapshot" in tools["checkpoint"]
-    assert "not an automatic execution checkpoint" in tools["checkpoint"]
-
-    assert "recorded snapshot" in tools["recovery_read"]
-    assert "current live state" in tools["recovery_read"]
-    assert "pruned handles" in tools["recovery_read"]
-
-
-async def test_checkpoint_global_visibility_described_in_tools(daemon):
-    """Agents must know checkpoints are not private before creating them."""
-    tool_descs = {t.name: (t.description or "") for t in await build("p1", "vibe").list_tools()}
-
-    # The checkpoint tool must say the snapshot is visible to every participant.
-    assert "every participant" in tool_descs["checkpoint"].lower()
-    # list_checkpoints must say it is machine-global and explain why.
-    assert "machine-global" in tool_descs["list_checkpoints"].lower()
-    assert "dead" in tool_descs["list_checkpoints"].lower()
-    # recovery_read and recovery_restore must say they work on any participant's checkpoint.
-    assert "any participant" in tool_descs["recovery_read"].lower()
-    assert "any participant" in tool_descs["recovery_restore"].lower()
-    # recovery_restore must say restoring your own checkpoint is allowed, and
-    # that a descendant of the creator is still refused (the real deadlock).
-    assert "your own" in tool_descs["recovery_restore"].lower()
-    assert "descendant" in tool_descs["recovery_restore"].lower()
-    assert "cycle" in tool_descs["recovery_restore"].lower()
 
 
 async def test_await_description_communicates_first_any_completion(daemon):
@@ -245,14 +214,6 @@ async def test_new_tool_schemas_match_public_signatures(daemon):
 
     assert schema["scratchpad_write"]["required"] == ["value", "namespace"]
     assert schema["scratchpad_get"]["required"] == ["namespace"]
-    assert schema["checkpoint"]["required"] == ["name"]
-    assert schema["recovery_read"]["required"] == ["checkpoint_id"]
-
-    notes = schema["checkpoint"]["properties"]["notes"]
-    variants = notes["anyOf"]
-    assert {"type": "string"} in variants
-    assert {"type": "null"} in variants
-    assert notes["default"] is None
 
 
 async def test_response_format_wrappers_forward_to_tool_bodies(monkeypatch):
@@ -318,18 +279,8 @@ async def test_new_tool_wrappers_forward_to_tool_bodies(monkeypatch):
         calls.append(("scratchpad_get", session, namespace, keys))
         return {"namespace": namespace, "entries": {"k1": "v1"}}
 
-    async def fake_checkpoint(session, *, name: str, notes: str | None = None) -> dict:
-        calls.append(("checkpoint", session, name, notes))
-        return {"checkpoint_id": 7, "jobs": []}
-
-    async def fake_recovery_read(session, *, checkpoint_id: int) -> dict:
-        calls.append(("recovery_read", session, checkpoint_id))
-        return {"checkpoint_id": checkpoint_id, "recorded": [], "live": []}
-
     monkeypatch.setattr(mcp_tools, "scratchpad_write", fake_scratchpad_write)
     monkeypatch.setattr(mcp_tools, "scratchpad_get", fake_scratchpad_get)
-    monkeypatch.setattr(mcp_tools, "checkpoint", fake_checkpoint)
-    monkeypatch.setattr(mcp_tools, "recovery_read", fake_recovery_read)
 
     mcp = build("p1", "vibe")
     assert _payload(
@@ -342,20 +293,10 @@ async def test_new_tool_wrappers_forward_to_tool_bodies(monkeypatch):
         "namespace": "plan",
         "entries": {"k1": "v1"},
     }
-    assert _payload(
-        await mcp.call_tool("checkpoint", {"name": "before merge", "notes": "watch p-you"})
-    ) == {"checkpoint_id": 7, "jobs": []}
-    assert _payload(await mcp.call_tool("recovery_read", {"checkpoint_id": 7})) == {
-        "checkpoint_id": 7,
-        "recorded": [],
-        "live": [],
-    }
 
     assert [(call[0], *call[2:]) for call in calls] == [
         ("scratchpad_write", "plan", "p-you", None),
         ("scratchpad_get", "plan", None),
-        ("checkpoint", "before merge", "watch p-you"),
-        ("recovery_read", 7),
     ]
     assert all(isinstance(call[1], mcp_tools.Session) for call in calls)
 

@@ -21,7 +21,6 @@ left as a ghost that the régie would draw forever.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import os
 import secrets
@@ -65,32 +64,6 @@ async def _uncancellable(fn, /, *args, reconcile=None, **kwargs):
         if reconcile is not None:
             reconcile(result)
         raise
-
-
-def _capture_worktree_git_facts(
-    cwd: str, child_id: str, branch: str | None
-) -> tuple[str | None, str | None]:
-    """Pure git-only helper for ``_record_launch_provenance``. Never touches Store/Registry."""
-    repo_root: str | None = None
-    base_commit: str | None = None
-
-    with contextlib.suppress(Exception):
-        repo_root = worktree_mod.main_repo_root(cwd, child_id=child_id)
-
-    if branch and cwd:
-        with contextlib.suppress(Exception):
-            r2 = worktree_mod._git(
-                ["git", "rev-parse", branch],
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-            if r2.returncode == 0:
-                base_commit = r2.stdout.strip() or None
-
-    return repo_root, base_commit
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,8 +149,6 @@ class Spawner:
                 plan = replace(plan, receipt_token=minted_token)
             with timing.span("spawn.worktree", id=participant.id, kind=req.worktree or None):
                 child_cwd = await self._prepare_worktree(req, participant)
-            with timing.span("spawn.provenance", id=participant.id):
-                await self._record_launch_provenance(req, participant)
             self._record_launch_identity(participant, plan)
 
             if resume_predecessor is not None:
@@ -395,61 +366,6 @@ class Spawner:
                 exc_info=True,
             )
         self.registry.mark_dead(participant.id)
-
-    async def _record_launch_provenance(self, req: SpawnRequest, participant: Participant) -> None:
-        """Persist immutable launch provenance for orchestration-tree recovery.
-
-        Called after worktree creation so ``participant.cwd`` is already the
-        resolved child cwd. The blob is written once and never updated: it is
-        the ground-truth for cold-respawning a dead participant when the
-        checkpoint restorer cannot resume its native session.
-        """
-        import json
-
-        worktree_type: str | None = None
-        worktree_name: str | None = None
-        worktree_repo_root: str | None = None
-        worktree_base_commit: str | None = None
-
-        if req.worktree is True:
-            worktree_type = "unique"
-        elif isinstance(req.worktree, str) and req.worktree:
-            worktree_type = "named"
-            worktree_name = req.worktree
-
-        effective_cwd = participant.cwd or req.cwd
-        if worktree_type is not None and effective_cwd:
-            worktree_repo_root, worktree_base_commit = await workers.to_thread(
-                _capture_worktree_git_facts,
-                effective_cwd,
-                participant.id,
-                participant.branch,
-                label="spawn.provenance_git",
-            )
-
-        provenance: dict = {
-            "prompt": req.prompt,
-            "approval": req.approval,
-            "cwd_requested": req.cwd,
-            "cwd_resolved": participant.cwd,
-            "model": req.model,
-            "reasoning_effort": req.reasoning_effort,
-            "worktree": req.worktree,
-            "worktree_type": worktree_type,
-            "worktree_name": worktree_name,
-            "worktree_branch": participant.branch,
-            "worktree_repo_root": worktree_repo_root,
-            "worktree_base_commit": worktree_base_commit,
-            "base_branch": req.base_branch,
-            "response_format": req.response_format,
-            "resume_session_id": req.resume,
-            "tmux_session": req.tmux_session,
-            "window_name": req.window_name,
-        }
-        participant.launch_provenance = json.dumps(
-            provenance, sort_keys=True, separators=(",", ":")
-        )
-        self.registry.store.upsert_participant(participant)
 
     def _record_launch_identity(self, participant: Participant, plan) -> None:
         """Persist exact launch facts before the process can write output."""

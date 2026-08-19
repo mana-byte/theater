@@ -138,18 +138,6 @@ theater/
 - **Schema edits go through Alembic.** A bare `CREATE TABLE IF NOT EXISTS` change
   is a silent no-op against existing databases (the v1.2 hazard). Regenerate a
   revision and run `alembic check`.
-- **Checkpoints are machine-global, not per-agent.** Any participant may list,
-  read, or restore any checkpoint — including one whose creator is dead. This
-  is intentional: a live sibling must be able to discover and restore a dead
-  creator's checkpoint without knowing who made it. `checkpoint.list` is
-  scoped only by `limit` and the optional `participant_id` filter; it never
-  filters by caller. The creator and restorer identities are persisted in the
-  row (`participant_id`, `restored_by`). Restore still requires explicit
-  approval and uses a single-use atomic claim; a creator CAN restore its own
-  checkpoint (reused live in place, never spawned/resumed) as long as it is
-  actually live and addressable. What's still refused is a *descendant* of
-  the creator restoring the creator's checkpoint (deadlock guard, not a
-  permission check) — that caller would await a job sent to its own ancestor.
 - **Rows are deletable, handles are not.** The send-sequence counter lives in the
   `meta` table because it used to be re-seeded from `MAX(jobs)`; once the GC can
   delete old jobs, that regresses the counter and re-mints handles pruned jobs

@@ -17,12 +17,10 @@ The sweep runs in six phases, in this order:
    so a participant whose last job just went becomes eligible in the same
    sweep.
 4. **Receipt tokens** — remove expired/orphaned Claude hook tokens from meta.
-5. **Checkpoints** — delete checkpoints older than the jobs cutoff in
-   bounded batches.
-6. **scratchpad** — delete rows whose spawn tree has no live participant.
+5. **scratchpad** — delete rows whose spawn tree has no live participant.
    Computes the roots of all live participants through lineage.root_of()
    and retains those, deleting everything else in bounded batches.
-7. **Bus** — delete rows older than ``bus_days`` (except ``send.refused`` and
+6. **Bus** — delete rows older than ``bus_days`` (except ``send.refused`` and
    active transcript-identity-loss audit rows), then trim ``send.refused`` to
    the newest ``refused_cap`` rows.
 
@@ -60,7 +58,7 @@ from sqlalchemy import delete, select, text, update
 
 from theater.config import RetentionSection
 from theater.daemon import lineage
-from theater.daemon.schema import bus, checkpoints, jobs, participants, touch, tree_kv
+from theater.daemon.schema import bus, jobs, participants, touch, tree_kv
 from theater.daemon.store import Store
 from theater.models import now
 from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
@@ -85,7 +83,6 @@ class SweepResult:
     participants: int = 0
     running_marked: int = 0
     scratchpad: int = 0
-    checkpoints: int = 0
 
 
 async def sweep(
@@ -114,7 +111,6 @@ async def sweep(
         participants=0,
         running_marked=0,
         scratchpad=0,
-        checkpoints=0,
     )
 
     cutoff_jobs = now() - retention.jobs_days * _DAY
@@ -130,7 +126,6 @@ async def sweep(
         participants=result.participants,
         running_marked=marked,
         scratchpad=result.scratchpad,
-        checkpoints=result.checkpoints,
     )
     await asyncio.sleep(0)
 
@@ -143,7 +138,6 @@ async def sweep(
         participants=result.participants,
         running_marked=result.running_marked,
         scratchpad=result.scratchpad,
-        checkpoints=result.checkpoints,
     )
 
     # Phase 3: participants — after jobs, so a participant whose last job
@@ -156,7 +150,6 @@ async def sweep(
         participants=part_deleted,
         running_marked=result.running_marked,
         scratchpad=result.scratchpad,
-        checkpoints=result.checkpoints,
     )
     await asyncio.sleep(0)
 
@@ -165,9 +158,6 @@ async def sweep(
     store.cleanup_receipt_tokens()
     await asyncio.sleep(0)
 
-    # Phase 5: checkpoints — after participant cleanup, before bus cleanup.
-    # Deletes checkpoints older than the jobs cutoff in bounded batches.
-    ckpt_deleted = await _sweep_checkpoints(store, cutoff_jobs, retention.batch)
     result = SweepResult(
         bus=result.bus,
         jobs=result.jobs,
@@ -175,10 +165,9 @@ async def sweep(
         participants=result.participants,
         running_marked=result.running_marked,
         scratchpad=result.scratchpad,
-        checkpoints=ckpt_deleted,
     )
 
-    # Phase 6: scratchpad — delete rows whose spawn tree has no live
+    # Phase 5: scratchpad — delete rows whose spawn tree has no live
     # participant. A root can be dead while descendants remain live, so
     # compute the roots of all live participants and retain their rows.
     kv_deleted = await _sweep_scratchpad(store, retention.batch)
@@ -189,10 +178,9 @@ async def sweep(
         participants=result.participants,
         running_marked=result.running_marked,
         scratchpad=kv_deleted,
-        checkpoints=result.checkpoints,
     )
 
-    # Phase 7: bus.
+    # Phase 6: bus.
     bus_deleted = await _sweep_bus(store, cutoff_bus, retention.batch, retention.refused_cap)
     result = SweepResult(
         bus=bus_deleted,
@@ -201,7 +189,6 @@ async def sweep(
         participants=result.participants,
         running_marked=result.running_marked,
         scratchpad=result.scratchpad,
-        checkpoints=result.checkpoints,
     )
 
     # The WAL was measured at 4.12 MB live and grows with churn; checkpointing
@@ -450,34 +437,6 @@ async def _active_identity_loss_audit_ids(store: Store, batch: int) -> set[int]:
         live.update(row[0] for row in rows)
         await asyncio.sleep(0)
     return {row_id for participant_id, row_id in active.items() if participant_id in live}
-
-
-async def _sweep_checkpoints(store: Store, cutoff: float, batch: int) -> int:
-    """Delete checkpoints older than the jobs cutoff in bounded batches.
-
-    Uses ``created_at`` for checkpoints — unlike jobs, a checkpoint has no
-    ``finished_at``, and a checkpoint is a static snapshot that never
-    transitions, so age is the right predicate. A checkpoint in the
-    ``restoring`` state is exempt: an in-flight restore may be awaiting a
-    tmux operation, and deleting its row would strand the finalization.
-    """
-    total = 0
-    while True:
-        sub = (
-            select(checkpoints.c.id)
-            .where(checkpoints.c.created_at < cutoff)
-            .where(checkpoints.c.restore_state != "restoring")
-            .limit(batch)
-        )
-        ids = [r[0] for r in store.conn.execute(sub).fetchall()]
-        if not ids:
-            break
-        result = store.conn.execute(delete(checkpoints).where(checkpoints.c.id.in_(ids)))
-        total += result.rowcount
-        await asyncio.sleep(0)
-        if len(ids) < batch:
-            break
-    return total
 
 
 async def _sweep_scratchpad(store: Store, batch: int) -> int:

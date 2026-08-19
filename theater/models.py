@@ -67,9 +67,6 @@ class Participant:
     status: Status = Status.IDLE
     last_activity: float = field(default_factory=now)
     created_at: float = field(default_factory=now)
-    # Durable launch provenance (JSON blob), persisted at spawn time.
-    # Null for EXTERNAL, ADOPTED, and pre-0012 SPAWNED participants.
-    launch_provenance: str | None = None
     # Live-only: populated by the Registry for participants that are alive,
     # None for dead ones. Never persisted — the name is regenerated when the
     # daemon restarts, and a dead participant's name is released so a later
@@ -130,7 +127,6 @@ class Participant:
         d.pop("transcript_domain", None)
         d.pop("transcript_location", None)
         d.pop("resume_floor", None)
-        d.pop("launch_provenance", None)
         d["tier"] = str(self.tier)
         d["status"] = str(self.status)
         d["addressable"] = self.addressable
@@ -161,7 +157,6 @@ class Participant:
             status=status,
             last_activity=mapping["last_activity"],
             created_at=mapping["created_at"],
-            launch_provenance=mapping.get("launch_provenance"),
         )
 
 
@@ -348,45 +343,3 @@ class NameTaken(TheaterError):
     """
 
     code = "name_taken"
-
-
-class CheckpointAlreadyRestored(TheaterError):
-    """A restore was attempted on a checkpoint already restored.
-
-    A checkpoint can only be restored once. The caller should create a
-    fresh checkpoint if it needs a new restore point.
-    """
-
-    code = "checkpoint_already_restored"
-
-
-class CheckpointRestoreInProgress(TheaterError):
-    """A restore was attempted on a checkpoint currently being restored.
-
-    Another caller has claimed this checkpoint and is mid-restore. The
-    caller should wait for the in-flight restore to complete.
-    """
-
-    code = "checkpoint_restore_in_progress"
-
-
-class CheckpointRestoreFailed(TheaterError):
-    """A restore was attempted on a checkpoint that previously failed.
-
-    A failed restore may have left partial side effects (e.g. a spawned
-    pane). The caller should inspect the checkpoint's restore_error field
-    and create a fresh checkpoint if needed.
-    """
-
-    code = "checkpoint_restore_failed"
-
-
-class CheckpointRestorePartial(TheaterError):
-    """A restore was attempted on a checkpoint in the 'partial' state.
-
-    A previous restore succeeded for some nodes and failed for others. The
-    checkpoint is consumed: read ``restore_progress`` for the audit record and
-    create a new checkpoint if another restore point is required.
-    """
-
-    code = "checkpoint_restore_partial"

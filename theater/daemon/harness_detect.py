@@ -53,11 +53,11 @@ def detect_harness(
     tool running `theater adopt` — so `vibe` is in the tree even though it
     is not the foreground leaf.
 
-    A caller checking several panes in one pass (the unmanaged sweep, a
-    tree restore) may pass a `snapshot` captured once up front, so this walk
-    costs no `ps` of its own. Omit it — the default — and a descendant walk
-    here captures a fresh one, which is what single-pane callers like `adopt`
-    and the delivery gate's stale-target check need.
+    A caller checking several panes in one pass (the unmanaged sweep) may
+    pass a `snapshot` captured once up front, so this walk costs no `ps` of
+    its own. Omit it — the default — and a descendant walk here captures a
+    fresh one, which is what single-pane callers like `adopt` and the
+    delivery gate's stale-target check need.
     """
     name = match_binary(pane_command, HARNESSES)
     if name:
@@ -70,7 +70,7 @@ def detect_harness(
     #
     # When a snapshot is supplied, the root comm is read from the already
     # parsed process table — no ``ps`` of its own.  Without one, the single-
-    # pane callers (``adopt``, creator-restore preflight, the delivery gate)
+    # pane callers (``adopt``, the delivery gate)
     # get a fresh ``proc.comm`` fork so the root check is as current as the
     # pane facts it is compared against.
     if pane_pid > 0:

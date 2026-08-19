@@ -39,7 +39,6 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from theater.daemon.schema import (
     bus,
-    checkpoints,
     jobs,
     meta,
     named_worktrees,
@@ -57,7 +56,7 @@ BASELINE = "0001"
 #: The latest revision. A legacy database is stamped at BASELINE and then
 #: upgraded to this; a fresh database lands here directly. Tests assert
 #: against this rather than hardcoding a revision string.
-HEAD = "0014"
+HEAD = "0015"
 RECEIPT_TOKEN_PREFIX = "receipt_token:"
 
 
@@ -169,7 +168,6 @@ class Store:
             "status": str(p.status),
             "last_activity": p.last_activity,
             "created_at": p.created_at,
-            "launch_provenance": p.launch_provenance,
         }
 
     def bind_operator_transcript(
@@ -591,246 +589,6 @@ class Store:
             stmt = stmt.where(tree_kv.c.key.in_(keys))
         rows = self.conn.execute(stmt).fetchall()
         return {row[0]: row[1] for row in rows}
-
-    # ---- checkpoints ----------------------------------------------------
-
-    def create_checkpoint(
-        self,
-        *,
-        participant_id: str,
-        name: str,
-        jobs_snapshot: str,
-        notes: str | None = None,
-        creator_name: str | None = None,
-    ) -> int:
-        result = self.conn.execute(
-            insert(checkpoints).values(
-                participant_id=participant_id,
-                creator_name=creator_name,
-                name=name,
-                notes=notes,
-                jobs_snapshot=jobs_snapshot,
-                created_at=now(),
-            )
-        )
-        pk = result.inserted_primary_key
-        assert pk is not None
-        return pk[0]
-
-    def get_checkpoint(self, checkpoint_id: int) -> dict | None:
-        row = self.conn.execute(
-            select(checkpoints).where(checkpoints.c.id == checkpoint_id)
-        ).first()
-        return dict(row._mapping) if row else None
-
-    def list_checkpoints(
-        self, *, participant_id: str | None = None, restorable_only: bool = False, limit: int = 100
-    ) -> list[dict]:
-        """List checkpoints, globally or filtered by creator.
-
-        When ``participant_id`` is None, returns all checkpoints across every
-        participant — the default path for discovery by a live sibling whose
-        creator may be dead. When given, narrows to that creator only.
-
-        ``restorable_only=True`` adds a SQL ``WHERE restore_state = 'ready'``
-        predicate *before* the LIMIT. Filtering in Python after the LIMIT is
-        wrong: if every row inside the limit is non-ready, the caller gets an
-        empty list while restorable rows sit just past the cutoff.
-
-        The LEFT JOIN resolves the creator's status in the same query so callers
-        can surface ``creator_present`` without N+1 store calls.
-        """
-        stmt = (
-            select(
-                checkpoints.c.id,
-                checkpoints.c.participant_id,
-                checkpoints.c.creator_name,
-                checkpoints.c.name,
-                checkpoints.c.notes,
-                checkpoints.c.created_at,
-                checkpoints.c.restore_state,
-                checkpoints.c.restored_at,
-                checkpoints.c.restored_by,
-                # jobs_snapshot is included so callers can detect snapshot version
-                # without a second query (checkpoint.list summaries show version/count).
-                checkpoints.c.jobs_snapshot,
-                participants.c.status.label("creator_status"),
-            )
-            .outerjoin(participants, checkpoints.c.participant_id == participants.c.id)
-            .order_by(checkpoints.c.created_at.desc(), checkpoints.c.id.desc())
-            .limit(limit)
-        )
-        if participant_id is not None:
-            stmt = stmt.where(checkpoints.c.participant_id == participant_id)
-        if restorable_only:
-            # The non-null column was introduced with server_default='ready';
-            # no legacy NULL alias exists. Discovery exactly matches claiming.
-            stmt = stmt.where(checkpoints.c.restore_state == "ready")
-        rows = self.conn.execute(stmt).fetchall()
-        return [dict(r._mapping) for r in rows]
-
-    def claim_checkpoint_restore(self, checkpoint_id: int, restored_by: str) -> str | None:
-        """Atomically claim a checkpoint for restoration.
-
-        Returns a token on success, or None if the checkpoint is not in the
-        ``ready`` state. The caller uses the token to finalize or release
-        the restore. ``restore_claimed_by`` is set here so concurrent callers
-        can see who holds the claim while the restore is in progress.
-
-        Only ``ready`` is claimable. ``partial`` and ``failed`` are terminal
-        states that cannot be re-claimed.
-        """
-        token = new_id()
-        result = self.conn.execute(
-            update(checkpoints)
-            .where(checkpoints.c.id == checkpoint_id)
-            .where(checkpoints.c.restore_state == "ready")
-            .values(
-                restore_state="restoring",
-                restore_started_at=now(),
-                restore_token=token,
-                restore_error=None,
-                restore_claimed_by=restored_by,
-            )
-        )
-        if result.rowcount == 0:
-            return None
-        return token
-
-    def finalize_checkpoint_restore(
-        self,
-        checkpoint_id: int,
-        *,
-        token: str,
-        restored_by: str,
-        error: str | None = None,
-        result: str | None = None,
-        partial: bool = False,
-        progress: str | None = None,
-    ) -> bool:
-        """Finalize a checkpoint restore as restored, partial, or failed.
-
-        On success (``error is None`` and ``partial=False``): sets
-        ``restore_state='restored'``, ``restored_at``, ``restored_by``, and
-        ``restore_result`` (JSON).
-
-        On partial/failed (``partial=True`` or ``error is not None``): both set
-        a terminal state. ``partial`` → ``restore_state='partial'``;
-        error → ``restore_state='failed'``. Neither can be re-claimed.
-        ``restore_result`` holds the structured result (when available) and
-        ``restore_progress`` holds the per-node audit record.
-
-        The token must match the one returned by ``claim_checkpoint_restore``.
-        """
-        if error is None and not partial:
-            values: dict = {
-                "restore_state": "restored",
-                "restored_at": now(),
-                "restored_by": restored_by,
-                "restore_result": result,
-                "restore_claimed_by": None,
-            }
-        elif partial:
-            # partial is terminal: some nodes succeeded, some failed.
-            values = {
-                "restore_state": "partial",
-                "restored_at": now(),
-                "restored_by": restored_by,
-                "restore_result": result,
-                "restore_claimed_by": None,
-            }
-        else:
-            values = {
-                "restore_state": "failed",
-                "restore_error": error,
-                "restored_at": now(),
-                "restored_by": restored_by,
-                "restore_result": result,
-                "restore_claimed_by": None,
-            }
-        # Only overwrite restore_progress when explicitly provided; otherwise keep
-        # whatever persist_restore_progress wrote per-node (audit record).
-        if progress is not None:
-            values["restore_progress"] = progress
-        result_clause = (
-            update(checkpoints)
-            .where(checkpoints.c.id == checkpoint_id)
-            .where(checkpoints.c.restore_state == "restoring")
-            .where(checkpoints.c.restore_token == token)
-            .values(values)
-        )
-        result_obj = self.conn.execute(result_clause)
-        return result_obj.rowcount > 0
-
-    def persist_restore_progress(
-        self,
-        checkpoint_id: int,
-        *,
-        token: str,
-        progress: str,
-    ) -> bool:
-        """Write the cumulative audit report after each node outcome.
-
-        Token-gated: only the current restoring holder may write progress.
-        The restore_state remains 'restoring'; only restore_progress is updated.
-        Returns True on success, False if token mismatch or row absent.
-        """
-        result = self.conn.execute(
-            update(checkpoints)
-            .where(checkpoints.c.id == checkpoint_id)
-            .where(checkpoints.c.restore_state == "restoring")
-            .where(checkpoints.c.restore_token == token)
-            .values(restore_progress=progress)
-        )
-        return result.rowcount > 0
-
-    def release_checkpoint_restore(self, checkpoint_id: int, *, token: str) -> bool:
-        """Release a claimed checkpoint back to 'ready' state.
-
-        Used when a failure occurs before any side effect (e.g. validation,
-        JSON decode). The checkpoint can be safely re-attempted later.
-        """
-        result = self.conn.execute(
-            update(checkpoints)
-            .where(checkpoints.c.id == checkpoint_id)
-            .where(checkpoints.c.restore_state == "restoring")
-            .where(checkpoints.c.restore_token == token)
-            .values(
-                restore_state="ready",
-                restore_token=None,
-                restore_started_at=None,
-                restore_error=None,
-                restore_claimed_by=None,
-            )
-        )
-        return result.rowcount > 0
-
-    def recover_stranded_restores(self) -> int:
-        """Convert any leftover 'restoring' checkpoints to 'failed'.
-
-        Called at daemon startup. No restore RPC survives a daemon restart,
-        so any checkpoint left in 'restoring' was interrupted by a crash.
-        Both cases (with or without progress) move to 'failed' because the
-        final state is unknown — 'partial' is a deliberate terminal state
-        that requires the restore to have fully evaluated all nodes.
-
-        ``restore_progress`` is preserved in the row so the audit record of
-        completed side effects is not lost. ``restore_error`` describes the
-        stranding event.
-
-        ``restore_claimed_by`` is promoted to ``restored_by`` and cleared.
-        """
-        result = self.conn.execute(
-            update(checkpoints)
-            .where(checkpoints.c.restore_state == "restoring")
-            .values(
-                restore_state="failed",
-                restore_error="daemon restarted while restore was in progress",
-                restored_by=checkpoints.c.restore_claimed_by,
-                restore_claimed_by=None,
-            )
-        )
-        return result.rowcount
 
     def reparent_participant(self, pid: str, *, new_parent_id: str) -> None:
         """Set the parent_id of a participant.

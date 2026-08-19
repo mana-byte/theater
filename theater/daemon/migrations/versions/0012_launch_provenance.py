@@ -1,14 +1,6 @@
 """Add launch_provenance column to participants.
 
-Persists durable launch provenance at spawn time — prompt, approval,
-requested/resolved cwd, model, reasoning_effort, worktree details, base
-branch, response_format, resume_session_id — as a compact JSON blob. Null for
-EXTERNAL, ADOPTED, and pre-0012 SPAWNED participants.
-
-This column is the immutable source-of-truth for orchestration-tree checkpoint
-recovery: when a participant row is still present but the daemon has restarted,
-recovery can cold-respawn the participant from provenance rather than requiring
-the creator to remember every spawn argument.
+Dropped in 0015 — this migration remains for chain continuity.
 
 Revision ID: 0012
 Revises: 0011

@@ -16,7 +16,6 @@ import subprocess
 from pathlib import Path
 
 from theater.client import DaemonClient
-from theater.daemon.jobs import JobState
 from theater.daemon.server import Daemon
 
 
@@ -227,38 +226,6 @@ async def test_restart_preserves_scratchpad(theater_home, fake_tmux, tmp_path):
     await d2.aclose()
 
     assert got == {"namespace": "handoff", "entries": {wrote["key"]: "survives"}}
-
-
-async def test_restart_preserves_checkpoints(theater_home, fake_tmux):
-    d1 = Daemon(harnesses={})
-    await d1.start()
-    async with DaemonClient(autostart=False) as c:
-        caller = await c.call("hello", id="caller", harness="vibe", cwd="/tmp")
-        d1.jobs.create(
-            handle="caller#1",
-            caller_id=caller["id"],
-            target_id=None,
-            kind="send",
-            prompt="remember this",
-        )
-        created = await c.call(
-            "checkpoint.create",
-            caller_id=caller["id"],
-            name="before restart",
-        )
-        d1.jobs.finish("caller#1", state=JobState.DONE, result="done")
-    await d1.aclose()
-
-    d2 = Daemon(harnesses={})
-    await d2.start()
-    async with DaemonClient(autostart=False) as c:
-        read = await c.call("checkpoint.read", checkpoint_id=created["checkpoint_id"])
-    await d2.aclose()
-
-    assert read["checkpoint"]["name"] == "before restart"
-    assert [job["handle"] for job in read["recorded_jobs"]] == ["caller#1"]
-    assert read["recorded_jobs"][0]["state"] == "running"
-    assert read["live_jobs"][0]["state"] == "done"
 
 
 async def test_restart_identity_loss_replay_does_not_crash_fresh_job(theater_home, fake_tmux):

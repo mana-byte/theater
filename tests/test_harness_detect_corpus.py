@@ -12,7 +12,7 @@ that the detection chain cannot identify must yield ``UNDETERMINED`` against a
 registry row claiming any harness — never ``CONFLICT``.  That is the exact
 regression that caused a production incident where a live `claude` participant
 was misdetected as `unknown` and treated as a foreign harness, cascading into a
-permanently-unusable checkpoint.  The judgement half was fixed in
+permanently-unusable pane.  The judgement half was fixed in
 ``compare_detected_harness``; the policy guards pin that judgement so nobody
 later "tightens" undetermined into conflict.  The guards call the judgement
 function directly with a literal ``"unknown"``, not via ``detect_harness``, so
@@ -177,7 +177,7 @@ def test_undetermined_never_conflict_for_python312(recorded_harness):
     so the detection chain returns ``"unknown"``.  The judgement must be
     ``UNDETERMINED`` (absence of evidence), never ``CONFLICT``, because a
     conflict on a pane that cannot be identified is the exact regression that
-    cascaded into a permanently-unusable checkpoint.
+    cascaded into a permanently-unusable pane.
     """
     verdict = compare_detected_harness(recorded_harness, "unknown", "python3.12")
     assert verdict is PaneHarnessVerdict.UNDETERMINED, (
@@ -213,3 +213,87 @@ def test_compare_pane_harness_undetermined_for_python312():
     snapshot = proc.ProcessSnapshot()
     verdict = compare_pane_harness("vibe", "python3.12", 999_999, snapshot=snapshot)
     assert verdict is PaneHarnessVerdict.UNDETERMINED
+
+
+# ---- F4/F5/F6: wrapper-renamed binary detection and generic _unwrap ----------
+
+
+def test_match_binary_wrapper_name_resolves():
+    """.claude-wrapped resolves to the claude harness."""
+    result = match_binary(".claude-wrapped", HARNESSES)
+    assert result == "claude"
+
+
+def test_match_binary_wrapper_with_path_resolves():
+    """A full path with a wrapper basename still resolves."""
+    result = match_binary("/nix/store/.../bin/.claude-wrapped", HARNESSES)
+    assert result == "claude"
+
+
+def test_match_binary_unknown_command_returns_none():
+    assert match_binary("some-random-program", HARNESSES) is None
+
+
+def test_detect_harness_wrapper_name_resolves():
+    """detect_harness with a wrapper name and an unreachable pid resolves."""
+    result = detect_harness(".claude-wrapped", 999_999)
+    assert result == "claude"
+
+
+def _bare_harness(name: str, binary: str):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(name=name, binary=binary, binaries=frozenset())
+
+
+def test_unwrap_generic_dot_prefix_stripped():
+    harnesses = {"mytool": _bare_harness("mytool", "mytool")}
+    assert match_binary(".mytool", harnesses) == "mytool"
+
+
+def test_unwrap_generic_wrapped_suffix_stripped():
+    harnesses = {"mytool": _bare_harness("mytool", "mytool")}
+    assert match_binary("mytool-wrapped", harnesses) == "mytool"
+
+
+def test_unwrap_generic_both_affixes_with_path():
+    harnesses = {"mytool": _bare_harness("mytool", "mytool")}
+    assert match_binary("/nix/store/x/bin/.mytool-wrapped", harnesses) == "mytool"
+
+
+def test_unwrap_generic_plain_name_still_matches():
+    harnesses = {"mytool": _bare_harness("mytool", "mytool")}
+    assert match_binary("mytool", harnesses) == "mytool"
+
+
+def test_known_binaries_includes_wrapper_names():
+    from theater.harness import known_binaries
+
+    binaries = known_binaries()
+    assert ".claude-wrapped" in binaries
+    assert "claude-wrapped" in binaries
+
+
+def test_compare_pane_harness_match():
+    verdict = compare_pane_harness("claude", "claude", 1)
+    assert verdict is PaneHarnessVerdict.MATCH
+
+
+def test_compare_pane_harness_conflict():
+    verdict = compare_pane_harness("claude", "codex", 1)
+    assert verdict is PaneHarnessVerdict.CONFLICT
+
+
+def test_compare_pane_harness_harness_gone():
+    verdict = compare_pane_harness("vibe", "bash", 999999)
+    assert verdict is PaneHarnessVerdict.HARNESS_GONE
+
+
+def test_compare_pane_harness_undetermined():
+    verdict = compare_pane_harness("vibe", "some-tool", 999999)
+    assert verdict is PaneHarnessVerdict.UNDETERMINED
+
+
+def test_compare_pane_harness_recorded_unknown_is_match():
+    verdict = compare_pane_harness("unknown", "claude", 999999)
+    assert verdict is PaneHarnessVerdict.MATCH

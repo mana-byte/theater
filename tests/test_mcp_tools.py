@@ -303,51 +303,6 @@ async def test_scratchpad_get_identifies_and_forwards_exact_rpc_arguments():
     }
 
 
-async def test_checkpoint_identifies_and_forwards_exact_rpc_arguments():
-    s = session(**{"checkpoint.create": {"checkpoint_id": 7, "jobs": []}})
-    got = await tools.checkpoint(s, name="before merge", notes="watch p-you")
-    assert got == {"checkpoint_id": 7, "jobs": []}
-    assert s.client.methods == ["hello", "checkpoint.create"]
-    assert s.client.params("checkpoint.create") == {
-        "name": "before merge",
-        "notes": "watch p-you",
-        "caller_id": "p-me",
-    }
-
-
-async def test_recovery_read_identifies_and_forwards_exact_rpc_arguments():
-    s = session(**{"checkpoint.read": {"checkpoint_id": 7, "recorded": [], "live": []}})
-    got = await tools.recovery_read(s, checkpoint_id=7)
-    assert got == {"checkpoint_id": 7, "recorded": [], "live": []}
-    assert s.client.methods == ["hello", "checkpoint.read"]
-    assert s.client.params("checkpoint.read") == {
-        "checkpoint_id": 7,
-        "caller_id": "p-me",
-    }
-
-
-async def test_list_checkpoints_forwards_participant_id_restorable_only_and_caller_id():
-    s = session(**{"checkpoint.list": []})
-    await tools.list_checkpoints(s, limit=5, participant_id="p-them", restorable_only=True)
-    assert s.client.methods == ["hello", "checkpoint.list"]
-    assert s.client.params("checkpoint.list") == {
-        "caller_id": "p-me",
-        "limit": 5,
-        "participant_id": "p-them",
-        "restorable_only": True,
-    }
-
-
-async def test_list_checkpoints_defaults_are_forwarded():
-    s = session(**{"checkpoint.list": []})
-    await tools.list_checkpoints(s)
-    params = s.client.params("checkpoint.list")
-    assert params["caller_id"] == "p-me"
-    assert params["limit"] == 100
-    assert params["participant_id"] is None
-    assert params["restorable_only"] is False
-
-
 async def test_read_transcript_asks_for_the_number_of_events_requested():
     s = resolved(read_transcript={"id": "p-you", "events": []})
     await tools.read_transcript(s, target_id="p-you", last_n=12)

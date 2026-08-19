@@ -18,7 +18,7 @@ from sqlalchemy import func, select
 
 from theater import cli
 from theater.daemon.jobs import JobState
-from theater.daemon.schema import bus, checkpoints, jobs, participants, touch, tree_kv
+from theater.daemon.schema import bus, jobs, participants, touch, tree_kv
 from theater.models import Job, Participant, Status, Tier, now
 
 _DAY = 86400.0
@@ -121,21 +121,6 @@ def _bus(
     return pk[0]
 
 
-def _checkpoint(store, *, created_at: float | None = None) -> int:
-    result = store.conn.execute(
-        checkpoints.insert().values(
-            participant_id="p1",
-            name="old",
-            notes=None,
-            jobs_snapshot="[]",
-            created_at=created_at if created_at is not None else now(),
-        )
-    )
-    pk = result.inserted_primary_key
-    assert pk is not None
-    return pk[0]
-
-
 def _scratchpad_row(store, *, tree_root_id: str = "p1", repo_root: str = "/repo") -> None:
     store.conn.execute(
         tree_kv.insert().values(
@@ -171,14 +156,12 @@ async def test_gc_rpc_returns_all_keys_with_matching_counts(client, daemon, fake
     )
     _touch(daemon.store, job_handle="old1", path="x.py")
     _bus(daemon.store, kind="job.created", ts=now() - 30 * _DAY)
-    _checkpoint(daemon.store, created_at=now() - 90 * _DAY)
     _scratchpad_row(daemon.store)
 
     before_jobs = _count(daemon.store, jobs)
     before_touch = _count(daemon.store, touch)
     before_bus = _count(daemon.store, bus)
     before_part = _count(daemon.store, participants)
-    before_checkpoints = _count(daemon.store, checkpoints)
     before_scratchpad = _count(daemon.store, tree_kv)
 
     data = await client.call("gc")
@@ -190,7 +173,6 @@ async def test_gc_rpc_returns_all_keys_with_matching_counts(client, daemon, fake
         "participants",
         "running_marked",
         "scratchpad",
-        "checkpoints",
         "coverage",
         "db_bytes_before",
         "db_bytes_after",
@@ -202,7 +184,6 @@ async def test_gc_rpc_returns_all_keys_with_matching_counts(client, daemon, fake
     assert data["touch"] == before_touch - _count(daemon.store, touch)
     assert data["bus"] == before_bus - _count(daemon.store, bus)
     assert data["participants"] == before_part - _count(daemon.store, participants)
-    assert data["checkpoints"] == before_checkpoints - _count(daemon.store, checkpoints)
     assert data["scratchpad"] == before_scratchpad - _count(daemon.store, tree_kv)
 
     assert isinstance(data["coverage"], dict)
@@ -325,7 +306,6 @@ def _gc_payload(**over) -> dict:
         "participants": 0,
         "running_marked": 0,
         "scratchpad": 0,
-        "checkpoints": 0,
         "coverage": {"jobs_from": None, "bus_from": None},
         "db_bytes_before": 1024,
         "db_bytes_after": 1024,
@@ -363,20 +343,17 @@ def test_render_deleted_without_vacuum_warns_file_did_not_shrink(monkeypatch, ca
             participants=2,
             running_marked=1,
             scratchpad=3,
-            checkpoints=4,
         ),
     )
     assert "file size unchanged" in out
     assert "--vacuum" in out
     assert "3 scratchpad" in out
-    assert "4 checkpoints" in out
 
 
-def test_render_scratchpad_and_checkpoints_count_as_collection(monkeypatch, capsys):
-    out = _render(monkeypatch, capsys, _gc_payload(scratchpad=1, checkpoints=2))
+def test_render_scratchpad_counts_as_collection(monkeypatch, capsys):
+    out = _render(monkeypatch, capsys, _gc_payload(scratchpad=1))
     assert "nothing to collect" not in out
     assert "1 scratchpad" in out
-    assert "2 checkpoints" in out
 
 
 def test_render_deleted_with_vacuum_reports_reclaimed_space(monkeypatch, capsys):

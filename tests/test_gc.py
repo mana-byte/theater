@@ -17,7 +17,7 @@ import json
 from theater.config import RetentionSection
 from theater.daemon.gc import SweepResult, sweep
 from theater.daemon.jobs import JobManager, JobState
-from theater.daemon.schema import bus, checkpoints, jobs, participants, touch, tree_kv
+from theater.daemon.schema import bus, jobs, participants, touch, tree_kv
 from theater.models import Job, Participant, Status, Tier, now
 from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
@@ -157,29 +157,6 @@ def _kv(
             updated_by=updated_by,
         )
     )
-
-
-def _checkpoint(
-    store,
-    *,
-    participant_id: str = "p1",
-    name: str = "plan",
-    notes: str | None = None,
-    jobs_snapshot: str = "[]",
-    created_at: float | None = None,
-) -> int:
-    result = store.conn.execute(
-        checkpoints.insert().values(
-            participant_id=participant_id,
-            name=name,
-            notes=notes,
-            jobs_snapshot=jobs_snapshot,
-            created_at=created_at if created_at is not None else now(),
-        )
-    )
-    pk = result.inserted_primary_key
-    assert pk is not None
-    return pk[0]
 
 
 def _count(store, table) -> int:
@@ -623,59 +600,6 @@ async def test_sweep_on_empty_database_is_noop(store):
     assert result.participants == 0
     assert result.running_marked == 0
     assert result.scratchpad == 0
-    assert result.checkpoints == 0
-
-
-# ---- Checkpoints cleanup ---------------------------------------------------
-
-
-async def test_old_checkpoints_are_deleted(store):
-    """Checkpoints older than the jobs cutoff are deleted in batches."""
-    _participant(store, pid="p1")
-    _checkpoint(
-        store,
-        participant_id="p1",
-        name="old",
-        created_at=now() - 90 * _DAY,
-    )
-    _checkpoint(
-        store,
-        participant_id="p1",
-        name="recent",
-        created_at=now(),
-    )
-    result = await sweep(store, _retention(jobs_days=60))
-    assert result.checkpoints == 1
-    assert _count(store, checkpoints) == 1
-
-
-async def test_checkpoint_cleanup_is_batched(store):
-    """With batch set small, the sweep still removes all old checkpoints."""
-    _participant(store, pid="p1")
-    for i in range(10):
-        _checkpoint(
-            store,
-            participant_id="p1",
-            name=f"plan-{i}",
-            created_at=now() - 90 * _DAY,
-        )
-    result = await sweep(store, _retention(jobs_days=60, batch=3))
-    assert result.checkpoints == 10
-    assert _count(store, checkpoints) == 0
-
-
-async def test_recent_checkpoints_survive(store):
-    """Checkpoints newer than the cutoff are kept."""
-    _participant(store, pid="p1")
-    _checkpoint(
-        store,
-        participant_id="p1",
-        name="recent",
-        created_at=now(),
-    )
-    result = await sweep(store, _retention(jobs_days=60))
-    assert result.checkpoints == 0
-    assert _count(store, checkpoints) == 1
 
 
 # ---- tree_kv cleanup -------------------------------------------------------
@@ -765,13 +689,6 @@ async def test_sweep_result_counts_match_all_tables(store):
     _bus(store, kind="job.created", ts=now() - 30 * _DAY)
     _bus(store, kind="send.refused", ts=now() - 30 * _DAY)
 
-    _checkpoint(
-        store,
-        participant_id="p1",
-        name="old-plan",
-        created_at=now() - 90 * _DAY,
-    )
-
     _participant(store, pid="kvroot", status=Status.DEAD)
     _kv(store, tree_root_id="kvroot")
 
@@ -779,7 +696,6 @@ async def test_sweep_result_counts_match_all_tables(store):
     before_touch = _count(store, touch)
     before_bus = _count(store, bus)
     before_part = _count(store, participants)
-    before_ckpt = _count(store, checkpoints)
     before_kv = _count(store, tree_kv)
 
     result = await sweep(store, _retention(bus_days=7, jobs_days=60))
@@ -788,5 +704,4 @@ async def test_sweep_result_counts_match_all_tables(store):
     assert result.touch == before_touch - _count(store, touch)
     assert result.bus == before_bus - _count(store, bus)
     assert result.participants == before_part - _count(store, participants)
-    assert result.checkpoints == before_ckpt - _count(store, checkpoints)
     assert result.scratchpad == before_kv - _count(store, tree_kv)

@@ -60,7 +60,6 @@ def test_migrations_created_the_alembic_version_table(store):
         "bus",
         "budgets",
         "tree_kv",
-        "checkpoints",
         "named_worktrees",
     } <= tables
     stamped = store.conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
@@ -71,12 +70,6 @@ def test_migrations_created_the_alembic_version_table(store):
     col_info = store.conn.exec_driver_sql("PRAGMA table_info(participants)").fetchall()
     col_names = {row[1] for row in col_info}
     assert "resume_floor" in col_names
-
-    # Migration 0011 added restore_claimed_by and creator_name to checkpoints.
-    ckpt_col_info = store.conn.exec_driver_sql("PRAGMA table_info(checkpoints)").fetchall()
-    ckpt_col_names = {row[1] for row in ckpt_col_info}
-    assert "restore_claimed_by" in ckpt_col_names
-    assert "creator_name" in ckpt_col_names
 
 
 def test_bus_ids_are_never_reused(store):
@@ -165,52 +158,3 @@ def test_a_legacy_database_is_adopted_not_rebuilt(theater_home):
         assert job.structured_status is None
     finally:
         store.close()
-
-
-def test_migration_0014_repairs_stamped_0013_missing_creator_name(theater_home):
-    """0014 backfills creator_name on a DB stamped 0013 but missing the column.
-
-    Reproduces the drift that migration 0011 caused when it was amended in place
-    after it had already run on a live DB: alembic_version reads 0013, yet
-    checkpoints has no creator_name column, so every query that selects it
-    (list_checkpoints) fails with 'no such column'. 0014 is idempotent — a no-op
-    on a healthy DB, a repair on a drifted one.
-    """
-    path = paths.db_path()
-
-    # Build a healthy, fully-migrated DB, then knock it into the drifted shape:
-    # drop creator_name and rewind the stamp to 0013, exactly as the in-place
-    # amendment left real databases.
-    Store(path).close()
-    broken = sqlite3.connect(path, isolation_level=None)
-    broken.execute("ALTER TABLE checkpoints DROP COLUMN creator_name")
-    broken.execute("UPDATE alembic_version SET version_num = '0013'")
-    cols_before = {row[1] for row in broken.execute("PRAGMA table_info(checkpoints)").fetchall()}
-    broken.close()
-    assert "creator_name" not in cols_before  # the drift is real
-
-    # Reopening runs migrations; 0014 must re-add the column and advance to HEAD.
-    repaired = Store(path)
-    try:
-        cols = {
-            row[1]
-            for row in repaired.conn.exec_driver_sql("PRAGMA table_info(checkpoints)").fetchall()
-        }
-        assert "creator_name" in cols
-        stamped = repaired.conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
-        assert stamped == HEAD
-        # The query that originally failed now succeeds.
-        assert repaired.list_checkpoints() == []
-    finally:
-        repaired.close()
-
-    # Idempotent: a healthy DB already at HEAD reopens as a clean no-op.
-    again = Store(path)
-    try:
-        cols = {
-            row[1]
-            for row in again.conn.exec_driver_sql("PRAGMA table_info(checkpoints)").fetchall()
-        }
-        assert "creator_name" in cols
-    finally:
-        again.close()
