@@ -466,3 +466,62 @@ def test_list_participants_ids_dead_included_with_include_dead(store):
     rows = store.list_participants(ids=[p.id], include_dead=True)
     assert len(rows) == 1
     assert rows[0].id == p.id
+
+
+# ---- recent dead -------------------------------------------------------------
+
+
+def test_list_recent_dead_returns_dead_ordered_by_last_activity(store):
+    p1 = Participant(harness="vibe", cwd="/tmp/a")
+    store.upsert_participant(p1)
+    p2 = Participant(harness="codex", cwd="/tmp/b")
+    store.upsert_participant(p2)
+    store.set_status(p1.id, Status.DEAD)
+    store.set_status(p2.id, Status.DEAD)
+    rows = store.list_recent_dead(limit=20)
+    assert {r.id for r in rows} == {p1.id, p2.id}
+
+
+def test_list_recent_dead_excludes_alive(store):
+    p = Participant(harness="vibe", cwd="/tmp/x")
+    store.upsert_participant(p)
+    rows = store.list_recent_dead(limit=20)
+    assert rows == []
+
+
+def test_list_recent_dead_respects_limit(store):
+    for i in range(5):
+        p = Participant(harness="vibe", cwd=f"/tmp/{i}")
+        store.upsert_participant(p)
+        store.set_status(p.id, Status.DEAD)
+    rows = store.list_recent_dead(limit=2)
+    assert len(rows) == 2
+
+
+def test_spawn_prompts_for_targets_returns_first_spawn_prompt(store):
+    p = Participant(harness="vibe", cwd="/tmp")
+    store.upsert_participant(p)
+    store.create_job(
+        Job(
+            handle="spawn1",
+            caller_id="cli",
+            target_id=p.id,
+            kind="spawn",
+            prompt="first task",
+            state=JobState.RUNNING,
+            result=None,
+            error_code=None,
+            created_at=1.0,
+            finished_at=None,
+        )
+    )
+    prompts = store.spawn_prompts_for_targets([p.id])
+    assert prompts == {p.id: "first task"}
+
+
+def test_spawn_prompts_for_targets_empty_ids_returns_empty(store):
+    assert store.spawn_prompts_for_targets([]) == {}
+
+
+def test_spawn_prompts_for_targets_missing_target_returns_empty(store):
+    assert store.spawn_prompts_for_targets(["nonexistent"]) == {}

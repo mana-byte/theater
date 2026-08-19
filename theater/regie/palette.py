@@ -16,11 +16,13 @@ not belong on a one-keystroke list.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from functools import partial
 
+from rich.text import Text
 from textual.command import DiscoveryHit, Hit, Hits, Provider
 
-from theater.harness import describe
+from theater.harness import describe, harness_icon
 
 
 def _order(rows: list[dict], favourite: str | None) -> list[dict]:
@@ -137,3 +139,65 @@ class ViewCommands(Provider):
         score = matcher.match(display)
         if score > 0:
             yield Hit(score, matcher.highlight(display), toggle, help=help_text)
+
+
+def _dead_session_label(row: dict) -> str:
+    icon = harness_icon(row.get("harness"))
+    harness = row.get("harness", "?")
+    cwd = row.get("cwd") or ""
+    label = f"{icon} {harness} {cwd}"
+    prompt = row.get("spawn_prompt")
+    if prompt:
+        plain = " ".join(prompt.split())
+        if len(plain) > 120:
+            plain = plain[:119] + "\u2026"
+        label += f"\n{plain}"
+    return label
+
+
+def _to_text(display: str) -> Text:
+    rendered = Text(display)
+    if "\n" in display:
+        rendered.stylize("dim", display.index("\n") + 1)
+    return rendered
+
+
+class ResumeDeadSessionCommands(Provider):
+    """Browse recent dead sessions and resume one in its original cwd."""
+
+    def __init__(self, screen, match_style=None):
+        super().__init__(screen, match_style)
+        self.rows: list[dict] = []
+
+    async def startup(self) -> None:
+        loader = getattr(self.app, "load_dead_sessions", None)
+        if loader is not None:
+            try:
+                self.rows = await loader()
+            except Exception:
+                self.rows = []
+
+    @property
+    def commands(self) -> list[tuple[str, str, Callable[[], None]]]:
+        callback = getattr(self.app, "resume_dead_session", None)
+        if callback is None:
+            return []
+        return [
+            ("Resume dead session", _dead_session_label(row), partial(callback, row))
+            for row in self.rows
+        ]
+
+    async def discover(self) -> Hits:
+        for prefix, display, command in self.commands:
+            yield DiscoveryHit(_to_text(display), command, text=f"{prefix} {display}")
+
+    async def search(self, query: str) -> Hits:
+        matcher = self.matcher(query)
+        for prefix, display, command in self.commands:
+            searchable = f"{prefix} {display}"
+            score = matcher.match(searchable)
+            if score > 0:
+                highlighted = matcher.highlight(display)
+                if "\n" in display:
+                    highlighted.stylize("dim", display.index("\n") + 1)
+                yield Hit(score, highlighted, command, text=searchable)

@@ -262,3 +262,74 @@ async def test_scratchpad_write_ignores_client_supplied_updated_by(client, daemo
     row = daemon.store.conn.execute(tree_kv.select()).first()
     assert row is not None
     assert row._mapping["updated_by"] == caller["id"]
+
+
+# ---- participants.recent_dead ------------------------------------------------
+
+
+async def test_recent_dead_returns_dead_participants_with_spawn_prompt(client, daemon, tmp_path):
+    repo = _repo(tmp_path, "repo")
+    await client.call("hello", id="root", harness="vibe", cwd=str(repo))
+
+    child = await client.call(
+        "spawn",
+        harness="vibe",
+        approval="manual",
+        prompt="review the code",
+        cwd=str(repo),
+        tmux_session="test",
+    )
+    child_id = child["id"]
+
+    daemon.registry.mark_dead(child_id)
+
+    rows = await client.call("participants.recent_dead", limit=20)
+    matching = [r for r in rows if r["id"] == child_id]
+    assert len(matching) == 1
+    row = matching[0]
+    assert row["status"] == "dead"
+    assert row["spawn_prompt"] == "review the code"
+    assert "resume_state" in row
+
+
+async def test_recent_dead_empty_when_no_dead(client, tmp_path):
+    repo = _repo(tmp_path, "repo")
+    await client.call("hello", id="root", harness="vibe", cwd=str(repo))
+
+    rows = await client.call("participants.recent_dead")
+    assert rows == []
+
+
+async def test_recent_dead_rejects_invalid_limit(client, tmp_path):
+    repo = _repo(tmp_path, "repo")
+    await client.call("hello", id="root", harness="vibe", cwd=str(repo))
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call("participants.recent_dead", limit=0)
+    assert exc.value.code == "bad_request"
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call("participants.recent_dead", limit=21)
+    assert exc.value.code == "bad_request"
+
+
+async def test_recent_dead_spawn_prompt_null_for_bare_cli(client, daemon, tmp_path):
+    repo = _repo(tmp_path, "repo")
+    await client.call("hello", id="root", harness="vibe", cwd=str(repo))
+
+    child = await client.call(
+        "spawn",
+        harness="vibe",
+        approval="manual",
+        prompt="",
+        cwd=str(repo),
+        tmux_session="test",
+    )
+    child_id = child["id"]
+
+    daemon.registry.mark_dead(child_id)
+
+    rows = await client.call("participants.recent_dead", limit=20)
+    matching = [r for r in rows if r["id"] == child_id]
+    assert len(matching) == 1
+    assert matching[0]["spawn_prompt"] == ""

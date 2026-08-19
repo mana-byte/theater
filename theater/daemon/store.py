@@ -257,6 +257,33 @@ class Store:
         stmt = stmt.order_by(participants.c.created_at.asc())
         return [Participant.from_row(r._mapping) for r in self.conn.execute(stmt)]
 
+    def list_recent_dead(self, *, limit: int = 20) -> list[Participant]:
+        stmt = (
+            select(participants)
+            .where(participants.c.status == str(Status.DEAD))
+            .order_by(
+                participants.c.last_activity.desc(),
+                participants.c.created_at.desc(),
+                participants.c.id.desc(),
+            )
+            .limit(limit)
+        )
+        return [Participant.from_row(r._mapping) for r in self.conn.execute(stmt)]
+
+    def spawn_prompts_for_targets(self, ids: Sequence[str]) -> dict[str, str | None]:
+        if not ids:
+            return {}
+        rows = self.conn.execute(
+            select(jobs.c.target_id, jobs.c.prompt)
+            .where(jobs.c.target_id.in_(ids))
+            .where(jobs.c.kind == "spawn")
+            .order_by(jobs.c.created_at.asc())
+        )
+        prompts: dict[str, str | None] = {}
+        for target_id, prompt in rows:
+            prompts.setdefault(target_id, prompt)
+        return prompts
+
     def children_of(self, pid: str) -> list[Participant]:
         stmt = (
             select(participants)

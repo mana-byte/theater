@@ -51,7 +51,7 @@ from textual.widgets import Footer, Label, RichLog, Static
 from theater.client import DaemonClient
 from theater.config import Config, RegieSection
 from theater.regie.bus_view import format_bus_line
-from theater.regie.palette import SpawnCommands, ViewCommands
+from theater.regie.palette import ResumeDeadSessionCommands, SpawnCommands, ViewCommands
 from theater.regie.tree import (
     DOWN,
     LEFT,
@@ -719,7 +719,7 @@ class RegieApp(App):
 
     #: ctrl+p opens the palette. Ours adds one `Spawn <harness>` entry per
     #: registered harness on top of Textual's system commands.
-    COMMANDS = App.COMMANDS | {SpawnCommands, ViewCommands}
+    COMMANDS = App.COMMANDS | {SpawnCommands, ViewCommands, ResumeDeadSessionCommands}
 
     title = "theater régie"
 
@@ -1459,6 +1459,57 @@ class RegieApp(App):
             self.notify(f"spawn failed: {exc}", severity="error")
             return
         # The new agent appears in the tree on the next refresh.
+        await self._refresh_tree()
+
+    async def load_dead_sessions(self) -> list[dict]:
+        if self._client is None:
+            return []
+        try:
+            rows = await self._client.call("participants.recent_dead", limit=20)
+            assert isinstance(rows, list)
+        except Exception:
+            return []
+        return rows
+
+    def resume_dead_session(self, row: dict) -> None:
+        state = row.get("resume_state", "")
+        if state != "resumable":
+            reasons = {
+                "live": "session is still running",
+                "no_session_id": "no session id was recorded",
+                "harness_cannot_resume": "this harness does not support resume",
+                "untrusted": "transcript identity could not be verified",
+                "owned_by_live": "another live session holds this session id",
+            }
+            reason = reasons.get(state, state or "unknown reason")
+            self.notify(
+                f"Cannot resume: {reason}",
+                title="Session not resumable",
+                severity="warning",
+            )
+            return
+        if not row.get("cwd"):
+            self.notify("Cannot resume: original cwd is missing", severity="warning")
+            return
+        self.run_worker(self._resume_dead_session(row), exclusive=False)
+
+    async def _resume_dead_session(self, row: dict) -> None:
+        if self._client is None:
+            return
+        try:
+            await self._client.call(
+                "spawn",
+                harness=row["harness"],
+                prompt="",
+                cwd=row["cwd"],
+                approval="manual",
+                resume=row["session_id"],
+                worktree=False,
+                tmux_session=self.my_session_name,
+            )
+        except Exception as exc:
+            self.notify(f"resume failed: {exc}", severity="error")
+            return
         await self._refresh_tree()
 
     async def action_focus_stage(self) -> None:

@@ -36,6 +36,5 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     raise NotImplementedError(
-        "checkpoints and launch_provenance have been removed; "
-        "downgrade is not supported"
+        "checkpoints and launch_provenance have been removed; downgrade is not supported"
     )

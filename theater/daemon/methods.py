@@ -474,6 +474,24 @@ async def _list(daemon, params: dict) -> list[dict]:
     return result
 
 
+@method("participants.recent_dead")
+async def _recent_dead(daemon, params: dict) -> list[dict]:
+    limit = params.get("limit", 20)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
+        raise BadRequest("limit must be an integer between 1 and 20")
+    rows = daemon.store.list_recent_dead(limit=limit)
+    live_peers = daemon.registry.list(include_dead=False)
+    ids = [p.id for p in rows]
+    prompts = daemon.store.spawn_prompts_for_targets(ids)
+    result = []
+    for p in rows:
+        record = p.to_dict()
+        record["resume_state"] = _resume_state(p, live_peers)
+        record["spawn_prompt"] = prompts.get(p.id)
+        result.append(record)
+    return result
+
+
 @method("participants.tree")
 async def _tree(daemon, params: dict) -> list[dict]:
     return daemon.registry.tree()
