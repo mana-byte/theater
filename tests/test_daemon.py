@@ -766,6 +766,47 @@ def _fake_list_panes(output: str):
     return run
 
 
+async def test_reap_isolation_one_failure_does_not_skip_others(
+    daemon, client, fake_tmux, monkeypatch
+):
+    """Bug B: if retire() raises for one participant, the rest in that tick
+    must still be marked dead and their jobs finished.  Before the fix,
+    one exception aborted the entire for-loop and skipped all remaining
+    participants."""
+    from theater.tmux import client as tmux_client
+
+    # Spawn two participants so both have worktrees + branches.
+    r1 = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+    r2 = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+
+    # Both panes vanish — the reaper should mark both dead.
+    monkeypatch.setattr(tmux_client, "available", lambda: True)
+    monkeypatch.setattr(tmux_client, "run", _fake_list_panes("%other"))
+
+    # Make retire() blow up for the first participant only.
+    original_retire = daemon.spawner.retire
+    call_order = []
+
+    async def exploding_retire(p, *, delete_branch):
+        call_order.append(p.id)
+        if p.id == r1["id"]:
+            raise RuntimeError("simulated retire failure")
+        return await original_retire(p, delete_branch=delete_branch)
+
+    monkeypatch.setattr(daemon.spawner, "retire", exploding_retire)
+
+    await daemon._reap_once()
+
+    # Both participants were attempted (the first one's failure didn't skip the second).
+    assert len(call_order) == 2
+
+    # Both must be dead — the first despite retire raising, the second normally.
+    p1 = await client.call("participants.get", id=r1["id"])
+    p2 = await client.call("participants.get", id=r2["id"])
+    assert p1["status"] == "dead"
+    assert p2["status"] == "dead"
+
+
 async def test_bus_records_the_story(client, fake_tmux):
     await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
     kinds = [e["kind"] for e in await client.call("bus.tail")]
@@ -1278,13 +1319,13 @@ async def test_unmanaged_skips_capture_when_foreground_directly_matches(
 async def test_unmanaged_dispatches_the_capture_through_to_thread(client, fake_tmux, monkeypatch):
     """The one `ps` for an unresolved pane must run off the event loop."""
     to_thread_calls = []
-    real_to_thread = asyncio.to_thread
+    real_to_thread = methods.workers.to_thread
 
-    async def spy_to_thread(func, /, *args, **kwargs):
-        to_thread_calls.append(func)
-        return await real_to_thread(func, *args, **kwargs)
+    async def spy_to_thread(fn, /, *args, **kwargs):
+        to_thread_calls.append(fn)
+        return await real_to_thread(fn, *args, **kwargs)
 
-    monkeypatch.setattr(methods.asyncio, "to_thread", spy_to_thread)
+    monkeypatch.setattr(methods.workers, "to_thread", spy_to_thread)
     monkeypatch.setattr(
         methods.proc.ProcessSnapshot,
         "capture",
@@ -1333,11 +1374,13 @@ async def test_unmanaged_does_exactly_one_ps_regardless_of_pane_count(
 
     monkeypatch.setattr(subprocess_mod, "check_output", fake_check_output)
 
-    async def sync_to_thread(func, /, *args, **kwargs):
+    async def sync_to_thread(fn, /, *args, **kwargs):
         # Run synchronously — the fake check_output is not I/O.
-        return func(*args, **kwargs)
+        # Strip the `label` kwarg that workers.to_thread takes.
+        kwargs.pop("label", None)
+        return fn(*args, **kwargs)
 
-    monkeypatch.setattr(methods.asyncio, "to_thread", sync_to_thread)
+    monkeypatch.setattr(methods.workers, "to_thread", sync_to_thread)
 
     rows = await client.call("participants.unmanaged")
 
@@ -1788,8 +1831,8 @@ async def test_cleanup_reservation_is_idempotent(registry, monkeypatch):
     participant = reservation.participant
 
     # Call cleanup twice — both must succeed.
-    spawner.cleanup_reservation(participant)
-    spawner.cleanup_reservation(participant)
+    await spawner.cleanup_reservation(participant)
+    await spawner.cleanup_reservation(participant)
 
     p = registry.get(participant.id)
     assert p is not None
@@ -2063,3 +2106,35 @@ async def test_list_no_internal_fields_exposed(client):
         assert "transcript_domain" not in row
         assert "transcript_location" not in row
         assert "resume_floor" not in row
+
+
+async def test_workers_shutdown_drains_before_returning(daemon):
+    """workers.shutdown() must drain in-flight workers before returning,
+    so a replacement daemon cannot acquire the lock while the old daemon's
+    git operations are still running."""
+    from theater.daemon import workers
+
+    workers._executor = None
+    executor = workers._get_executor()
+    started = asyncio.Event()
+    finished = False
+
+    def slow_task():
+        nonlocal finished
+        started.set()
+        import time
+
+        time.sleep(0.3)
+        finished = True
+        return "done"
+
+    loop = asyncio.get_running_loop()
+    fut = loop.run_in_executor(executor, slow_task)
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+
+    await workers.shutdown()
+    assert finished, "shutdown must drain in-flight workers before returning"
+    assert workers._executor is None
+
+    result = await fut
+    assert result == "done"

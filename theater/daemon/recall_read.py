@@ -31,6 +31,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 
+from theater.daemon import workers
 from theater.daemon.observer import history_correlation_is_ambiguous
 from theater.daemon.schema import jobs, touch
 from theater.harness import HARNESSES, normalize
@@ -84,7 +85,7 @@ async def read_segment(
     really happened deserves everything the database still remembers.
     """
     if segment_id.startswith("gap:"):
-        return _read_gap(segment_id, cwd=cwd)
+        return await workers.to_thread(_read_gap, segment_id, cwd=cwd, label="recall_read.gap")
     return await _read_job(segment_id, store=store, registry=registry, observer=observer)
 
 

@@ -412,7 +412,7 @@ async def test_item7_creator_failure_marks_checkpoint_failed(client, daemon, mon
 # ---- Item 8: worktree safety — fail clearly ---------------------------------
 
 
-def test_item8_worktree_required_but_missing_returns_none_cwd():
+async def test_item8_worktree_required_but_missing_returns_none_cwd():
     """Item 8: worktree required, path gone, no provenance → (None, False, warnings)."""
     from theater.daemon.recovery import _resolve_worktree_cwd
 
@@ -423,7 +423,7 @@ def test_item8_worktree_required_but_missing_returns_none_cwd():
         "cwd_resolved": "/nonexistent/path/worktree",
         "cwd_requested": "/nonexistent/path",
     }
-    cwd, wt_param, wt_warnings = _resolve_worktree_cwd(prov, {}, new_participant_id="p")
+    cwd, wt_param, wt_warnings = await _resolve_worktree_cwd(prov, {}, new_participant_id="p")
     assert cwd is None, "Must return None cwd when worktree required but unrestorable"
     assert wt_param is False
     assert any("missing" in w or "provenance" in w for w in wt_warnings), (
@@ -448,7 +448,7 @@ def test_item8_worktree_uses_main_repo_root_not_show_toplevel(daemon):
     assert "worktree_mod.main_repo_root" in src, "must call via worktree_mod"
 
 
-def test_item8_worktree_no_spurious_param_on_reuse(tmp_path):
+async def test_item8_worktree_no_spurious_param_on_reuse(tmp_path):
     """Item 8: When reusing an existing verified worktree path, worktree_param=False."""
     from theater.daemon.recovery import _resolve_worktree_cwd
 
@@ -463,7 +463,7 @@ def test_item8_worktree_no_spurious_param_on_reuse(tmp_path):
         "worktree_repo_root": str(tmp_path),
         "cwd_resolved": str(wt_path),
     }
-    cwd, wt_param, _warnings = _resolve_worktree_cwd(prov, {}, new_participant_id="p")
+    cwd, wt_param, _warnings = await _resolve_worktree_cwd(prov, {}, new_participant_id="p")
     # If git rev-parse failed (not a real repo), it falls through to recreation.
     # Either way, param should not be True if path is being reused (cwd=path, param=False).
     # In a real worktree, cwd=path and param=False. In this tmp case, git fails →

@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 from sqlalchemy import func, select
 
 from theater import paths, proc, protocol
-from theater.daemon import lineage, worktree
+from theater.daemon import lineage, workers, worktree
 from theater.daemon.harness_detect import (
     PaneHarnessVerdict,
     compare_detected_harness,
@@ -336,10 +336,15 @@ def _caller_participant(daemon, params: dict, *, method_name: str):
     return caller
 
 
-def _repo_scope_for_store(caller) -> str:
+async def _repo_scope_for_store(caller) -> str:
     if not caller.cwd:
         raise BadRequest("store cannot be used outside a git repository: caller has no cwd")
-    repo_root = worktree.main_repo_root(caller.cwd, child_id=caller.id)
+    repo_root = await workers.to_thread(
+        worktree.main_repo_root,
+        caller.cwd,
+        child_id=caller.id,
+        label="store.repo_root",
+    )
     if repo_root is None:
         raise BadRequest(
             "store cannot be used outside a git repository: caller cwd is not in a git repo"
@@ -676,7 +681,7 @@ async def _kill(daemon, params: dict) -> dict:
         # only after the pane is confirmed dead.
         for job in daemon.store.running_jobs_for_target(pid):
             daemon.jobs.finish(job.handle, state=JobState.KILLED, error_code="killed")
-        daemon.spawner.teardown(participant)
+        await daemon.spawner.teardown(participant)
     finally:
         daemon._explicit_kills.discard(pid)
 
@@ -726,7 +731,11 @@ async def _unmanaged(daemon, params: dict) -> list[dict]:
     # — one `ps`, off the event loop — when some candidate needs it, and reuse
     # that single snapshot for every one of them rather than one `ps` each.
     needs_walk = any(match_binary(p.current_command, HARNESSES) is None for p in candidates)
-    snapshot = await asyncio.to_thread(proc.ProcessSnapshot.capture) if needs_walk else None
+    snapshot = (
+        await workers.to_thread(proc.ProcessSnapshot.capture, label="unmanaged.capture")
+        if needs_walk
+        else None
+    )
 
     out: list[dict] = []
     for p in candidates:
@@ -808,27 +817,9 @@ async def _spawn(daemon, params: dict) -> dict:
             # `send`. Done *after* launch succeeds so a launch failure still
             # leaves the job CRASHED, not DONE.
             daemon.jobs.finish(handle, state=JobState.DONE, result="")
-    except Exception:
-        # One cleanup boundary: after reserve succeeds, any failure — in
-        # jobs.create (including a bus_append that raised after the job
-        # row persisted), in launch, or in the promptless finish — must
-        # leave consistent state.
-        #
-        # If launch has NOT succeeded, the participant and worktree must
-        # be cleaned up. This covers jobs.create failures where the job
-        # row may or may not have persisted (create_job at jobs.py:207
-        # precedes bus_append at :211, so a bus_append failure leaves a
-        # persisted RUNNING job that create() never returned).
-        #
-        # If launch HAS succeeded, the pane is live and working — do not
-        # tear it down over a promptless finish failure. Only crash the
-        # job.
-        #
-        # In both cases, check jobs.get(handle) and crash any persisted
-        # RUNNING job. This catches the bus_append-after-persist case
-        # where create() raised but the row exists.
+    except BaseException:
         if not launched:
-            daemon.spawner.cleanup_reservation(reservation.participant)
+            await daemon.spawner.cleanup_reservation(reservation.participant)
         job = daemon.jobs.get(handle)
         if job is not None and job.state == JobState.RUNNING:
             daemon.jobs.finish(
@@ -1031,7 +1022,7 @@ async def _store_put(daemon, params: dict) -> dict:
     value = _string_param(params, "value", method_name="store.put", allow_empty=True)
     daemon.store.put_kv(
         tree_root_id=lineage.root_of(daemon.store, caller.id),
-        repo_root=_repo_scope_for_store(caller),
+        repo_root=await _repo_scope_for_store(caller),
         namespace=namespace,
         key=key,
         value=value,
@@ -1047,7 +1038,7 @@ async def _store_get(daemon, params: dict) -> dict:
     key = _string_param(params, "key", method_name="store.get")
     value = daemon.store.get_kv(
         tree_root_id=lineage.root_of(daemon.store, caller.id),
-        repo_root=_repo_scope_for_store(caller),
+        repo_root=await _repo_scope_for_store(caller),
         namespace=namespace,
         key=key,
     )
@@ -2330,6 +2321,7 @@ async def _recall(daemon, params: dict) -> dict:
     calls per query regardless of path count — see
     ``theater.daemon.recall`` for the budget.
     """
+    from theater.daemon.recall import _dirty_set, _git_root
     from theater.daemon.recall import recall as _do_recall
 
     paths = _require(params, "paths")
@@ -2337,11 +2329,18 @@ async def _recall(daemon, params: dict) -> dict:
         raise BadRequest("paths must be a non-empty list")
     depth = int(params.get("depth", 5))
     caller_cwd = params.get("caller_cwd")
+    # Pre-fetch the two git calls off the event loop, then pass them in
+    # so the sync body of recall() forks nothing.
+    effective_cwd = caller_cwd or str(Path.cwd())
+    precomputed_root = await workers.to_thread(_git_root, effective_cwd, label="recall.git_root")
+    precomputed_dirty = await workers.to_thread(_dirty_set, effective_cwd, label="recall.dirty_set")
     result = _do_recall(
         daemon.store,
         paths=paths,
         depth=depth,
         caller_cwd=caller_cwd,
+        precomputed_root=precomputed_root,
+        precomputed_dirty=precomputed_dirty,
     )
     _attach_parent_names(daemon, result)
     return result

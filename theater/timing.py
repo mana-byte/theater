@@ -15,6 +15,7 @@ DEFAULT_SLOW_MS = 250.0
 TMUX_MS = 100.0
 GIT_MS = 200.0
 PROC_MS = 50.0
+WORKERS_MS = 500.0
 
 #: Past this, a readiness lag is not a spawn measurement: every participant is
 #: re-watched when the daemon restarts, and `created_at` can be hours old.

@@ -42,13 +42,44 @@ from theater.models import BadRequest
 
 logger = logging.getLogger("theater.worktree")
 
+#: Return codes synthesized by ``_git()`` that are NOT a genuine "ref
+#: does not exist".  Callers using ``returncode != 0`` to mean "already
+#: gone" must exclude these — a timeout, missing binary, or git fatal
+#: error does not prove the branch was deleted.  git rev-parse --verify
+#: returns 128 for both missing refs AND fatal errors, so 128 is
+#: indeterminate (not "gone").
+GIT_TIMEOUT_RC = 124
+GIT_MISSING_RC = 127
+GIT_FATAL_RC = 128
+_INDETERMINATE_RCS = frozenset({GIT_TIMEOUT_RC, GIT_MISSING_RC, GIT_FATAL_RC})
+
 
 def _git(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
-    """Run and time a git command."""
+    """Run and time a git command. Never raises ``TimeoutExpired`` or
+    ``OSError`` — synthesizes a failed ``CompletedProcess`` (rc 124 for
+    timeout, 127 for missing binary) so callers' ``returncode != 0``
+    branching handles it without try/except. Pins ``encoding="utf-8"`` /
+    ``errors="backslashreplace"`` to match ``tmux/client.py``."""
+    kwargs.setdefault("encoding", "utf-8")
+    kwargs.setdefault("errors", "backslashreplace")
     with timing.span(
         f"git.{'-'.join(argv[1:3])}", slow_ms=timing.GIT_MS, cwd=kwargs.get("cwd")
     ) as sp:
-        proc = subprocess.run(argv, **kwargs)  # noqa: PLW1510  (callers pass check=)
+        try:
+            proc = subprocess.run(argv, **kwargs)  # noqa: PLW1510  (callers pass check=)
+        except subprocess.TimeoutExpired as exc:
+            sp["rc"] = 124
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=124,
+                stdout="",
+                stderr=f"git timed out after {exc.timeout}s",
+            )
+        except OSError as exc:
+            sp["rc"] = 127
+            return subprocess.CompletedProcess(
+                args=argv, returncode=127, stdout="", stderr=str(exc)
+            )
         sp["rc"] = proc.returncode
         return proc
 
@@ -395,8 +426,6 @@ def remove_worktree(
 
         if not branch_removed:
             stderr = br_result.stderr.strip()
-            # git branch -D returns nonzero if the branch doesn't exist.
-            # If rev-parse can't find it, it's already gone — success.
             verify = _git(
                 ["git", "rev-parse", "--verify", branch],
                 cwd=real_root,
@@ -405,9 +434,7 @@ def remove_worktree(
                 text=True,
                 timeout=5,
             )
-            if verify.returncode != 0:
-                branch_removed = True
-            else:
+            if verify.returncode == 0:
                 result.errors.append(f"branch delete: {stderr}")
                 logger.warning(
                     "git branch -D failed for %s (branch %s): %s",
@@ -415,6 +442,18 @@ def remove_worktree(
                     branch,
                     stderr,
                 )
+            elif verify.returncode in _INDETERMINATE_RCS:
+                result.errors.append(
+                    f"branch delete: {stderr} (verify indeterminate, rc={verify.returncode})"
+                )
+                logger.warning(
+                    "git branch -D for %s (branch %s): verify indeterminate (rc=%d)",
+                    child_id,
+                    branch,
+                    verify.returncode,
+                )
+            else:
+                branch_removed = True
 
     result = WorktreeRemoveResult(
         ok=worktree_removed and (branch_removed or not delete_branch),
@@ -657,9 +696,7 @@ def remove_named_worktree(
                 text=True,
                 timeout=5,
             )
-            if verify.returncode != 0:
-                branch_removed = True
-            else:
+            if verify.returncode == 0:
                 result.errors.append(f"branch delete: {stderr}")
                 logger.warning(
                     "git branch -D failed for named worktree %s (branch %s): %s",
@@ -667,6 +704,19 @@ def remove_named_worktree(
                     branch,
                     stderr,
                 )
+            elif verify.returncode in _INDETERMINATE_RCS:
+                result.errors.append(
+                    f"branch delete: {stderr} (verify indeterminate, rc={verify.returncode})"
+                )
+                logger.warning(
+                    "git branch -D for named worktree %s (branch %s): delete failed "
+                    "and verify was indeterminate (rc=%d); not reporting as removed",
+                    name,
+                    branch,
+                    verify.returncode,
+                )
+            else:
+                branch_removed = True
 
     result = WorktreeRemoveResult(
         ok=worktree_removed and (branch_removed or not delete_branch),

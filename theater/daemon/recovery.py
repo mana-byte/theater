@@ -122,10 +122,11 @@ import asyncio
 import contextlib
 import json
 import logging
+import subprocess
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from theater.daemon import lineage
+from theater.daemon import lineage, workers
 from theater.daemon.rails import (
     check_budget,
     check_depth,
@@ -1010,7 +1011,26 @@ def _reparent_live(
 # ---- worktree recovery -------------------------------------------------------
 
 
-def _resolve_worktree_cwd(  # noqa: PLR0912, PLR0915
+def _check_branch(cwd: str) -> subprocess.CompletedProcess:
+    """Pure git helper — read the symbolic-ref of a worktree.
+
+    Safe to run in a worker thread (no Store/Registry access).
+    Routes through ``worktree._git`` for consistent encoding pinning
+    and timeout/OSError handling.
+    """
+    from theater.daemon import worktree as worktree_mod
+
+    return worktree_mod._git(
+        ["git", "symbolic-ref", "--short", "HEAD"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+
+
+async def _resolve_worktree_cwd(  # noqa: PLR0912, PLR0915
     prov: dict,
     recorded: dict,
     *,
@@ -1056,16 +1076,19 @@ def _resolve_worktree_cwd(  # noqa: PLR0912, PLR0915
         return None, False, warnings
 
     # Node required a worktree. Try to verify or recreate it.
-    import subprocess
     from pathlib import Path as _Path
 
-    if worktree_recorded_path and _Path(worktree_recorded_path).is_dir():
+    if worktree_recorded_path and _Path(worktree_recorded_path).is_dir():  # noqa: ASYNC240
         # Verify using main_repo_root (canonical), not show-toplevel (linked).
         # Require non-null canonical root AND it must match the recorded canonical root.
         try:
             from theater.daemon import worktree as worktree_mod
 
-            canonical_root = worktree_mod.main_repo_root(worktree_recorded_path)
+            canonical_root = await workers.to_thread(
+                worktree_mod.main_repo_root,
+                worktree_recorded_path,
+                label="resolve.main_repo_root",
+            )
 
             if canonical_root is None:
                 warnings.append(
@@ -1085,13 +1108,10 @@ def _resolve_worktree_cwd(  # noqa: PLR0912, PLR0915
                 # Verify expected branch is checked out.
                 branch_ok = True
                 if worktree_branch:
-                    r = subprocess.run(
-                        ["git", "symbolic-ref", "--short", "HEAD"],
-                        cwd=worktree_recorded_path,
-                        capture_output=True,
-                        text=True,
-                        timeout=5,
-                        check=False,
+                    r = await workers.to_thread(
+                        _check_branch,
+                        worktree_recorded_path,
+                        label="resolve.symbolic_ref",
                     )
                     if r.returncode == 0:
                         current_branch = r.stdout.strip()
@@ -1135,11 +1155,13 @@ def _resolve_worktree_cwd(  # noqa: PLR0912, PLR0915
                             f"named worktree {worktree_name!r} registry/path identity mismatch"
                         )
                     else:
-                        worktree_mod.verify_named_worktree(
+                        await workers.to_thread(
+                            worktree_mod.verify_named_worktree,
                             repo_root=worktree_repo_root,
                             name=worktree_name,
                             expected_path=worktree_recorded_path,
                             expected_branch=worktree_branch,
+                            label="resolve.verify_named",
                         )
                         # Join through the spawner from the canonical root so it
                         # records shared membership and branch ownership.
@@ -1152,7 +1174,7 @@ def _resolve_worktree_cwd(  # noqa: PLR0912, PLR0915
                     expected_path = worktree_mod.worktree_path(
                         worktree_repo_root, new_participant_id
                     )
-                    if Path(expected_path).resolve() != Path(worktree_recorded_path).resolve():
+                    if Path(expected_path).resolve() != Path(worktree_recorded_path).resolve():  # noqa: ASYNC240
                         warnings.append(
                             f"unique worktree path {worktree_recorded_path!r} does not match "
                             f"recorded participant identity {expected_path!r}"
@@ -1437,7 +1459,9 @@ async def restore_tree(  # noqa: PLR0912, PLR0915
             needs_snapshot = True
             break
     proc_snapshot = (
-        await asyncio.to_thread(proc.ProcessSnapshot.capture) if needs_snapshot else None
+        await workers.to_thread(proc.ProcessSnapshot.capture, label="restore.capture")
+        if needs_snapshot
+        else None
     )
 
     id_map: dict[str, str | None] = {}
@@ -2185,7 +2209,7 @@ async def _spawn_node(  # noqa: PLR0912, PLR0915
             return p, "resumed", warnings
 
     # Cold respawn.
-    cwd, worktree_param, wt_warnings = _resolve_worktree_cwd(
+    cwd, worktree_param, wt_warnings = await _resolve_worktree_cwd(
         prov,
         recorded,
         new_participant_id=orig_id,

@@ -30,7 +30,10 @@ from theater.config import Config
 from theater.config import load as load_config
 
 # Importing methods registers all @method handlers as a side effect.
-from theater.daemon import methods  # noqa: F401
+from theater.daemon import (
+    methods,  # noqa: F401
+    workers,
+)
 from theater.daemon.jobs import JobManager, JobState
 from theater.daemon.lock import DaemonLock, file_id
 from theater.daemon.methods import METHODS
@@ -61,7 +64,7 @@ CLOSE_TIMEOUT = 2.0
 #: How long run() gives the whole shutdown before it gives up and releases the
 #: socket and lock regardless. A daemon that cannot finish closing must still
 #: not be allowed to block every future daemon on the machine.
-SHUTDOWN_TIMEOUT = 10.0
+SHUTDOWN_TIMEOUT = 45.0
 
 
 def _check_socket_path(sock) -> None:
@@ -244,7 +247,7 @@ class Daemon:
                 # The pane is gone but the worktree is not. Branch kept —
                 # the child may have finished, and the branch holds whatever
                 # it committed.
-                self.spawner.retire(p, delete_branch=False)
+                await self.spawner.retire(p, delete_branch=False)
                 self.registry.mark_dead(p.id)
 
         for p in self.registry.list(include_dead=True):
@@ -285,17 +288,7 @@ class Daemon:
         self._stopping.set()
 
     async def aclose(self) -> None:
-        """Shut down in the one order that terminates.
-
-        The listener closes first, before connections are cancelled: closing
-        it only stops accepting, so this shuts the door on a new connection
-        arriving between the cancel loop and wait_closed() — which would
-        otherwise make wait_closed() block on a handler nobody cancelled.
-
-        wait_closed() is bounded even so. It is the only step here that waits
-        on work we do not fully control, and no diagnosis it could offer is
-        worth leaving the socket and lock held.
-        """
+        """Shut down in the one order that terminates."""
         self.stop()
         if self._server:
             self._server.close()
@@ -317,6 +310,7 @@ class Daemon:
         if self._conns:
             await asyncio.gather(*self._conns, return_exceptions=True)
             self._conns.clear()
+        await workers.shutdown()
         if self._server:
             try:
                 await asyncio.wait_for(self._server.wait_closed(), CLOSE_TIMEOUT)
@@ -442,7 +436,12 @@ class Daemon:
                 logger.info("participant %s lost its pane %s", p.id, p.tmux_pane)
                 # The child exited; prune its worktree but keep the branch —
                 # it left because it finished, and the branch holds its commits.
-                self.spawner.retire(p, delete_branch=False)
+                # Per-participant isolation: a failure for one participant
+                # must not skip the rest in this tick.
+                try:
+                    await self.spawner.retire(p, delete_branch=False)
+                except Exception:
+                    logger.exception("retire failed for %s; marking dead anyway", p.id)
                 self.registry.mark_dead(p.id)
                 running = self.store.running_jobs_for_target(p.id)
                 for job in running:

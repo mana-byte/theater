@@ -334,7 +334,7 @@ def _spawner():
     return Spawner(registry=None)
 
 
-def test_retire_removes_worktree_and_branch_of_a_killed_child(repo):
+async def test_retire_removes_worktree_and_branch_of_a_killed_child(repo):
     """The kill path, end to end, with the cwd shape production has.
 
     The child's cwd is its worktree — the exact input that made every
@@ -344,10 +344,10 @@ def test_retire_removes_worktree_and_branch_of_a_killed_child(repo):
     wt_path = wt.create_worktree(repo_root=repo, child_id="killme")
     p = _participant("killme", wt_path)
 
-    _spawner().retire(p, delete_branch=True)
+    await _spawner().retire(p, delete_branch=True)
 
     assert not Path(wt_path).exists()
-    verify = subprocess.run(
+    verify = subprocess.run(  # noqa: ASYNC221
         ["git", "rev-parse", "--verify", "theater/killme"],
         cwd=repo,
         capture_output=True,
@@ -355,7 +355,7 @@ def test_retire_removes_worktree_and_branch_of_a_killed_child(repo):
         check=False,
     )
     assert verify.returncode != 0
-    listing = subprocess.run(
+    listing = subprocess.run(  # noqa: ASYNC221
         ["git", "worktree", "list", "--porcelain"],
         cwd=repo,
         capture_output=True,
@@ -365,10 +365,10 @@ def test_retire_removes_worktree_and_branch_of_a_killed_child(repo):
     assert "killme" not in listing.stdout
 
 
-def test_retire_keeps_the_branch_of_a_child_that_exited(repo):
+async def test_retire_keeps_the_branch_of_a_child_that_exited(repo):
     """The reaper path: directory reclaimed, commits preserved."""
     wt_path = wt.create_worktree(repo_root=repo, child_id="exited")
-    subprocess.run(
+    subprocess.run(  # noqa: ASYNC221
         ["git", "commit", "--allow-empty", "-m", "child work"],
         cwd=wt_path,
         check=True,
@@ -376,10 +376,10 @@ def test_retire_keeps_the_branch_of_a_child_that_exited(repo):
     )
     p = _participant("exited", wt_path)
 
-    _spawner().retire(p, delete_branch=False)
+    await _spawner().retire(p, delete_branch=False)
 
     assert not Path(wt_path).exists()
-    verify = subprocess.run(
+    verify = subprocess.run(  # noqa: ASYNC221
         ["git", "rev-parse", "--verify", "theater/exited"],
         cwd=repo,
         capture_output=True,
@@ -389,7 +389,7 @@ def test_retire_keeps_the_branch_of_a_child_that_exited(repo):
     assert verify.returncode == 0
 
 
-def test_retire_ignores_a_participant_without_a_theater_branch(repo):
+async def test_retire_ignores_a_participant_without_a_theater_branch(repo):
     """A child spawned without worktree=True shares the parent's checkout.
 
     Its cwd is the repo itself and its branch is whatever the user is on.
@@ -400,9 +400,9 @@ def test_retire_ignores_a_participant_without_a_theater_branch(repo):
 
     p = Participant(id="plain", harness="vibe", tier=Tier.SPAWNED, cwd=repo, branch="main")
 
-    _spawner().retire(p, delete_branch=True)
+    await _spawner().retire(p, delete_branch=True)
 
-    verify = subprocess.run(
+    verify = subprocess.run(  # noqa: ASYNC221
         ["git", "rev-parse", "--verify", "main"],
         cwd=repo,
         capture_output=True,
@@ -553,7 +553,7 @@ def _named_participant(child_id: str, cwd: str, name: str):
     )
 
 
-def test_named_worktree_spawner_creates_and_joins(repo, store):
+async def test_named_worktree_spawner_creates_and_joins(repo, store):
     """Two spawns with the same name share the same directory and branch."""
     from theater.daemon.store import Store
 
@@ -566,7 +566,9 @@ def test_named_worktree_spawner_creates_and_joins(repo, store):
         registry = type("R", (), {"store": s})()
         spawner = Spawner(registry=registry)
 
-        path1, branch1 = spawner._spawn_named_worktree(root=repo, name="shared", base_branch=None)
+        path1, branch1 = await spawner._spawn_named_worktree(
+            root=repo, name="shared", base_branch=None
+        )
         # The named_worktrees row should exist
         row = s.get_named_worktree(repo_root=repo, name="shared")
         assert row is not None
@@ -574,7 +576,9 @@ def test_named_worktree_spawner_creates_and_joins(repo, store):
         assert row["branch"] == branch1
 
         # Second spawn with same name joins
-        path2, branch2 = spawner._spawn_named_worktree(root=repo, name="shared", base_branch=None)
+        path2, branch2 = await spawner._spawn_named_worktree(
+            root=repo, name="shared", base_branch=None
+        )
         assert path2 == path1
         assert branch2 == branch1
 
@@ -583,7 +587,7 @@ def test_named_worktree_spawner_creates_and_joins(repo, store):
         s.close()
 
 
-def test_named_worktree_spawner_refuses_conflicting_base_branch(repo, store):
+async def test_named_worktree_spawner_refuses_conflicting_base_branch(repo, store):
     """A later join with a conflicting base_branch is refused."""
     from theater.daemon.store import Store
 
@@ -594,14 +598,14 @@ def test_named_worktree_spawner_refuses_conflicting_base_branch(repo, store):
         registry = type("R", (), {"store": s})()
         spawner = Spawner(registry=registry)
 
-        spawner._spawn_named_worktree(root=repo, name="conflict", base_branch="main")
+        await spawner._spawn_named_worktree(root=repo, name="conflict", base_branch="main")
         with pytest.raises(BadRequest, match="base_branch"):
-            spawner._spawn_named_worktree(root=repo, name="conflict", base_branch="feature")
+            await spawner._spawn_named_worktree(root=repo, name="conflict", base_branch="feature")
     finally:
         s.close()
 
 
-def test_named_worktree_retire_does_not_remove_when_others_live(repo, store):
+async def test_named_worktree_retire_does_not_remove_when_others_live(repo, store):
     """Retiring one participant in a shared named worktree must not remove
     the directory or branch while another live participant is still using it."""
     from theater.daemon.store import Store
@@ -613,7 +617,7 @@ def test_named_worktree_retire_does_not_remove_when_others_live(repo, store):
         registry = type("R", (), {"store": s})()
         spawner = Spawner(registry=registry)
 
-        path, _branch = spawner._spawn_named_worktree(
+        path, _branch = await spawner._spawn_named_worktree(
             root=repo, name="shared-retire", base_branch=None
         )
 
@@ -623,11 +627,11 @@ def test_named_worktree_retire_does_not_remove_when_others_live(repo, store):
         s.upsert_participant(p2)
 
         # Retire p1 — p2 is still live in the same cwd
-        spawner.retire(p1, delete_branch=True)
+        await spawner.retire(p1, delete_branch=True)
 
         # The directory and branch must still exist
         assert Path(path).exists()
-        verify = subprocess.run(
+        verify = subprocess.run(  # noqa: ASYNC221
             ["git", "rev-parse", "--verify", "theater/named/shared-retire"],
             cwd=repo,
             capture_output=True,
@@ -643,7 +647,7 @@ def test_named_worktree_retire_does_not_remove_when_others_live(repo, store):
         s.close()
 
 
-def test_named_worktree_retire_removes_when_last_participant(repo, store):
+async def test_named_worktree_retire_removes_when_last_participant(repo, store):
     """Retiring the last live participant in a named worktree removes the
     directory but always retains the shared branch."""
     from theater.daemon.store import Store
@@ -655,15 +659,17 @@ def test_named_worktree_retire_removes_when_last_participant(repo, store):
         registry = type("R", (), {"store": s})()
         spawner = Spawner(registry=registry)
 
-        path, _branch = spawner._spawn_named_worktree(root=repo, name="last-one", base_branch=None)
+        path, _branch = await spawner._spawn_named_worktree(
+            root=repo, name="last-one", base_branch=None
+        )
 
         p1 = _named_participant("only-child", path, "last-one")
         s.upsert_participant(p1)
 
-        spawner.retire(p1, delete_branch=True)
+        await spawner.retire(p1, delete_branch=True)
 
         assert not Path(path).exists()
-        verify = subprocess.run(
+        verify = subprocess.run(  # noqa: ASYNC221
             ["git", "rev-parse", "--verify", "theater/named/last-one"],
             cwd=repo,
             capture_output=True,
@@ -679,7 +685,7 @@ def test_named_worktree_retire_removes_when_last_participant(repo, store):
         s.close()
 
 
-def test_named_worktree_persists_across_restart(repo, store):
+async def test_named_worktree_persists_across_restart(repo, store):
     """A daemon restart recognises a named worktree from the table."""
     from theater.daemon.store import Store
 
@@ -690,7 +696,9 @@ def test_named_worktree_persists_across_restart(repo, store):
         registry = type("R", (), {"store": s})()
         spawner = Spawner(registry=registry)
 
-        path, branch = spawner._spawn_named_worktree(root=repo, name="survivor", base_branch=None)
+        path, branch = await spawner._spawn_named_worktree(
+            root=repo, name="survivor", base_branch=None
+        )
     finally:
         s.close()
 
@@ -701,7 +709,7 @@ def test_named_worktree_persists_across_restart(repo, store):
         spawner2 = Spawner(registry=registry2)
 
         # Join should find the existing named worktree
-        path2, branch2 = spawner2._spawn_named_worktree(
+        path2, branch2 = await spawner2._spawn_named_worktree(
             root=repo, name="survivor", base_branch=None
         )
         assert path2 == path
@@ -713,7 +721,7 @@ def test_named_worktree_persists_across_restart(repo, store):
 # ---- Fix 1: canonical scope from inside a linked worktree ---------------
 
 
-def test_named_worktree_canonical_scope_from_linked_worktree(repo, store):
+async def test_named_worktree_canonical_scope_from_linked_worktree(repo, store):
     """A named worktree created from inside another linked worktree must
     key and locate itself under the canonical main repository."""
     from theater.daemon.store import Store
@@ -729,7 +737,7 @@ def test_named_worktree_canonical_scope_from_linked_worktree(repo, store):
         spawner = Spawner(registry=registry)
 
         # Spawn a named worktree from inside the linked worktree
-        path, branch = spawner._spawn_named_worktree(
+        path, branch = await spawner._spawn_named_worktree(
             root=inner_wt, name="from-linked", base_branch=None
         )
 
@@ -744,7 +752,7 @@ def test_named_worktree_canonical_scope_from_linked_worktree(repo, store):
         assert row["path"] == path
 
         # A second join from inside the linked worktree should find the same one
-        path2, branch2 = spawner._spawn_named_worktree(
+        path2, branch2 = await spawner._spawn_named_worktree(
             root=inner_wt, name="from-linked", base_branch=None
         )
         assert path2 == path
@@ -756,7 +764,7 @@ def test_named_worktree_canonical_scope_from_linked_worktree(repo, store):
 # ---- Fix 2: base_branch rejection on join -------------------------------
 
 
-def test_named_worktree_base_branch_none_rejects_explicit_on_join(repo, store):
+async def test_named_worktree_base_branch_none_rejects_explicit_on_join(repo, store):
     """If persisted base_branch is None, an explicit base_branch on join is rejected."""
     from theater.daemon.store import Store
 
@@ -768,16 +776,16 @@ def test_named_worktree_base_branch_none_rejects_explicit_on_join(repo, store):
         spawner = Spawner(registry=registry)
 
         # Create with base_branch=None
-        spawner._spawn_named_worktree(root=repo, name="bb-none", base_branch=None)
+        await spawner._spawn_named_worktree(root=repo, name="bb-none", base_branch=None)
 
         # Join with an explicit base_branch should be rejected
         with pytest.raises(BadRequest, match="base_branch"):
-            spawner._spawn_named_worktree(root=repo, name="bb-none", base_branch="main")
+            await spawner._spawn_named_worktree(root=repo, name="bb-none", base_branch="main")
     finally:
         s.close()
 
 
-def test_named_worktree_base_branch_exact_match_allows_join(repo, store):
+async def test_named_worktree_base_branch_exact_match_allows_join(repo, store):
     """An explicit base_branch that exactly equals the persisted value allows join."""
     from theater.daemon.store import Store
 
@@ -789,10 +797,10 @@ def test_named_worktree_base_branch_exact_match_allows_join(repo, store):
         spawner = Spawner(registry=registry)
 
         # Create with base_branch="main"
-        spawner._spawn_named_worktree(root=repo, name="bb-main", base_branch="main")
+        await spawner._spawn_named_worktree(root=repo, name="bb-main", base_branch="main")
 
         # Join with the same base_branch should succeed
-        path2, branch2 = spawner._spawn_named_worktree(
+        path2, branch2 = await spawner._spawn_named_worktree(
             root=repo, name="bb-main", base_branch="main"
         )
         assert path2 is not None
@@ -804,7 +812,7 @@ def test_named_worktree_base_branch_exact_match_allows_join(repo, store):
 # ---- Fix 3: stale registry rows ----------------------------------------
 
 
-def test_named_worktree_join_refused_missing_path(repo, store):
+async def test_named_worktree_join_refused_missing_path(repo, store):
     """Joining a named worktree whose directory was deleted is refused."""
     from theater.daemon.store import Store
 
@@ -815,7 +823,7 @@ def test_named_worktree_join_refused_missing_path(repo, store):
         registry = type("R", (), {"store": s})()
         spawner = Spawner(registry=registry)
 
-        path, _branch = spawner._spawn_named_worktree(
+        path, _branch = await spawner._spawn_named_worktree(
             root=repo, name="stale-path", base_branch=None
         )
 
@@ -825,12 +833,12 @@ def test_named_worktree_join_refused_missing_path(repo, store):
         shutil.rmtree(path)
 
         with pytest.raises(BadRequest, match="does not exist"):
-            spawner._spawn_named_worktree(root=repo, name="stale-path", base_branch=None)
+            await spawner._spawn_named_worktree(root=repo, name="stale-path", base_branch=None)
     finally:
         s.close()
 
 
-def test_named_worktree_join_refused_wrong_branch(repo, store):
+async def test_named_worktree_join_refused_wrong_branch(repo, store):
     """Joining a named worktree where the checked-out branch was switched is refused."""
     from theater.daemon.store import Store
 
@@ -841,10 +849,12 @@ def test_named_worktree_join_refused_wrong_branch(repo, store):
         registry = type("R", (), {"store": s})()
         spawner = Spawner(registry=registry)
 
-        path, _branch = spawner._spawn_named_worktree(root=repo, name="hijacked", base_branch=None)
+        path, _branch = await spawner._spawn_named_worktree(
+            root=repo, name="hijacked", base_branch=None
+        )
 
         # Switch the checked-out branch in the worktree
-        subprocess.run(
+        subprocess.run(  # noqa: ASYNC221
             ["git", "checkout", "-b", "some-other-branch"],
             cwd=path,
             check=True,
@@ -852,12 +862,12 @@ def test_named_worktree_join_refused_wrong_branch(repo, store):
         )
 
         with pytest.raises(BadRequest, match="checked out"):
-            spawner._spawn_named_worktree(root=repo, name="hijacked", base_branch=None)
+            await spawner._spawn_named_worktree(root=repo, name="hijacked", base_branch=None)
     finally:
         s.close()
 
 
-def test_named_worktree_join_refused_unexpected_persisted_path(repo, store):
+async def test_named_worktree_join_refused_unexpected_persisted_path(repo, store):
     from theater.daemon.store import Store
 
     db_path = Path(repo) / ".theater" / "test.db"
@@ -867,8 +877,8 @@ def test_named_worktree_join_refused_unexpected_persisted_path(repo, store):
         registry = type("R", (), {"store": s})()
         spawner = Spawner(registry=registry)
 
-        spawner._spawn_named_worktree(root=repo, name="expected", base_branch=None)
-        other_path, other_branch = spawner._spawn_named_worktree(
+        await spawner._spawn_named_worktree(root=repo, name="expected", base_branch=None)
+        other_path, other_branch = await spawner._spawn_named_worktree(
             root=repo, name="other", base_branch=None
         )
         s.upsert_named_worktree(
@@ -880,12 +890,12 @@ def test_named_worktree_join_refused_unexpected_persisted_path(repo, store):
         )
 
         with pytest.raises(BadRequest, match="expected Theater-managed path"):
-            spawner._spawn_named_worktree(root=repo, name="expected", base_branch=None)
+            await spawner._spawn_named_worktree(root=repo, name="expected", base_branch=None)
     finally:
         s.close()
 
 
-def test_named_worktree_join_refused_unexpected_persisted_branch(repo, store):
+async def test_named_worktree_join_refused_unexpected_persisted_branch(repo, store):
     from theater.daemon.store import Store
 
     db_path = Path(repo) / ".theater" / "test.db"
@@ -895,7 +905,7 @@ def test_named_worktree_join_refused_unexpected_persisted_branch(repo, store):
         registry = type("R", (), {"store": s})()
         spawner = Spawner(registry=registry)
 
-        path, _branch = spawner._spawn_named_worktree(
+        path, _branch = await spawner._spawn_named_worktree(
             root=repo, name="expected-branch", base_branch=None
         )
         s.upsert_named_worktree(
@@ -907,7 +917,7 @@ def test_named_worktree_join_refused_unexpected_persisted_branch(repo, store):
         )
 
         with pytest.raises(BadRequest, match="expected Theater-managed branch"):
-            spawner._spawn_named_worktree(root=repo, name="expected-branch", base_branch=None)
+            await spawner._spawn_named_worktree(root=repo, name="expected-branch", base_branch=None)
     finally:
         s.close()
 
@@ -915,7 +925,7 @@ def test_named_worktree_join_refused_unexpected_persisted_branch(repo, store):
 # ---- Fix 4: named branch survives kill ---------------------------------
 
 
-def test_named_worktree_branch_survives_kill(repo, store):
+async def test_named_worktree_branch_survives_kill(repo, store):
     """A named shared branch must never be auto-deleted on kill.
 
     Participant A finishes, B is the last live member and is killed.
@@ -930,7 +940,7 @@ def test_named_worktree_branch_survives_kill(repo, store):
         registry = type("R", (), {"store": s})()
         spawner = Spawner(registry=registry)
 
-        path, _branch = spawner._spawn_named_worktree(
+        path, _branch = await spawner._spawn_named_worktree(
             root=repo, name="survive-kill", base_branch=None
         )
 
@@ -941,21 +951,21 @@ def test_named_worktree_branch_survives_kill(repo, store):
 
         # A finishes first — retire and mark dead (full teardown for a
         # self-exit uses delete_branch=False). B is still live.
-        spawner.retire(p_a, delete_branch=False)
+        await spawner.retire(p_a, delete_branch=False)
         s.set_status(p_a.id, "dead")
 
         # Directory still exists (B is live)
         assert Path(path).exists()
 
         # B is killed — last live member, delete_branch=True
-        spawner.retire(p_b, delete_branch=True)
+        await spawner.retire(p_b, delete_branch=True)
         s.set_status(p_b.id, "dead")
 
         # Directory removed
         assert not Path(path).exists()
 
         # Branch must survive — this is the core of Fix 4
-        verify = subprocess.run(
+        verify = subprocess.run(  # noqa: ASYNC221
             ["git", "rev-parse", "--verify", "theater/named/survive-kill"],
             cwd=repo,
             capture_output=True,
@@ -971,7 +981,7 @@ def test_named_worktree_branch_survives_kill(repo, store):
         s.close()
 
 
-def test_named_worktree_name_not_recreatable_after_teardown(repo, store):
+async def test_named_worktree_name_not_recreatable_after_teardown(repo, store):
     """After last teardown, the branch remains, so the name cannot be recreated."""
     from theater.daemon.store import Store
 
@@ -982,20 +992,20 @@ def test_named_worktree_name_not_recreatable_after_teardown(repo, store):
         registry = type("R", (), {"store": s})()
         spawner = Spawner(registry=registry)
 
-        spawner._spawn_named_worktree(root=repo, name="retained", base_branch=None)
+        await spawner._spawn_named_worktree(root=repo, name="retained", base_branch=None)
         p = _named_participant("only", wt.named_worktree_path(repo, "retained"), "retained")
         s.upsert_participant(p)
-        spawner.retire(p, delete_branch=True)
+        await spawner.retire(p, delete_branch=True)
 
         # The row is gone, but the branch exists — creating again should fail
         # because create_named_worktree checks if the branch already exists
         with pytest.raises(BadRequest, match="already exists"):
-            spawner._spawn_named_worktree(root=repo, name="retained", base_branch=None)
+            await spawner._spawn_named_worktree(root=repo, name="retained", base_branch=None)
     finally:
         s.close()
 
 
-def test_named_worktree_retire_recovers_when_directory_already_missing(repo, store):
+async def test_named_worktree_retire_recovers_when_directory_already_missing(repo, store):
     from theater.daemon.store import Store
 
     db_path = Path(repo) / ".theater" / "test.db"
@@ -1005,7 +1015,7 @@ def test_named_worktree_retire_recovers_when_directory_already_missing(repo, sto
         registry = type("R", (), {"store": s})()
         spawner = Spawner(registry=registry)
 
-        path, _branch = spawner._spawn_named_worktree(
+        path, _branch = await spawner._spawn_named_worktree(
             root=repo, name="missing-at-retire", base_branch=None
         )
         participant = _named_participant("only", path, "missing-at-retire")
@@ -1014,10 +1024,10 @@ def test_named_worktree_retire_recovers_when_directory_already_missing(repo, sto
         import shutil
 
         shutil.rmtree(path)
-        spawner.retire(participant, delete_branch=True)
+        await spawner.retire(participant, delete_branch=True)
 
         assert s.get_named_worktree(repo_root=repo, name="missing-at-retire") is None
-        verify = subprocess.run(
+        verify = subprocess.run(  # noqa: ASYNC221
             ["git", "rev-parse", "--verify", "theater/named/missing-at-retire"],
             cwd=repo,
             capture_output=True,
@@ -1233,3 +1243,252 @@ async def test_reserve_then_launch_failure_retires_named_worktree(repo, monkeypa
         assert p.status is Status.DEAD
     finally:
         s.close()
+
+
+# ---- _git() timeout and error handling -------------------------------------
+
+
+def test_git_returns_failed_result_on_timeout(monkeypatch):
+    """_git() must not raise TimeoutExpired — it synthesizes a failed
+    CompletedProcess so callers' existing ``returncode != 0`` branching
+    handles the failure.  This is the fix for the incident: a stuck
+    ``git worktree remove`` blocked the event loop and the reaper retried
+    forever because TimeoutExpired propagated past retire().
+    """
+    import theater.daemon.worktree as wt_mod
+
+    def fake_run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout", 10))
+
+    monkeypatch.setattr(wt_mod.subprocess, "run", fake_run)
+
+    result = wt._git(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd="/tmp",
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 124
+    assert "timed out" in result.stderr
+
+
+def test_git_returns_failed_result_on_oserror(monkeypatch):
+    """_git() must not raise OSError (missing binary) — synthesizes rc=127."""
+    import theater.daemon.worktree as wt_mod
+
+    def fake_run(argv, **kwargs):
+        raise FileNotFoundError("git not found")
+
+    monkeypatch.setattr(wt_mod.subprocess, "run", fake_run)
+
+    result = wt._git(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd="/tmp",
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 127
+    assert "git not found" in result.stderr
+
+
+async def test_remove_worktree_returns_ok_false_on_git_timeout(monkeypatch, repo):
+    """remove_worktree must return WorktreeRemoveResult(ok=False) when git
+    times out, not raise — the docstring says "never raises on git failure"
+    and the reaper depends on this."""
+    import theater.daemon.worktree as wt_mod
+
+    # Let create_worktree succeed (real git), but make remove fail.
+    real_run = subprocess.run
+
+    def fake_run(argv, **kwargs):
+        if "worktree" in argv and "remove" in argv:
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout", 10))
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(wt_mod.subprocess, "run", fake_run)
+
+    wt_path = wt.create_worktree(repo_root=repo, child_id="timeout-test")
+    result = wt.remove_worktree(repo_root=repo, child_id="timeout-test", delete_branch=True)
+
+    assert result.ok is False
+    assert result.worktree_removed is False
+    assert Path(wt_path).exists()
+
+
+# ---- timeout-as-indeterminate: rc 124/127 must NOT be treated as "gone" ----
+
+
+def test_remove_worktree_timeout_does_not_falsely_report_branch_removed(monkeypatch, repo):
+    """When ``git branch -D`` fails and the verify ``rev-parse`` times out
+    (rc=124), ``remove_worktree`` must NOT set ``branch_removed=True`` — a
+    timeout does not prove the branch is gone."""
+    import theater.daemon.worktree as wt_mod
+
+    wt.create_worktree(repo_root=repo, child_id="indeterminate-test")
+    real_run = subprocess.run
+
+    def fake_run(argv, **kwargs):
+        if "branch" in argv and "-D" in argv:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=1, stdout="", stderr="error: branch delete failed"
+            )
+        if "rev-parse" in argv and "--verify" in argv:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=124, stdout="", stderr="git timed out"
+            )
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(wt_mod.subprocess, "run", fake_run)
+
+    result = wt.remove_worktree(repo_root=repo, child_id="indeterminate-test", delete_branch=True)
+
+    assert result.branch_removed is False, "timeout (rc=124) must NOT be treated as 'branch gone'"
+    assert result.ok is False
+    assert any("indeterminate" in e for e in result.errors)
+
+
+def test_remove_worktree_missing_git_does_not_falsely_report_branch_removed(monkeypatch, repo):
+    """When verify rev-parse returns rc=127 (missing git binary),
+    ``remove_worktree`` must NOT set ``branch_removed=True``."""
+    import theater.daemon.worktree as wt_mod
+
+    wt.create_worktree(repo_root=repo, child_id="missing-git-test")
+    real_run = subprocess.run
+
+    def fake_run(argv, **kwargs):
+        if "branch" in argv and "-D" in argv:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=1, stdout="", stderr="error: branch delete failed"
+            )
+        if "rev-parse" in argv and "--verify" in argv:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=127, stdout="", stderr="git: not found"
+            )
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(wt_mod.subprocess, "run", fake_run)
+
+    result = wt.remove_worktree(repo_root=repo, child_id="missing-git-test", delete_branch=True)
+
+    assert result.branch_removed is False, (
+        "missing git (rc=127) must NOT be treated as 'branch gone'"
+    )
+    assert result.ok is False
+
+
+def test_remove_worktree_git_fatal_128_does_not_falsely_report_branch_removed(monkeypatch, repo):
+    """When verify rev-parse returns rc=128 (git's actual code for a
+    missing ref OR a fatal error), ``remove_worktree`` must NOT set
+    ``branch_removed=True`` — 128 is indeterminate, not 'gone'."""
+    import theater.daemon.worktree as wt_mod
+
+    wt.create_worktree(repo_root=repo, child_id="fatal-128-test")
+    real_run = subprocess.run
+
+    def fake_run(argv, **kwargs):
+        if "branch" in argv and "-D" in argv:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=1, stdout="", stderr="error: branch delete failed"
+            )
+        if "rev-parse" in argv and "--verify" in argv:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=128, stdout="", stderr="fatal: not a valid ref"
+            )
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(wt_mod.subprocess, "run", fake_run)
+
+    result = wt.remove_worktree(repo_root=repo, child_id="fatal-128-test", delete_branch=True)
+
+    assert result.branch_removed is False, "git fatal rc=128 must NOT be treated as 'branch gone'"
+    assert result.ok is False
+
+
+def test_remove_worktree_genuine_rc1_still_reports_branch_removed(monkeypatch, repo):
+    """When ``git branch -D`` succeeds (rc=0), ``remove_worktree`` sets
+    ``branch_removed=True`` — that is the normal success path, and the
+    indeterminate fix must not break it."""
+    import theater.daemon.worktree as wt_mod
+
+    wt.create_worktree(repo_root=repo, child_id="genuine-gone-test")
+    real_run = subprocess.run
+
+    def fake_run(argv, **kwargs):
+        if "branch" in argv and "-D" in argv:
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(wt_mod.subprocess, "run", fake_run)
+
+    result = wt.remove_worktree(repo_root=repo, child_id="genuine-gone-test", delete_branch=True)
+
+    assert result.branch_removed is True, "git branch -D rc=0 must report branch_removed=True"
+    assert result.ok is True
+
+
+# ---- named-worktree serialization -------------------------------------------
+
+
+async def test_named_worktree_lock_serializes_concurrent_creates(repo, store):
+    """Two concurrent ``_spawn_named_worktree`` calls for the same name and
+    repo must be serialized — the lock prevents the create/create race where
+    both see no row, both call ``git worktree add``, and one fails."""
+    from theater.daemon.spawner import Spawner
+
+    registry = type("R", (), {"store": store})()
+    spawner = Spawner(registry=registry)
+
+    task1 = asyncio.create_task(
+        spawner._spawn_named_worktree(root=repo, name="shared", base_branch=None)
+    )
+    task2 = asyncio.create_task(
+        spawner._spawn_named_worktree(root=repo, name="shared", base_branch=None)
+    )
+    path1, branch1 = await task1
+    path2, branch2 = await task2
+
+    assert path1 == path2
+    assert branch1 == branch2
+
+    row = store.get_named_worktree(repo_root=repo, name="shared")
+    assert row is not None
+    assert row["path"] == path1
+
+
+async def test_named_worktree_cancel_during_create_reconciles_state(repo, store):
+    """Cancelling during ``create_named_worktree`` must still commit the
+    store row (reconcile) and propagate ``CancelledError``."""
+    import theater.daemon.worktree as wt_mod
+    from theater.daemon.spawner import Spawner
+
+    registry = type("R", (), {"store": store})()
+    spawner = Spawner(registry=registry)
+
+    create_done = asyncio.Event()
+    real_run = subprocess.run
+
+    def fake_run(argv, **kwargs):
+        if "worktree" in argv and "add" in argv:
+            r = real_run(argv, **kwargs)
+            create_done.set()
+            return r
+        return real_run(argv, **kwargs)
+
+    import unittest.mock
+
+    with unittest.mock.patch.object(wt_mod.subprocess, "run", fake_run):
+        task = asyncio.create_task(
+            spawner._spawn_named_worktree(root=repo, name="cancel-test", base_branch=None)
+        )
+        await asyncio.wait_for(create_done.wait(), timeout=5.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    row = store.get_named_worktree(repo_root=repo, name="cancel-test")
+    assert row is not None, "store row must be committed even after cancellation"
+    assert Path(row["path"]).exists()

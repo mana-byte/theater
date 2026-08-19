@@ -1058,3 +1058,31 @@ def test_attach_parent_names_resolves_known_parents(registry):
     assert points[1]["parent_name"] is None
     assert "parent_name" not in points[2]
     assert "parent_name" not in points[3]
+
+
+def test_precomputed_root_none_does_not_recall_git_root(monkeypatch, tmp_path, store):
+    """Passing precomputed_root=None explicitly (the "cwd is not a git repo"
+    case) must NOT make recall() re-call _git_root synchronously — that
+    would reintroduce the blocking pattern this migration eliminated.
+    The _UNSET sentinel distinguishes "not provided" from "provided but None".
+    """
+
+    # If the sentinel is broken (None instead of _UNSET), recall() would
+    # call _git_root again. Patch it to blow up if called.
+    def boom(cwd):
+        raise AssertionError("_git_root should not be called when precomputed_root is provided")
+
+    monkeypatch.setattr("theater.daemon.recall._git_root", boom)
+
+    # precomputed_root=None means "already checked, not a git repo."
+    # recall() should use it directly, not call _git_root again.
+    result = recall(
+        store,
+        paths=["x"],
+        caller_cwd=str(tmp_path),
+        precomputed_root=None,
+        precomputed_dirty=set(),
+    )
+    # paths=["x"] with an empty store → empty timeline, no error
+    assert result["x"]["timeline"] == []
+    assert result["x"]["current"] is None

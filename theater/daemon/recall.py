@@ -28,6 +28,7 @@ from __future__ import annotations
 import datetime
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import or_, select
 
@@ -352,12 +353,22 @@ def _normalise_paths(paths: list[str], git_root: str) -> list[str]:
     return out
 
 
+#: Sentinel for ``precomputed_root`` — distinguishes "not provided" from
+#: "provided but ``None``" (caller's cwd is not a git repo).  Without this,
+#: a legitimately-``None`` precomputed root would make ``recall()`` re-call
+#: ``_git_root`` synchronously on the event loop — exactly the blocking
+#: pattern this migration set out to eliminate.
+_UNSET: Any = object()
+
+
 def recall(
     store: Store,
     *,
     paths: list[str],
     depth: int = DEFAULT_DEPTH,
     caller_cwd: str | None = None,
+    precomputed_root: Any | str | None = _UNSET,
+    precomputed_dirty: set[str] | None = None,
 ) -> dict[str, dict]:
     """Build per-file timelines from the touch table.
 
@@ -376,12 +387,22 @@ def recall(
     ``caller_cwd`` is where the caller's git root is found. It defaults
     to the process cwd, which is correct for the MCP tool (an agent's
     cwd is its repo root) and for direct calls in tests.
+
+    ``precomputed_root`` and ``precomputed_dirty`` let an async caller
+    that has already offloaded the git calls (via ``workers.to_thread``)
+    pass in the results so the sync body forks nothing. When ``None``
+    (the default for ``precomputed_dirty``), the function computes them
+    inline — today's exact behavior, so all existing tests are unchanged.
+    ``precomputed_root`` uses a sentinel default so that a legitimately
+    ``None`` result (cwd is not a git repo) is distinguished from "not
+    provided" — without this, a ``None`` precomputed root would trigger
+    a synchronous ``_git_root`` call back on the event loop.
     """
     if not paths:
         return {}
 
     cwd = caller_cwd or str(Path.cwd())
-    root = _git_root(cwd)
+    root = precomputed_root if precomputed_root is not _UNSET else _git_root(cwd)
     if root is None:
         # Not a git repo: no dirty set, no root to normalise against.
         # Degraded but not broken.
@@ -389,7 +410,7 @@ def recall(
 
     repo_paths = _normalise_paths(paths, root)
 
-    dirty = _dirty_set(cwd)
+    dirty = precomputed_dirty if precomputed_dirty is not None else _dirty_set(cwd)
 
     return _build_timeline(
         store,

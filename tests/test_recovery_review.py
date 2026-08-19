@@ -981,7 +981,7 @@ async def test_item12_spawn_captures_worktree_provenance(fake_tmux, daemon):
     assert "cwd_requested" in prov
     assert "prompt" in prov
     # Clean up.
-    daemon.spawner.cleanup_reservation(child.participant)
+    await daemon.spawner.cleanup_reservation(child.participant)
 
 
 # ---- Item 13: Snapshot validation before claim --------------------------
