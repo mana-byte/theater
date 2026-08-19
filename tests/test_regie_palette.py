@@ -17,7 +17,7 @@ from theater import harness as harness_registry
 from theater.config import Config, TheaterSection
 from theater.harness import HARNESSES
 from theater.regie.app import RegieApp
-from theater.regie.palette import SpawnCommands, ViewCommands, entries
+from theater.regie.palette import SpawnCommand, SpawnHarnessCommands, ViewCommands, entries
 
 
 class FakeApp:
@@ -52,7 +52,7 @@ def installed(monkeypatch):
 @pytest.fixture
 def provider(installed):
     app = FakeApp()
-    return SpawnCommands(FakeScreen(app)), app
+    return SpawnHarnessCommands(FakeScreen(app)), app
 
 
 # ---- entries ------------------------------------------------------------
@@ -182,7 +182,7 @@ async def test_the_daemons_list_is_what_gets_offered(installed):
     rows = [{"name": "codex", "icon": "◇", "binary": "codex", "installed": True}]
     app = FakeApp()
     app.harnesses = rows
-    prov = SpawnCommands(FakeScreen(app))
+    prov = SpawnHarnessCommands(FakeScreen(app))
     hits = [hit async for hit in prov.discover()]
     assert len(hits) == 1
     hits[0].command()
@@ -205,7 +205,7 @@ async def test_an_app_without_settings_still_gets_a_palette(provider):
 async def test_the_configured_favourite_is_discovered_first(installed):
     last = sorted(HARNESSES)[-1]
     settings = Config(theater=TheaterSection(favourite=last))
-    prov = SpawnCommands(FakeScreen(FakeApp(settings)))
+    prov = SpawnHarnessCommands(FakeScreen(FakeApp(settings)))
     first = await anext(prov.discover())
     first.command()
     assert prov.app.spawned == [last]
@@ -215,8 +215,8 @@ async def test_the_configured_favourite_is_discovered_first(installed):
 
 
 def test_the_provider_is_registered_without_dropping_the_built_ins():
-    assert SpawnCommands in RegieApp.COMMANDS
-    assert {SpawnCommands} < RegieApp.COMMANDS
+    assert SpawnCommand in RegieApp.COMMANDS
+    assert {SpawnCommand} < RegieApp.COMMANDS
 
 
 # ---- what the app actually asks the daemon for --------------------------
@@ -316,7 +316,7 @@ async def test_the_loaded_list_is_what_the_palette_offers():
     app = RegieApp()
     app._client = Answering()
     await app._load_harnesses()
-    prov = SpawnCommands(FakeScreen(app))
+    prov = SpawnHarnessCommands(FakeScreen(app))
     assert [name for _, name, _ in prov._entries()] == ["codex"]
 
 

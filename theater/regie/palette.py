@@ -63,17 +63,16 @@ def entries(
     return rows
 
 
-class SpawnCommands(Provider):
-    """Offer `Spawn <harness>` for each harness Theater knows how to drive."""
+class SpawnHarnessCommands(Provider):
+    """Offer `Spawn <harness>` for each harness Theater knows how to drive.
+
+    Shown in the second palette pushed by SpawnCommand.
+    """
 
     def _hit_command(self, name: str):
-        # partial, not a closure over the loop variable: a closure would
-        # spawn whichever harness the loop ended on.
         return partial(self.app.spawn_harness, name)  # type: ignore[attr-defined]
 
     def _favourite(self) -> str | None:
-        # Defensive: Textual builds providers against whatever app is running;
-        # the palette must not break a screen.
         settings = getattr(self.app, "settings", None)
         if settings is None:
             return None
@@ -83,7 +82,6 @@ class SpawnCommands(Provider):
         return entries(getattr(self.app, "harnesses", None), self._favourite())
 
     async def discover(self) -> Hits:
-        """Shown before the user types anything, which is where these belong."""
         for display, name, help_text in self._entries():
             yield DiscoveryHit(display, self._hit_command(name), help=help_text)
 
@@ -100,6 +98,35 @@ class SpawnCommands(Provider):
                 )
 
 
+class SpawnCommand(Provider):
+    """Single 'Spawn' entry that opens a second palette with harness choices."""
+
+    async def discover(self) -> Hits:
+        callback = getattr(self.app, "action_spawn", None)
+        if callback is None:
+            return
+        yield DiscoveryHit(
+            "Spawn",
+            callback,
+            help="Spawn a fresh session from a supported harness",
+        )
+
+    async def search(self, query: str) -> Hits:
+        callback = getattr(self.app, "action_spawn", None)
+        if callback is None:
+            return
+        matcher = self.matcher(query)
+        display = "Spawn"
+        score = matcher.match(display)
+        if score > 0:
+            yield Hit(
+                score,
+                matcher.highlight(display),
+                callback,
+                help="Spawn a fresh session from a supported harness",
+            )
+
+
 class ViewCommands(Provider):
     """Show and hide the parts of the régie that can be turned off.
 
@@ -109,7 +136,7 @@ class ViewCommands(Provider):
     """
 
     def _toggle(self):
-        # Same reason as SpawnCommands._favourite: the app is not always a RegieApp.
+        # Same reason as SpawnHarnessCommands._favourite: the app is not always a RegieApp.
         return getattr(self.app, "action_toggle_bus", None)
 
     def _entry(self) -> tuple[str, str]:
@@ -152,6 +179,8 @@ def _dead_session_label(row: dict) -> str:
         if len(plain) > 120:
             plain = plain[:119] + "\u2026"
         label += f"\n{plain}"
+    else:
+        label += "\n\u00a0"
     return label
 
 
@@ -163,7 +192,7 @@ def _to_text(display: str) -> Text:
 
 
 class ResumeDeadSessionCommands(Provider):
-    """Browse recent dead sessions and resume one in its original cwd."""
+    """Lists dead sessions in a second palette (pushed by ResumeDeadSessionCommand)."""
 
     def __init__(self, screen, match_style=None):
         super().__init__(screen, match_style)
@@ -178,26 +207,51 @@ class ResumeDeadSessionCommands(Provider):
                 self.rows = []
 
     @property
-    def commands(self) -> list[tuple[str, str, Callable[[], None]]]:
+    def commands(self) -> list[tuple[str, Callable[[], None]]]:
         callback = getattr(self.app, "resume_dead_session", None)
         if callback is None:
             return []
-        return [
-            ("Resume dead session", _dead_session_label(row), partial(callback, row))
-            for row in self.rows
-        ]
+        return [(_dead_session_label(row), partial(callback, row)) for row in self.rows]
 
     async def discover(self) -> Hits:
-        for prefix, display, command in self.commands:
-            yield DiscoveryHit(_to_text(display), command, text=f"{prefix} {display}")
+        for display, command in self.commands:
+            yield DiscoveryHit(_to_text(display), command, text=display)
 
     async def search(self, query: str) -> Hits:
         matcher = self.matcher(query)
-        for prefix, display, command in self.commands:
-            searchable = f"{prefix} {display}"
-            score = matcher.match(searchable)
+        for display, command in self.commands:
+            score = matcher.match(display)
             if score > 0:
                 highlighted = matcher.highlight(display)
                 if "\n" in display:
                     highlighted.stylize("dim", display.index("\n") + 1)
-                yield Hit(score, highlighted, command, text=searchable)
+                yield Hit(score, highlighted, command, text=display)
+
+
+class ResumeDeadSessionCommand(Provider):
+    """Single 'Resume dead session' entry that opens a second palette."""
+
+    async def discover(self) -> Hits:
+        callback = getattr(self.app, "action_resume_dead_session", None)
+        if callback is None:
+            return
+        yield DiscoveryHit(
+            "Resume sessions",
+            callback,
+            help="Browse recent dead sessions and resume one",
+        )
+
+    async def search(self, query: str) -> Hits:
+        callback = getattr(self.app, "action_resume_dead_session", None)
+        if callback is None:
+            return
+        matcher = self.matcher(query)
+        display = "Resume sessions"
+        score = matcher.match(display)
+        if score > 0:
+            yield Hit(
+                score,
+                matcher.highlight(display),
+                callback,
+                help="Browse recent dead sessions and resume one",
+            )

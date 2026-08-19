@@ -250,7 +250,7 @@ who found the setting is not bounded.
 The spans differ because the value of a row does. Bus events are a feed the
 régie reads forward through a cursor, and nothing reads a week-old one — 7 days.
 Finished jobs and their `touch` rows are what `recall` reaches back through —
-60 days, past which the code has moved, the branches are merged and the harness
+15 days, past which the code has moved, the branches are merged and the harness
 transcript is usually gone from disk anyway. `send.refused` is exempt from the
 age sweep and capped by count instead: it is the only record that a send was
 refused, and at ~3/day the cap is a century of headroom.

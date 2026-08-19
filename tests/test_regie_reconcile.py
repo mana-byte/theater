@@ -267,6 +267,53 @@ async def test_inserted_child_in_the_middle_preserves_order(daemon, tmux):
         assert third_widget is after[1]
 
 
+async def test_zebra_stripe_updates_after_insertion(daemon, tmux):
+    """tree-alt is recomputed every tick so insertions keep parity correct."""
+    app = make_app()
+    async with app.run_test():
+        panel = _panel(app)
+
+        daemon["answers"]["participants.tree"] = [dict(PARENT, children=[dict(CHILD)])]
+        await app._refresh_tree()
+
+        parent_w = panel._key_widgets[("p", PARENT["id"])]
+        child_w = panel._key_widgets[("p", CHILD["id"])]
+        assert parent_w.has_class("tree-alt") is True
+        assert child_w.has_class("tree-alt") is False
+
+        daemon["answers"]["participants.tree"] = [
+            dict(PARENT, children=[dict(THIRD), dict(CHILD)])
+        ]
+        await app._refresh_tree()
+
+        third_w = panel._key_widgets[("p", THIRD["id"])]
+        assert parent_w.has_class("tree-alt") is True
+        assert third_w.has_class("tree-alt") is False
+        assert child_w.has_class("tree-alt") is True
+
+
+async def test_zebra_stripe_ignores_separator_rows(daemon, tmux):
+    """A separator between participants must not consume parity."""
+    app = make_app()
+    async with app.run_test():
+        panel = _panel(app)
+
+        daemon["answers"]["participants.tree"] = [dict(PARENT, children=[])]
+        daemon["answers"]["participants.unmanaged"] = [
+            {"pane": "%99", "harness": "codex", "cwd": "/tmp/other"}
+        ]
+        await app._refresh_tree()
+
+        participant_widgets = [
+            panel._key_widgets[k]
+            for k in [("p", PARENT["id"]), ("u", "%99")]
+            if k in panel._key_widgets
+        ]
+        assert len(participant_widgets) == 2
+        assert participant_widgets[0].has_class("tree-alt") is True
+        assert participant_widgets[1].has_class("tree-alt") is False
+
+
 async def test_empty_tree_and_back(daemon, tmux):
     """Going to an empty tree and recovering works."""
     app = make_app()

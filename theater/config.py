@@ -113,11 +113,10 @@ class RetentionSection:
     #: Bus events are the fire: 94% of the file, 7.1 MB/day. Nothing reads a
     #: week-old bus event — the régie's cursor is forward-only.
     bus_days: int = field(default=7, metadata={"min": 1})
-    #: Two months. Recall over a job older than that is nearly worthless: the
+    #: Two weeks. Recall over a job older than that is nearly worthless: the
     #: code has moved, branches are merged or deleted, and the harness
-    #: transcript is usually gone from disk already. Jobs are 3.4% of the
-    #: file, so this is generous on purpose.
-    jobs_days: int = field(default=60, metadata={"min": 1})
+    #: transcript is usually gone from disk already.
+    jobs_days: int = field(default=15, metadata={"min": 1})
     #: `send.refused` is the only record of a refused send — `_refuse_send`
     #: writes no job row — so it is exempt from the age TTL and capped by row
     #: count instead. Observed ~3/day; this is a century of headroom, existing

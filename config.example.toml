@@ -178,7 +178,7 @@ bus_days = 7
 # Jobs are filtered on `finished_at`, never `created_at`: a running job has
 # finished_at = NULL, and NULL < x is never true in SQL, so a sweep can never
 # delete a job whose caller is still waiting on it.
-jobs_days = 60
+jobs_days = 15
 
 # Maximum number of `send.refused` bus rows to keep. These are exempt from the
 # age TTL because they are the only record of a refused send. Observed rate is

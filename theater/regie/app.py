@@ -51,7 +51,13 @@ from textual.widgets import Footer, Label, RichLog, Static
 from theater.client import DaemonClient
 from theater.config import Config, RegieSection
 from theater.regie.bus_view import format_bus_line
-from theater.regie.palette import ResumeDeadSessionCommands, SpawnCommands, ViewCommands
+from theater.regie.palette import (
+    ResumeDeadSessionCommand,
+    ResumeDeadSessionCommands,
+    SpawnCommand,
+    SpawnHarnessCommands,
+    ViewCommands,
+)
 from theater.regie.tree import (
     DOWN,
     LEFT,
@@ -517,8 +523,12 @@ class TreePanel(VerticalScroll):
         # TreePanel.app is RegieApp at runtime; Widget.app is typed App[Any].
         cwd_segments = self.app.settings.regie.cwd_segments  # type: ignore[attr-defined]
         ordered_widgets: list[Widget] = []
+        participant_index = 0
         for i, (label, node, key, prefix, cont_prefix) in enumerate(lines):
             widget = self._reconcile_row(label, node, key, prefix, cont_prefix, cwd_segments, i)
+            if _is_participant_key(key):
+                widget.set_class(participant_index % 2 == 0, "tree-alt")
+                participant_index += 1
             ordered_widgets.append(widget)
 
         # move_child is synchronous and takes widget references, so a
@@ -545,9 +555,10 @@ class TreePanel(VerticalScroll):
         ``update``. New participant rows get a fresh ``AgentLeaf``, new
         separator rows get a plain ``Label``.
 
-        *index* is the row's position in the flat line list. The alternating
-        ``tree-alt`` class is set only at creation time so a refresh tick
-        cannot trigger the re-render that would drop a pending click target.
+        *index* is the row's position in the flat line list, used to identify
+        the first root. The alternating ``tree-alt`` class is recomputed every
+        tick in ``_reconcile`` based on the participant index, so insertions
+        and removals keep the zebra stripe correct.
         The *is_first_root* flag is recomputed every tick and threaded to the
         leaf so its spinner re-renders also blank row 1 for the first root.
         """
@@ -574,8 +585,6 @@ class TreePanel(VerticalScroll):
             widget = Label(label)
         self._key_widgets[key] = widget
         self.mount(widget)
-        if _is_participant_key(key) and index % 2 == 0:
-            widget.add_class("tree-alt")
         return widget
 
     def _reconcile_empty(self) -> None:
@@ -719,7 +728,7 @@ class RegieApp(App):
 
     #: ctrl+p opens the palette. Ours adds one `Spawn <harness>` entry per
     #: registered harness on top of Textual's system commands.
-    COMMANDS = App.COMMANDS | {SpawnCommands, ViewCommands, ResumeDeadSessionCommands}
+    COMMANDS = App.COMMANDS | {SpawnCommand, ViewCommands, ResumeDeadSessionCommand}
 
     title = "theater régie"
 
@@ -1430,6 +1439,16 @@ class RegieApp(App):
             self.notify(f"kill failed: {exc}", severity="error")
         await self._refresh_tree()
 
+    def action_spawn(self) -> None:
+        from textual.command import CommandPalette
+
+        self.push_screen(
+            CommandPalette(
+                providers=[SpawnHarnessCommands],
+                placeholder="Spawn a fresh session\u2026",
+            ),
+        )
+
     def spawn_harness(self, harness: str) -> None:
         """Start a bare CLI of this harness, from the command palette.
 
@@ -1470,6 +1489,16 @@ class RegieApp(App):
         except Exception:
             return []
         return rows
+
+    def action_resume_dead_session(self) -> None:
+        from textual.command import CommandPalette
+
+        self.push_screen(
+            CommandPalette(
+                providers=[ResumeDeadSessionCommands],
+                placeholder="Search for dead sessions\u2026",
+            ),
+        )
 
     def resume_dead_session(self, row: dict) -> None:
         state = row.get("resume_state", "")
