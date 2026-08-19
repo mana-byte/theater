@@ -338,7 +338,7 @@ def _caller_participant(daemon, params: dict, *, method_name: str):
 
 async def _repo_scope_for_store(caller) -> str:
     if not caller.cwd:
-        raise BadRequest("store cannot be used outside a git repository: caller has no cwd")
+        raise BadRequest("scratchpad cannot be used outside a git repository: caller has no cwd")
     repo_root = await workers.to_thread(
         worktree.main_repo_root,
         caller.cwd,
@@ -347,7 +347,7 @@ async def _repo_scope_for_store(caller) -> str:
     )
     if repo_root is None:
         raise BadRequest(
-            "store cannot be used outside a git repository: caller cwd is not in a git repo"
+            "scratchpad cannot be used outside a git repository: caller cwd is not in a git repo"
         )
     return repo_root
 
@@ -1014,35 +1014,41 @@ async def _jobs_status(daemon, params: dict) -> dict:
     return job.to_dict()
 
 
-@method("store.put")
-async def _store_put(daemon, params: dict) -> dict:
-    caller = _caller_participant(daemon, params, method_name="store.put")
-    namespace = _string_param(params, "namespace", method_name="store.put")
-    key = _string_param(params, "key", method_name="store.put")
-    value = _string_param(params, "value", method_name="store.put", allow_empty=True)
-    daemon.store.put_kv(
+@method("scratchpad.write")
+async def _scratchpad_write(daemon, params: dict) -> dict:
+    caller = _caller_participant(daemon, params, method_name="scratchpad.write")
+    namespace = _string_param(params, "namespace", method_name="scratchpad.write")
+    value = _string_param(params, "value", method_name="scratchpad.write", allow_empty=True)
+    key = _optional_string_param(params, "key", method_name="scratchpad.write")
+    minted = daemon.store.scratchpad_write(
         tree_root_id=lineage.root_of(daemon.store, caller.id),
         repo_root=await _repo_scope_for_store(caller),
         namespace=namespace,
-        key=key,
         value=value,
         updated_by=caller.id,
+        key=key,
     )
-    return {"stored": True}
+    return {"namespace": namespace, "key": minted}
 
 
-@method("store.get")
-async def _store_get(daemon, params: dict) -> dict:
-    caller = _caller_participant(daemon, params, method_name="store.get")
-    namespace = _string_param(params, "namespace", method_name="store.get")
-    key = _string_param(params, "key", method_name="store.get")
-    value = daemon.store.get_kv(
+@method("scratchpad.get")
+async def _scratchpad_get(daemon, params: dict) -> dict:
+    caller = _caller_participant(daemon, params, method_name="scratchpad.get")
+    namespace = _string_param(params, "namespace", method_name="scratchpad.get")
+    keys_raw = params.get("keys")
+    if keys_raw is None:
+        keys: list[str] | None = None
+    elif isinstance(keys_raw, list) and all(isinstance(k, str) for k in keys_raw):
+        keys = keys_raw
+    else:
+        raise BadRequest("scratchpad.get parameter 'keys' must be a list of strings or null")
+    entries = daemon.store.scratchpad_get(
         tree_root_id=lineage.root_of(daemon.store, caller.id),
         repo_root=await _repo_scope_for_store(caller),
         namespace=namespace,
-        key=key,
+        keys=keys,
     )
-    return {"value": value}
+    return {"namespace": namespace, "entries": entries}
 
 
 @method("checkpoint.create")
@@ -2051,7 +2057,7 @@ async def _gc(daemon, params: dict) -> dict:
             "touch": int,            # touch rows deleted (with their jobs)
             "participants": int,     # dead participants deleted
             "running_marked": int,   # stale running jobs marked crashed
-            "tree_kv": int,          # tree-scoped store rows deleted
+            "scratchpad": int,       # scratchpad rows deleted
             "checkpoints": int,      # checkpoint rows deleted
             "coverage": {            # retention floors *after* the sweep
                 "jobs_from": float | None,
@@ -2090,7 +2096,7 @@ async def _gc(daemon, params: dict) -> dict:
         "touch": result.touch,
         "participants": result.participants,
         "running_marked": result.running_marked,
-        "tree_kv": result.tree_kv,
+        "scratchpad": result.scratchpad,
         "checkpoints": result.checkpoints,
         "coverage": _retention_floor(daemon),
         "db_bytes_before": db_bytes_before,

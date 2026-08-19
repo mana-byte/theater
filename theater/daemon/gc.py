@@ -19,7 +19,7 @@ The sweep runs in six phases, in this order:
 4. **Receipt tokens** — remove expired/orphaned Claude hook tokens from meta.
 5. **Checkpoints** — delete checkpoints older than the jobs cutoff in
    bounded batches.
-6. **tree_kv** — delete rows whose spawn tree has no live participant.
+6. **scratchpad** — delete rows whose spawn tree has no live participant.
    Computes the roots of all live participants through lineage.root_of()
    and retains those, deleting everything else in bounded batches.
 7. **Bus** — delete rows older than ``bus_days`` (except ``send.refused`` and
@@ -84,7 +84,7 @@ class SweepResult:
     touch: int = 0
     participants: int = 0
     running_marked: int = 0
-    tree_kv: int = 0
+    scratchpad: int = 0
     checkpoints: int = 0
 
 
@@ -113,7 +113,7 @@ async def sweep(
         touch=0,
         participants=0,
         running_marked=0,
-        tree_kv=0,
+        scratchpad=0,
         checkpoints=0,
     )
 
@@ -129,7 +129,7 @@ async def sweep(
         touch=result.touch,
         participants=result.participants,
         running_marked=marked,
-        tree_kv=result.tree_kv,
+        scratchpad=result.scratchpad,
         checkpoints=result.checkpoints,
     )
     await asyncio.sleep(0)
@@ -142,7 +142,7 @@ async def sweep(
         touch=touch_deleted,
         participants=result.participants,
         running_marked=result.running_marked,
-        tree_kv=result.tree_kv,
+        scratchpad=result.scratchpad,
         checkpoints=result.checkpoints,
     )
 
@@ -155,7 +155,7 @@ async def sweep(
         touch=result.touch,
         participants=part_deleted,
         running_marked=result.running_marked,
-        tree_kv=result.tree_kv,
+        scratchpad=result.scratchpad,
         checkpoints=result.checkpoints,
     )
     await asyncio.sleep(0)
@@ -174,21 +174,21 @@ async def sweep(
         touch=result.touch,
         participants=result.participants,
         running_marked=result.running_marked,
-        tree_kv=result.tree_kv,
+        scratchpad=result.scratchpad,
         checkpoints=ckpt_deleted,
     )
 
-    # Phase 6: tree_kv — delete rows whose spawn tree has no live
+    # Phase 6: scratchpad — delete rows whose spawn tree has no live
     # participant. A root can be dead while descendants remain live, so
     # compute the roots of all live participants and retain their rows.
-    kv_deleted = await _sweep_tree_kv(store, retention.batch)
+    kv_deleted = await _sweep_scratchpad(store, retention.batch)
     result = SweepResult(
         bus=result.bus,
         jobs=result.jobs,
         touch=result.touch,
         participants=result.participants,
         running_marked=result.running_marked,
-        tree_kv=kv_deleted,
+        scratchpad=kv_deleted,
         checkpoints=result.checkpoints,
     )
 
@@ -200,7 +200,7 @@ async def sweep(
         touch=result.touch,
         participants=result.participants,
         running_marked=result.running_marked,
-        tree_kv=result.tree_kv,
+        scratchpad=result.scratchpad,
         checkpoints=result.checkpoints,
     )
 
@@ -480,7 +480,7 @@ async def _sweep_checkpoints(store: Store, cutoff: float, batch: int) -> int:
     return total
 
 
-async def _sweep_tree_kv(store: Store, batch: int) -> int:
+async def _sweep_scratchpad(store: Store, batch: int) -> int:
     """Delete tree_kv rows whose spawn tree has no live participant.
 
     A root can be dead while descendants remain live, so the naive test —

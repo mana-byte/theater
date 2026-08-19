@@ -145,9 +145,9 @@ meta = Table(
     Column("value", Text, nullable=False),
 )
 
-# Tree-scoped key-value scratchpad. Composite primary key on
-# (tree_root_id, repo_root, namespace, key) so each spawn tree can keep
-# per-namespace per-key values isolated from every other tree.
+# Tree-scoped scratchpad. The daemon mints a random short id for each
+# entry; an optional caller-supplied key updates an existing entry or
+# inserts if absent.
 tree_kv = Table(
     "tree_kv",
     metadata,

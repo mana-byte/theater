@@ -492,19 +492,19 @@ class Daemon:
                     or result.touch
                     or result.participants
                     or result.running_marked
-                    or result.tree_kv
+                    or result.scratchpad
                     or result.checkpoints
                 ):
                     logger.info(
                         "gc sweep: %d bus, %d jobs, %d touch, "
                         "%d participants, %d running marked, "
-                        "%d tree kv, %d checkpoints",
+                        "%d scratchpad, %d checkpoints",
                         result.bus,
                         result.jobs,
                         result.touch,
                         result.participants,
                         result.running_marked,
-                        result.tree_kv,
+                        result.scratchpad,
                         result.checkpoints,
                     )
             except Exception:

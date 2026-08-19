@@ -1,4 +1,4 @@
-"""Daemon RPC tests for the tree-scoped key/value store."""
+"""Daemon RPC tests for the tree-scoped scratchpad."""
 
 from __future__ import annotations
 
@@ -18,26 +18,28 @@ def _repo(tmp_path: Path, name: str) -> Path:
     return path
 
 
-async def test_root_caller_can_put_and_get_value(client, tmp_path):
+async def test_root_caller_can_write_and_get(client, tmp_path):
     repo = _repo(tmp_path, "repo")
     caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
 
-    assert await client.call(
-        "store.put",
+    wrote = await client.call(
+        "scratchpad.write",
         caller_id=caller["id"],
         namespace="plan",
-        key="next",
         value="ship it",
-    ) == {"stored": True}
-    assert await client.call(
-        "store.get",
+    )
+    assert wrote["namespace"] == "plan"
+    assert isinstance(wrote["key"], str) and len(wrote["key"]) > 0
+
+    got = await client.call(
+        "scratchpad.get",
         caller_id=caller["id"],
         namespace="plan",
-        key="next",
-    ) == {"value": "ship it"}
+    )
+    assert got == {"namespace": "plan", "entries": {wrote["key"]: "ship it"}}
 
 
-async def test_descendants_and_siblings_share_tree_value(client, daemon, tmp_path):
+async def test_descendants_and_siblings_share_scratchpad(client, daemon, tmp_path):
     repo = _repo(tmp_path, "repo")
     root = daemon.registry.create_spawned(harness="vibe", cwd=str(repo), pid="root")
     child = daemon.registry.create_spawned(
@@ -47,44 +49,42 @@ async def test_descendants_and_siblings_share_tree_value(client, daemon, tmp_pat
         harness="vibe", cwd=str(repo), parent_id=root.id, pid="sibling"
     )
 
-    await client.call(
-        "store.put",
+    wrote = await client.call(
+        "scratchpad.write",
         caller_id=child.id,
         namespace="handoff",
-        key="summary",
         value="ready",
     )
 
-    assert await client.call(
-        "store.get",
+    got = await client.call(
+        "scratchpad.get",
         caller_id=sibling.id,
         namespace="handoff",
-        key="summary",
-    ) == {"value": "ready"}
+    )
+    assert got == {"namespace": "handoff", "entries": {wrote["key"]: "ready"}}
 
 
-async def test_tree_store_is_isolated_between_trees(client, daemon, tmp_path):
+async def test_scratchpad_is_isolated_between_trees(client, daemon, tmp_path):
     repo = _repo(tmp_path, "repo")
     first = daemon.registry.create_spawned(harness="vibe", cwd=str(repo), pid="first")
     second = daemon.registry.create_spawned(harness="vibe", cwd=str(repo), pid="second")
 
     await client.call(
-        "store.put",
+        "scratchpad.write",
         caller_id=first.id,
         namespace="handoff",
-        key="summary",
         value="first tree",
     )
 
-    assert await client.call(
-        "store.get",
+    got = await client.call(
+        "scratchpad.get",
         caller_id=second.id,
         namespace="handoff",
-        key="summary",
-    ) == {"value": None}
+    )
+    assert got == {"namespace": "handoff", "entries": {}}
 
 
-async def test_tree_store_is_isolated_between_repo_roots(client, daemon, tmp_path):
+async def test_scratchpad_is_isolated_between_repo_roots(client, daemon, tmp_path):
     repo_a = _repo(tmp_path, "repo-a")
     repo_b = _repo(tmp_path, "repo-b")
     root = daemon.registry.create_spawned(harness="vibe", cwd=str(repo_a), pid="root")
@@ -93,64 +93,139 @@ async def test_tree_store_is_isolated_between_repo_roots(client, daemon, tmp_pat
     )
 
     await client.call(
-        "store.put",
+        "scratchpad.write",
         caller_id=root.id,
         namespace="handoff",
-        key="summary",
         value="repo a",
     )
 
-    assert await client.call(
-        "store.get",
+    got = await client.call(
+        "scratchpad.get",
         caller_id=child.id,
         namespace="handoff",
-        key="summary",
-    ) == {"value": None}
+    )
+    assert got == {"namespace": "handoff", "entries": {}}
 
 
-async def test_tree_store_upsert_replaces_value(client, tmp_path):
+async def test_scratchpad_write_with_key_updates_existing(client, tmp_path):
     repo = _repo(tmp_path, "repo")
     caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
-    for value in ("first", "second"):
+
+    first = await client.call(
+        "scratchpad.write",
+        caller_id=caller["id"],
+        namespace="notes",
+        value="first",
+    )
+    second = await client.call(
+        "scratchpad.write",
+        caller_id=caller["id"],
+        namespace="notes",
+        value="second",
+        key=first["key"],
+    )
+    assert second == {"namespace": "notes", "key": first["key"]}
+
+    got = await client.call(
+        "scratchpad.get",
+        caller_id=caller["id"],
+        namespace="notes",
+    )
+    assert got == {"namespace": "notes", "entries": {first["key"]: "second"}}
+
+
+async def test_scratchpad_write_with_nonexistent_key_inserts(client, tmp_path):
+    repo = _repo(tmp_path, "repo")
+    caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
+
+    wrote = await client.call(
+        "scratchpad.write",
+        caller_id=caller["id"],
+        namespace="notes",
+        value="inserted",
+        key="custom-key",
+    )
+    assert wrote == {"namespace": "notes", "key": "custom-key"}
+
+    got = await client.call(
+        "scratchpad.get",
+        caller_id=caller["id"],
+        namespace="notes",
+    )
+    assert got == {"namespace": "notes", "entries": {"custom-key": "inserted"}}
+
+
+async def test_scratchpad_get_rejects_non_string_keys_elements(client, tmp_path):
+    repo = _repo(tmp_path, "repo")
+    caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
+
+    with pytest.raises(RemoteError) as exc:
         await client.call(
-            "store.put",
+            "scratchpad.get",
             caller_id=caller["id"],
             namespace="notes",
-            key="latest",
-            value=value,
+            keys=[123],
         )
-
-    assert await client.call(
-        "store.get",
-        caller_id=caller["id"],
-        namespace="notes",
-        key="latest",
-    ) == {"value": "second"}
+    assert exc.value.code == "bad_request"
+    assert "list of strings" in str(exc.value)
 
 
-async def test_tree_store_missing_value_returns_none(client, tmp_path):
+async def test_scratchpad_get_with_keys_filters(client, tmp_path):
     repo = _repo(tmp_path, "repo")
     caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
 
-    assert await client.call(
-        "store.get",
+    a = await client.call(
+        "scratchpad.write",
         caller_id=caller["id"],
         namespace="notes",
-        key="missing",
-    ) == {"value": None}
+        value="a",
+    )
+    b = await client.call(
+        "scratchpad.write",
+        caller_id=caller["id"],
+        namespace="notes",
+        value="b",
+    )
+
+    got = await client.call(
+        "scratchpad.get",
+        caller_id=caller["id"],
+        namespace="notes",
+        keys=[a["key"]],
+    )
+    assert got == {"namespace": "notes", "entries": {a["key"]: "a"}}
+
+    all_got = await client.call(
+        "scratchpad.get",
+        caller_id=caller["id"],
+        namespace="notes",
+    )
+    assert set(all_got["entries"].keys()) == {a["key"], b["key"]}
 
 
-async def test_tree_store_refuses_callers_outside_git(client, tmp_path):
+async def test_scratchpad_get_missing_keys_returns_empty(client, tmp_path):
+    repo = _repo(tmp_path, "repo")
+    caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
+
+    got = await client.call(
+        "scratchpad.get",
+        caller_id=caller["id"],
+        namespace="notes",
+        keys=["nonexistent"],
+    )
+    assert got == {"namespace": "notes", "entries": {}}
+
+
+async def test_scratchpad_refuses_callers_outside_git(client, tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()
     caller = await client.call("hello", id="root", harness="vibe", cwd=str(outside))
 
     with pytest.raises(RemoteError) as exc:
         await client.call(
-            "store.put",
+            "scratchpad.write",
             caller_id=caller["id"],
             namespace="notes",
-            key="latest",
             value="nope",
         )
 
@@ -158,14 +233,13 @@ async def test_tree_store_refuses_callers_outside_git(client, tmp_path):
     assert "outside a git repository" in str(exc.value)
 
 
-async def test_tree_store_requires_existing_caller(client, tmp_path):
+async def test_scratchpad_requires_existing_caller(client, tmp_path):
     repo = _repo(tmp_path, "repo")
     with pytest.raises(RemoteError) as exc:
         await client.call(
-            "store.put",
+            "scratchpad.write",
             caller_id="ghost",
             namespace="notes",
-            key="latest",
             value=str(repo),
         )
 
@@ -173,15 +247,14 @@ async def test_tree_store_requires_existing_caller(client, tmp_path):
     assert "existing participant" in str(exc.value)
 
 
-async def test_tree_store_ignores_client_supplied_updated_by(client, daemon, tmp_path):
+async def test_scratchpad_write_ignores_client_supplied_updated_by(client, daemon, tmp_path):
     repo = _repo(tmp_path, "repo")
     caller = await client.call("hello", id="root", harness="vibe", cwd=str(repo))
 
     await client.call(
-        "store.put",
+        "scratchpad.write",
         caller_id=caller["id"],
         namespace="notes",
-        key="latest",
         value="mine",
         updated_by="somebody-else",
     )

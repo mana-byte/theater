@@ -136,7 +136,7 @@ def _checkpoint(store, *, created_at: float | None = None) -> int:
     return pk[0]
 
 
-def _tree_kv(store, *, tree_root_id: str = "p1", repo_root: str = "/repo") -> None:
+def _scratchpad_row(store, *, tree_root_id: str = "p1", repo_root: str = "/repo") -> None:
     store.conn.execute(
         tree_kv.insert().values(
             tree_root_id=tree_root_id,
@@ -172,14 +172,14 @@ async def test_gc_rpc_returns_all_keys_with_matching_counts(client, daemon, fake
     _touch(daemon.store, job_handle="old1", path="x.py")
     _bus(daemon.store, kind="job.created", ts=now() - 30 * _DAY)
     _checkpoint(daemon.store, created_at=now() - 90 * _DAY)
-    _tree_kv(daemon.store)
+    _scratchpad_row(daemon.store)
 
     before_jobs = _count(daemon.store, jobs)
     before_touch = _count(daemon.store, touch)
     before_bus = _count(daemon.store, bus)
     before_part = _count(daemon.store, participants)
     before_checkpoints = _count(daemon.store, checkpoints)
-    before_tree_kv = _count(daemon.store, tree_kv)
+    before_scratchpad = _count(daemon.store, tree_kv)
 
     data = await client.call("gc")
 
@@ -189,7 +189,7 @@ async def test_gc_rpc_returns_all_keys_with_matching_counts(client, daemon, fake
         "touch",
         "participants",
         "running_marked",
-        "tree_kv",
+        "scratchpad",
         "checkpoints",
         "coverage",
         "db_bytes_before",
@@ -203,7 +203,7 @@ async def test_gc_rpc_returns_all_keys_with_matching_counts(client, daemon, fake
     assert data["bus"] == before_bus - _count(daemon.store, bus)
     assert data["participants"] == before_part - _count(daemon.store, participants)
     assert data["checkpoints"] == before_checkpoints - _count(daemon.store, checkpoints)
-    assert data["tree_kv"] == before_tree_kv - _count(daemon.store, tree_kv)
+    assert data["scratchpad"] == before_scratchpad - _count(daemon.store, tree_kv)
 
     assert isinstance(data["coverage"], dict)
     assert set(data["coverage"]) == {"jobs_from", "bus_from"}
@@ -324,7 +324,7 @@ def _gc_payload(**over) -> dict:
         "touch": 0,
         "participants": 0,
         "running_marked": 0,
-        "tree_kv": 0,
+        "scratchpad": 0,
         "checkpoints": 0,
         "coverage": {"jobs_from": None, "bus_from": None},
         "db_bytes_before": 1024,
@@ -362,20 +362,20 @@ def test_render_deleted_without_vacuum_warns_file_did_not_shrink(monkeypatch, ca
             touch=10,
             participants=2,
             running_marked=1,
-            tree_kv=3,
+            scratchpad=3,
             checkpoints=4,
         ),
     )
     assert "file size unchanged" in out
     assert "--vacuum" in out
-    assert "3 tree kv" in out
+    assert "3 scratchpad" in out
     assert "4 checkpoints" in out
 
 
-def test_render_tree_kv_and_checkpoints_count_as_collection(monkeypatch, capsys):
-    out = _render(monkeypatch, capsys, _gc_payload(tree_kv=1, checkpoints=2))
+def test_render_scratchpad_and_checkpoints_count_as_collection(monkeypatch, capsys):
+    out = _render(monkeypatch, capsys, _gc_payload(scratchpad=1, checkpoints=2))
     assert "nothing to collect" not in out
-    assert "1 tree kv" in out
+    assert "1 scratchpad" in out
     assert "2 checkpoints" in out
 
 

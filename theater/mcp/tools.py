@@ -335,42 +335,31 @@ async def send_prompt(
     return record
 
 
-async def store_put(session: Session, *, namespace: str, key: str, value: str) -> dict:
-    """Store an exact string in the caller's shared sibling scratchpad.
-
-    Values are exact strings: Theater does not parse, merge, or normalise them.
-    Writes are last-writer-wins. The daemon scopes access to the caller's spawn
-    tree intersected with the canonical main repo, so this is a short-lived
-    scratchpad for siblings coordinating inside git, not durable storage and
-    not available outside a git repository.
-    """
+async def scratchpad_write(
+    session: Session, *, value: str, namespace: str, key: str | None = None
+) -> dict:
     if not session._resolved:
         await session.identify()
     result = await session.client.call(
-        "store.put",
+        "scratchpad.write",
         namespace=namespace,
-        key=key,
         value=value,
+        key=key,
         caller_id=session.participant_id,
     )
     assert isinstance(result, dict)
     return result
 
 
-async def store_get(session: Session, *, namespace: str, key: str) -> dict:
-    """Read an exact string from the caller's shared sibling scratchpad.
-
-    Values are returned exactly as stored, or null when absent. The namespace
-    and key are scoped by the daemon to the caller's spawn tree intersected
-    with the canonical main repo. This is a short-lived sibling scratchpad
-    inside git, with last-writer-wins semantics.
-    """
+async def scratchpad_get(
+    session: Session, *, namespace: str, keys: list[str] | None = None
+) -> dict:
     if not session._resolved:
         await session.identify()
     result = await session.client.call(
-        "store.get",
+        "scratchpad.get",
         namespace=namespace,
-        key=key,
+        keys=keys,
         caller_id=session.participant_id,
     )
     assert isinstance(result, dict)

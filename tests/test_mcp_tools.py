@@ -278,27 +278,27 @@ async def test_send_identifies_first_or_the_reply_has_nowhere_to_go():
     assert s.client.methods == ["hello", "send"]
 
 
-async def test_store_put_identifies_and_forwards_exact_rpc_arguments():
-    s = session(**{"store.put": {"stored": True}})
-    got = await tools.store_put(s, namespace="plan", key="owner", value="p-you")
-    assert got == {"stored": True}
-    assert s.client.methods == ["hello", "store.put"]
-    assert s.client.params("store.put") == {
+async def test_scratchpad_write_identifies_and_forwards_exact_rpc_arguments():
+    s = session(**{"scratchpad.write": {"namespace": "plan", "key": "abc123"}})
+    got = await tools.scratchpad_write(s, value="p-you", namespace="plan")
+    assert got == {"namespace": "plan", "key": "abc123"}
+    assert s.client.methods == ["hello", "scratchpad.write"]
+    assert s.client.params("scratchpad.write") == {
         "namespace": "plan",
-        "key": "owner",
         "value": "p-you",
+        "key": None,
         "caller_id": "p-me",
     }
 
 
-async def test_store_get_identifies_and_forwards_exact_rpc_arguments():
-    s = session(**{"store.get": {"value": "p-you"}})
-    got = await tools.store_get(s, namespace="plan", key="owner")
-    assert got == {"value": "p-you"}
-    assert s.client.methods == ["hello", "store.get"]
-    assert s.client.params("store.get") == {
+async def test_scratchpad_get_identifies_and_forwards_exact_rpc_arguments():
+    s = session(**{"scratchpad.get": {"namespace": "plan", "entries": {"k1": "v1"}}})
+    got = await tools.scratchpad_get(s, namespace="plan")
+    assert got == {"namespace": "plan", "entries": {"k1": "v1"}}
+    assert s.client.methods == ["hello", "scratchpad.get"]
+    assert s.client.params("scratchpad.get") == {
         "namespace": "plan",
-        "key": "owner",
+        "keys": None,
         "caller_id": "p-me",
     }
 

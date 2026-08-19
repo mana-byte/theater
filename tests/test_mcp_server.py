@@ -51,8 +51,8 @@ async def test_tools_are_registered(daemon):
         "register_pane",
         "await_sessions",
         "send",
-        "store_put",
-        "store_get",
+        "scratchpad_write",
+        "scratchpad_get",
         "checkpoint",
         "list_checkpoints",
         "recovery_read",
@@ -106,16 +106,12 @@ async def test_orchestration_directives_reach_the_tools_that_need_them(daemon):
 async def test_new_feature_descriptions_reach_their_tools(daemon):
     tools = {t.name: (t.description or "").lower() for t in await build("p1", "vibe").list_tools()}
 
-    for name in ("store_put", "store_get"):
+    for name in ("scratchpad_write", "scratchpad_get"):
         desc = tools[name]
-        assert "exact string" in desc
-        assert "last-writer-wins" in desc
         assert "spawn tree" in desc
         assert "canonical main repo" in desc
         assert "outside a git repository" in desc
-        assert "prefix listing" in desc
-        assert "cas" not in desc
-        assert "lock" not in desc
+        assert "not durable" in desc
 
     assert "explicit" in tools["checkpoint"]
     assert "cumulative snapshot" in tools["checkpoint"]
@@ -247,8 +243,8 @@ async def test_response_format_parameters_have_nullable_object_schema(daemon):
 async def test_new_tool_schemas_match_public_signatures(daemon):
     schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
 
-    assert schema["store_put"]["required"] == ["namespace", "key", "value"]
-    assert schema["store_get"]["required"] == ["namespace", "key"]
+    assert schema["scratchpad_write"]["required"] == ["value", "namespace"]
+    assert schema["scratchpad_get"]["required"] == ["namespace"]
     assert schema["checkpoint"]["required"] == ["name"]
     assert schema["recovery_read"]["required"] == ["checkpoint_id"]
 
@@ -310,13 +306,17 @@ async def test_response_format_wrappers_forward_to_tool_bodies(monkeypatch):
 async def test_new_tool_wrappers_forward_to_tool_bodies(monkeypatch):
     calls = []
 
-    async def fake_store_put(session, *, namespace: str, key: str, value: str) -> dict:
-        calls.append(("store_put", session, namespace, key, value))
-        return {"stored": True}
+    async def fake_scratchpad_write(
+        session, *, value: str, namespace: str, key: str | None = None
+    ) -> dict:
+        calls.append(("scratchpad_write", session, namespace, value, key))
+        return {"namespace": namespace, "key": "abc123"}
 
-    async def fake_store_get(session, *, namespace: str, key: str) -> dict:
-        calls.append(("store_get", session, namespace, key))
-        return {"value": "p-you"}
+    async def fake_scratchpad_get(
+        session, *, namespace: str, keys: list[str] | None = None
+    ) -> dict:
+        calls.append(("scratchpad_get", session, namespace, keys))
+        return {"namespace": namespace, "entries": {"k1": "v1"}}
 
     async def fake_checkpoint(session, *, name: str, notes: str | None = None) -> dict:
         calls.append(("checkpoint", session, name, notes))
@@ -326,20 +326,21 @@ async def test_new_tool_wrappers_forward_to_tool_bodies(monkeypatch):
         calls.append(("recovery_read", session, checkpoint_id))
         return {"checkpoint_id": checkpoint_id, "recorded": [], "live": []}
 
-    monkeypatch.setattr(mcp_tools, "store_put", fake_store_put)
-    monkeypatch.setattr(mcp_tools, "store_get", fake_store_get)
+    monkeypatch.setattr(mcp_tools, "scratchpad_write", fake_scratchpad_write)
+    monkeypatch.setattr(mcp_tools, "scratchpad_get", fake_scratchpad_get)
     monkeypatch.setattr(mcp_tools, "checkpoint", fake_checkpoint)
     monkeypatch.setattr(mcp_tools, "recovery_read", fake_recovery_read)
 
     mcp = build("p1", "vibe")
     assert _payload(
         await mcp.call_tool(
-            "store_put",
-            {"namespace": "plan", "key": "owner", "value": "p-you"},
+            "scratchpad_write",
+            {"namespace": "plan", "value": "p-you"},
         )
-    ) == {"stored": True}
-    assert _payload(await mcp.call_tool("store_get", {"namespace": "plan", "key": "owner"})) == {
-        "value": "p-you"
+    ) == {"namespace": "plan", "key": "abc123"}
+    assert _payload(await mcp.call_tool("scratchpad_get", {"namespace": "plan"})) == {
+        "namespace": "plan",
+        "entries": {"k1": "v1"},
     }
     assert _payload(
         await mcp.call_tool("checkpoint", {"name": "before merge", "notes": "watch p-you"})
@@ -351,8 +352,8 @@ async def test_new_tool_wrappers_forward_to_tool_bodies(monkeypatch):
     }
 
     assert [(call[0], *call[2:]) for call in calls] == [
-        ("store_put", "plan", "owner", "p-you"),
-        ("store_get", "plan", "owner"),
+        ("scratchpad_write", "plan", "p-you", None),
+        ("scratchpad_get", "plan", None),
         ("checkpoint", "before merge", "watch p-you"),
         ("recovery_read", 7),
     ]

@@ -518,77 +518,79 @@ class Store:
             ).first()
         return Participant.from_row(row._mapping) if row else None
 
-    # ---- tree KV --------------------------------------------------------
+    # ---- scratchpad -----------------------------------------------------
 
-    def put_kv(
+    def scratchpad_write(
         self,
         *,
         tree_root_id: str,
         repo_root: str,
         namespace: str,
-        key: str,
         value: str,
         updated_by: str,
-    ) -> None:
-        stmt = sqlite_insert(tree_kv).values(
-            tree_root_id=tree_root_id,
-            repo_root=repo_root,
-            namespace=namespace,
-            key=key,
-            value=value,
-            updated_at=now(),
-            updated_by=updated_by,
-        )
-        self.conn.execute(
-            stmt.on_conflict_do_update(
-                index_elements=[
-                    tree_kv.c.tree_root_id,
-                    tree_kv.c.repo_root,
-                    tree_kv.c.namespace,
-                    tree_kv.c.key,
-                ],
-                set_={
-                    "value": value,
-                    "updated_at": now(),
-                    "updated_by": updated_by,
-                },
+        key: str | None = None,
+    ) -> str:
+        if key is None:
+            key = new_id()
+            stmt = sqlite_insert(tree_kv).values(
+                tree_root_id=tree_root_id,
+                repo_root=repo_root,
+                namespace=namespace,
+                key=key,
+                value=value,
+                updated_at=now(),
+                updated_by=updated_by,
             )
+            self.conn.execute(stmt)
+        else:
+            existing = self.conn.execute(
+                select(tree_kv.c.key)
+                .where(tree_kv.c.tree_root_id == tree_root_id)
+                .where(tree_kv.c.repo_root == repo_root)
+                .where(tree_kv.c.namespace == namespace)
+                .where(tree_kv.c.key == key)
+            ).first()
+            if existing:
+                self.conn.execute(
+                    tree_kv.update()
+                    .where(tree_kv.c.tree_root_id == tree_root_id)
+                    .where(tree_kv.c.repo_root == repo_root)
+                    .where(tree_kv.c.namespace == namespace)
+                    .where(tree_kv.c.key == key)
+                    .values(value=value, updated_at=now(), updated_by=updated_by)
+                )
+            else:
+                self.conn.execute(
+                    sqlite_insert(tree_kv).values(
+                        tree_root_id=tree_root_id,
+                        repo_root=repo_root,
+                        namespace=namespace,
+                        key=key,
+                        value=value,
+                        updated_at=now(),
+                        updated_by=updated_by,
+                    )
+                )
+        return key
+
+    def scratchpad_get(
+        self,
+        *,
+        tree_root_id: str,
+        repo_root: str,
+        namespace: str,
+        keys: list[str] | None = None,
+    ) -> dict[str, str]:
+        stmt = (
+            select(tree_kv.c.key, tree_kv.c.value)
+            .where(tree_kv.c.tree_root_id == tree_root_id)
+            .where(tree_kv.c.repo_root == repo_root)
+            .where(tree_kv.c.namespace == namespace)
         )
-
-    def get_kv(
-        self,
-        *,
-        tree_root_id: str,
-        repo_root: str,
-        namespace: str,
-        key: str,
-    ) -> str | None:
-        row = self.conn.execute(
-            select(tree_kv.c.value)
-            .where(tree_kv.c.tree_root_id == tree_root_id)
-            .where(tree_kv.c.repo_root == repo_root)
-            .where(tree_kv.c.namespace == namespace)
-            .where(tree_kv.c.key == key)
-        ).first()
-        return row[0] if row else None
-
-    def list_kv(
-        self,
-        *,
-        tree_root_id: str,
-        repo_root: str,
-        namespace: str,
-        limit: int = 100,
-    ) -> list[dict]:
-        rows = self.conn.execute(
-            select(tree_kv)
-            .where(tree_kv.c.tree_root_id == tree_root_id)
-            .where(tree_kv.c.repo_root == repo_root)
-            .where(tree_kv.c.namespace == namespace)
-            .order_by(tree_kv.c.key.asc())
-            .limit(limit)
-        ).fetchall()
-        return [dict(r._mapping) for r in rows]
+        if keys is not None:
+            stmt = stmt.where(tree_kv.c.key.in_(keys))
+        rows = self.conn.execute(stmt).fetchall()
+        return {row[0]: row[1] for row in rows}
 
     # ---- checkpoints ----------------------------------------------------
 

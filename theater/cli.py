@@ -900,9 +900,9 @@ def cmd_gc(args) -> int:
     touch = data.get("touch", 0)
     participants = data.get("participants", 0)
     running_marked = data.get("running_marked", 0)
-    tree_kv = data.get("tree_kv", 0)
+    scratchpad = data.get("scratchpad", 0)
     checkpoints = data.get("checkpoints", 0)
-    total = bus + jobs + touch + participants + running_marked + tree_kv + checkpoints
+    total = bus + jobs + touch + participants + running_marked + scratchpad + checkpoints
 
     if total == 0:
         print("nothing to collect — database is already within retention")
@@ -910,7 +910,7 @@ def cmd_gc(args) -> int:
         print(
             f"collected: {bus} bus, {jobs} jobs, {touch} touch, "
             f"{participants} participants, {running_marked} stale running marked, "
-            f"{tree_kv} tree kv, {checkpoints} checkpoints"
+            f"{scratchpad} scratchpad, {checkpoints} checkpoints"
         )
 
     coverage = data.get("coverage") or {}

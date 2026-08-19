@@ -202,17 +202,16 @@ async def test_restart_preserves_response_format_jobs(theater_home, fake_tmux):
     assert after["prompt"] == before["prompt"]
 
 
-async def test_restart_preserves_tree_store(theater_home, fake_tmux, tmp_path):
+async def test_restart_preserves_scratchpad(theater_home, fake_tmux, tmp_path):
     repo = _repo(tmp_path, "repo")
     d1 = Daemon(harnesses={})
     await d1.start()
     async with DaemonClient(autostart=False) as c:
         caller = await c.call("hello", id="root", harness="vibe", cwd=str(repo))
-        await c.call(
-            "store.put",
+        wrote = await c.call(
+            "scratchpad.write",
             caller_id=caller["id"],
             namespace="handoff",
-            key="summary",
             value="survives",
         )
     await d1.aclose()
@@ -221,14 +220,13 @@ async def test_restart_preserves_tree_store(theater_home, fake_tmux, tmp_path):
     await d2.start()
     async with DaemonClient(autostart=False) as c:
         got = await c.call(
-            "store.get",
+            "scratchpad.get",
             caller_id=caller["id"],
             namespace="handoff",
-            key="summary",
         )
     await d2.aclose()
 
-    assert got == {"value": "survives"}
+    assert got == {"namespace": "handoff", "entries": {wrote["key"]: "survives"}}
 
 
 async def test_restart_preserves_checkpoints(theater_home, fake_tmux):

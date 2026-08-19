@@ -261,179 +261,150 @@ def test_finish_job_without_structured_fields_keeps_legacy_semantics(store):
     assert job.structured_status is None
 
 
-# ---- tree KV ---------------------------------------------------------------
+# ---- scratchpad -------------------------------------------------------------
 
 
-def test_kv_put_and_get(store):
-    store.put_kv(
+def test_scratchpad_write_and_get(store):
+    key = store.scratchpad_write(
         tree_root_id="root1",
         repo_root="/repo",
         namespace="ns1",
-        key="key1",
         value="val1",
         updated_by="p1",
     )
-    assert (
-        store.get_kv(
-            tree_root_id="root1",
-            repo_root="/repo",
-            namespace="ns1",
-            key="key1",
-        )
-        == "val1"
-    )
+    assert isinstance(key, str) and len(key) > 0
+    entries = store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1")
+    assert entries == {key: "val1"}
 
 
-def test_kv_get_missing_returns_none(store):
-    assert (
-        store.get_kv(
-            tree_root_id="nope",
-            repo_root="/repo",
-            namespace="ns1",
-            key="key1",
-        )
-        is None
-    )
+def test_scratchpad_get_missing_returns_empty(store):
+    entries = store.scratchpad_get(tree_root_id="nope", repo_root="/repo", namespace="ns1")
+    assert entries == {}
 
 
-def test_kv_upsert(store):
-    store.put_kv(
+def test_scratchpad_write_with_key_updates_existing(store):
+    key = store.scratchpad_write(
         tree_root_id="root1",
         repo_root="/repo",
         namespace="ns1",
-        key="key1",
         value="old",
         updated_by="p1",
     )
-    store.put_kv(
+    same = store.scratchpad_write(
         tree_root_id="root1",
         repo_root="/repo",
         namespace="ns1",
-        key="key1",
         value="new",
         updated_by="p2",
+        key=key,
     )
-    assert (
-        store.get_kv(
-            tree_root_id="root1",
-            repo_root="/repo",
-            namespace="ns1",
-            key="key1",
-        )
-        == "new"
-    )
-    rows = store.list_kv(tree_root_id="root1", repo_root="/repo", namespace="ns1")
-    assert len(rows) == 1
-    assert rows[0]["value"] == "new"
+    assert same == key
+    entries = store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1")
+    assert entries == {key: "new"}
 
 
-def test_kv_list_ordered_by_key(store):
-    for k in ["c", "a", "b"]:
-        store.put_kv(
-            tree_root_id="root1",
-            repo_root="/repo",
-            namespace="ns1",
-            key=k,
-            value=f"val-{k}",
-            updated_by="p1",
-        )
-    rows = store.list_kv(tree_root_id="root1", repo_root="/repo", namespace="ns1")
-    assert [r["key"] for r in rows] == ["a", "b", "c"]
-
-
-def test_kv_list_respects_limit(store):
-    for i in range(5):
-        store.put_kv(
-            tree_root_id="root1",
-            repo_root="/repo",
-            namespace="ns1",
-            key=f"k{i}",
-            value="v",
-            updated_by="p1",
-        )
-    rows = store.list_kv(tree_root_id="root1", repo_root="/repo", namespace="ns1", limit=3)
-    assert len(rows) == 3
-
-
-def test_kv_isolation_by_tree(store):
-    store.put_kv(
+def test_scratchpad_write_with_nonexistent_key_inserts(store):
+    key = store.scratchpad_write(
         tree_root_id="root1",
         repo_root="/repo",
         namespace="ns1",
-        key="k",
+        value="val",
+        updated_by="p1",
+        key="my-custom-key",
+    )
+    assert key == "my-custom-key"
+    entries = store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1")
+    assert entries == {"my-custom-key": "val"}
+
+
+def test_scratchpad_get_with_keys_filters(store):
+    a = store.scratchpad_write(
+        tree_root_id="root1",
+        repo_root="/repo",
+        namespace="ns1",
+        value="va",
+        updated_by="p1",
+    )
+    b = store.scratchpad_write(
+        tree_root_id="root1",
+        repo_root="/repo",
+        namespace="ns1",
+        value="vb",
+        updated_by="p1",
+    )
+    filtered = store.scratchpad_get(
+        tree_root_id="root1", repo_root="/repo", namespace="ns1", keys=[a]
+    )
+    assert filtered == {a: "va"}
+    all_entries = store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1")
+    assert set(all_entries.keys()) == {a, b}
+
+
+def test_scratchpad_isolation_by_tree(store):
+    store.scratchpad_write(
+        tree_root_id="root1",
+        repo_root="/repo",
+        namespace="ns1",
         value="from-root1",
         updated_by="p1",
     )
-    store.put_kv(
+    store.scratchpad_write(
         tree_root_id="root2",
         repo_root="/repo",
         namespace="ns1",
-        key="k",
         value="from-root2",
         updated_by="p2",
     )
-    assert (
-        store.get_kv(tree_root_id="root1", repo_root="/repo", namespace="ns1", key="k")
-        == "from-root1"
-    )
-    assert (
-        store.get_kv(tree_root_id="root2", repo_root="/repo", namespace="ns1", key="k")
-        == "from-root2"
-    )
+    r1 = store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1")
+    r2 = store.scratchpad_get(tree_root_id="root2", repo_root="/repo", namespace="ns1")
+    assert list(r1.values()) == ["from-root1"]
+    assert list(r2.values()) == ["from-root2"]
 
 
-def test_kv_isolation_by_namespace(store):
-    store.put_kv(
+def test_scratchpad_isolation_by_namespace(store):
+    store.scratchpad_write(
         tree_root_id="root1",
         repo_root="/repo",
         namespace="ns1",
-        key="k",
         value="from-ns1",
         updated_by="p1",
     )
-    store.put_kv(
+    store.scratchpad_write(
         tree_root_id="root1",
         repo_root="/repo",
         namespace="ns2",
-        key="k",
         value="from-ns2",
         updated_by="p1",
     )
-    assert (
-        store.get_kv(tree_root_id="root1", repo_root="/repo", namespace="ns1", key="k")
-        == "from-ns1"
-    )
-    assert (
-        store.get_kv(tree_root_id="root1", repo_root="/repo", namespace="ns2", key="k")
-        == "from-ns2"
-    )
+    assert list(
+        store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns1").values()
+    ) == ["from-ns1"]
+    assert list(
+        store.scratchpad_get(tree_root_id="root1", repo_root="/repo", namespace="ns2").values()
+    ) == ["from-ns2"]
 
 
-def test_kv_isolation_by_repo_root(store):
-    store.put_kv(
+def test_scratchpad_isolation_by_repo_root(store):
+    store.scratchpad_write(
         tree_root_id="root1",
         repo_root="/repo-a",
         namespace="ns1",
-        key="k",
         value="from-a",
         updated_by="p1",
     )
-    store.put_kv(
+    store.scratchpad_write(
         tree_root_id="root1",
         repo_root="/repo-b",
         namespace="ns1",
-        key="k",
         value="from-b",
         updated_by="p1",
     )
-    assert (
-        store.get_kv(tree_root_id="root1", repo_root="/repo-a", namespace="ns1", key="k")
-        == "from-a"
-    )
-    assert (
-        store.get_kv(tree_root_id="root1", repo_root="/repo-b", namespace="ns1", key="k")
-        == "from-b"
-    )
+    assert list(
+        store.scratchpad_get(tree_root_id="root1", repo_root="/repo-a", namespace="ns1").values()
+    ) == ["from-a"]
+    assert list(
+        store.scratchpad_get(tree_root_id="root1", repo_root="/repo-b", namespace="ns1").values()
+    ) == ["from-b"]
 
 
 # ---- checkpoints -----------------------------------------------------------

@@ -355,57 +355,45 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         )
 
     @mcp.tool()
-    async def store_put(namespace: str, key: str, value: str) -> dict:
-        """Store one exact string for short-lived sibling coordination.
+    async def scratchpad_write(value: str, namespace: str, key: str | None = None) -> dict:
+        """Append a string entry to the sibling scratchpad; daemon mints the key.
 
-        Values are exact strings: Theater does not parse, merge, or normalise
-        them. Writes are last-writer-wins. The daemon scopes access to your
+        Returns {"namespace": str, "key": str}. The key is a random short id
+        unless you pass one, in which case that entry is updated if it exists
+        or inserted if it does not. The daemon scopes access to your
         spawn tree intersected with the canonical main repo, so this is a
-        sibling scratchpad inside git, not durable storage and not available
-        outside a git repository. There is no prefix listing in this MCP
-        surface.
+        sibling scratchpad inside git, not durable storage and not
+        available outside a git repository.
 
-        Use it for small coordination facts: file claims, sibling handoff
-        notes, shared design decisions, or "child X owns slice Y" breadcrumbs.
-        Choose naturally unique keys such as repo paths, child ids, or task
-        ids so two agents do not silently overwrite each other.
+        Use it for small coordination facts: file claims, handoff notes,
+        shared design decisions, or breadcrumbs. Do not use it for mutual
+        exclusion, queues, durable memory, or source-of-truth records.
 
-        Do not use it for mutual exclusion, queues, durable memory, project
-        state, or source-of-truth records. A stored value is only a note for
-        related live agents; commits, transcripts, checkpoints, and repo
-        inspection are still the evidence.
-
-        namespace: coordination bucket chosen by the agents sharing it.
-        key:       exact key inside that namespace.
         value:     exact string to store.
+        namespace: coordination bucket chosen by the agents sharing it.
+        key:       optional key to update or insert under; None mints a new id.
         """
-        return await tools.store_put(
+        return await tools.scratchpad_write(
             session,
+            value=value,
             namespace=namespace,
             key=key,
-            value=value,
         )
 
     @mcp.tool()
-    async def store_get(namespace: str, key: str) -> dict:
-        """Read one exact string from the sibling scratchpad.
+    async def scratchpad_get(namespace: str, keys: list[str] | None = None) -> dict:
+        """Read entries from the sibling scratchpad.
 
-        Returns {"value": str | null}. Values are exact strings and writes are
-        last-writer-wins. The daemon scopes access to your spawn tree
-        intersected with the canonical main repo, so this is a short-lived
-        scratchpad for siblings coordinating inside git and is unavailable
-        outside a git repository. There is no prefix listing in this MCP
-        surface.
-
-        Reach for it when a sibling may already have recorded a file claim,
-        handoff note, shared assumption, or work-slice ownership. Treat a
-        missing value as "no note was found", not as proof that nobody is
-        working there; Theater does not provide atomic claims or listing here.
+        Returns {"namespace": str, "entries": {key: value, ...}}. Pass keys
+        to fetch specific entries; omit to fetch all entries in the namespace.
+        The daemon scopes access to your spawn tree intersected with the
+        canonical main repo, so this is not durable storage and is
+        unavailable outside a git repository.
 
         namespace: coordination bucket chosen by the agents sharing it.
-        key:       exact key inside that namespace.
+        keys:      optional list of entry ids to fetch; None means all.
         """
-        return await tools.store_get(session, namespace=namespace, key=key)
+        return await tools.scratchpad_get(session, namespace=namespace, keys=keys)
 
     @mcp.tool()
     async def checkpoint(name: str, notes: str | None = None) -> dict:

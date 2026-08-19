@@ -622,7 +622,7 @@ async def test_sweep_on_empty_database_is_noop(store):
     assert result.touch == 0
     assert result.participants == 0
     assert result.running_marked == 0
-    assert result.tree_kv == 0
+    assert result.scratchpad == 0
     assert result.checkpoints == 0
 
 
@@ -687,7 +687,7 @@ async def test_fully_dead_tree_kv_is_cleaned(store):
     _kv(store, tree_root_id="root")
     _kv(store, tree_root_id="root", key="k2")
     result = await sweep(store, _retention())
-    assert result.tree_kv == 2
+    assert result.scratchpad == 2
     assert _count(store, tree_kv) == 0
 
 
@@ -696,7 +696,7 @@ async def test_live_tree_kv_is_retained(store):
     _participant(store, pid="root", status=Status.IDLE)
     _kv(store, tree_root_id="root")
     result = await sweep(store, _retention())
-    assert result.tree_kv == 0
+    assert result.scratchpad == 0
     assert _count(store, tree_kv) == 1
 
 
@@ -712,7 +712,7 @@ async def test_dead_root_with_live_descendant_retains_kv(store):
     _participant(store, pid="child", parent_id="root", status=Status.IDLE)
     _kv(store, tree_root_id="root")
     result = await sweep(store, _retention())
-    assert result.tree_kv == 0
+    assert result.scratchpad == 0
     assert _count(store, tree_kv) == 1
 
 
@@ -729,7 +729,7 @@ async def test_dead_tree_with_live_descendant_uses_correct_root(store):
     _kv(store, tree_root_id="rootB")
 
     result = await sweep(store, _retention())
-    assert result.tree_kv == 1
+    assert result.scratchpad == 1
     assert _count(store, tree_kv) == 1
 
 
@@ -739,7 +739,7 @@ async def test_tree_kv_cleanup_is_batched(store):
     for i in range(10):
         _kv(store, tree_root_id="root", key=f"k{i}")
     result = await sweep(store, _retention(batch=3))
-    assert result.tree_kv == 10
+    assert result.scratchpad == 10
     assert _count(store, tree_kv) == 0
 
 
@@ -789,4 +789,4 @@ async def test_sweep_result_counts_match_all_tables(store):
     assert result.bus == before_bus - _count(store, bus)
     assert result.participants == before_part - _count(store, participants)
     assert result.checkpoints == before_ckpt - _count(store, checkpoints)
-    assert result.tree_kv == before_kv - _count(store, tree_kv)
+    assert result.scratchpad == before_kv - _count(store, tree_kv)
