@@ -331,21 +331,12 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
                    after a death and respawn; use the id for any targeting
                    that spans time or has destructive consequences.
         prompt:    the text to type into the target's pane.
-        response_format: optional JSON Schema hint for prompt guidance only.
-                   Pass a JSON object or null. The daemon serializes and
-                   injects that guidance exactly once; MCP forwards the object
-                   unchanged and does not inject prompt text. After the job
-                   finishes, Theater parses the whole final assistant answer
-                   with json.loads. It performs no schema validation, JSON
-                   scraping, fence stripping, type coercion, or retry.
-
-        Fails with `human_present` if a human is detected at the target
-        pane — never inject into a session a human is using. Fails with
-        `busy` if the target is already processing a send prompt. Fails with
-        `transcript_untrusted` for an adopted transcript-backed target that
-        still needs an operator/proven/exact transcript binding, and with
-        `transcript_identity_lost` when a trusted transcript pin must be
-        rebound before attribution can resume.
+        response_format: optional JSON Schema hint, guidance only. Pass a
+                   JSON object or null. Theater parses the whole final answer with
+                   json.loads — no schema validation, fence stripping, or retry.
+        Fails with `human_present` (human at the pane), `busy` (target
+        processing), `transcript_untrusted` or `transcript_identity_lost`
+        (transcript needs binding).
         """
         return await tools.send_prompt(
             session,
@@ -404,25 +395,18 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         `last_n` events (user, assistant, tool_call, tool_result) with
         complete, unclipped text.
 
-        target_id: the participant id or its name. Names work only while
-                   the participant is live; a dead participant's name is
-                   null and cannot be resolved. Use the id to read the
-                   transcript of a dead participant — the id is the stable
-                   reference for as long as the row is retained (historical
-                   access is retention-bounded; dead rows are eventually
-                   deleted by GC).
+        target_id: the participant id or its name. Use the id for dead
+                   participants (names are null when dead). The id is the
+                   stable reference for as long as the row is retained
+                   (historical access is retention-bounded; dead rows are
+                   eventually deleted by GC).
         last_n:    number of events to return, newest. Default 5. Set to
                    0 for all events in the current transcript.
 
         Returns {"id": ..., "events": [...], "path": ...}. Each event
         has "role", "text" (full), "tool_name", and "turn_end".
 
-        Refuses with `transcript_untrusted` until adopted transcript-backed
-        sessions are operator/proven/exact. Refuses with
-        `transcript_identity_lost` if a trusted pin lost identity; screen
-        status may still be live, but attribution-bearing reads wait for
-        `theater candidates <id>` / `theater bind <id> <candidate>
-        --confirm-id <id>`.
+        Refuses if the transcript needs binding or its identity is lost.
         """
         return await tools.read_transcript(session, target_id=target_id, last_n=last_n)
 
@@ -439,29 +423,16 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         ask again on a later turn. An approval to spawn is not an approval
         to kill, and neither is a general instruction to tidy up.
 
-        Only a direct child of yours can be killed via this MCP tool: the
-        daemon checks that the target's parent_id equals your own
-        participant id, which this tool always sends. But the check only
-        applies to callers that identify themselves. The CLI and the régie
-        deliberately send no caller_id and are treated as the operator, so
-        an agent that shells out to `theater kill` bypasses the check
-        entirely — the parent-child gate does not protect you there.
+        Only a direct child of yours can be killed via this tool. Do not
+        bypass this safety policy by shelling out to `theater kill`.
 
-        target_id: the participant id or name of the child to kill.
-                   Names work only while the participant is live; a dead
-                   participant's name is null and cannot be resolved. Use
-                   the id for destructive targeting: names are recyclable,
-                   so a name that pointed at one child can later point at
-                   a successor after a death and respawn.
+        target_id: the participant id or name of the child to kill. Use the
+                   stable child ID; avoid recyclable names for destructive
+                   targeting.
 
-        Refuses with `no_self_kill` if the target is you. Refuses with
-        `not_your_child` if the target exists but is not your child
-        (a sibling, a parent, a stranger, or a grandchild). A target
-        that does not exist arrives as `not_found`. A target that is
-        already dead is a no-op — but only when addressed by id, because
-        a dead participant has no name to resolve. The no-op returns
-        {"killed": false, "reason": "already_dead"} rather than an
-        error — killing a dead thing is not a failure.
+        Refuses with `no_self_kill`, `not_your_child`, or `not_found`.
+        An already-dead target addressed by ID is a no-op returning {"killed": false,
+        "reason": "already_dead"}.
 
         **Side effect: destroying a worktree child erases uncommitted
         work.** If the child was spawned with worktree=True (a unique
@@ -474,12 +445,8 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         be asked for every time.
 
         If the child was spawned with worktree="<name>" (a named shared
-        linked worktree), the directory is removed on the last live
-        participant's teardown but the shared branch is always retained
-        — other participants may already have completed work on it.
-        After the last teardown the branch remains, and the name cannot
-        be recreated until the retained branch is integrated as appropriate
-        and deleted by the user.
+        worktree), the directory is removed on the last live participant's
+        teardown but the shared branch is always retained.
 
         So collect before you kill. Merge the branch, or record the
         commits somewhere outside the worktree, and only then ask. A
@@ -500,20 +467,12 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         ``git log`` cannot: uncommitted edits, and the identity of the
         agent that made each change.
 
-        One timeline per path, newest first. Each job point carries:
-
-        - what: ``task`` and ``result`` (clipped to 300 chars),
-          ``outcome``, and ``sha`` before → after
-        - who: ``harness``, ``session_id``, ``cwd``, ``branch``;
-          ``parent_id``/``parent_name`` is whoever spawned that agent
-          (``None`` for a root), ``caller_id`` whoever ordered that job
-          — for a ``send``, often a sibling rather than the parent
-        - where next: ``segment``, which ``recall_read`` expands
-
-        Beside the timeline: ``current`` (the file's sha right now) and
-        ``dirty`` (differs from HEAD). Compare ``current`` against the
-        newest point's ``sha_after`` to see if anything has moved the
-        file since the last job left it.
+        One timeline per path, newest first. Each point carries clipped
+        task/result, outcome, sha before/after, and a ``segment`` that
+        ``recall_read`` expands. Beside the timeline: ``current`` (the
+        file's sha now) and ``dirty`` (differs from HEAD). Compare
+        ``current`` with the newest point's ending SHA to detect
+        post-job changes.
 
         A gap point is a sha transition no job claims — something
         outside Theater edited the file. ``recall_read`` on its segment
@@ -527,12 +486,9 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
                for 40 — ask about every file you care about at once.
         depth: points per path, gaps included. Default 5.
 
-        Scoped to your git root: a job whose cwd sits outside it is not
-        returned. Worktree children live under it, so their edits do
-        appear — two worktrees sharing a repo-relative path share one
-        timeline, and the jump between them can read as a gap. A path
-        Theater never watched returns an empty timeline, not an error.
-        Results are keyed by path.
+        Scoped to your git root. Worktree children live under it, so their
+        edits appear — two worktrees sharing a repo-relative path share
+        one timeline, and the jump between them can read as a gap.
         """
         return await tools.recall(session, paths=paths, depth=depth)
 
