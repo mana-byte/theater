@@ -16,7 +16,8 @@ régie then re-asserts its own pane layout so the tree stays visible.
 Keybindings:
     j/k or up/down  navigate the tree
     Enter           stage the selected agent (join its pane into this window)
-    z               focus the staged pane (type at the agent directly)
+    l               stage the selected agent (if needed) and focus it
+    <prefix> h      return focus to régie from the stage (claimed only if free)
     x               kill the selected agent's pane
     ctrl+p          command palette, including `Spawn <harness>`
     q               quit (unstages first; detaches, kills nothing)
@@ -84,6 +85,10 @@ _DEFAULTS = RegieSection()
 TREE_INTERVAL = _DEFAULTS.tree_interval
 BUS_INTERVAL = _DEFAULTS.bus_interval
 BUS_BATCH = _DEFAULTS.bus_batch
+
+#: Note tag on the `<prefix> h` return key, so teardown can tell "ours" from
+#: a binding someone else made after we installed it.
+_RETURN_KEY_NOTE = "theater-regie-return"
 
 #: How often a travelling tree trace moves. The number of moves comes from
 #: the route length so long cross-root sends/spawns do not skip most of their
@@ -707,7 +712,7 @@ class RegieApp(App):
         Binding("down", "cursor_down", "down", show=False),
         Binding("up", "cursor_up", "up", show=False),
         Binding("enter", "stage", "stage"),
-        Binding("z", "focus_stage", "focus"),
+        Binding("l", "focus_stage", "focus", show=False),
         Binding("x", "kill", "kill"),
         Binding("q", "quit", "quit"),
     ]
@@ -758,6 +763,9 @@ class RegieApp(App):
     _status_set: bool = False
     #: Teardown runs from two places and must not run twice.
     _torn_down: bool = False
+    #: Whether we actually installed the `<prefix> h` return key (vs. the
+    #: user already having one), so teardown only removes what we added.
+    _return_key_set: bool = False
 
     def __init__(self, settings: Config | None = None):
         super().__init__()
@@ -818,6 +826,7 @@ class RegieApp(App):
                 self.my_session_name = await tmux.display_message("#{session_name}", target=my_pane)
             except Exception as exc:
                 logger.debug("could not discover window/session id: %s", exc)
+            await self._bind_return_key()
         await self._enable_mouse()
         await self._hide_status()
         self._apply_theme()
@@ -947,6 +956,31 @@ class RegieApp(App):
         except Exception as exc:
             logger.debug("could not restore status line: %s", exc)
 
+    async def _bind_return_key(self) -> None:
+        """Claim `<prefix> h` for `select-pane -L`, unless the user already has it.
+
+        Has to be a tmux binding, not a Textual one: once the staged pane has
+        tmux's focus, régie gets no keystrokes at all. The stage always sits
+        to the right of régie, so "move left" is "return to régie" — no
+        hardcoded pane id needed, and if the user's own config already binds
+        `h` this way, it already does what we want.
+        """
+        try:
+            self._return_key_set = await tmux.bind_key_if_free(
+                "prefix", "h", ["select-pane", "-L"], note=_RETURN_KEY_NOTE
+            )
+        except Exception as exc:
+            logger.debug("could not bind <prefix> h return key: %s", exc)
+
+    async def _unbind_return_key(self) -> None:
+        if not self._return_key_set:
+            return
+        self._return_key_set = False
+        try:
+            await tmux.unbind_key_if_owned("prefix", "h", note=_RETURN_KEY_NOTE)
+        except Exception as exc:
+            logger.debug("could not unbind <prefix> h return key: %s", exc)
+
     async def _teardown(self) -> None:
         """Leave tmux as we found it: nothing staged, options restored.
 
@@ -967,6 +1001,7 @@ class RegieApp(App):
                 logger.debug("unstage on exit failed: %s", exc)
         await self._restore_mouse()
         await self._restore_status()
+        await self._unbind_return_key()
 
     async def action_quit(self) -> None:
         """Quit, but put the stage back first.
@@ -1427,15 +1462,19 @@ class RegieApp(App):
         await self._refresh_tree()
 
     async def action_focus_stage(self) -> None:
-        """Focus the staged pane so the user can type at the agent.
+        """Stage the selected agent if needed, then focus it. Bound to `l`.
 
-        This is the 'zoom' action — it selects the staged pane in tmux,
-        which brings it to the foreground of the window. The user can then
-        interact with the agent directly. Pressing q in the régie still
-        detaches everything.
+        The way back is `<prefix> h`, not a régie key — see `_bind_return_key`.
         """
+        node = selected_participant(self.tree_lines, self.cursor)
+        pane = node.get("tmux_pane") if node else None
+        if not (pane and pane == self.staged_pane):
+            await self.action_stage()
+            if self.staged_pane != pane:
+                # Staging failed, or there was nothing to stage: action_stage
+                # already notified why. Don't focus whatever was staged before.
+                return
         if not self.staged_pane:
-            self.notify("nothing staged — press Enter to stage first", severity="warning")
             return
         try:
             await panes.select_pane(self.staged_pane)

@@ -373,3 +373,61 @@ async def test_unset_option_uses_u_so_the_global_value_applies_again(monkeypatch
     assert "-u" in argv
     assert "-g" not in argv
     assert argv[-1] == "mouse"
+
+
+# ---- key bindings --------------------------------------------------------
+
+
+async def test_key_bound_reads_key_string_not_key(monkeypatch):
+    """`#{key}` silently expands to empty; `#{key_string}` is the real field."""
+    captured = _capture(monkeypatch, "Left\nh\nc\n")
+    assert await client.key_bound("prefix", "h") is True
+    argv = captured[0]
+    assert argv[:3] == ["list-keys", "-T", "prefix"]
+    assert argv[argv.index("-F") + 1] == "#{key_string}"
+
+
+async def test_key_bound_false_when_key_absent(monkeypatch):
+    _capture(monkeypatch, "Left\nc\n")
+    assert await client.key_bound("prefix", "h") is False
+
+
+async def test_bind_key_if_free_skips_an_existing_binding(monkeypatch):
+    captured = _capture(monkeypatch, "h\n")
+    installed = await client.bind_key_if_free("prefix", "h", ["select-pane", "-L"], note="x")
+    assert installed is False
+    assert all(argv[0] != "bind-key" for argv in captured)
+
+
+async def test_bind_key_if_free_installs_and_tags_with_the_note(monkeypatch):
+    captured = _capture(monkeypatch, "")
+    installed = await client.bind_key_if_free("prefix", "h", ["select-pane", "-L"], note="x")
+    assert installed is True
+    argv = captured[-1]
+    assert argv[0] == "bind-key"
+    assert argv[argv.index("-N") + 1] == "x"
+    assert argv[-2:] == ["select-pane", "-L"]
+    assert "h" in argv
+
+
+async def test_unbind_key_if_owned_removes_a_matching_note(monkeypatch):
+    captured = _capture(monkeypatch, f"h{client._FORMAT_SEP}x\n")
+    await client.unbind_key_if_owned("prefix", "h", note="x")
+    assert ["unbind-key", "-T", "prefix", "h"] in captured
+
+
+async def test_unbind_key_if_owned_leaves_someone_elses_binding_alone(monkeypatch):
+    captured = _capture(monkeypatch, f"h{client._FORMAT_SEP}someone-else\n")
+    await client.unbind_key_if_owned("prefix", "h", note="x")
+    assert all(argv[0] != "unbind-key" for argv in captured)
+
+
+async def test_bind_key_if_free_does_not_bind_when_inspection_fails(monkeypatch):
+    """A failed check must not read as "nothing bound" and overwrite blindly."""
+
+    async def failing_run(*args: str, check: bool = True) -> str:
+        raise client.TmuxError("list-keys failed")
+
+    monkeypatch.setattr(client, "run", failing_run)
+    with pytest.raises(client.TmuxError):
+        await client.bind_key_if_free("prefix", "h", ["select-pane", "-L"], note="x")

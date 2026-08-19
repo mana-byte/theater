@@ -171,11 +171,20 @@ def tmux(monkeypatch):
     async def select_pane(pane):
         calls.append(("select", pane))
 
+    async def bind_key_if_free(table, key, command, *, note):
+        calls.append(("bind", table, key, tuple(command)))
+        return True
+
+    async def unbind_key_if_owned(table, key, *, note):
+        calls.append(("unbind", table, key))
+
     monkeypatch.setattr(app_mod.tmux, "current_pane", lambda: "%1")
     monkeypatch.setattr(app_mod.tmux, "display_message", display_message)
     monkeypatch.setattr(app_mod.tmux, "show_option", show_option)
     monkeypatch.setattr(app_mod.tmux, "set_option", set_option)
     monkeypatch.setattr(app_mod.tmux, "unset_option", unset_option)
+    monkeypatch.setattr(app_mod.tmux, "bind_key_if_free", bind_key_if_free)
+    monkeypatch.setattr(app_mod.tmux, "unbind_key_if_owned", unbind_key_if_owned)
     monkeypatch.setattr(app_mod.panes, "join_pane", join_pane)
     monkeypatch.setattr(app_mod.panes, "break_pane", break_pane)
     monkeypatch.setattr(app_mod.panes, "resize_pane", resize_pane)
@@ -421,15 +430,32 @@ async def test_focus_selects_the_staged_pane(daemon, tmux):
     app, _ = make_app()
     async with app.run_test() as pilot:
         await pilot.press("enter")
-        await pilot.press("z")
+        await pilot.press("l")
     assert ("select", "%10") in tmux
 
 
-async def test_focus_with_nothing_staged_says_what_to_press(daemon, tmux):
+async def test_focus_stages_first_when_nothing_is_staged(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test() as pilot:
+        await pilot.press("l")
+        assert app.staged_pane == "%10"
+    assert ("join", "%10", "@7") in tmux
+    assert ("select", "%10") in tmux
+
+
+async def test_focus_does_not_refocus_a_stale_pane_after_a_failed_switch(daemon, tmux, monkeypatch):
+    async def refuse(pane, *, target_window=None):
+        raise RuntimeError("no such window")
+
     app, notes = make_app()
     async with app.run_test() as pilot:
-        await pilot.press("z")
-    assert any("press Enter to stage" in msg for msg, _ in notes)
+        await pilot.press("enter")
+        assert app.staged_pane == "%10"
+        monkeypatch.setattr(app_mod.panes, "join_pane", refuse)
+        await pilot.press("j")
+        await pilot.press("l")
+    assert not any(call[0] == "select" for call in tmux)
+    assert any("stage failed" in msg and sev == "error" for msg, sev in notes)
 
 
 # ---- kill ----------------------------------------------------------------
