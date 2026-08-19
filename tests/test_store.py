@@ -472,9 +472,9 @@ def test_list_participants_ids_dead_included_with_include_dead(store):
 
 
 def test_list_recent_dead_returns_dead_ordered_by_last_activity(store):
-    p1 = Participant(harness="vibe", cwd="/tmp/a")
+    p1 = Participant(harness="vibe", cwd="/tmp/a", session_id="s1")
     store.upsert_participant(p1)
-    p2 = Participant(harness="codex", cwd="/tmp/b")
+    p2 = Participant(harness="codex", cwd="/tmp/b", session_id="s2")
     store.upsert_participant(p2)
     store.set_status(p1.id, Status.DEAD)
     store.set_status(p2.id, Status.DEAD)
@@ -491,11 +491,74 @@ def test_list_recent_dead_excludes_alive(store):
 
 def test_list_recent_dead_respects_limit(store):
     for i in range(5):
-        p = Participant(harness="vibe", cwd=f"/tmp/{i}")
+        p = Participant(harness="vibe", cwd=f"/tmp/{i}", session_id=f"s{i}")
         store.upsert_participant(p)
         store.set_status(p.id, Status.DEAD)
     rows = store.list_recent_dead(limit=2)
     assert len(rows) == 2
+
+
+def test_list_recent_dead_excludes_without_session_id(store):
+    p = Participant(harness="vibe", cwd="/tmp/x")
+    store.upsert_participant(p)
+    store.set_status(p.id, Status.DEAD)
+    assert store.list_recent_dead(limit=20) == []
+
+
+def test_list_recent_dead_excludes_empty_string_session_id(store):
+    p = Participant(harness="vibe", cwd="/tmp/x", session_id="")
+    store.upsert_participant(p)
+    store.set_status(p.id, Status.DEAD)
+    assert store.list_recent_dead(limit=20) == []
+
+
+def test_list_recent_dead_filter_before_limit(store):
+    from theater.daemon.schema import participants
+    from theater.models import now as _now
+
+    recent = Participant(harness="vibe", cwd="/tmp/recent")
+    store.upsert_participant(recent)
+    store.set_status(recent.id, Status.DEAD)
+
+    older = Participant(harness="vibe", cwd="/tmp/older", session_id="valid")
+    store.upsert_participant(older)
+    store.set_status(older.id, Status.DEAD)
+    store.conn.execute(
+        participants.update()
+        .where(participants.c.id == older.id)
+        .values(last_activity=_now() - 999999)
+    )
+
+    rows = store.list_recent_dead(limit=1)
+    assert len(rows) == 1
+    assert rows[0].id == older.id
+
+
+def test_list_recent_dead_excludes_live_session_ids(store):
+    from theater.daemon.schema import participants
+    from theater.models import now as _now
+
+    held = Participant(harness="vibe", cwd="/tmp/held", session_id="held")
+    store.upsert_participant(held)
+    store.set_status(held.id, Status.DEAD)
+    store.conn.execute(
+        participants.update()
+        .where(participants.c.id == held.id)
+        .values(last_activity=_now())
+    )
+
+    allowed = Participant(harness="vibe", cwd="/tmp/allowed", session_id="free")
+    store.upsert_participant(allowed)
+    store.set_status(allowed.id, Status.DEAD)
+    store.conn.execute(
+        participants.update()
+        .where(participants.c.id == allowed.id)
+        .values(last_activity=_now() - 999999)
+    )
+
+    rows = store.list_recent_dead(limit=1, exclude_session_ids={"held"})
+    assert len(rows) == 1
+    assert rows[0].id == allowed.id
 
 
 def test_spawn_prompts_for_targets_returns_first_spawn_prompt(store):

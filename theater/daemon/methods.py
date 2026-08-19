@@ -479,10 +479,11 @@ async def _recent_dead(daemon, params: dict) -> list[dict]:
     limit = params.get("limit", 20)
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
         raise BadRequest("limit must be an integer between 1 and 20")
-    rows = daemon.store.list_recent_dead(limit=limit)
     live_peers = daemon.registry.list(include_dead=False)
     live_session_ids = {p.session_id for p in live_peers if p.session_id}
-    rows = [p for p in rows if p.session_id not in live_session_ids]
+    rows = daemon.store.list_recent_dead(
+        limit=limit, exclude_session_ids=live_session_ids or None
+    )
     ids = [p.id for p in rows]
     prompts = daemon.store.spawn_prompts_for_targets(ids)
     result = []

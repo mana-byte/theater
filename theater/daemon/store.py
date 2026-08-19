@@ -257,17 +257,22 @@ class Store:
         stmt = stmt.order_by(participants.c.created_at.asc())
         return [Participant.from_row(r._mapping) for r in self.conn.execute(stmt)]
 
-    def list_recent_dead(self, *, limit: int = 20) -> list[Participant]:
+    def list_recent_dead(
+        self, *, limit: int = 20, exclude_session_ids: set[str] | None = None
+    ) -> list[Participant]:
         stmt = (
             select(participants)
             .where(participants.c.status == str(Status.DEAD))
-            .order_by(
-                participants.c.last_activity.desc(),
-                participants.c.created_at.desc(),
-                participants.c.id.desc(),
-            )
-            .limit(limit)
+            .where(participants.c.session_id.is_not(None))
+            .where(participants.c.session_id != "")
         )
+        if exclude_session_ids:
+            stmt = stmt.where(participants.c.session_id.not_in(exclude_session_ids))
+        stmt = stmt.order_by(
+            participants.c.last_activity.desc(),
+            participants.c.created_at.desc(),
+            participants.c.id.desc(),
+        ).limit(limit)
         return [Participant.from_row(r._mapping) for r in self.conn.execute(stmt)]
 
     def spawn_prompts_for_targets(self, ids: Sequence[str]) -> dict[str, str | None]:

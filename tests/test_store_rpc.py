@@ -281,6 +281,10 @@ async def test_recent_dead_returns_dead_participants_with_spawn_prompt(client, d
     )
     child_id = child["id"]
 
+    p = daemon.registry.get(child_id)
+    p.session_id = "test-session-123"
+    daemon.store.upsert_participant(p)
+
     daemon.registry.mark_dead(child_id)
 
     rows = await client.call("participants.recent_dead", limit=20)
@@ -327,9 +331,34 @@ async def test_recent_dead_spawn_prompt_null_for_bare_cli(client, daemon, tmp_pa
     )
     child_id = child["id"]
 
+    p = daemon.registry.get(child_id)
+    p.session_id = "bare-session-456"
+    daemon.store.upsert_participant(p)
+
     daemon.registry.mark_dead(child_id)
 
     rows = await client.call("participants.recent_dead", limit=20)
     matching = [r for r in rows if r["id"] == child_id]
     assert len(matching) == 1
     assert matching[0]["spawn_prompt"] == ""
+
+
+async def test_recent_dead_excludes_sessions_without_session_id(client, daemon, tmp_path):
+    repo = _repo(tmp_path, "repo")
+    await client.call("hello", id="root", harness="vibe", cwd=str(repo))
+
+    child = await client.call(
+        "spawn",
+        harness="vibe",
+        approval="manual",
+        prompt="no session id here",
+        cwd=str(repo),
+        tmux_session="test",
+    )
+    child_id = child["id"]
+
+    daemon.registry.mark_dead(child_id)
+
+    rows = await client.call("participants.recent_dead", limit=20)
+    matching = [r for r in rows if r["id"] == child_id]
+    assert matching == []
