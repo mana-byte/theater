@@ -459,6 +459,7 @@ class CodexObserver(TranscriptObserver):
         #: that clone exists at all: this instance is otherwise shared by every
         #: codex session on the machine.
         self.pane_pid = pane_pid
+        self._last_model: str | None = None
         #: Whether the id this clone was opened with is itself proof — a resume
         #: token or a launch receipt — rather than an id read back off whatever
         #: file an earlier cwd guess happened to pick. It decides which of the
@@ -968,7 +969,12 @@ class CodexObserver(TranscriptObserver):
             ]
         if ptype == "token_count":
             return self._token_count(payload, ts, index)
-        # task_started, patch_apply_end, thread_settings_applied.
+        if ptype == "thread_settings_applied":
+            settings = payload.get("thread_settings")
+            if isinstance(settings, dict):
+                m = settings.get("model")
+                if isinstance(m, str) and m:
+                    self._last_model = m
         return []
 
     def _mcp_result(self, result) -> str:
@@ -1003,7 +1009,7 @@ class CodexObserver(TranscriptObserver):
         )
         totals = tuple(int(total.get(field) or 0) for field in fields)
         latest = tuple(int(last.get(field) or 0) for field in fields)
-        model = info.get("model") or info.get("model_name")
+        model = info.get("model") or info.get("model_name") or self._last_model
         model = model or None if isinstance(model, str) else None
         input_tokens, cache_read, cache_write, output_tokens, reasoning = latest
         usage = TokenUsage(
