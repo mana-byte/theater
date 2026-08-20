@@ -61,6 +61,7 @@ def test_migrations_created_the_alembic_version_table(store):
         "budgets",
         "tree_kv",
         "named_worktrees",
+        "usage",
     } <= tables
     stamped = store.conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
     assert stamped == HEAD

@@ -593,6 +593,7 @@ class TranscriptSource(Source):
                 error=f"trusted transcript pin {str(path)!r} no longer exists on disk",
                 pinned=True,
             )
+        events = [event for event in events if not event.usage_only]
         return History(
             location=str(path),
             events=events[-last_n:] if last_n > 0 else events,
@@ -867,7 +868,8 @@ class TranscriptSource(Source):
         last_event: Event | None = None
         if last_line is not None:
             parsed = self._observer.parse(last_line, lines - 1)
-            last_event = parsed[-1] if parsed else None
+            semantic = [event for event in parsed if not event.usage_only]
+            last_event = semantic[-1] if semantic else None
         self._pending = (path, size, lines, mtime, session_id)
         return Attachment(
             location=str(path),

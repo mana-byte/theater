@@ -97,6 +97,7 @@ from theater.harness.base import (
     Harness,
     LaunchPlan,
     ResumeLaunchOverlay,
+    TokenUsage,
     clip,
     theater_binary,
     whole,
@@ -290,6 +291,30 @@ def _loads(raw) -> dict:
     except ValueError:
         return {}
     return found if isinstance(found, dict) else {}
+
+
+def _opencode_usage(info: dict) -> TokenUsage | None:
+    """Extract usage from an OpenCode assistant message."""
+    tokens = info.get("tokens")
+    if not isinstance(tokens, dict):
+        return None
+    cache = tokens.get("cache") or {}
+    cost = info.get("cost")
+    cost = float(cost) if isinstance(cost, (int, float)) and cost > 0 else None
+    model = info.get("modelID")
+    model = model if isinstance(model, str) and model else None
+    native_id = info.get("id")
+    usage_key = f"opencode:{native_id}" if isinstance(native_id, str) and native_id else None
+    return TokenUsage(
+        model=model,
+        input_tokens=int(tokens.get("input") or 0),
+        output_tokens=int(tokens.get("output") or 0),
+        cache_creation_input_tokens=int(cache.get("write") or 0),
+        cache_read_input_tokens=int(cache.get("read") or 0),
+        reasoning_output_tokens=int(tokens.get("reasoning") or 0),
+        cost_usd=cost,
+        idempotency_key=usage_key,
+    )
 
 
 def _table(value) -> dict:
@@ -989,6 +1014,7 @@ class OpenCodeSource(Source):
                 error=f"reading OpenCode database failed: {exc}",
                 pinned=pinned,
             )
+        events = [event for event in events if not event.usage_only]
         if last_n > 0:
             events = events[-last_n:]
         # Stored rows carry no sequence number, so position stands in for one.
@@ -1038,7 +1064,8 @@ class OpenCodeSource(Source):
                 )
         finish = info.get("finish")
         turn_end = bool(finish) and finish != STEP_FINISH
-        if text or turn_end:
+        usage = _opencode_usage(info)
+        if text or turn_end or usage is not None:
             out.append(
                 Event(
                     kind=EventKind.ASSISTANT,
@@ -1047,6 +1074,7 @@ class OpenCodeSource(Source):
                     ts=ts,
                     turn_end=turn_end,
                     turn_id=info.get("id") or None,
+                    usage=usage,
                 )
             )
         return out
@@ -1402,8 +1430,8 @@ class OpenCodeSource(Source):
         )
         text = "".join(self._text.pop(mid, {}).values())
         turn_end = finish != STEP_FINISH
-        if not text and not turn_end:
-            # Tool events already reported it; an empty line would be noise.
+        usage = _opencode_usage(info)
+        if not text and not turn_end and usage is None:
             return []
         return [
             Event(
@@ -1412,11 +1440,9 @@ class OpenCodeSource(Source):
                 raw_text=text,
                 ts=ts,
                 turn_end=turn_end,
-                # The assistant message id. Every part of the reply references
-                # it as `message_id`, so it names the turn as well as the
-                # message — opencode ends a turn by finishing a message.
                 turn_id=mid or None,
                 raw_index=seq,
+                usage=usage,
             )
         ]
 

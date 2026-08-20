@@ -46,7 +46,7 @@ from textual.content import Content
 from textual.reactive import reactive
 from textual.timer import Timer
 from textual.widget import Widget
-from textual.widgets import Footer, Label, RichLog, Static
+from textual.widgets import Label, RichLog, Static
 
 from theater.client import DaemonClient
 from theater.config import Config, RegieSection
@@ -657,6 +657,41 @@ class TreePanel(VerticalScroll):
                 self.scroll_to_widget(widget)
 
 
+def _fmt_tokens(n: int) -> str:
+    """Human-readable token count."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.0f}k"
+    return str(n)
+
+
+class UsageFooter(Widget):
+    """Footer showing palette key + aggregate token/cost usage."""
+
+    DEFAULT_CSS = ""
+    totals: reactive[dict | None] = reactive(None)
+
+    def render(self) -> Content:
+        left = Content.assemble((" ctrl+p palette", "$text-muted"))
+        t = self.totals
+        if not isinstance(t, dict):
+            right = Content.assemble(("  —", "$text"))
+        else:
+            inp = _fmt_tokens(t.get("input_tokens", 0))
+            out = _fmt_tokens(
+                t.get("output_tokens", 0) + t.get("reasoning_output_tokens", 0)
+            )
+            cache = _fmt_tokens(
+                t.get("cache_read_input_tokens", 0) + t.get("cache_creation_input_tokens", 0)
+            )
+            cost = t.get("cost_microcents", 0) / 100_000_000.0
+            right = Content.assemble(
+                (f"  {inp} in  {out} out  {cache} cache  ${cost:.2f}", "$text bold")
+            )
+        return left + Content(" " * 4) + right
+
+
 class RegieApp(App):
     """The theater control panel."""
 
@@ -707,7 +742,7 @@ class RegieApp(App):
     .log {
         background: $surface;
     }
-    Footer {
+    UsageFooter {
         dock: none;
         height: 1;
         background: $surface;
@@ -806,10 +841,10 @@ class RegieApp(App):
 
     def compose(self) -> ComposeResult:
         # No Header: it restates the app's class name to someone who just
-        # typed the command that started it. The footer has the keybindings.
+        # typed the command that started it. The footer shows usage totals.
         with Vertical(id="sidebar"):
             yield TreePanel(id="tree-panel")
-            yield Footer()
+            yield UsageFooter(id="usage-footer")
             bus = RichLog(id="bus-panel", max_lines=200, wrap=False, markup=True)
             # Applied here, not in watch_bus_visible: a reactive assigned
             # its own default fires no watcher, so false-vs-false would
@@ -935,7 +970,7 @@ class RegieApp(App):
     async def _hide_status(self) -> None:
         """Hide tmux's own status line while the régie is up.
 
-        The régie already draws a footer carrying the keybindings, and the
+        The régie already draws a footer with usage totals, and the
         rest of the window is the stage — a real agent pane. tmux's status
         bar underneath duplicates neither and costs a row of a terminal the
         stage wants. Scoped to the session and remembered on exactly the
@@ -1043,6 +1078,10 @@ class RegieApp(App):
         if self.cursor >= len(self.tree_lines):
             self.cursor = max(0, len(self.tree_lines) - 1)
         self._render_tree()
+        with contextlib.suppress(Exception):
+            totals = await self._client.call("usage_totals")
+            assert isinstance(totals, dict)
+            self.query_one("#usage-footer", UsageFooter).totals = totals
 
     async def _refresh_bus(self) -> None:
         if not self._client:

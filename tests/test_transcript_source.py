@@ -359,6 +359,29 @@ async def test_history_does_not_move_the_poll_cursor(root, workdir):
     assert [e.text for e in (await s.read()).events] == ["two"]
 
 
+async def test_usage_only_records_do_not_consume_history_or_attachment(root, workdir):
+    usage = json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "id": "m-usage",
+                "stop_reason": "tool_use",
+                "content": [{"type": "thinking", "thinking": "hidden"}],
+                "usage": {"input_tokens": 2, "output_tokens": 3},
+            },
+        }
+    )
+    transcript(root, "aaa", workdir, record("visible"), usage)
+    s = source(root, workdir)
+
+    history = await s.history(last_n=1)
+    attached = await s.read()
+
+    assert [event.text for event in history.events] == ["visible"]
+    assert attached.attached is not None
+    assert attached.attached.last_event is None
+
+
 async def test_history_of_a_transcript_that_does_not_exist_is_empty(root, workdir):
     got = await source(root, workdir).history(last_n=5)
     assert got == History()

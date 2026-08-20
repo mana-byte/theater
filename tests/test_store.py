@@ -127,6 +127,34 @@ def test_name_is_never_persisted_to_sqlite(store):
     assert "name" not in participants_table.c
 
 
+def test_usage_is_deduplicated_and_aggregated(store):
+    values = {
+        "participant_id": "p1",
+        "tree_root_id": "p1",
+        "usage_key": "session:message",
+        "ts": 10.0,
+        "model": "model",
+        "input_tokens": 11,
+        "output_tokens": 7,
+        "cache_creation_input_tokens": 3,
+        "cache_read_input_tokens": 5,
+        "reasoning_output_tokens": 2,
+        "cost_microcents": 900,
+    }
+
+    assert store.record_usage(**values) is True
+    assert store.record_usage(**values) is False
+    assert store.usage_totals() == {
+        "input_tokens": 11,
+        "output_tokens": 7,
+        "cache_creation_input_tokens": 3,
+        "cache_read_input_tokens": 5,
+        "reasoning_output_tokens": 2,
+        "cost_microcents": 900,
+    }
+    assert all(value == 0 for value in store.usage_totals(since=11.0).values())
+
+
 # ---- Job structured fields ------------------------------------------------
 
 

@@ -46,6 +46,7 @@ import logging
 import shlex
 import uuid
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -61,6 +62,7 @@ from theater.harness.base import (
     LaunchPlan,
     NativeChild,
     ResumeLaunchOverlay,
+    TokenUsage,
     clipper,
     last_screen_line,
     theater_binary,
@@ -216,6 +218,29 @@ def _epoch(value) -> float | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return None
+
+
+def _token_usage(message: dict, record: dict) -> TokenUsage | None:
+    """Extract usage from a Claude assistant record."""
+    raw = message.get("usage")
+    if not isinstance(raw, dict):
+        return None
+    model = message.get("model")
+    if not isinstance(model, str) or not model:
+        model = None
+    cost = record.get("costUSD")
+    cost = float(cost) if isinstance(cost, (int, float)) and cost > 0 else None
+    native_id = message.get("id") or record.get("requestId")
+    usage_key = f"claude:{native_id}" if isinstance(native_id, str) and native_id else None
+    return TokenUsage(
+        model=model,
+        input_tokens=int(raw.get("input_tokens") or 0),
+        output_tokens=int(raw.get("output_tokens") or 0),
+        cache_creation_input_tokens=int(raw.get("cache_creation_input_tokens") or 0),
+        cache_read_input_tokens=int(raw.get("cache_read_input_tokens") or 0),
+        cost_usd=cost,
+        idempotency_key=usage_key,
+    )
 
 
 def _relativise(path: str, cwd: str | None) -> str | None:
@@ -815,14 +840,11 @@ class ClaudeCodeObserver(TranscriptObserver):
 
         stop = message.get("stop_reason")
         turn_end = stop is not None and stop != "tool_use"
-        # `message.id` is shared by every record one message was split into —
-        # exactly the set that can repeat a boundary. The record's `uuid`
-        # differs per record and would name each duplicate a separate turn.
-        # `requestId` is the fallback for records written without a message id.
         tid = message.get("id") or record.get("requestId")
         tid = tid if isinstance(tid, str) and tid else None
         cwd = record.get("cwd")
         cwd = cwd if isinstance(cwd, str) and cwd else None
+        usage = _token_usage(message, record)
         out: list[Event] = []
         for block in message.get("content") or []:
             if not isinstance(block, dict):
@@ -855,25 +877,21 @@ class ClaudeCodeObserver(TranscriptObserver):
                         ),
                     )
                 )
-            # `thinking` is deliberately dropped: it is the agent's private
-            # reasoning, it is the bulk of the bytes, and no consumer of the bus
-            # needs it to answer "what is this agent doing".
-        if turn_end:
-            # A thinking-only record can end a turn. Never lose the boundary
-            # just because the payload was filtered out.
-            if out:
-                last = out[-1]
-                out[-1] = Event(
-                    kind=last.kind,
-                    text=last.text,
-                    raw_text=last.raw_text,
-                    tool_name=last.tool_name,
-                    ts=last.ts,
-                    turn_end=True,
+        if usage is not None and out:
+            out[-1] = replace(out[-1], usage=usage)
+        elif usage is not None and not out and not turn_end:
+            out.append(
+                Event(
+                    kind=EventKind.ASSISTANT,
+                    ts=ts,
                     turn_id=tid,
-                    raw_index=last.raw_index,
-                    paths=last.paths,
+                    raw_index=index,
+                    usage=usage,
                 )
+            )
+        if turn_end:
+            if out:
+                out[-1] = replace(out[-1], turn_end=True)
             else:
                 out.append(
                     Event(
@@ -882,6 +900,7 @@ class ClaudeCodeObserver(TranscriptObserver):
                         turn_end=True,
                         turn_id=tid,
                         raw_index=index,
+                        usage=usage,
                     )
                 )
         return out

@@ -174,3 +174,25 @@ named_worktrees = Table(
 )
 
 Index("idx_named_worktrees_path", named_worktrees.c.path)
+
+usage = Table(
+    "usage",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("participant_id", Text, nullable=False),
+    Column("tree_root_id", Text),
+    Column("usage_key", Text),
+    Column("ts", REAL, nullable=False),
+    Column("model", Text),
+    Column("input_tokens", Integer, nullable=False, server_default=text("0")),
+    Column("output_tokens", Integer, nullable=False, server_default=text("0")),
+    Column("cache_creation_input_tokens", Integer, nullable=False, server_default=text("0")),
+    Column("cache_read_input_tokens", Integer, nullable=False, server_default=text("0")),
+    Column("reasoning_output_tokens", Integer, nullable=False, server_default=text("0")),
+    Column("cost_microcents", Integer, nullable=False, server_default=text("0")),
+    sqlite_autoincrement=True,
+)
+
+Index("idx_usage_participant", usage.c.participant_id, usage.c.ts)
+Index("idx_usage_tree", usage.c.tree_root_id, usage.c.ts)
+Index("idx_usage_identity", usage.c.participant_id, usage.c.usage_key, unique=True)

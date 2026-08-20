@@ -165,6 +165,20 @@ class EventPath:
 
 
 @dataclass(frozen=True, slots=True)
+class TokenUsage:
+    """Normalized, non-overlapping token counts for one model response."""
+
+    model: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    reasoning_output_tokens: int = 0
+    cost_usd: float | None = None
+    idempotency_key: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Event:
     """One thing that happened inside an agent, stripped of harness dialect."""
 
@@ -194,6 +208,20 @@ class Event:
     #: The same text before clipping, when the adapter has textual content.
     #: ``None`` means "no separate raw text"; callers fall back to ``text``.
     raw_text: str | None = None
+    #: Per-turn token usage, when available.
+    usage: TokenUsage | None = None
+
+    @property
+    def usage_only(self) -> bool:
+        """Whether this event carries accounting data only."""
+        return (
+            self.usage is not None
+            and not self.text
+            and not self.raw_text
+            and self.tool_name is None
+            and not self.paths
+            and not self.turn_end
+        )
 
 
 @dataclass(frozen=True, slots=True)

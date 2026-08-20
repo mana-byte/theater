@@ -1091,6 +1091,17 @@ async def _stats(daemon, params: dict) -> dict:
     }
 
 
+@method("usage_totals")
+async def _usage_totals(daemon, params: dict) -> dict:
+    """Aggregate token and cost totals across all participants."""
+    window = params.get("window")
+    since = None if window in (None, "") else now() - float(window) * 3600.0
+    return {
+        "since": since,
+        **daemon.store.usage_totals(since=since),
+    }
+
+
 def _refuse_send(
     daemon, exc: Exception, *, reason: str, caller_id: str, target_id: str
 ) -> NoReturn:

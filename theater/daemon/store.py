@@ -44,6 +44,7 @@ from theater.daemon.schema import (
     named_worktrees,
     participants,
     tree_kv,
+    usage,
 )
 from theater.models import Job, Participant, Status, new_id, now
 from theater.provenance import TranscriptProvenance
@@ -56,7 +57,7 @@ BASELINE = "0001"
 #: The latest revision. A legacy database is stamped at BASELINE and then
 #: upgraded to this; a fresh database lands here directly. Tests assert
 #: against this rather than hardcoding a revision string.
-HEAD = "0015"
+HEAD = "0016"
 RECEIPT_TOKEN_PREFIX = "receipt_token:"
 
 
@@ -755,6 +756,66 @@ class Store:
                 reason = "unknown"
             counts[reason] = counts.get(reason, 0) + 1
         return counts
+
+    # ---- usage ----------------------------------------------------------
+
+    def record_usage(
+        self,
+        *,
+        participant_id: str,
+        tree_root_id: str | None,
+        usage_key: str | None,
+        ts: float,
+        model: str | None,
+        input_tokens: int,
+        output_tokens: int,
+        cache_creation_input_tokens: int,
+        cache_read_input_tokens: int,
+        reasoning_output_tokens: int,
+        cost_microcents: int,
+    ) -> bool:
+        """Insert one usage row, returning whether its native key was new."""
+        statement = sqlite_insert(usage).values(
+            participant_id=participant_id,
+            tree_root_id=tree_root_id,
+            usage_key=usage_key,
+            ts=ts,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_creation_input_tokens=cache_creation_input_tokens,
+            cache_read_input_tokens=cache_read_input_tokens,
+            reasoning_output_tokens=reasoning_output_tokens,
+            cost_microcents=cost_microcents,
+        )
+        if usage_key is not None:
+            statement = statement.on_conflict_do_nothing(
+                index_elements=[usage.c.participant_id, usage.c.usage_key]
+            )
+        result = self.conn.execute(statement)
+        return result.rowcount > 0
+
+    def usage_totals(self, *, since: float | None = None) -> dict:
+        """Sum of all token and cost columns across the usage table."""
+        query = select(
+            func.coalesce(func.sum(usage.c.input_tokens), 0).label("input_tokens"),
+            func.coalesce(func.sum(usage.c.output_tokens), 0).label("output_tokens"),
+            func.coalesce(func.sum(usage.c.cache_creation_input_tokens), 0).label(
+                "cache_creation_input_tokens"
+            ),
+            func.coalesce(func.sum(usage.c.cache_read_input_tokens), 0).label(
+                "cache_read_input_tokens"
+            ),
+            func.coalesce(func.sum(usage.c.reasoning_output_tokens), 0).label(
+                "reasoning_output_tokens"
+            ),
+            func.coalesce(func.sum(usage.c.cost_microcents), 0).label("cost_microcents"),
+        )
+        if since is not None:
+            query = query.where(usage.c.ts >= since)
+        row = self.conn.execute(query).fetchone()
+        assert row is not None
+        return dict(row._mapping)
 
     # ---- bus ----------------------------------------------------------
 

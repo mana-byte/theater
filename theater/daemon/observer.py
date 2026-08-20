@@ -71,6 +71,7 @@ from pathlib import Path
 
 from theater import timing
 from theater.config import ObserverSection
+from theater.daemon import lineage
 from theater.daemon.registry import Registry
 from theater.harness import (
     HARNESSES,
@@ -97,6 +98,7 @@ from theater.harness.source import (
 )
 from theater.models import JobState, Status, Tier
 from theater.models import now as wall_now
+from theater.pricing import usage_cost_microcents
 from theater.provenance import (
     TranscriptProvenance,
     is_trusted_provenance,
@@ -936,7 +938,31 @@ class Observer:
             f"{type(source).__name__} returned a batch that is both waiting and attached"
         )
 
-    def _apply(self, pid: str, batch: Batch, clock: QuietClock, turns: TurnAccumulator) -> bool:
+    def _record_usage(self, pid: str, event: Event) -> bool:
+        """Persist a usage report, returning whether it was new."""
+        assert event.usage is not None
+        u = event.usage
+        participant = self.store.get_participant(pid)
+        usage_key = u.idempotency_key
+        if usage_key is not None and participant is not None:
+            scope = participant.session_id or participant.transcript_location
+            if scope:
+                usage_key = f"{scope}:{usage_key}"
+        return self.store.record_usage(
+            participant_id=pid,
+            tree_root_id=lineage.root_of(self.store, pid),
+            usage_key=usage_key,
+            ts=event.ts if event.ts is not None else wall_now(),
+            model=u.model,
+            input_tokens=u.input_tokens,
+            output_tokens=u.output_tokens,
+            cache_creation_input_tokens=u.cache_creation_input_tokens,
+            cache_read_input_tokens=u.cache_read_input_tokens,
+            reasoning_output_tokens=u.reasoning_output_tokens,
+            cost_microcents=usage_cost_microcents(u),
+        )
+
+    def _apply(self, pid: str, batch: Batch, clock: QuietClock, turns: TurnAccumulator) -> bool:  # noqa: PLR0912
         """Put a batch on the bus and move the participant's status.
 
         Returns whether anything happened, which is what the quiet timers read.
@@ -971,6 +997,10 @@ class Observer:
 
         last = None
         for event in batch.events:
+            if event.usage is not None:
+                self._record_usage(pid, event)
+            if event.usage_only:
+                continue
             self.store.bus_append(
                 f"agent.{event.kind}",
                 from_id=pid,
@@ -1041,13 +1071,14 @@ class Observer:
     def _has_semantic_progress(batch: Batch) -> bool:
         """Whether a batch says something about the participant, not just its source.
 
-        ``progressed`` deliberately includes bookkeeping and unknown records so
-        they protect a live turn from relocation and rescue. Events, explicit
-        status and attachment evidence are the subset that can also restart the
-        independent screen-status clock. Derived here rather than declared by a
-        plugin, so a batch cannot contradict its own contents.
+        ``progressed`` includes bookkeeping and unknown records. Conversation
+        events, status and attachments can also restart the screen-status clock.
         """
-        return bool(batch.events) or batch.status is not None or batch.attached is not None
+        return (
+            any(not event.usage_only for event in batch.events)
+            or batch.status is not None
+            or batch.attached is not None
+        )
 
     def _unblock_on_semantic_progress(self, pid: str, batch: Batch) -> None:
         """Raw bookkeeping cannot overrule a modal found by the screen arm."""

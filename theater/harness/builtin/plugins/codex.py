@@ -131,6 +131,7 @@ from theater.harness.base import (
     LaunchPlan,
     NativeChild,
     ResumeLaunchOverlay,
+    TokenUsage,
     clipper,
     theater_binary,
 )
@@ -965,7 +966,9 @@ class CodexObserver(TranscriptObserver):
                     raw_index=index,
                 )
             ]
-        # token_count, task_started, patch_apply_end, thread_settings_applied.
+        if ptype == "token_count":
+            return self._token_count(payload, ts, index)
+        # task_started, patch_apply_end, thread_settings_applied.
         return []
 
     def _mcp_result(self, result) -> str:
@@ -979,6 +982,48 @@ class CodexObserver(TranscriptObserver):
         if err is not None:
             return err if isinstance(err, str) else json.dumps(err, default=str)
         return json.dumps(result, default=str)
+
+    def _token_count(self, payload: dict, ts: float | None, index: int) -> list[Event]:
+        """Extract per-turn usage from a token_count event_msg."""
+        info = payload.get("info")
+        if not isinstance(info, dict):
+            return []
+        last = info.get("last_token_usage")
+        if not isinstance(last, dict):
+            return []
+        total = info.get("total_token_usage") or {}
+        if not isinstance(total, dict):
+            return []
+        fields = (
+            "input_tokens",
+            "cached_input_tokens",
+            "cache_write_input_tokens",
+            "output_tokens",
+            "reasoning_output_tokens",
+        )
+        totals = tuple(int(total.get(field) or 0) for field in fields)
+        latest = tuple(int(last.get(field) or 0) for field in fields)
+        model = info.get("model") or info.get("model_name")
+        model = model or None if isinstance(model, str) else None
+        input_tokens, cache_read, cache_write, output_tokens, reasoning = latest
+        usage = TokenUsage(
+            model=model,
+            input_tokens=max(0, input_tokens - cache_read - cache_write),
+            output_tokens=max(0, output_tokens - reasoning),
+            cache_creation_input_tokens=cache_write,
+            cache_read_input_tokens=cache_read,
+            reasoning_output_tokens=reasoning,
+            idempotency_key="codex:" + ":".join(str(value) for value in totals + latest),
+        )
+        if (
+            usage.input_tokens == 0
+            and usage.output_tokens == 0
+            and usage.cache_creation_input_tokens == 0
+            and usage.cache_read_input_tokens == 0
+            and usage.reasoning_output_tokens == 0
+        ):
+            return []
+        return [Event(kind=EventKind.ASSISTANT, ts=ts, raw_index=index, usage=usage)]
 
     def _item(self, payload: dict, ts: float | None, index: int, *, clip_text: bool) -> list[Event]:
         _clip = clipper(clip_text)

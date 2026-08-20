@@ -30,7 +30,8 @@ from theater.daemon.observer import (
     TurnAccumulator,
 )
 from theater.daemon.schema import jobs as jobs_table
-from theater.harness.base import Event, EventKind
+from theater.daemon.schema import usage as usage_table
+from theater.harness.base import Event, EventKind, TokenUsage
 from theater.harness.observation import (
     HarnessObserver,
     ScreenConfidence,
@@ -363,6 +364,69 @@ def test_new_bytes_restart_the_rescue_clock_too():
     cursor.stir()
     assert cursor.rescue_since is None
     assert cursor.rescue_quiet_for(90.0) == 0.0
+
+
+def test_usage_only_events_are_persisted_without_changing_status_or_bus(registry):
+    participant = registry.register(harness="codex", pane="%1", cwd="/tmp")
+    participant.session_id = "session-a"
+    registry.store.upsert_participant(participant)
+    registry.set_status(participant.id, Status.AWAITING_INPUT)
+    observer = Observer(registry, harnesses={})
+    event = Event(
+        kind=EventKind.ASSISTANT,
+        usage=TokenUsage(input_tokens=12, cost_usd=0.29, idempotency_key="native-1"),
+    )
+    batch = Batch(events=[event])
+    bus_before = registry.store.bus_tail()
+
+    observer._apply(
+        participant.id,
+        batch,
+        QuietClock(),
+        TurnAccumulator(),
+    )
+    observer._unblock_on_semantic_progress(participant.id, batch)
+    observer._apply(
+        participant.id,
+        batch,
+        QuietClock(),
+        TurnAccumulator(),
+    )
+
+    rows = registry.store.conn.execute(usage_table.select()).fetchall()
+    assert len(rows) == 1
+    assert rows[0].usage_key == "session-a:native-1"
+    assert rows[0].cost_microcents == 29_000_000
+    assert registry.store.bus_tail() == bus_before
+    assert registry.get(participant.id).status is Status.AWAITING_INPUT
+
+
+def test_usage_identity_is_scoped_by_participant_and_session(registry):
+    observer = Observer(registry, harnesses={})
+    event = Event(
+        kind=EventKind.ASSISTANT,
+        usage=TokenUsage(input_tokens=1, idempotency_key="native-1"),
+    )
+    first = registry.register(harness="codex", pane="%1", cwd="/tmp")
+    first.session_id = "session-a"
+    registry.store.upsert_participant(first)
+    observer._record_usage(first.id, event)
+
+    first.session_id = "session-b"
+    registry.store.upsert_participant(first)
+    observer._record_usage(first.id, event)
+
+    second = registry.register(harness="codex", pane="%2", cwd="/tmp")
+    second.session_id = "session-a"
+    registry.store.upsert_participant(second)
+    observer._record_usage(second.id, event)
+
+    rows = registry.store.conn.execute(usage_table.select()).fetchall()
+    assert len(rows) == 3
+    assert {row.usage_key for row in rows} == {
+        "session-a:native-1",
+        "session-b:native-1",
+    }
 
 
 # ---- rescuing a job whose turn end was never read ---------------------

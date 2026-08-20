@@ -63,15 +63,22 @@ def test_claude_turn_parses_to_the_expected_event_sequence():
     assert [e.kind for e in events] == [
         EventKind.USER,
         EventKind.ASSISTANT,
+        EventKind.ASSISTANT,
         EventKind.TOOL_CALL,
         EventKind.TOOL_RESULT,
         EventKind.ASSISTANT,
+        EventKind.ASSISTANT,
     ]
-    # Thinking blocks and bookkeeping records produce nothing at all.
-    assert len(events) == 5
-    assert events[2].tool_name == "Read"
+    assert len(events) == 7
+    assert events[3].tool_name == "Read"
     assert events[-1].turn_end is True
-    assert [e.turn_end for e in events[:-1]] == [False] * 4
+    assert [e.turn_end for e in events[:-1]] == [False] * 6
+
+    repeated = [events[i].usage for i in (1, 2, 3)]
+    assert all(item is not None for item in repeated)
+    assert len({item.idempotency_key for item in repeated if item is not None}) == 1
+    assert events[5].text == ""
+    assert events[5].usage.output_tokens == 3081
 
 
 def test_claude_records_carry_their_own_timestamp():
@@ -83,7 +90,7 @@ def test_claude_records_carry_their_own_timestamp():
 
 def test_claude_raw_index_tracks_the_source_record():
     events = events_for(ClaudeCodeObserver(), FIXTURES / "claude_code.jsonl")
-    assert [e.raw_index for e in events] == [0, 2, 3, 4, 6]
+    assert [e.raw_index for e in events] == [0, 1, 2, 3, 4, 5, 6]
 
 
 def test_a_thinking_only_record_still_ends_the_turn():
@@ -268,6 +275,22 @@ def test_codex_records_carry_their_own_timestamp():
     assert all(e.ts is not None for e in events)
     # ISO-8601 with a Z suffix, parsed as UTC rather than local time.
     assert events[0].ts == pytest.approx(1786534852.2, abs=0.01)
+
+
+def test_codex_usage_is_normalized_and_stably_keyed():
+    lines = (FIXTURES / "turn_codex.jsonl").read_text().splitlines()
+    observer = CodexObserver()
+    first = observer.parse(lines[9], 9)
+    second = observer.parse(lines[9], 9)
+
+    assert len(first) == len(second) == 1
+    assert first[0].usage == second[0].usage
+    usage = first[0].usage
+    assert usage is not None
+    assert usage.input_tokens == 3
+    assert usage.cache_creation_input_tokens == 15635
+    assert usage.output_tokens == 11
+    assert usage.idempotency_key is not None
 
 
 def test_codex_takes_the_reply_from_the_turn_boundary_not_the_final_message():
@@ -496,6 +519,39 @@ def test_opencode_source_preserves_raw_text_before_clipping(tmp_path):
     assert events[0].text != LONG
     assert events[0].text.endswith(f"(+{MAX_TEXT * 2} chars)")
     assert events[0].raw_text == LONG
+
+
+def test_opencode_emits_usage_for_an_empty_tool_step(tmp_path):
+    from theater.harness.builtin.plugins.opencode import OpenCodeSource
+
+    src = OpenCodeSource(tmp_path / "opencode-stable.db", cwd=str(tmp_path))
+    events = src._on_message(
+        {
+            "info": {
+                "id": "msg_a1",
+                "role": "assistant",
+                "finish": "tool-calls",
+                "modelID": "model-a",
+                "time": {"completed": 2000},
+                "cost": 0.01,
+                "tokens": {
+                    "input": 10,
+                    "output": 4,
+                    "reasoning": 2,
+                    "cache": {"read": 3, "write": 1},
+                },
+            }
+        },
+        0,
+    )
+
+    assert len(events) == 1
+    usage = events[0].usage
+    assert usage is not None
+    assert usage.idempotency_key == "opencode:msg_a1"
+    assert usage.input_tokens == 10
+    assert usage.cache_read_input_tokens == 3
+    assert events[0].turn_end is False
 
 
 # ---- idle screens ------------------------------------------------------
