@@ -79,6 +79,11 @@ sidebar_width = 52
 # rather than skipping whatever arrived meanwhile.
 bus_visible = false
 
+# Which cost window the price footer shows: "day", "week", or "year".
+# The total cost is fetched for this period and animated on each refresh.
+# The daily average is always computed from the last 30 days regardless.
+cost_window = "day"
+
 
 [rails]
 

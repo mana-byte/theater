@@ -155,6 +155,40 @@ def test_usage_is_deduplicated_and_aggregated(store):
     assert all(value == 0 for value in store.usage_totals(since=11.0).values())
 
 
+def test_usage_summary_returns_all_footer_windows_in_one_result(store):
+    base = {
+        "participant_id": "p1",
+        "tree_root_id": "p1",
+        "model": "model",
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "reasoning_output_tokens": 0,
+    }
+    for key, ts, tokens, cost in (
+        ("old", 1.0, 1, 10),
+        ("average", 20.0, 2, 20),
+        ("windowed", 30.0, 4, 40),
+    ):
+        assert store.record_usage(
+            **base,
+            usage_key=key,
+            ts=ts,
+            input_tokens=tokens,
+            output_tokens=tokens * 10,
+            cost_microcents=cost,
+        )
+
+    summary = store.usage_summary(since=25.0, average_since=15.0)
+
+    assert summary["all_time"]["input_tokens"] == 7
+    assert summary["all_time"]["output_tokens"] == 70
+    assert summary["all_time"]["cost_microcents"] == 70
+    assert summary["windowed"]["input_tokens"] == 4
+    assert summary["windowed"]["cost_microcents"] == 40
+    assert summary["average"]["input_tokens"] == 6
+    assert summary["average"]["cost_microcents"] == 60
+
+
 # ---- Job structured fields ------------------------------------------------
 
 

@@ -169,6 +169,8 @@ class RegieSection:
     #: is not polled at all — see `RegieApp._refresh_bus`. The palette toggles
     #: it for the current session; this only decides the open state.
     bus_visible: bool = False
+    #: Which cost window the price footer shows: "day", "week", or "year".
+    cost_window: str = "day"
 
 
 #: Section name -> dataclass. Drives both parsing and the unknown-section

@@ -1102,6 +1102,21 @@ async def _usage_totals(daemon, params: dict) -> dict:
     }
 
 
+@method("usage_summary")
+async def _usage_summary(daemon, params: dict) -> dict:
+    """Aggregate footer usage windows in one synchronous SQLite scan."""
+    window = params.get("window")
+    hours = 24.0 if window in (None, "") else float(window)
+    timestamp = now()
+    since = timestamp - hours * 3600.0
+    average_since = timestamp - 720.0 * 3600.0
+    return {
+        "since": since,
+        "average_since": average_since,
+        **daemon.store.usage_summary(since=since, average_since=average_since),
+    }
+
+
 def _refuse_send(
     daemon, exc: Exception, *, reason: str, caller_id: str, target_id: str
 ) -> NoReturn:

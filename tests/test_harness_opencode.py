@@ -492,6 +492,51 @@ def test_the_finish_that_fires_twice_is_reported_once(rec, workdir):
     assert events[0].text == "hello"
 
 
+def test_finish_usage_is_reported_once_with_full_model_identity(rec, workdir):
+    src = drain(rec, workdir)
+    info = rec.message("msg_a1", "assistant")
+    info.update(
+        providerID="openai-foundry",
+        modelID="zai-glm-5-2",
+        cost=0,
+        tokens={
+            "input": 11,
+            "output": 7,
+            "reasoning": 2,
+            "cache": {"read": 5, "write": 3},
+        },
+    )
+    rec.text("msg_a1", "prt_t1", "hello")
+    rec.finish(info, "stop")
+
+    events = asyncio.run(src.read()).events
+
+    assert len(events) == 1
+    usage = events[0].usage
+    assert usage is not None
+    assert usage.model == "openai-foundry/zai-glm-5-2"
+    assert usage.cost_usd is None
+    assert usage.input_tokens == 11
+    assert usage.output_tokens == 7
+    assert usage.cache_read_input_tokens == 5
+    assert usage.cache_creation_input_tokens == 3
+    assert usage.reasoning_output_tokens == 2
+    assert usage.idempotency_key == "opencode:msg_a1"
+
+
+def test_usage_falls_back_to_model_id_without_provider(rec, workdir):
+    src = drain(rec, workdir)
+    info = rec.message("msg_a1", "assistant")
+    info.update(modelID="gpt-5", tokens={"input": 1, "output": 2})
+    rec.text("msg_a1", "prt_t1", "hello")
+    rec.finish(info, "stop")
+
+    usage = asyncio.run(src.read()).events[0].usage
+
+    assert usage is not None
+    assert usage.model == "gpt-5"
+
+
 def test_streamed_text_is_emitted_once_whole_at_the_end(rec, workdir):
     """Not once per update: the bus would carry three prefixes of one reply,
     and the job would resolve with whichever fragment landed last."""

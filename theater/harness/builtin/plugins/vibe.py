@@ -41,11 +41,13 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import secrets
 import stat
 import tomllib
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -61,6 +63,7 @@ from theater.harness.base import (
     LaunchPlan,
     NativeChild,
     ResumeLaunchOverlay,
+    TokenUsage,
     clipper,
     last_screen_line,
     theater_binary,
@@ -71,7 +74,7 @@ from theater.harness.observation import (
     ScreenReading,
     TranscriptObserver,
 )
-from theater.harness.source import TranscriptCandidate
+from theater.harness.source import Batch, Source, TranscriptCandidate, TranscriptSource
 from theater.models import BadRequest
 from theater.provenance import TranscriptProvenance
 
@@ -532,6 +535,243 @@ class VibeHarness(Harness):
         return base / "config.toml"
 
 
+class _VibeSource(Source):
+    """Wraps TranscriptSource to emit usage events from meta.json.
+
+    Vibe stores cumulative token totals in meta.json, not per-message in
+    messages.jsonl. This wrapper reads meta.json on every poll, computes
+    the delta from the previous cumulative baseline, and appends a
+    usage-only Event to the batch when tokens have increased.
+    """
+
+    def __init__(
+        self,
+        inner: TranscriptSource,
+        *,
+        after: float | None,
+        session_id: str | None,
+        known_location: str | None,
+    ) -> None:
+        self._inner = inner
+        self.collision_domain = inner.collision_domain
+        self._baseline: tuple[int, int, int] | None = None
+        self._meta_fingerprint: tuple[int, int, int, int] | None = None
+        self._cached_meta: dict | None = None
+        # A genuinely new Theater launch may incur its first model call before
+        # the observer attaches. A resume/adoption/restart must baseline current
+        # totals instead, or it would recount history.
+        self._count_initial = after is not None and session_id is None and known_location is None
+
+    # These complete the concrete TranscriptSource surface asserted by the
+    # trusted-pin and quarantine tests. They intentionally do not belong on the
+    # Source ABC, whose inputs need not be file-backed.
+    @property
+    def path(self) -> Path | None:
+        return self._inner.path
+
+    def correlation_for(self, path: Path, session_id: str | None) -> str:
+        return self._inner.correlation_for(path, session_id)
+
+    async def refresh(self) -> Batch:
+        return await self._inner.refresh()
+
+    async def probe_identity_loss(self):
+        return await self._inner.probe_identity_loss()
+
+    async def history(self, *, last_n: int):
+        return await self._inner.history(last_n=last_n)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+    def commit_attachment(self) -> None:
+        self._inner.commit_attachment()
+        self._meta_fingerprint = None
+        self._cached_meta = None
+
+    def discard_attachment(self) -> None:
+        self._inner.discard_attachment()
+
+    def revoke_attachment(self) -> None:
+        self._inner.revoke_attachment()
+        self._baseline = None
+        self._meta_fingerprint = None
+        self._cached_meta = None
+        self._count_initial = False
+
+    def admit_exact_location(self, *, location: str, session_id: str):
+        result = self._inner.admit_exact_location(location=location, session_id=session_id)
+        if result == "staged":
+            self._meta_fingerprint = None
+            self._cached_meta = None
+        return result
+
+    async def read(self) -> Batch:
+        batch = await self._inner.read()
+        if batch.attached is not None:
+            return batch
+        if self._inner.path is None:
+            return batch
+        usage_events = self._check_usage()
+        if usage_events:
+            return replace(
+                batch,
+                events=[*batch.events, *usage_events],
+                progressed=True,
+            )
+        return batch
+
+    def _read_meta(self) -> dict | None:
+        path = self.path
+        if path is None:
+            return None
+        meta_path = path.parent / "meta.json"
+        try:
+            st = meta_path.stat()
+        except OSError:
+            return None
+        fingerprint = (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size)
+        if self._meta_fingerprint == fingerprint:
+            return self._cached_meta
+        try:
+            data = json.loads(meta_path.read_text())
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        self._meta_fingerprint = fingerprint
+        self._cached_meta = data
+        return data
+
+    @staticmethod
+    def _counter(stats: dict, name: str) -> int | None:
+        value = stats.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        return value
+
+    def _check_usage(self) -> list[Event]:
+        meta = self._read_meta()
+        if meta is None:
+            return []
+        stats = meta.get("stats")
+        if not isinstance(stats, dict):
+            return []
+        prompt = self._counter(stats, "session_prompt_tokens")
+        completion = self._counter(stats, "session_completion_tokens")
+        cached = self._counter(stats, "session_cached_tokens")
+        if prompt is None or completion is None or cached is None:
+            return []
+        current = (prompt, completion, cached)
+        if self._baseline is None:
+            if self._count_initial:
+                self._baseline = (0, 0, 0)
+                self._count_initial = False
+            else:
+                self._baseline = current
+                return []
+        if current == self._baseline:
+            return []
+        old_prompt, old_completion, old_cached = self._baseline
+        if prompt < old_prompt or completion < old_completion or cached < old_cached:
+            self._baseline = current
+            return []
+        d_prompt = prompt - old_prompt
+        d_completion = completion - old_completion
+        d_cached = cached - old_cached
+        self._baseline = current
+        cache_read = min(d_cached, d_prompt)
+        input_tokens = d_prompt - cache_read
+        if input_tokens == 0 and d_completion == 0 and cache_read == 0:
+            return []
+        cost_usd = self._compute_cost(meta, stats, input_tokens, d_completion, cache_read)
+        model = self._resolve_model(meta)
+        key = f"vibe:{old_prompt}:{old_completion}:{old_cached}->{prompt}:{completion}:{cached}"
+        usage = TokenUsage(
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=d_completion,
+            cache_read_input_tokens=cache_read,
+            cost_usd=cost_usd,
+            idempotency_key=key,
+        )
+        return [Event(kind=EventKind.ASSISTANT, usage=usage)]
+
+    @staticmethod
+    def _model_entry(models: object, active: str) -> dict | None:
+        active_folded = active.casefold()
+        if isinstance(models, list):
+            for model in models:
+                if not isinstance(model, dict):
+                    continue
+                names = (model.get("name"), model.get("alias"))
+                if any(
+                    isinstance(value, str) and value.casefold() == active_folded for value in names
+                ):
+                    return model
+        elif isinstance(models, dict):
+            for key, value in models.items():
+                if (
+                    isinstance(key, str)
+                    and key.casefold() == active_folded
+                    and isinstance(value, dict)
+                ):
+                    return value
+        return None
+
+    def _resolve_model(self, meta: dict) -> str | None:
+        config = meta.get("config")
+        if not isinstance(config, dict):
+            return None
+        active = config.get("active_model")
+        if isinstance(active, str) and active:
+            matched = self._model_entry(config.get("models"), active)
+            if matched is not None:
+                name = matched.get("name")
+                provider = matched.get("provider")
+                if isinstance(provider, str) and provider and isinstance(name, str) and name:
+                    return f"{provider}/{name}"
+                if isinstance(name, str) and name:
+                    return name
+            return active
+        routed = config.get("routed_model_config")
+        if isinstance(routed, dict):
+            name = routed.get("name")
+            if isinstance(name, str) and name:
+                return name
+        return None
+
+    @staticmethod
+    def _price(value: object, *, positive: bool) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        price = float(value)
+        if not math.isfinite(price) or price < 0 or (positive and price == 0):
+            return None
+        return price
+
+    def _compute_cost(
+        self, _meta: dict, stats: dict, inp: int, out: int, cached: int
+    ) -> float | None:
+        input_price = stats.get("input_price_per_million")
+        output_price = stats.get("output_price_per_million")
+        cached_price = stats.get("cached_input_price_per_million")
+        inp_rate = self._price(input_price, positive=True)
+        out_rate = self._price(output_price, positive=True)
+        if inp_rate is None or out_rate is None:
+            return None
+        cache_rate = self._price(cached_price, positive=False)
+        # Vibe's null cached rate means full input price, not an unavailable
+        # price. This reproduces its own session_cost exactly.
+        if cache_rate is None:
+            cache_rate = inp_rate
+        return (
+            inp * inp_rate / 1_000_000
+            + out * out_rate / 1_000_000
+            + cached * cache_rate / 1_000_000
+        )
+
+
 class VibeObserver(TranscriptObserver):
     """Read `~/.vibe/logs/session/*/messages.jsonl`.
 
@@ -587,7 +827,7 @@ class VibeObserver(TranscriptObserver):
             correlation_root=self.correlation_root,
             isolated=self.isolated,
         )
-        return TranscriptSource(
+        inner = TranscriptSource(
             reader,
             cwd=cwd,
             session_id=session_id,
@@ -596,6 +836,12 @@ class VibeObserver(TranscriptObserver):
             exact_attachments=reader.isolated,
             session_provenance=session_provenance,
             collision_domain=str(reader.root.resolve()),
+            known_location=known_location,
+        )
+        return _VibeSource(
+            inner,
+            after=after,
+            session_id=session_id,
             known_location=known_location,
         )
 

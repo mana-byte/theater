@@ -50,6 +50,7 @@ from textual.widgets import Label, RichLog, Static
 
 from theater.client import DaemonClient
 from theater.config import Config, RegieSection
+from theater.protocol import RemoteError
 from theater.regie.bus_view import format_bus_line
 from theater.regie.palette import (
     ResumeDeadSessionCommand,
@@ -91,6 +92,10 @@ _DEFAULTS = RegieSection()
 TREE_INTERVAL = _DEFAULTS.tree_interval
 BUS_INTERVAL = _DEFAULTS.bus_interval
 BUS_BATCH = _DEFAULTS.bus_batch
+USAGE_INTERVAL = 10.0
+
+#: Maps [regie] cost_window values to hours for the usage_totals RPC.
+_COST_WINDOWS: dict[str, float] = {"day": 24.0, "week": 168.0, "year": 8760.0}
 
 #: Note tag on the `<prefix> h` return key, so teardown can tell "ours" from
 #: a binding someone else made after we installed it.
@@ -666,27 +671,303 @@ def _fmt_tokens(n: int) -> str:
     return str(n)
 
 
-class UsageFooter(Widget):
-    """Footer showing aggregate token/cost usage."""
+FOOTER_ANIM_INTERVAL = 0.1
+FOOTER_ANIM_DURATION = 2.0
+FOOTER_ANIM_FRAMES = round(FOOTER_ANIM_DURATION / FOOTER_ANIM_INTERVAL)
 
-    DEFAULT_CSS = ""
+
+def _pulsing_value(
+    value: str,
+    suffix: str,
+    *,
+    frame: int,
+    active: bool,
+    value_style: str,
+    suffix_style: str,
+) -> Content:
+    """Render one footer value with the tree's working-harness grey wave."""
+    if not active:
+        return Content.assemble((value, value_style), (suffix, suffix_style))
+    parts: list[str | tuple[str, str]] = []
+    offset = 0
+    for char in value:
+        if char.isspace():
+            parts.append(char)
+            continue
+        parts.append((char, working_harness_style(frame, offset)))
+        offset += 1
+    parts.append((suffix, suffix_style))
+    return Content.assemble(*parts)
+
+
+def _advance_float(value: float, target: float, step: float, formatter) -> float:
+    """Move one frame, snapping once the remaining change is no longer visible."""
+    candidate = value + step
+    if (step >= 0 and candidate >= target) or (step < 0 and candidate <= target):
+        return target
+    return target if formatter(candidate) == formatter(target) else candidate
+
+
+def _advance_int(value: int, target: int, step: int) -> int:
+    """Move one integral frame, clamping at the target."""
+    candidate = value + step
+    if (step >= 0 and candidate >= target) or (step < 0 and candidate <= target):
+        return target
+    return target if _fmt_tokens(candidate) == _fmt_tokens(target) else candidate
+
+
+class PriceFooter(Widget):
+    """Price row — two centered columns via CSS, no manual padding."""
+
+    DEFAULT_CSS = """
+    PriceFooter {
+        height: 3;
+        layout: horizontal;
+    }
+    PriceFooter > Static {
+        width: 1fr;
+        height: 1fr;
+        text-align: center;
+        content-align: center bottom;
+    }
+    #price-col {
+        color: $text;
+    }
+    #avg-col {
+        color: $text;
+    }
+    """
+
+    totals: reactive[dict | None] = reactive(None)
+    daily_avg: reactive[float] = reactive(0.0)
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._price_display = 0.0
+        self._price_target = 0.0
+        self._price_step = 0.0
+        self._avg_display = 0.0
+        self._avg_target = 0.0
+        self._avg_step = 0.0
+        self._frame = 0
+        self._timer: Timer | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="price-col")
+        yield Static("", id="avg-col")
+
+    def watch_totals(self, totals: dict | None) -> None:
+        if not isinstance(totals, dict):
+            return
+        self._price_target = totals.get("cost_microcents", 0) / 100_000_000.0
+        if self.is_mounted:
+            self._prepare_animation()
+
+    def watch_daily_avg(self, val: float) -> None:
+        self._avg_target = val
+        if self.is_mounted:
+            self._prepare_animation()
+
+    @staticmethod
+    def _fmt_price(value: float) -> str:
+        return f"${value:.3f}"
+
+    @staticmethod
+    def _fmt_avg(value: float) -> str:
+        return f"${value:.3f}"
+
+    def _price_active(self) -> bool:
+        return self._fmt_price(self._price_display) != self._fmt_price(self._price_target)
+
+    def _avg_active(self) -> bool:
+        return self._fmt_avg(self._avg_display) != self._fmt_avg(self._avg_target)
+
+    def _render_values(self) -> None:
+        self.query_one("#price-col", Static).update(
+            Content.assemble(
+                "\n",
+                _pulsing_value(
+                    self._fmt_price(self._price_display),
+                    "",
+                    frame=self._frame,
+                    active=self._price_active(),
+                    value_style="$text bold",
+                    suffix_style="$text",
+                ),
+                "\n",
+                ("cost", "$text dim"),
+            )
+        )
+        self.query_one("#avg-col", Static).update(
+            Content.assemble(
+                "\n",
+                _pulsing_value(
+                    self._fmt_avg(self._avg_display),
+                    "",
+                    frame=self._frame,
+                    active=self._avg_active(),
+                    value_style="$text",
+                    suffix_style="$text",
+                ),
+                "\n",
+                ("avg/day", "$text dim"),
+            )
+        )
+
+    def _prepare_animation(self) -> None:
+        self._stop_timer()
+        if not self._price_active():
+            self._price_display = self._price_target
+        if not self._avg_active():
+            self._avg_display = self._avg_target
+        self._price_step = (self._price_target - self._price_display) / FOOTER_ANIM_FRAMES
+        self._avg_step = (self._avg_target - self._avg_display) / FOOTER_ANIM_FRAMES
+        self._frame = 0
+        self._render_values()
+        if self._price_active() or self._avg_active():
+            self._start_timer()
+
+    def _tick(self) -> None:
+        self._frame = (self._frame + 1) % 10
+        if self._price_active():
+            self._price_display = _advance_float(
+                self._price_display, self._price_target, self._price_step, self._fmt_price
+            )
+        if self._avg_active():
+            self._avg_display = _advance_float(
+                self._avg_display, self._avg_target, self._avg_step, self._fmt_avg
+            )
+        self._render_values()
+        if not self._price_active() and not self._avg_active():
+            self._stop_timer()
+
+    def _start_timer(self) -> None:
+        if self._timer is not None:
+            return
+        self._timer = self.set_interval(FOOTER_ANIM_INTERVAL, self._tick)
+
+    def _stop_timer(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+
+    def on_mount(self) -> None:
+        self._prepare_animation()
+
+    def on_unmount(self) -> None:
+        self._stop_timer()
+
+
+class StatsFooter(Widget):
+    """Token stats row — three centered columns via CSS."""
+
+    DEFAULT_CSS = """
+    StatsFooter {
+        height: 3;
+        layout: horizontal;
+        background: $surface;
+        color: $text-muted;
+    }
+    StatsFooter > Static {
+        width: 1fr;
+        height: 1fr;
+        text-align: center;
+        content-align: center bottom;
+        padding: 0;
+        border: none;
+    }
+    """
+
     totals: reactive[dict | None] = reactive(None)
 
-    def render(self) -> Content:
-        t = self.totals
-        if not isinstance(t, dict):
-            return Content.assemble(("  —", "$text"))
-        inp = _fmt_tokens(t.get("input_tokens", 0))
-        out = _fmt_tokens(
-            t.get("output_tokens", 0) + t.get("reasoning_output_tokens", 0)
-        )
-        cache = _fmt_tokens(
-            t.get("cache_read_input_tokens", 0) + t.get("cache_creation_input_tokens", 0)
-        )
-        cost = t.get("cost_microcents", 0) / 100_000_000.0
-        return Content.assemble(
-            (f"  {inp} in  {out} out  {cache} cache  ${cost:.2f}", "$text bold")
-        )
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._display = [0, 0, 0]
+        self._targets = [0, 0, 0]
+        self._steps = [0, 0, 0]
+        self._frame = 0
+        self._timer: Timer | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="in-col")
+        yield Static("", id="out-col")
+        yield Static("", id="cache-col")
+
+    def watch_totals(self, totals: dict | None) -> None:
+        if not isinstance(totals, dict):
+            return
+        self._targets = [
+            int(totals.get("input_tokens", 0)),
+            int(totals.get("output_tokens", 0))
+            + int(totals.get("reasoning_output_tokens", 0)),
+            int(totals.get("cache_read_input_tokens", 0))
+            + int(totals.get("cache_creation_input_tokens", 0)),
+        ]
+        if self.is_mounted:
+            self._prepare_animation()
+
+    def _active(self, index: int) -> bool:
+        return _fmt_tokens(self._display[index]) != _fmt_tokens(self._targets[index])
+
+    def _render_values(self) -> None:
+        for index, (selector, suffix, label) in enumerate(
+            (("#in-col", " ↓", "input"), ("#out-col", " ↑", "output"),
+             ("#cache-col", " ⛁", "cache"))
+        ):
+            self.query_one(selector, Static).update(
+                Content.assemble(
+                    "\n",
+                    _pulsing_value(
+                        _fmt_tokens(self._display[index]),
+                        suffix,
+                        frame=self._frame,
+                        active=self._active(index),
+                        value_style="$text",
+                        suffix_style="$text",
+                    ),
+                    "\n",
+                    (label, "$text dim"),
+                )
+            )
+
+    def _prepare_animation(self) -> None:
+        self._stop_timer()
+        for index, target in enumerate(self._targets):
+            if not self._active(index):
+                self._display[index] = target
+            difference = target - self._display[index]
+            magnitude = (abs(difference) + FOOTER_ANIM_FRAMES - 1) // FOOTER_ANIM_FRAMES
+            self._steps[index] = magnitude if difference >= 0 else -magnitude
+        self._frame = 0
+        self._render_values()
+        if any(self._active(index) for index in range(3)):
+            self._start_timer()
+
+    def _tick(self) -> None:
+        self._frame = (self._frame + 1) % 10
+        for index in range(3):
+            if self._active(index):
+                self._display[index] = _advance_int(
+                    self._display[index], self._targets[index], self._steps[index]
+                )
+        self._render_values()
+        if not any(self._active(index) for index in range(3)):
+            self._stop_timer()
+
+    def _start_timer(self) -> None:
+        if self._timer is None:
+            self._timer = self.set_interval(FOOTER_ANIM_INTERVAL, self._tick)
+
+    def _stop_timer(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+
+    def on_mount(self) -> None:
+        self._prepare_animation()
+
+    def on_unmount(self) -> None:
+        self._stop_timer()
 
 
 class RegieApp(App):
@@ -739,11 +1020,11 @@ class RegieApp(App):
     .log {
         background: $surface;
     }
-    UsageFooter {
-        dock: none;
-        height: 1;
-        background: $surface;
-        color: $text-muted;
+    PriceFooter {
+        height: 3;
+    }
+    StatsFooter {
+        height: 3;
     }
     """
 
@@ -814,6 +1095,7 @@ class RegieApp(App):
         #: The whole config, not just [regie]: the palette needs
         #: theater.favourite. Injectable for tests.
         self.settings = settings or Config()
+        self._cost_window_hours = _COST_WINDOWS.get(self.settings.regie.cost_window, 24.0)
         #: What the daemon says it can spawn, or None (before mount or on
         #: failure). The palette reads None as "ask the local registry".
         self.harnesses: list[dict] | None = None
@@ -841,7 +1123,8 @@ class RegieApp(App):
         # typed the command that started it. The footer shows usage totals.
         with Vertical(id="sidebar"):
             yield TreePanel(id="tree-panel")
-            yield UsageFooter(id="usage-footer")
+            yield StatsFooter(id="stats-footer")
+            yield PriceFooter(id="price-footer")
             bus = RichLog(id="bus-panel", max_lines=200, wrap=False, markup=True)
             # Applied here, not in watch_bus_visible: a reactive assigned
             # its own default fires no watcher, so false-vs-false would
@@ -871,12 +1154,15 @@ class RegieApp(App):
         await self._enable_mouse()
         await self._hide_status()
         self._apply_theme()
+        self._cost_window_hours = self._validate_cost_window()
         await self._load_harnesses()
         self.set_interval(self.settings.regie.tree_interval, self._refresh_tree)
         self.set_interval(self.settings.regie.bus_interval, self._refresh_bus)
         self.set_interval(self.settings.regie.bus_interval, self._refresh_anim)
+        self.set_interval(USAGE_INTERVAL, self._refresh_usage)
         await self._refresh_tree()
         await self._refresh_bus()
+        await self._refresh_usage()
         # Primes the animation cursor: whatever is already in the log
         # happened before the régie was looking, and is not news.
         await self._refresh_anim()
@@ -923,6 +1209,20 @@ class RegieApp(App):
             )
             return
         self.theme = name
+
+    def _validate_cost_window(self) -> float:
+        """Warn about unknown cost_window values at mount, falling back to 'day'."""
+        name = self.settings.regie.cost_window
+        if name in _COST_WINDOWS:
+            return _COST_WINDOWS[name]
+        self.notify(
+            f"unknown cost_window {name!r} — using 'day'. "
+            f"available: {', '.join(sorted(_COST_WINDOWS))}",
+            title="config",
+            severity="warning",
+            timeout=10,
+        )
+        return _COST_WINDOWS["day"]
 
     async def on_unmount(self) -> None:
         # Best effort: q / ctrl-c already tore down in action_quit where
@@ -1075,10 +1375,48 @@ class RegieApp(App):
         if self.cursor >= len(self.tree_lines):
             self.cursor = max(0, len(self.tree_lines) - 1)
         self._render_tree()
-        with contextlib.suppress(Exception):
-            totals = await self._client.call("usage_totals")
-            assert isinstance(totals, dict)
-            self.query_one("#usage-footer", UsageFooter).totals = totals
+
+    async def _legacy_usage_summary(self) -> dict:
+        """Compatibility with a pre-upgrade daemon that lacks usage_summary."""
+        assert self._client is not None
+        all_time = await self._client.call("usage_totals")
+        windowed = await self._client.call("usage_totals", window=self._cost_window_hours)
+        average = await self._client.call("usage_totals", window=720.0)
+        return {"all_time": all_time, "windowed": windowed, "average": average}
+
+    async def _refresh_usage(self) -> None:
+        if self._client is None:
+            return
+        try:
+            summary = await self._client.call("usage_summary", window=self._cost_window_hours)
+        except RemoteError as exc:
+            if exc.code != "unknown_method":
+                logger.debug("usage refresh failed: %s", exc)
+                return
+            try:
+                summary = await self._legacy_usage_summary()
+            except Exception as fallback_exc:
+                logger.debug("legacy usage refresh failed: %s", fallback_exc)
+                return
+        except Exception as exc:
+            logger.debug("usage refresh failed: %s", exc)
+            return
+        if not isinstance(summary, dict):
+            logger.debug("usage refresh returned %s, expected dict", type(summary).__name__)
+            return
+        all_time = summary.get("all_time")
+        windowed = summary.get("windowed")
+        average = summary.get("average")
+        if isinstance(all_time, dict):
+            with contextlib.suppress(Exception):
+                self.query_one("#stats-footer", StatsFooter).totals = all_time
+        if isinstance(windowed, dict):
+            with contextlib.suppress(Exception):
+                self.query_one("#price-footer", PriceFooter).totals = windowed
+        if isinstance(average, dict):
+            daily = average.get("cost_microcents", 0) / 100_000_000.0 / 30.0
+            with contextlib.suppress(Exception):
+                self.query_one("#price-footer", PriceFooter).daily_avg = daily
 
     async def _refresh_bus(self) -> None:
         if not self._client:

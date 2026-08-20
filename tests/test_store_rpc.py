@@ -11,6 +11,22 @@ from theater.daemon.schema import tree_kv
 from theater.protocol import RemoteError
 
 
+async def test_usage_summary_rpc_returns_all_three_windows(client):
+    result = await client.call("usage_summary", window=24.0)
+
+    assert result["since"] > result["average_since"]
+    assert set(result) == {"since", "average_since", "all_time", "windowed", "average"}
+    for group in ("all_time", "windowed", "average"):
+        assert result[group] == {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "reasoning_output_tokens": 0,
+            "cost_microcents": 0,
+        }
+
+
 def _repo(tmp_path: Path, name: str) -> Path:
     path = tmp_path / name
     path.mkdir()

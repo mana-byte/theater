@@ -16,6 +16,7 @@ from __future__ import annotations
 import pytest
 
 from theater.config import Config, RegieSection
+from theater.protocol import RemoteError
 from theater.regie import app as app_mod
 from theater.regie.app import RegieApp
 from theater.regie.tree import SEND_STYLE, send_path
@@ -106,7 +107,10 @@ class FakeClient:
         self.calls.append((method, params))
         if method in self.broken:
             raise RuntimeError(f"{method} is unavailable")
-        return self.answers.get(method, [])
+        answer = self.answers.get(method, [])
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
 
     async def aclose(self) -> None:
         self.closed = True
@@ -124,6 +128,11 @@ def daemon(monkeypatch):
             "participants.unmanaged": [],
             "bus.tail": [],
             "harnesses": [{"name": "vibe"}, {"name": "claude"}],
+            "usage_summary": {
+                "all_time": {"input_tokens": 11, "output_tokens": 7},
+                "windowed": {"cost_microcents": 25_000_000},
+                "average": {"cost_microcents": 300_000_000},
+            },
         },
         "broken": set(),
         "client": None,
@@ -240,6 +249,212 @@ async def test_mount_fills_the_tree_and_the_bus(daemon, tmux):
         panel = app.query_one("#tree-panel", app_mod.TreePanel)
         assert len(panel.children) == 2
         assert panel._lines_data[1][1]["id"] == CHILD["id"]
+
+
+async def test_mount_fetches_all_usage_windows_with_one_rpc(daemon, tmux):
+    app, _ = make_app(cost_window="week")
+    async with app.run_test():
+        client = daemon["client"]
+        assert client.asked("usage_summary") == [{"window": 168.0}]
+        assert client.asked("usage_totals") == []
+        stats = app.query_one("#stats-footer", app_mod.StatsFooter)
+        price = app.query_one("#price-footer", app_mod.PriceFooter)
+        assert stats.totals == {"input_tokens": 11, "output_tokens": 7}
+        assert price.totals == {"cost_microcents": 25_000_000}
+        assert price.daily_avg == 0.1
+
+
+async def test_unknown_cost_window_warns_once_and_uses_day(daemon, tmux):
+    app, notes = make_app(cost_window="fortnight")
+    async with app.run_test():
+        client = daemon["client"]
+        assert client.asked("usage_summary") == [{"window": 24.0}]
+        assert [message for message, severity in notes if severity == "warning"] == [
+            "unknown cost_window 'fortnight' — using 'day'. available: day, week, year"
+        ]
+
+
+async def test_old_daemon_falls_back_to_three_usage_totals_calls(daemon, tmux):
+    totals = {"input_tokens": 2, "output_tokens": 3, "cost_microcents": 90}
+    daemon["answers"]["usage_summary"] = RemoteError("unknown_method", "old daemon")
+    daemon["answers"]["usage_totals"] = totals
+    app, _ = make_app(cost_window="year")
+
+    async with app.run_test():
+        client = daemon["client"]
+        assert client.asked("usage_summary") == [{"window": 8760.0}]
+        assert client.asked("usage_totals") == [
+            {},
+            {"window": 8760.0},
+            {"window": 720.0},
+        ]
+
+
+async def test_price_animation_pulses_both_values_for_twenty_slower_frames(daemon, tmux):
+    app, _ = make_app()
+    footer = None
+    async with app.run_test():
+        footer = app.query_one("#price-footer", app_mod.PriceFooter)
+        footer._stop_timer()
+        footer._price_display = footer._price_target = 0.0
+        footer._avg_display = footer._avg_target = 0.0
+        footer._render_values()
+
+        footer.totals = {"cost_microcents": 2_000_000}
+        footer.daily_avg = 0.04
+        assert footer._timer is not None
+        assert footer._price_step == pytest.approx(0.001)
+        assert footer._avg_step == pytest.approx(0.002)
+        assert app_mod.FOOTER_ANIM_INTERVAL == 0.1
+        assert app_mod.FOOTER_ANIM_FRAMES == 20
+
+        footer._stop_timer()
+        price = footer.query_one("#price-col", app_mod.Static)
+        average = footer.query_one("#avg-col", app_mod.Static)
+        price_pulse = [style for style in _styles(price) if style.startswith("#")]
+        average_pulse = [style for style in _styles(average) if style.startswith("#")]
+        assert price_pulse == [
+            app_mod.working_harness_style(0, offset) for offset in range(len("$0.000"))
+        ]
+        assert average_pulse == [
+            app_mod.working_harness_style(0, offset) for offset in range(len("$0.000"))
+        ]
+
+        for _ in range(19):
+            footer._tick()
+        assert footer._price_display == pytest.approx(0.019)
+        assert footer._avg_display == pytest.approx(0.038)
+        assert any(style.startswith("#") for style in _styles(price))
+
+        footer._tick()
+        assert footer._price_display == 0.02
+        assert footer._avg_display == 0.04
+        assert footer._timer is None
+        assert not any(style.startswith("#") for style in _styles(price))
+        assert not any(style.startswith("#") for style in _styles(average))
+
+        footer._price_display = footer._price_target = 1.0
+        footer.totals = {"cost_microcents": 50_000_000}
+        assert footer._price_step == pytest.approx(-0.025)
+        footer._stop_timer()
+        footer._tick()
+        assert footer._price_display == pytest.approx(0.975)
+
+        footer.totals = {"cost_microcents": 20_000_000}
+        assert footer._price_step == pytest.approx(-0.03875)
+        assert footer._timer is not None
+
+    assert footer is not None
+    assert footer._timer is None
+
+
+async def test_token_animation_is_independent_for_all_three_values(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test():
+        footer = app.query_one("#stats-footer", app_mod.StatsFooter)
+        footer._stop_timer()
+        footer._display = [5, 0, 7]
+        footer._targets = [5, 0, 7]
+        footer._render_values()
+
+        footer.totals = {
+            "input_tokens": 5,
+            "output_tokens": 20,
+            "reasoning_output_tokens": 20,
+            "cache_read_input_tokens": 7,
+            "cache_creation_input_tokens": 0,
+        }
+        assert footer._targets == [5, 40, 7]
+        assert footer._steps == [0, 2, 0]
+        assert footer._timer is not None
+        footer._stop_timer()
+
+        inp = footer.query_one("#in-col", app_mod.Static)
+        out = footer.query_one("#out-col", app_mod.Static)
+        cache = footer.query_one("#cache-col", app_mod.Static)
+        assert not any(style.startswith("#") for style in _styles(inp))
+        assert any(style.startswith("#") for style in _styles(out))
+        assert not any(style.startswith("#") for style in _styles(cache))
+
+        footer._display = [0, 0, 0]
+        footer._targets = [0, 0, 0]
+        footer.totals = {
+            "input_tokens": 20,
+            "output_tokens": 40,
+            "cache_read_input_tokens": 60,
+        }
+        assert footer._steps == [1, 2, 3]
+        footer._stop_timer()
+        for _ in range(20):
+            footer._tick()
+        assert footer._display == [20, 40, 60]
+        assert footer._timer is None
+        assert not any(style.startswith("#") for style in _styles(inp))
+        assert not any(style.startswith("#") for style in _styles(out))
+        assert not any(style.startswith("#") for style in _styles(cache))
+
+
+async def test_visually_unchanged_footer_deltas_snap_without_pulsing(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test():
+        price = app.query_one("#price-footer", app_mod.PriceFooter)
+        price._stop_timer()
+        price._price_display = price._price_target = 0.0001
+        price._avg_display = price._avg_target = 0.0
+        price.totals = {"cost_microcents": 40_000}
+        assert price._price_display == 0.0004
+        assert price._timer is None
+
+        stats = app.query_one("#stats-footer", app_mod.StatsFooter)
+        stats._stop_timer()
+        stats._display = [5_000_000, 0, 0]
+        stats._targets = [5_000_000, 0, 0]
+        stats.totals = {"input_tokens": 5_010_000}
+        assert stats._display[0] == 5_010_000
+        assert stats._timer is None
+
+
+def test_footer_targets_are_retained_before_mount():
+    price = app_mod.PriceFooter()
+    price.totals = {"cost_microcents": 25_000_000}
+    price.daily_avg = 0.2
+    stats = app_mod.StatsFooter()
+    stats.totals = {
+        "input_tokens": 1,
+        "output_tokens": 2,
+        "reasoning_output_tokens": 3,
+        "cache_read_input_tokens": 4,
+        "cache_creation_input_tokens": 5,
+    }
+
+    assert price._price_target == 0.25
+    assert price._avg_target == 0.2
+    assert stats._targets == [1, 5, 9]
+
+
+async def test_preloaded_stats_footer_animates_when_mounted_and_stops_when_removed():
+    footer = app_mod.StatsFooter()
+    was_mounted = footer.is_mounted
+    footer.totals = {
+        "input_tokens": 5_000_000,
+        "output_tokens": 4_000_000,
+        "cache_read_input_tokens": 3_000_000,
+    }
+
+    class FooterHost(app_mod.App):
+        def compose(self):
+            yield footer
+
+    assert was_mounted is False
+    assert footer._timer is None
+    async with FooterHost().run_test():
+        assert footer._targets == [5_000_000, 4_000_000, 3_000_000]
+        assert footer._timer is not None
+        inp = footer.query_one("#in-col", app_mod.Static)
+        assert any(style.startswith("#") for style in _styles(inp))
+
+        await footer.remove()
+        assert footer._timer is None
 
 
 async def test_every_tree_row_shares_one_left_inset(daemon, tmux):

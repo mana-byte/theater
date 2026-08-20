@@ -817,6 +817,37 @@ class Store:
         assert row is not None
         return dict(row._mapping)
 
+    def usage_summary(self, *, since: float, average_since: float) -> dict[str, dict]:
+        """All-time and two windowed usage totals in one table scan."""
+        columns = {
+            "input_tokens": usage.c.input_tokens,
+            "output_tokens": usage.c.output_tokens,
+            "cache_creation_input_tokens": usage.c.cache_creation_input_tokens,
+            "cache_read_input_tokens": usage.c.cache_read_input_tokens,
+            "reasoning_output_tokens": usage.c.reasoning_output_tokens,
+            "cost_microcents": usage.c.cost_microcents,
+        }
+        selected: list[ColumnElement] = []
+        for name, column in columns.items():
+            selected.extend(
+                (
+                    func.coalesce(func.sum(column), 0).label(f"all_time_{name}"),
+                    func.coalesce(func.sum(case((usage.c.ts >= since, column), else_=0)), 0).label(
+                        f"windowed_{name}"
+                    ),
+                    func.coalesce(
+                        func.sum(case((usage.c.ts >= average_since, column), else_=0)), 0
+                    ).label(f"average_{name}"),
+                )
+            )
+        row = self.conn.execute(select(*selected)).fetchone()
+        assert row is not None
+        values = row._mapping
+        return {
+            group: {name: values[f"{group}_{name}"] for name in columns}
+            for group in ("all_time", "windowed", "average")
+        }
+
     # ---- bus ----------------------------------------------------------
 
     def bus_append(

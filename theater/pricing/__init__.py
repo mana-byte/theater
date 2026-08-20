@@ -12,6 +12,16 @@ MICROCENTS_PER_DOLLAR = 100_000_000
 _PRICES_PATH = Path(__file__).parent / "model_prices.json"
 _PRICES: dict[str, dict] | None = None
 
+# OpenCode publishes this exact providerID/modelID pair while reporting a
+# native cost of zero. Its provider is not present in LiteLLM's catalog, but
+# the model's published 1.4/4.4/0.26 per-million rates match this catalog row.
+# Vibe normally uses its native stats rates before reaching this fallback; in
+# particular, a missing Vibe cache rate deliberately means full input price so
+# Theater stays bit-exact with Vibe's own session_cost.
+_ALIASES = {
+    "openai-foundry/zai-glm-5-2": "cloudflare/@cf/zai-org/glm-5.2",
+}
+
 
 def _load() -> dict[str, dict]:
     global _PRICES  # noqa: PLW0603
@@ -29,7 +39,8 @@ def _lookup(model: str) -> dict | None:
         bare = model.split("/", 1)[1]
         if bare in prices:
             return prices[bare]
-    return None
+    alias = _ALIASES.get(model)
+    return prices.get(alias) if alias is not None else None
 
 
 def usage_cost_microcents(usage: TokenUsage) -> int:

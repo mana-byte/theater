@@ -300,9 +300,18 @@ def _opencode_usage(info: dict) -> TokenUsage | None:
         return None
     cache = tokens.get("cache") or {}
     cost = info.get("cost")
+    # OpenCode uses zero when it has no authoritative per-turn price. Theater's
+    # footer is an estimate, so zero deliberately falls through to model pricing
+    # rather than being recorded as a known-free turn.
     cost = float(cost) if isinstance(cost, (int, float)) and cost > 0 else None
-    model = info.get("modelID")
-    model = model if isinstance(model, str) and model else None
+    provider = info.get("providerID")
+    model_id = info.get("modelID")
+    if isinstance(provider, str) and isinstance(model_id, str) and provider and model_id:
+        model = f"{provider}/{model_id}"
+    elif isinstance(model_id, str) and model_id:
+        model = model_id
+    else:
+        model = None
     native_id = info.get("id")
     usage_key = f"opencode:{native_id}" if isinstance(native_id, str) and native_id else None
     return TokenUsage(
