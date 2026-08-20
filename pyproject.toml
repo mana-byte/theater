@@ -127,6 +127,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "tmux: drives a real tmux server; skipped when tmux is not installed",
+    "unpatched_tmux_client: exercises theater.tmux.client itself, so the autouse `fake_tmux` must stand aside",
 ]
 
 [tool.coverage.run]

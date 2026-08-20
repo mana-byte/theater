@@ -12,6 +12,11 @@ import pytest
 
 from theater.tmux import client
 
+#: This module is the one place that wants the real client: it patches `run`
+#: and `run_sync` underneath the public functions, so the autouse `fake_tmux`
+#: replacing those functions would leave nothing to assert against.
+pytestmark = pytest.mark.unpatched_tmux_client
+
 
 @pytest.fixture(autouse=True)
 def _reset_version_cache():
