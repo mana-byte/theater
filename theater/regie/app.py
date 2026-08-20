@@ -667,29 +667,26 @@ def _fmt_tokens(n: int) -> str:
 
 
 class UsageFooter(Widget):
-    """Footer showing palette key + aggregate token/cost usage."""
+    """Footer showing aggregate token/cost usage."""
 
     DEFAULT_CSS = ""
     totals: reactive[dict | None] = reactive(None)
 
     def render(self) -> Content:
-        left = Content.assemble((" ctrl+p palette", "$text-muted"))
         t = self.totals
         if not isinstance(t, dict):
-            right = Content.assemble(("  —", "$text"))
-        else:
-            inp = _fmt_tokens(t.get("input_tokens", 0))
-            out = _fmt_tokens(
-                t.get("output_tokens", 0) + t.get("reasoning_output_tokens", 0)
-            )
-            cache = _fmt_tokens(
-                t.get("cache_read_input_tokens", 0) + t.get("cache_creation_input_tokens", 0)
-            )
-            cost = t.get("cost_microcents", 0) / 100_000_000.0
-            right = Content.assemble(
-                (f"  {inp} in  {out} out  {cache} cache  ${cost:.2f}", "$text bold")
-            )
-        return left + Content(" " * 4) + right
+            return Content.assemble(("  —", "$text"))
+        inp = _fmt_tokens(t.get("input_tokens", 0))
+        out = _fmt_tokens(
+            t.get("output_tokens", 0) + t.get("reasoning_output_tokens", 0)
+        )
+        cache = _fmt_tokens(
+            t.get("cache_read_input_tokens", 0) + t.get("cache_creation_input_tokens", 0)
+        )
+        cost = t.get("cost_microcents", 0) / 100_000_000.0
+        return Content.assemble(
+            (f"  {inp} in  {out} out  {cache} cache  ${cost:.2f}", "$text bold")
+        )
 
 
 class RegieApp(App):
