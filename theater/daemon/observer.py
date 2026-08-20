@@ -777,6 +777,8 @@ class Observer:
             if observer.has_transcript and not p.cwd:
                 self._warn_unobservable(pid, p)
                 continue
+            if p.tier is Tier.SPAWNED and p.tmux_pane is None:
+                continue
             self._unobservable.discard(pid)
             watch = self._watch if observer.has_transcript else self._watch_screen
             if observer.has_transcript:

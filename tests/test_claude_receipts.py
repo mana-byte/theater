@@ -40,6 +40,7 @@ def _transcript(root: Path, session_id: str, cwd: Path, *, project: str = "proje
 
 def _spawn_claude(daemon, cwd: Path, *, pid: str, token: str = "tok"):
     participant = daemon.registry.create_spawned(harness="claude", cwd=str(cwd), pid=pid)
+    daemon.registry.attach_pane(participant.id, "%1", pane_pid=10001)
     daemon.store.set_receipt_token(participant.id, token)
     return participant
 
@@ -115,8 +116,9 @@ async def test_claude_initial_receipt_waits_for_first_message(
     daemon.observer.search = 0.01
     cwd = tmp_path / "repo"
     cwd.mkdir()
-    participant = _spawn_claude(daemon, cwd, pid="p-claude", token="secret")
+    _spawn_claude(daemon, cwd, pid="p-claude", token="secret")
     session_id = "11111111-1111-4111-8111-111111111111"
+    participant = daemon.store.get_participant("p-claude")
     participant.session_id = session_id
     participant.session_correlation = str(TranscriptProvenance.EXACT)
     daemon.store.upsert_participant(participant)
