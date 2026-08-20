@@ -16,6 +16,11 @@ from __future__ import annotations
 import pytest
 
 from theater.config import Config, RegieSection
+from theater.constants import (
+    MICROCENTS_PER_DOLLAR,
+    USAGE_AVERAGE_WINDOW_DAYS,
+    USAGE_AVERAGE_WINDOW_HOURS,
+)
 from theater.protocol import RemoteError
 from theater.regie import app as app_mod
 from theater.regie.app import RegieApp
@@ -131,7 +136,7 @@ def daemon(monkeypatch):
             "usage_summary": {
                 "all_time": {"input_tokens": 11, "output_tokens": 7},
                 "windowed": {"cost_microcents": 25_000_000},
-                "average": {"cost_microcents": 300_000_000},
+                "average": {"cost_microcents": 300_000_000, "active_days": 3},
             },
         },
         "broken": set(),
@@ -261,7 +266,7 @@ async def test_mount_fetches_all_usage_windows_with_one_rpc(daemon, tmux):
         price = app.query_one("#price-footer", app_mod.PriceFooter)
         assert stats.totals == {"input_tokens": 11, "output_tokens": 7}
         assert price.totals == {"cost_microcents": 25_000_000}
-        assert price.daily_avg == 0.1
+        assert price.daily_avg == 1.0
 
 
 async def test_unknown_cost_window_warns_once_and_uses_day(daemon, tmux):
@@ -286,8 +291,47 @@ async def test_old_daemon_falls_back_to_three_usage_totals_calls(daemon, tmux):
         assert client.asked("usage_totals") == [
             {},
             {"window": 8760.0},
-            {"window": 720.0},
+            {"window": USAGE_AVERAGE_WINDOW_HOURS},
         ]
+        price = app.query_one("#price-footer", app_mod.PriceFooter)
+        assert price.daily_avg == pytest.approx(
+            90 / MICROCENTS_PER_DOLLAR / USAGE_AVERAGE_WINDOW_DAYS
+        )
+
+
+async def test_usage_summary_without_active_days_keeps_thirty_day_compatibility(daemon, tmux):
+    daemon["answers"]["usage_summary"]["average"] = {"cost_microcents": 300_000_000}
+    app, _ = make_app()
+
+    async with app.run_test():
+        price = app.query_one("#price-footer", app_mod.PriceFooter)
+        assert price.daily_avg == 0.1
+
+
+async def test_empty_average_window_reports_zero_per_active_day(daemon, tmux):
+    app, _ = make_app()
+
+    async with app.run_test():
+        price = app.query_one("#price-footer", app_mod.PriceFooter)
+        assert price.daily_avg == 1.0
+        daemon["answers"]["usage_summary"]["average"] = {
+            "cost_microcents": 0,
+            "active_days": 0,
+        }
+        await app._refresh_usage()
+        assert price.daily_avg == 0.0
+
+
+async def test_cost_and_active_day_captions_render_when_usage_refresh_fails(daemon, tmux):
+    daemon["broken"].add("usage_summary")
+    app, _ = make_app(cost_window="week")
+
+    async with app.run_test():
+        footer = app.query_one("#price-footer", app_mod.PriceFooter)
+        price = footer.query_one("#price-col", app_mod.Static)
+        average = footer.query_one("#avg-col", app_mod.Static)
+        assert "cost (week)" in str(price.render())
+        assert f"avg/active day ({USAGE_AVERAGE_WINDOW_DAYS}d)" in str(average.render())
 
 
 async def test_price_animation_pulses_both_values_for_twenty_slower_frames(daemon, tmux):

@@ -5,9 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from theater.constants import MICROCENTS_PER_DOLLAR
 from theater.harness.base import TokenUsage
-
-MICROCENTS_PER_DOLLAR = 100_000_000
 
 _PRICES_PATH = Path(__file__).parent / "model_prices.json"
 _PRICES: dict[str, dict] | None = None

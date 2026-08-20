@@ -187,6 +187,38 @@ def test_usage_summary_returns_all_footer_windows_in_one_result(store):
     assert summary["windowed"]["cost_microcents"] == 40
     assert summary["average"]["input_tokens"] == 6
     assert summary["average"]["cost_microcents"] == 60
+    assert summary["average"]["active_days"] == 1
+
+
+def test_usage_summary_counts_only_distinct_active_rolling_days(store):
+    average_since = 1_000_000.0
+    base = {
+        "participant_id": "p1",
+        "tree_root_id": "p1",
+        "model": "model",
+        "input_tokens": 1,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "reasoning_output_tokens": 0,
+    }
+    for key, offset, cost in (
+        ("older", -1.0, 100),
+        ("bucket-0-a", 3_600.0, 0),
+        ("bucket-0-b", 84_600.0, 0),
+        ("bucket-1", 93_600.0, 200),
+    ):
+        assert store.record_usage(
+            **base,
+            usage_key=key,
+            ts=average_since + offset,
+            cost_microcents=cost,
+        )
+
+    summary = store.usage_summary(since=average_since, average_since=average_since)
+
+    assert summary["average"]["active_days"] == 2
+    assert summary["average"]["cost_microcents"] == 200
 
 
 # ---- Job structured fields ------------------------------------------------

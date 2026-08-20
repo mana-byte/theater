@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 from sqlalchemy import func, select
 
 from theater import paths, proc, protocol
+from theater.constants import SECONDS_PER_DAY, USAGE_AVERAGE_WINDOW_DAYS
 from theater.daemon import lineage, workers, worktree
 from theater.daemon.harness_detect import (
     PaneHarnessVerdict,
@@ -1109,7 +1110,7 @@ async def _usage_summary(daemon, params: dict) -> dict:
     hours = 24.0 if window in (None, "") else float(window)
     timestamp = now()
     since = timestamp - hours * 3600.0
-    average_since = timestamp - 720.0 * 3600.0
+    average_since = timestamp - USAGE_AVERAGE_WINDOW_DAYS * SECONDS_PER_DAY
     return {
         "since": since,
         "average_since": average_since,

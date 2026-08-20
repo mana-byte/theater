@@ -50,6 +50,11 @@ from textual.widgets import Label, RichLog, Static
 
 from theater.client import DaemonClient
 from theater.config import Config, RegieSection
+from theater.constants import (
+    MICROCENTS_PER_DOLLAR,
+    USAGE_AVERAGE_WINDOW_DAYS,
+    USAGE_AVERAGE_WINDOW_HOURS,
+)
 from theater.protocol import RemoteError
 from theater.regie.bus_view import format_bus_line
 from theater.regie.palette import (
@@ -740,6 +745,7 @@ class PriceFooter(Widget):
 
     totals: reactive[dict | None] = reactive(None)
     daily_avg: reactive[float] = reactive(0.0)
+    cost_window_label: reactive[str] = reactive("day")
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -759,7 +765,7 @@ class PriceFooter(Widget):
     def watch_totals(self, totals: dict | None) -> None:
         if not isinstance(totals, dict):
             return
-        self._price_target = totals.get("cost_microcents", 0) / 100_000_000.0
+        self._price_target = totals.get("cost_microcents", 0) / MICROCENTS_PER_DOLLAR
         if self.is_mounted:
             self._prepare_animation()
 
@@ -767,6 +773,10 @@ class PriceFooter(Widget):
         self._avg_target = val
         if self.is_mounted:
             self._prepare_animation()
+
+    def watch_cost_window_label(self, _label: str) -> None:
+        if self.is_mounted:
+            self._render_values()
 
     @staticmethod
     def _fmt_price(value: float) -> str:
@@ -795,7 +805,7 @@ class PriceFooter(Widget):
                     suffix_style="$text",
                 ),
                 "\n",
-                ("cost", "$text dim"),
+                (f"cost ({self.cost_window_label})", "$text dim"),
             )
         )
         self.query_one("#avg-col", Static).update(
@@ -810,7 +820,7 @@ class PriceFooter(Widget):
                     suffix_style="$text",
                 ),
                 "\n",
-                ("avg/day", "$text dim"),
+                (f"avg/active day ({USAGE_AVERAGE_WINDOW_DAYS}d)", "$text dim"),
             )
         )
 
@@ -1096,6 +1106,7 @@ class RegieApp(App):
         #: theater.favourite. Injectable for tests.
         self.settings = settings or Config()
         self._cost_window_hours = _COST_WINDOWS.get(self.settings.regie.cost_window, 24.0)
+        self._cost_window_label = "day"
         #: What the daemon says it can spawn, or None (before mount or on
         #: failure). The palette reads None as "ask the local registry".
         self.harnesses: list[dict] | None = None
@@ -1155,6 +1166,7 @@ class RegieApp(App):
         await self._hide_status()
         self._apply_theme()
         self._cost_window_hours = self._validate_cost_window()
+        self.query_one("#price-footer", PriceFooter).cost_window_label = self._cost_window_label
         await self._load_harnesses()
         self.set_interval(self.settings.regie.tree_interval, self._refresh_tree)
         self.set_interval(self.settings.regie.bus_interval, self._refresh_bus)
@@ -1214,7 +1226,9 @@ class RegieApp(App):
         """Warn about unknown cost_window values at mount, falling back to 'day'."""
         name = self.settings.regie.cost_window
         if name in _COST_WINDOWS:
+            self._cost_window_label = name
             return _COST_WINDOWS[name]
+        self._cost_window_label = "day"
         self.notify(
             f"unknown cost_window {name!r} — using 'day'. "
             f"available: {', '.join(sorted(_COST_WINDOWS))}",
@@ -1381,7 +1395,11 @@ class RegieApp(App):
         assert self._client is not None
         all_time = await self._client.call("usage_totals")
         windowed = await self._client.call("usage_totals", window=self._cost_window_hours)
-        average = await self._client.call("usage_totals", window=720.0)
+        average = await self._client.call(
+            "usage_totals", window=USAGE_AVERAGE_WINDOW_HOURS
+        )
+        if isinstance(average, dict):
+            average = {**average, "active_days": USAGE_AVERAGE_WINDOW_DAYS}
         return {"all_time": all_time, "windowed": windowed, "average": average}
 
     async def _refresh_usage(self) -> None:
@@ -1414,9 +1432,18 @@ class RegieApp(App):
             with contextlib.suppress(Exception):
                 self.query_one("#price-footer", PriceFooter).totals = windowed
         if isinstance(average, dict):
-            daily = average.get("cost_microcents", 0) / 100_000_000.0 / 30.0
-            with contextlib.suppress(Exception):
-                self.query_one("#price-footer", PriceFooter).daily_avg = daily
+            active_days = average.get("active_days", USAGE_AVERAGE_WINDOW_DAYS)
+            try:
+                daily = (
+                    average.get("cost_microcents", 0) / MICROCENTS_PER_DOLLAR / active_days
+                    if active_days > 0
+                    else 0.0
+                )
+            except (TypeError, ValueError):
+                logger.debug("usage refresh returned invalid active-day totals: %r", average)
+            else:
+                with contextlib.suppress(Exception):
+                    self.query_one("#price-footer", PriceFooter).daily_avg = daily
 
     async def _refresh_bus(self) -> None:
         if not self._client:

@@ -25,9 +25,12 @@ from alembic.config import Config
 from sqlalchemy import (
     ColumnElement,
     Connection,
+    Integer,
     case,
+    cast,
     create_engine,
     delete,
+    distinct,
     event,
     func,
     insert,
@@ -37,6 +40,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from theater.constants import SECONDS_PER_DAY
 from theater.daemon.schema import (
     bus,
     jobs,
@@ -840,13 +844,21 @@ class Store:
                     ).label(f"average_{name}"),
                 )
             )
+        bucket = cast((usage.c.ts - average_since) / SECONDS_PER_DAY, Integer)
+        selected.append(
+            func.count(distinct(case((usage.c.ts >= average_since, bucket)))).label(
+                "average_active_days"
+            )
+        )
         row = self.conn.execute(select(*selected)).fetchone()
         assert row is not None
         values = row._mapping
-        return {
+        result = {
             group: {name: values[f"{group}_{name}"] for name in columns}
             for group in ("all_time", "windowed", "average")
         }
+        result["average"]["active_days"] = values["average_active_days"]
+        return result
 
     # ---- bus ----------------------------------------------------------
 

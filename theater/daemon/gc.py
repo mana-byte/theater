@@ -57,6 +57,7 @@ from dataclasses import dataclass
 from sqlalchemy import delete, select, text, update
 
 from theater.config import RetentionSection
+from theater.constants import SECONDS_PER_DAY
 from theater.daemon import lineage
 from theater.daemon.schema import bus, jobs, participants, touch, tree_kv
 from theater.daemon.store import Store
@@ -64,9 +65,6 @@ from theater.models import now
 from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
 logger = logging.getLogger("theater.gc")
-
-#: Seconds per day, factored out so the arithmetic reads at the call site.
-_DAY = 86400.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,9 +111,9 @@ async def sweep(
         scratchpad=0,
     )
 
-    cutoff_jobs = now() - retention.jobs_days * _DAY
-    cutoff_bus = now() - retention.bus_days * _DAY
-    stale_cutoff = now() - retention.stale_running_days * _DAY
+    cutoff_jobs = now() - retention.jobs_days * SECONDS_PER_DAY
+    cutoff_bus = now() - retention.bus_days * SECONDS_PER_DAY
+    stale_cutoff = now() - retention.stale_running_days * SECONDS_PER_DAY
 
     # Phase 1: stale running jobs.
     marked = _sweep_stale_running(store, stale_cutoff, retention.batch, live_handles)
