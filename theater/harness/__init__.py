@@ -44,6 +44,13 @@ from theater.harness.base import (
     status_after,
     theater_binary,
 )
+from theater.harness.contracts.source import (
+    Attachment,
+    Batch,
+    History,
+    Source,
+    StreamPoint,
+)
 from theater.harness.observation import (
     HarnessObserver,
     ScreenConfidence,
@@ -106,14 +113,7 @@ from theater.harness.registry.lookup import (
     normalize,
     observation_lookup,
 )
-from theater.harness.source import (
-    Attachment,
-    Batch,
-    History,
-    Source,
-    StreamPoint,
-    TranscriptSource,
-)
+from theater.harness.transcript.source import TranscriptSource
 
 logger = logging.getLogger("theater.harness")
 

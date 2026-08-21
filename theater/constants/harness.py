@@ -26,5 +26,8 @@ SPAWN_KILL_POLL_INTERVAL_SECONDS = 0.25
 #: Both tmux and Linux truncate observed process names to this length.
 HARNESS_TMUX_OBSERVATION_NAME_LENGTH = 15
 
+#: Read-chunk size for the initial transcript scan in attach_point.
+HARNESS_TRANSCRIPT_SCAN_CHUNK_BYTES = 1 << 20
+
 # Compatibility alias re-exported by the spawner façade.
 FALLBACK_SESSION = SPAWN_FALLBACK_TMUX_SESSION
