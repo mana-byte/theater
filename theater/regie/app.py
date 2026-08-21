@@ -53,7 +53,6 @@ from theater.config import Config, RegieSection
 from theater.constants import (
     MICROCENTS_PER_DOLLAR,
     USAGE_AVERAGE_WINDOW_DAYS,
-    USAGE_AVERAGE_WINDOW_HOURS,
 )
 from theater.constants.regie import (
     REGIE_AWAIT_ANIM_TTL,
@@ -70,7 +69,6 @@ from theater.constants.regie import (
     REGIE_USAGE_METRIC_RIGHT,
     REGIE_USAGE_METRIC_UP,
 )
-from theater.protocol import RemoteError
 from theater.regie.bus_view import format_bus_line
 from theater.regie.controllers.animation import (  # noqa: F401
     _AWAIT_TRACE_GLYPHS,
@@ -89,6 +87,7 @@ from theater.regie.controllers.usage import (
     FetchAccept,
     SyncOutcome,
     UsagePanelState,
+    UsageQueries,
 )
 from theater.regie.palette import (
     ResumeDeadSessionCommand,
@@ -546,37 +545,19 @@ class RegieApp(App):
         """Fetch one snapshot; stale hover sessions are never allowed to repaint."""
         if self._client is None:
             return
-        result: dict | None = None
-        message: str | None = None
-        try:
-            response = await self._client.call("usage_by_harness")
-            if isinstance(response, dict):
-                result = response
-            else:
-                logger.debug(
-                    "per-harness usage returned %s, expected dict",
-                    type(response).__name__,
-                )
-                message = "per-harness stats unavailable"
-        except RemoteError as exc:
-            if exc.code == "unknown_method":
-                message = "restart daemon for per-harness stats"
-            else:
-                logger.debug("per-harness usage unavailable: %s", exc)
-                message = "per-harness stats unavailable"
-        except Exception as exc:
-            logger.debug("per-harness usage unavailable: %s", exc)
-            message = "per-harness stats unavailable"
-
-        accepted = self._usage.accept_fetch(
-            generation=generation, result=result, message=message
-        ) is FetchAccept.ACCEPTED
+        fetched = await UsageQueries(self._client).fetch_breakdown()
+        accepted = (
+            self._usage.accept_fetch(
+                generation=generation, result=fetched.result, message=fetched.message
+            )
+            is FetchAccept.ACCEPTED
+        )
         if accepted:
             assert self._usage_active_metric is not None
             self.query_one("#usage-breakdown", UsageBreakdownPanel).render_state(
                 self._usage_active_metric,
-                result=result,
-                message=message,
+                result=fetched.result,
+                message=fetched.message,
             )
 
     async def _load_harnesses(self) -> None:
@@ -795,35 +776,17 @@ class RegieApp(App):
     async def _legacy_usage_summary(self) -> dict:
         """Compatibility with a pre-upgrade daemon that lacks usage_summary."""
         assert self._client is not None
-        windowed = await self._client.call("usage_totals", window=self._cost_window_hours)
-        average = await self._client.call(
-            "usage_totals", window=USAGE_AVERAGE_WINDOW_HOURS
-        )
-        if isinstance(average, dict):
-            average = {**average, "active_days": USAGE_AVERAGE_WINDOW_DAYS}
-        return {"period": None, "windowed": windowed, "average": average}
+        return await UsageQueries(self._client).legacy_summary(window=self._cost_window_hours)
 
     async def _refresh_usage(self) -> None:
         if self._client is None:
             return
-        try:
-            summary = await self._client.call(
-                "usage_summary",
-                window=self._cost_window_hours,
-                period=self._cost_window_period,
-            )
-        except RemoteError as exc:
-            if exc.code != "unknown_method":
-                logger.debug("usage refresh failed: %s", exc)
-                return
-            try:
-                summary = await self._legacy_usage_summary()
-            except Exception as fallback_exc:
-                logger.debug("legacy usage refresh failed: %s", fallback_exc)
-                return
-        except Exception as exc:
-            logger.debug("usage refresh failed: %s", exc)
+        result = await UsageQueries(self._client).fetch_summary(
+            window=self._cost_window_hours, period=self._cost_window_period
+        )
+        if not result.available:
             return
+        summary = result.raw
         if not isinstance(summary, dict):
             logger.debug("usage refresh returned %s, expected dict", type(summary).__name__)
             return
