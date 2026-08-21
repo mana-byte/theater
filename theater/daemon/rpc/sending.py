@@ -7,6 +7,7 @@ import logging
 from collections.abc import Callable
 from typing import NoReturn
 
+from theater.constants.daemon import SEND_CLAIM_TTL
 from theater.daemon.harness_detect import (
     PaneHarnessVerdict,
     compare_detected_harness,
@@ -41,13 +42,6 @@ from theater.transcript_identity import (
 )
 
 logger = logging.getLogger(__name__)
-
-#: How long a running send job keeps its exclusive claim on a pane. Nothing
-#: verifies the prompt reached the agent — a human can clear the composer
-#: before it is read, leaving the job RUNNING with no matching turn end. Past
-#: this TTL the job stops blocking the pane; the observer may still answer
-#: it if a turn end arrives, it has only lost its reservation.
-SEND_CLAIM_TTL = 300.0
 
 
 def _transcript_identity_lost(daemon, pid: str) -> bool:
@@ -264,8 +258,7 @@ async def _send(daemon, params: dict) -> dict:
 
     _check_transcript_send_preflight(daemon, target, refuse)
 
-    # Busy is any running job that carried a prompt — a spawn counts too.
-    # A job that has held its reservation past SEND_CLAIM_TTL is dropped from this check.
+    # Busy is any running job that carried a prompt; past SEND_CLAIM_TTL it no longer blocks.
     stale = now() - SEND_CLAIM_TTL
     if [
         j

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from theater.constants.daemon import AWAIT_ANNOUNCE_AFTER, MAX_AWAIT
 from theater.daemon.rails import check_cycle, check_wait_cycle
 from theater.daemon.rpc.params import _require
 from theater.daemon.rpc.router import method
@@ -15,23 +16,6 @@ from theater.transcript_identity import (
 )
 
 logger = logging.getLogger(__name__)
-
-#: Ceiling on a single `jobs.await`. An await holds a connection open and
-#: stretches the client's socket timeout to match. Five minutes is longer
-#: than any turn observed; a caller wanting more can await again.
-MAX_AWAIT = 300.0
-
-#: How long an await must stay blocked before it is announced on the bus.
-#:
-#: `job.await.start` exists so the régie can draw the line between an agent and
-#: whatever it is stuck on. An agent polling `await_sessions(handles,
-#: max_wait=0.1)` in a loop is not stuck on anything, yet announcing at call
-#: entry writes two rows per handle per call — six handles polled ten times a
-#: second is 120 rows/second of churn. Waiting this long first makes the row
-#: mean "this agent is really waiting" rather than "this agent called await".
-#: A quarter second is longer than any await that was never going to block.
-#: Read at call time, so a test can patch it rather than sleep.
-AWAIT_ANNOUNCE_AFTER = 0.25
 
 _JOB_ERROR_MESSAGES = {
     "transcript_correlation_failed": (

@@ -2,11 +2,9 @@
 
 All handlers now live in ``theater.daemon.rpc.*``.  This module re-exports the
 public surface (``METHODS``, ``MAX_AWAIT``, ``SEND_CLAIM_TTL``, and the private
-helpers tests import) so existing ``from theater.daemon.methods import X`` calls
-continue to work.  It also re-imports the module-level names that tests
-monkeypatch (``now``, ``human_present``, ``detect_harness``, ``HARNESSES``,
-``tmux``, ``proc``, ``workers``, ``AWAIT_ANNOUNCE_AFTER``) so those patches
-remain visible on this module's namespace.
+helpers tests import directly) so existing ``from theater.daemon.methods import
+X`` calls continue to work.  It does not re-import timing seams or external
+modules — tests that monkeypatch those must patch the owning rpc submodule.
 
 Importing this module has the side effect of registering every RPC handler,
 via the ``rpc`` package's ``__init__``.
@@ -14,18 +12,14 @@ via the ``rpc`` package's ``__init__``.
 
 from __future__ import annotations
 
-from theater import proc  # noqa: F401
-from theater.daemon import workers  # noqa: F401
-
-# Re-import patched names so monkeypatch.setattr(methods, X, ...) is a no-op alias.
-from theater.daemon.harness_detect import detect_harness  # noqa: F401
-
-# Importing the rpc package registers every @method handler as a side effect.
+from theater.constants.daemon import (
+    AWAIT_ANNOUNCE_AFTER,
+    MAX_AWAIT,
+    SEND_CLAIM_TTL,
+)
 from theater.daemon.rpc import METHODS
 from theater.daemon.rpc.jobs import (
     _JOB_ERROR_MESSAGES,
-    AWAIT_ANNOUNCE_AFTER,
-    MAX_AWAIT,
     _await_announced,
     _close_await,
     _open_await,
@@ -40,13 +34,10 @@ from theater.daemon.rpc.params import (
     _string_param,
     _validate_worktree_param,
 )
-from theater.daemon.rpc.participants import (
-    _resume_state,
-)
+from theater.daemon.rpc.participants import _resume_state
 from theater.daemon.rpc.recall import _attach_parent_names
 from theater.daemon.rpc.router import Handler, method
 from theater.daemon.rpc.sending import (
-    SEND_CLAIM_TTL,
     _check_approval_modal,
     _check_pane_identity,
     _check_transcript_send_preflight,
@@ -68,10 +59,6 @@ from theater.daemon.rpc.transcripts import (
     _transcript_receipt,
 )
 from theater.daemon.rpc.usage import _calendar_period_since, _retention_floor
-from theater.harness import HARNESSES  # noqa: F401
-from theater.models import now  # noqa: F401
-from theater.tmux import client as tmux  # noqa: F401
-from theater.tmux.presence import human_present  # noqa: F401
 
 __all__ = [
     "AWAIT_ANNOUNCE_AFTER",

@@ -10,8 +10,9 @@ on the loop thread. Store calls are synchronous because they are local and
 sub-millisecond; there is no thread pool and no lock, because there is only ever
 one thread touching the database.
 
-RPC handlers live in theater/daemon/methods.py — they are registered via the
+RPC handlers live in theater/daemon/rpc/ — they are registered via the
 @method decorator into the METHODS dict, which this module dispatches from.
+theater/daemon/methods.py is a compatibility façade that re-exports the same.
 """
 
 from __future__ import annotations

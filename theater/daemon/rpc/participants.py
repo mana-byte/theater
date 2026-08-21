@@ -17,13 +17,14 @@ from theater.models import (
     JobState,
     NoSelfKill,
     NotYourChild,
+    Participant,
     Status,
 )
 from theater.provenance import is_trusted_provenance
 from theater.tmux import client as tmux
 
 
-def _resume_state(p, live_peers) -> str:
+def _resume_state(p: Participant, live_peers: list[Participant]) -> str:
     """Derive the resume verdict for one participant without extra DB queries.
 
     Covers the generic identity and capability gates spawn_session checks before

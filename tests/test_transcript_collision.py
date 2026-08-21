@@ -41,6 +41,7 @@ from theater.daemon.observer import (
     history_correlation_is_ambiguous,
 )
 from theater.daemon.registry import Registry
+from theater.daemon.rpc import transcripts as transcripts_mod
 from theater.harness.builtin.plugins.vibe import ISOLATION_MARKER, isolation_marker_text
 from theater.harness.observation import ScreenConfidence, ScreenKind, ScreenReading
 from theater.harness.source import Attachment, Batch, History, Source
@@ -447,7 +448,7 @@ async def test_read_transcript_refuses_a_fulgenzio_style_heuristic_swap(
 ):
     """A stored guessed id cannot make read_transcript serve its sibling."""
     harness = VibeHarness(root=vibe_tree["root"])
-    monkeypatch.setitem(methods_mod.HARNESSES, "vibe", harness)
+    monkeypatch.setitem(transcripts_mod.HARNESSES, "vibe", harness)
     domain = str(vibe_tree["root"].resolve())
 
     fulgenzio = collision_registry.register(
@@ -513,7 +514,7 @@ async def test_read_transcript_reopens_vibe_isolated_domain_through_factory(
     participant.transcript_domain = str(domain.resolve())
     collision_registry.store.upsert_participant(participant)
     harness = VibeHarness(root=tmp_path / "shared-vibe")
-    monkeypatch.setitem(methods_mod.HARNESSES, "vibe", harness)
+    monkeypatch.setitem(transcripts_mod.HARNESSES, "vibe", harness)
     daemon = SimpleNamespace(
         registry=collision_registry,
         observer=Observer(collision_registry, {"vibe": harness}),
@@ -553,7 +554,7 @@ async def test_read_transcript_pinned_symlink_escape_fails_closed(
     participant.transcript_location = str(link)
     collision_registry.store.upsert_participant(participant)
     harness = VibeHarness(root=tmp_path / "shared-vibe")
-    monkeypatch.setitem(methods_mod.HARNESSES, "vibe", harness)
+    monkeypatch.setitem(transcripts_mod.HARNESSES, "vibe", harness)
     daemon = SimpleNamespace(
         registry=collision_registry,
         observer=Observer(collision_registry, {"vibe": harness}),
@@ -636,7 +637,7 @@ async def test_read_transcript_trusts_restored_location_only(
     collision_registry, vibe_tree, monkeypatch, provenance
 ):
     harness = VibeHarness(root=vibe_tree["root"])
-    monkeypatch.setitem(methods_mod.HARNESSES, "vibe", harness)
+    monkeypatch.setitem(transcripts_mod.HARNESSES, "vibe", harness)
     participant = collision_registry.register(
         harness="vibe",
         pane=None,
@@ -666,7 +667,7 @@ async def test_read_transcript_does_not_apply_restored_trust_without_location(
     collision_registry, vibe_tree, monkeypatch, provenance
 ):
     harness = VibeHarness(root=vibe_tree["root"])
-    monkeypatch.setitem(methods_mod.HARNESSES, "vibe", harness)
+    monkeypatch.setitem(transcripts_mod.HARNESSES, "vibe", harness)
     participant = collision_registry.register(
         harness="vibe",
         pane=None,
@@ -881,7 +882,7 @@ async def test_read_transcript_reports_a_missing_pin_instead_of_ambiguity(
     collision_registry, vibe_tree, tmp_path, monkeypatch
 ):
     harness = VibeHarness(root=vibe_tree["root"])
-    monkeypatch.setitem(methods_mod.HARNESSES, "vibe", harness)
+    monkeypatch.setitem(transcripts_mod.HARNESSES, "vibe", harness)
     participant = collision_registry.register(
         harness="vibe", pane=None, cwd=str(vibe_tree["project"])
     )
@@ -1245,7 +1246,7 @@ async def test_identity_loss_rebind_rearms_and_is_idempotent(
     collision_registry, vibe_tree, monkeypatch
 ):
     harness = VibeHarness(root=vibe_tree["root"])
-    monkeypatch.setitem(methods_mod.HARNESSES, "vibe", harness)
+    monkeypatch.setitem(transcripts_mod.HARNESSES, "vibe", harness)
     observer = Observer(collision_registry, {"vibe": harness})
     participant = collision_registry.register(
         harness="vibe", pane="%1", cwd=str(vibe_tree["project"])
