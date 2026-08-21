@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from theater.config import RegieSection
@@ -31,7 +31,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger("theater.regie")
 
 
-@runtime_checkable
 class PaneOperations(Protocol):
     """The tmux pane operations the staging controller needs, resolved at call time.
 
@@ -50,15 +49,12 @@ class PaneOperations(Protocol):
         self, pane_id: str, *, width: int | None = ..., height: int | None = ...
     ) -> None: ...
 
-    async def select_pane(self, pane_id: str) -> None: ...
-
 
 class StageOutcome(Enum):
     """What ``stage`` needs the app to do after the controller runs."""
 
     STAGED = "staged"
     UNSTAGED = "unstaged"
-    ALREADY_STAGED = "already_staged"
     NO_NODE = "no_node"
     NO_PANE = "no_pane"
     NO_WINDOW = "no_window"
