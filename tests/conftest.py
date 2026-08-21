@@ -313,7 +313,6 @@ def fake_tmux(request, monkeypatch):
     for pane_id in ("%1", "%2", "%3"):
         fake.add_pane(pane_id)
 
-    import theater.daemon.methods as methods_mod
     import theater.daemon.spawner as spawner_mod
     from theater.tmux import client as tmux_client
 
@@ -341,8 +340,10 @@ def fake_tmux(request, monkeypatch):
     monkeypatch.setattr(
         spawner_mod, "shutil", SimpleNamespace(which=lambda binary: f"/usr/bin/{binary}")
     )
-    # methods.py imports human_present by name, so it needs its own patch.
-    monkeypatch.setattr(methods_mod, "human_present", fake.human_present)
+    # sending.py imports human_present by name, so it needs its own patch.
+    from theater.daemon.rpc import sending as sending_mod
+
+    monkeypatch.setattr(sending_mod, "human_present", fake.human_present)
 
     return fake
 

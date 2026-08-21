@@ -15,7 +15,9 @@ import pytest
 
 from theater import harness as harness_registry
 from theater import paths
-from theater.daemon import methods
+from theater.daemon import methods  # noqa: F401 — compatibility import for side-effect registration
+from theater.daemon.rpc import jobs as jobs_mod
+from theater.daemon.rpc import participants as participants_mod
 from theater.harness import HARNESSES
 from theater.protocol import RemoteError
 
@@ -826,7 +828,7 @@ async def test_await_records_active_wait_edges(client, fake_tmux, monkeypatch):
     # about *which* rows an await writes, and a wall-clock threshold is flaky
     # on a loaded machine. The one test about timing patches it too, on both
     # sides of the wait.
-    monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
+    monkeypatch.setattr(jobs_mod, "AWAIT_ANNOUNCE_AFTER", 0.0)
     parent = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
     child = await client.call(
         "spawn",
@@ -858,7 +860,7 @@ async def test_await_records_active_wait_edges(client, fake_tmux, monkeypatch):
 
 async def test_await_records_one_pair_per_handle(client, fake_tmux, monkeypatch):
     """Two children, two edges — and every start closed exactly once."""
-    monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
+    monkeypatch.setattr(jobs_mod, "AWAIT_ANNOUNCE_AFTER", 0.0)
     parent = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
     children = [
         await client.call(
@@ -893,7 +895,7 @@ async def test_await_that_returns_immediately_does_not_record_active_wait(
     client, fake_tmux, monkeypatch
 ):
     """A finished job is not something to be blocked on, delay or no delay."""
-    monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
+    monkeypatch.setattr(jobs_mod, "AWAIT_ANNOUNCE_AFTER", 0.0)
     parent = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
     child = await client.call(
         "spawn",
@@ -917,7 +919,7 @@ async def test_await_that_returns_immediately_does_not_record_active_wait(
 
 async def test_await_with_one_finished_job_records_nothing(client, fake_tmux, monkeypatch):
     """One terminal job ends the whole call at entry — so no edge is live."""
-    monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
+    monkeypatch.setattr(jobs_mod, "AWAIT_ANNOUNCE_AFTER", 0.0)
     parent = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
     running = await client.call(
         "spawn",
@@ -995,12 +997,12 @@ async def test_await_announces_once_it_has_really_blocked(client, fake_tmux, mon
 
     # Threshold above the wait: the caller gave up before the régie would ever
     # have been told it was waiting.
-    monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 5.0)
+    monkeypatch.setattr(jobs_mod, "AWAIT_ANNOUNCE_AFTER", 5.0)
     await client.call("jobs.await", **call)
     assert await _await_events(client) == []
 
     # Same call, threshold under the wait.
-    monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
+    monkeypatch.setattr(jobs_mod, "AWAIT_ANNOUNCE_AFTER", 0.0)
     await client.call("jobs.await", **call)
     assert [e["kind"] for e in await _await_events(client)] == [
         "job.await.start",
@@ -1010,7 +1012,7 @@ async def test_await_announces_once_it_has_really_blocked(client, fake_tmux, mon
 
 async def test_await_refused_by_the_rails_records_nothing(client, fake_tmux, monkeypatch):
     """A refused await never happened: no row for the régie to animate."""
-    monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
+    monkeypatch.setattr(jobs_mod, "AWAIT_ANNOUNCE_AFTER", 0.0)
     parent = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
     child = await client.call(
         "spawn",
@@ -1034,7 +1036,7 @@ async def test_await_refused_by_the_rails_records_nothing(client, fake_tmux, mon
 
 async def test_await_that_raises_still_closes_its_starts(daemon, client, fake_tmux, monkeypatch):
     """An exception inside the wait must not strand the animation."""
-    monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
+    monkeypatch.setattr(jobs_mod, "AWAIT_ANNOUNCE_AFTER", 0.0)
     parent = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
     child = await client.call(
         "spawn",
@@ -1071,7 +1073,7 @@ async def test_a_start_that_fails_halfway_still_closes_what_was_written(
     daemon, client, fake_tmux, monkeypatch
 ):
     """Half the start rows out, then the disk refuses — close those halves."""
-    monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
+    monkeypatch.setattr(jobs_mod, "AWAIT_ANNOUNCE_AFTER", 0.0)
     parent = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
     children = [
         await client.call(
@@ -1251,7 +1253,9 @@ async def test_unmanaged_finds_harness_panes_with_no_participant(client, fake_tm
         capture_calls += 1
         return snapshot
 
-    monkeypatch.setattr(methods.proc.ProcessSnapshot, "capture", staticmethod(fake_capture))
+    monkeypatch.setattr(
+        participants_mod.proc.ProcessSnapshot, "capture", staticmethod(fake_capture)
+    )
     fake_tmux.visible_panes = [
         _make_pane("%10", command="python3", cwd="/tmp/a", pane_pid=12345),
         _make_pane("%11", command="python3", cwd="/tmp/b", pane_pid=12346),
@@ -1283,7 +1287,9 @@ async def test_unmanaged_skips_capture_when_there_are_no_candidates(client, fake
     def fail_capture():
         raise AssertionError("must not capture a process table with no candidate panes")
 
-    monkeypatch.setattr(methods.proc.ProcessSnapshot, "capture", staticmethod(fail_capture))
+    monkeypatch.setattr(
+        participants_mod.proc.ProcessSnapshot, "capture", staticmethod(fail_capture)
+    )
 
     fake_tmux.visible_panes = []
     assert await client.call("participants.unmanaged") == []
@@ -1301,7 +1307,9 @@ async def test_unmanaged_skips_capture_when_foreground_directly_matches(
     def fail_capture():
         raise AssertionError("must not capture a process table when foreground already resolves")
 
-    monkeypatch.setattr(methods.proc.ProcessSnapshot, "capture", staticmethod(fail_capture))
+    monkeypatch.setattr(
+        participants_mod.proc.ProcessSnapshot, "capture", staticmethod(fail_capture)
+    )
 
     fake_tmux.visible_panes = [
         _make_pane("%31", command="vibe", cwd="/tmp/a"),
@@ -1314,15 +1322,15 @@ async def test_unmanaged_skips_capture_when_foreground_directly_matches(
 async def test_unmanaged_dispatches_the_capture_through_to_thread(client, fake_tmux, monkeypatch):
     """The one `ps` for an unresolved pane must run off the event loop."""
     to_thread_calls = []
-    real_to_thread = methods.workers.to_thread
+    real_to_thread = participants_mod.workers.to_thread
 
     async def spy_to_thread(fn, /, *args, **kwargs):
         to_thread_calls.append(fn)
         return await real_to_thread(fn, *args, **kwargs)
 
-    monkeypatch.setattr(methods.workers, "to_thread", spy_to_thread)
+    monkeypatch.setattr(participants_mod.workers, "to_thread", spy_to_thread)
     monkeypatch.setattr(
-        methods.proc.ProcessSnapshot,
+        participants_mod.proc.ProcessSnapshot,
         "capture",
         staticmethod(lambda: _FakeSnapshot({})),
     )
@@ -1331,7 +1339,7 @@ async def test_unmanaged_dispatches_the_capture_through_to_thread(client, fake_t
     rows = await client.call("participants.unmanaged")
 
     assert rows == []
-    assert to_thread_calls == [methods.proc.ProcessSnapshot.capture]
+    assert to_thread_calls == [participants_mod.proc.ProcessSnapshot.capture]
 
 
 async def test_unmanaged_does_exactly_one_ps_regardless_of_pane_count(
@@ -1375,7 +1383,7 @@ async def test_unmanaged_does_exactly_one_ps_regardless_of_pane_count(
         kwargs.pop("label", None)
         return fn(*args, **kwargs)
 
-    monkeypatch.setattr(methods.workers, "to_thread", sync_to_thread)
+    monkeypatch.setattr(participants_mod.workers, "to_thread", sync_to_thread)
 
     rows = await client.call("participants.unmanaged")
 

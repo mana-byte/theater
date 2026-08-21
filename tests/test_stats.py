@@ -187,12 +187,12 @@ async def test_a_refused_send_is_recorded_on_the_bus(
     daemon.store.upsert_participant(participant)
 
     if setup == "human":
-        import theater.daemon.methods as methods_mod
+        import theater.daemon.rpc.sending as sending_mod
 
         async def human_here(pane_id):
             return True
 
-        monkeypatch.setattr(methods_mod, "human_present", human_here)
+        monkeypatch.setattr(sending_mod, "human_present", human_here)
     else:
         await client.call("send", target=target["id"], prompt="first")
 

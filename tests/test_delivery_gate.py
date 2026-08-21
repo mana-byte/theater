@@ -171,12 +171,12 @@ async def test_a_shell_with_the_harness_still_below_it_delivers(
     rather than staged, because the tree walk is a real `ps` call and the
     point here is the gate's logic, not the walk's.
     """
-    import theater.daemon.methods as methods_mod
+    import theater.daemon.rpc.sending as sending_mod
 
     target = await _target(client, fake_tmux, daemon, command="vibe")
     fake_tmux.add_pane("%1", command="zsh", pid=4242)
-    # The send path calls detect_harness by its imported name in methods.py.
-    monkeypatch.setattr(methods_mod, "detect_harness", lambda cmd, pid, snapshot=None: "vibe")
+    # The send path calls detect_harness by its imported name in sending.py.
+    monkeypatch.setattr(sending_mod, "detect_harness", lambda cmd, pid, snapshot=None: "vibe")
 
     await client.call("send", target=target["id"], prompt="hi")
 
@@ -215,7 +215,7 @@ async def test_a_participant_of_unknown_harness_is_not_gated(client, fake_tmux):
 
 async def test_the_gate_runs_before_the_presence_check(client, fake_tmux, daemon, monkeypatch):
     """A pane that is not the target's is not worth scraping for a human."""
-    import theater.daemon.methods as methods_mod
+    import theater.daemon.rpc.sending as sending_mod
 
     target = await _target(client, fake_tmux, daemon)
     fake_tmux.remove_pane("%1")
@@ -223,7 +223,7 @@ async def test_the_gate_runs_before_the_presence_check(client, fake_tmux, daemon
     async def human_here(pane_id):
         raise AssertionError("presence was consulted for a pane that is gone")
 
-    monkeypatch.setattr(methods_mod, "human_present", human_here)
+    monkeypatch.setattr(sending_mod, "human_present", human_here)
 
     with pytest.raises(RemoteError) as exc:
         await client.call("send", target=target["id"], prompt="hi")
