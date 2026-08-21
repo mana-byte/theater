@@ -235,12 +235,12 @@ async def test_send_to_unaddressable_rejected(client, fake_tmux):
 async def test_send_with_human_present_rejected(client, fake_tmux, daemon, monkeypatch):
     """send to a pane where a human is present returns human_present."""
     target = await _target(client, daemon)
-    import theater.daemon.methods as methods_mod
+    import theater.daemon.rpc.sending as sending_mod
 
     async def human_here(pane_id):
         return True
 
-    monkeypatch.setattr(methods_mod, "human_present", human_here)
+    monkeypatch.setattr(sending_mod, "human_present", human_here)
     with pytest.raises(RemoteError) as exc:
         await client.call("send", target=target["id"], prompt="hi")
     assert exc.value.code == "human_present"
@@ -270,8 +270,8 @@ async def test_send_allowed_after_job_exceeds_ttl(client, fake_tmux, daemon, mon
     Past the TTL the job loses its reservation — it is not finished, the
     observer may still answer it, but a new send is accepted.
     """
-    import theater.daemon.methods as methods_mod
-    from theater.daemon.methods import SEND_CLAIM_TTL
+    import theater.daemon.rpc.sending as sending_mod
+    from theater.daemon.rpc.sending import SEND_CLAIM_TTL
 
     target = await _target(client, daemon)
     await client.call("send", target=target["id"], prompt="first")
@@ -280,8 +280,8 @@ async def test_send_allowed_after_job_exceeds_ttl(client, fake_tmux, daemon, mon
     # and rejects jobs whose created_at is newer than that. By advancing `now`
     # past the TTL, the job's real created_at falls on the stale side and the
     # busy gate drops it.
-    real_now = methods_mod.now()
-    monkeypatch.setattr(methods_mod, "now", lambda: real_now + SEND_CLAIM_TTL + 1)
+    real_now = sending_mod.now()
+    monkeypatch.setattr(sending_mod, "now", lambda: real_now + SEND_CLAIM_TTL + 1)
 
     # The stale job no longer blocks; a new send is accepted.
     job2 = await client.call("send", target=target["id"], prompt="second")
@@ -455,12 +455,12 @@ async def test_send_to_a_pane_whose_screen_reads_unknown_is_allowed(
 
 async def test_send_is_allowed_when_the_capture_raises(client, fake_tmux, daemon, monkeypatch):
     """A tmux error during capture does not turn into an unreachable pane."""
-    import theater.daemon.methods as methods_mod
+    import theater.daemon.rpc.sending as sending_mod
 
     async def broken_run(*args, check=True):
         raise RuntimeError("tmux exploded")
 
-    monkeypatch.setattr(methods_mod.tmux, "run", broken_run)
+    monkeypatch.setattr(sending_mod.tmux, "run", broken_run)
     target = await _target(client, daemon)
     job = await client.call("send", target=target["id"], prompt="go ahead")
     assert job["state"] == "running"

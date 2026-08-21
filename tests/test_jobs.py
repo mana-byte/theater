@@ -204,7 +204,7 @@ async def test_await_will_not_block_for_longer_than_the_ceiling(
     client, fake_tmux, daemon, monkeypatch
 ):
     """An agent asking for an hour gets five minutes, not an hour."""
-    import theater.daemon.methods as methods_mod
+    import theater.daemon.rpc.jobs as jobs_mod
 
     seen: list[float] = []
     real = daemon.jobs.await_jobs
@@ -216,7 +216,7 @@ async def test_await_will_not_block_for_longer_than_the_ceiling(
     monkeypatch.setattr(daemon.jobs, "await_jobs", spy)
     record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
     await client.call("jobs.await", handles=[record["handle"]], max_wait=3600)
-    assert seen == [methods_mod.MAX_AWAIT]
+    assert seen == [jobs_mod.MAX_AWAIT]
 
 
 # ---- bus events ---------------------------------------------------------

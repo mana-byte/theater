@@ -36,9 +36,9 @@ from theater.daemon import (
 )
 from theater.daemon.jobs import JobManager, JobState
 from theater.daemon.lock import DaemonLock, file_id
-from theater.daemon.methods import METHODS
 from theater.daemon.observer import Observer
 from theater.daemon.registry import Registry
+from theater.daemon.rpc import METHODS
 from theater.daemon.spawner import Spawner
 from theater.daemon.store import Store
 from theater.harness import Harness
