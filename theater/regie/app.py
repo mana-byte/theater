@@ -763,7 +763,11 @@ class RegieApp(App):
     async def _refresh_tree(self) -> None:
         if not self._client:
             return
-        result = await self._polling.poll_tree(self.settings.regie.cwd_segments, self._client)
+        result = await self._polling.poll_tree(
+            self.settings.regie.cwd_segments,
+            self._client,
+            render_tree,
+        )
         if result.lines is None:
             return
         self.tree_lines = result.lines

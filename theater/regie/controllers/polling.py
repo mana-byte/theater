@@ -19,6 +19,7 @@ The controller preserves:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -93,17 +94,19 @@ class PollingController:
     def __init__(self, regie: RegieSection) -> None:
         self._regie = regie
         self.bus_cursor: int = 0
-        #: Separate from bus_cursor: the panel must not consume rows while
-        #: hidden, and the animation must run whether hidden or not.
+        # A separate cursor lets animation continue without consuming hidden bus rows.
         self.anim_cursor: int = 0
         #: Whether the animation poll has seen the log once (prime-only first).
         self._anim_primed: bool = False
 
-    async def poll_tree(self, cwd_segments: int, client: DaemonClient) -> TreeRefreshResult:
+    async def poll_tree(
+        self,
+        cwd_segments: int,
+        client: DaemonClient,
+        renderer: Callable[..., list[TreeLine]],
+    ) -> TreeRefreshResult:
         """Fetch the participant tree and unmanaged panes, render to lines."""
         try:
-            from theater.regie.render.layout import render_tree
-
             tree = await client.call("participants.tree")
             assert isinstance(tree, list)
             unmanaged = await client.call("participants.unmanaged")
@@ -111,7 +114,7 @@ class PollingController:
         except Exception as exc:
             logger.debug("tree refresh failed: %s", exc)
             return TreeRefreshResult(lines=None)
-        lines = render_tree(tree, unmanaged, cwd_segments=cwd_segments)
+        lines = renderer(tree, unmanaged, cwd_segments=cwd_segments)
         return TreeRefreshResult(lines=lines)
 
     async def poll_bus(self, bus_visible: bool, client: DaemonClient) -> BusRefreshResult:
