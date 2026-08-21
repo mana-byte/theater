@@ -29,7 +29,12 @@ only signal that is both reliable and safe.
 
 from __future__ import annotations
 
-from theater.tmux.client import run
+
+# Proxy: delegate to client.run at call time so both presence.run and client.run patches work.
+async def run(*args: str, check: bool = True) -> str:
+    from theater.tmux.client import run as _run
+
+    return await _run(*args, check=check)
 
 
 async def human_present(pane_id: str) -> bool:
@@ -42,8 +47,7 @@ async def human_present(pane_id: str) -> bool:
     try:
         in_mode = await run("display-message", "-p", "-t", pane_id, "#{pane_in_mode}")
     except Exception:
-        # If we can't query the pane, assume no human — queue rather
-        # than block forever.
+        # If we can't query the pane, assume no human — queue rather than block forever.
         return False
 
     return bool(in_mode and in_mode != "0")

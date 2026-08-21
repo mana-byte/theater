@@ -1,9 +1,9 @@
-"""Staging: move panes between windows without destroying them.
+"""Pane and session operations: queries, mutations, and staging.
 
 The régie's "stage" is a tmux window that shows the currently-selected agent.
 Agents themselves live in hidden windows. Swapping the stage occupant means
 moving the agent's pane out of its window into the stage window (or vice versa),
-without killing anything. tmux's `break-pane` and `join-pane` do exactly this.
+without killing anything. tmux's ``break-pane`` and ``join-pane`` do exactly this.
 
 Layout target
 -------------
@@ -18,8 +18,8 @@ Layout target
     └──────────────┴────────────────────────────┘
 
 The régie is a pane in the same session as the stage. The stage is a window.
-Agents park in their own windows (created by `spawn`), and `stage` moves one
-onto the stage window as a new pane, or `unstage` moves it back.
+Agents park in their own windows (created by ``spawn``), and ``stage`` moves one
+onto the stage window as a new pane, or ``unstage`` moves it back.
 
 UNVERIFIED: tmux is unavailable in the development sandbox. argv is asserted
 in tests/test_tmux_panes.py. Behaviour must be verified by the user.
@@ -27,7 +27,134 @@ in tests/test_tmux_panes.py. Behaviour must be verified by the user.
 
 from __future__ import annotations
 
-from theater.tmux.client import _FORMAT_SEP, TmuxError, run, tmux_version
+from theater.tmux.command import _FORMAT_SEP, _PANE_FORMAT, Pane, TmuxError
+
+# Proxies: delegate to the facade at call time so both panes.run and client.run patches work.
+
+
+async def run(*args: str, check: bool = True) -> str:
+    from theater.tmux.client import run as _run
+
+    return await _run(*args, check=check)
+
+
+def tmux_version() -> str | None:
+    from theater.tmux.client import tmux_version as _tmux_version
+
+    return _tmux_version()
+
+
+# ---- queries -----------------------------------------------------------
+
+
+async def list_panes(session: str | None = None) -> list[Pane]:
+    """Every pane on the server, or only those in one session."""
+    # Bare -t is a window target; trailing colon prevents session 0 reading as window 0.
+    if session is None:
+        scope: list[str] = ["-a"]
+    else:
+        target = session if session.endswith(":") else f"{session}:"
+        scope = ["-s", "-t", target]
+    out = await run("list-panes", *scope, "-F", _PANE_FORMAT, check=False)
+    return [Pane.parse(line) for line in out.splitlines() if line]
+
+
+async def pane_exists(pane_id: str) -> bool:
+    out = await run("list-panes", "-a", "-F", "#{pane_id}", check=False)
+    return pane_id in out.split()
+
+
+async def pane_info(pane_id: str) -> Pane | None:
+    """The full row for one pane, or None if it no longer exists.
+
+    `pane_exists` answers the same question more cheaply but only as a
+    boolean, and every caller that cares whether a pane is alive also cares
+    what is now running in it. One `list-panes` serves both, so asking twice
+    would only widen the window between the two answers.
+    """
+    # Resolve from the facade so conftest patches to client.list_panes are seen.
+    from theater.tmux.client import list_panes
+
+    for pane in await list_panes():
+        if pane.pane_id == pane_id:
+            return pane
+    return None
+
+
+async def sessions() -> list[str]:
+    out = await run("list-sessions", "-F", "#{session_name}", check=False)
+    return [line for line in out.splitlines() if line]
+
+
+async def display_message(fmt: str, *, target: str | None = None) -> str:
+    """Query a tmux format string for a target pane/window.
+
+    Used by the régie to discover its own pane id and window id at startup:
+    `display-message -p -t $TMUX_PANE '#{pane_id}'` and
+    `display-message -p -t $TMUX_PANE '#{window_id}'`.
+    """
+    args = ["display-message", "-p"]
+    if target:
+        args += ["-t", target]
+    args.append(fmt)
+    return await run(*args)
+
+
+# ---- mutations ---------------------------------------------------------
+
+
+async def ensure_session(name: str, *, cwd: str | None = None) -> str:
+    """Create a detached session if it does not exist. Returns the name.
+
+    Only used when Theater has nowhere to put a window: the normal path adopts
+    the session the user is already in.
+    """
+    # Resolve from the facade so conftest patches to client.sessions are seen.
+    from theater.tmux.client import sessions
+
+    if name in await sessions():
+        return name
+    args = ["new-session", "-d", "-s", name]
+    if cwd:
+        args += ["-c", cwd]
+    await run(*args)
+    return name
+
+
+async def new_window(
+    *,
+    session: str,
+    name: str,
+    cwd: str,
+    command: list[str],
+    env: dict[str, str] | None = None,
+    background: bool = True,
+) -> str:
+    """Create a window running `command` and return its pane id.
+
+    `-d` keeps the window from stealing focus. `-P -F` makes tmux print the new
+    pane id, which is the whole point: it is how a spawned participant gets an
+    identity without any inference.
+    """
+    target = session if session.endswith(":") else f"{session}:"
+    args = ["new-window", "-P", "-F", "#{pane_id}", "-t", target, "-n", name, "-c", cwd]
+    if background:
+        args.insert(1, "-d")
+    for key, value in (env or {}).items():
+        args += ["-e", f"{key}={value}"]
+    args.append("--")
+    args += command
+    pane = await run(*args)
+    if not pane.startswith("%"):
+        raise TmuxError(f"new-window returned an unexpected pane id: {pane!r}")
+    return pane
+
+
+async def kill_pane(pane_id: str) -> None:
+    await run("kill-pane", "-t", pane_id, check=False)
+
+
+# ---- staging -----------------------------------------------------------
 
 
 async def break_pane(pane_id: str, *, target_window: str | None = None) -> None:
@@ -37,12 +164,7 @@ async def break_pane(pane_id: str, *, target_window: str | None = None) -> None:
     after it; otherwise tmux chooses the name. Used to park an agent back into
     its own window when unstaging.
     """
-    # tmux 3.7 segfaults break-pane when -n is absent and ignores -n when
-    # given (NULL-deref); 3.7a reverted it. On exactly 3.7, always pass -n
-    # (a placeholder when the caller gave none), capture the new window id
-    # with -P -F, and issue a follow-up rename-window when a real name was
-    # requested. Gated on the exact string "3.7" — 3.7a and 3.7b are fixed.
-    # See libtmux pane.py:2468-2472 for the upstream analysis.
+    # 3.7 segfaults break-pane without -n; on exactly 3.7 pass -n, capture and rename after.
     is_37 = tmux_version() == "3.7"
 
     args: list[str] = ["break-pane", "-d", "-s", pane_id]
@@ -54,8 +176,6 @@ async def break_pane(pane_id: str, *, target_window: str | None = None) -> None:
     result = await run(*args)
 
     if is_37 and target_window:
-        # 3.7 ignores -n, so the placeholder or requested name did not take.
-        # result is the window id from -P -F; rename it to the real name.
         window_id = result.strip()
         await run("rename-window", "-t", window_id, target_window)
 
