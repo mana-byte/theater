@@ -708,9 +708,7 @@ def test_list_recent_dead_excludes_live_session_ids(store):
     store.upsert_participant(held)
     store.set_status(held.id, Status.DEAD)
     store.conn.execute(
-        participants.update()
-        .where(participants.c.id == held.id)
-        .values(last_activity=_now())
+        participants.update().where(participants.c.id == held.id).values(last_activity=_now())
     )
 
     allowed = Participant(harness="vibe", cwd="/tmp/allowed", session_id="free")

@@ -37,13 +37,9 @@ def upgrade() -> None:
         ),
         sa.Column("cost_microcents", sa.Integer(), nullable=False, server_default=sa.text("0")),
     )
-    op.create_index(
-        "idx_usage_participant", "usage", ["participant_id", "ts"], unique=False
-    )
+    op.create_index("idx_usage_participant", "usage", ["participant_id", "ts"], unique=False)
     op.create_index("idx_usage_tree", "usage", ["tree_root_id", "ts"], unique=False)
-    op.create_index(
-        "idx_usage_identity", "usage", ["participant_id", "usage_key"], unique=True
-    )
+    op.create_index("idx_usage_identity", "usage", ["participant_id", "usage_key"], unique=True)
 
 
 def downgrade() -> None:

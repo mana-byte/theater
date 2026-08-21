@@ -281,9 +281,7 @@ async def test_zebra_stripe_updates_after_insertion(daemon, tmux):
         assert parent_w.has_class("tree-alt") is True
         assert child_w.has_class("tree-alt") is False
 
-        daemon["answers"]["participants.tree"] = [
-            dict(PARENT, children=[dict(THIRD), dict(CHILD)])
-        ]
+        daemon["answers"]["participants.tree"] = [dict(PARENT, children=[dict(THIRD), dict(CHILD)])]
         await app._refresh_tree()
 
         third_w = panel._key_widgets[("p", THIRD["id"])]
