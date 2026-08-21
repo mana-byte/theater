@@ -39,17 +39,19 @@ receives.
 
 from __future__ import annotations
 
+from theater.constants.tmux import TMUX_PASTE_BUFFER_PREFIX, TMUX_RAW_PASTE_MIN_VERSION
+
 
 async def deliver_text(pane_id: str, text: str, *, enter: bool = True) -> None:
     # Resolve from the facade so test patches to client.* are seen.
     from theater.tmux.client import run, tmux_at_least
 
-    buffer = f"theater-{pane_id.lstrip('%')}"
+    buffer = f"{TMUX_PASTE_BUFFER_PREFIX}{pane_id.lstrip('%')}"
     await run("set-buffer", "-b", buffer, "--", text)
     try:
         # tmux 3.7+ escapes pastes via vis(3); -S restores raw bytes (libtmux no_vis).
         paste_args = ["paste-buffer", "-b", buffer, "-t", pane_id, "-p", "-d"]
-        if tmux_at_least(3, 7):
+        if tmux_at_least(*TMUX_RAW_PASTE_MIN_VERSION):
             paste_args.append("-S")
         await run(*paste_args)
     finally:

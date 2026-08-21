@@ -27,6 +27,10 @@ in tests/test_tmux_panes.py. Behaviour must be verified by the user.
 
 from __future__ import annotations
 
+from theater.constants.tmux import (
+    TMUX_BREAK_PANE_PLACEHOLDER_NAME,
+    TMUX_BREAK_PANE_WORKAROUND_VERSION,
+)
 from theater.tmux.command import _FORMAT_SEP, _PANE_FORMAT, Pane, TmuxError
 
 # Proxies: delegate to the facade at call time so both panes.run and client.run patches work.
@@ -165,11 +169,17 @@ async def break_pane(pane_id: str, *, target_window: str | None = None) -> None:
     its own window when unstaging.
     """
     # 3.7 segfaults break-pane without -n; on exactly 3.7 pass -n, capture and rename after.
-    is_37 = tmux_version() == "3.7"
+    is_37 = tmux_version() == TMUX_BREAK_PANE_WORKAROUND_VERSION
 
     args: list[str] = ["break-pane", "-d", "-s", pane_id]
     if is_37:
-        args += ["-P", "-F", "#{window_id}", "-n", target_window or "theater"]
+        args += [
+            "-P",
+            "-F",
+            "#{window_id}",
+            "-n",
+            target_window or TMUX_BREAK_PANE_PLACEHOLDER_NAME,
+        ]
     elif target_window:
         args += ["-n", target_window]
 

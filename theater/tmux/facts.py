@@ -12,7 +12,7 @@ import re
 import shutil
 import subprocess
 
-from theater.tmux.command import RUN_TIMEOUT, TmuxError
+from theater.tmux.command import TmuxError
 
 
 def available() -> bool:
@@ -44,7 +44,7 @@ def tmux_version() -> str | None:
     Returns ``None`` if tmux is absent or the output is unparseable. Never
     raises. The leading ``tmux `` prefix from ``tmux -V`` is stripped.
     """
-    from theater.tmux.client import available
+    from theater.tmux.client import RUN_TIMEOUT, available
 
     cached = _VERSION_CACHE[0]
     if cached is not _UNPROBED:

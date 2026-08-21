@@ -23,20 +23,16 @@ import subprocess
 from dataclasses import dataclass
 
 from theater import timing
+from theater.constants.tmux import (
+    TMUX_FIELD_SEPARATOR,
+    TMUX_PANE_FORMAT,
+    TMUX_RUN_TIMEOUT_SECONDS,
+)
 from theater.models import TheaterError
 
-#: U+241E — safe list-panes delimiter (libtmux uses the same, formats.py:21).
-_FORMAT_SEP = "\u241e"
-
-_PANE_FORMAT = (
-    f"#{{pane_id}}{_FORMAT_SEP}#{{pane_pid}}{_FORMAT_SEP}#{{pane_current_path}}{_FORMAT_SEP}"
-    f"#{{window_id}}{_FORMAT_SEP}#{{session_name}}{_FORMAT_SEP}#{{window_name}}{_FORMAT_SEP}"
-    f"#{{pane_current_command}}"
-)
-
-
-#: Ceiling on a single tmux invocation; daemon socket client derives its read timeout from it.
-RUN_TIMEOUT = 10.0
+_FORMAT_SEP = TMUX_FIELD_SEPARATOR
+_PANE_FORMAT = TMUX_PANE_FORMAT
+RUN_TIMEOUT = TMUX_RUN_TIMEOUT_SECONDS
 
 
 class TmuxError(TheaterError):
@@ -81,6 +77,12 @@ def _require() -> None:
         raise TmuxMissing("tmux is not on PATH; Theater cannot run without it")
 
 
+def _run_timeout() -> float:
+    from theater.tmux.client import RUN_TIMEOUT
+
+    return RUN_TIMEOUT
+
+
 def run_sync(*args: str, check: bool = True) -> str:
     _require()
     # text=True uses locale.getpreferredencoding(False); pin UTF-8 for non-ASCII pane paths.
@@ -90,7 +92,7 @@ def run_sync(*args: str, check: bool = True) -> str:
         text=True,
         encoding="utf-8",
         errors="backslashreplace",
-        timeout=RUN_TIMEOUT,
+        timeout=_run_timeout(),
         check=False,
     )
     if check and proc.returncode != 0:
@@ -108,7 +110,7 @@ async def run(*args: str, check: bool = True) -> str:
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            out, err = await asyncio.wait_for(proc.communicate(), timeout=RUN_TIMEOUT)
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=_run_timeout())
         except TimeoutError:
             proc.kill()
             raise TmuxError(f"tmux {' '.join(args)} timed out") from None
