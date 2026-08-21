@@ -14,7 +14,8 @@ the daemon tells tmux to join that agent's pane into the stage window; the
 régie then re-asserts its own pane layout so the tree stays visible.
 
 Keybindings:
-    j/k or up/down  navigate the tree
+    j/k or up/down  navigate the tree and usage footer
+    h/l or left/right  navigate usage footer rows
     Enter           stage the selected agent (join its pane into this window)
     l               stage the selected agent (if needed) and focus it
     <prefix> h      return focus to régie from the stage (claimed only if free)
@@ -105,6 +106,8 @@ BUS_BATCH = _DEFAULTS.bus_batch
 USAGE_INTERVAL = 10.0
 #: Maximum rows the hover breakdown may cover.
 USAGE_BREAKDOWN_MAX_HEIGHT = 12
+#: Suppresses the tree highlight while the footer owns the cursor.
+HIDDEN_TREE_CURSOR = -1
 
 #: Maps [regie] cost_window values to legacy rolling hours. Current daemons use
 #: the period name; older daemons use these hours through either usage RPC.
@@ -461,6 +464,8 @@ class AgentLeaf(Static):
         index = app._index_for_key(self._key)
         if index is None:
             return
+        if app._usage_keyboard_metric is not None:
+            app._leave_usage_metrics()
         app.cursor = index
         if event.chain >= 2:
             await app.action_stage()
@@ -497,6 +502,8 @@ class EmptyTreeState(NonSelectableStatic):
 
 class UsageBreakdownPanel(VerticalScroll):
     """Per-harness table overlaid just above the usage footer."""
+
+    can_focus = False
 
     DEFAULT_CSS = f"""
     UsageBreakdownPanel {{
@@ -679,6 +686,8 @@ class TreePanel(VerticalScroll):
     removed-but-not-yet-pumped widget still sitting in the list therefore
     cannot corrupt the highlight or the scroll target.
     """
+
+    can_focus = False
 
     lines: reactive[list[tuple[Content, dict, Key, str, str]]] = reactive([])
 
@@ -974,6 +983,12 @@ class UsageMetricTile(Vertical):
 
     def on_leave(self, _event: events.Leave) -> None:
         self.post_message(self.Left())
+
+
+_USAGE_METRIC_LEFT = {"output": "input", "cache": "output", "average": "cost"}
+_USAGE_METRIC_RIGHT = {"input": "output", "output": "cache", "cost": "average"}
+_USAGE_METRIC_DOWN = {"input": "cost", "output": "average", "cache": "average"}
+_USAGE_METRIC_UP = {"cost": "input", "average": "cache"}
 
 
 class UsagePeriodBar(NonSelectableStatic):
@@ -1348,8 +1363,11 @@ class RegieApp(App):
         Binding("k", "cursor_up", "up", show=False),
         Binding("down", "cursor_down", "down", show=False),
         Binding("up", "cursor_up", "up", show=False),
+        Binding("h", "cursor_left", "left", show=False),
+        Binding("left", "cursor_left", "left", show=False),
+        Binding("right", "cursor_right", "right", show=False),
         Binding("enter", "stage", "stage"),
-        Binding("l", "focus_stage", "focus", show=False),
+        Binding("l", "cursor_right_or_focus", "focus", show=False),
         Binding("x", "kill", "kill"),
         Binding("q", "quit", "quit"),
     ]
@@ -1434,10 +1452,10 @@ class RegieApp(App):
         #: Runs only while something is in flight — an idle régie costs no
         #: frames, the same bargain AgentLeaf's spinner makes.
         self._anim_timer: Timer | None = None
-        #: A hover session starts when the pointer enters any usage tile and
-        #: ends only after it has left all five. Direct tile-to-tile movement
-        #: shares one daemon snapshot and cannot flicker the overlay closed.
-        self._usage_hover_metric: str | None = None
+        self._usage_keyboard_metric: str | None = None
+        self._usage_keyboard_origin: str | None = None
+        self._usage_pointer_metric: str | None = None
+        self._usage_active_metric: str | None = None
         self._usage_breakdown: dict | None = None
         self._usage_breakdown_message: str | None = None
         self._usage_breakdown_generation = 0
@@ -1453,6 +1471,7 @@ class RegieApp(App):
             yield StatsFooter(id="stats-footer")
             yield PriceFooter(id="price-footer")
             bus = RichLog(id="bus-panel", max_lines=200, wrap=False, markup=True)
+            bus.can_focus = False
             # Applied here, not in watch_bus_visible: a reactive assigned
             # its own default fires no watcher, so false-vs-false would
             # mount the panel visible and never correct it.
@@ -1496,13 +1515,17 @@ class RegieApp(App):
         await self._refresh_anim()
 
     def on_usage_metric_tile_hovered(self, message: UsageMetricTile.Hovered) -> None:
-        """Show the selected metric and start one fetch for a new hover session."""
-        previous_metric = self._usage_hover_metric
+        """Let the pointer temporarily own the usage panel."""
+        self._usage_pointer_metric = message.metric
+        self._sync_usage_metric()
+
+    def _activate_usage_metric(self, metric: str) -> None:
+        previous_metric = self._usage_active_metric
         first_tile = previous_metric is None
-        self._usage_hover_metric = message.metric
-        if previous_metric != message.metric:
+        self._usage_active_metric = metric
+        if previous_metric != metric:
             for tile in self.query(UsageMetricTile):
-                tile.set_class(tile.metric == message.metric, "-hot")
+                tile.set_class(tile.metric == metric, "-hot")
         panel = self.query_one("#usage-breakdown", UsageBreakdownPanel)
         panel.set_class(True, "-visible")
         if first_tile:
@@ -1511,14 +1534,30 @@ class RegieApp(App):
             generation = self._usage_breakdown_generation
             self._usage_breakdown = None
             self._usage_breakdown_message = None
-            panel.render_state(message.metric)
+            panel.render_state(metric)
             self.run_worker(self._fetch_usage_breakdown(generation), exclusive=False)
-        elif previous_metric != message.metric:
+        elif previous_metric != metric:
             panel.render_state(
-                message.metric,
+                metric,
                 result=self._usage_breakdown,
                 message=self._usage_breakdown_message,
             )
+
+    def _sync_usage_metric(self) -> None:
+        metric = self._usage_pointer_metric or self._usage_keyboard_metric
+        if metric is not None:
+            self._activate_usage_metric(metric)
+            return
+        if self._usage_active_metric is None:
+            return
+        for tile in self.query(UsageMetricTile):
+            tile.set_class(False, "-hot")
+        self._usage_active_metric = None
+        self._usage_breakdown = None
+        self._usage_breakdown_message = None
+        self._usage_breakdown_generation += 1
+        with contextlib.suppress(Exception):
+            self.query_one("#usage-breakdown", UsageBreakdownPanel).set_class(False, "-visible")
 
     def on_usage_metric_tile_left(self, _message: UsageMetricTile.Left) -> None:
         """Defer the close so crossing between adjacent tiles never flickers."""
@@ -1538,17 +1577,15 @@ class RegieApp(App):
     def _hide_usage_breakdown_if_unhovered(self) -> None:
         node: DOMNode | None = self.mouse_over
         while node is not None:
-            if isinstance(node, (UsageMetricTile, UsageBreakdownPanel)):
+            if isinstance(node, UsageMetricTile):
+                self._usage_pointer_metric = node.metric
+                self._sync_usage_metric()
+                return
+            if isinstance(node, UsageBreakdownPanel):
                 return
             node = node.parent
-        for tile in self.query(UsageMetricTile):
-            tile.set_class(False, "-hot")
-        self._usage_hover_metric = None
-        self._usage_breakdown = None
-        self._usage_breakdown_message = None
-        self._usage_breakdown_generation += 1
-        with contextlib.suppress(Exception):
-            self.query_one("#usage-breakdown", UsageBreakdownPanel).set_class(False, "-visible")
+        self._usage_pointer_metric = None
+        self._sync_usage_metric()
 
     async def _fetch_usage_breakdown(self, generation: int) -> None:
         """Fetch one snapshot; stale hover sessions are never allowed to repaint."""
@@ -1576,12 +1613,12 @@ class RegieApp(App):
             logger.debug("per-harness usage unavailable: %s", exc)
             message = "per-harness stats unavailable"
 
-        if generation != self._usage_breakdown_generation or self._usage_hover_metric is None:
+        if generation != self._usage_breakdown_generation or self._usage_active_metric is None:
             return
         self._usage_breakdown = result
         self._usage_breakdown_message = message
         self.query_one("#usage-breakdown", UsageBreakdownPanel).render_state(
-            self._usage_hover_metric,
+            self._usage_active_metric,
             result=result,
             message=message,
         )
@@ -2143,8 +2180,12 @@ class RegieApp(App):
             return
         panel._lines_data = self.tree_lines
         panel.lines = self.tree_lines
-        panel.apply_cursor(self.cursor, self.staged_pane)
-        panel.scroll_to_cursor(self.cursor)
+        cursor = self._visible_tree_cursor()
+        panel.apply_cursor(cursor, self.staged_pane)
+        panel.scroll_to_cursor(cursor)
+
+    def _visible_tree_cursor(self) -> int:
+        return HIDDEN_TREE_CURSOR if self._usage_keyboard_metric is not None else self.cursor
 
     def _index_for_key(self, key: Key) -> int | None:
         """The line index of *key* in the current tree, or None."""
@@ -2158,6 +2199,7 @@ class RegieApp(App):
         panel = self._panel()
         if panel is None:
             return
+        cursor = self._visible_tree_cursor()
         panel.apply_cursor(cursor, self.staged_pane)
         panel.scroll_to_cursor(cursor)
 
@@ -2166,7 +2208,7 @@ class RegieApp(App):
         panel = self._panel()
         if panel is None:
             return
-        panel.apply_cursor(self.cursor, self.staged_pane)
+        panel.apply_cursor(self._visible_tree_cursor(), self.staged_pane)
 
     def watch_bus_visible(self, visible: bool) -> None:
         """Show or hide the bus panel, giving the tree the space either way."""
@@ -2184,14 +2226,68 @@ class RegieApp(App):
         self.bus_visible = not self.bus_visible
 
     def action_cursor_down(self) -> None:
+        metric = self._usage_keyboard_metric
+        if metric is not None:
+            target = _USAGE_METRIC_DOWN.get(metric)
+            if target is not None:
+                self._usage_keyboard_origin = metric
+                self._select_usage_metric(target)
+            return
         if self.cursor < len(self.tree_lines) - 1:
             self.cursor += 1
             self._render_tree()
+            return
+        self._usage_keyboard_origin = None
+        self._select_usage_metric("input")
 
     def action_cursor_up(self) -> None:
+        metric = self._usage_keyboard_metric
+        if metric is not None:
+            if metric in _USAGE_METRIC_UP:
+                target = self._usage_keyboard_origin or _USAGE_METRIC_UP[metric]
+                self._usage_keyboard_origin = None
+                self._select_usage_metric(target)
+            else:
+                self._leave_usage_metrics()
+            return
         if self.cursor > 0:
             self.cursor -= 1
             self._render_tree()
+
+    def action_cursor_left(self) -> None:
+        metric = self._usage_keyboard_metric
+        if metric is None:
+            return
+        target = _USAGE_METRIC_LEFT.get(metric)
+        if target is not None:
+            self._usage_keyboard_origin = None
+            self._select_usage_metric(target)
+
+    def action_cursor_right(self) -> None:
+        metric = self._usage_keyboard_metric
+        if metric is None:
+            return
+        target = _USAGE_METRIC_RIGHT.get(metric)
+        if target is not None:
+            self._usage_keyboard_origin = None
+            self._select_usage_metric(target)
+
+    async def action_cursor_right_or_focus(self) -> None:
+        if self._usage_keyboard_metric is not None:
+            self.action_cursor_right()
+        else:
+            await self.action_focus_stage()
+
+    def _select_usage_metric(self, metric: str) -> None:
+        self._usage_keyboard_metric = metric
+        self._render_tree()
+        self._sync_usage_metric()
+
+    def _leave_usage_metrics(self) -> None:
+        self._usage_keyboard_metric = None
+        self._usage_keyboard_origin = None
+        self._render_tree()
+        self._sync_usage_metric()
 
     async def action_stage(self) -> None:
         """Stage the selected agent: join its pane into the régie's window.
@@ -2199,6 +2295,8 @@ class RegieApp(App):
         If something is already staged, break it back out to a hidden window
         first. Then join the new pane in and resize it to fill the stage area.
         """
+        if self._usage_keyboard_metric is not None:
+            return
         node = selected_participant(self.tree_lines, self.cursor)
         if node is None:
             self.notify("nothing to stage", severity="warning")
@@ -2242,6 +2340,8 @@ class RegieApp(App):
 
     async def action_kill(self) -> None:
         """Kill the selected participant."""
+        if self._usage_keyboard_metric is not None:
+            return
         node = selected_participant(self.tree_lines, self.cursor)
         if node is None:
             self.notify("nothing to kill", severity="warning")

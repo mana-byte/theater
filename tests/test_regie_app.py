@@ -1104,7 +1104,7 @@ async def test_a_known_theme_is_applied(daemon, tmux):
 # ---- cursor --------------------------------------------------------------
 
 
-async def test_j_and_k_move_the_cursor_and_stop_at_the_ends(daemon, tmux):
+async def test_j_and_k_move_between_the_tree_and_footer(daemon, tmux):
     app, _ = make_app()
     async with app.run_test() as pilot:
         assert app.cursor == 0
@@ -1112,10 +1112,130 @@ async def test_j_and_k_move_the_cursor_and_stop_at_the_ends(daemon, tmux):
         assert app.cursor == 0
         await pilot.press("j")
         assert app.cursor == 1
-        await pilot.press("j")  # already at the bottom
+        await pilot.press("j")
+        assert app.cursor == 1
+        assert app._usage_keyboard_metric == "input"
+        await pilot.press("k")
+        assert app._usage_keyboard_metric is None
         assert app.cursor == 1
         await pilot.press("k")
         assert app.cursor == 0
+
+
+async def test_arrows_reach_the_app_with_a_scrollable_tree(daemon, tmux):
+    daemon["answers"]["participants.tree"] = [
+        {
+            **PARENT,
+            "id": f"{index:012x}",
+            "tmux_pane": f"%{index + 10}",
+            "children": [],
+        }
+        for index in range(40)
+    ]
+    app, _ = make_app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        panel = app.query_one("#tree-panel", app_mod.TreePanel)
+        breakdown = app.query_one("#usage-breakdown", app_mod.UsageBreakdownPanel)
+        bus = app.query_one("#bus-panel")
+        assert app.focused is None
+        assert not panel.can_focus and not breakdown.can_focus and not bus.can_focus
+
+        await pilot.press("down")
+        assert app.cursor == 1
+        await pilot.press("up")
+        assert app.cursor == 0
+
+        app.cursor = len(app.tree_lines) - 1
+        app._render_tree()
+        await pilot.press("down")
+        assert app._usage_keyboard_metric == "input"
+        assert not list(panel.query(".tree-cursor"))
+        await app._refresh_tree()
+        assert not list(panel.query(".tree-cursor"))
+
+
+async def test_footer_navigation_uses_arrows_and_vim_keys(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test() as pilot:
+        app.cursor = len(app.tree_lines) - 1
+        await pilot.press("j")
+        assert app._usage_keyboard_metric == "input"
+
+        await pilot.press("right")
+        assert app._usage_keyboard_metric == "output"
+        await pilot.press("l")
+        assert app._usage_keyboard_metric == "cache"
+        await pilot.press("h")
+        assert app._usage_keyboard_metric == "output"
+        await pilot.press("left")
+        assert app._usage_keyboard_metric == "input"
+
+        for top, bottom in (
+            ("input", "cost"),
+            ("output", "average"),
+            ("cache", "average"),
+        ):
+            app._select_usage_metric(top)
+            await pilot.press("down")
+            assert app._usage_keyboard_metric == bottom
+            await pilot.press("up")
+            assert app._usage_keyboard_metric == top
+
+        app._select_usage_metric("cache")
+        await pilot.press("down", "left", "up")
+        assert app._usage_keyboard_metric == "input"
+        await pilot.press("up")
+        assert app._usage_keyboard_metric is None
+
+
+async def test_keyboard_footer_reuses_snapshot_and_pointer_temporarily_overrides_it(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test() as pilot:
+        app.cursor = len(app.tree_lines) - 1
+        await pilot.press("down")
+        await pilot.pause()
+        panel = app.query_one("#usage-breakdown", app_mod.UsageBreakdownPanel)
+        assert panel.has_class("-visible")
+        assert app.query_one("#in-col").has_class("-hot")
+        assert daemon["client"].asked("usage_by_harness") == [{}]
+
+        await pilot.press("right")
+        assert app._usage_active_metric == "output"
+        assert daemon["client"].asked("usage_by_harness") == [{}]
+
+        await pilot.hover("#cache-col")
+        await pilot.pause()
+        assert app._usage_active_metric == "cache"
+        await pilot.hover("#tree-panel")
+        await pilot.pause()
+        assert app._usage_active_metric == "output"
+        assert app.query_one("#out-col").has_class("-hot")
+        assert daemon["client"].asked("usage_by_harness") == [{}]
+
+        await pilot.press("up")
+        assert app._usage_keyboard_metric is None
+        assert not panel.has_class("-visible")
+
+
+async def test_tree_actions_do_nothing_while_footer_is_selected(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test() as pilot:
+        app.cursor = len(app.tree_lines) - 1
+        await pilot.press("j", "enter", "x")
+        assert app.staged_pane is None
+        assert daemon["client"].asked("participant.kill") == []
+    assert not any(call[0] in {"join", "select"} for call in tmux)
+
+
+async def test_empty_tree_can_enter_and_leave_the_footer(daemon, tmux):
+    daemon["answers"]["participants.tree"] = []
+    app, _ = make_app()
+    async with app.run_test() as pilot:
+        assert app.tree_lines == []
+        await pilot.press("down")
+        assert app._usage_keyboard_metric == "input"
+        await pilot.press("up")
+        assert app._usage_keyboard_metric is None
 
 
 async def test_the_cursor_line_carries_the_cursor_class(daemon, tmux):
@@ -1813,3 +1933,25 @@ async def test_click_on_any_row_of_a_leaf_moves_the_cursor(daemon, tmux):
         # Click at offset (0, 2) — the third row (cwd), still inside the leaf.
         await pilot.click(widget=child_widget, offset=(0, 2))
         assert app.cursor == 1
+
+
+async def test_tree_click_takes_cursor_back_from_footer(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test(size=(80, 40)) as pilot:
+        app.cursor = len(app.tree_lines) - 1
+        await pilot.press("j")
+        breakdown = app.query_one("#usage-breakdown", app_mod.UsageBreakdownPanel)
+        panel = app.query_one("#tree-panel", app_mod.TreePanel)
+        parent_widget = panel._key_widgets[("p", PARENT["id"])]
+
+        await pilot.click(widget=parent_widget)
+        assert app._usage_keyboard_metric is None
+        assert not breakdown.has_class("-visible")
+        assert app.cursor == 0
+        assert parent_widget.has_class("tree-cursor")
+
+        app.cursor = len(app.tree_lines) - 1
+        await pilot.press("j")
+        await pilot.click(widget=parent_widget, times=2)
+        assert app.staged_pane == "%10"
+    assert ("join", "%10", "@7") in tmux
