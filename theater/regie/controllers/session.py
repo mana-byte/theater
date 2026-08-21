@@ -1,36 +1,33 @@
 """Session/tmux lifecycle controller for the régie.
 
 ``SessionController`` owns the régie's tmux session discovery, mouse/status
-option changes, return-key binding, and teardown sequencing. It receives an
-explicit ``SessionOperations`` collaborator (the ``app_mod.tmux`` /
-``app_mod.panes`` modules or test doubles) rather than ``RegieApp`` or an
-untyped service locator. Functions are resolved at call time so tests that
-monkeypatch ``app_mod.tmux`` / ``app_mod.panes`` after app construction still
-see the patched functions.
+option changes, return-key binding, and teardown sequencing. It receives
+the ``tmux`` and ``panes`` module objects as explicit collaborators and
+resolves their function attributes at call time, so tests that monkeypatch
+those modules after app construction still see the patched functions.
 
 The controller never touches Textual widgets, reactives, or notifications.
-Mount and teardown return explicit values; the app performs all side effects
-in the same order as before, preserving exact observable behavior.
+Mount and teardown dispatch through caller-provided hooks so the app's
+legacy wrappers and subclass overrides stay in the call path.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Protocol
+from collections.abc import Awaitable, Callable
+from typing import Protocol
 
 logger = logging.getLogger("theater.regie")
 
 # Note tag on the <prefix> h return key, so teardown can tell ours from theirs.
 _RETURN_KEY_NOTE = "theater-regie-return"
 
+#: Lifecycle hook: an async callable taking no arguments.
+LifecycleHook = Callable[[], Awaitable[None]] | None
 
-class SessionOperations(Protocol):
-    """tmux functions the controller needs, resolved at call time.
 
-    Mirrors ``theater.tmux`` (client) and ``theater.tmux.panes`` so the app
-    can pass both module objects and tests that monkeypatch them after
-    construction still see the patched functions.
-    """
+class TmuxOptions(Protocol):
+    """Session-scoped tmux options and key-binding functions the controller needs."""
 
     def current_pane(self) -> str | None: ...
     async def display_message(self, fmt: str, *, target: str | None = ...) -> str: ...
@@ -41,45 +38,51 @@ class SessionOperations(Protocol):
         self, table: str, key: str, command: list[str], *, note: str
     ) -> bool: ...
     async def unbind_key_if_owned(self, table: str, key: str, *, note: str) -> None: ...
+
+
+class PaneOps(Protocol):
+    """Pane mutation the controller needs for teardown unstaging."""
+
     async def break_pane(self, pane_id: str, *, target_window: str | None = ...) -> None: ...
 
 
 class _DynamicSessionOps:
-    """Resolve tmux functions from app_mod at call time.
+    """Resolve tmux/panes functions from module objects at call time.
 
-    Holding the module object itself would snapshot function references at
-    construction; resolving by name on each call picks up monkeypatched
-    functions set after the app was built.
+    Storing the module objects (not snapshots of their functions) means
+    monkeypatching ``module.attr`` after construction is visible on the
+    next call.
     """
 
-    def __init__(self, app_mod: Any) -> None:
-        self._app_mod = app_mod
+    def __init__(self, tmux: TmuxOptions, panes: PaneOps) -> None:
+        self._tmux = tmux
+        self._panes = panes
 
     def current_pane(self) -> str | None:
-        return self._app_mod.tmux.current_pane()
+        return self._tmux.current_pane()
 
     async def display_message(self, fmt: str, *, target: str | None = None) -> str:
-        return await self._app_mod.tmux.display_message(fmt, target=target)
+        return await self._tmux.display_message(fmt, target=target)
 
     async def show_option(self, name: str, *, target: str) -> str | None:
-        return await self._app_mod.tmux.show_option(name, target=target)
+        return await self._tmux.show_option(name, target=target)
 
     async def set_option(self, name: str, value: str, *, target: str) -> None:
-        await self._app_mod.tmux.set_option(name, value, target=target)
+        await self._tmux.set_option(name, value, target=target)
 
     async def unset_option(self, name: str, *, target: str) -> None:
-        await self._app_mod.tmux.unset_option(name, target=target)
+        await self._tmux.unset_option(name, target=target)
 
     async def bind_key_if_free(
         self, table: str, key: str, command: list[str], *, note: str
     ) -> bool:
-        return await self._app_mod.tmux.bind_key_if_free(table, key, command, note=note)
+        return await self._tmux.bind_key_if_free(table, key, command, note=note)
 
     async def unbind_key_if_owned(self, table: str, key: str, *, note: str) -> None:
-        await self._app_mod.tmux.unbind_key_if_owned(table, key, note=note)
+        await self._tmux.unbind_key_if_owned(table, key, note=note)
 
     async def break_pane(self, pane_id: str, *, target_window: str | None = None) -> None:
-        await self._app_mod.panes.break_pane(pane_id, target_window=target_window)
+        await self._panes.break_pane(pane_id, target_window=target_window)
 
 
 class SessionController:
@@ -89,13 +92,13 @@ class SessionController:
     ``my_session_name``, prior mouse/status values, changed/owned flags,
     return-key flag, and torn-down flag.
 
-    Constructed with the ``app_mod`` (for dynamic tmux resolution) and used
-    by ``RegieApp`` via explicit values and thin wrappers — never receives
-    ``RegieApp`` itself.
+    Constructed with the ``tmux`` and ``panes`` module collaborators (or
+    test doubles) and used by ``RegieApp`` via explicit hooks and thin
+    wrappers — never receives ``RegieApp`` itself.
     """
 
-    def __init__(self, app_mod: Any) -> None:
-        self._ops: SessionOperations = _DynamicSessionOps(app_mod)
+    def __init__(self, tmux: TmuxOptions, panes: PaneOps) -> None:
+        self._ops = _DynamicSessionOps(tmux, panes)
         self.my_pane: str | None = None
         self.my_window: str | None = None
         self.my_session: str | None = None
@@ -110,9 +113,9 @@ class SessionController:
     async def discover_and_setup(
         self,
         *,
-        bind_return_key: Any = None,
-        enable_mouse: Any = None,
-        hide_status: Any = None,
+        bind_return_key: LifecycleHook = None,
+        enable_mouse: LifecycleHook = None,
+        hide_status: LifecycleHook = None,
     ) -> None:
         """Sequential pane/window/session/name discovery, then mouse and status.
 
@@ -206,9 +209,9 @@ class SessionController:
         self,
         *,
         staged_pane: str | None,
-        restore_mouse: Any = None,
-        restore_status: Any = None,
-        unbind_return_key: Any = None,
+        restore_mouse: LifecycleHook = None,
+        restore_status: LifecycleHook = None,
+        unbind_return_key: LifecycleHook = None,
     ) -> None:
         """Leave tmux as we found it: nothing staged, options restored.
 

@@ -154,7 +154,7 @@ from theater.regie.widgets.usage_footer import (  # noqa: F401
     _fmt_tokens,
     _pulsing_value,
 )
-from theater.tmux import client as tmux  # noqa: F401 — tests monkeypatch app_mod.tmux
+from theater.tmux import client as tmux
 from theater.tmux import panes
 
 logger = logging.getLogger("theater.regie")
@@ -328,9 +328,7 @@ class RegieApp(App):
         self._nav = NavigationState()
         self._usage = UsagePanelState()
         self._staging = StageController(self.settings.regie, panes)
-        import sys
-
-        self._session = SessionController(sys.modules[__name__])
+        self._session = SessionController(tmux, panes)
 
     @property
     def bus_cursor(self) -> int:
@@ -437,9 +435,7 @@ class RegieApp(App):
         # read config. The same value is used in action_stage; the two must
         # agree or Textual and tmux disagree about the sidebar edge.
         self.query_one("#sidebar").styles.width = self.settings.regie.sidebar_width
-        # Discover our own pane/window/session and set up tmux options.
-        # Dispatches through the app's own wrappers so subclass overrides and
-        # monkeypatch seams stay in the call path.
+        # Discover pane/window/session and set up tmux options through the app's own wrappers.
         await self._session.discover_and_setup(
             bind_return_key=self._bind_return_key,
             enable_mouse=self._enable_mouse,
