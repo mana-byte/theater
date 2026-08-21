@@ -417,6 +417,21 @@ async def test_old_daemon_falls_back_to_two_usage_totals_calls(daemon, tmux):
         )
 
 
+async def test_non_dict_usage_summary_logs_actual_type_and_skips_update(daemon, tmux, caplog):
+    daemon["answers"]["usage_summary"] = [42]
+    caplog.set_level("DEBUG", logger="theater.regie")
+    app, _ = make_app()
+
+    async with app.run_test():
+        stats = app.query_one("#stats-footer", app_mod.StatsFooter)
+        price = app.query_one("#price-footer", app_mod.PriceFooter)
+        assert stats.totals is None
+        assert price.totals is None
+
+    assert "usage refresh returned list, expected dict" in caplog.text
+    assert caplog.text.count("usage refresh returned") == 1
+
+
 async def test_usage_summary_without_period_echo_uses_rolling_label(daemon, tmux):
     daemon["answers"]["usage_summary"].pop("period")
     app, _ = make_app(cost_window="week")
