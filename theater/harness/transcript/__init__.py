@@ -8,6 +8,17 @@ The ``TranscriptSource`` and ``attach_point`` helper live here. The public
 from __future__ import annotations
 
 from theater.harness.transcript.attachment import attach_point
+from theater.harness.transcript.observer import (
+    TranscriptObserver,
+    enumerate_transcript_candidates,
+    open_participant_source,
+)
 from theater.harness.transcript.source import TranscriptSource
 
-__all__ = ["TranscriptSource", "attach_point"]
+__all__ = [
+    "TranscriptObserver",
+    "TranscriptSource",
+    "attach_point",
+    "enumerate_transcript_candidates",
+    "open_participant_source",
+]

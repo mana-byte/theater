@@ -1,7 +1,8 @@
 """Canonical harness contract modules.
 
-Event types, launch-plan dataclasses, and the Harness ABC live here.
-``base.py`` re-exports everything in this package for backward compatibility.
+Event types, launch-plan dataclasses, the Harness ABC, and observation
+contracts live here. ``base.py`` re-exports everything in this package for
+backward compatibility.
 """
 
 from __future__ import annotations
@@ -24,6 +25,12 @@ from theater.harness.contracts.launch import (
     ResumeLaunchOverlay,
     theater_binary,
 )
+from theater.harness.contracts.observation import (
+    HarnessObserver,
+    ScreenConfidence,
+    ScreenKind,
+    ScreenReading,
+)
 
 __all__ = [
     "APPROVALS",
@@ -31,9 +38,13 @@ __all__ = [
     "EventKind",
     "EventPath",
     "Harness",
+    "HarnessObserver",
     "LaunchPlan",
     "NativeChild",
     "ResumeLaunchOverlay",
+    "ScreenConfidence",
+    "ScreenKind",
+    "ScreenReading",
     "TokenUsage",
     "clip",
     "clipper",
