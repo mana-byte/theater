@@ -5,7 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from theater.constants.daemon import AWAIT_ANNOUNCE_AFTER, MAX_AWAIT
+from theater.constants.daemon import (
+    RPC_AWAIT_ANNOUNCE_DELAY_SECONDS as AWAIT_ANNOUNCE_AFTER,
+)
+from theater.constants.daemon import (
+    RPC_MAX_AWAIT_SECONDS as MAX_AWAIT,
+)
 from theater.daemon.rails import check_cycle, check_wait_cycle
 from theater.daemon.rpc.params import _require
 from theater.daemon.rpc.router import method

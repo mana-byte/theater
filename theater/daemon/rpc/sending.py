@@ -7,7 +7,7 @@ import logging
 from collections.abc import Callable
 from typing import NoReturn
 
-from theater.constants.daemon import SEND_CLAIM_TTL
+from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS as SEND_CLAIM_TTL
 from theater.daemon.harness_detect import (
     PaneHarnessVerdict,
     compare_detected_harness,

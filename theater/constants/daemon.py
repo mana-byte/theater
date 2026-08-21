@@ -10,10 +10,10 @@ breath.
 from __future__ import annotations
 
 #: Ceiling on a single `jobs.await`; five minutes is longer than any turn observed.
-MAX_AWAIT = 300.0
+RPC_MAX_AWAIT_SECONDS = 300.0
 
 #: How long an await must block before announcement; read at call time so tests can patch it.
-AWAIT_ANNOUNCE_AFTER = 0.25
+RPC_AWAIT_ANNOUNCE_DELAY_SECONDS = 0.25
 
 #: How long a running send job keeps its exclusive claim on a pane; past this it no longer blocks.
-SEND_CLAIM_TTL = 300.0
+SEND_CLAIM_TTL_SECONDS = 300.0

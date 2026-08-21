@@ -12,14 +12,11 @@ via the ``rpc`` package's ``__init__``.
 
 from __future__ import annotations
 
-from theater.constants.daemon import (
-    AWAIT_ANNOUNCE_AFTER,
-    MAX_AWAIT,
-    SEND_CLAIM_TTL,
-)
 from theater.daemon.rpc import METHODS
 from theater.daemon.rpc.jobs import (
     _JOB_ERROR_MESSAGES,
+    AWAIT_ANNOUNCE_AFTER,
+    MAX_AWAIT,
     _await_announced,
     _close_await,
     _open_await,
@@ -38,6 +35,7 @@ from theater.daemon.rpc.participants import _resume_state
 from theater.daemon.rpc.recall import _attach_parent_names
 from theater.daemon.rpc.router import Handler, method
 from theater.daemon.rpc.sending import (
+    SEND_CLAIM_TTL,
     _check_approval_modal,
     _check_pane_identity,
     _check_transcript_send_preflight,
