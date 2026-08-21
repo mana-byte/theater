@@ -42,38 +42,20 @@ class Participant:
     cwd: str | None = None
     branch: str | None = None
     session_id: str | None = None
-    #: Provenance of ``session_id``: exact launch/receipt evidence or a
-    #: heuristic cwd/time discovery. Persisted so a daemon restart cannot
-    #: launder an old guess into an exact claim merely because the id matches
-    #: the same foreign transcript again.
+    #: Provenance of session_id: exact evidence or heuristic. Persisted across restarts.
     session_correlation: str | None = None
-    #: Resolved namespace searched by heuristic transcript discovery. Distinct
-    #: domains cannot contain the same transcript even when harness and cwd are
-    #: equal (the normal Vibe root versus a participant-isolated save dir).
+    #: Namespace for heuristic transcript discovery; distinct domains cannot share a transcript.
     transcript_domain: str | None = None
-    #: Last location accepted by the central attachment policy. Unlike
-    #: ``session_correlation``, this is a pin, not proof of process identity.
+    #: Last location accepted by attachment policy — a pin, not proof of identity.
     transcript_location: str | None = None
-    #: A persisted resume floor: the stream position of a trusted dead
-    #: predecessor's transcript at the last safe pre-launch moment, captured
-    #: so the successor's observer can suppress stale pre-floor records. Stored
-    #: as structured JSON (records, size, dev, ino). ``None`` for cold/adopted
-    #: participants; a present-but-unknown floor uses ``"unknown"`` to
-    #: distinguish "the spawner tried but could not capture facts" from "this
-    #: is a cold spawn with no floor".
+    #: Persisted resume floor: predecessor's stream position at last safe pre-launch. None for cold.
     resume_floor: str | None = None
     parent_id: str | None = None
     pid: int | None = None
     status: Status = Status.IDLE
     last_activity: float = field(default_factory=now)
     created_at: float = field(default_factory=now)
-    # Live-only: populated by the Registry for participants that are alive,
-    # None for dead ones. Never persisted — the name is regenerated when the
-    # daemon restarts, and a dead participant's name is released so a later
-    # participant can recycle it. The id is the stable identity for as long
-    # as the row is retained (dead rows are eventually deleted by retention
-    # GC); use it, not the name, for any targeting that spans time or has
-    # destructive consequences, because a recycled name can identify a successor.
+    # Live-only alias; never persisted. Use the id for cross-time targeting — names recycle.
     name: str | None = None
 
     @property
@@ -134,9 +116,7 @@ class Participant:
 
     @classmethod
     def from_row(cls, row) -> Participant:
-        # Migration shim: older daemons persisted 'starting' before that status
-        # was removed. A row with it loads as IDLE — a participant that never
-        # left 'starting' was functionally idle.
+        # Migration shim: older daemons persisted 'starting'; loads as IDLE.
         raw_status = row["status"]
         status = Status.IDLE if raw_status == "starting" else Status(raw_status)
         mapping = row._mapping if hasattr(row, "_mapping") else row

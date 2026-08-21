@@ -31,14 +31,10 @@ from theater import timing
 
 logger = logging.getLogger("theater.proc")
 
-#: Both probes are read-only interrogations of local kernel state and should
-#: return in milliseconds. The timeout exists for the pathological case — an
-#: `lsof` blocked on a wedged network mount — where hanging would stall the
-#: observer's search arm for every participant, not just this one.
+#: Both probes are read-only kernel interrogations; timeout guards a wedged-network-mount lsof.
 _TIMEOUT = 5
 
-#: What `lsof -F` prefixes a file name with. One field per line, the first
-#: character naming the field, so a name is every line after an `n`.
+#: lsof -F prefixes file names with this; a name is every line after an 'n'.
 _LSOF_NAME = "n"
 
 
@@ -73,9 +69,7 @@ class ProcessSnapshot:
             pid = queue.popleft()
             for child_pid, comm in self._children.get(pid, []):
                 if child_pid in seen:
-                    # A cycle is impossible in a real process table, but this
-                    # walk runs on data we parsed from text and a loop here
-                    # would hang the daemon rather than mis-answer.
+                    # Cycle impossible in a real process table, but a loop here hangs the daemon.
                     continue
                 seen.add(child_pid)
                 found.append((child_pid, comm))
@@ -188,12 +182,10 @@ def _proc_open_files(fds: Path) -> list[Path]:
         except OSError:
             continue
         if not target.startswith("/"):
-            # Sockets, pipes and epoll handles read back as `socket:[12345]`
-            # rather than as a path, and a path is all any caller wants.
+            # Sockets, pipes, epoll handles read back as socket:[12345], not a path.
             continue
         if target.endswith(" (deleted)"):
-            # The process still holds the inode, but the name no longer
-            # resolves. A correlation built on it would point at nothing.
+            # Inode held but name gone; a correlation on it would point at nothing.
             continue
         found.append(Path(target))
     return found
@@ -224,8 +216,7 @@ def _lsof_open_files(pid: int) -> list[Path]:
         if not line.startswith(_LSOF_NAME):
             continue
         name = line[1:]
-        # Sockets and pipes are named too (`->127.0.0.1:443`, `pipe`), and the
-        # leading slash is what separates them from a file.
+        # Sockets and pipes are named too (->127.0.0.1:443, pipe); leading slash separates files.
         if name.startswith("/"):
             found.append(Path(name))
     return found
