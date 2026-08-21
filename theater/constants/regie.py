@@ -33,3 +33,15 @@ REGIE_TREE_BRANCH = "├── "
 REGIE_TREE_LAST_BRANCH = "└── "
 REGIE_TREE_RAIL = "│   "
 REGIE_TREE_GAP = "    "
+
+#: How often a travelling tree trace moves (seconds). Slower than the spinners.
+REGIE_TRACE_ANIM_INTERVAL = 0.10
+
+#: Ceiling on concurrent traces; more is noise, not signal.
+REGIE_MAX_TRACE_ANIMS = 6
+
+#: Ceiling on concurrent await pulses; more turns the tree into fog.
+REGIE_MAX_AWAIT_ANIMS = 12
+
+#: Max seconds an await pulse may run without its end row before expiring.
+REGIE_AWAIT_ANIM_TTL = 330.0
