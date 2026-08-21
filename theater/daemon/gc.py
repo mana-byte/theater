@@ -58,6 +58,7 @@ from sqlalchemy import delete, select, text, update
 
 from theater.config import RetentionSection
 from theater.constants import SECONDS_PER_DAY
+from theater.constants.daemon import BUS_KIND_SEND_REFUSED, TRANSCRIPT_AUDIT_KINDS
 from theater.daemon import lineage
 from theater.daemon.schema import bus, jobs, participants, touch, tree_kv
 from theater.daemon.store import Store
@@ -320,7 +321,7 @@ async def _sweep_bus(store: Store, cutoff: float, batch: int, refused_cap: int) 
         sub = (
             select(bus.c.id)
             .where(bus.c.ts < cutoff)
-            .where(bus.c.kind != "send.refused")
+            .where(bus.c.kind != BUS_KIND_SEND_REFUSED)
             .where(bus.c.id > after_id)
             .order_by(bus.c.id)
             .limit(batch)
@@ -338,7 +339,7 @@ async def _sweep_bus(store: Store, cutoff: float, batch: int, refused_cap: int) 
             break
 
     # Cap-based trimming of send.refused: keep the newest refused_cap rows.
-    count_stmt = select(bus.c.id).where(bus.c.kind == "send.refused")
+    count_stmt = select(bus.c.id).where(bus.c.kind == BUS_KIND_SEND_REFUSED)
     refused_ids = [r[0] for r in store.conn.execute(count_stmt).fetchall()]
     if len(refused_ids) > refused_cap:
         # IDs are autoincrement, so higher id = newer. Keep the newest.
@@ -362,13 +363,7 @@ async def _active_identity_loss_audit_ids(store: Store, batch: int) -> set[int]:
     TTL. Superseded loss rows remain retention-bounded, and dead/orphaned rows
     are not protected because dead bindings are never quarantined.
     """
-    kinds = (
-        "agent.observation_error",
-        "agent.transcript",
-        "agent.transcript_receipt",
-        "operator.transcript_bind",
-        "operator.transcript_unbind",
-    )
+    kinds = tuple(TRANSCRIPT_AUDIT_KINDS)
     decided: set[str] = set()
     active: dict[str, int] = {}
     before_id: int | None = None

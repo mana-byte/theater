@@ -12,6 +12,7 @@ from pathlib import Path
 
 from theater.constants.worktree import (
     BRANCH_PREFIX,
+    GIT_QUERY_TIMEOUT_SECONDS,
     MAX_NAME_LENGTH,
     NAMED_BRANCH_PREFIX,
     NAMED_WORKTREE_DIR,
@@ -89,7 +90,7 @@ def validate_name(name: str) -> None:
         check=False,
         capture_output=True,
         text=True,
-        timeout=5,
+        timeout=GIT_QUERY_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
         raise BadRequest(

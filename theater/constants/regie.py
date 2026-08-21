@@ -81,3 +81,30 @@ REGIE_USAGE_METRIC_RIGHT = {"input": "output", "output": "cache", "cost": "avera
 REGIE_USAGE_METRIC_DOWN = {"input": "cost", "output": "average", "cache": "average"}
 #: Footer keyboard navigation: up arrow mapping.
 REGIE_USAGE_METRIC_UP = {"cost": "input", "average": "cache"}
+
+#: How often the régie polls the daemon for usage data (seconds).
+REGIE_USAGE_POLL_INTERVAL_SECONDS = 10.0
+
+#: Maps [regie] cost_window config values to hours for the usage RPC.
+REGIE_COST_WINDOW_HOURS: dict[str, float] = {
+    "day": 24.0,
+    "week": 168.0,
+    "month": 720.0,
+    "year": 8760.0,
+}
+
+#: Maps [regie] cost_window config values to current-period display labels.
+REGIE_COST_WINDOW_LABELS: dict[str, str] = {
+    "day": "today",
+    "week": "this week",
+    "month": "this month",
+    "year": "this year",
+}
+
+#: Maps [regie] cost_window config values to rolling-period display labels.
+REGIE_COST_WINDOW_ROLLING_LABELS: dict[str, str] = {
+    "day": "last 24h",
+    "week": "last 7d",
+    "month": "last 30d",
+    "year": "last 365d",
+}

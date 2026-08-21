@@ -31,6 +31,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 
+from theater.constants.daemon import TRANSCRIPT_READABLE_KINDS
 from theater.daemon import workers
 from theater.daemon.observer import history_correlation_is_ambiguous
 from theater.daemon.schema import jobs, touch
@@ -45,8 +46,8 @@ from theater.transcript_identity import (
 
 logger = logging.getLogger("theater.recall.read")
 
-#: Kinds reported in a job segment's transcript; ERROR dropped (same filter as methods._READABLE).
-_READABLE = ("assistant", "user", "tool_call", "tool_result")
+#: Kinds in a job segment's transcript; ERROR dropped (same filter as transcripts._READABLE).
+_READABLE = TRANSCRIPT_READABLE_KINDS
 
 #: Ceiling on git log output for a gap segment; caller gets a truncation note.
 _MAX_GAP_COMMITS = 200

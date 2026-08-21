@@ -55,6 +55,9 @@ from theater.constants import (
 )
 from theater.constants.regie import (
     REGIE_AWAIT_ANIM_TTL,
+    REGIE_COST_WINDOW_HOURS,
+    REGIE_COST_WINDOW_LABELS,
+    REGIE_COST_WINDOW_ROLLING_LABELS,
     REGIE_EMPTY_TREE_HINT,
     REGIE_EMPTY_TREE_SHORTCUT,
     REGIE_EMPTY_TREE_SHORTCUT_STYLE,
@@ -67,6 +70,7 @@ from theater.constants.regie import (
     REGIE_USAGE_METRIC_LEFT,
     REGIE_USAGE_METRIC_RIGHT,
     REGIE_USAGE_METRIC_UP,
+    REGIE_USAGE_POLL_INTERVAL_SECONDS,
 )
 from theater.regie.bus_view import format_bus_line
 from theater.regie.controllers.animation import (  # noqa: F401
@@ -159,51 +163,29 @@ from theater.tmux import panes
 
 logger = logging.getLogger("theater.regie")
 
-#: Fallbacks. `config.RegieSection` owns the literals; `RegieApp` reads the
-#: loaded config at start-up and overrides these per instance.
+#: Fallbacks; RegieApp overrides from loaded config at start-up.
 _DEFAULTS = RegieSection()
 
 TREE_INTERVAL = _DEFAULTS.tree_interval
 BUS_INTERVAL = _DEFAULTS.bus_interval
 BUS_BATCH = _DEFAULTS.bus_batch
-USAGE_INTERVAL = 10.0
-# Legacy aliases; canonical values in theater.constants.regie.
+USAGE_INTERVAL = REGIE_USAGE_POLL_INTERVAL_SECONDS
 HIDDEN_TREE_CURSOR = REGIE_HIDDEN_TREE_CURSOR
 _USAGE_METRIC_LEFT = REGIE_USAGE_METRIC_LEFT
 _USAGE_METRIC_RIGHT = REGIE_USAGE_METRIC_RIGHT
 _USAGE_METRIC_DOWN = REGIE_USAGE_METRIC_DOWN
 _USAGE_METRIC_UP = REGIE_USAGE_METRIC_UP
 
-#: Maps [regie] cost_window values to legacy rolling hours. Current daemons use
-#: the period name; older daemons use these hours through either usage RPC.
-_COST_WINDOWS: dict[str, float] = {
-    "day": 24.0,
-    "week": 168.0,
-    "month": 720.0,
-    "year": 8760.0,
-}
-_COST_WINDOW_LABELS: dict[str, str] = {
-    "day": "today",
-    "week": "this week",
-    "month": "this month",
-    "year": "this year",
-}
-_COST_WINDOW_ROLLING_LABELS: dict[str, str] = {
-    "day": "last 24h",
-    "week": "last 7d",
-    "month": "last 30d",
-    "year": "last 365d",
-}
+#: Maps [regie] cost_window values to legacy rolling hours for older daemons.
+_COST_WINDOWS = REGIE_COST_WINDOW_HOURS
+_COST_WINDOW_LABELS = REGIE_COST_WINDOW_LABELS
+_COST_WINDOW_ROLLING_LABELS = REGIE_COST_WINDOW_ROLLING_LABELS
 
-# Legacy aliases for empty-tree constants; canonical values in theater.constants.regie.
 EMPTY_TREE_SHORTCUT = REGIE_EMPTY_TREE_SHORTCUT
 EMPTY_TREE_SHORTCUT_STYLE = REGIE_EMPTY_TREE_SHORTCUT_STYLE
 EMPTY_TREE_TAIL = REGIE_EMPTY_TREE_TAIL
 EMPTY_TREE_HINT = REGIE_EMPTY_TREE_HINT
 
-# Legacy alias; canonical value in theater.regie.controllers.session.
-
-# Legacy names for route-animation constants; canonical values in theater.constants.regie.
 TRACE_ANIM_INTERVAL = REGIE_TRACE_ANIM_INTERVAL
 MAX_TRACE_ANIMS = REGIE_MAX_TRACE_ANIMS
 MAX_AWAIT_ANIMS = REGIE_MAX_AWAIT_ANIMS
@@ -411,8 +393,7 @@ class RegieApp(App):
         self._usage.generation = value
 
     def compose(self) -> ComposeResult:
-        # No Header: it restates the app's class name to someone who just
-        # typed the command that started it. The footer shows usage totals.
+        # No Header: restates the class name; footer already shows usage totals.
         with Vertical(id="sidebar"):
             with TreeStack(id="tree-stack"):
                 yield TreePanel(id="tree-panel")
@@ -422,18 +403,14 @@ class RegieApp(App):
             yield PriceFooter(id="price-footer")
             bus = RichLog(id="bus-panel", max_lines=200, wrap=False, markup=True)
             bus.can_focus = False
-            # Applied here, not in watch_bus_visible: a reactive assigned
-            # its own default fires no watcher, so false-vs-false would
-            # mount the panel visible and never correct it.
+            # Applied here: a reactive default fires no watcher; false-vs-false would mount visible.
             bus.set_class(not self.bus_visible, "-hidden")
             yield bus
 
     async def on_mount(self) -> None:
         self._client = DaemonClient()
         await self._client.connect()
-        # Width is imperative, not CSS: App.CSS is parsed once and cannot
-        # read config. The same value is used in action_stage; the two must
-        # agree or Textual and tmux disagree about the sidebar edge.
+        # Width is imperative: App.CSS is parsed once; must match action_stage.
         self.query_one("#sidebar").styles.width = self.settings.regie.sidebar_width
         # Discover pane/window/session and set up tmux options through the app's own wrappers.
         await self._session.discover_and_setup(
@@ -452,8 +429,7 @@ class RegieApp(App):
         await self._refresh_tree()
         await self._refresh_bus()
         await self._refresh_usage()
-        # Primes the animation cursor: whatever is already in the log
-        # happened before the régie was looking, and is not news.
+        # Primes the animation cursor: existing log predates the régie and is not news.
         await self._refresh_anim()
 
     def on_usage_metric_tile_hovered(self, message: UsageMetricTile.Hovered) -> None:
@@ -603,8 +579,7 @@ class RegieApp(App):
         return _COST_WINDOWS["day"]
 
     async def on_unmount(self) -> None:
-        # Best effort: q / ctrl-c already tore down in action_quit where
-        # awaiting works; this catches paths that never reach it.
+        # Best effort: catches paths that never reach action_quit's teardown.
         await self._teardown()
         if self._client:
             await self._client.aclose()
@@ -1120,13 +1095,11 @@ class RegieApp(App):
             await self._client.call(
                 "spawn",
                 harness=harness,
-                # No prompt, no parent: the palette starts a CLI, not a
-                # delegation. `manual` adds no approval flags.
+                # No prompt/parent: palette starts a CLI; manual adds no approval flags.
                 prompt="",
                 approval="manual",
                 cwd=str(Path.cwd()),
-                # By name, and only ours: a new window belongs in the
-                # user's session, not the fallback `theater` one.
+                # By name, only ours: new window goes in the user's session, not the fallback.
                 tmux_session=self.my_session_name,
             )
         except Exception as exc:

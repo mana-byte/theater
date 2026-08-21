@@ -19,6 +19,10 @@ from pathlib import Path
 from sqlalchemy import insert, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from theater.constants.daemon import (
+    BUS_KIND_OPERATOR_TRANSCRIPT_BIND,
+    BUS_KIND_OPERATOR_TRANSCRIPT_UNBIND,
+)
 from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories.bus import BusRepository
 from theater.daemon.persistence.repositories.jobs import JobRepository
@@ -130,7 +134,7 @@ class Store:
                         ts=now(),
                         from_id="cli",
                         to_id=prior_owner.id,
-                        kind="operator.transcript_unbind",
+                        kind=BUS_KIND_OPERATOR_TRANSCRIPT_UNBIND,
                         payload=json.dumps(
                             {
                                 "actor_surface": "cli",
@@ -154,7 +158,7 @@ class Store:
                     ts=now(),
                     from_id="cli",
                     to_id=target.id,
-                    kind="operator.transcript_bind",
+                    kind=BUS_KIND_OPERATOR_TRANSCRIPT_BIND,
                     payload=json.dumps(audit_payload),
                 )
             )

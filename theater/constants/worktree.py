@@ -32,3 +32,12 @@ NAMED_WORKTREE_DIR = ".theater/worktrees/named"
 
 #: Maximum length of a named-worktree name.
 MAX_NAME_LENGTH = 100
+
+#: Timeout for quick git metadata queries (rev-parse, check-ref-format, branch -D).
+GIT_QUERY_TIMEOUT_SECONDS = 5
+
+#: Timeout for git worktree remove/prune operations.
+GIT_WORKTREE_REMOVE_TIMEOUT_SECONDS = 10
+
+#: Timeout for git worktree add operations.
+GIT_WORKTREE_ADD_TIMEOUT_SECONDS = 30

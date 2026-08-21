@@ -64,7 +64,6 @@ def _resume_state(p: Participant, live_peers: list[Participant]) -> str:
         return "live"
     if not p.session_id:
         return "no_session_id"
-    # normalize(p.harness) mirrors every other callsite that looks up a harness by name.
     harness = HARNESSES.get(normalize(p.harness))
     if harness is None or not supports_resume(harness):
         return "harness_cannot_resume"
@@ -116,7 +115,6 @@ async def _list(daemon, params: dict) -> list[dict]:
 
     page = daemon.registry.list(include_dead=include_dead, ids=ids)
 
-    # live_peers is only needed when page can contain a dead row.
     live_peers = daemon.registry.list(include_dead=False) if include_dead else []
 
     result = []

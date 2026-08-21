@@ -9,6 +9,9 @@ from theater.constants.daemon import (
     RPC_AWAIT_ANNOUNCE_DELAY_SECONDS as AWAIT_ANNOUNCE_AFTER,
 )
 from theater.constants.daemon import (
+    RPC_DEFAULT_MAX_WAIT_SECONDS as DEFAULT_MAX_WAIT,
+)
+from theater.constants.daemon import (
     RPC_MAX_AWAIT_SECONDS as MAX_AWAIT,
 )
 from theater.daemon.rails import check_cycle, check_wait_cycle
@@ -71,7 +74,7 @@ async def _jobs_await(daemon, params: dict) -> list[dict]:
     handles = params.get("handles") or []
     if not handles:
         raise BadRequest("at least one handle is required")
-    max_wait = min(max(float(params.get("max_wait", 150.0)), 0.0), MAX_AWAIT)
+    max_wait = min(max(float(params.get("max_wait", DEFAULT_MAX_WAIT)), 0.0), MAX_AWAIT)
     caller_id = params.get("caller_id")
 
     known = {h: daemon.jobs.get(h) for h in handles}

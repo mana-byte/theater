@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from theater.constants.daemon import RPC_DEFAULT_MAX_WAIT_SECONDS
 from theater.mcp.session import Session
 from theater.mcp.toolsets.participants import _summarise
 
@@ -153,7 +154,7 @@ async def spawn_session(
 
 
 async def await_sessions(
-    session: Session, *, handles: list[str], max_wait: float = 150.0
+    session: Session, *, handles: list[str], max_wait: float = RPC_DEFAULT_MAX_WAIT_SECONDS
 ) -> list[dict]:
     """Wait for spawned child sessions to finish, up to max_wait seconds.
 

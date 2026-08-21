@@ -9,6 +9,7 @@ from __future__ import annotations
 import hmac
 from pathlib import Path
 
+from theater.constants.daemon import BUS_KIND_AGENT_TRANSCRIPT_RECEIPT, TRANSCRIPT_READABLE_KINDS
 from theater.daemon.rpc.params import (
     _optional_string_param,
     _require,
@@ -42,10 +43,10 @@ from theater.transcript_identity import (
 
 CLAUDE_RECEIPT_RPC = "claude.receipt"
 TRANSCRIPT_RECEIPT_RPC = "transcript.receipt"
-TRANSCRIPT_RECEIPT_BUS_KIND = "agent.transcript_receipt"
+TRANSCRIPT_RECEIPT_BUS_KIND = BUS_KIND_AGENT_TRANSCRIPT_RECEIPT
 
 #: Kinds `read_transcript` reports. ERROR is dropped: not part of the conversation.
-_READABLE = ("assistant", "user", "tool_call", "tool_result")
+_READABLE = TRANSCRIPT_READABLE_KINDS
 
 
 def _transcript_identity_lost(daemon, pid: str) -> bool:

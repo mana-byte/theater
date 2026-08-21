@@ -126,9 +126,7 @@ def trusted_location_unavailable_reason(
     except OSError as exc:
         if exc.errno == errno.ENOENT:
             return f"trusted transcript pin {location!r} no longer exists on disk"
-        # EIO, permission failures, exhausted descriptors and other generic
-        # source failures do not prove that the persisted identity is wrong.
-        # The source reports those through the ordinary observation grace.
+        # Generic source failures (EIO, permissions, fd exhaustion) don't prove identity is wrong.
         return None
     if not stat.S_ISREG(mode):
         return f"trusted transcript pin {location!r} is not a readable transcript file"

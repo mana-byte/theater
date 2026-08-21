@@ -18,6 +18,8 @@ import os
 from mcp.server import MCPServer
 
 from theater.client import DaemonClient
+from theater.constants.daemon import RPC_DEFAULT_MAX_WAIT_SECONDS
+from theater.constants.harness import HARNESS_MCP_SERVER_NAME
 from theater.harness import describe
 from theater.mcp import tools
 from theater.mcp.tools import Session
@@ -154,7 +156,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         harness=harness,
         client=DaemonClient(),
     )
-    mcp = MCPServer("theater", instructions=INSTRUCTIONS)
+    mcp = MCPServer(HARNESS_MCP_SERVER_NAME, instructions=INSTRUCTIONS)
 
     @mcp.tool()
     async def whoami() -> dict:
@@ -283,7 +285,9 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         return await tools.register_pane(session, pane=pane)
 
     @mcp.tool()
-    async def await_sessions(handles: list[str], max_wait: float = 150.0) -> list[dict]:
+    async def await_sessions(
+        handles: list[str], max_wait: float = RPC_DEFAULT_MAX_WAIT_SECONDS
+    ) -> list[dict]:
         """Wait for spawned child sessions to finish.
 
         Blocks until ANY of the requested handles reaches a terminal state
