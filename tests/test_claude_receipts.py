@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from theater import cli, paths
+from theater.cli.commands import identity as identity_mod
 from theater.client import DaemonClient
 from theater.daemon.server import Daemon
 from theater.daemon.store import Store
@@ -709,7 +710,7 @@ def test_claude_receipt_cli_uses_non_autostart_client(monkeypatch, tmp_path):
         async def call(self, method, **params):
             return {"ok": True}
 
-    monkeypatch.setattr(cli, "DaemonClient", Client)
+    monkeypatch.setattr(identity_mod, "DaemonClient", Client)
     monkeypatch.setattr("sys.stdin", _receipt_stdin(transcript))
 
     assert cli.cmd_claude_receipt(_receipt_args(token_file)) == 0
@@ -731,7 +732,7 @@ def test_claude_receipt_cli_is_quiet_when_daemon_cannot_accept(monkeypatch, caps
     async def reject(*args, **kwargs):
         raise exc
 
-    monkeypatch.setattr(cli, "_send_transcript_receipt", reject)
+    monkeypatch.setattr(identity_mod, "_send_transcript_receipt", reject)
     monkeypatch.setattr("sys.stdin", _receipt_stdin(transcript))
 
     assert cli.cmd_claude_receipt(_receipt_args(token_file)) == 0

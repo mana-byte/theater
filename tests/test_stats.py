@@ -268,8 +268,9 @@ async def test_stats_response_carries_coverage_and_all_prior_keys(client, daemon
 
 def _render(monkeypatch, capsys, payload: dict, *argv: str) -> str:
     from theater import cli
+    from theater.cli.commands import introspection as introspection_mod
 
-    monkeypatch.setattr(cli, "call_sync", lambda method, **kw: payload)
+    monkeypatch.setattr(introspection_mod, "call_sync", lambda method, **kw: payload)
     assert cli.cmd_stats(cli._parser().parse_args(["stats", *argv])) == 0
     return capsys.readouterr().out
 

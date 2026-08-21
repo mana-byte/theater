@@ -17,6 +17,7 @@ import json
 from sqlalchemy import func, select
 
 from theater import cli
+from theater.cli.commands import maintenance as maintenance_mod
 from theater.daemon.jobs import JobState
 from theater.daemon.schema import bus, jobs, participants, touch, tree_kv
 from theater.models import Job, Participant, Status, Tier, now
@@ -293,7 +294,7 @@ async def test_gc_rpc_sweeps_when_retention_disabled(client, daemon, fake_tmux):
 
 
 def _render(monkeypatch, capsys, payload: dict, *argv: str) -> str:
-    monkeypatch.setattr(cli, "call_sync", lambda method, **kw: payload)
+    monkeypatch.setattr(maintenance_mod, "call_sync", lambda method, **kw: payload)
     assert cli.cmd_gc(cli._parser().parse_args(["gc", *argv])) == 0
     return capsys.readouterr().out
 
@@ -390,7 +391,7 @@ def test_render_vacuum_with_nothing_reclaimed_says_so(monkeypatch, capsys):
 
 def test_json_emits_raw_response(monkeypatch, capsys):
     payload = _gc_payload(bus=3, jobs=1)
-    monkeypatch.setattr(cli, "call_sync", lambda method, **kw: payload)
+    monkeypatch.setattr(maintenance_mod, "call_sync", lambda method, **kw: payload)
     assert cli.cmd_gc(cli._parser().parse_args(["gc", "--json"])) == 0
     out = capsys.readouterr().out
     assert json.loads(out) == payload

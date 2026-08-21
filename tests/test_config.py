@@ -13,6 +13,7 @@ import pytest
 
 from theater import cli, paths
 from theater import config as cfg
+from theater.cli.commands import participants as participants_mod
 from theater.client import DaemonClient
 from theater.daemon.server import Daemon
 from theater.protocol import RemoteError
@@ -600,7 +601,7 @@ def spawned_params(monkeypatch, *argv) -> dict:
         seen.update(params)
         return {"id": "abc", "harness": params["harness"], "tmux_pane": "%1"}
 
-    monkeypatch.setattr(cli, "call_sync", fake_call)
+    monkeypatch.setattr(participants_mod, "call_sync", fake_call)
     monkeypatch.setattr(cli.tmux, "current_session_sync", lambda: "main")
     assert cli.main(["spawn", *argv, "--approval", "manual"]) == 0
     return seen
@@ -625,6 +626,6 @@ def test_the_prompt_flag_wins_over_the_positional(monkeypatch, capsys):
 
 
 def test_spawning_with_no_harness_and_no_favourite_exits_nonzero(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "call_sync", lambda *a, **k: {})
+    monkeypatch.setattr(participants_mod, "call_sync", lambda *a, **k: {})
     assert cli.main(["spawn", "--approval", "manual"]) == 1
     assert "favourite" in capsys.readouterr().err
