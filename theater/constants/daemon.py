@@ -17,3 +17,9 @@ RPC_AWAIT_ANNOUNCE_DELAY_SECONDS = 0.25
 
 #: How long a running send job keeps its exclusive claim on a pane; past this it no longer blocks.
 SEND_CLAIM_TTL_SECONDS = 300.0
+
+#: Meta key for the durable send-sequence counter; persisted, never derived from MAX(jobs).
+SEND_SEQ_META_KEY = "send_seq"
+
+#: Meta key prefix for per-participant receipt tokens; the participant id is appended.
+RECEIPT_TOKEN_PREFIX = "receipt_token:"
