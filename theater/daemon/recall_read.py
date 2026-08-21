@@ -45,21 +45,13 @@ from theater.transcript_identity import (
 
 logger = logging.getLogger("theater.recall.read")
 
-#: Kinds reported in a job segment's transcript. ERROR is dropped: the
-#: caller is an agent reading what was said, and a harness-level error
-#: record is not part of the conversation. Same filter as
-#: ``methods._READABLE``.
+#: Kinds reported in a job segment's transcript; ERROR dropped (same filter as methods._READABLE).
 _READABLE = ("assistant", "user", "tool_call", "tool_result")
 
-#: Ceiling on ``git log`` output for a gap segment. A path with ten
-#: thousand commits must not hang the daemon; the caller gets a note that
-#: the list was truncated and can narrow the query if they need more.
+#: Ceiling on git log output for a gap segment; caller gets a truncation note.
 _MAX_GAP_COMMITS = 200
 
-#: How long a ``git log`` for a gap segment may run before it is killed.
-#: Two seconds is long enough for any real history lookup and short
-#: enough that a pathological repo (huge pack, slow disk) does not stall
-#: the daemon's event loop.
+#: How long a git log for a gap segment may run before being killed; prevents stalling the daemon.
 _GIT_TIMEOUT = 10
 
 
@@ -149,8 +141,7 @@ async def _read_job(
         "transcript": None,
     }
 
-    # A job whose target was None (a CLI spawn with no target) has no
-    # transcript to read.
+    # A job whose target was None (CLI spawn, no target) has no transcript to read.
     target_id = j["target_id"]
     if target_id is None:
         brief["transcript"] = {
@@ -162,8 +153,7 @@ async def _read_job(
     try:
         p = registry.get(target_id)
     except Exception:
-        # The participant was forgotten — the job still happened; only
-        # the transcript is unavailable.
+        # The participant was forgotten — the job still happened; only the transcript is gone.
         brief["transcript"] = {
             "available": False,
             "reason": f"participant {target_id} is no longer registered",
@@ -188,8 +178,7 @@ async def _read_job(
     harness_name = normalize(p.harness)
     harness = HARNESSES.get(harness_name)
     if harness is None:
-        # Harness adapter not loaded — the job metadata survives; only
-        # the transcript is unreadable.
+        # Harness adapter not loaded — the job metadata survives; only the transcript is unreadable.
         brief["transcript"] = {
             "available": False,
             "reason": f"harness {p.harness!r} is not known",
@@ -238,8 +227,7 @@ async def _read_job(
         return brief
 
     if history.location is None:
-        # The source located nothing — transcript file deleted, or the
-        # opencode database has no session row.
+        # The source located nothing — transcript file deleted, or opencode has no session row.
         brief["transcript"] = {
             "available": False,
             "reason": "transcript no longer exists on disk",
@@ -299,8 +287,7 @@ def _read_gap(segment_id: str, *, cwd: str) -> dict:
     call is spent deliberately, by a caller who has looked at a gap and
     decided they want to know.
     """
-    # Parse ``gap:<path>:<before>..<after>``. Split from the right: the
-    # path may contain colons (legal on Linux).
+    # Parse gap:<path>:<before>..<after>; split from the right (path may have colons).
     body = segment_id[len("gap:") :]
     colon = body.rfind(":")
     if colon < 0:
@@ -317,8 +304,7 @@ def _read_gap(segment_id: str, *, cwd: str) -> dict:
     before = None if before_raw == "-" else before_raw
     after = None if after_raw == "-" else after_raw
 
-    # The git root is a hard privacy wall — never read outside the
-    # caller's repo. ``..`` in a path is an attack, not a typo.
+    # The git root is a hard privacy wall; ``..`` in a path is an attack, not a typo.
     root = _git_root(cwd)
     if root is None:
         return {
@@ -332,8 +318,7 @@ def _read_gap(segment_id: str, *, cwd: str) -> dict:
             "note": "cwd is not inside a git repository",
         }
 
-    # Refuse a path that escapes the root. ``realpath`` resolves ``..``
-    # so the check is against the real filesystem, not a lexical one.
+    # Refuse a path that escapes the root; realpath resolves ``..`` against the real filesystem.
     resolved = _resolve_within_root(raw_path, root)
     if resolved is None:
         return {
@@ -405,9 +390,7 @@ def _resolve_within_root(path: str, root: str) -> str | None:
     symlink that points outside the repo is caught.
     """
     root_path = Path(root).resolve()
-    # Reject ``..`` lexically, before resolution. Stricter than needed
-    # but the cost of a false reject is low and a false accept is a
-    # privacy breach.
+    # Reject ``..`` lexically before resolution; a false accept is a privacy breach.
     if ".." in path.split("/"):
         return None
     candidate = (root_path / path).resolve()

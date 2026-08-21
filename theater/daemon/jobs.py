@@ -67,8 +67,7 @@ from theater.models import Job, JobKind, JobState, now
 
 logger = logging.getLogger("theater.jobs")
 
-#: Re-exported for callers that think of these as job vocabulary. They live in
-#: theater.models so the store can build a Job without importing this module.
+#: Re-exported for callers that think of these as job vocabulary (they live in theater.models).
 __all__ = [
     "Job",
     "JobKind",
@@ -102,20 +101,13 @@ class TouchAccumulator:
     collects nothing and ``finish`` writes no touch rows.
     """
 
-    #: The working directory the job runs in. Paths in EventPath are
-    #: repo-relative; this is how they resolve to a real file for hashing.
+    #: The working directory the job runs in; EventPath paths are resolved against this.
     cwd: str
-    #: path -> sha_before, captured the first time the path is seen. A path
-    #: seen again does not re-hash: the before state is first sight, not last
-    #: sight, and re-hashing would overwrite it with a mid-job hash.
+    #: path -> sha_before, captured once on first sight; re-hashing would overwrite.
     _before: dict[str, str | None] = field(default_factory=dict)
-    #: All paths seen, in first-seen order. Preserved so touch rows have a
-    #: deterministic order — non-deterministic order makes test assertions
-    #: flaky and debugging harder.
+    #: All paths in first-seen order; preserved so touch rows have deterministic order.
     _paths: list[str] = field(default_factory=list)
-    #: mode per path, last write wins. A path read then written records
-    #: "write"; written then read records "read". The final action is the
-    #: one that left the file in the state the next job sees.
+    #: mode per path, last write wins; the final action left the file in its state.
     _mode: dict[str, str] = field(default_factory=dict)
 
     def observe(self, paths: tuple[EventPath, ...]) -> None:
@@ -171,13 +163,9 @@ class JobManager:
     def __init__(self, store: Store):
         self.store = store
         self._events: dict[str, asyncio.Event] = {}
-        #: Awaits in flight, keyed by an opaque token so two concurrent awaits
-        #: from the same caller can be torn down independently. Read as a
-        #: graph by `wait_graph`.
+        #: Awaits in flight, keyed by opaque token so concurrent awaits can be torn down.
         self._waits: dict[object, tuple[str, frozenset[str]]] = {}
-        #: Per-job path accumulators. Created in `create`, consumed in
-        #: `finish`. A job whose target is None (CLI spawn, no target) gets
-        #: no accumulator — no working directory to resolve paths against.
+        #: Per-job path accumulators; a job with no cwd (CLI spawn, no target) gets no accumulator.
         self._accumulators: dict[str, TouchAccumulator] = {}
 
     def create(
@@ -244,8 +232,7 @@ class JobManager:
         if job is None:
             return None
         if job.state != JobState.RUNNING:
-            # Already finished. The event may still be here after a daemon
-            # restart lost the original and `await_jobs` made a fresh one.
+            # Already finished; event may linger after a daemon restart — set it so await wakes.
             event = self._events.pop(handle, None)
             if event:
                 event.set()
@@ -262,9 +249,7 @@ class JobManager:
             raw_result=raw_result,
         )
         if acc:
-            # Write job result and touches in one transaction so a result
-            # without its touches is impossible. The store's connection is
-            # autocommit, so we open an explicit transaction here.
+            # Write job result and touches in one transaction; store connection is autocommit.
             self._finish_with_touches(
                 handle,
                 state=str(state),
@@ -288,9 +273,7 @@ class JobManager:
                 structured_status=structured_status,
             )
 
-        # Wake anyone waiting, then drop the event: the job is terminal, so
-        # `await_jobs` short-circuits on state from here on. Keeping it would
-        # grow the dict one entry per prompt ever sent.
+        # Wake waiters then drop the event; await_jobs short-circuits on terminal state.
         event = self._events.pop(handle, None)
         if event:
             event.set()
@@ -421,9 +404,7 @@ class JobManager:
         with ``bad_request`` before calling this method, so callers that go
         through the socket never see a silent drop.
         """
-        # Partition into already-terminal (return immediately) vs. running
-        # (need to wait). An already-terminal job at entry means we return
-        # right away without waiting at all.
+        # Partition into terminal (return immediately) vs running (wait); any terminal = no wait.
         events: list[asyncio.Event] = []
         for h in handles:
             job = self.store.get_job(h)
@@ -434,9 +415,7 @@ class JobManager:
                 return [j for j in (self.store.get_job(h) for h in handles) if j is not None]
             event = self._events.get(h)
             if event is None:
-                # Lost the event (daemon restart). The job is running, so a
-                # fresh unset event is right: finish() will set it, or we
-                # time out and the caller re-awaits.
+                # Lost the event (daemon restart); fresh unset event so finish() can set it.
                 event = asyncio.Event()
                 self._events[h] = event
             events.append(event)

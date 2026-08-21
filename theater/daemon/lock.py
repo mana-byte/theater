@@ -34,9 +34,7 @@ from theater import paths
 
 logger = logging.getLogger("theater.daemon")
 
-#: errnos meaning "someone else holds it", as opposed to "locking does not work
-#: on this filesystem". flock reports EWOULDBLOCK (== EAGAIN) on Linux and
-#: macOS; EACCES turns up on some others.
+#: errnos meaning "someone else holds it"; EWOULDBLOCK/EAGAIN on Linux+macOS, EACCES on others.
 _HELD = frozenset({errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES})
 
 
@@ -167,10 +165,7 @@ class DaemonLock:
                 pid = read_pid(self.path)
                 os.close(fd)
                 raise LockHeld(pid) from exc
-            # NFS and some FUSE mounts have no working flock. Carry on
-            # unlocked: the pid in the file still rules out the common case
-            # of a daemon already running. What is lost is atomicity — two
-            # daemons starting at once can both find the file empty and both win.
+            # NFS/FUSE may lack flock; carry on unlocked — pid file still rules out the common case.
             live = _live_daemon_pid(self.path)
             if live is not None:
                 os.close(fd)
@@ -198,8 +193,7 @@ class DaemonLock:
         if file_id(self.path) == _fd_id(fd):
             with contextlib.suppress(OSError):
                 self.path.unlink()
-        # Closing releases the flock. Last, so the file is gone before anyone
-        # waiting on the lock can see it free.
+        # Closing releases the flock; last so the file is gone before anyone waiting sees it free.
         with contextlib.suppress(OSError):
             os.close(fd)
 

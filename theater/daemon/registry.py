@@ -35,10 +35,7 @@ from theater.models import (
 class Registry:
     def __init__(self, store: Store):
         self.store = store
-        # participant id -> runtime name.  Never persisted: a daemon restart
-        # regenerates every name from scratch.  Only live (non-DEAD)
-        # participants appear here — mark_dead removes the entry so the name
-        # can be reused, and a dead participant answering by id gets name=None.
+        # participant id -> runtime name; never persisted, only live participants.
         self._names: dict[str, str] = {}
 
     # ---- naming --------------------------------------------------------
@@ -73,8 +70,7 @@ class Registry:
             raise NotFound(f"no participant {pid!r}")
         return self._named(p)
 
-    # `builtins.` because this class defines a method named `list`, which
-    # shadows the builtin for every annotation written after it.
+    # `builtins.` because this class defines a `list` method shadowing the builtin in annotations.
     def list(
         self,
         *,
@@ -210,8 +206,7 @@ class Registry:
         if p.tmux_pane == pane:
             return
         if p.tier is Tier.SPAWNED and p.tmux_pane:
-            # We read this pane id from tmux when we made the window. That
-            # beats anything the occupant tells us about itself.
+            # We read this pane id from tmux when we made the window; it beats occupant reports.
             return
         self._evict_pane_holder(pane, keep=p.id)
         p.tmux_pane = pane
@@ -248,36 +243,14 @@ class Registry:
                 existing.cwd = cwd or existing.cwd
                 if pane:
                     self._claim_pane(existing, pane)
-                # Converge an alias-stored harness on a trustworthy reconnect:
-                # the incoming harness was normalised above, and a claimed_id
-                # match means the same agent is calling back with the id we
-                # gave it — so the canonical spelling it reports now is
-                # authoritative. Without this, a row first written with an
-                # alias (e.g. "claude-code") keeps the alias forever while
-                # every fresh registration stores "claude", and comparison
-                # sites that match on harness miss that row.
-                # The guard is ``normalize(existing.harness) == harness``: only
-                # an alias of the same harness converges. A genuinely different
-                # harness, a typo, or an unknown name is retained — overwriting
-                # the row with an unrecognised name would make it unobservable.
-                # Residual limitation: if an alias is *reassigned* to a different
-                # harness in the config between two daemon lifetimes, a surviving
-                # row storing the old alias normalises to the new owner and is
-                # rewritten on reconnect — so a still-running participant of the
-                # old harness is recorded, and then observed, as the new one.
-                # Closing that needs historical alias ownership, which we do not
-                # persist; the alias table carries no history. We accept the gap
-                # because it requires alias reassignment across a restart while an
-                # old participant survives, and inventing the history is out of
-                # proportion here.
+                # Converge an alias-stored harness on reconnect (guard: normalize() == harness).
                 if normalize(existing.harness) == harness and existing.harness != harness:
                     existing.harness = harness
                 existing.last_activity = now()
                 self.store.upsert_participant(existing)
                 self.store.bus_append("participant.hello", to_id=existing.id)
                 return self._named(existing)
-            # A stale id from a previous daemon lifetime. Fall through and
-            # re-register rather than refusing: the agent is real either way.
+            # A stale id from a previous daemon lifetime; fall through and re-register.
 
         if pane:
             prior = self.store.find_by_pane(pane)
@@ -341,8 +314,7 @@ class Registry:
                 f"{{0,23}}$ (e.g. Arlequin, Scapin-2)"
             )
 
-        # A 12-char pure-hex name would be indistinguishable from a
-        # participant id and make resolve ambiguous.
+        # A 12-char pure-hex name is indistinguishable from a participant id.
         if len(new_name) == 12 and all(c in "0123456789abcdef" for c in new_name.casefold()):
             raise BadRequest(
                 f"name {new_name!r} looks like a participant id; "
@@ -380,9 +352,7 @@ class Registry:
         if p is not None:
             return self._named(p)
 
-        # Name search: follow only live participants.  A stale mapping
-        # (left behind by a store-level status change the registry did not
-        # see) is purged on sight rather than followed into a dead row.
+        # Name search: follow only live participants; stale mappings are purged on sight.
         for pid, name in list(self._names.items()):
             if name.casefold() != token.casefold():
                 continue
@@ -396,11 +366,7 @@ class Registry:
 
     def set_status(self, pid: str, status: Status) -> None:
         if status is Status.DEAD:
-            # Validate existence before delegating so set_status(missing, DEAD)
-            # raises NotFound just like every other status — mark_dead itself is
-            # intentionally idempotent (stale-map cleanup / no-op for missing),
-            # so the check belongs here, not there.  A bare store.get_participant
-            # rather than self.get avoids naming a dead row just to reject it.
+            # Validate existence so set_status(missing, DEAD) raises NotFound.
             if self.store.get_participant(pid) is None:
                 raise NotFound(f"no participant {pid!r}")
             self.mark_dead(pid)
@@ -412,9 +378,7 @@ class Registry:
     def mark_dead(self, pid: str) -> None:
         p = self.store.get_participant(pid)
         if p is None or p.status is Status.DEAD:
-            # Already dead or gone: still purge any stale name entry so the
-            # mask can be reused.  This covers a row killed directly via
-            # Store.set_status that left a dangling mapping behind.
+            # Already dead or gone: still purge stale name entry so the mask can be reused.
             self._names.pop(pid, None)
             self.store.delete_receipt_token(pid)
             return

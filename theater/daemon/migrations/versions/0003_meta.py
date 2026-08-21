@@ -42,10 +42,7 @@ def upgrade() -> None:
         sqlite_where=sa.text("status != 'dead'"),
     )
 
-    # Seed the send-sequence counter from the existing jobs table. A
-    # pure-SQL MAX(handle) would be lexically wrong for the same reason
-    # Store.max_send_seq's docstring explains: "#9" > "#10" as text.
-    # Parse the numeric suffix in Python and take the numeric max.
+    # Seed the send-sequence counter from the jobs table; pure-SQL MAX(handle) is lexically wrong.
     bind = op.get_bind()
     rows = bind.execute(sa.text("SELECT handle FROM jobs WHERE handle LIKE '%#%'")).fetchall()
     best = 0

@@ -50,16 +50,9 @@ from theater.models import BadRequest
 
 logger = logging.getLogger("theater.rails")
 
-#: Fallbacks for direct calls. `config.RailsSection` owns both literals so
-#: the settable value and the default cannot drift; `methods.spawn` passes
-#: the configured numbers in.
-#:
-#: Depth: roots are depth 0, children depth 1. A cap of 3 means a root can
-#: spawn children that spawn children that spawn children, but those
-#: grandchildren cannot spawn further.
-#:
-#: Budget: a count of participants in a tree, not a dollar amount. A count
-#: cap stops runaway spawning without pretending to know the cost.
+#: Fallbacks for direct calls; config.RailsSection owns the literals so they cannot drift.
+#: Depth: roots are 0, children 1; cap 3 means root → child → child → child but no further.
+#: Budget: a count of participants in a tree, not dollars; stops runaway spawning.
 _DEFAULTS = RailsSection()
 
 DEFAULT_DEPTH_CAP = _DEFAULTS.depth_cap
@@ -196,8 +189,7 @@ def check_cycle(
     for target_id in target_ids:
         if target_id == caller_id:
             raise CycleDetected(f"participant {caller_id} cannot await itself")
-        # Walk the caller's ancestry. If the target appears as an ancestor
-        # of the caller, awaiting it would close a cycle.
+        # Walk the caller's ancestry; if the target is an ancestor, awaiting it would close a cycle.
         if target_id in set(lineage.ancestor_ids(store, caller_id)):
             raise CycleDetected(
                 f"await would close a cycle: {target_id} is an ancestor of {caller_id}"
