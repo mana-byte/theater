@@ -53,11 +53,11 @@ from typing import TYPE_CHECKING, Any
 
 from theater.harness.contracts.events import Event
 from theater.harness.contracts.launch import NativeChild
-from theater.harness.source import StreamPoint, TranscriptCandidate
+from theater.harness.contracts.source import StreamPoint, TranscriptCandidate
 from theater.provenance import TranscriptProvenance, normalize_provenance
 
 if TYPE_CHECKING:
-    from theater.harness.source import Source
+    from theater.harness.contracts.source import Source
 
 
 class ScreenKind(StrEnum):
@@ -456,7 +456,7 @@ class TranscriptObserver(HarnessObserver):
         present-but-unknown floor instead of one that could be confused with
         a cold spawn.
         """
-        from theater.harness.source import attach_point
+        from theater.harness.transcript.attachment import attach_point
 
         try:
             path = Path(location)
@@ -472,7 +472,7 @@ class TranscriptObserver(HarnessObserver):
         session_id: str | None = None,
         after: float | None = None,
     ) -> Source:
-        from theater.harness.source import TranscriptSource
+        from theater.harness.transcript.source import TranscriptSource
 
         return TranscriptSource(
             self,
@@ -493,7 +493,7 @@ class TranscriptObserver(HarnessObserver):
         known_location: str | None = None,
     ) -> Source:
         """Preserve persisted session-id provenance in the source claim."""
-        from theater.harness.source import TranscriptSource
+        from theater.harness.transcript.source import TranscriptSource
 
         return TranscriptSource(
             self,

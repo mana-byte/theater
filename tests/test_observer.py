@@ -1000,7 +1000,7 @@ async def test_quarantined_full_watch_moves_screen_without_reading_source(regist
 
 @pytest.mark.asyncio
 async def test_healthy_polling_replays_and_probes_pin_only_once(registry, vibe_tree, monkeypatch):
-    from theater.harness import source as source_mod
+    from theater.harness.transcript import source as source_mod
 
     harness = VibeHarness(root=vibe_tree["root"])
     participant = registry.register(
