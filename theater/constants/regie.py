@@ -45,3 +45,15 @@ REGIE_MAX_AWAIT_ANIMS = 12
 
 #: Max seconds an await pulse may run without its end row before expiring.
 REGIE_AWAIT_ANIM_TTL = 330.0
+
+#: Footer value animation tick interval in seconds.
+REGIE_FOOTER_ANIM_INTERVAL = 0.1
+
+#: Footer value animation total duration in seconds.
+REGIE_FOOTER_ANIM_DURATION = 2.0
+
+#: Number of frames in one footer animation cycle.
+REGIE_FOOTER_ANIM_FRAMES = round(REGIE_FOOTER_ANIM_DURATION / REGIE_FOOTER_ANIM_INTERVAL)
+
+#: Maximum rows the usage breakdown overlay may cover.
+REGIE_USAGE_BREAKDOWN_MAX_HEIGHT = 12
