@@ -16,6 +16,7 @@ import hmac
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
@@ -1109,13 +1110,38 @@ async def _usage_summary(daemon, params: dict) -> dict:
     window = params.get("window")
     hours = 24.0 if window in (None, "") else float(window)
     timestamp = now()
-    since = timestamp - hours * 3600.0
+    requested_period = params.get("period")
+    since = _calendar_period_since(requested_period, timestamp)
+    resolved_period = requested_period if since is not None else None
+    if since is None:
+        # Compatibility for older clients and for unrecognised future period names.
+        since = timestamp - hours * 3600.0
     average_since = timestamp - USAGE_AVERAGE_WINDOW_DAYS * SECONDS_PER_DAY
     return {
         "since": since,
         "average_since": average_since,
+        "period": resolved_period,
+        # `all_time` from this summary remains for older régies; current ones use `windowed`.
         **daemon.store.usage_summary(since=since, average_since=average_since),
     }
+
+
+def _calendar_period_since(period: object, timestamp: float) -> float | None:
+    """Return the local calendar boundary for a recognised usage period."""
+    today = datetime.fromtimestamp(timestamp).date()
+    if period == "day":
+        boundary = today
+    elif period == "week":
+        # Theater uses the ISO convention: weeks begin on Monday.
+        boundary = today - timedelta(days=today.weekday())
+    elif period == "year":
+        boundary = date(today.year, 1, 1)
+    else:
+        return None
+
+    # Localise the boundary itself. Replacing fields on an aware `now` would
+    # retain today's offset and be an hour wrong on DST-transition days.
+    return datetime.combine(boundary, time.min).astimezone().timestamp()
 
 
 def _refuse_send(

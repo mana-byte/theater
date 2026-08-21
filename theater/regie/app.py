@@ -41,9 +41,10 @@ from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.reactive import reactive
+from textual.selection import Selection
 from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Label, RichLog, Static
@@ -99,8 +100,19 @@ BUS_INTERVAL = _DEFAULTS.bus_interval
 BUS_BATCH = _DEFAULTS.bus_batch
 USAGE_INTERVAL = 10.0
 
-#: Maps [regie] cost_window values to hours for the usage_totals RPC.
+#: Maps [regie] cost_window values to legacy rolling hours. Current daemons use
+#: the period name; older daemons use these hours through either usage RPC.
 _COST_WINDOWS: dict[str, float] = {"day": 24.0, "week": 168.0, "year": 8760.0}
+_COST_WINDOW_LABELS: dict[str, str] = {
+    "day": "today",
+    "week": "this week",
+    "year": "this year",
+}
+_COST_WINDOW_ROLLING_LABELS: dict[str, str] = {
+    "day": "last 24h",
+    "week": "last 7d",
+    "year": "last 365d",
+}
 
 #: Note tag on the `<prefix> h` return key, so teardown can tell "ours" from
 #: a binding someone else made after we installed it.
@@ -683,16 +695,14 @@ FOOTER_ANIM_FRAMES = round(FOOTER_ANIM_DURATION / FOOTER_ANIM_INTERVAL)
 
 def _pulsing_value(
     value: str,
-    suffix: str,
     *,
     frame: int,
     active: bool,
     value_style: str,
-    suffix_style: str,
 ) -> Content:
     """Render one footer value with the tree's working-harness grey wave."""
     if not active:
-        return Content.assemble((value, value_style), (suffix, suffix_style))
+        return Content.assemble((value, value_style))
     parts: list[str | tuple[str, str]] = []
     offset = 0
     for char in value:
@@ -701,7 +711,6 @@ def _pulsing_value(
             continue
         parts.append((char, working_harness_style(frame, offset)))
         offset += 1
-    parts.append((suffix, suffix_style))
     return Content.assemble(*parts)
 
 
@@ -721,6 +730,40 @@ def _advance_int(value: int, target: int, step: int) -> int:
     return target if _fmt_tokens(candidate) == _fmt_tokens(target) else candidate
 
 
+class NonSelectableStatic(Static):
+    """Static footer chrome excluded from drag and select-all extraction."""
+
+    ALLOW_SELECT: ClassVar[bool] = False
+
+    def get_selection(self, selection: Selection) -> tuple[str, str] | None:
+        return None
+
+
+class UsagePeriodBar(NonSelectableStatic):
+    """One-line period caption above the usage footers."""
+
+    DEFAULT_CSS = """
+    UsagePeriodBar {
+        height: 1;
+        text-align: center;
+        content-align: center middle;
+        /* Transparent so this row reads with the tree background above it. */
+    }
+    """
+
+    period_label: reactive[str] = reactive("today")
+
+    def watch_period_label(self, _label: str) -> None:
+        if self.is_mounted:
+            self._render_label()
+
+    def _render_label(self) -> None:
+        self.update(Content.assemble((self.period_label, "$text dim")))
+
+    def on_mount(self) -> None:
+        self._render_label()
+
+
 class PriceFooter(Widget):
     """Price row — two centered columns via CSS, no manual padding."""
 
@@ -729,9 +772,13 @@ class PriceFooter(Widget):
         height: 3;
         layout: horizontal;
     }
-    PriceFooter > Static {
+    PriceFooter > .footer-column {
         width: 1fr;
-        height: 1fr;
+        height: 3;
+    }
+    PriceFooter .footer-row {
+        width: 1fr;
+        height: 1;
         text-align: center;
         content-align: center bottom;
     }
@@ -745,7 +792,6 @@ class PriceFooter(Widget):
 
     totals: reactive[dict | None] = reactive(None)
     daily_avg: reactive[float] = reactive(0.0)
-    cost_window_label: reactive[str] = reactive("day")
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -759,8 +805,24 @@ class PriceFooter(Widget):
         self._timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
-        yield Static("", id="price-col")
-        yield Static("", id="avg-col")
+        with Vertical(id="price-col", classes="footer-column"):
+            yield NonSelectableStatic("", classes="footer-row footer-spacer")
+            yield Static("", id="price-value", classes="footer-row footer-value")
+            yield NonSelectableStatic(
+                Content.assemble(("cost", "$text dim")),
+                id="price-caption",
+                classes="footer-row",
+            )
+        with Vertical(id="avg-col", classes="footer-column"):
+            yield NonSelectableStatic("", classes="footer-row footer-spacer")
+            yield Static("", id="avg-value", classes="footer-row footer-value")
+            yield NonSelectableStatic(
+                Content.assemble(
+                    (f"avg/active day ({USAGE_AVERAGE_WINDOW_DAYS}d)", "$text dim")
+                ),
+                id="avg-caption",
+                classes="footer-row",
+            )
 
     def watch_totals(self, totals: dict | None) -> None:
         if not isinstance(totals, dict):
@@ -773,10 +835,6 @@ class PriceFooter(Widget):
         self._avg_target = val
         if self.is_mounted:
             self._prepare_animation()
-
-    def watch_cost_window_label(self, _label: str) -> None:
-        if self.is_mounted:
-            self._render_values()
 
     @staticmethod
     def _fmt_price(value: float) -> str:
@@ -793,34 +851,20 @@ class PriceFooter(Widget):
         return self._fmt_avg(self._avg_display) != self._fmt_avg(self._avg_target)
 
     def _render_values(self) -> None:
-        self.query_one("#price-col", Static).update(
-            Content.assemble(
-                "\n",
-                _pulsing_value(
-                    self._fmt_price(self._price_display),
-                    "",
-                    frame=self._frame,
-                    active=self._price_active(),
-                    value_style="$text bold",
-                    suffix_style="$text",
-                ),
-                "\n",
-                (f"cost ({self.cost_window_label})", "$text dim"),
+        self.query_one("#price-value", Static).update(
+            _pulsing_value(
+                self._fmt_price(self._price_display),
+                frame=self._frame,
+                active=self._price_active(),
+                value_style="$text bold",
             )
         )
-        self.query_one("#avg-col", Static).update(
-            Content.assemble(
-                "\n",
-                _pulsing_value(
-                    self._fmt_avg(self._avg_display),
-                    "",
-                    frame=self._frame,
-                    active=self._avg_active(),
-                    value_style="$text",
-                    suffix_style="$text",
-                ),
-                "\n",
-                (f"avg/active day ({USAGE_AVERAGE_WINDOW_DAYS}d)", "$text dim"),
+        self.query_one("#avg-value", Static).update(
+            _pulsing_value(
+                self._fmt_avg(self._avg_display),
+                frame=self._frame,
+                active=self._avg_active(),
+                value_style="$text",
             )
         )
 
@@ -878,13 +922,27 @@ class StatsFooter(Widget):
         background: $surface;
         color: $text-muted;
     }
-    StatsFooter > Static {
+    StatsFooter > .footer-column {
         width: 1fr;
-        height: 1fr;
+        height: 3;
+    }
+    StatsFooter .footer-row {
+        width: 1fr;
+        height: 1;
         text-align: center;
         content-align: center bottom;
         padding: 0;
         border: none;
+    }
+    StatsFooter .footer-value-row {
+        width: 1fr;
+        height: 1;
+        align: center middle;
+    }
+    StatsFooter .footer-value-row > Static {
+        width: auto;
+        height: 1;
+        color: $text;
     }
     """
 
@@ -899,9 +957,21 @@ class StatsFooter(Widget):
         self._timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
-        yield Static("", id="in-col")
-        yield Static("", id="out-col")
-        yield Static("", id="cache-col")
+        for prefix, suffix, caption in (
+            ("in", " ↓", "input"),
+            ("out", " ↑", "output"),
+            ("cache", " ⛁", "cache"),
+        ):
+            with Vertical(id=f"{prefix}-col", classes="footer-column"):
+                yield NonSelectableStatic("", classes="footer-row footer-spacer")
+                with Horizontal(classes="footer-value-row"):
+                    yield Static("", id=f"{prefix}-value", classes="footer-value")
+                    yield NonSelectableStatic(suffix, id=f"{prefix}-suffix")
+                yield NonSelectableStatic(
+                    Content.assemble((caption, "$text dim")),
+                    id=f"{prefix}-caption",
+                    classes="footer-row",
+                )
 
     def watch_totals(self, totals: dict | None) -> None:
         if not isinstance(totals, dict):
@@ -920,23 +990,13 @@ class StatsFooter(Widget):
         return _fmt_tokens(self._display[index]) != _fmt_tokens(self._targets[index])
 
     def _render_values(self) -> None:
-        for index, (selector, suffix, label) in enumerate(
-            (("#in-col", " ↓", "input"), ("#out-col", " ↑", "output"),
-             ("#cache-col", " ⛁", "cache"))
-        ):
+        for index, selector in enumerate(("#in-value", "#out-value", "#cache-value")):
             self.query_one(selector, Static).update(
-                Content.assemble(
-                    "\n",
-                    _pulsing_value(
-                        _fmt_tokens(self._display[index]),
-                        suffix,
-                        frame=self._frame,
-                        active=self._active(index),
-                        value_style="$text",
-                        suffix_style="$text",
-                    ),
-                    "\n",
-                    (label, "$text dim"),
+                _pulsing_value(
+                    _fmt_tokens(self._display[index]),
+                    frame=self._frame,
+                    active=self._active(index),
+                    value_style="$text",
                 )
             )
 
@@ -1033,6 +1093,9 @@ class RegieApp(App):
     PriceFooter {
         height: 3;
     }
+    UsagePeriodBar {
+        height: 1;
+    }
     StatsFooter {
         height: 3;
     }
@@ -1106,7 +1169,8 @@ class RegieApp(App):
         #: theater.favourite. Injectable for tests.
         self.settings = settings or Config()
         self._cost_window_hours = _COST_WINDOWS.get(self.settings.regie.cost_window, 24.0)
-        self._cost_window_label = "day"
+        self._cost_window_period = "day"
+        self._cost_window_label = _COST_WINDOW_LABELS["day"]
         #: What the daemon says it can spawn, or None (before mount or on
         #: failure). The palette reads None as "ask the local registry".
         self.harnesses: list[dict] | None = None
@@ -1134,6 +1198,7 @@ class RegieApp(App):
         # typed the command that started it. The footer shows usage totals.
         with Vertical(id="sidebar"):
             yield TreePanel(id="tree-panel")
+            yield UsagePeriodBar(id="usage-period")
             yield StatsFooter(id="stats-footer")
             yield PriceFooter(id="price-footer")
             bus = RichLog(id="bus-panel", max_lines=200, wrap=False, markup=True)
@@ -1166,7 +1231,7 @@ class RegieApp(App):
         await self._hide_status()
         self._apply_theme()
         self._cost_window_hours = self._validate_cost_window()
-        self.query_one("#price-footer", PriceFooter).cost_window_label = self._cost_window_label
+        self.query_one("#usage-period", UsagePeriodBar).period_label = self._cost_window_label
         await self._load_harnesses()
         self.set_interval(self.settings.regie.tree_interval, self._refresh_tree)
         self.set_interval(self.settings.regie.bus_interval, self._refresh_bus)
@@ -1226,9 +1291,11 @@ class RegieApp(App):
         """Warn about unknown cost_window values at mount, falling back to 'day'."""
         name = self.settings.regie.cost_window
         if name in _COST_WINDOWS:
-            self._cost_window_label = name
+            self._cost_window_period = name
+            self._cost_window_label = _COST_WINDOW_LABELS[name]
             return _COST_WINDOWS[name]
-        self._cost_window_label = "day"
+        self._cost_window_period = "day"
+        self._cost_window_label = _COST_WINDOW_LABELS["day"]
         self.notify(
             f"unknown cost_window {name!r} — using 'day'. "
             f"available: {', '.join(sorted(_COST_WINDOWS))}",
@@ -1393,20 +1460,23 @@ class RegieApp(App):
     async def _legacy_usage_summary(self) -> dict:
         """Compatibility with a pre-upgrade daemon that lacks usage_summary."""
         assert self._client is not None
-        all_time = await self._client.call("usage_totals")
         windowed = await self._client.call("usage_totals", window=self._cost_window_hours)
         average = await self._client.call(
             "usage_totals", window=USAGE_AVERAGE_WINDOW_HOURS
         )
         if isinstance(average, dict):
             average = {**average, "active_days": USAGE_AVERAGE_WINDOW_DAYS}
-        return {"all_time": all_time, "windowed": windowed, "average": average}
+        return {"period": None, "windowed": windowed, "average": average}
 
     async def _refresh_usage(self) -> None:
         if self._client is None:
             return
         try:
-            summary = await self._client.call("usage_summary", window=self._cost_window_hours)
+            summary = await self._client.call(
+                "usage_summary",
+                window=self._cost_window_hours,
+                period=self._cost_window_period,
+            )
         except RemoteError as exc:
             if exc.code != "unknown_method":
                 logger.debug("usage refresh failed: %s", exc)
@@ -1422,13 +1492,19 @@ class RegieApp(App):
         if not isinstance(summary, dict):
             logger.debug("usage refresh returned %s, expected dict", type(summary).__name__)
             return
-        all_time = summary.get("all_time")
+        echoed_period = summary.get("period")
+        period_label = (
+            _COST_WINDOW_LABELS.get(echoed_period) if isinstance(echoed_period, str) else None
+        )
+        if period_label is None:
+            period_label = _COST_WINDOW_ROLLING_LABELS[self._cost_window_period]
+        with contextlib.suppress(Exception):
+            self.query_one("#usage-period", UsagePeriodBar).period_label = period_label
         windowed = summary.get("windowed")
         average = summary.get("average")
-        if isinstance(all_time, dict):
-            with contextlib.suppress(Exception):
-                self.query_one("#stats-footer", StatsFooter).totals = all_time
         if isinstance(windowed, dict):
+            with contextlib.suppress(Exception):
+                self.query_one("#stats-footer", StatsFooter).totals = windowed
             with contextlib.suppress(Exception):
                 self.query_one("#price-footer", PriceFooter).totals = windowed
         if isinstance(average, dict):

@@ -2,20 +2,49 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
+import time
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
+from theater.daemon import methods as methods_mod
 from theater.daemon.schema import tree_kv
 from theater.protocol import RemoteError
 
 
-async def test_usage_summary_rpc_returns_all_three_windows(client):
+@pytest.fixture
+def paris_timezone(monkeypatch):
+    """Run local-boundary assertions outside UTC, restoring libc's timezone."""
+    previous = os.environ.get("TZ")
+    monkeypatch.setenv("TZ", "Europe/Paris")
+    time.tzset()
+    yield
+    if previous is None:
+        monkeypatch.delenv("TZ", raising=False)
+    else:
+        monkeypatch.setenv("TZ", previous)
+    time.tzset()
+
+
+async def test_usage_summary_rpc_returns_all_three_windows(client, monkeypatch):
+    timestamp = 2_000_000.0
+    monkeypatch.setattr(methods_mod, "now", lambda: timestamp)
     result = await client.call("usage_summary", window=24.0)
 
-    assert result["since"] > result["average_since"]
-    assert set(result) == {"since", "average_since", "all_time", "windowed", "average"}
+    assert result["since"] == timestamp - 24.0 * 3600.0
+    assert set(result) == {
+        "since",
+        "average_since",
+        "period",
+        "all_time",
+        "windowed",
+        "average",
+    }
+    assert result["period"] is None
     for group in ("all_time", "windowed"):
         assert result[group] == {
             "input_tokens": 0,
@@ -34,6 +63,87 @@ async def test_usage_summary_rpc_returns_all_three_windows(client):
         "cost_microcents": 0,
         "active_days": 0,
     }
+
+
+async def test_usage_summary_uses_local_calendar_period_boundaries(
+    client, monkeypatch, paris_timezone
+):
+    zone = ZoneInfo("Europe/Paris")
+    timestamp = datetime(2026, 8, 21, 15, 30, tzinfo=zone).timestamp()
+    monkeypatch.setattr(methods_mod, "now", lambda: timestamp)
+
+    expected = {
+        "day": datetime(2026, 8, 21, tzinfo=zone).timestamp(),
+        "week": datetime(2026, 8, 17, tzinfo=zone).timestamp(),
+        "year": datetime(2026, 1, 1, tzinfo=zone).timestamp(),
+    }
+    for period, since in expected.items():
+        result = await client.call("usage_summary", window=1.0, period=period)
+        assert result["since"] == since
+        assert result["period"] == period
+
+    unknown = await client.call("usage_summary", window=2.0, period="fortnight")
+    assert unknown["since"] == timestamp - 2.0 * 3600.0
+    assert unknown["period"] is None
+
+
+async def test_usage_summary_local_midnight_is_dst_safe(client, monkeypatch, paris_timezone):
+    zone = ZoneInfo("Europe/Paris")
+    # Europe/Paris changes from +01:00 to +02:00 after midnight on this date.
+    timestamp = datetime(2026, 3, 29, 12, 0, tzinfo=zone).timestamp()
+    monkeypatch.setattr(methods_mod, "now", lambda: timestamp)
+
+    result = await client.call("usage_summary", window=24.0, period="day")
+
+    assert result["since"] == datetime(2026, 3, 29, tzinfo=zone).timestamp()
+
+
+async def test_usage_summary_day_resets_all_footer_totals_at_midnight(
+    client, daemon, monkeypatch, paris_timezone
+):
+    zone = ZoneInfo("Europe/Paris")
+    midnight = datetime(2026, 8, 21, tzinfo=zone).timestamp()
+    timestamp = datetime(2026, 8, 21, 15, 30, tzinfo=zone).timestamp()
+    monkeypatch.setattr(methods_mod, "now", lambda: timestamp)
+    base = {
+        "participant_id": "p1",
+        "tree_root_id": "p1",
+        "model": "model",
+        "reasoning_output_tokens": 0,
+    }
+    assert daemon.store.record_usage(
+        **base,
+        usage_key="yesterday",
+        ts=midnight - 1,
+        input_tokens=100,
+        output_tokens=200,
+        cache_creation_input_tokens=300,
+        cache_read_input_tokens=400,
+        cost_microcents=500,
+    )
+    assert daemon.store.record_usage(
+        **base,
+        usage_key="today",
+        ts=midnight + 1,
+        input_tokens=1,
+        output_tokens=2,
+        cache_creation_input_tokens=3,
+        cache_read_input_tokens=4,
+        cost_microcents=5,
+    )
+
+    result = await client.call("usage_summary", window=24.0, period="day")
+
+    assert result["windowed"] == {
+        "input_tokens": 1,
+        "output_tokens": 2,
+        "cache_creation_input_tokens": 3,
+        "cache_read_input_tokens": 4,
+        "reasoning_output_tokens": 0,
+        "cost_microcents": 5,
+    }
+    assert result["all_time"]["input_tokens"] == 101
+    assert result["all_time"]["cost_microcents"] == 505
 
 
 def _repo(tmp_path: Path, name: str) -> Path:

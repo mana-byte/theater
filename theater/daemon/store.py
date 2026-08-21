@@ -822,7 +822,10 @@ class Store:
         return dict(row._mapping)
 
     def usage_summary(self, *, since: float, average_since: float) -> dict[str, dict]:
-        """All-time and two windowed usage totals in one table scan."""
+        """All-time and two windowed usage totals in one table scan.
+
+        ``all_time`` remains part of the compatibility contract for older régies.
+        """
         columns = {
             "input_tokens": usage.c.input_tokens,
             "output_tokens": usage.c.output_tokens,

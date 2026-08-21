@@ -14,6 +14,7 @@ The widgets, the reactives, the bindings and the render path are the real ones.
 from __future__ import annotations
 
 import pytest
+from textual.selection import SELECT_ALL
 
 from theater.config import Config, RegieSection
 from theater.constants import (
@@ -95,6 +96,8 @@ AWAIT_END_ROW = {
     "kind": "job.await.end",
 }
 
+_ECHO_PERIOD = object()
+
 
 class FakeClient:
     """A DaemonClient that answers from a dict and remembers what was asked."""
@@ -115,6 +118,12 @@ class FakeClient:
         answer = self.answers.get(method, [])
         if isinstance(answer, Exception):
             raise answer
+        if (
+            method == "usage_summary"
+            and isinstance(answer, dict)
+            and answer.get("period") is _ECHO_PERIOD
+        ):
+            return {**answer, "period": params.get("period")}
         return answer
 
     async def aclose(self) -> None:
@@ -134,8 +143,16 @@ def daemon(monkeypatch):
             "bus.tail": [],
             "harnesses": [{"name": "vibe"}, {"name": "claude"}],
             "usage_summary": {
+                "period": _ECHO_PERIOD,
                 "all_time": {"input_tokens": 11, "output_tokens": 7},
-                "windowed": {"cost_microcents": 25_000_000},
+                "windowed": {
+                    "input_tokens": 5,
+                    "output_tokens": 3,
+                    "reasoning_output_tokens": 2,
+                    "cache_read_input_tokens": 7,
+                    "cache_creation_input_tokens": 11,
+                    "cost_microcents": 25_000_000,
+                },
                 "average": {"cost_microcents": 300_000_000, "active_days": 3},
             },
         },
@@ -254,32 +271,44 @@ async def test_mount_fills_the_tree_and_the_bus(daemon, tmux):
         panel = app.query_one("#tree-panel", app_mod.TreePanel)
         assert len(panel.children) == 2
         assert panel._lines_data[1][1]["id"] == CHILD["id"]
+        sidebar = app.query_one("#sidebar")
+        assert [child.id for child in sidebar.children] == [
+            "tree-panel",
+            "usage-period",
+            "stats-footer",
+            "price-footer",
+            "bus-panel",
+        ]
 
 
 async def test_mount_fetches_all_usage_windows_with_one_rpc(daemon, tmux):
     app, _ = make_app(cost_window="week")
     async with app.run_test():
         client = daemon["client"]
-        assert client.asked("usage_summary") == [{"window": 168.0}]
+        assert client.asked("usage_summary") == [{"window": 168.0, "period": "week"}]
         assert client.asked("usage_totals") == []
         stats = app.query_one("#stats-footer", app_mod.StatsFooter)
+        period = app.query_one("#usage-period", app_mod.UsagePeriodBar)
         price = app.query_one("#price-footer", app_mod.PriceFooter)
-        assert stats.totals == {"input_tokens": 11, "output_tokens": 7}
-        assert price.totals == {"cost_microcents": 25_000_000}
+        assert stats.totals == daemon["answers"]["usage_summary"]["windowed"]
+        assert price.totals == daemon["answers"]["usage_summary"]["windowed"]
         assert price.daily_avg == 1.0
+        assert period.period_label == "this week"
 
 
 async def test_unknown_cost_window_warns_once_and_uses_day(daemon, tmux):
     app, notes = make_app(cost_window="fortnight")
     async with app.run_test():
         client = daemon["client"]
-        assert client.asked("usage_summary") == [{"window": 24.0}]
+        assert client.asked("usage_summary") == [{"window": 24.0, "period": "day"}]
+        period = app.query_one("#usage-period", app_mod.UsagePeriodBar)
+        assert period.period_label == "today"
         assert [message for message, severity in notes if severity == "warning"] == [
             "unknown cost_window 'fortnight' — using 'day'. available: day, week, year"
         ]
 
 
-async def test_old_daemon_falls_back_to_three_usage_totals_calls(daemon, tmux):
+async def test_old_daemon_falls_back_to_two_usage_totals_calls(daemon, tmux):
     totals = {"input_tokens": 2, "output_tokens": 3, "cost_microcents": 90}
     daemon["answers"]["usage_summary"] = RemoteError("unknown_method", "old daemon")
     daemon["answers"]["usage_totals"] = totals
@@ -287,16 +316,35 @@ async def test_old_daemon_falls_back_to_three_usage_totals_calls(daemon, tmux):
 
     async with app.run_test():
         client = daemon["client"]
-        assert client.asked("usage_summary") == [{"window": 8760.0}]
+        assert client.asked("usage_summary") == [{"window": 8760.0, "period": "year"}]
         assert client.asked("usage_totals") == [
-            {},
             {"window": 8760.0},
             {"window": USAGE_AVERAGE_WINDOW_HOURS},
         ]
+        period = app.query_one("#usage-period", app_mod.UsagePeriodBar)
         price = app.query_one("#price-footer", app_mod.PriceFooter)
+        assert period.period_label == "last 365d"
         assert price.daily_avg == pytest.approx(
             90 / MICROCENTS_PER_DOLLAR / USAGE_AVERAGE_WINDOW_DAYS
         )
+
+
+async def test_usage_summary_without_period_echo_uses_rolling_label(daemon, tmux):
+    daemon["answers"]["usage_summary"].pop("period")
+    app, _ = make_app(cost_window="week")
+
+    async with app.run_test():
+        period = app.query_one("#usage-period", app_mod.UsagePeriodBar)
+        assert period.period_label == "last 7d"
+
+
+async def test_usage_summary_with_unknown_period_echo_uses_rolling_label(daemon, tmux):
+    daemon["answers"]["usage_summary"]["period"] = "fortnight"
+    app, _ = make_app(cost_window="day")
+
+    async with app.run_test():
+        period = app.query_one("#usage-period", app_mod.UsagePeriodBar)
+        assert period.period_label == "last 24h"
 
 
 async def test_usage_summary_without_active_days_keeps_thirty_day_compatibility(daemon, tmux):
@@ -322,16 +370,72 @@ async def test_empty_average_window_reports_zero_per_active_day(daemon, tmux):
         assert price.daily_avg == 0.0
 
 
-async def test_cost_and_active_day_captions_render_when_usage_refresh_fails(daemon, tmux):
+async def test_period_cost_and_active_day_captions_render_when_usage_refresh_fails(daemon, tmux):
     daemon["broken"].add("usage_summary")
     app, _ = make_app(cost_window="week")
 
     async with app.run_test():
-        footer = app.query_one("#price-footer", app_mod.PriceFooter)
-        price = footer.query_one("#price-col", app_mod.Static)
-        average = footer.query_one("#avg-col", app_mod.Static)
-        assert "cost (week)" in str(price.render())
+        period = app.query_one("#usage-period", app_mod.UsagePeriodBar)
+        stats = app.query_one("#stats-footer", app_mod.StatsFooter)
+        price_footer = app.query_one("#price-footer", app_mod.PriceFooter)
+        output = stats.query_one("#out-value", app_mod.Static)
+        price = price_footer.query_one("#price-caption", app_mod.NonSelectableStatic)
+        average = price_footer.query_one("#avg-caption", app_mod.NonSelectableStatic)
+        assert str(period.render()) == "this week"
+        assert "$text dim" in _styles(period)
+        assert period.size.height == 1
+        assert period.background_colors[1] == app.screen.background_colors[1]
+        assert "this week" not in str(output.render())
+        assert "cost" in str(price.render())
+        assert "cost (week)" not in str(price.render())
         assert f"avg/active day ({USAGE_AVERAGE_WINDOW_DAYS}d)" in str(average.render())
+        assert "$text dim" in _styles(price)
+        assert "$text dim" in _styles(average)
+
+
+async def test_only_footer_values_are_selectable():
+    period = app_mod.UsagePeriodBar()
+    stats = app_mod.StatsFooter()
+    price = app_mod.PriceFooter()
+
+    class FooterHost(app_mod.App):
+        def compose(self):
+            yield period
+            yield stats
+            yield price
+
+    async with FooterHost().run_test() as pilot:
+        stats._stop_timer()
+        stats._display = [1_000, 2_000, 3_000]
+        stats._targets = [1_000, 2_000, 3_000]
+        stats._render_values()
+        price._stop_timer()
+        price._price_display = price._price_target = 1.25
+        price._avg_display = price._avg_target = 0.5
+        price._render_values()
+
+        chrome = list(pilot.app.query(app_mod.NonSelectableStatic))
+        values = list(pilot.app.query(".footer-value"))
+        assert chrome
+        assert len(values) == 5
+        assert all(not widget.allow_select for widget in chrome)
+        assert all(widget.get_selection(SELECT_ALL) is None for widget in chrome)
+        assert all(widget.allow_select for widget in values)
+        assert [
+            str(pilot.app.query_one(f"#{prefix}-suffix", app_mod.NonSelectableStatic).render())
+            for prefix in ("in", "out", "cache")
+        ] == [" ↓", " ↑", " ⛁"]
+        assert [
+            str(pilot.app.query_one(f"#{prefix}-caption", app_mod.NonSelectableStatic).render())
+            for prefix in ("in", "out", "cache")
+        ] == ["input", "output", "cache"]
+        assert period.size.height == 1
+        assert period.background_colors[1] == pilot.app.screen.background_colors[1]
+        assert stats.size.height == 3
+        assert price.size.height == 3
+
+        pilot.app.screen._select_all_in_widget(pilot.app.screen)
+        assert pilot.app.screen.get_selected_text() == "1k\n2k\n3k\n$1.250\n$0.500"
 
 
 async def test_price_animation_pulses_both_values_for_twenty_slower_frames(daemon, tmux):
@@ -353,8 +457,8 @@ async def test_price_animation_pulses_both_values_for_twenty_slower_frames(daemo
         assert app_mod.FOOTER_ANIM_FRAMES == 20
 
         footer._stop_timer()
-        price = footer.query_one("#price-col", app_mod.Static)
-        average = footer.query_one("#avg-col", app_mod.Static)
+        price = footer.query_one("#price-value", app_mod.Static)
+        average = footer.query_one("#avg-value", app_mod.Static)
         price_pulse = [style for style in _styles(price) if style.startswith("#")]
         average_pulse = [style for style in _styles(average) if style.startswith("#")]
         assert price_pulse == [
@@ -413,9 +517,9 @@ async def test_token_animation_is_independent_for_all_three_values(daemon, tmux)
         assert footer._timer is not None
         footer._stop_timer()
 
-        inp = footer.query_one("#in-col", app_mod.Static)
-        out = footer.query_one("#out-col", app_mod.Static)
-        cache = footer.query_one("#cache-col", app_mod.Static)
+        inp = footer.query_one("#in-value", app_mod.Static)
+        out = footer.query_one("#out-value", app_mod.Static)
+        cache = footer.query_one("#cache-value", app_mod.Static)
         assert not any(style.startswith("#") for style in _styles(inp))
         assert any(style.startswith("#") for style in _styles(out))
         assert not any(style.startswith("#") for style in _styles(cache))
@@ -494,7 +598,7 @@ async def test_preloaded_stats_footer_animates_when_mounted_and_stops_when_remov
     async with FooterHost().run_test():
         assert footer._targets == [5_000_000, 4_000_000, 3_000_000]
         assert footer._timer is not None
-        inp = footer.query_one("#in-col", app_mod.Static)
+        inp = footer.query_one("#in-value", app_mod.Static)
         assert any(style.startswith("#") for style in _styles(inp))
 
         await footer.remove()
