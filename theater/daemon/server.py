@@ -32,38 +32,35 @@ import logging
 import signal
 
 from theater import harness as harness_registry
-from theater import paths
+from theater import paths, protocol, timing  # noqa: F401 — compatibility imports
 from theater.config import Config
 from theater.config import load as load_config
 
 # Importing methods registers all @method handlers as a side effect.
 from theater.daemon import (  # noqa: F401
     methods,
+    workers,
 )
 from theater.daemon.jobs import JobManager
 from theater.daemon.lock import DaemonLock
 from theater.daemon.observer import Observer
 from theater.daemon.registry import Registry
-from theater.daemon.rpc import METHODS  # noqa: F401 — re-exported for cold-import surface tests
+from theater.daemon.rpc import METHODS
 from theater.daemon.runtime import lifecycle, maintenance
 from theater.daemon.runtime import socket as socket_mod
-from theater.daemon.runtime.lifecycle import (
-    CLOSE_TIMEOUT,  # noqa: F401 — monkeypatched via server_mod
-    SHUTDOWN_TIMEOUT,
-)
-from theater.daemon.runtime.maintenance import (
-    REAP_INTERVAL,  # noqa: F401 — monkeypatched via server_mod
-)
-from theater.daemon.runtime.socket import (
-    MAX_SOCKET_PATH,  # noqa: F401 — monkeypatched via server_mod
-    clear_stale_socket,
-)
+from theater.daemon.runtime.lifecycle import CLOSE_TIMEOUT, SHUTDOWN_TIMEOUT
+from theater.daemon.runtime.maintenance import REAP_INTERVAL
+from theater.daemon.runtime.socket import MAX_SOCKET_PATH
 from theater.daemon.spawning.service import Spawner
 from theater.daemon.store import Store
 from theater.harness import Harness
 from theater.tmux import client as tmux  # noqa: F401 — monkeypatched via server_mod
 
 logger = logging.getLogger("theater.daemon")
+
+
+def _check_socket_path(sock) -> None:
+    socket_mod.check_socket_path(sock, maximum=MAX_SOCKET_PATH)
 
 
 class Daemon:
@@ -82,9 +79,7 @@ class Daemon:
         config: Config | None = None,
     ):
         paths.ensure_home()
-        # Held from construction to aclose(). Taken in __init__, not start(),
-        # because constructing a Daemon opens the shared SQLite file and runs
-        # migrations. The lock must come before the first touch of shared state.
+        # Construction opens SQLite, so the process lock must be acquired first.
         self._lock = DaemonLock()
         self._lock.acquire()
         try:
@@ -114,11 +109,9 @@ class Daemon:
             self._reaper: asyncio.Task | None = None
             self._gc: asyncio.Task | None = None
             self._lag: asyncio.Task | None = None
-            # Participant ids whose kill is in flight. While a pid is in here,
-            # the reaper skips it — the explicit-kill path must win the race.
+            # The reaper skips participant ids while their explicit kill is in flight.
             self._explicit_kills: set[str] = set()
-            # (device, inode) of the bound socket, so shutdown can tell ours
-            # from a successor's at the same path.
+            # Socket identity prevents shutdown from unlinking a successor's path.
             self._sock_id: tuple[int, int] | None = None
             self._stopping = asyncio.Event()
             # One task per open connection, so shutdown can end them.
@@ -126,8 +119,7 @@ class Daemon:
             # Monotonic counter for send-job handle uniqueness.
             self._send_seq = 0
         except BaseException:
-            # Construction failing leaves no object to close, so nothing would
-            # drop the fd. Releasing here lets the next attempt get the lock.
+            # No object exists to close after construction fails, so release the lock here.
             self._lock.release()
             raise
 
@@ -140,7 +132,7 @@ class Daemon:
     # ---- lifecycle -----------------------------------------------------
 
     async def start(self) -> None:
-        await lifecycle.start(self)
+        await lifecycle.start(self, check_path=_check_socket_path)
 
     async def _reconcile(self) -> None:
         await lifecycle.reconcile(self)
@@ -152,19 +144,23 @@ class Daemon:
         lifecycle.stop(self)
 
     async def aclose(self) -> None:
-        await lifecycle.aclose(self)
+        await lifecycle.aclose(
+            self,
+            close_timeout=CLOSE_TIMEOUT,
+            shutdown_workers=workers.shutdown,
+        )
 
     def _release_files(self) -> None:
         lifecycle.release_files(self)
 
     @staticmethod
     def _clear_stale_socket(sock) -> None:
-        clear_stale_socket(sock)
+        socket_mod.clear_stale_socket(sock)
 
     # ---- reaper --------------------------------------------------------
 
     async def _reap_loop(self) -> None:
-        await maintenance.reap_loop(self)
+        await maintenance.reap_loop(self, interval=REAP_INTERVAL)
 
     def _socket_lost(self) -> bool:
         return maintenance.socket_lost(self)
@@ -183,7 +179,7 @@ class Daemon:
         await socket_mod.handle_connection(self, reader, writer)
 
     async def _dispatch(self, line: bytes) -> bytes:
-        return await socket_mod.dispatch(self, line)
+        return await socket_mod.dispatch(self, line, methods=METHODS)
 
 
 # ---- entrypoint --------------------------------------------------------

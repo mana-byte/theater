@@ -181,8 +181,7 @@ async def await_sessions(
     """
     if not session._resolved:
         await session.identify()
-    # Identify the caller so the daemon can refuse an await that would
-    # deadlock — waiting on a participant that is, right now, waiting on you.
+    # Caller identity lets the daemon reject mutual-await deadlocks.
     jobs = await session.client.call(
         "jobs.await",
         handles=handles,

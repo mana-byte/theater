@@ -71,7 +71,7 @@ async def reap_once(daemon) -> None:
                 daemon.jobs.finish(job.handle, state=JobState.CRASHED, error_code="crashed")
 
 
-async def reap_loop(daemon) -> None:
+async def reap_loop(daemon, *, interval: float) -> None:
     """Poll for vanished panes until the daemon stops.
 
     Polling, not tmux hooks. A hook would make correctness depend on state
@@ -79,16 +79,16 @@ async def reap_loop(daemon) -> None:
     a config reload.
     """
     while not daemon._stopping.is_set():
-        if socket_lost(daemon):
+        if daemon._socket_lost():
             logger.warning("our socket is gone; nothing can reach us, stopping")
             daemon.stop()
             return
         try:
-            await reap_once(daemon)
+            await daemon._reap_once()
         except Exception:
             logger.exception("reaper iteration failed")
         with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(daemon._stopping.wait(), timeout=REAP_INTERVAL)
+            await asyncio.wait_for(daemon._stopping.wait(), timeout=interval)
 
 
 async def gc_loop(daemon) -> None:

@@ -14,7 +14,6 @@ import math
 import socket as _socket
 
 from theater import protocol, timing
-from theater.daemon.rpc import METHODS
 from theater.models import TheaterError
 
 logger = logging.getLogger("theater.daemon")
@@ -23,12 +22,12 @@ logger = logging.getLogger("theater.daemon")
 MAX_SOCKET_PATH = 100
 
 
-def check_socket_path(sock) -> None:
+def check_socket_path(sock, *, maximum: int = MAX_SOCKET_PATH) -> None:
     """Raise if the unix socket path exceeds the OS buffer."""
-    if len(str(sock).encode()) > MAX_SOCKET_PATH:
+    if len(str(sock).encode()) > maximum:
         raise RuntimeError(
             f"socket path is too long for the OS ({len(str(sock))} bytes, "
-            f"max {MAX_SOCKET_PATH}): {sock}. Set THEATER_HOME to somewhere shorter."
+            f"max {maximum}): {sock}. Set THEATER_HOME to somewhere shorter."
         )
 
 
@@ -63,8 +62,7 @@ async def handle_connection(daemon, reader, writer) -> None:
             try:
                 line = await protocol.read_message(reader)
             except protocol.MessageTooLarge as exc:
-                # Answer rather than hang up: one absurd prompt should not cost
-                # an agent its session. id 0 means "could not read far enough".
+                # Answer with id 0 when the request was too large to read its real id.
                 logger.warning("oversized request: %s", exc)
                 writer.write(protocol.err(0, "too_large", str(exc)))
                 await writer.drain()
@@ -72,7 +70,7 @@ async def handle_connection(daemon, reader, writer) -> None:
                 continue
             if not line:
                 break
-            response = await dispatch(daemon, line)
+            response = await daemon._dispatch(line)
             writer.write(response)
             await writer.drain()
     except (ConnectionResetError, BrokenPipeError):
@@ -85,7 +83,7 @@ async def handle_connection(daemon, reader, writer) -> None:
             await writer.wait_closed()
 
 
-async def dispatch(daemon, line: bytes) -> bytes:
+async def dispatch(daemon, line: bytes, *, methods) -> bytes:
     """Parse one NDJSON request, call the handler, and return a response."""
     try:
         msg = json.loads(line)
@@ -95,7 +93,7 @@ async def dispatch(daemon, line: bytes) -> bytes:
     req_id = msg.get("id", 0)
     name = msg.get("method")
     params = msg.get("params") or {}
-    handler = METHODS.get(name)
+    handler = methods.get(name)
     if handler is None:
         return protocol.err(req_id, "unknown_method", f"no method {name!r}")
 

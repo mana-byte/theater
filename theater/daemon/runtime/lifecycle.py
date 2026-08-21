@@ -15,7 +15,6 @@ import logging
 from theater import paths, protocol, timing
 from theater.daemon.jobs import JobState
 from theater.daemon.lock import file_id
-from theater.daemon.runtime.socket import check_socket_path, clear_stale_socket
 from theater.models import Status
 from theater.tmux import client as tmux
 
@@ -54,12 +53,12 @@ def next_send_seq(daemon) -> int:
     return daemon._send_seq
 
 
-async def start(daemon) -> None:
+async def start(daemon, *, check_path) -> None:
     """Bind the socket. Raises here, in the caller's face, if it cannot."""
     sock = paths.socket_path()
-    check_socket_path(sock)
+    check_path(sock)
     try:
-        clear_stale_socket(sock)
+        daemon._clear_stale_socket(sock)
         daemon._server = await asyncio.start_unix_server(
             daemon._handle, path=str(sock), limit=protocol.MAX_MESSAGE_BYTES
         )
@@ -68,8 +67,8 @@ async def start(daemon) -> None:
         daemon._lock.release()
         raise
     daemon._sock_id = file_id(sock)
-    await reconcile(daemon)
-    init_send_seq(daemon)
+    await daemon._reconcile()
+    daemon._init_send_seq()
     daemon._reaper = asyncio.create_task(daemon._reap_loop())
     daemon._lag = asyncio.create_task(timing.lag_monitor(daemon._stopping))
     if daemon.config.retention.enabled:
@@ -134,7 +133,7 @@ async def serve(daemon) -> None:
     wait_closed(), which since 3.12 waits for every connection handler to
     finish — and our handlers only finish when their client disconnects.
     """
-    await start(daemon)
+    await daemon.start()
     assert daemon._server is not None
     await daemon._stopping.wait()
 
@@ -143,9 +142,9 @@ def stop(daemon) -> None:
     daemon._stopping.set()
 
 
-async def aclose(daemon) -> None:
+async def aclose(daemon, *, close_timeout: float, shutdown_workers) -> None:
     """Shut down in the one order that terminates."""
-    stop(daemon)
+    daemon.stop()
     if daemon._server:
         daemon._server.close()
     await daemon.observer.aclose()
@@ -166,19 +165,17 @@ async def aclose(daemon) -> None:
     if daemon._conns:
         await asyncio.gather(*daemon._conns, return_exceptions=True)
         daemon._conns.clear()
-    from theater.daemon import workers
-
-    await workers.shutdown()
+    await shutdown_workers()
     if daemon._server:
         try:
-            await asyncio.wait_for(daemon._server.wait_closed(), CLOSE_TIMEOUT)
+            await asyncio.wait_for(daemon._server.wait_closed(), close_timeout)
         except TimeoutError:
             logger.warning(
                 "listener did not close within %.1fs; releasing anyway",
-                CLOSE_TIMEOUT,
+                close_timeout,
             )
     daemon.store.close()
-    release_files(daemon)
+    daemon._release_files()
 
 
 def release_files(daemon) -> None:
