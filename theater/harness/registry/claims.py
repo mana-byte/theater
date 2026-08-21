@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from theater.config import ConfigError
 from theater.constants.harness import HARNESS_TMUX_OBSERVATION_NAME_LENGTH
-from theater.harness.base import Harness
+from theater.harness.contracts.harness import Harness
 from theater.harness.registry import (
     _ALIASES,
     _BINARIES,

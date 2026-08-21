@@ -7,7 +7,7 @@ holders reading a stale registry with no symptom but a missing harness.
 
 from __future__ import annotations
 
-from theater.harness.base import Harness
+from theater.harness.contracts.harness import Harness
 from theater.harness.plugins import Plugin
 
 #: The live registry. Mutated in place by ``install``, never rebound.

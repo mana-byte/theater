@@ -13,7 +13,8 @@ import inspect
 from pathlib import Path
 from typing import Any
 
-from theater.harness.base import Harness, LaunchPlan
+from theater.harness.contracts.harness import Harness
+from theater.harness.contracts.launch import LaunchPlan
 from theater.harness.registry.lookup import get
 from theater.models import BadRequest
 
