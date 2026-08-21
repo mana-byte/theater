@@ -61,9 +61,14 @@ from theater.constants.regie import (
     REGIE_EMPTY_TREE_SHORTCUT,
     REGIE_EMPTY_TREE_SHORTCUT_STYLE,
     REGIE_EMPTY_TREE_TAIL,
+    REGIE_HIDDEN_TREE_CURSOR,
     REGIE_MAX_AWAIT_ANIMS,
     REGIE_MAX_TRACE_ANIMS,
     REGIE_TRACE_ANIM_INTERVAL,
+    REGIE_USAGE_METRIC_DOWN,
+    REGIE_USAGE_METRIC_LEFT,
+    REGIE_USAGE_METRIC_RIGHT,
+    REGIE_USAGE_METRIC_UP,
 )
 from theater.protocol import RemoteError
 from theater.regie.bus_view import format_bus_line
@@ -78,6 +83,7 @@ from theater.regie.controllers.animation import (  # noqa: F401
     _await_route_style,
     _send_trace_glyph,
 )
+from theater.regie.controllers.navigation import NavigationState, UpDecision
 from theater.regie.palette import (
     ResumeDeadSessionCommand,
     ResumeDeadSessionCommands,
@@ -146,8 +152,12 @@ TREE_INTERVAL = _DEFAULTS.tree_interval
 BUS_INTERVAL = _DEFAULTS.bus_interval
 BUS_BATCH = _DEFAULTS.bus_batch
 USAGE_INTERVAL = 10.0
-#: Suppresses the tree highlight while the footer owns the cursor.
-HIDDEN_TREE_CURSOR = -1
+# Legacy aliases; canonical values in theater.constants.regie.
+HIDDEN_TREE_CURSOR = REGIE_HIDDEN_TREE_CURSOR
+_USAGE_METRIC_LEFT = REGIE_USAGE_METRIC_LEFT
+_USAGE_METRIC_RIGHT = REGIE_USAGE_METRIC_RIGHT
+_USAGE_METRIC_DOWN = REGIE_USAGE_METRIC_DOWN
+_USAGE_METRIC_UP = REGIE_USAGE_METRIC_UP
 
 #: Maps [regie] cost_window values to legacy rolling hours. Current daemons use
 #: the period name; older daemons use these hours through either usage RPC.
@@ -185,12 +195,6 @@ TRACE_ANIM_INTERVAL = REGIE_TRACE_ANIM_INTERVAL
 MAX_TRACE_ANIMS = REGIE_MAX_TRACE_ANIMS
 MAX_AWAIT_ANIMS = REGIE_MAX_AWAIT_ANIMS
 AWAIT_ANIM_TTL = REGIE_AWAIT_ANIM_TTL
-
-
-_USAGE_METRIC_LEFT = {"output": "input", "cache": "output", "average": "cost"}
-_USAGE_METRIC_RIGHT = {"input": "output", "output": "cache", "cost": "average"}
-_USAGE_METRIC_DOWN = {"input": "cost", "output": "average", "cache": "average"}
-_USAGE_METRIC_UP = {"cost": "input", "average": "cache"}
 
 
 class RegieApp(App):
@@ -353,13 +357,28 @@ class RegieApp(App):
         #: Runs only while something is in flight — an idle régie costs no
         #: frames, the same bargain AgentLeaf's spinner makes.
         self._anim_timer: Timer | None = None
-        self._usage_keyboard_metric: str | None = None
-        self._usage_keyboard_origin: str | None = None
+        self._nav = NavigationState()
         self._usage_pointer_metric: str | None = None
         self._usage_active_metric: str | None = None
         self._usage_breakdown: dict | None = None
         self._usage_breakdown_message: str | None = None
         self._usage_breakdown_generation = 0
+
+    @property
+    def _usage_keyboard_metric(self) -> str | None:
+        return self._nav.metric
+
+    @_usage_keyboard_metric.setter
+    def _usage_keyboard_metric(self, value: str | None) -> None:
+        self._nav.metric = value
+
+    @property
+    def _usage_keyboard_origin(self) -> str | None:
+        return self._nav.origin
+
+    @_usage_keyboard_origin.setter
+    def _usage_keyboard_origin(self, value: str | None) -> None:
+        self._nav.origin = value
 
     def compose(self) -> ComposeResult:
         # No Header: it restates the app's class name to someone who just
@@ -1127,66 +1146,56 @@ class RegieApp(App):
         self.bus_visible = not self.bus_visible
 
     def action_cursor_down(self) -> None:
-        metric = self._usage_keyboard_metric
-        if metric is not None:
-            target = _USAGE_METRIC_DOWN.get(metric)
-            if target is not None:
-                self._usage_keyboard_origin = metric
+        if self._nav.in_footer:
+            old = self._usage_keyboard_metric
+            target = self._nav.down()
+            if target != old:
+                assert target is not None
                 self._select_usage_metric(target)
             return
         if self.cursor < len(self.tree_lines) - 1:
             self.cursor += 1
             self._render_tree()
             return
-        self._usage_keyboard_origin = None
-        self._select_usage_metric("input")
+        target = self._nav.down()
+        assert target is not None
+        self._select_usage_metric(target)
 
     def action_cursor_up(self) -> None:
-        metric = self._usage_keyboard_metric
-        if metric is not None:
-            if metric in _USAGE_METRIC_UP:
-                target = self._usage_keyboard_origin or _USAGE_METRIC_UP[metric]
-                self._usage_keyboard_origin = None
-                self._select_usage_metric(target)
-            else:
-                self._leave_usage_metrics()
+        result = self._nav.up()
+        if result is UpDecision.LEAVE:
+            self._leave_usage_metrics()
+            return
+        if result is not None:
+            self._select_usage_metric(result)
             return
         if self.cursor > 0:
             self.cursor -= 1
             self._render_tree()
 
     def action_cursor_left(self) -> None:
-        metric = self._usage_keyboard_metric
-        if metric is None:
-            return
-        target = _USAGE_METRIC_LEFT.get(metric)
+        target = self._nav.left()
         if target is not None:
-            self._usage_keyboard_origin = None
             self._select_usage_metric(target)
 
     def action_cursor_right(self) -> None:
-        metric = self._usage_keyboard_metric
-        if metric is None:
-            return
-        target = _USAGE_METRIC_RIGHT.get(metric)
+        target = self._nav.right()
         if target is not None:
-            self._usage_keyboard_origin = None
             self._select_usage_metric(target)
 
     async def action_cursor_right_or_focus(self) -> None:
-        if self._usage_keyboard_metric is not None:
+        if self._nav.in_footer:
             self.action_cursor_right()
         else:
             await self.action_focus_stage()
 
     def _select_usage_metric(self, metric: str) -> None:
-        self._usage_keyboard_metric = metric
+        self._nav.select(metric)
         self._render_tree()
         self._sync_usage_metric()
 
     def _leave_usage_metrics(self) -> None:
-        self._usage_keyboard_metric = None
-        self._usage_keyboard_origin = None
+        self._nav.leave()
         self._render_tree()
         self._sync_usage_metric()
 

@@ -69,3 +69,15 @@ REGIE_EMPTY_TREE_HINT = f"{REGIE_EMPTY_TREE_SHORTCUT}{REGIE_EMPTY_TREE_TAIL}"
 
 #: Leaf spinner/animation timer interval in seconds.
 REGIE_LEAF_SPINNER_INTERVAL = 0.1
+
+#: Suppresses the tree highlight while the footer owns the keyboard cursor.
+REGIE_HIDDEN_TREE_CURSOR = -1
+
+#: Footer keyboard navigation: left arrow mapping.
+REGIE_USAGE_METRIC_LEFT = {"output": "input", "cache": "output", "average": "cost"}
+#: Footer keyboard navigation: right arrow mapping.
+REGIE_USAGE_METRIC_RIGHT = {"input": "output", "output": "cache", "cost": "average"}
+#: Footer keyboard navigation: down arrow mapping.
+REGIE_USAGE_METRIC_DOWN = {"input": "cost", "output": "average", "cache": "average"}
+#: Footer keyboard navigation: up arrow mapping.
+REGIE_USAGE_METRIC_UP = {"cost": "input", "average": "cache"}
