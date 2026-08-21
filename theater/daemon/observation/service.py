@@ -31,6 +31,7 @@ from theater.daemon.observation.turns import Turn, TurnAccumulator
 from theater.daemon.registry import Registry
 from theater.harness import (
     HARNESSES,
+    Event,
     Harness,
     HarnessObserver,
 )
@@ -440,7 +441,7 @@ class Observer:
 
     # ---- legacy private method wrappers (explicit forwarding) ----------
 
-    def _record_usage(self, pid: str, event) -> bool:
+    def _record_usage(self, pid: str, event: Event) -> bool:
         return self._reducer.record_usage(pid, event)
 
     def _apply(self, pid: str, batch: Batch, clock: QuietClock, turns: TurnAccumulator) -> bool:
@@ -617,7 +618,7 @@ class Observer:
             turn_result_fn=self._turn_result,
         )
 
-    def _settle_from_event(self, pid: str, event) -> None:
+    def _settle_from_event(self, pid: str, event: Event) -> None:
         self._reducer.settle_from_event(
             pid, event, answer_turn_fn=self._answer_turn, turn_result_fn=self._turn_result
         )
