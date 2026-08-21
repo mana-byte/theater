@@ -27,6 +27,7 @@ from theater.cli.commands.bus import (  # noqa: F401
     cmd_bus,
 )
 from theater.cli.commands.identity import (  # noqa: F401
+    _hook_string,
     _send_transcript_receipt,
     cmd_bind,
     cmd_candidates,
@@ -34,12 +35,14 @@ from theater.cli.commands.identity import (  # noqa: F401
     cmd_transcript_receipt,
 )
 from theater.cli.commands.introspection import (  # noqa: F401
+    _harness_rows,
+    _print_coverage,
     cmd_config,
     cmd_harnesses,
     cmd_models,
     cmd_stats,
 )
-from theater.cli.commands.maintenance import (  # noqa: F401  # noqa: F401
+from theater.cli.commands.maintenance import (  # noqa: F401
     _await_daemon_gone,
     _daemon_released,
     _shutdown_running_daemon,
@@ -58,7 +61,14 @@ from theater.cli.commands.participants import (  # noqa: F401
 )
 from theater.cli.commands.process import cmd_daemon, cmd_mcp, cmd_regie  # noqa: F401
 from theater.cli.errors import BadUsage
-from theater.cli.parser import _parser
+from theater.cli.parser import (  # noqa: F401
+    _add_gc_parser,
+    _add_models_parser,
+    _add_name_parser,
+    _add_process_parsers,
+    _add_receipt_parser,
+    _parser,
+)
 from theater.cli.render import (  # noqa: F401
     _bus_line,
     _candidate_line,
@@ -66,9 +76,11 @@ from theater.cli.render import (  # noqa: F401
     _format_floor,
     _format_ls,
     _matching,
-    _models_block,
     _row_line,
     _width,
+)
+from theater.cli.render import (
+    _models_block as _render_models_block,
 )
 from theater.client import DaemonClient, call_sync  # noqa: F401
 from theater.constants.cli import (
@@ -88,6 +100,11 @@ from theater.protocol import RemoteError
 from theater.tmux import client as tmux  # noqa: F401
 
 _COMMANDS = COMMANDS
+
+
+def _models_block(harness: str, models: list[str]) -> str:
+    """Render a `[models]` entry, using the config section name."""
+    return _render_models_block(harness, models, config.MODELS_SECTION)
 
 
 def main(argv: list[str] | None = None) -> int:
