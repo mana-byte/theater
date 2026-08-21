@@ -37,12 +37,16 @@ import time
 from pathlib import Path
 from typing import ClassVar
 
+from rich.style import Style
+from rich.table import Table
 from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
+from textual.dom import DOMNode
+from textual.message import Message
 from textual.reactive import reactive
 from textual.selection import Selection
 from textual.timer import Timer
@@ -99,20 +103,35 @@ TREE_INTERVAL = _DEFAULTS.tree_interval
 BUS_INTERVAL = _DEFAULTS.bus_interval
 BUS_BATCH = _DEFAULTS.bus_batch
 USAGE_INTERVAL = 10.0
+#: Maximum rows the hover breakdown may cover.
+USAGE_BREAKDOWN_MAX_HEIGHT = 12
 
 #: Maps [regie] cost_window values to legacy rolling hours. Current daemons use
 #: the period name; older daemons use these hours through either usage RPC.
-_COST_WINDOWS: dict[str, float] = {"day": 24.0, "week": 168.0, "year": 8760.0}
+_COST_WINDOWS: dict[str, float] = {
+    "day": 24.0,
+    "week": 168.0,
+    "month": 720.0,
+    "year": 8760.0,
+}
 _COST_WINDOW_LABELS: dict[str, str] = {
     "day": "today",
     "week": "this week",
+    "month": "this month",
     "year": "this year",
 }
 _COST_WINDOW_ROLLING_LABELS: dict[str, str] = {
     "day": "last 24h",
     "week": "last 7d",
+    "month": "last 30d",
     "year": "last 365d",
 }
+
+#: Empty-tree call to action. This is intentionally absent once participants exist.
+EMPTY_TREE_SHORTCUT = "Ctrl+P"
+EMPTY_TREE_SHORTCUT_STYLE = "$text-accent bold"
+EMPTY_TREE_TAIL = " to get started"
+EMPTY_TREE_HINT = f"{EMPTY_TREE_SHORTCUT}{EMPTY_TREE_TAIL}"
 
 #: Note tag on the `<prefix> h` return key, so teardown can tell "ours" from
 #: a binding someone else made after we installed it.
@@ -454,15 +473,194 @@ class AgentLeaf(Static):
         self._stop_timer()
 
 
+class NonSelectableStatic(Static):
+    """Static chrome excluded from drag and select-all extraction."""
+
+    ALLOW_SELECT: ClassVar[bool] = False
+
+    def get_selection(self, selection: Selection) -> tuple[str, str] | None:
+        return None
+
+
+class EmptyTreeState(NonSelectableStatic):
+    """Full-panel call to action shown while the participant tree is empty."""
+
+    DEFAULT_CSS = """
+    EmptyTreeState {
+        width: 1fr;
+        height: 1fr;
+        content-align: center middle;
+        text-align: center;
+    }
+    """
+
+
+class UsageBreakdownPanel(VerticalScroll):
+    """Per-harness table overlaid just above the usage footer."""
+
+    DEFAULT_CSS = f"""
+    UsageBreakdownPanel {{
+        display: none;
+        dock: bottom;
+        layer: overlay;
+        width: 100%;
+        height: auto;
+        max-height: {USAGE_BREAKDOWN_MAX_HEIGHT};
+        padding: 1;
+        /* Softer than the active tile's 10% wash. */
+        background: $accent 8%;
+        scrollbar-size: 1 1;
+    }}
+    UsageBreakdownPanel.-visible {{
+        display: block;
+    }}
+    UsageBreakdownPanel > Static {{
+        width: 100%;
+        height: auto;
+    }}
+    #usage-breakdown-title {{
+        color: $text-accent;
+        text-style: bold;
+    }}
+    #usage-breakdown-note {{
+        color: $text-muted;
+    }}
+    """
+
+    _METRIC_TITLES: ClassVar[dict[str, str]] = {
+        "input": "input",
+        "output": "output",
+        "cache": "cache",
+        "cost": "cost",
+        "average": "avg/active day",
+    }
+    _METRIC_GLYPHS: ClassVar[dict[str, str]] = {
+        "input": "↓",
+        "output": "↑",
+        "cache": "⛁",
+    }
+
+    class Left(Message):
+        pass
+
+    def compose(self) -> ComposeResult:
+        yield NonSelectableStatic("", id="usage-breakdown-title")
+        yield NonSelectableStatic("", id="usage-breakdown-content")
+        yield NonSelectableStatic("", id="usage-breakdown-note")
+
+    def on_leave(self, _event: events.Leave) -> None:
+        self.post_message(self.Left())
+
+    @staticmethod
+    def _format_cost(microcents: int | float) -> str:
+        dollars = microcents / MICROCENTS_PER_DOLLAR
+        for divisor, suffix in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "k")):
+            if dollars >= divisor:
+                return f"${dollars / divisor:.1f}{suffix}"
+        return f"${dollars:.3f}"
+
+    @staticmethod
+    def _format_tokens(tokens: int) -> str:
+        for divisor, suffix in (
+            (1_000_000_000_000_000_000, "E"),
+            (1_000_000_000_000_000, "Q"),
+            (1_000_000_000_000, "T"),
+            (1_000_000_000, "B"),
+        ):
+            if tokens >= divisor:
+                return f"{tokens / divisor:.1f}{suffix}"
+        return _fmt_tokens(tokens)
+
+    @classmethod
+    def _format_metric(cls, metric: str, period: dict) -> str:
+        if metric == "input":
+            return cls._format_tokens(int(period.get("input_tokens", 0)))
+        if metric == "output":
+            value = int(period.get("output_tokens", 0)) + int(
+                period.get("reasoning_output_tokens", 0)
+            )
+            return cls._format_tokens(value)
+        if metric == "cache":
+            value = int(period.get("cache_read_input_tokens", 0)) + int(
+                period.get("cache_creation_input_tokens", 0)
+            )
+            return cls._format_tokens(value)
+        cost = float(period.get("cost_microcents", 0))
+        if metric == "average":
+            active_days = int(period.get("active_days", 0))
+            cost = cost / active_days if active_days > 0 else 0
+        return cls._format_cost(cost)
+
+    def render_state(
+        self,
+        metric: str,
+        *,
+        result: dict | None = None,
+        message: str | None = None,
+    ) -> None:
+        title = self._METRIC_TITLES[metric]
+        glyph = self._METRIC_GLYPHS.get(metric)
+        title_text = f"{glyph} {title}" if glyph else title
+        self.query_one("#usage-breakdown-title", NonSelectableStatic).update(title_text)
+        content = self.query_one("#usage-breakdown-content", NonSelectableStatic)
+        note = self.query_one("#usage-breakdown-note", NonSelectableStatic)
+        note.update("")
+        if message is not None:
+            content.update(Content.assemble((message, "$text-muted")))
+            return
+        rows = result.get("harnesses") if isinstance(result, dict) else None
+        if not isinstance(rows, list):
+            content.update(Content.assemble(("loading…", "$text-muted")))
+            return
+
+        panel_background = content.background_colors[1]
+        zebra_background = panel_background.blend(content.colors[3], 0.04)
+        # Rich row_styles needs resolved colors; ANSI Color.blend returns its target.
+        row_styles = (
+            (Style.null(), Style(bgcolor=zebra_background.rich_color))
+            if panel_background.ansi is None and zebra_background.ansi is None
+            else (Style.null(),)
+        )
+        table = Table(
+            box=None,
+            expand=True,
+            pad_edge=False,
+            padding=(0, 1),
+            header_style=Style(dim=True),
+            row_styles=row_styles,
+        )
+        table.add_column("harness", ratio=1, min_width=7, no_wrap=True, overflow="ellipsis")
+        for heading in ("today", "week", "month"):
+            table.add_column(
+                heading,
+                width=8,
+                justify="right",
+                no_wrap=True,
+                overflow="crop",
+            )
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            harness = str(row.get("harness", "unknown"))
+            label = "unknown*" if harness == "unknown" else harness
+            values = [
+                self._format_metric(metric, row.get(period, {}))
+                for period in ("today", "week", "month")
+            ]
+            table.add_row(label, *values)
+        if any(isinstance(row, dict) and row.get("harness") == "unknown" for row in rows):
+            note.update("* pre-upgrade")
+        content.update(table)
+
+
 class TreePanel(VerticalScroll):
     """A scrollable list of participant tree leaves.
 
     Each participant is an :class:`AgentLeaf` widget spanning three rows.
-    Separator rows and the "no participants" placeholder stay plain
-    ``Label`` widgets. The panel scrolls natively when the list is longer
-    than the viewport. Cursor and staged highlighting are done via Textual
-    CSS classes (which respect the user's theme) rather than hardcoded Rich
-    colours.
+    Separator rows stay plain ``Label`` widgets; the empty state is its own
+    full-panel widget. The panel scrolls natively when the list is longer than
+    the viewport. Cursor and staged highlighting are done via Textual CSS
+    classes (which respect the user's theme) rather than hardcoded Rich colours.
 
     The panel reconciles by key rather than rebuilding on every refresh: a
     widget that survives a tick is updated in place with
@@ -495,8 +693,8 @@ class TreePanel(VerticalScroll):
         #: Stable widget map, keyed by the row key from render_tree.
         #: Survives a refresh so per-widget state is not lost. The value is
         #: ``AgentLeaf`` for participants and unmanaged panes, ``Label`` for
-        #: the separator and the empty placeholder — both are ``Widget``
-        #: subclasses, so the annotation is widened honestly.
+        #: separators, and ``EmptyTreeState`` for the placeholder. All are
+        #: ``Widget`` subclasses, so the annotation is widened honestly.
         self._key_widgets: dict[Key, Widget] = {}
         #: Which leaves currently carry a send trace, so the next frame knows
         #: which ones to clear. Tracking the request rather than the widget:
@@ -610,12 +808,17 @@ class TreePanel(VerticalScroll):
         return widget
 
     def _reconcile_empty(self) -> None:
-        """Show the 'no participants' placeholder, removing all row widgets."""
+        """Show the empty-tree call to action, removing all row widgets."""
         for key in list(self._key_widgets):
             if key != self._EMPTY_KEY:
                 self._remove_widget(self._key_widgets.pop(key))
         if self._EMPTY_KEY not in self._key_widgets:
-            widget = Label(Content.assemble(("no participants", "$text dim italic")))
+            widget = EmptyTreeState(
+                Content.assemble(
+                    (EMPTY_TREE_SHORTCUT, EMPTY_TREE_SHORTCUT_STYLE),
+                    (EMPTY_TREE_TAIL, "$text-muted"),
+                )
+            )
             self._key_widgets[self._EMPTY_KEY] = widget
             self.mount(widget)
 
@@ -679,6 +882,17 @@ class TreePanel(VerticalScroll):
                 self.scroll_to_widget(widget)
 
 
+class TreeStack(Vertical):
+    """Tree plus the usage overlay, clamped to the remaining height."""
+
+    def on_resize(self, event: events.Resize) -> None:
+        # Use the event size: reading stack.size here lags one resize.
+        with contextlib.suppress(Exception):
+            panel = self.query_one(UsageBreakdownPanel)
+            if panel.has_class("-visible"):
+                panel.styles.max_height = min(USAGE_BREAKDOWN_MAX_HEIGHT, event.size.height)
+
+
 def _fmt_tokens(n: int) -> str:
     """Human-readable token count."""
     if n >= 1_000_000:
@@ -730,13 +944,36 @@ def _advance_int(value: int, target: int, step: int) -> int:
     return target if _fmt_tokens(candidate) == _fmt_tokens(target) else candidate
 
 
-class NonSelectableStatic(Static):
-    """Static footer chrome excluded from drag and select-all extraction."""
+class UsageMetricTile(Vertical):
+    """A full footer column that reports hover transitions to the app."""
 
-    ALLOW_SELECT: ClassVar[bool] = False
+    DEFAULT_CSS = """
+    UsageMetricTile {
+        width: 1fr;
+        height: 3;
+    }
+    UsageMetricTile.-hot {
+        background: $accent 10%;
+    }
+    """
 
-    def get_selection(self, selection: Selection) -> tuple[str, str] | None:
-        return None
+    class Hovered(Message):
+        def __init__(self, metric: str) -> None:
+            super().__init__()
+            self.metric = metric
+
+    class Left(Message):
+        pass
+
+    def __init__(self, metric: str, *children: Widget, **kwargs) -> None:
+        super().__init__(*children, **kwargs)
+        self.metric = metric
+
+    def on_enter(self, _event: events.Enter) -> None:
+        self.post_message(self.Hovered(self.metric))
+
+    def on_leave(self, _event: events.Leave) -> None:
+        self.post_message(self.Left())
 
 
 class UsagePeriodBar(NonSelectableStatic):
@@ -805,7 +1042,7 @@ class PriceFooter(Widget):
         self._timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="price-col", classes="footer-column"):
+        with UsageMetricTile("cost", id="price-col", classes="footer-column"):
             yield NonSelectableStatic("", classes="footer-row footer-spacer")
             yield Static("", id="price-value", classes="footer-row footer-value")
             yield NonSelectableStatic(
@@ -813,7 +1050,7 @@ class PriceFooter(Widget):
                 id="price-caption",
                 classes="footer-row",
             )
-        with Vertical(id="avg-col", classes="footer-column"):
+        with UsageMetricTile("average", id="avg-col", classes="footer-column"):
             yield NonSelectableStatic("", classes="footer-row footer-spacer")
             yield Static("", id="avg-value", classes="footer-row footer-value")
             yield NonSelectableStatic(
@@ -957,12 +1194,12 @@ class StatsFooter(Widget):
         self._timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
-        for prefix, suffix, caption in (
-            ("in", " ↓", "input"),
-            ("out", " ↑", "output"),
-            ("cache", " ⛁", "cache"),
+        for prefix, metric, suffix, caption in (
+            ("in", "input", " ↓", "input"),
+            ("out", "output", " ↑", "output"),
+            ("cache", "cache", " ⛁", "cache"),
         ):
-            with Vertical(id=f"{prefix}-col", classes="footer-column"):
+            with UsageMetricTile(metric, id=f"{prefix}-col", classes="footer-column"):
                 yield NonSelectableStatic("", classes="footer-row footer-spacer")
                 with Horizontal(classes="footer-value-row"):
                     yield Static("", id=f"{prefix}-value", classes="footer-value")
@@ -1050,8 +1287,13 @@ class RegieApp(App):
     #sidebar {
         layout: vertical;
     }
+    #tree-stack {
+        height: 1fr;
+        layers: base overlay;
+    }
     #tree-panel {
         height: 1fr;
+        layer: base;
     }
     #bus-panel {
         height: 18;
@@ -1192,12 +1434,21 @@ class RegieApp(App):
         #: Runs only while something is in flight — an idle régie costs no
         #: frames, the same bargain AgentLeaf's spinner makes.
         self._anim_timer: Timer | None = None
+        #: A hover session starts when the pointer enters any usage tile and
+        #: ends only after it has left all five. Direct tile-to-tile movement
+        #: shares one daemon snapshot and cannot flicker the overlay closed.
+        self._usage_hover_metric: str | None = None
+        self._usage_breakdown: dict | None = None
+        self._usage_breakdown_message: str | None = None
+        self._usage_breakdown_generation = 0
 
     def compose(self) -> ComposeResult:
         # No Header: it restates the app's class name to someone who just
         # typed the command that started it. The footer shows usage totals.
         with Vertical(id="sidebar"):
-            yield TreePanel(id="tree-panel")
+            with TreeStack(id="tree-stack"):
+                yield TreePanel(id="tree-panel")
+                yield UsageBreakdownPanel(id="usage-breakdown")
             yield UsagePeriodBar(id="usage-period")
             yield StatsFooter(id="stats-footer")
             yield PriceFooter(id="price-footer")
@@ -1243,6 +1494,97 @@ class RegieApp(App):
         # Primes the animation cursor: whatever is already in the log
         # happened before the régie was looking, and is not news.
         await self._refresh_anim()
+
+    def on_usage_metric_tile_hovered(self, message: UsageMetricTile.Hovered) -> None:
+        """Show the selected metric and start one fetch for a new hover session."""
+        previous_metric = self._usage_hover_metric
+        first_tile = previous_metric is None
+        self._usage_hover_metric = message.metric
+        if previous_metric != message.metric:
+            for tile in self.query(UsageMetricTile):
+                tile.set_class(tile.metric == message.metric, "-hot")
+        panel = self.query_one("#usage-breakdown", UsageBreakdownPanel)
+        panel.set_class(True, "-visible")
+        if first_tile:
+            self._constrain_usage_breakdown()
+            self._usage_breakdown_generation += 1
+            generation = self._usage_breakdown_generation
+            self._usage_breakdown = None
+            self._usage_breakdown_message = None
+            panel.render_state(message.metric)
+            self.run_worker(self._fetch_usage_breakdown(generation), exclusive=False)
+        elif previous_metric != message.metric:
+            panel.render_state(
+                message.metric,
+                result=self._usage_breakdown,
+                message=self._usage_breakdown_message,
+            )
+
+    def on_usage_metric_tile_left(self, _message: UsageMetricTile.Left) -> None:
+        """Defer the close so crossing between adjacent tiles never flickers."""
+        self.call_after_refresh(self._hide_usage_breakdown_if_unhovered)
+
+    def on_usage_breakdown_panel_left(self, _message: UsageBreakdownPanel.Left) -> None:
+        """Close after leaving the panel unless the pointer returned to a tile."""
+        self.call_after_refresh(self._hide_usage_breakdown_if_unhovered)
+
+    def _constrain_usage_breakdown(self) -> None:
+        """Clamp the overlay to its tree stack."""
+        panel = self.query_one("#usage-breakdown", UsageBreakdownPanel)
+        stack = self.query_one("#tree-stack", Vertical)
+        # Bottom-docked overflow clips upward instead of scrolling.
+        panel.styles.max_height = min(USAGE_BREAKDOWN_MAX_HEIGHT, stack.size.height)
+
+    def _hide_usage_breakdown_if_unhovered(self) -> None:
+        node: DOMNode | None = self.mouse_over
+        while node is not None:
+            if isinstance(node, (UsageMetricTile, UsageBreakdownPanel)):
+                return
+            node = node.parent
+        for tile in self.query(UsageMetricTile):
+            tile.set_class(False, "-hot")
+        self._usage_hover_metric = None
+        self._usage_breakdown = None
+        self._usage_breakdown_message = None
+        self._usage_breakdown_generation += 1
+        with contextlib.suppress(Exception):
+            self.query_one("#usage-breakdown", UsageBreakdownPanel).set_class(False, "-visible")
+
+    async def _fetch_usage_breakdown(self, generation: int) -> None:
+        """Fetch one snapshot; stale hover sessions are never allowed to repaint."""
+        if self._client is None:
+            return
+        result: dict | None = None
+        message: str | None = None
+        try:
+            response = await self._client.call("usage_by_harness")
+            if isinstance(response, dict):
+                result = response
+            else:
+                logger.debug(
+                    "per-harness usage returned %s, expected dict",
+                    type(response).__name__,
+                )
+                message = "per-harness stats unavailable"
+        except RemoteError as exc:
+            if exc.code == "unknown_method":
+                message = "restart daemon for per-harness stats"
+            else:
+                logger.debug("per-harness usage unavailable: %s", exc)
+                message = "per-harness stats unavailable"
+        except Exception as exc:
+            logger.debug("per-harness usage unavailable: %s", exc)
+            message = "per-harness stats unavailable"
+
+        if generation != self._usage_breakdown_generation or self._usage_hover_metric is None:
+            return
+        self._usage_breakdown = result
+        self._usage_breakdown_message = message
+        self.query_one("#usage-breakdown", UsageBreakdownPanel).render_state(
+            self._usage_hover_metric,
+            result=result,
+            message=message,
+        )
 
     async def _load_harnesses(self) -> None:
         """Ask the daemon what it can spawn, for the palette to offer.

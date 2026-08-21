@@ -10,13 +10,16 @@ from __future__ import annotations
 
 import sqlite3
 
+from alembic import command
 from alembic.autogenerate import compare_metadata
+from alembic.config import Config
 from alembic.migration import MigrationContext
-from sqlalchemy import Column, MetaData, Table, Text
+from sqlalchemy import Column, MetaData, Table, Text, create_engine
 
 from theater import paths
 from theater.daemon.schema import metadata
-from theater.daemon.store import HEAD, Store
+from theater.daemon.store import HEAD, MIGRATIONS, Store
+from theater.models import Participant
 
 
 def _diff(store: Store) -> list:
@@ -71,6 +74,54 @@ def test_migrations_created_the_alembic_version_table(store):
     col_info = store.conn.exec_driver_sql("PRAGMA table_info(participants)").fetchall()
     col_names = {row[1] for row in col_info}
     assert "resume_floor" in col_names
+
+    usage_cols = store.conn.exec_driver_sql("PRAGMA table_info(usage)").fetchall()
+    assert "harness" in {row[1] for row in usage_cols}
+    usage_indexes = store.conn.exec_driver_sql("PRAGMA index_list(usage)").fetchall()
+    assert "idx_usage_harness_ts" in {row[1] for row in usage_indexes}
+
+
+def test_usage_harness_migration_backfills_survivors_and_marks_orphans(theater_home):
+    path = paths.db_path()
+    store = Store(path)
+    participant = Participant(id="known", harness="codex")
+    store.upsert_participant(participant)
+    store.record_usage(
+        participant_id="known",
+        tree_root_id="known",
+        usage_key="known-row",
+        ts=1.0,
+        model=None,
+        harness="wrong-before-downgrade",
+        input_tokens=0,
+        output_tokens=0,
+        cache_creation_input_tokens=0,
+        cache_read_input_tokens=0,
+        reasoning_output_tokens=0,
+        cost_microcents=0,
+    )
+    store.close()
+
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        with engine.connect() as conn:
+            cfg = Config()
+            cfg.set_main_option("script_location", str(MIGRATIONS))
+            cfg.attributes["connection"] = conn
+            command.downgrade(cfg, "0016")
+            conn.exec_driver_sql(
+                "INSERT INTO usage (participant_id, usage_key, ts) "
+                "VALUES ('gone', 'orphan-row', 2.0)"
+            )
+            command.upgrade(cfg, "head")
+            conn.commit()
+            rows = conn.exec_driver_sql(
+                "SELECT participant_id, harness FROM usage ORDER BY participant_id"
+            ).fetchall()
+    finally:
+        engine.dispose()
+
+    assert rows == [("gone", "unknown"), ("known", "codex")]
 
 
 def test_bus_ids_are_never_reused(store):

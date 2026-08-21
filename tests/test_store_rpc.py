@@ -75,6 +75,7 @@ async def test_usage_summary_uses_local_calendar_period_boundaries(
     expected = {
         "day": datetime(2026, 8, 21, tzinfo=zone).timestamp(),
         "week": datetime(2026, 8, 17, tzinfo=zone).timestamp(),
+        "month": datetime(2026, 8, 1, tzinfo=zone).timestamp(),
         "year": datetime(2026, 1, 1, tzinfo=zone).timestamp(),
     }
     for period, since in expected.items():
@@ -109,6 +110,7 @@ async def test_usage_summary_day_resets_all_footer_totals_at_midnight(
         "participant_id": "p1",
         "tree_root_id": "p1",
         "model": "model",
+        "harness": "codex",
         "reasoning_output_tokens": 0,
     }
     assert daemon.store.record_usage(
@@ -144,6 +146,76 @@ async def test_usage_summary_day_resets_all_footer_totals_at_midnight(
     }
     assert result["all_time"]["input_tokens"] == 101
     assert result["all_time"]["cost_microcents"] == 505
+
+
+async def test_usage_by_harness_covers_week_crossing_month_and_zero_fills_plugins(
+    client, daemon, monkeypatch, paris_timezone
+):
+    zone = ZoneInfo("Europe/Paris")
+    timestamp = datetime(2026, 9, 1, 15, 30, tzinfo=zone).timestamp()
+    week_start = datetime(2026, 8, 31, tzinfo=zone).timestamp()
+    month_start = day_start = datetime(2026, 9, 1, tzinfo=zone).timestamp()
+    monkeypatch.setattr(methods_mod, "now", lambda: timestamp)
+    base = {
+        "participant_id": "p1",
+        "tree_root_id": "p1",
+        "model": "model",
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "reasoning_output_tokens": 0,
+    }
+    for key, harness, ts, tokens, cost in (
+        ("monday", "codex", datetime(2026, 8, 31, 12, tzinfo=zone).timestamp(), 10, 100),
+        ("tuesday", "codex", datetime(2026, 9, 1, 12, tzinfo=zone).timestamp(), 1, 10),
+        ("plugin", "custom", datetime(2026, 9, 1, 13, tzinfo=zone).timestamp(), 2, 20),
+        # A zero-token/cost row is still an active unattributed day.
+        ("legacy", "unknown", datetime(2026, 9, 1, 14, tzinfo=zone).timestamp(), 0, 0),
+    ):
+        assert daemon.store.record_usage(
+            **base,
+            usage_key=key,
+            harness=harness,
+            ts=ts,
+            input_tokens=tokens,
+            output_tokens=tokens * 2,
+            cost_microcents=cost,
+        )
+
+    result = await client.call("usage_by_harness")
+
+    assert result["since"] == {
+        "day": day_start,
+        "week": week_start,
+        "month": month_start,
+    }
+    rows = result["harnesses"]
+    names = [row["harness"] for row in rows]
+    assert names[-2:] == ["custom", "unknown"]
+    codex = rows[names.index("codex")]
+    assert codex["today"]["input_tokens"] == 1
+    assert codex["week"]["input_tokens"] == 11
+    assert codex["week"]["active_days"] == 2
+    assert codex["month"]["input_tokens"] == 1
+    vibe = rows[names.index("vibe")]
+    assert all(value == 0 for value in vibe["today"].values())
+    unknown = rows[-1]
+    assert unknown["today"]["active_days"] == 1
+    assert sum(row["week"]["input_tokens"] for row in rows) == 13
+
+
+async def test_usage_by_harness_does_not_zero_fill_plugins_that_failed_to_load(client, monkeypatch):
+    monkeypatch.setattr(
+        methods_mod,
+        "describe",
+        lambda: [
+            {"name": "working", "error": None},
+            {"name": "broken", "error": "failed to import"},
+        ],
+    )
+
+    result = await client.call("usage_by_harness")
+
+    assert [row["harness"] for row in result["harnesses"]] == ["working"]
 
 
 def _repo(tmp_path: Path, name: str) -> Path:

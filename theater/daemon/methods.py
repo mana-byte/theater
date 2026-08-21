@@ -1126,6 +1126,63 @@ async def _usage_summary(daemon, params: dict) -> dict:
     }
 
 
+@method("usage_by_harness")
+async def _usage_by_harness(daemon, params: dict) -> dict:
+    """Usage for each loaded or historically observed harness over three periods."""
+    timestamp = now()
+    day_since = _calendar_period_since("day", timestamp)
+    week_since = _calendar_period_since("week", timestamp)
+    month_since = _calendar_period_since("month", timestamp)
+    assert day_since is not None and week_since is not None and month_since is not None
+    boundaries = {"day": day_since, "week": week_since, "month": month_since}
+    observed = daemon.store.usage_by_harness(
+        day_since=day_since,
+        week_since=week_since,
+        month_since=month_since,
+    )
+    observed_by_name = {row["harness"]: row for row in observed}
+    empty_period = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "cost_microcents": 0,
+        "active_days": 0,
+    }
+    # `describe` also reports plugins that failed to import, so `theater
+    # harnesses` can tell a user where their harness went. A broken plugin
+    # has never produced a usage row and is not zero-filled here. One that
+    # broke after producing usage still appears through `extra`.
+    loaded = [row["name"] for row in describe() if not row["error"]]
+    extra = sorted(set(observed_by_name) - set(loaded) - {"unknown"})
+    names = [*loaded, *extra]
+    unknown = observed_by_name.get("unknown")
+    if unknown is not None and any(
+        period["active_days"] > 0
+        for period in (unknown["today"], unknown["week"], unknown["month"])
+    ):
+        names.append("unknown")
+
+    rows = []
+    for name in names:
+        row = observed_by_name.get(name)
+        rows.append(
+            row
+            if row is not None
+            else {
+                "harness": name,
+                "today": dict(empty_period),
+                "week": dict(empty_period),
+                "month": dict(empty_period),
+            }
+        )
+    return {
+        "since": boundaries,
+        "harnesses": rows,
+    }
+
+
 def _calendar_period_since(period: object, timestamp: float) -> float | None:
     """Return the local calendar boundary for a recognised usage period."""
     today = datetime.fromtimestamp(timestamp).date()
@@ -1134,6 +1191,8 @@ def _calendar_period_since(period: object, timestamp: float) -> float | None:
     elif period == "week":
         # Theater uses the ISO convention: weeks begin on Monday.
         boundary = today - timedelta(days=today.weekday())
+    elif period == "month":
+        boundary = date(today.year, today.month, 1)
     elif period == "year":
         boundary = date(today.year, 1, 1)
     else:

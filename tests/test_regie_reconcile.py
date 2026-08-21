@@ -327,14 +327,18 @@ async def test_empty_tree_and_back(daemon, tmux):
         await app._refresh_tree()
         await pilot.pause()
         assert len(panel.children) == 1
-        assert "no participants" in str(panel.children[0].render())
+        empty = panel.query_one(app_mod.EmptyTreeState)
+        assert str(empty.render()) == app_mod.EMPTY_TREE_HINT
+        assert empty.region == panel.content_region
+        assert empty.styles.content_align == ("center", "middle")
 
         # Back to populated.
         daemon["answers"]["participants.tree"] = [dict(PARENT, children=[dict(CHILD)])]
         await app._refresh_tree()
         await pilot.pause()
         assert len(panel.children) == 2
-        assert "no participants" not in str(panel.children[0].render())
+        assert panel._EMPTY_KEY not in panel._key_widgets
+        assert not panel.query(app_mod.EmptyTreeState)
         assert ("p", PARENT["id"]) in panel._key_widgets
         assert ("p", CHILD["id"]) in panel._key_widgets
 

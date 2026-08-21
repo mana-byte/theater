@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 from shipped import VibeHarness
-from sqlalchemy import update
+from sqlalchemy import delete, update
 
 from theater.daemon import methods as methods_mod
 from theater.daemon import observer as observer_mod
@@ -30,6 +30,7 @@ from theater.daemon.observer import (
     TurnAccumulator,
 )
 from theater.daemon.schema import jobs as jobs_table
+from theater.daemon.schema import participants as participants_table
 from theater.daemon.schema import usage as usage_table
 from theater.harness.base import Event, EventKind, TokenUsage
 from theater.harness.observation import (
@@ -396,6 +397,7 @@ def test_usage_only_events_are_persisted_without_changing_status_or_bus(registry
     rows = registry.store.conn.execute(usage_table.select()).fetchall()
     assert len(rows) == 1
     assert rows[0].usage_key == "session-a:native-1"
+    assert rows[0].harness == "codex"
     assert rows[0].cost_microcents == 29_000_000
     assert registry.store.bus_tail() == bus_before
     assert registry.get(participant.id).status is Status.AWAITING_INPUT
@@ -427,6 +429,25 @@ def test_usage_identity_is_scoped_by_participant_and_session(registry):
         "session-a:native-1",
         "session-b:native-1",
     }
+
+
+def test_usage_keeps_harness_attribution_after_participant_gc(registry):
+    observer = Observer(registry, harnesses={})
+    participant = registry.register(harness="codex", pane="%1", cwd="/tmp")
+    event = Event(kind=EventKind.ASSISTANT, usage=TokenUsage(input_tokens=7))
+    observer._record_usage(participant.id, event)
+
+    registry.store.conn.execute(
+        delete(participants_table).where(participants_table.c.id == participant.id)
+    )
+
+    [row] = registry.store.usage_by_harness(
+        day_since=0.0,
+        week_since=0.0,
+        month_since=0.0,
+    )
+    assert row["harness"] == "codex"
+    assert row["today"]["input_tokens"] == 7
 
 
 # ---- rescuing a job whose turn end was never read ---------------------

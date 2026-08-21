@@ -20,8 +20,14 @@ uv run theater stop                    # kill any old daemon
 uv run theater regie                   # launches the TUI
 ```
 
-The régie should show "no participants" in the tree panel and an empty
-bus panel. The daemon auto-starts on first connect.
+The régie should show "Ctrl+P to get started" centered in the tree panel,
+and an empty bus panel. The daemon auto-starts on first connect.
+
+Hover each input, output, cache, cost, and avg/active-day footer tile. The
+whole three-row tile should tint subtly and a table should overlay the top of
+the sidebar without moving the footer. It should show every loaded harness for
+today, this week, and this month; moving directly between tiles should update
+the metric without flashing the table closed.
 
 ## Step 2: Start two Vibe sessions by hand
 

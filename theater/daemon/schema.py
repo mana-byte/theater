@@ -184,6 +184,7 @@ usage = Table(
     Column("usage_key", Text),
     Column("ts", REAL, nullable=False),
     Column("model", Text),
+    Column("harness", Text, nullable=False, server_default=text("'unknown'")),
     Column("input_tokens", Integer, nullable=False, server_default=text("0")),
     Column("output_tokens", Integer, nullable=False, server_default=text("0")),
     Column("cache_creation_input_tokens", Integer, nullable=False, server_default=text("0")),
@@ -196,3 +197,4 @@ usage = Table(
 Index("idx_usage_participant", usage.c.participant_id, usage.c.ts)
 Index("idx_usage_tree", usage.c.tree_root_id, usage.c.ts)
 Index("idx_usage_identity", usage.c.participant_id, usage.c.usage_key, unique=True)
+Index("idx_usage_harness_ts", usage.c.harness, usage.c.ts)

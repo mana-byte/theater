@@ -954,6 +954,7 @@ class Observer:
             usage_key=usage_key,
             ts=event.ts if event.ts is not None else wall_now(),
             model=u.model,
+            harness=participant.harness if participant is not None else "unknown",
             input_tokens=u.input_tokens,
             output_tokens=u.output_tokens,
             cache_creation_input_tokens=u.cache_creation_input_tokens,

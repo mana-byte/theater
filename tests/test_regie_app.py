@@ -13,8 +13,17 @@ The widgets, the reactives, the bindings and the render path are the real ones.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+from io import StringIO
+
 import pytest
+from rich.cells import cell_len
+from rich.console import Console
+from rich.table import Table
+from textual.color import Color
 from textual.selection import SELECT_ALL
+from textual.theme import BUILTIN_THEMES
 
 from theater.config import Config, RegieSection
 from theater.constants import (
@@ -118,6 +127,10 @@ class FakeClient:
         answer = self.answers.get(method, [])
         if isinstance(answer, Exception):
             raise answer
+        if callable(answer):
+            answer = answer(params)
+        if inspect.isawaitable(answer):
+            answer = await answer
         if (
             method == "usage_summary"
             and isinstance(answer, dict)
@@ -154,6 +167,46 @@ def daemon(monkeypatch):
                     "cost_microcents": 25_000_000,
                 },
                 "average": {"cost_microcents": 300_000_000, "active_days": 3},
+            },
+            "usage_by_harness": {
+                "harnesses": [
+                    {
+                        "harness": "vibe",
+                        "today": {
+                            "input_tokens": 1_000,
+                            "output_tokens": 2_000,
+                            "reasoning_output_tokens": 500,
+                            "cache_read_input_tokens": 300,
+                            "cache_creation_input_tokens": 200,
+                            "cost_microcents": 100_000_000,
+                            "active_days": 2,
+                        },
+                        "week": {
+                            "input_tokens": 2_000,
+                            "output_tokens": 4_000,
+                            "reasoning_output_tokens": 1_000,
+                            "cache_read_input_tokens": 600,
+                            "cache_creation_input_tokens": 400,
+                            "cost_microcents": 200_000_000,
+                            "active_days": 4,
+                        },
+                        "month": {
+                            "input_tokens": 3_000,
+                            "output_tokens": 6_000,
+                            "reasoning_output_tokens": 1_500,
+                            "cache_read_input_tokens": 900,
+                            "cache_creation_input_tokens": 600,
+                            "cost_microcents": 300_000_000,
+                            "active_days": 6,
+                        },
+                    },
+                    {
+                        "harness": "claude",
+                        "today": {},
+                        "week": {},
+                        "month": {},
+                    },
+                ]
             },
         },
         "broken": set(),
@@ -257,6 +310,31 @@ def _overlay_glyphs(widget) -> list[str]:
     return glyphs
 
 
+def _usage_breakdown_text(panel: app_mod.UsageBreakdownPanel) -> str:
+    """Render all three pieces of the usage overlay as plain terminal text."""
+    title = panel.query_one("#usage-breakdown-title", app_mod.NonSelectableStatic)
+    body = panel.query_one("#usage-breakdown-content", app_mod.NonSelectableStatic)
+    note = panel.query_one("#usage-breakdown-note", app_mod.NonSelectableStatic)
+    if isinstance(body.content, Table):
+        stream = StringIO()
+        console = Console(
+            file=stream,
+            width=max(1, body.content_size.width),
+            color_system=None,
+            force_terminal=False,
+        )
+        console.print(body.content)
+        body_text = stream.getvalue()
+    else:
+        body_text = str(body.render())
+    return "\n".join((str(title.render()), body_text, str(note.render())))
+
+
+def _color_delta(left: Color, right: Color) -> int:
+    """Summed RGB distance, sufficient for theme-surface contrast assertions."""
+    return sum(abs(a - b) for a, b in zip(left[:3], right[:3], strict=True))
+
+
 # ---- mount ---------------------------------------------------------------
 
 
@@ -273,12 +351,14 @@ async def test_mount_fills_the_tree_and_the_bus(daemon, tmux):
         assert panel._lines_data[1][1]["id"] == CHILD["id"]
         sidebar = app.query_one("#sidebar")
         assert [child.id for child in sidebar.children] == [
-            "tree-panel",
+            "tree-stack",
             "usage-period",
             "stats-footer",
             "price-footer",
             "bus-panel",
         ]
+        stack = app.query_one("#tree-stack")
+        assert [child.id for child in stack.children] == ["tree-panel", "usage-breakdown"]
 
 
 async def test_mount_fetches_all_usage_windows_with_one_rpc(daemon, tmux):
@@ -296,6 +376,14 @@ async def test_mount_fetches_all_usage_windows_with_one_rpc(daemon, tmux):
         assert period.period_label == "this week"
 
 
+async def test_month_cost_window_uses_calendar_month(daemon, tmux):
+    app, _ = make_app(cost_window="month")
+    async with app.run_test():
+        client = daemon["client"]
+        assert client.asked("usage_summary") == [{"window": 720.0, "period": "month"}]
+        assert app.query_one("#usage-period", app_mod.UsagePeriodBar).period_label == "this month"
+
+
 async def test_unknown_cost_window_warns_once_and_uses_day(daemon, tmux):
     app, notes = make_app(cost_window="fortnight")
     async with app.run_test():
@@ -304,7 +392,7 @@ async def test_unknown_cost_window_warns_once_and_uses_day(daemon, tmux):
         period = app.query_one("#usage-period", app_mod.UsagePeriodBar)
         assert period.period_label == "today"
         assert [message for message, severity in notes if severity == "warning"] == [
-            "unknown cost_window 'fortnight' — using 'day'. available: day, week, year"
+            "unknown cost_window 'fortnight' — using 'day'. available: day, month, week, year"
         ]
 
 
@@ -368,6 +456,323 @@ async def test_empty_average_window_reports_zero_per_active_day(daemon, tmux):
         }
         await app._refresh_usage()
         assert price.daily_avg == 0.0
+
+
+async def test_usage_tiles_hover_as_whole_widgets_and_share_one_snapshot(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test(size=(80, 30)) as pilot:
+        client = daemon["client"]
+        tiles = list(app.query(app_mod.UsageMetricTile))
+        assert [tile.metric for tile in tiles] == [
+            "input",
+            "output",
+            "cache",
+            "cost",
+            "average",
+        ]
+        assert all(tile.size.height == 3 and tile.size.width > 1 for tile in tiles)
+        assert client.asked("usage_by_harness") == []
+
+        input_tile = app.query_one("#in-col", app_mod.UsageMetricTile)
+        background = input_tile.background_colors
+        await pilot.hover(input_tile, offset=(0, 0))
+        await pilot.pause()
+        panel = app.query_one("#usage-breakdown", app_mod.UsageBreakdownPanel)
+        rendered = _usage_breakdown_text(panel)
+        assert input_tile.has_class("-hot")
+        assert not input_tile.has_pseudo_class("hover")
+        assert not panel.has_pseudo_class("hover")
+        assert input_tile.background_colors != background
+        assert panel.has_class("-visible")
+        assert "↓ input" in rendered
+        assert "1k" in rendered and "2k" in rendered and "3k" in rendered
+        assert client.asked("usage_by_harness") == [{}]
+
+        output_tile = app.query_one("#out-col", app_mod.UsageMetricTile)
+        await pilot.hover(output_tile, offset=(0, 0))
+        await pilot.pause()
+        rendered = _usage_breakdown_text(panel)
+        assert output_tile.has_class("-hot")
+        assert not output_tile.has_pseudo_class("hover")
+        assert not input_tile.has_class("-hot")
+        assert panel.has_class("-visible")
+        assert "↑ output" in rendered
+        assert "2k" in rendered and "5k" in rendered and "8k" in rendered
+        assert client.asked("usage_by_harness") == [{}]
+
+        await pilot.hover(panel, offset=(1, 1))
+        await pilot.pause()
+        assert panel.has_class("-visible")
+        assert output_tile.has_class("-hot")
+        assert not panel.has_pseudo_class("hover")
+
+        await pilot.hover("#tree-panel")
+        await pilot.pause()
+        assert not panel.has_class("-visible")
+        assert not any(tile.has_class("-hot") for tile in tiles)
+
+        await pilot.hover("#cache-col", offset=(0, 0))
+        await pilot.pause()
+        assert client.asked("usage_by_harness") == [{}, {}]
+
+
+async def test_usage_breakdown_rebuilds_only_when_metric_changes(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test() as pilot:
+        input_tile = app.query_one("#in-col", app_mod.UsageMetricTile)
+        await pilot.hover(input_tile)
+        await pilot.pause()
+        body = app.query_one("#usage-breakdown-content", app_mod.NonSelectableStatic)
+        input_table = body.content
+        assert isinstance(input_table, Table)
+
+        input_tile.post_message(app_mod.UsageMetricTile.Hovered("input"))
+        await pilot.pause()
+        assert body.content is input_table
+
+        await pilot.hover("#out-col")
+        await pilot.pause()
+        assert body.content is not input_table
+
+
+async def test_usage_breakdown_renders_cost_average_unknown_and_old_daemon(daemon, tmux):
+    daemon["answers"]["usage_by_harness"]["harnesses"].append(
+        {
+            "harness": "unknown",
+            "today": {"cost_microcents": 0, "active_days": 1},
+            "week": {"cost_microcents": 0, "active_days": 1},
+            "month": {"cost_microcents": 0, "active_days": 1},
+        }
+    )
+    app, _ = make_app()
+    async with app.run_test() as pilot:
+        panel = app.query_one("#usage-breakdown", app_mod.UsageBreakdownPanel)
+        await pilot.hover("#price-col")
+        await pilot.pause()
+        rendered = _usage_breakdown_text(panel)
+        assert "cost" in rendered
+        assert "$1.000" in rendered and "$2.000" in rendered and "$3.000" in rendered
+        assert "unknown*" in rendered and "* pre-upgrade" in rendered
+
+        await pilot.hover("#avg-col")
+        await pilot.pause()
+        rendered = _usage_breakdown_text(panel)
+        assert "avg/active day" in rendered
+        assert rendered.count("$0.500") >= 3
+
+        await pilot.hover("#tree-panel")
+        await pilot.pause()
+        daemon["answers"]["usage_by_harness"] = RemoteError("unknown_method", "old")
+        await pilot.hover("#price-col")
+        await pilot.pause()
+        assert "restart daemon for per-harness stats" in _usage_breakdown_text(panel)
+
+
+@pytest.mark.parametrize("bus_visible", [False, True])
+@pytest.mark.parametrize("height", [24, 28, 30, 32, 40, 60])
+async def test_usage_breakdown_overlay_sits_above_footer_without_moving_it(
+    daemon, tmux, bus_visible, height
+):
+    app, _ = make_app(bus_visible=bus_visible)
+    async with app.run_test(size=(80, height)) as pilot:
+        panel = app.query_one("#usage-breakdown", app_mod.UsageBreakdownPanel)
+        stack = app.query_one("#tree-stack")
+        tree = app.query_one("#tree-panel", app_mod.TreePanel)
+        period = app.query_one("#usage-period", app_mod.UsagePeriodBar)
+        stats = app.query_one("#stats-footer", app_mod.StatsFooter)
+        price = app.query_one("#price-footer", app_mod.PriceFooter)
+        tree_region = tree.region
+        period_region = period.region
+        stats_region = stats.region
+        price_region = price.region
+
+        await pilot.hover("#in-col", offset=(0, 0))
+        await pilot.pause()
+
+        assert panel.has_class("-visible")
+        assert panel.region.bottom == period.region.y
+        assert panel.size.height <= 12
+        assert tree.region == tree_region
+        assert period.region == period_region
+        assert stats.region == stats_region
+        assert price.region == price_region
+        assert panel.background_colors[1] != tree.background_colors[1]
+        assert panel.background_colors[1] != stats.background_colors[1]
+        assert panel.styles.border_bottom[0] == ""
+        if bus_visible and height == 24:
+            # Bus + footer exceed 24 rows; padding makes two rows irreducible.
+            assert stack.size.height == 1
+            assert panel.region.height == 2
+            assert panel.region.y == -1
+            assert panel.region.bottom == period.region.y
+        elif stack.size.height >= 3:
+            title = panel.query_one("#usage-breakdown-title", app_mod.NonSelectableStatic)
+            assert panel.region.y >= 0
+            assert panel.region.height <= stack.size.height
+            assert title.region.y >= 0
+        if bus_visible and height in (28, 30):
+            assert panel.max_scroll_y > 0
+
+
+async def test_usage_breakdown_surface_is_distinct_in_every_builtin_theme(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test(size=(80, 40)) as pilot:
+        panel = app.query_one("#usage-breakdown", app_mod.UsageBreakdownPanel)
+        tree = app.query_one("#tree-panel", app_mod.TreePanel)
+        stats = app.query_one("#stats-footer", app_mod.StatsFooter)
+        panel.set_class(True, "-visible")
+
+        for theme in BUILTIN_THEMES:
+            app.theme = theme
+            await pilot.pause()
+            panel.render_state("cost", result=daemon["answers"]["usage_by_harness"])
+            background = panel.background_colors[1]
+            body = panel.query_one("#usage-breakdown-content", app_mod.NonSelectableStatic)
+            zebra = background.blend(body.colors[3], 0.04)
+            table = body.content
+            assert isinstance(table, Table)
+
+            assert _color_delta(background, tree.background_colors[1]) >= 16, theme
+            assert _color_delta(background, stats.background_colors[1]) >= 6, theme
+            if background.ansi is not None or zebra.ansi is not None:
+                assert len(table.row_styles) == 1, theme
+            else:
+                assert len(table.row_styles) == 2, theme
+                assert table.row_styles[0] != table.row_styles[1], theme
+                assert _color_delta(zebra, background) >= 6, theme
+
+
+async def test_usage_breakdown_tracks_tree_stack_resize_without_lag(daemon, tmux):
+    period = {"cost_microcents": 100_000_000, "active_days": 1}
+    daemon["answers"]["usage_by_harness"] = {
+        "harnesses": [
+            {"harness": f"h{index}", "today": period, "week": period, "month": period}
+            for index in range(15)
+        ]
+    }
+    app, _ = make_app(bus_visible=True)
+    async with app.run_test(size=(80, 60)) as pilot:
+        await pilot.hover("#in-col")
+        panel = app.query_one("#usage-breakdown", app_mod.UsageBreakdownPanel)
+        stack = app.query_one("#tree-stack", app_mod.TreeStack)
+        period_bar = app.query_one("#usage-period", app_mod.UsagePeriodBar)
+
+        for height in (32, 30, 28, 24, 60):
+            await pilot.resize_terminal(80, height)
+            assert panel.region.bottom == period_bar.region.y
+            if stack.size.height >= 3:
+                assert panel.region.y >= 0
+                assert panel.region.height <= stack.size.height
+
+        assert panel.styles.max_height.value == app_mod.USAGE_BREAKDOWN_MAX_HEIGHT
+        assert panel.region.height == app_mod.USAGE_BREAKDOWN_MAX_HEIGHT
+
+
+def test_usage_breakdown_titles_use_single_cell_footer_glyphs():
+    assert {glyph: cell_len(glyph) for glyph in ("↓", "↑", "⛁")} == {
+        "↓": 1,
+        "↑": 1,
+        "⛁": 1,
+    }
+
+
+async def test_usage_breakdown_titles_match_each_metric(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test():
+        panel = app.query_one("#usage-breakdown", app_mod.UsageBreakdownPanel)
+        title = panel.query_one("#usage-breakdown-title", app_mod.NonSelectableStatic)
+        result = daemon["answers"]["usage_by_harness"]
+        for metric, expected in (
+            ("input", "↓ input"),
+            ("output", "↑ output"),
+            ("cache", "⛁ cache"),
+            ("cost", "cost"),
+            ("average", "avg/active day"),
+        ):
+            panel.render_state(metric, result=result)
+            assert str(title.render()) == expected
+
+
+def test_usage_breakdown_compact_formatters_have_bounded_crossovers():
+    assert app_mod.UsageBreakdownPanel._format_cost(999_999 * 100_000) == "$999.999"
+    assert app_mod.UsageBreakdownPanel._format_cost(1_234_567 * 100_000) == "$1.2k"
+    assert app_mod.PriceFooter._fmt_price(1_234.567) == "$1234.567"
+    assert app_mod.UsageBreakdownPanel._format_tokens(1_500_000_000) == "1.5B"
+    assert app_mod._fmt_tokens(1_500_000_000) == "1500.0M"
+    assert cell_len(app_mod.UsageBreakdownPanel._format_cost(2**63 - 1)) <= 8
+    assert cell_len(app_mod.UsageBreakdownPanel._format_tokens(2**63 - 1)) <= 8
+
+
+async def test_usage_breakdown_narrow_zebra_table_keeps_numeric_cells_whole(daemon, tmux):
+    period = {
+        "cost_microcents": 99_999_900_000,
+        "active_days": 1,
+    }
+    daemon["answers"]["usage_by_harness"] = {
+        "harnesses": [
+            {
+                "harness": f"deliberately-long-harness-name-{index}",
+                "today": period,
+                "week": period,
+                "month": period,
+            }
+            for index in range(15)
+        ]
+    }
+    app, _ = make_app(sidebar_width=40)
+    async with app.run_test(size=(80, 48)) as pilot:
+        await pilot.hover("#price-col")
+        await pilot.pause()
+        panel = app.query_one("#usage-breakdown", app_mod.UsageBreakdownPanel)
+        body = panel.query_one("#usage-breakdown-content", app_mod.NonSelectableStatic)
+        table = body.content
+        assert isinstance(table, Table)
+        assert len(table.columns) == 4
+        assert table.columns[0].min_width == 7
+        assert table.columns[0].overflow == "ellipsis"
+        assert all(column.width == 8 for column in table.columns[1:])
+        assert all(column.justify == "right" for column in table.columns[1:])
+        horizontal_padding = (len(table.columns) - 1) * (table.padding[1] + table.padding[3])
+        assert 7 + horizontal_padding + sum(column.width or 0 for column in table.columns[1:]) <= 37
+
+        rendered = _usage_breakdown_text(panel)
+        assert "deliberately-long-harness-name" not in rendered
+        assert "…" in rendered
+        assert rendered.count("$999.999") == 45
+        assert panel.region.height == 12
+        assert panel.max_scroll_y > 0
+        panel.scroll_down(animate=False, immediate=True)
+        await pilot.pause()
+        assert panel.scroll_y > 0
+        assert body.allow_select is False
+        assert body.get_selection(SELECT_ALL) is None
+        assert len(table.row_styles) == 2
+        assert table.row_styles[0] != table.row_styles[1]
+
+
+async def test_late_usage_breakdown_response_cannot_reopen_after_leave(daemon, tmux):
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed(_params):
+        started.set()
+        await release.wait()
+        return {"harnesses": []}
+
+    daemon["answers"]["usage_by_harness"] = delayed
+    app, _ = make_app()
+    async with app.run_test() as pilot:
+        panel = app.query_one("#usage-breakdown", app_mod.UsageBreakdownPanel)
+        await pilot.hover("#in-col")
+        await started.wait()
+        await pilot.hover("#tree-panel")
+        await pilot.pause()
+        assert not panel.has_class("-visible")
+
+        release.set()
+        await pilot.pause()
+        assert not panel.has_class("-visible")
+        assert app._usage_breakdown is None
 
 
 async def test_period_cost_and_active_day_captions_render_when_usage_refresh_fails(daemon, tmux):
@@ -658,7 +1063,19 @@ async def test_an_empty_tree_says_so_instead_of_rendering_nothing(daemon, tmux):
     async with app.run_test():
         panel = app.query_one("#tree-panel", app_mod.TreePanel)
         assert len(panel.children) == 1
-        assert "no participants" in str(panel.children[0].render())
+        empty = panel.query_one(app_mod.EmptyTreeState)
+        assert str(empty.render()) == app_mod.EMPTY_TREE_HINT
+        assert empty.region == panel.content_region
+        assert empty.region.height > 1
+        assert empty.region.width > len(app_mod.EMPTY_TREE_HINT)
+        assert empty.styles.content_align == ("center", "middle")
+        assert empty.styles.text_align == "center"
+        assert _styles(empty) == [app_mod.EMPTY_TREE_SHORTCUT_STYLE, "$text-muted"]
+        assert empty.allow_select is False
+        assert empty.get_selection(SELECT_ALL) is None
+        assert not empty.has_class("tree-cursor")
+        assert not empty.has_class("tree-staged")
+        assert not empty.has_class("tree-alt")
 
 
 async def test_a_daemon_that_will_not_answer_does_not_stop_the_regie(daemon, tmux):

@@ -25,9 +25,7 @@ from alembic.config import Config
 from sqlalchemy import (
     ColumnElement,
     Connection,
-    Integer,
     case,
-    cast,
     create_engine,
     delete,
     distinct,
@@ -40,7 +38,6 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from theater.constants import SECONDS_PER_DAY
 from theater.daemon.schema import (
     bus,
     jobs,
@@ -61,7 +58,7 @@ BASELINE = "0001"
 #: The latest revision. A legacy database is stamped at BASELINE and then
 #: upgraded to this; a fresh database lands here directly. Tests assert
 #: against this rather than hardcoding a revision string.
-HEAD = "0016"
+HEAD = "0017"
 RECEIPT_TOKEN_PREFIX = "receipt_token:"
 
 
@@ -771,6 +768,7 @@ class Store:
         usage_key: str | None,
         ts: float,
         model: str | None,
+        harness: str,
         input_tokens: int,
         output_tokens: int,
         cache_creation_input_tokens: int,
@@ -785,6 +783,7 @@ class Store:
             usage_key=usage_key,
             ts=ts,
             model=model,
+            harness=harness,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cache_creation_input_tokens=cache_creation_input_tokens,
@@ -847,9 +846,9 @@ class Store:
                     ).label(f"average_{name}"),
                 )
             )
-        bucket = cast((usage.c.ts - average_since) / SECONDS_PER_DAY, Integer)
+        local_date = func.date(usage.c.ts, "unixepoch", "localtime")
         selected.append(
-            func.count(distinct(case((usage.c.ts >= average_since, bucket)))).label(
+            func.count(distinct(case((usage.c.ts >= average_since, local_date)))).label(
                 "average_active_days"
             )
         )
@@ -861,6 +860,66 @@ class Store:
             for group in ("all_time", "windowed", "average")
         }
         result["average"]["active_days"] = values["average_active_days"]
+        return result
+
+    def usage_by_harness(
+        self, *, day_since: float, week_since: float, month_since: float
+    ) -> list[dict]:
+        """Aggregate the three local-calendar usage periods by durable harness.
+
+        This is intentionally called only once per footer-hover interaction.
+        It is one synchronous scan of a table the GC does not prune, and the
+        three distinct local-date counts grow linearly with that table. If the
+        occasional hover becomes expensive, replace this with a daily rollup
+        rather than polling this query in the daemon event loop.
+        """
+        periods = {
+            "today": day_since,
+            "week": week_since,
+            "month": month_since,
+        }
+        columns = {
+            "input_tokens": usage.c.input_tokens,
+            "output_tokens": usage.c.output_tokens,
+            "cache_creation_input_tokens": usage.c.cache_creation_input_tokens,
+            "cache_read_input_tokens": usage.c.cache_read_input_tokens,
+            "reasoning_output_tokens": usage.c.reasoning_output_tokens,
+            "cost_microcents": usage.c.cost_microcents,
+        }
+        local_date = func.date(usage.c.ts, "unixepoch", "localtime")
+        selected: list[ColumnElement] = [usage.c.harness]
+        for period, since in periods.items():
+            for name, column in columns.items():
+                selected.append(
+                    func.coalesce(func.sum(case((usage.c.ts >= since, column), else_=0)), 0).label(
+                        f"{period}_{name}"
+                    )
+                )
+            selected.append(
+                func.count(distinct(case((usage.c.ts >= since, local_date)))).label(
+                    f"{period}_active_days"
+                )
+            )
+
+        lower_bound = min(week_since, month_since)
+        rows = self.conn.execute(
+            select(*selected).where(usage.c.ts >= lower_bound).group_by(usage.c.harness)
+        ).fetchall()
+        result: list[dict] = []
+        for row in rows:
+            values = row._mapping
+            result.append(
+                {
+                    "harness": values["harness"],
+                    **{
+                        period: {
+                            **{name: values[f"{period}_{name}"] for name in columns},
+                            "active_days": values[f"{period}_active_days"],
+                        }
+                        for period in periods
+                    },
+                }
+            )
         return result
 
     # ---- bus ----------------------------------------------------------

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 from theater.models import Job, JobState, Participant, Status, Tier, now
 
 
@@ -134,6 +136,7 @@ def test_usage_is_deduplicated_and_aggregated(store):
         "usage_key": "session:message",
         "ts": 10.0,
         "model": "model",
+        "harness": "codex",
         "input_tokens": 11,
         "output_tokens": 7,
         "cache_creation_input_tokens": 3,
@@ -160,6 +163,7 @@ def test_usage_summary_returns_all_footer_windows_in_one_result(store):
         "participant_id": "p1",
         "tree_root_id": "p1",
         "model": "model",
+        "harness": "codex",
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0,
         "reasoning_output_tokens": 0,
@@ -196,6 +200,7 @@ def test_usage_summary_counts_only_distinct_active_rolling_days(store):
         "participant_id": "p1",
         "tree_root_id": "p1",
         "model": "model",
+        "harness": "codex",
         "input_tokens": 1,
         "output_tokens": 0,
         "cache_creation_input_tokens": 0,
@@ -219,6 +224,78 @@ def test_usage_summary_counts_only_distinct_active_rolling_days(store):
 
     assert summary["average"]["active_days"] == 2
     assert summary["average"]["cost_microcents"] == 200
+
+
+def test_usage_summary_rolling_window_can_span_thirty_one_calendar_dates(store):
+    average_since = datetime(2026, 1, 1, 12).timestamp()
+    base = {
+        "participant_id": "p1",
+        "tree_root_id": "p1",
+        "model": "model",
+        "harness": "codex",
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "cost_microcents": 0,
+    }
+    for day in range(31):
+        assert store.record_usage(
+            **base,
+            usage_key=str(day),
+            ts=(datetime(2026, 1, 1, 12) + timedelta(days=day)).timestamp(),
+        )
+
+    summary = store.usage_summary(since=average_since, average_since=average_since)
+
+    # A rolling 30×24h interval begins and ends mid-day, so both partial
+    # boundary dates can be active even though the label remains "30d".
+    assert summary["average"]["active_days"] == 31
+
+
+def test_usage_by_harness_uses_each_calendar_boundary_and_metric_semantics(store):
+    week_since = datetime(2026, 8, 31).timestamp()
+    month_since = day_since = datetime(2026, 9, 1).timestamp()
+    base = {
+        "participant_id": "p1",
+        "tree_root_id": "p1",
+        "model": "model",
+        "harness": "codex",
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "reasoning_output_tokens": 0,
+    }
+    assert store.record_usage(
+        **base,
+        usage_key="monday",
+        ts=datetime(2026, 8, 31, 12).timestamp(),
+        input_tokens=10,
+        output_tokens=20,
+        cost_microcents=30,
+    )
+    assert store.record_usage(
+        **base,
+        usage_key="tuesday",
+        ts=datetime(2026, 9, 1, 12).timestamp(),
+        input_tokens=1,
+        output_tokens=2,
+        cost_microcents=3,
+    )
+
+    [row] = store.usage_by_harness(
+        day_since=day_since,
+        week_since=week_since,
+        month_since=month_since,
+    )
+
+    assert row["today"]["input_tokens"] == 1
+    assert row["today"]["active_days"] == 1
+    assert row["week"]["input_tokens"] == 11
+    assert row["week"]["output_tokens"] == 22
+    assert row["week"]["cost_microcents"] == 33
+    assert row["week"]["active_days"] == 2
+    assert row["month"]["input_tokens"] == 1
 
 
 # ---- Job structured fields ------------------------------------------------
