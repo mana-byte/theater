@@ -83,6 +83,10 @@ from theater.regie.controllers.animation import (  # noqa: F401
 )
 from theater.regie.controllers.navigation import NavigationState, UpDecision
 from theater.regie.controllers.polling import PollingController
+from theater.regie.controllers.session import (
+    _RETURN_KEY_NOTE,  # noqa: F401 — legacy alias
+    SessionController,
+)
 from theater.regie.controllers.staging import (
     StageController,
     StageOutcome,
@@ -150,7 +154,7 @@ from theater.regie.widgets.usage_footer import (  # noqa: F401
     _fmt_tokens,
     _pulsing_value,
 )
-from theater.tmux import client as tmux
+from theater.tmux import client as tmux  # noqa: F401 — tests monkeypatch app_mod.tmux
 from theater.tmux import panes
 
 logger = logging.getLogger("theater.regie")
@@ -197,9 +201,7 @@ EMPTY_TREE_SHORTCUT_STYLE = REGIE_EMPTY_TREE_SHORTCUT_STYLE
 EMPTY_TREE_TAIL = REGIE_EMPTY_TREE_TAIL
 EMPTY_TREE_HINT = REGIE_EMPTY_TREE_HINT
 
-#: Note tag on the `<prefix> h` return key, so teardown can tell "ours" from
-#: a binding someone else made after we installed it.
-_RETURN_KEY_NOTE = "theater-regie-return"
+# Legacy alias; canonical value in theater.regie.controllers.session.
 
 # Legacy names for route-animation constants; canonical values in theater.constants.regie.
 TRACE_ANIM_INTERVAL = REGIE_TRACE_ANIM_INTERVAL
@@ -299,34 +301,8 @@ class RegieApp(App):
     #: Whether the bus panel is showing. Toggled from the palette, not a key:
     #: a once-a-session decision. Hiding it pauses the poll (see _refresh_bus).
     bus_visible: reactive[bool] = reactive(False)
-    #: The régie's own pane id (from $TMUX_PANE), discovered at mount.
-    my_pane: str | None = None
-    #: The window id the régie lives in, discovered at mount.
-    my_window: str | None = None
     #: The pane id currently on stage (joined into our window), or None.
     staged_pane: reactive[str | None] = reactive(None)
-    #: The session the régie is running in. tmux options are scoped to it.
-    my_session: str | None = None
-    #: The session by name. The spawner matches list-sessions output, which
-    #: is names, so the `$id` form is no use to it.
-    my_session_name: str | None = None
-    #: The session-local value of tmux's `mouse` option before we changed it,
-    #: or None if the session had no override of its own.
-    _mouse_prev: str | None = None
-    #: Whether we actually changed the option, so a failed enable does not
-    #: cause a restore that clobbers a setting we never touched.
-    _mouse_set: bool = False
-    #: The session-local value of tmux's `status` option before we hid it,
-    #: or None if the session had no override of its own.
-    _status_prev: str | None = None
-    #: Whether we actually hid the status line, on the same terms as
-    #: `_mouse_set`: a failed hide must not trigger a restore.
-    _status_set: bool = False
-    #: Teardown runs from two places and must not run twice.
-    _torn_down: bool = False
-    #: Whether we actually installed the `<prefix> h` return key (vs. the
-    #: user already having one), so teardown only removes what we added.
-    _return_key_set: bool = False
 
     def __init__(self, settings: Config | None = None):
         super().__init__()
@@ -352,6 +328,9 @@ class RegieApp(App):
         self._nav = NavigationState()
         self._usage = UsagePanelState()
         self._staging = StageController(self.settings.regie, panes)
+        import sys
+
+        self._session = SessionController(sys.modules[__name__])
 
     @property
     def bus_cursor(self) -> int:
@@ -458,20 +437,8 @@ class RegieApp(App):
         # read config. The same value is used in action_stage; the two must
         # agree or Textual and tmux disagree about the sidebar edge.
         self.query_one("#sidebar").styles.width = self.settings.regie.sidebar_width
-        # Discover our own pane and window: staging joins another pane
-        # into this window, so we need to know which one we are in.
-        my_pane = tmux.current_pane()
-        if my_pane:
-            self.my_pane = my_pane
-            try:
-                self.my_window = await tmux.display_message("#{window_id}", target=my_pane)
-                self.my_session = await tmux.display_message("#{session_id}", target=my_pane)
-                self.my_session_name = await tmux.display_message("#{session_name}", target=my_pane)
-            except Exception as exc:
-                logger.debug("could not discover window/session id: %s", exc)
-            await self._bind_return_key()
-        await self._enable_mouse()
-        await self._hide_status()
+        # Discover our own pane/window/session and set up tmux options.
+        await self._session.discover_and_setup()
         self._apply_theme()
         self._cost_window_hours = self._validate_cost_window()
         self.query_one("#usage-period", UsagePeriodBar).period_label = self._cost_window_label
@@ -640,118 +607,108 @@ class RegieApp(App):
         if self._client:
             await self._client.aclose()
 
-    # ---- tmux lifecycle -------------------------------------------------
+    # ---- tmux lifecycle (delegates to SessionController) ----------------
+
+    @property
+    def my_pane(self) -> str | None:
+        return self._session.my_pane
+
+    @my_pane.setter
+    def my_pane(self, value: str | None) -> None:
+        self._session.my_pane = value
+
+    @property
+    def my_window(self) -> str | None:
+        return self._session.my_window
+
+    @my_window.setter
+    def my_window(self, value: str | None) -> None:
+        self._session.my_window = value
+
+    @property
+    def my_session(self) -> str | None:
+        return self._session.my_session
+
+    @my_session.setter
+    def my_session(self, value: str | None) -> None:
+        self._session.my_session = value
+
+    @property
+    def my_session_name(self) -> str | None:
+        return self._session.my_session_name
+
+    @my_session_name.setter
+    def my_session_name(self, value: str | None) -> None:
+        self._session.my_session_name = value
+
+    @property
+    def _mouse_prev(self) -> str | None:
+        return self._session._mouse_prev
+
+    @_mouse_prev.setter
+    def _mouse_prev(self, value: str | None) -> None:
+        self._session._mouse_prev = value
+
+    @property
+    def _mouse_set(self) -> bool:
+        return self._session._mouse_set
+
+    @_mouse_set.setter
+    def _mouse_set(self, value: bool) -> None:
+        self._session._mouse_set = value
+
+    @property
+    def _status_prev(self) -> str | None:
+        return self._session._status_prev
+
+    @_status_prev.setter
+    def _status_prev(self, value: str | None) -> None:
+        self._session._status_prev = value
+
+    @property
+    def _status_set(self) -> bool:
+        return self._session._status_set
+
+    @_status_set.setter
+    def _status_set(self, value: bool) -> None:
+        self._session._status_set = value
+
+    @property
+    def _return_key_set(self) -> bool:
+        return self._session._return_key_set
+
+    @_return_key_set.setter
+    def _return_key_set(self, value: bool) -> None:
+        self._session._return_key_set = value
+
+    @property
+    def _torn_down(self) -> bool:
+        return self._session._torn_down
+
+    @_torn_down.setter
+    def _torn_down(self, value: bool) -> None:
+        self._session._torn_down = value
 
     async def _enable_mouse(self) -> None:
-        """Turn tmux mouse reporting on for the régie's session.
-
-        Scoped to the session rather than `-g`: a global set would change every
-        session on the server and outlive this process, which is not a choice a
-        TUI gets to make on the user's behalf. The previous session-local value
-        is remembered so exiting puts it back.
-        """
-        if not self.my_session:
-            return
-        try:
-            self._mouse_prev = await tmux.show_option("mouse", target=self.my_session)
-            await tmux.set_option("mouse", "on", target=self.my_session)
-            self._mouse_set = True
-        except Exception as exc:
-            logger.debug("could not enable mouse: %s", exc)
+        await self._session._enable_mouse()
 
     async def _restore_mouse(self) -> None:
-        if not self._mouse_set or not self.my_session:
-            return
-        self._mouse_set = False
-        try:
-            if self._mouse_prev is None:
-                # No prior override: remove ours rather than pinning to the
-                # global value.
-                await tmux.unset_option("mouse", target=self.my_session)
-            else:
-                await tmux.set_option("mouse", self._mouse_prev, target=self.my_session)
-        except Exception as exc:
-            logger.debug("could not restore mouse: %s", exc)
+        await self._session._restore_mouse()
 
     async def _hide_status(self) -> None:
-        """Hide tmux's own status line while the régie is up.
-
-        The régie already draws a footer with usage totals, and the
-        rest of the window is the stage — a real agent pane. tmux's status
-        bar underneath duplicates neither and costs a row of a terminal the
-        stage wants. Scoped to the session and remembered on exactly the
-        terms `_enable_mouse` uses: a `-g` set would change every session on
-        the server and outlive this process.
-        """
-        if not self.my_session:
-            return
-        try:
-            self._status_prev = await tmux.show_option("status", target=self.my_session)
-            await tmux.set_option("status", "off", target=self.my_session)
-            self._status_set = True
-        except Exception as exc:
-            logger.debug("could not hide status line: %s", exc)
+        await self._session._hide_status()
 
     async def _restore_status(self) -> None:
-        if not self._status_set or not self.my_session:
-            return
-        self._status_set = False
-        try:
-            if self._status_prev is None:
-                # No prior override: remove ours rather than pinning to the
-                # global value.
-                await tmux.unset_option("status", target=self.my_session)
-            else:
-                await tmux.set_option("status", self._status_prev, target=self.my_session)
-        except Exception as exc:
-            logger.debug("could not restore status line: %s", exc)
+        await self._session._restore_status()
 
     async def _bind_return_key(self) -> None:
-        """Claim `<prefix> h` for `select-pane -L`, unless the user already has it.
-
-        Has to be a tmux binding, not a Textual one: once the staged pane has
-        tmux's focus, régie gets no keystrokes at all. The stage always sits
-        to the right of régie, so "move left" is "return to régie" — no
-        hardcoded pane id needed, and if the user's own config already binds
-        `h` this way, it already does what we want.
-        """
-        try:
-            self._return_key_set = await tmux.bind_key_if_free(
-                "prefix", "h", ["select-pane", "-L"], note=_RETURN_KEY_NOTE
-            )
-        except Exception as exc:
-            logger.debug("could not bind <prefix> h return key: %s", exc)
+        await self._session._bind_return_key()
 
     async def _unbind_return_key(self) -> None:
-        if not self._return_key_set:
-            return
-        self._return_key_set = False
-        try:
-            await tmux.unbind_key_if_owned("prefix", "h", note=_RETURN_KEY_NOTE)
-        except Exception as exc:
-            logger.debug("could not unbind <prefix> h return key: %s", exc)
+        await self._session._unbind_return_key()
 
     async def _teardown(self) -> None:
-        """Leave tmux as we found it: nothing staged, options restored.
-
-        Unstaging matters more than it looks. The staged agent's pane lives in
-        the régie's window only for as long as the régie is there to frame it;
-        quitting without breaking it out would leave the agent alive but sharing
-        a window with a dead TUI. `break_pane` moves it back to a window of its
-        own without touching the process.
-        """
-        if self._torn_down:
-            return
-        self._torn_down = True
-        pane = self.staged_pane
-        if pane:
-            try:
-                await panes.break_pane(pane)
-            except Exception as exc:
-                logger.debug("unstage on exit failed: %s", exc)
-        await self._restore_mouse()
-        await self._restore_status()
-        await self._unbind_return_key()
+        await self._session.teardown(staged_pane=self.staged_pane)
 
     async def action_quit(self) -> None:
         """Quit, but put the stage back first.

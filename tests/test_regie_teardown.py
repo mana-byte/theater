@@ -39,12 +39,24 @@ def tmux_calls(monkeypatch):
     return calls
 
 
-def _app(*, staged=None, session="$1", mouse_set=True, mouse_prev=None) -> RegieApp:
+def _app(
+    *,
+    staged=None,
+    session="$1",
+    mouse_set=True,
+    mouse_prev=None,
+    status_set=False,
+    status_prev=None,
+    return_key_set=False,
+) -> RegieApp:
     app = RegieApp()
     app.staged_pane = staged
     app.my_session = session
     app._mouse_set = mouse_set
     app._mouse_prev = mouse_prev
+    app._status_set = status_set
+    app._status_prev = status_prev
+    app._return_key_set = return_key_set
     return app
 
 
@@ -118,3 +130,46 @@ async def test_quitting_tears_down_before_exiting(monkeypatch, tmux_calls):
     await app.action_quit()
     assert ("break", "%7") in tmux_calls
     assert exited == [True]
+
+
+# ---- status option ------------------------------------------------------
+
+
+async def test_a_pre_existing_status_value_is_put_back_verbatim(tmux_calls):
+    """Same contract as mouse: the prior session-local value goes back."""
+    await _app(status_set=True, status_prev="on")._teardown()
+    assert ("set", "status", "on", "$1") in tmux_calls
+
+
+async def test_a_status_we_added_is_removed_not_pinned(tmux_calls):
+    await _app(status_set=True, status_prev=None)._teardown()
+    assert ("unset", "status", "$1") in tmux_calls
+
+
+# ---- return key ---------------------------------------------------------
+
+
+async def test_no_unbind_when_the_binding_was_not_owned(tmux_calls):
+    """If bind_key_if_free returned False, teardown must not unbind."""
+    await _app(return_key_set=False)._teardown()
+    assert not [c for c in tmux_calls if c[0] == "unbind"]
+
+
+# ---- failure isolation --------------------------------------------------
+
+
+async def test_a_failed_mouse_restore_does_not_block_status_restore(monkeypatch, tmux_calls):
+    """Each restore is isolated: a failure in one does not prevent the next."""
+    original_set = app_mod.tmux.set_option
+    call_count: list[int] = [0]
+
+    async def flaky_set(name, value, *, target):
+        call_count[0] += 1
+        if name == "mouse":
+            raise RuntimeError("mouse restore failed")
+        await original_set(name, value, target=target)
+
+    monkeypatch.setattr(app_mod.tmux, "set_option", flaky_set)
+    await _app(mouse_set=True, mouse_prev="off", status_set=True, status_prev="on")._teardown()
+    # Mouse restore failed, but status restore still happened.
+    assert ("set", "status", "on", "$1") in tmux_calls
