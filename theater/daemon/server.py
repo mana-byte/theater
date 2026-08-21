@@ -40,7 +40,7 @@ from theater.daemon.lock import DaemonLock, file_id
 from theater.daemon.observer import Observer
 from theater.daemon.registry import Registry
 from theater.daemon.rpc import METHODS
-from theater.daemon.spawner import Spawner
+from theater.daemon.spawning.service import Spawner
 from theater.daemon.store import Store
 from theater.harness import Harness
 from theater.models import Status, TheaterError

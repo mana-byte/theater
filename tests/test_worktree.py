@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from theater.daemon import worktree as wt
-from theater.daemon.spawner import Spawner
+from theater.daemon.spawning.service import Spawner
 from theater.models import BadRequest
 
 
@@ -327,7 +327,7 @@ def _participant(child_id: str, cwd: str):
 
 
 def _spawner():
-    from theater.daemon.spawner import Spawner
+    from theater.daemon.spawning.service import Spawner
 
     # retire() never touches the registry; passing None keeps the test
     # to the one behaviour it is about.
@@ -1112,8 +1112,9 @@ async def test_reserve_then_launch_failure_retires_unique_worktree(repo, monkeyp
     launch raises, ``cleanup_reservation`` must retire the worktree (remove
     the directory and delete the branch) and mark the participant DEAD.
     """
-    import theater.daemon.spawner as spawner_mod
-    from theater.daemon.spawner import Spawner, SpawnRequest
+    import theater.daemon.spawning.service as spawner_mod
+    from theater.daemon.spawning.models import SpawnRequest
+    from theater.daemon.spawning.service import Spawner
     from theater.models import Status
 
     monkeypatch.setattr(spawner_mod.shutil, "which", lambda b: f"/usr/bin/{b}")
@@ -1180,8 +1181,9 @@ async def test_reserve_then_launch_failure_retires_named_worktree(repo, monkeypa
     Named worktree semantics: the directory is removed but the branch is
     retained (other participants may have completed work on it).
     """
-    import theater.daemon.spawner as spawner_mod
-    from theater.daemon.spawner import Spawner, SpawnRequest
+    import theater.daemon.spawning.service as spawner_mod
+    from theater.daemon.spawning.models import SpawnRequest
+    from theater.daemon.spawning.service import Spawner
     from theater.models import Status
 
     monkeypatch.setattr(spawner_mod.shutil, "which", lambda b: f"/usr/bin/{b}")
@@ -1272,6 +1274,8 @@ def test_git_returns_failed_result_on_timeout(monkeypatch):
     )
     assert result.returncode == 124
     assert "timed out" in result.stderr
+    # Compatibility: old private name still present on the façade.
+    assert wt._INDETERMINATE_RCS == wt.INDETERMINATE_RCS
 
 
 def test_git_returns_failed_result_on_oserror(monkeypatch):
@@ -1437,7 +1441,7 @@ async def test_named_worktree_lock_serializes_concurrent_creates(repo, store):
     """Two concurrent ``_spawn_named_worktree`` calls for the same name and
     repo must be serialized — the lock prevents the create/create race where
     both see no row, both call ``git worktree add``, and one fails."""
-    from theater.daemon.spawner import Spawner
+    from theater.daemon.spawning.service import Spawner
 
     registry = type("R", (), {"store": store})()
     spawner = Spawner(registry=registry)
@@ -1463,7 +1467,7 @@ async def test_named_worktree_cancel_during_create_reconciles_state(repo, store)
     """Cancelling during ``create_named_worktree`` must still commit the
     store row (reconcile) and propagate ``CancelledError``."""
     import theater.daemon.worktree as wt_mod
-    from theater.daemon.spawner import Spawner
+    from theater.daemon.spawning.service import Spawner
 
     registry = type("R", (), {"store": store})()
     spawner = Spawner(registry=registry)

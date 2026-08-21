@@ -643,7 +643,7 @@ async def test_gc_removes_dead_participant_receipt_tokens(registry, tmp_path):
 
 
 def test_private_token_file_is_restricted_even_when_preexisting(registry, tmp_path):
-    from theater.daemon.spawner import Spawner
+    from theater.daemon.spawning.service import Spawner
     from theater.harness.base import LaunchPlan
 
     token_file = paths.observation_dir("claude", "p-claude") / "receipt-token"

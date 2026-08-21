@@ -313,7 +313,7 @@ def fake_tmux(request, monkeypatch):
     for pane_id in ("%1", "%2", "%3"):
         fake.add_pane(pane_id)
 
-    import theater.daemon.spawner as spawner_mod
+    import theater.daemon.spawning.service as spawner_mod
     from theater.tmux import client as tmux_client
 
     # The spawner and the daemon both bind `theater.tmux.client`, so patching
@@ -336,7 +336,7 @@ def fake_tmux(request, monkeypatch):
     # `shutil.which("tmux") is not None`, and `harness.describe()`. That was
     # survivable while this fixture was opt-in. Autouse, it would quietly
     # rewrite the world for all 1981 tests. The spawner asks `shutil` exactly
-    # one question (spawner.py:134), so one answer is the whole seam.
+    # one question, so one answer is the whole seam.
     monkeypatch.setattr(
         spawner_mod, "shutil", SimpleNamespace(which=lambda binary: f"/usr/bin/{binary}")
     )
