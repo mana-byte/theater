@@ -26,10 +26,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from theater.harness.source import StreamPoint
 
-#: The string stored when the spawner captured a floor but could not produce
-#: file facts (non-file source, unreadable file, etc.). Distinct from ``None``
-#: (no floor at all — cold spawn) so the reducer suppresses completion rather
-#: than treating the successor as a fresh start.
+#: Spawner captured a floor but could not produce file facts. Distinct from None (cold spawn).
 UNKNOWN_FLOOR = "unknown"
 
 

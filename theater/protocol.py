@@ -21,17 +21,10 @@ import asyncio
 import json
 from typing import Any
 
-#: Bumped when the shape of a request or response changes incompatibly. The
-#: daemon refuses clients from a different major.
+#: Bumped when the request/response shape changes incompatibly; daemon refuses different majors.
 PROTOCOL_VERSION = 1
 
-#: Longest single message either end will read, in bytes.
-#:
-#: asyncio's 64 KiB default is far too small — whole transcripts, deep bus
-#: tails and a prompt carrying a pasted file all cross it routinely, and the
-#: overrun is not a clean error (see `read_message`). 64 MiB is a thousandfold
-#: headroom and still a limit: it caps what a peer that never sends a newline
-#: can make the other end buffer.
+#: Longest message either end reads. 64 MiB — headroom for transcripts, caps non-terminating peers.
 MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 
 

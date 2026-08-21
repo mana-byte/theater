@@ -41,10 +41,7 @@ from theater.tmux import client as tmux
 #: How long to wait for a freshly started daemon to come up.
 START_TIMEOUT = 8.0
 
-#: How long to wait for a reply before declaring the connection unusable.
-#: Derived from the tmux ceiling: the slowest handlers shell out to tmux
-#: (``send`` runs up to three invocations), so a client that gave up first
-#: would abandon a read the daemon was still going to answer.
+#: Reply timeout derived from the tmux ceiling (send runs up to three invocations).
 CALL_TIMEOUT = 4 * tmux.RUN_TIMEOUT
 
 
@@ -95,17 +92,13 @@ class DaemonClient:
         Racy by construction: the daemon can take the lock between our check
         and our fork. That costs one wasted process and is caught downstream.
         """
-        # Local import: the MCP server never runs a daemon, so the daemon
-        # package stays off its import path; the import is local to keep it
-        # that way.
+        # Local import keeps the daemon package off the MCP server's import path.
         from theater.daemon import lock
 
         if not lock.is_free():
             return
         paths.ensure_home()
-        # Blocking on purpose. Forking is blocking whichever way it is
-        # written, and this runs once, on the path where no daemon exists
-        # yet, so there is nothing else on the loop to starve.
+        # Blocking on purpose: forking is blocking, and this runs once on cold start.
         log = paths.log_path().open("ab")
         try:
             subprocess.Popen(  # noqa: ASYNC220
@@ -117,8 +110,7 @@ class DaemonClient:
                 env=os.environ.copy(),
             )
         finally:
-            # Popen has dup'd it into the child; ours would otherwise stay
-            # open for the life of this process.
+            # Popen has dup'd the fd into the child; close ours to avoid leaking it.
             log.close()
 
     async def _await_socket(self):
@@ -151,8 +143,7 @@ class DaemonClient:
         return CALL_TIMEOUT
 
     async def call(self, method: str, **params) -> object:
-        # The lock covers connect() too: two callers racing on a poisoned
-        # connection would otherwise each open one and orphan the loser.
+        # The lock covers connect() too: racers on a poisoned connection would orphan the loser.
         async with self._lock:
             await self.connect()
             assert self._reader and self._writer
@@ -163,8 +154,7 @@ class DaemonClient:
                 await self._writer.drain()
                 msg = await self._read_reply(req_id, self._timeout_for(method, params))
             except asyncio.CancelledError:
-                # Awaiting during cancellation is not safe, so tear the
-                # connection down without waiting for the close to land.
+                # Awaiting during cancellation is unsafe; tear down without waiting for close.
                 self._discard()
                 raise
             except (TimeoutError, ConnectionError, OSError):
@@ -199,13 +189,10 @@ class DaemonClient:
             try:
                 msg = json.loads(line)
             except json.JSONDecodeError as exc:
-                # Half a line: the tail of a reply whose head someone else
-                # already read. Unrecoverable in place -- raise as a
-                # connection fault so the caller drops and reconnects.
+                # Half a line left by a cancelled read — unrecoverable, raise as a connection fault.
                 raise ConnectionError(f"truncated reply from daemon: {exc}") from exc
             got = msg.get("id")
-            # The daemon answers with id 0 when it could not parse the request
-            # far enough to echo one back; that is still our reply.
+            # The daemon answers with id 0 when it could not parse the request to echo one.
             if got in (req_id, 0):
                 return msg
             if isinstance(got, int) and got < req_id:
