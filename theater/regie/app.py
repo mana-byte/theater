@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import time
 from pathlib import Path
 from typing import ClassVar
 
@@ -77,11 +76,13 @@ from theater.regie.controllers.animation import (  # noqa: F401
     AwaitRouteAnim,
     LeafOverlay,
     RouteAnim,
+    RouteAnimationController,
     _await_route_glyph,
     _await_route_style,
     _send_trace_glyph,
 )
 from theater.regie.controllers.navigation import NavigationState, UpDecision
+from theater.regie.controllers.polling import PollingController
 from theater.regie.controllers.usage import (
     ActivateOutcome,
     FetchAccept,
@@ -290,16 +291,6 @@ class RegieApp(App):
 
     cursor: reactive[int] = reactive(0)
     tree_lines: reactive[list[tuple[Content, dict, Key, str, str]]] = reactive([])
-    bus_cursor: int = 0
-    #: The tree-route animation's own place in the bus. Separate from `bus_cursor`
-    #: on purpose: the panel must not consume rows it cannot display while
-    #: hidden, and the animation must run whether it is hidden or not. Two
-    #: readers of one log, each keeping its own place.
-    anim_cursor: int = 0
-    #: Whether the animation poll has seen the log once. The first poll only
-    #: takes the cursor: without it, starting the régie would replay every
-    #: send still in the daemon's buffer as if it had just happened.
-    _anim_primed: bool = False
     #: Whether the bus panel is showing. Toggled from the palette, not a key:
     #: a once-a-session decision. Hiding it pauses the poll (see _refresh_bus).
     bus_visible: reactive[bool] = reactive(False)
@@ -345,25 +336,40 @@ class RegieApp(App):
         #: failure). The palette reads None as "ask the local registry".
         self.harnesses: list[dict] | None = None
         self.bus_visible = self.settings.regie.bus_visible
-        #: Tree-route traces in flight. Concurrent rather than queued: a queue
-        #: would show a route after the event it represents, which is a lie
-        #: about when it happened.
-        self._route_anims: list[RouteAnim] = []
-        #: Await routes that should pulse until the daemon says the await call
-        #: returned. Keyed by the daemon's await token plus handle.
-        self._await_anims: dict[tuple[str, str, str, str], AwaitRouteAnim] = {}
-        #: Bumped whenever `tree_lines` is replaced. An await route is a
-        #: property of the drawn tree, which changes once a second, and it is
-        #: asked for ten times a second — so it is computed against this and
-        #: reused until the tree moves under it.
+        #: Controllers extracted from the composition root.
+        self._polling = PollingController(regie=self.settings.regie)
+        self._anim_ctrl = RouteAnimationController()
+        #: Bumped whenever tree_lines is replaced; shared with the animation controller.
         self._tree_revision = 0
-        self._await_cells: dict[tuple[str, str], list[AwaitCell] | None] = {}
-        self._await_cells_revision = -1
         #: Runs only while something is in flight — an idle régie costs no
         #: frames, the same bargain AgentLeaf's spinner makes.
         self._anim_timer: Timer | None = None
         self._nav = NavigationState()
         self._usage = UsagePanelState()
+
+    @property
+    def bus_cursor(self) -> int:
+        return self._polling.bus_cursor
+
+    @bus_cursor.setter
+    def bus_cursor(self, value: int) -> None:
+        self._polling.bus_cursor = value
+
+    @property
+    def anim_cursor(self) -> int:
+        return self._polling.anim_cursor
+
+    @anim_cursor.setter
+    def anim_cursor(self, value: int) -> None:
+        self._polling.anim_cursor = value
+
+    @property
+    def _anim_primed(self) -> bool:
+        return self._polling._anim_primed
+
+    @_anim_primed.setter
+    def _anim_primed(self, value: bool) -> None:
+        self._polling._anim_primed = value
 
     @property
     def _usage_keyboard_metric(self) -> str | None:
@@ -757,17 +763,10 @@ class RegieApp(App):
     async def _refresh_tree(self) -> None:
         if not self._client:
             return
-        try:
-            tree = await self._client.call("participants.tree")
-            assert isinstance(tree, list)
-            unmanaged = await self._client.call("participants.unmanaged")
-            assert isinstance(unmanaged, list)
-        except Exception as exc:
-            logger.debug("tree refresh failed: %s", exc)
+        result = await self._polling.poll_tree(self.settings.regie.cwd_segments, self._client)
+        if result.lines is None:
             return
-        self.tree_lines = render_tree(
-            tree, unmanaged, cwd_segments=self.settings.regie.cwd_segments
-        )
+        self.tree_lines = result.lines
         self._tree_revision += 1
         if self.cursor >= len(self.tree_lines):
             self.cursor = max(0, len(self.tree_lines) - 1)
@@ -822,140 +821,53 @@ class RegieApp(App):
     async def _refresh_bus(self) -> None:
         if not self._client:
             return
-        if not self.bus_visible:
-            # A display:none RichLog accepts writes and keeps none of them.
-            # Polling on would advance the cursor past never-rendered lines.
-            # Leaving it means resuming from the last drawn line, and the gap
-            # check below says so if the daemon's buffer wrapped while hidden.
+        result = await self._polling.poll_bus(self.bus_visible, self._client)
+        if result.rows is None:
             return
-        try:
-            rows = await self._client.call(
-                "bus.tail", limit=self.settings.regie.bus_batch, after_id=self.bus_cursor
-            )
-            assert isinstance(rows, list)
-        except Exception as exc:
-            logger.debug("bus refresh failed: %s", exc)
-            return
-        if not rows:
-            return
-        # bus.tail returns newest N after cursor (DESC); reverse for display
-        # if there's a gap.
-        if rows[0]["id"] > self.bus_cursor + 1 and self.bus_cursor > 0:
-            missed = rows[0]["id"] - self.bus_cursor - 1
+        rows = result.rows
+        if result.gap > 0:
             log = self.query_one("#bus-panel", RichLog)
-            log.write(Text(f"... {missed} events dropped", style="dim italic"))
+            log.write(Text(f"... {result.gap} events dropped", style="dim italic"))
         rows_sorted = sorted(rows, key=lambda r: r["id"])
         log = self.query_one("#bus-panel", RichLog)
-        # Resolved per batch: the palette can switch themes mid-session, and
-        # lines written after that should follow it. Already-written lines
-        # keep their old colour — the price of a RichLog, cheaper than
-        # re-rendering on every tick.
         variables = self.theme_variables
         for row in rows_sorted:
             log.write(format_bus_line(row, variables=variables))
-        self.bus_cursor = rows[-1]["id"]
+        self._polling.bus_cursor = result.new_cursor
 
     # ---- tree-route animation -------------------------------------------
 
     async def _refresh_anim(self) -> None:
-        """Read the bus for visible tree-route events, hidden panel or not.
-
-        A second reader of the same log rather than a hook in `_refresh_bus`,
-        because the two want opposite things from a hidden panel: the panel
-        must not advance past rows it never drew, and the animation must not
-        stop just because nobody is reading the text. Its own cursor is the
-        whole of that separation, and this method never writes to the panel.
-
-        `agent.send` is the send trigger rather than `job.created` because it
-        is emitted after the keystrokes reached the target's pane — the trace
-        stands for delivery, not for intent. `participant.created` is the spawn
-        trigger; it carries parent -> child and causes an immediate tree refresh
-        because the child may not be in the current render yet. `job.await.*`
-        brackets an active await call, so the route can pulse only while the
-        caller is actually blocked on the target.
-
-        A batch that needs the tree refreshed gets exactly one refresh, before
-        any of its rows are turned into animations. Refreshing per row was one
-        daemon round-trip per row: a burst of spawns then paid for the same
-        answer several times over, in sequence, on the frame that could least
-        afford it.
-        """
+        """Read the bus for visible tree-route events, hidden panel or not."""
         if not self._client:
             return
-        try:
-            rows = await self._client.call(
-                "bus.tail", limit=self.settings.regie.bus_batch, after_id=self.anim_cursor
-            )
-            assert isinstance(rows, list)
-        except Exception as exc:
-            logger.debug("tree route animation poll failed: %s", exc)
+        result = await self._polling.poll_anim(self._client)
+        if result.primed:
             return
-        if rows:
-            self.anim_cursor = max(int(row["id"]) for row in rows)
-        if not self._anim_primed:
-            self._anim_primed = True
-            return
-        if any(self._needs_tree_refresh(row) for row in rows):
+        if result.needs_tree:
             await self._refresh_tree()
-        for row in rows:
-            payload = row.get("payload") or {}
-            # A spawn carrying a prompt is a send in all but name: the parent
-            # handed the child something to do, and the trace says so.
-            if row.get("kind") == "agent.send" or self._is_prompted_spawn(row):
-                self.start_route_anim(row.get("from_id"), row.get("to_id"))
-            elif row.get("kind") == "job.await.start":
-                self.start_await_anim(
-                    payload.get("token"),
-                    payload.get("handle"),
-                    row.get("from_id"),
-                    row.get("to_id"),
-                )
-            elif row.get("kind") == "job.await.end":
-                self.stop_await_anim(
-                    payload.get("token"),
-                    payload.get("handle"),
-                    row.get("from_id"),
-                    row.get("to_id"),
-                )
+        for event in result.events:
+            if event.kind == "send":
+                self.start_route_anim(event.from_id, event.to_id)
+            elif event.kind == "await_start":
+                self.start_await_anim(event.token, event.handle, event.from_id, event.to_id)
+            elif event.kind == "await_end":
+                self.stop_await_anim(event.token, event.handle, event.from_id, event.to_id)
 
     @staticmethod
     def _is_prompted_spawn(row: dict) -> bool:
         """Whether *row* is a child created with a prompt from a visible parent."""
-        payload = row.get("payload") or {}
-        return bool(
-            row.get("kind") == "participant.created"
-            and row.get("from_id")
-            and payload.get("has_prompt") is True
-        )
+        return PollingController._is_prompted_spawn(row)
 
     @classmethod
     def _needs_tree_refresh(cls, row: dict) -> bool:
-        """Whether *row* animates something the current render may not hold yet.
-
-        A spawn's child and an await's target can both be newer than the last
-        tree poll, and an animation with no row to start from is dropped
-        silently — so these two kinds are worth a refresh before they are read.
-        Asked of the whole batch at once: one round-trip answers for all of it,
-        and a burst of spawns used to pay for the same answer several times
-        over, in sequence, on the frame that could least afford it.
-        """
-        return row.get("kind") == "job.await.start" or cls._is_prompted_spawn(row)
+        """Whether *row* animates something the current render may not hold yet."""
+        return PollingController._needs_tree_refresh(row)
 
     def start_route_anim(self, from_id: str | None, to_id: str | None) -> None:
-        """Begin a trace travelling from *from_id* to *to_id*, if it can.
-
-        Silently declines when there is no route: a send from the CLI, from an
-        external agent with no row, or to a participant that has already left
-        the tree has no visible route to draw. The visualisation is decoration —
-        the one thing it must never do is complain.
-        """
-        if len(self._route_anims) >= MAX_TRACE_ANIMS:
-            return
-        if send_path(self.tree_lines, from_id, to_id) is None:
-            return
-        assert from_id and to_id  # send_path returned a route, so both exist
-        self._route_anims.append(RouteAnim(from_id, to_id))
-        if self._anim_timer is None:
+        """Begin a trace travelling from *from_id* to *to_id*, if it can."""
+        decision = self._anim_ctrl.start_route(self.tree_lines, from_id, to_id)
+        if decision.started and self._anim_timer is None:
             self._anim_timer = self.set_interval(TRACE_ANIM_INTERVAL, self._tick_route_anims)
 
     def start_await_anim(
@@ -965,21 +877,9 @@ class RegieApp(App):
         from_id: str | None,
         to_id: str | None,
     ) -> None:
-        """Begin a grayscale pulse for an await edge, if both ends are visible.
-
-        Expired pulses are reaped first: a slot held by an await whose end row
-        never came must not be what turns a real one away.
-        """
-        self._reap_await_anims()
-        if len(self._await_anims) >= MAX_AWAIT_ANIMS:
-            return
-        if not token or not handle or not from_id or not to_id or from_id == to_id:
-            return
-        if await_path(self.tree_lines, from_id, to_id) is None:
-            return
-        anim = AwaitRouteAnim(str(token), str(handle), from_id, to_id)
-        self._await_anims[anim.key] = anim
-        if self._anim_timer is None:
+        """Begin a grayscale pulse for an await edge, if both ends are visible."""
+        decision = self._anim_ctrl.start_await(self.tree_lines, token, handle, from_id, to_id)
+        if decision.started and self._anim_timer is None:
             self._anim_timer = self.set_interval(TRACE_ANIM_INTERVAL, self._tick_route_anims)
 
     def stop_await_anim(
@@ -990,88 +890,55 @@ class RegieApp(App):
         to_id: str | None,
     ) -> None:
         """End one active await pulse and clear it if it was the last overlay."""
-        if not token or not handle or not from_id or not to_id:
-            return
-        self._await_anims.pop((str(token), str(handle), from_id, to_id), None)
-        if self._route_anims or self._await_anims:
-            return
-        panel = self._panel()
-        if panel is not None:
-            panel.set_overlays({})
-        self._stop_anim_timer()
+        decision = self._anim_ctrl.stop_await(token, handle, from_id, to_id)
+        if decision.clear_overlays:
+            panel = self._panel()
+            if panel is not None:
+                panel.set_overlays({})
+        if decision.stop_timer:
+            self._stop_anim_timer()
 
     def _reap_await_anims(self) -> None:
         """Drop pulses whose end row never arrived. See :data:`AWAIT_ANIM_TTL`."""
-        now = time.monotonic()
-        for key, anim in list(self._await_anims.items()):
-            if anim.expired(now):
-                del self._await_anims[key]
+        self._anim_ctrl._reap_await_anims()
+
+    @property
+    def _route_anims(self) -> list[RouteAnim]:
+        return self._anim_ctrl.route_anims
+
+    @property
+    def _await_anims(self) -> dict[tuple[str, str, str, str], AwaitRouteAnim]:
+        return self._anim_ctrl.await_anims
+
+    @property
+    def _await_cells(self) -> dict[tuple[str, str], list[AwaitCell] | None]:
+        return self._anim_ctrl._await_cells
+
+    @_await_cells.setter
+    def _await_cells(self, value: dict[tuple[str, str], list[AwaitCell] | None]) -> None:
+        self._anim_ctrl._await_cells = value
+
+    @property
+    def _await_cells_revision(self) -> int:
+        return self._anim_ctrl._await_cells_revision
+
+    @_await_cells_revision.setter
+    def _await_cells_revision(self, value: int) -> None:
+        self._anim_ctrl._await_cells_revision = value
 
     def _await_route_cells(self, from_id: str, to_id: str) -> list[AwaitCell] | None:
-        """The await route's visible cells, computed once per tree revision.
-
-        The tree is redrawn once a second and the pulse is drawn ten times a
-        second, so nine frames in ten would otherwise re-run a breadth-first
-        search over a grid that has not moved.
-        """
-        if self._await_cells_revision != self._tree_revision:
-            self._await_cells.clear()
-            self._await_cells_revision = self._tree_revision
-        key = (from_id, to_id)
-        if key not in self._await_cells:
-            self._await_cells[key] = await_highlight_cells(self.tree_lines, from_id, to_id)
-        return self._await_cells[key]
+        """The await route's visible cells, computed once per tree revision."""
+        return self._anim_ctrl._await_route_cells(
+            self.tree_lines, self._tree_revision, from_id, to_id, await_highlight_cells
+        )
 
     def _tick_route_anims(self) -> None:
-        """Draw every trace where it is now, then advance it one step.
-
-        Drawing before advancing is what puts the first frame on the sender
-        rather than one step past it. A trace that has run out of steps is
-        dropped here without being drawn, so the tick that retires the last
-        one is also the tick that clears the tree of it — an animation that
-        ends by stopping its own timer would otherwise leave its final frame
-        on screen for good.
-        """
-        self._reap_await_anims()
-        overlays: dict[Key, LeafOverlay] = {}
-        for await_anim in self._await_anims.values():
-            for await_cell in self._await_route_cells(await_anim.from_id, await_anim.to_id) or ():
-                col = await_cell.cell[1]
-                leaf_index, row_in_leaf = cell_leaf(await_cell.cell)
-                if not 0 <= leaf_index < len(self.tree_lines):
-                    continue
-                heavy = _await_route_glyph(await_cell.glyph, await_cell.directions)
-                if heavy == await_cell.glyph:
-                    # The route crosses this cell without using any of its
-                    # arms; tinting it would light a rail the await never took.
-                    continue
-                key = self.tree_lines[leaf_index][2]
-                overlays.setdefault(key, {})[(row_in_leaf, col)] = (
-                    heavy,
-                    _await_route_style(await_anim.frame, await_cell.offset),
-                )
-            await_anim.frame = (await_anim.frame + 1) % 10
-
-        alive: list[RouteAnim] = []
-        for route_anim in self._route_anims:
-            path = send_path(self.tree_lines, route_anim.from_id, route_anim.to_id)
-            if not path or route_anim.step >= len(path):
-                continue
-            cell = path[route_anim.step]
-            leaf_index, row_in_leaf = cell_leaf(cell)
-            if not 0 <= leaf_index < len(self.tree_lines):
-                continue
-            key = self.tree_lines[leaf_index][2]
-            overlays.setdefault(key, {})[(row_in_leaf, cell[1])] = _send_trace_glyph(
-                path, route_anim.step
-            )
-            route_anim.step += 1
-            alive.append(route_anim)
-        self._route_anims = alive
+        """Draw every trace where it is now, then advance it one step."""
+        result = self._anim_ctrl.tick(self.tree_lines, self._tree_revision, await_highlight_cells)
         panel = self._panel()
         if panel is not None:
-            panel.set_overlays(overlays)
-        if not self._route_anims and not self._await_anims:
+            panel.set_overlays(result.overlays)
+        if result.stop_timer:
             self._stop_anim_timer()
 
     def _stop_anim_timer(self) -> None:
