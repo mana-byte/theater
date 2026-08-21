@@ -13,6 +13,11 @@ import json
 import pytest
 
 from theater import cli, paths
+from theater.cli.commands import bus as bus_mod
+from theater.cli.commands import identity as identity_mod
+from theater.cli.commands import introspection as introspection_mod
+from theater.cli.commands import maintenance as maintenance_mod
+from theater.cli.commands import participants as participants_mod
 from theater.formatting import event_summary, flatten_tree
 from theater.protocol import RemoteError
 
@@ -269,7 +274,8 @@ class FakeClient:
 def fake_follow(monkeypatch):
     def install(pages):
         client = FakeClient(pages)
-        monkeypatch.setattr(cli, "DaemonClient", lambda *a, **k: client)
+        monkeypatch.setattr(bus_mod, "DaemonClient", lambda *a, **k: client)
+        monkeypatch.setattr(participants_mod, "DaemonClient", lambda *a, **k: client)
         return client
 
     return install
@@ -337,8 +343,8 @@ def test_harnesses_never_starts_a_daemon(monkeypatch, capsys):
     def explode(*a, **k):
         raise AssertionError("cmd_harnesses started a daemon")
 
-    monkeypatch.setattr(cli, "call_sync", explode)
-    monkeypatch.setattr(cli.DaemonClient, "_start_daemon", explode)
+    monkeypatch.setattr(introspection_mod, "call_sync", explode)
+    monkeypatch.setattr(introspection_mod.DaemonClient, "_start_daemon", explode)
     assert cli.cmd_harnesses(parse("harnesses")) == 0
     assert "no daemon running" in capsys.readouterr().out
 
@@ -368,7 +374,7 @@ def test_harnesses_prefers_the_running_daemons_answer(monkeypatch, capsys):
                 }
             ]
 
-    monkeypatch.setattr(cli, "DaemonClient", FakeClient)
+    monkeypatch.setattr(introspection_mod, "DaemonClient", FakeClient)
     assert cli.cmd_harnesses(parse("harnesses")) == 0
     out = capsys.readouterr().out
     assert "codex" in out
@@ -413,7 +419,7 @@ def test_harnesses_icon_column_pads_by_display_width(monkeypatch, capsys):
                 },
             ]
 
-    monkeypatch.setattr(cli, "DaemonClient", FakeClient)
+    monkeypatch.setattr(introspection_mod, "DaemonClient", FakeClient)
     assert cli.cmd_harnesses(parse("harnesses")) == 0
     out = capsys.readouterr().out
     lines = out.splitlines()
@@ -479,7 +485,7 @@ def test_harnesses_falls_back_when_the_daemon_predates_the_method(monkeypatch, c
         async def call(self, method, **params):
             raise RemoteError("unknown_method", f"no method {method!r}")
 
-    monkeypatch.setattr(cli, "DaemonClient", OldDaemon)
+    monkeypatch.setattr(introspection_mod, "DaemonClient", OldDaemon)
     assert cli.cmd_harnesses(parse("harnesses")) == 0
     out = capsys.readouterr().out
     assert "predates this command" in out
@@ -503,7 +509,7 @@ def test_a_real_daemon_error_is_not_papered_over(monkeypatch):
         async def call(self, method, **params):
             raise RemoteError("internal", "the registry blew up")
 
-    monkeypatch.setattr(cli, "DaemonClient", Broken)
+    monkeypatch.setattr(introspection_mod, "DaemonClient", Broken)
     with pytest.raises(RemoteError):
         cli.cmd_harnesses(parse("harnesses"))
 
@@ -552,14 +558,14 @@ class NoDaemon:
 
 
 def test_stop_does_not_start_a_daemon_just_to_stop_it(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "DaemonClient", NoDaemon)
+    monkeypatch.setattr(maintenance_mod, "DaemonClient", NoDaemon)
     assert cli.cmd_stop(parse("stop")) == 0
     assert "no daemon running" in capsys.readouterr().out
 
 
 def test_stop_shuts_down_a_running_daemon(monkeypatch, capsys):
     StoppableDaemon.stopped = False
-    monkeypatch.setattr(cli, "DaemonClient", StoppableDaemon)
+    monkeypatch.setattr(maintenance_mod, "DaemonClient", StoppableDaemon)
     assert cli.cmd_stop(parse("stop")) == 0
     assert StoppableDaemon.stopped
     assert "stopping" in capsys.readouterr().out
@@ -568,8 +574,8 @@ def test_stop_shuts_down_a_running_daemon(monkeypatch, capsys):
 def test_restart_stops_the_old_daemon_before_starting_one(monkeypatch, capsys):
     StoppableDaemon.stopped = False
     order: list[str] = []
-    monkeypatch.setattr(cli, "DaemonClient", StoppableDaemon)
-    monkeypatch.setattr(cli, "call_sync", lambda method, **p: order.append(method))
+    monkeypatch.setattr(maintenance_mod, "DaemonClient", StoppableDaemon)
+    monkeypatch.setattr(maintenance_mod, "call_sync", lambda method, **p: order.append(method))
     assert cli.cmd_restart(parse("restart")) == 0
     assert StoppableDaemon.stopped
     assert order == ["ping"], "the new daemon has to be proved up, not assumed"
@@ -578,8 +584,8 @@ def test_restart_stops_the_old_daemon_before_starting_one(monkeypatch, capsys):
 
 def test_restart_with_no_daemon_just_starts_one(monkeypatch, capsys):
     started: list[str] = []
-    monkeypatch.setattr(cli, "DaemonClient", NoDaemon)
-    monkeypatch.setattr(cli, "call_sync", lambda method, **p: started.append(method))
+    monkeypatch.setattr(maintenance_mod, "DaemonClient", NoDaemon)
+    monkeypatch.setattr(maintenance_mod, "call_sync", lambda method, **p: started.append(method))
     assert cli.cmd_restart(parse("restart")) == 0
     assert started == ["ping"]
 
@@ -592,9 +598,9 @@ def test_restart_refuses_to_start_a_second_daemon(monkeypatch, capsys):
         async def call(self, method, **params):
             return {"stopping": True}  # says yes, never lets go
 
-    monkeypatch.setattr(cli, "DaemonClient", Deaf)
-    monkeypatch.setattr(cli, "STOP_TIMEOUT", 0.1)
-    monkeypatch.setattr(cli, "call_sync", _explode_on_call)
+    monkeypatch.setattr(maintenance_mod, "DaemonClient", Deaf)
+    monkeypatch.setattr(maintenance_mod, "STOP_TIMEOUT", 0.1)
+    monkeypatch.setattr(maintenance_mod, "call_sync", _explode_on_call)
     assert cli.cmd_restart(parse("restart")) == 1
     assert "still holding" in capsys.readouterr().err
 
@@ -623,7 +629,9 @@ def answers(monkeypatch):
             raise reply
         return reply
 
-    monkeypatch.setattr(cli, "call_sync", call_sync)
+    # Patch call_sync in every command module that reads it.
+    for mod in (bus_mod, identity_mod, introspection_mod, maintenance_mod, participants_mod):
+        monkeypatch.setattr(mod, "call_sync", call_sync)
     return state
 
 
@@ -1062,7 +1070,7 @@ class _FollowClient:
 def test_ls_watch_redraws_a_whole_frame_each_time(monkeypatch, capsys):
     """A partial redraw would leave the previous frame's rows on screen."""
     client = _FollowClient([[ROW], [], [ROW], []])
-    monkeypatch.setattr(cli, "DaemonClient", lambda: client)
+    monkeypatch.setattr(participants_mod, "DaemonClient", lambda: client)
     with pytest.raises(_Stop):
         cli.cmd_ls(parse("ls", "--watch", "--interval", "0"))
     out = capsys.readouterr().out
@@ -1073,7 +1081,7 @@ def test_ls_watch_redraws_a_whole_frame_each_time(monkeypatch, capsys):
 def test_ls_watch_in_tree_mode_never_asks_for_unmanaged_panes(monkeypatch):
     """Unmanaged panes have no place in a lineage tree — no parent, no children."""
     client = _FollowClient([[ROW]])
-    monkeypatch.setattr(cli, "DaemonClient", lambda: client)
+    monkeypatch.setattr(participants_mod, "DaemonClient", lambda: client)
     with pytest.raises(_Stop):
         cli.cmd_ls(parse("ls", "--watch", "--tree", "--interval", "0"))
     assert [m for m, _ in client.calls] == ["participants.tree", "participants.tree"]
@@ -1087,7 +1095,7 @@ def test_follow_says_when_the_feed_fell_behind(monkeypatch, capsys):
             [{"id": 5, "ts": 0, "kind": "agent.user", "actor_id": "p-a", "payload": {}}],
         ]
     )
-    monkeypatch.setattr(cli, "DaemonClient", lambda: client)
+    monkeypatch.setattr(bus_mod, "DaemonClient", lambda: client)
     with pytest.raises(_Stop):
         cli.cmd_bus(parse("bus", "-f", "--interval", "0"))
     assert "3 events dropped" in capsys.readouterr().out
@@ -1101,7 +1109,7 @@ def test_follow_holds_its_cursor_across_an_empty_poll(monkeypatch, capsys):
             [],
         ]
     )
-    monkeypatch.setattr(cli, "DaemonClient", lambda: client)
+    monkeypatch.setattr(bus_mod, "DaemonClient", lambda: client)
     with pytest.raises(_Stop):
         cli.cmd_bus(parse("bus", "-f", "--interval", "0"))
     assert [p.get("after_id") for _, p in client.calls] == [None, 7, 7]
@@ -1157,7 +1165,8 @@ def test_mcp_serves_the_id_it_was_given(monkeypatch):
 
 
 def test_main_dispatches_to_the_named_command(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "call_sync", lambda m, **p: [])
+
+    monkeypatch.setattr(participants_mod, "call_sync", lambda m, **p: [])
     assert cli.main(["ls"]) == 0
 
 
@@ -1165,7 +1174,7 @@ def test_main_turns_a_remote_error_into_one_line(monkeypatch, capsys):
     def fail(method, **params):
         raise RemoteError("busy", "target is mid-turn")
 
-    monkeypatch.setattr(cli, "call_sync", fail)
+    monkeypatch.setattr(participants_mod, "call_sync", fail)
     assert cli.main(["kill", "p-abc"]) == 1
     assert "busy: target is mid-turn" in capsys.readouterr().err
 
@@ -1174,7 +1183,7 @@ def test_main_turns_an_unreachable_daemon_into_one_line(monkeypatch, capsys):
     def fail(method, **params):
         raise ConnectionError("no daemon at /tmp/theater.sock")
 
-    monkeypatch.setattr(cli, "call_sync", fail)
+    monkeypatch.setattr(participants_mod, "call_sync", fail)
     assert cli.main(["kill", "p-abc"]) == 1
     assert "no daemon" in capsys.readouterr().err
 
@@ -1185,5 +1194,5 @@ def test_ctrl_c_out_of_a_follow_is_not_a_crash(monkeypatch):
     def interrupt(method, **params):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli, "call_sync", interrupt)
+    monkeypatch.setattr(participants_mod, "call_sync", interrupt)
     assert cli.main(["kill", "p-abc"]) == 130
