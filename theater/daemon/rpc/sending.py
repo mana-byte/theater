@@ -20,7 +20,7 @@ from theater.daemon.rpc.params import (
 )
 from theater.daemon.rpc.router import method
 from theater.harness import HARNESSES, normalize
-from theater.harness.observation import ScreenConfidence, ScreenKind
+from theater.harness.contracts.observation import ScreenConfidence, ScreenKind
 from theater.models import (
     AwaitingDecision,
     Busy,

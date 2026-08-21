@@ -39,7 +39,7 @@ from theater.harness.contracts.launch import LaunchPlan, ResumeLaunchOverlay
 from theater.models import BadRequest
 
 if TYPE_CHECKING:
-    from theater.harness.observation import HarnessObserver
+    from theater.harness.contracts.observation import HarnessObserver
     from theater.models import Participant
 
 #: No default anywhere — the whole safety story for a child nobody is watching.

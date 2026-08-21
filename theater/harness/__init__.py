@@ -44,19 +44,18 @@ from theater.harness.base import (
     status_after,
     theater_binary,
 )
+from theater.harness.contracts.observation import (
+    HarnessObserver,
+    ScreenConfidence,
+    ScreenKind,
+    ScreenReading,
+)
 from theater.harness.contracts.source import (
     Attachment,
     Batch,
     History,
     Source,
     StreamPoint,
-)
-from theater.harness.observation import (
-    HarnessObserver,
-    ScreenConfidence,
-    ScreenKind,
-    ScreenReading,
-    TranscriptObserver,
 )
 from theater.harness.plugins import Plugin, PluginError
 from theater.harness.registry import (  # noqa: F401
@@ -113,6 +112,7 @@ from theater.harness.registry.lookup import (
     normalize,
     observation_lookup,
 )
+from theater.harness.transcript.observer import TranscriptObserver
 from theater.harness.transcript.source import TranscriptSource
 
 logger = logging.getLogger("theater.harness")

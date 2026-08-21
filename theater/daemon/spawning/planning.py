@@ -15,7 +15,7 @@ from theater.daemon.spawning.models import SpawnRequest
 from theater.harness import get as get_harness
 from theater.harness import plan_launch
 from theater.harness.base import LaunchPlan, ResumeLaunchOverlay
-from theater.harness.observation import HarnessObserver
+from theater.harness.contracts.observation import HarnessObserver
 from theater.models import BadRequest, Participant
 from theater.provenance import TranscriptProvenance
 

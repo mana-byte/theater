@@ -87,7 +87,6 @@ from theater.harness import (
 from theater.harness import (
     normalize as normalize_harness,
 )
-from theater.harness.observation import open_participant_source
 from theater.harness.source import (
     Attachment,
     Batch,
@@ -96,6 +95,7 @@ from theater.harness.source import (
     Source,
     SourceContractError,
 )
+from theater.harness.transcript.observer import open_participant_source
 from theater.models import JobState, Status, Tier
 from theater.models import now as wall_now
 from theater.pricing import usage_cost_microcents

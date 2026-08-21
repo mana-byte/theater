@@ -37,7 +37,7 @@ from theater.transcript_identity import (
 )
 
 if TYPE_CHECKING:
-    from theater.harness.observation import TranscriptObserver
+    from theater.harness.transcript.observer import TranscriptObserver
 
 logger = logging.getLogger("theater.harness.source")
 

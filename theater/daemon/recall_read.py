@@ -35,7 +35,7 @@ from theater.daemon import workers
 from theater.daemon.observer import history_correlation_is_ambiguous
 from theater.daemon.schema import jobs, touch
 from theater.harness import HARNESSES, normalize
-from theater.harness.observation import open_participant_source
+from theater.harness.transcript.observer import open_participant_source
 from theater.models import BadRequest
 from theater.provenance import is_trusted_provenance, normalize_provenance
 from theater.transcript_identity import (
