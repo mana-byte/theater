@@ -32,9 +32,7 @@ def describe(config: Config) -> list[tuple[str, str, str]]:
             value = getattr(section, f.name)
             shown = "(unset)" if value is None else str(value)
             rows.append((dotted, shown, config.source(dotted)))
-    # `[models]` has no fields to enumerate. A harness absent from the file has
-    # no row: there is no default, and inventing one per registered harness would
-    # depend on the registry.
+    # `[models]` has no fields to enumerate; a harness absent from the file has no row.
     for harness in sorted(config.models):
         dotted = f"{MODELS_SECTION}.{harness}"
         rows.append((dotted, str(config.models[harness]), config.source(dotted)))

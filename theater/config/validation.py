@@ -43,14 +43,12 @@ def _suggest(name: str, known: list[str]) -> str:
 
 
 def _check_bool(value: Any) -> bool | None:
-    # An integer is not a truth value here, so `bus_visible = 1` is a type
-    # error rather than a quiet yes.
+    # An integer is not a truth value here; `bus_visible = 1` is a type error.
     return value if isinstance(value, bool) else None
 
 
 def _check_int(value: Any) -> int | None:
-    # bool is a subclass of int, so `depth_cap = true` would otherwise parse
-    # as 1.
+    # bool is a subclass of int, so `depth_cap = true` would otherwise parse as 1.
     if isinstance(value, bool) or not isinstance(value, int):
         return None
     return value
@@ -75,9 +73,7 @@ def _check_str_list(value: Any) -> list[str] | None:
     return list(value)
 
 
-#: Dispatch on the written form (annotations are strings under
-#: `from __future__ import annotations`). The set of legal field types is
-#: small and closed on purpose.
+#: Dispatch on the written form; annotations are strings under `from __future__ import annotations`.
 _CHECKERS = {
     "bool": (_check_bool, "true or false"),
     "int": (_check_int, "an integer"),
@@ -103,8 +99,7 @@ def _build_section(path: Path, name: str, cls: type, raw: Any) -> Any:
         if f.name not in raw:
             continue
         dotted = f"{name}.{f.name}"
-        # `f.type` is the written annotation, always a string here — see
-        # _CHECKERS.
+        # `f.type` is the written annotation, always a string here — see _CHECKERS.
         checker, expected = _CHECKERS[cast(str, f.type)]
         parsed = checker(raw[f.name])
         if parsed is None:
@@ -149,8 +144,7 @@ def _build_models(path: Path, raw: Any) -> tuple[dict[str, list[str]], dict[str,
         if names is None:
             got = type(value).__name__
             _fail(path, f"'{dotted}' must be a list of strings, got {got}")
-        # A duplicate is a copy-paste artefact, and would show up twice in
-        # every list Theater prints.
+        # A duplicate is a copy-paste artefact and would show up twice.
         if len(set(names)) != len(names):
             dupe = next(n for n in names if names.count(n) > 1)
             _fail(path, f"'{dotted}' lists {dupe!r} more than once")
