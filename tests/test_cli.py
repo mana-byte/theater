@@ -7,6 +7,7 @@ here is the formatting and the follow cursor.
 
 from __future__ import annotations
 
+import argparse
 import json
 
 import pytest
@@ -26,9 +27,44 @@ ROW = {
     "cwd": "/tmp/project",
 }
 
+EXPECTED_COMMANDS = {
+    "adopt",
+    "bind",
+    "bus",
+    "candidates",
+    "claude-receipt",
+    "config",
+    "daemon",
+    "gc",
+    "harnesses",
+    "kill",
+    "ls",
+    "mcp",
+    "models",
+    "name",
+    "regie",
+    "restart",
+    "spawn",
+    "stats",
+    "stop",
+    "transcript-receipt",
+}
+
 
 def parse(*argv):
     return cli._parser().parse_args(list(argv))
+
+
+# ---- command surface -------------------------------------------------------
+
+
+def test_the_cli_exposes_exactly_these_subcommands():
+    """Use a cold subprocess if command registration becomes import-driven."""
+    parser = cli._parser()
+    (subcommands,) = [
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    ]
+    assert set(subcommands.choices) == EXPECTED_COMMANDS
 
 
 # ---- ls -----------------------------------------------------------------

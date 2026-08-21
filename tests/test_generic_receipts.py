@@ -99,6 +99,7 @@ class FakeHarness(Harness):
 
 def _spawn_fake(daemon, cwd: Path, *, pid: str, token: str = "tok"):
     participant = daemon.registry.create_spawned(harness="fake", cwd=str(cwd), pid=pid)
+    daemon.registry.attach_pane(participant.id, "%1", pane_pid=10001)
     daemon.store.set_receipt_token(participant.id, token)
     return participant
 
