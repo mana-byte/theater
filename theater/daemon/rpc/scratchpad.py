@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from theater.daemon import lineage, workers, worktree
+from theater.daemon import lineage, workers
 from theater.daemon.rpc.params import (
     _optional_string_param,
     _string_param,
 )
 from theater.daemon.rpc.router import method
+from theater.daemon.worktrees import main_repo_root
 from theater.models import BadRequest
 
 
@@ -23,7 +24,7 @@ async def _repo_scope_for_store(caller) -> str:
     if not caller.cwd:
         raise BadRequest("scratchpad cannot be used outside a git repository: caller has no cwd")
     repo_root = await workers.to_thread(
-        worktree.main_repo_root,
+        main_repo_root,
         caller.cwd,
         child_id=caller.id,
         label="store.repo_root",

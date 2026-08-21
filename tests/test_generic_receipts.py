@@ -15,7 +15,7 @@ import pytest
 from theater import paths
 from theater.client import DaemonClient
 from theater.daemon.server import Daemon
-from theater.daemon.spawner import Spawner
+from theater.daemon.spawning.service import Spawner
 from theater.harness.base import Harness, LaunchPlan
 from theater.harness.observation import HarnessObserver, TranscriptObserver
 from theater.harness.source import TranscriptCandidate
@@ -212,7 +212,7 @@ def test_preflight_rejects_receipt_plan_against_inheriting_observer(
             return LaunchPlan(argv=["fake"])
 
     harness = InheritingHarness()
-    monkeypatch.setattr("theater.daemon.spawner.get_harness", lambda name: harness)
+    monkeypatch.setattr("theater.daemon.spawning.planning.get_harness", lambda name: harness)
 
     token_path = paths.observation_dir("inheriting", "p-x") / "receipt-token"
     plan = LaunchPlan(
@@ -231,7 +231,7 @@ def test_preflight_rejects_receipt_plan_against_inheriting_observer(
 def test_preflight_refuses_plan_that_sets_receipt_token(registry, tmp_path, monkeypatch):
     """Core mints the token; a plugin that sets receipt_token is refused."""
     harness = FakeHarness()
-    monkeypatch.setattr("theater.daemon.spawner.get_harness", lambda name: harness)
+    monkeypatch.setattr("theater.daemon.spawning.planning.get_harness", lambda name: harness)
 
     token_path = paths.observation_dir("fake", "p-x") / "receipt-token"
     token_path.parent.mkdir(parents=True, exist_ok=True)
@@ -251,7 +251,7 @@ def test_preflight_refuses_plan_that_sets_receipt_token(registry, tmp_path, monk
 
 def test_preflight_rejects_receipt_path_outside_observation_dir(registry, tmp_path, monkeypatch):
     harness = FakeHarness()
-    monkeypatch.setattr("theater.daemon.spawner.get_harness", lambda name: harness)
+    monkeypatch.setattr("theater.daemon.spawning.planning.get_harness", lambda name: harness)
 
     outside = tmp_path / "elsewhere" / "token"
     outside.parent.mkdir(parents=True, exist_ok=True)
@@ -267,7 +267,7 @@ def test_preflight_rejects_receipt_path_outside_observation_dir(registry, tmp_pa
 
 def test_preflight_rejects_receipt_path_colliding_with_plan_files(registry, tmp_path, monkeypatch):
     harness = FakeHarness()
-    monkeypatch.setattr("theater.daemon.spawner.get_harness", lambda name: harness)
+    monkeypatch.setattr("theater.daemon.spawning.planning.get_harness", lambda name: harness)
 
     token_path = paths.observation_dir("fake", "p-x") / "receipt-token"
     token_path.parent.mkdir(parents=True, exist_ok=True)
@@ -284,7 +284,7 @@ def test_preflight_rejects_receipt_path_colliding_with_plan_files(registry, tmp_
 
 def test_preflight_rejects_existing_symlink_at_receipt_path(registry, tmp_path, monkeypatch):
     harness = FakeHarness()
-    monkeypatch.setattr("theater.daemon.spawner.get_harness", lambda name: harness)
+    monkeypatch.setattr("theater.daemon.spawning.planning.get_harness", lambda name: harness)
 
     token_path = paths.observation_dir("fake", "p-x") / "receipt-token"
     token_path.parent.mkdir(parents=True, exist_ok=True)

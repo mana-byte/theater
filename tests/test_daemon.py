@@ -551,7 +551,7 @@ async def test_kill_finishes_jobs_before_removing_worktree(daemon, client, fake_
     row records a spurious deletion. This spy records the order of
     ``JobManager.finish`` and ``Spawner.retire`` and asserts finish came first.
     """
-    from theater.daemon import spawner as spawner_mod
+    from theater.daemon.spawning import service as spawner_mod
 
     parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
     child = await client.call(
@@ -1564,7 +1564,7 @@ async def test_spawn_job_exists_before_pane_launch(client, fake_tmux, daemon):
 
     # Patch the spawner's tmux module, which is the same object the fake
     # fixture already patched.
-    import theater.daemon.spawner as spawner_mod
+    import theater.daemon.spawning.service as spawner_mod
 
     monkeypatch_target = spawner_mod.tmux
     original = monkeypatch_target.new_window
@@ -1597,7 +1597,7 @@ async def test_spawn_launch_failure_leaves_crashed_job_and_dead_participant(
     job as CRASHED with a spawn failure code, and the spawner must mark the
     participant DEAD and retire any worktree.
     """
-    import theater.daemon.spawner as spawner_mod
+    import theater.daemon.spawning.service as spawner_mod
 
     # Patch tmux.new_window (on the spawner's tmux module reference) to fail.
     async def boom_new_window(**kwargs):
@@ -1634,7 +1634,7 @@ async def test_spawn_launch_failure_retires_worktree(
     client, fake_tmux, daemon, tmp_path, monkeypatch
 ):
     """A worktree created during reserve is retired when launch fails."""
-    import theater.daemon.spawner as spawner_mod
+    import theater.daemon.spawning.service as spawner_mod
 
     repo_root = _make_repo(tmp_path)
 
@@ -1691,7 +1691,7 @@ async def test_promptless_spawn_job_running_during_launch(client, fake_tmux, dae
     the pane. It is finished DONE only after launch succeeds, so a launch
     failure leaves the job CRASHED rather than DONE.
     """
-    import theater.daemon.spawner as spawner_mod
+    import theater.daemon.spawning.service as spawner_mod
 
     original_new_window = spawner_mod.tmux.new_window
     captured: dict = {}
@@ -1737,7 +1737,7 @@ async def test_jobs_create_failure_invokes_reservation_cleanup(
     work. Without this cleanup the participant row and worktree directory
     would leak.
     """
-    from theater.daemon.spawner import Spawner
+    from theater.daemon.spawning.service import Spawner
 
     cleanup_calls: list[str] = []
     original_cleanup = Spawner.cleanup_reservation
@@ -1785,7 +1785,7 @@ async def test_promptless_launch_failure_leaves_crashed_job(client, fake_tmux, d
     launched. Now the DONE finish is deferred until after launch succeeds,
     so a launch failure leaves the job CRASHED with spawn_failed.
     """
-    import theater.daemon.spawner as spawner_mod
+    import theater.daemon.spawning.service as spawner_mod
 
     async def boom_new_window(**kwargs):
         raise RuntimeError("tmux exploded")
@@ -1819,8 +1819,9 @@ async def test_cleanup_reservation_is_idempotent(registry, monkeypatch):
     already called it. Both retire and mark_dead must be safe to call
     twice.
     """
-    import theater.daemon.spawner as spawner_mod
-    from theater.daemon.spawner import Spawner, SpawnRequest
+    import theater.daemon.spawning.service as spawner_mod
+    from theater.daemon.spawning.models import SpawnRequest
+    from theater.daemon.spawning.service import Spawner
 
     monkeypatch.setattr(spawner_mod.shutil, "which", lambda b: f"/usr/bin/{b}")
     spawner = Spawner(registry)
@@ -1840,6 +1841,10 @@ async def test_cleanup_reservation_is_idempotent(registry, monkeypatch):
     p = registry.get(participant.id)
     assert p is not None
     assert p.status.value == "dead"
+    # Compatibility: old module-level constant still accessible on the façade.
+    import theater.daemon.spawner
+
+    assert theater.daemon.spawner.FALLBACK_SESSION == "theater"
 
 
 async def test_jobs_create_persists_then_raises_leaves_dead_and_crashed(

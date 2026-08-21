@@ -472,7 +472,7 @@ class _PinNoResumeHarness(Harness):
 @pytest.fixture
 def pin_harnesses(monkeypatch):
     """Install the two test harnesses and stub shutil.which."""
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     monkeypatch.setitem(HARNESSES, "resume-pin-test", _PinResumeHarness())
     monkeypatch.setitem(HARNESSES, "no-resume-pin-test", _PinNoResumeHarness())
 

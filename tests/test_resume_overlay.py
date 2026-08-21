@@ -154,7 +154,7 @@ def permissive_harness(monkeypatch):
 async def test_overlay_env_reaches_launch_plan(registry, overlay_harness, monkeypatch, fake_tmux):
     """Point 1: a non-Vibe harness implementing resume_launch_overlay drives a
     resume end to end, with overlay env reaching the launch plan."""
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     _trusted_predecessor(registry, harness="overlay-test")
     spawner = Spawner(registry)
     req = SpawnRequest(
@@ -182,7 +182,7 @@ async def test_base_overlay_empty_for_domainless_predecessor(
 ):
     """Point 1: the base default returns an empty overlay when the predecessor
     has no transcript_domain, and the spawn succeeds."""
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     _trusted_predecessor(registry, harness="permissive-test", transcript_domain=None)
     spawner = Spawner(registry)
     req = SpawnRequest(
@@ -201,7 +201,7 @@ async def test_base_overlay_refuses_predecessor_with_domain(
 ):
     """Point 1: the base default refuses when a predecessor has a transcript_domain
     but the harness does not implement resume_launch_overlay."""
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     _trusted_predecessor(registry, harness="permissive-test", transcript_domain="/tmp/some-domain")
     spawner = Spawner(registry)
     req = SpawnRequest(
@@ -223,7 +223,7 @@ async def test_overlay_env_wins_and_plan_env_not_mutated(
 ):
     """Point 3: overlay env wins over plan env on a conflicting key, and
     plan.env is not mutated by the merge."""
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     _trusted_predecessor(registry, harness="overlay-test")
     spawner = Spawner(registry)
     req = SpawnRequest(
@@ -289,7 +289,7 @@ async def test_overlay_none_transcript_domain_preserves_plan_domain(
             return ResumeLaunchOverlay()
 
     monkeypatch.setitem(HARNESSES, "null-domain-test", _NullDomainHarness())
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     _trusted_predecessor(registry, harness="null-domain-test", transcript_domain="/tmp/any")
     spawner = Spawner(registry)
     req = SpawnRequest(
@@ -310,7 +310,7 @@ async def test_overlay_none_transcript_domain_preserves_plan_domain(
 async def test_claude_refuses_mismatched_domain(registry, monkeypatch):
     """Point 5: Claude refuses a predecessor whose domain does not match its
     native observation namespace."""
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     _trusted_predecessor(registry, harness="claude", transcript_domain="/tmp/wrong-claude-root")
     spawner = Spawner(registry)
     req = SpawnRequest(
@@ -327,7 +327,7 @@ async def test_claude_refuses_mismatched_domain(registry, monkeypatch):
 async def test_codex_refuses_mismatched_domain(registry, monkeypatch):
     """Point 5: Codex refuses a predecessor whose domain does not match its
     native observation namespace."""
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     _trusted_predecessor(registry, harness="codex", transcript_domain="/tmp/wrong-codex-root")
     spawner = Spawner(registry)
     req = SpawnRequest(
@@ -344,7 +344,7 @@ async def test_codex_refuses_mismatched_domain(registry, monkeypatch):
 async def test_opencode_refuses_mismatched_domain(registry, monkeypatch):
     """Point 5: OpenCode refuses a predecessor whose domain does not match its
     native observation namespace."""
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     _trusted_predecessor(registry, harness="opencode", transcript_domain="/tmp/wrong-opencode-root")
     spawner = Spawner(registry)
     req = SpawnRequest(
@@ -398,7 +398,7 @@ async def test_alias_resolves_at_validate_resume_identity(registry, monkeypatch,
     This test dies with ``BadRequest: no trusted dead ... binding`` because
     the alias-stored row is not found by raw comparison.
     """
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     _alias_predecessor(registry, alias="claude-code", canonical="claude", session_id="sess-alias-1")
     spawner = Spawner(registry)
     req = SpawnRequest(
@@ -472,7 +472,7 @@ async def test_alias_resolves_at_resolve_resume_reference(registry, monkeypatch,
     This test dies with ``BadRequest: belongs to harness`` because the
     alias-stored row's harness does not match the request by raw comparison.
     """
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     p = _alias_predecessor(
         registry, alias="claude-code", canonical="claude", session_id="sess-alias-pid"
     )
@@ -549,7 +549,7 @@ async def test_rejected_plan_leaves_no_named_branch(registry, monkeypatch, tmp_p
     _prepare_worktree."""
     import subprocess
 
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     repo = _init_repo(tmp_path / "repo")
 
     # Sabotage _validate_receipt_plan to reject the plan after _build_plan.

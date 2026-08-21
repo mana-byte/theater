@@ -16,7 +16,7 @@ from theater.daemon.rpc.params import (
     _validate_worktree_param,
 )
 from theater.daemon.rpc.router import method
-from theater.daemon.spawner import SpawnRequest
+from theater.daemon.spawning.models import SpawnRequest
 from theater.harness import (
     HARNESSES,
     describe,

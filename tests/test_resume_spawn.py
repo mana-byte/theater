@@ -160,7 +160,7 @@ def drops_prompt_harness(monkeypatch):
 
 async def test_resume_reaches_plan_launch(registry, resume_harness, monkeypatch):
     """The session id travels from SpawnRequest through plan_launch."""
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     _trusted_resume(registry, harness="resume-spawn-test")
     spawner = Spawner(registry)
     req = SpawnRequest(
@@ -176,7 +176,7 @@ async def test_resume_reaches_plan_launch(registry, resume_harness, monkeypatch)
 
 async def test_resume_none_does_not_reach_plan_launch(registry, resume_harness, monkeypatch):
     """A None resume is not forwarded, identical to the model contract."""
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     spawner = Spawner(registry)
     req = SpawnRequest(
         harness="resume-spawn-test",
@@ -193,7 +193,7 @@ async def test_resume_none_does_not_reach_plan_launch(registry, resume_harness, 
 
 async def test_check_resume_refuses_unsupported_harness(registry, no_resume_harness, monkeypatch):
     """A resume asked of a harness without the parameter is refused up front."""
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     spawner = Spawner(registry)
     req = SpawnRequest(
         harness="no-resume-spawn-test",
@@ -218,7 +218,7 @@ async def test_resume_with_prompt_refused_for_dropping_harness(
     the alternative (resume without a prompt, then send).  Refused before
     the participant or worktree exists, so nothing is left behind.
     """
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     spawner = Spawner(registry)
     req = SpawnRequest(
         harness="drops-prompt-test",
@@ -239,7 +239,7 @@ async def test_resume_without_prompt_allowed_for_dropping_harness(
     The trap is specifically both resume AND prompt; resume alone has no
     prompt to drop.
     """
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     _trusted_resume(registry, harness="drops-prompt-test")
     spawner = Spawner(registry)
     req = SpawnRequest(
@@ -254,7 +254,7 @@ async def test_resume_without_prompt_allowed_for_dropping_harness(
 
 
 async def test_resume_refuses_unknown_session_id(registry, resume_harness, monkeypatch):
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     spawner = Spawner(registry)
     req = SpawnRequest(
         harness="resume-spawn-test",
@@ -269,7 +269,7 @@ async def test_resume_refuses_unknown_session_id(registry, resume_harness, monke
 
 
 async def test_resume_refuses_heuristic_session_id(registry, resume_harness, monkeypatch):
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     p = registry.register(
         harness="resume-spawn-test",
         pane=None,
@@ -292,7 +292,7 @@ async def test_resume_refuses_heuristic_session_id(registry, resume_harness, mon
 
 
 async def test_resume_allows_trusted_dead_session(registry, resume_harness, monkeypatch):
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     _trusted_resume(registry, harness="resume-spawn-test")
     spawner = Spawner(registry)
     req = SpawnRequest(
@@ -309,7 +309,7 @@ async def test_resume_allows_trusted_dead_session(registry, resume_harness, monk
 
 
 async def test_resume_refuses_live_trusted_session_id(registry, resume_harness, monkeypatch):
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     p = _trusted_resume(registry, harness="resume-spawn-test", live=True)
     spawner = Spawner(registry)
     req = SpawnRequest(
@@ -327,7 +327,7 @@ async def test_resume_refuses_live_trusted_session_id(registry, resume_harness, 
 async def test_dead_trusted_binding_remains_resumable_when_transcript_is_missing(
     registry, resume_harness, monkeypatch, tmp_path, fake_tmux
 ):
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     p = _trusted_resume(registry, harness="resume-spawn-test")
     p = registry.get(p.id)
     p.transcript_location = str(tmp_path / "missing" / "messages.jsonl")
@@ -567,7 +567,7 @@ async def test_vibe_resume_refuses_legacy_shared_root(registry, tmp_path, fake_t
 async def test_resume_with_response_format_refused_before_side_effects(
     registry, drops_prompt_harness, monkeypatch
 ):
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     spawner = Spawner(registry)
     req = SpawnRequest(
         harness="drops-prompt-test",
@@ -588,7 +588,7 @@ async def test_resume_with_response_format_refused_before_side_effects(
 async def test_resume_with_worktree_refused(registry, resume_harness, monkeypatch):
     """A resumed session's transcript describes files at its original cwd;
     a fresh worktree points it at different files."""
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     spawner = Spawner(registry)
     req = SpawnRequest(
         harness="resume-spawn-test",
@@ -604,7 +604,7 @@ async def test_resume_with_worktree_refused(registry, resume_harness, monkeypatc
 
 async def test_resume_with_named_worktree_refused(registry, resume_harness, monkeypatch):
     """A named worktree is also refused with resume, for the same reason."""
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     spawner = Spawner(registry)
     req = SpawnRequest(
         harness="resume-spawn-test",
@@ -636,7 +636,7 @@ async def test_spawn_session_schema_includes_resume(daemon):
 
 async def test_reserve_creates_participant_without_pane(registry, monkeypatch):
     """reserve mints the participant, worktree, and plan — but no tmux pane."""
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     spawner = Spawner(registry)
     req = SpawnRequest(
         harness="vibe",
@@ -661,7 +661,7 @@ async def test_reserve_creates_participant_without_pane(registry, monkeypatch):
 
 async def test_launch_creates_pane_and_attaches(registry, fake_tmux):
     """After launch, the participant has a pane and is addressable."""
-    import theater.daemon.spawner as spawner_mod
+    import theater.daemon.spawning.service as spawner_mod
 
     spawner_mod.shutil.which = lambda b: f"/usr/bin/{b}"
     spawner = Spawner(registry)
@@ -681,15 +681,13 @@ async def test_launch_creates_pane_and_attaches(registry, fake_tmux):
 
 async def test_reserve_failure_marks_participant_dead(registry, monkeypatch):
     """A failure during reserve (after participant creation) cleans up."""
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
 
     # Sabotage plan_launch to fail after the participant exists.
-    import theater.daemon.spawner as spawner_mod
-
     def boom(*args, **kwargs):
         raise RuntimeError("plan exploded")
 
-    monkeypatch.setattr(spawner_mod, "plan_launch", boom)
+    monkeypatch.setattr("theater.daemon.spawning.planning.plan_launch", boom)
 
     spawner = Spawner(registry)
     req = SpawnRequest(
@@ -709,7 +707,7 @@ async def test_reserve_failure_marks_participant_dead(registry, monkeypatch):
 
 async def test_launch_failure_marks_participant_dead(registry, fake_tmux, monkeypatch):
     """A failure during launch marks the participant dead and retires worktree."""
-    import theater.daemon.spawner as spawner_mod
+    import theater.daemon.spawning.service as spawner_mod
 
     monkeypatch.setattr(spawner_mod.shutil, "which", lambda b: f"/usr/bin/{b}")
     spawner = Spawner(registry)
@@ -737,7 +735,7 @@ async def test_launch_failure_marks_participant_dead(registry, fake_tmux, monkey
 
 async def test_spawn_wrapper_calls_reserve_then_launch(registry, fake_tmux):
     """The backward-compatible spawn() delegates to reserve + launch."""
-    import theater.daemon.spawner as spawner_mod
+    import theater.daemon.spawning.service as spawner_mod
 
     spawner_mod.shutil.which = lambda b: f"/usr/bin/{b}"
     spawner = Spawner(registry)
@@ -759,7 +757,7 @@ async def test_reserve_writes_config_files(registry, monkeypatch):
     """
     from theater import paths
 
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     spawner = Spawner(registry)
     req = SpawnRequest(
         harness="claude",
@@ -781,7 +779,7 @@ async def test_resume_persists_floor_on_successor(registry, resume_harness, monk
     """A resume spawn captures the predecessor's stream floor on the successor."""
     from theater.resume_floor import UNKNOWN_FLOOR
 
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     transcript_path = tmp_path / "messages.jsonl"
     transcript_path.write_text('{"role":"assistant","content":"old"}\n', encoding="utf-8")
     predecessor = _trusted_resume(registry, harness="resume-spawn-test")
@@ -808,7 +806,7 @@ async def test_resume_floor_unknown_when_transcript_missing(
     """A missing predecessor transcript location produces an unknown floor."""
     from theater.resume_floor import UNKNOWN_FLOOR
 
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     predecessor = _trusted_resume(registry, harness="resume-spawn-test")
     predecessor = registry.get(predecessor.id)
     # transcript_location stays None — the predecessor never attached
@@ -828,7 +826,7 @@ async def test_resume_floor_unknown_when_transcript_missing(
 
 async def test_cold_spawn_has_no_floor(registry, resume_harness, monkeypatch):
     """A cold spawn (no resume) has a NULL resume_floor."""
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     spawner = Spawner(registry)
     req = SpawnRequest(
         harness="resume-spawn-test",
@@ -847,7 +845,7 @@ async def test_resume_floor_unknown_when_file_unreadable(
     """An unreadable predecessor transcript produces an unknown floor."""
     from theater.resume_floor import UNKNOWN_FLOOR
 
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     transcript_path = tmp_path / "missing" / "messages.jsonl"
     predecessor = _trusted_resume(registry, harness="resume-spawn-test")
     predecessor = registry.get(predecessor.id)
@@ -873,7 +871,7 @@ async def test_resume_by_participant_id_resolves_to_session_id(
     registry, resume_harness, monkeypatch
 ):
     """A Theater participant id in resume is resolved to the harness session id."""
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     p = _trusted_resume(registry, harness="resume-spawn-test", session_id="native-sess-123")
     spawner = Spawner(registry)
     req = SpawnRequest(
@@ -890,7 +888,7 @@ async def test_resume_by_participant_id_resolves_to_session_id(
 async def test_resume_by_participant_id_wrong_harness_refused(
     registry, resume_harness, monkeypatch
 ):
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     p = _trusted_resume(registry, harness="resume-spawn-test", session_id="native-sess-123")
     spawner = Spawner(registry)
     req = SpawnRequest(
@@ -905,7 +903,7 @@ async def test_resume_by_participant_id_wrong_harness_refused(
 
 
 async def test_resume_by_participant_id_live_refused(registry, resume_harness, monkeypatch):
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     p = _trusted_resume(
         registry, harness="resume-spawn-test", session_id="native-sess-123", live=True
     )
@@ -924,7 +922,7 @@ async def test_resume_by_participant_id_live_refused(registry, resume_harness, m
 async def test_resume_by_participant_id_no_session_id_refused(
     registry, resume_harness, monkeypatch
 ):
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     p = _trusted_resume(registry, harness="resume-spawn-test", session_id="native-sess-123")
     p = registry.get(p.id)
     p.session_id = None
@@ -945,7 +943,7 @@ async def test_resume_by_unknown_id_falls_through_to_native_path(
     registry, resume_harness, monkeypatch
 ):
     """A value that is not a participant id is treated as a native session id."""
-    monkeypatch.setattr("theater.daemon.spawner.shutil.which", lambda b: f"/usr/bin/{b}")
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     _trusted_resume(registry, harness="resume-spawn-test", session_id="native-sess-456")
     spawner = Spawner(registry)
     req = SpawnRequest(
