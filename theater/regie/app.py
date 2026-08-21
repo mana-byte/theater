@@ -61,8 +61,25 @@ from theater.constants import (
     USAGE_AVERAGE_WINDOW_DAYS,
     USAGE_AVERAGE_WINDOW_HOURS,
 )
+from theater.constants.regie import (
+    REGIE_AWAIT_ANIM_TTL,
+    REGIE_MAX_AWAIT_ANIMS,
+    REGIE_MAX_TRACE_ANIMS,
+    REGIE_TRACE_ANIM_INTERVAL,
+)
 from theater.protocol import RemoteError
 from theater.regie.bus_view import format_bus_line
+from theater.regie.controllers.animation import (  # noqa: F401
+    _AWAIT_TRACE_GLYPHS,
+    _RAIL_ARMS,
+    _SEND_TRACE_GLYPHS,
+    AwaitRouteAnim,
+    LeafOverlay,
+    RouteAnim,
+    _await_route_glyph,
+    _await_route_style,
+    _send_trace_glyph,
+)
 from theater.regie.palette import (
     ResumeDeadSessionCommand,
     ResumeDeadSessionCommands,
@@ -70,7 +87,7 @@ from theater.regie.palette import (
     SpawnHarnessCommands,
     ViewCommands,
 )
-from theater.regie.tree import (
+from theater.regie.tree import (  # noqa: F401
     DOWN,
     LEFT,
     RIGHT,
@@ -140,169 +157,16 @@ EMPTY_TREE_HINT = f"{EMPTY_TREE_SHORTCUT}{EMPTY_TREE_TAIL}"
 #: a binding someone else made after we installed it.
 _RETURN_KEY_NOTE = "theater-regie-return"
 
-#: How often a travelling tree trace moves. The number of moves comes from
-#: the route length so long cross-root sends/spawns do not skip most of their
-#: rails. A little slower than the spinners so cross-tree routes are easy to
-#: follow. Not config: a constant nobody has asked to tune is not a setting.
-TRACE_ANIM_INTERVAL = 0.10
-
-#: A ceiling on concurrent traces. A busy machine can emit sends faster than
-#: one animation lasts, and a hundred bright rail cells at once is noise, not signal.
-MAX_TRACE_ANIMS = 6
-
-#: Active await routes can be batched, but beyond this the tree becomes a fog.
-#: The unit is handles, not `jobs.await` calls: a parent awaiting six children
-#: in one call emits six `job.await.start` rows and takes six slots. Overflow
-#: is permanent for that await — the daemon emits the row once and there is no
-#: retry, so the thirteenth edge is simply never drawn, though the await itself
-#: is unaffected and its `job.await.end` still clears whatever did get a slot.
-MAX_AWAIT_ANIMS = 12
-
-#: How long a pulse may run without the `job.await.end` row that should end it.
-#: `MAX_AWAIT` in `theater.daemon.methods` caps one `jobs.await` at 300s, so a
-#: pulse older than that plus a grace period is not a live await: its end row
-#: was missed — `bus.tail` returns only the newest rows after the cursor and
-#: silently drops the rest — or the daemon died mid-await. Not imported from
-#: the daemon: the régie is a client and does not put SQLAlchemy on the import
-#: path of a TUI. Without a ceiling the pulse runs forever and keeps one of
-#: the MAX_AWAIT_ANIMS slots with it.
-AWAIT_ANIM_TTL = 330.0
-
-#: Heavy trace glyphs to draw within one leaf: ``(row within the leaf, column)``.
-type LeafOverlay = dict[LeafCell, OverlayGlyph]
-
-_SEND_TRACE_GLYPHS = {
-    frozenset({LEFT}): "━",
-    frozenset({RIGHT}): "━",
-    frozenset({UP}): "┃",
-    frozenset({DOWN}): "┃",
-    frozenset({LEFT, RIGHT}): "━",
-    frozenset({UP, DOWN}): "┃",
-    frozenset({UP, RIGHT}): "┗",
-    frozenset({UP, LEFT}): "┛",
-    frozenset({DOWN, RIGHT}): "┏",
-    frozenset({DOWN, LEFT}): "┓",
-}
-
-#: Which arms each rail glyph the tree draws actually has. A route direction
-#: that is not one of them — leaving a ``└`` sideways across the blank cells
-#: of a branch — moves the line but lights nothing, because there is no arm
-#: there to light.
-_RAIL_ARMS: dict[str, frozenset[Direction]] = {
-    "│": frozenset({UP, DOWN}),
-    "─": frozenset({LEFT, RIGHT}),
-    "└": frozenset({UP, RIGHT}),
-    "├": frozenset({UP, DOWN, RIGHT}),
-}
-
-#: The heavy form of each rail glyph, by which of its arms the await route
-#: uses. Unicode has the mixed weights, so a junction the line only passes
-#: through keeps its other arms light instead of being lit whole (``┠``) or
-#: amputated into a plain ``┃`` — either of which claims a sibling is part of
-#: a wait it knows nothing about. Left-facing mirrors (``┨┩┪``) are absent
-#: because the tree draws no left-facing junction to put them on.
-_AWAIT_TRACE_GLYPHS: dict[tuple[str, frozenset[Direction]], str] = {
-    ("│", frozenset({UP, DOWN})): "┃",
-    ("│", frozenset({UP})): "╿",
-    ("│", frozenset({DOWN})): "╽",
-    ("─", frozenset({LEFT, RIGHT})): "━",
-    ("─", frozenset({LEFT})): "╾",
-    ("─", frozenset({RIGHT})): "╼",
-    ("└", frozenset({UP, RIGHT})): "┗",
-    ("└", frozenset({UP})): "┖",
-    ("└", frozenset({RIGHT})): "┕",
-    ("├", frozenset({UP, DOWN, RIGHT})): "┣",
-    ("├", frozenset({UP, DOWN})): "┠",
-    ("├", frozenset({UP, RIGHT})): "┡",
-    ("├", frozenset({DOWN, RIGHT})): "┢",
-    ("├", frozenset({UP})): "┞",
-    ("├", frozenset({DOWN})): "┟",
-    ("├", frozenset({RIGHT})): "┝",
-}
-
-
-def _send_trace_glyph(path: list[Cell], index: int) -> str:
-    """A heavy line glyph matching how the route passes through *index*."""
-    row, col = path[index]
-    directions: set[Direction] = set()
-    for neighbor_index in (index - 1, index + 1):
-        if 0 <= neighbor_index < len(path):
-            next_row, next_col = path[neighbor_index]
-            directions.add((next_row - row, next_col - col))
-    return _SEND_TRACE_GLYPHS.get(frozenset(directions), "━")
-
-
-def _await_route_glyph(glyph: str, directions: frozenset[Direction]) -> str:
-    """*glyph* with the arms the route uses drawn heavy, the rest left light.
-
-    Returns *glyph* unchanged when the route touches none of its arms, which
-    is the caller's cue to leave that cell alone rather than grey out a line
-    the await does not use.
-    """
-    arms = _RAIL_ARMS.get(glyph)
-    if arms is None:
-        return glyph
-    return _AWAIT_TRACE_GLYPHS.get((glyph, directions & arms), glyph)
-
-
-def _await_route_style(frame: int, offset: int = 0) -> str:
-    """The working harness grayscale, at this cell's place along the route.
-
-    No ``bold``: the glyphs are already the heavy box-drawing forms, and bold
-    promotes a grey into the bright ANSI palette on some terminals — which
-    turns the one thing this style is for, a line dimmer than a live agent,
-    into a line brighter than one.
-    """
-    return working_harness_style(frame, offset)
+# Legacy names for route-animation constants; canonical values in theater.constants.regie.
+TRACE_ANIM_INTERVAL = REGIE_TRACE_ANIM_INTERVAL
+MAX_TRACE_ANIMS = REGIE_MAX_TRACE_ANIMS
+MAX_AWAIT_ANIMS = REGIE_MAX_AWAIT_ANIMS
+AWAIT_ANIM_TTL = REGIE_AWAIT_ANIM_TTL
 
 
 def _is_participant_key(key: Key) -> bool:
     """Whether *key* identifies a participant or unmanaged pane (not a separator)."""
     return key[0] in ("p", "u")
-
-
-class RouteAnim:
-    """One trace travelling from a sender's leaf to its target's.
-
-    Holds the two participant ids and how many route cells it has travelled —
-    never the route itself. The tree refreshes underneath it every second, and
-    a stored route would go stale the moment an agent above it dies and every
-    row shifts up. Recomputing per frame means the trace lands somewhere
-    sensible even if the path changed length, and disappears cleanly the moment
-    either end stops being visible.
-    """
-
-    def __init__(self, from_id: str, to_id: str) -> None:
-        self.from_id = from_id
-        self.to_id = to_id
-        self.step = 0
-
-
-class AwaitRouteAnim:
-    """One active await relationship pulsing along a visible tree route.
-
-    Carries its own deadline. The pulse is supposed to end on a matching
-    `job.await.end` row, and mostly does — but a row that never arrives would
-    otherwise leave it pulsing for the rest of the session, so it also expires
-    on its own after :data:`AWAIT_ANIM_TTL`.
-    """
-
-    def __init__(
-        self, token: str, handle: str, from_id: str, to_id: str, started: float | None = None
-    ) -> None:
-        self.token = token
-        self.handle = handle
-        self.from_id = from_id
-        self.to_id = to_id
-        self.frame = 0
-        self.started = time.monotonic() if started is None else started
-
-    @property
-    def key(self) -> tuple[str, str, str, str]:
-        return (self.token, self.handle, self.from_id, self.to_id)
-
-    def expired(self, now: float) -> bool:
-        return now - self.started >= AWAIT_ANIM_TTL
 
 
 class AgentLeaf(Static):
