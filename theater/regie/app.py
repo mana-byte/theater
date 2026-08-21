@@ -84,6 +84,12 @@ from theater.regie.controllers.animation import (  # noqa: F401
     _send_trace_glyph,
 )
 from theater.regie.controllers.navigation import NavigationState, UpDecision
+from theater.regie.controllers.usage import (
+    ActivateOutcome,
+    FetchAccept,
+    SyncOutcome,
+    UsagePanelState,
+)
 from theater.regie.palette import (
     ResumeDeadSessionCommand,
     ResumeDeadSessionCommands,
@@ -358,11 +364,7 @@ class RegieApp(App):
         #: frames, the same bargain AgentLeaf's spinner makes.
         self._anim_timer: Timer | None = None
         self._nav = NavigationState()
-        self._usage_pointer_metric: str | None = None
-        self._usage_active_metric: str | None = None
-        self._usage_breakdown: dict | None = None
-        self._usage_breakdown_message: str | None = None
-        self._usage_breakdown_generation = 0
+        self._usage = UsagePanelState()
 
     @property
     def _usage_keyboard_metric(self) -> str | None:
@@ -379,6 +381,46 @@ class RegieApp(App):
     @_usage_keyboard_origin.setter
     def _usage_keyboard_origin(self, value: str | None) -> None:
         self._nav.origin = value
+
+    @property
+    def _usage_pointer_metric(self) -> str | None:
+        return self._usage.pointer_metric
+
+    @_usage_pointer_metric.setter
+    def _usage_pointer_metric(self, value: str | None) -> None:
+        self._usage.set_pointer(value)
+
+    @property
+    def _usage_active_metric(self) -> str | None:
+        return self._usage.active_metric
+
+    @_usage_active_metric.setter
+    def _usage_active_metric(self, value: str | None) -> None:
+        self._usage.active_metric = value
+
+    @property
+    def _usage_breakdown(self) -> dict | None:
+        return self._usage.breakdown
+
+    @_usage_breakdown.setter
+    def _usage_breakdown(self, value: dict | None) -> None:
+        self._usage.breakdown = value
+
+    @property
+    def _usage_breakdown_message(self) -> str | None:
+        return self._usage.message
+
+    @_usage_breakdown_message.setter
+    def _usage_breakdown_message(self, value: str | None) -> None:
+        self._usage.message = value
+
+    @property
+    def _usage_breakdown_generation(self) -> int:
+        return self._usage.generation
+
+    @_usage_breakdown_generation.setter
+    def _usage_breakdown_generation(self, value: int) -> None:
+        self._usage.generation = value
 
     def compose(self) -> ComposeResult:
         # No Header: it restates the app's class name to someone who just
@@ -440,23 +482,18 @@ class RegieApp(App):
         self._sync_usage_metric()
 
     def _activate_usage_metric(self, metric: str) -> None:
-        previous_metric = self._usage_active_metric
-        first_tile = previous_metric is None
-        self._usage_active_metric = metric
-        if previous_metric != metric:
+        outcome = self._usage.activate(metric)
+        if outcome is not ActivateOutcome.NO_CHANGE:
             for tile in self.query(UsageMetricTile):
                 tile.set_class(tile.metric == metric, "-hot")
         panel = self.query_one("#usage-breakdown", UsageBreakdownPanel)
         panel.set_class(True, "-visible")
-        if first_tile:
+        if outcome is ActivateOutcome.FIRST_OPEN:
             self._constrain_usage_breakdown()
-            self._usage_breakdown_generation += 1
-            generation = self._usage_breakdown_generation
-            self._usage_breakdown = None
-            self._usage_breakdown_message = None
+            generation = self._usage.begin_first_open()
             panel.render_state(metric)
             self.run_worker(self._fetch_usage_breakdown(generation), exclusive=False)
-        elif previous_metric != metric:
+        elif outcome is ActivateOutcome.SWITCH:
             panel.render_state(
                 metric,
                 result=self._usage_breakdown,
@@ -464,20 +501,18 @@ class RegieApp(App):
             )
 
     def _sync_usage_metric(self) -> None:
-        metric = self._usage_pointer_metric or self._usage_keyboard_metric
-        if metric is not None:
+        outcome = self._usage.sync(self._usage_keyboard_metric)
+        if outcome is SyncOutcome.ACTIVATE:
+            metric = self._usage.resolve_metric(self._usage_keyboard_metric)
+            assert metric is not None
             self._activate_usage_metric(metric)
             return
-        if self._usage_active_metric is None:
-            return
-        for tile in self.query(UsageMetricTile):
-            tile.set_class(False, "-hot")
-        self._usage_active_metric = None
-        self._usage_breakdown = None
-        self._usage_breakdown_message = None
-        self._usage_breakdown_generation += 1
-        with contextlib.suppress(Exception):
-            self.query_one("#usage-breakdown", UsageBreakdownPanel).set_class(False, "-visible")
+        if outcome is SyncOutcome.CLOSE:
+            for tile in self.query(UsageMetricTile):
+                tile.set_class(False, "-hot")
+            self._usage.clear()
+            with contextlib.suppress(Exception):
+                self.query_one("#usage-breakdown", UsageBreakdownPanel).set_class(False, "-visible")
 
     def on_usage_metric_tile_left(self, _message: UsageMetricTile.Left) -> None:
         """Defer the close so crossing between adjacent tiles never flickers."""
@@ -533,15 +568,16 @@ class RegieApp(App):
             logger.debug("per-harness usage unavailable: %s", exc)
             message = "per-harness stats unavailable"
 
-        if generation != self._usage_breakdown_generation or self._usage_active_metric is None:
-            return
-        self._usage_breakdown = result
-        self._usage_breakdown_message = message
-        self.query_one("#usage-breakdown", UsageBreakdownPanel).render_state(
-            self._usage_active_metric,
-            result=result,
-            message=message,
-        )
+        accepted = self._usage.accept_fetch(
+            generation=generation, result=result, message=message
+        ) is FetchAccept.ACCEPTED
+        if accepted:
+            assert self._usage_active_metric is not None
+            self.query_one("#usage-breakdown", UsageBreakdownPanel).render_state(
+                self._usage_active_metric,
+                result=result,
+                message=message,
+            )
 
     async def _load_harnesses(self) -> None:
         """Ask the daemon what it can spawn, for the palette to offer.
