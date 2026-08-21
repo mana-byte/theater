@@ -109,9 +109,7 @@ from theater.daemon.observation.service import (
 from theater.daemon.observation.turns import Turn, TurnAccumulator, answers_prompt
 from theater.harness.transcript.observer import open_participant_source
 
-# wall_now and open_participant_source are imported here so tests can
-# monkeypatch them on this module; the service reads them at call-time
-# via the facade (theater.daemon.observer).
+# Imported here so tests can monkeypatch them; the service reads them at call-time via the facade.
 from theater.models import now as wall_now
 
 __all__ = [

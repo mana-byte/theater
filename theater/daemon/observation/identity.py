@@ -67,8 +67,7 @@ def history_correlation_is_ambiguous(registry: Registry, pid: str, history: Hist
             and location_epoch is not None
             and other.last_activity < location_epoch
         ):
-            # This row predates location collection. Permitting it is a bounded
-            # upgrade-policy choice, not evidence that it owned no transcript.
+            # Predates location collection; a bounded upgrade-policy choice.
             continue
         return True
     return False

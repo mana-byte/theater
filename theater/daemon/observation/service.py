@@ -1,14 +1,12 @@
 """Observer lifecycle, supervision, and watch orchestration.
 
-The ``Observer`` class owns the mutable state (watch tasks, source errors,
-identity-loss sets, binding tables) and orchestrates the watch loop. It
-delegates the status policy to ``reducer``, job completion to ``completion``,
-attachment to ``attachment``, and source errors to ``failures``.
+The ``Observer`` class owns the mutable watch-task set and orchestrates the
+watch loop. It delegates status policy to ``Reducer``, job completion to
+``CompletionTracker``, attachment to ``AttachmentManager``, and source errors
+to ``FailureTracker``. All four are concrete, explicitly wired collaborators.
 
-Constants that tests monkeypatch at call-time (``OBSERVATION_FAILURE_GRACE``,
-``wall_now``, ``open_participant_source``) are read from the facade module
-``theater.daemon.observer`` at call-time, not imported into this module's
-globals, so patching ``theater.daemon.observer.X`` takes effect.
+Constants that tests monkeypatch at call-time are read from the facade module
+``theater.daemon.observer`` at call-time via ``_wall_now``/``_grace`` hooks.
 """
 
 from __future__ import annotations
@@ -16,96 +14,25 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import time
 from collections.abc import Sequence
 
 from theater import timing
 from theater.config import ObserverSection
 from theater.constants.observation import (
-    IDLE_CONFIRMATIONS,
     RAW_RESULT_UNSET,
-    RESCUE_CODE,
     SOURCE_CONTRACT_FAILED,
 )
-from theater.daemon.observation.attachment import (
-    accept_attachment as _accept_attachment_fn,
-)
-from theater.daemon.observation.attachment import (
-    is_untrusted_rotation as _is_untrusted_rotation_fn,
-)
-from theater.daemon.observation.attachment import (
-    on_attach as _on_attach_fn,
-)
-from theater.daemon.observation.attachment import (
-    record_operator_binding as _record_operator_binding_fn,
-)
-from theater.daemon.observation.attachment import (
-    release_transcript as _release_transcript_fn,
-)
-from theater.daemon.observation.attachment import (
-    stage_receipt_source as _stage_receipt_source_fn,
-)
-from theater.daemon.observation.completion import (
-    answer_turn as _answer_turn_fn,
-)
-from theater.daemon.observation.completion import (
-    finish_identity_lost_jobs,
-)
-from theater.daemon.observation.completion import (
-    release_jobs as _release_jobs_fn,
-)
-from theater.daemon.observation.failures import (
-    clear_source_error_on_progress as _clear_error_on_progress_fn,
-)
-from theater.daemon.observation.failures import (
-    clear_source_errors as _clear_source_errors_fn,
-)
-from theater.daemon.observation.failures import (
-    confirm_identity_loss as _confirm_identity_loss_fn,
-)
-from theater.daemon.observation.failures import (
-    handle_source_error as _handle_source_error_fn,
-)
-from theater.daemon.observation.failures import (
-    reset_identity_loss_confirmation as _reset_id_loss_fn,
-)
-from theater.daemon.observation.failures import (
-    restore_transcript_identity_loss as _restore_id_loss_fn,
-)
-from theater.daemon.observation.failures import (
-    sweep_identity_lost_grace as _sweep_grace_fn,
-)
-from theater.daemon.observation.identity import (
-    evidence_is_bound_to_another_live,
-    has_cwd_competitor,
-    history_correlation_is_ambiguous,
-    location_bound_to_another_live,
-    session_id_bound_to_another_live,
-    trusted_dead_owner_blocks,
-)
-from theater.daemon.observation.reducer import (
-    QuietClock,
-    apply_batch,
-    apply_screen_reading,
-    has_semantic_progress,
-    record_usage,
-    settle,
-    turn_result,
-    unblock,
-)
-from theater.daemon.observation.screen import end_turn_from_screen_text
-from theater.daemon.observation.turns import (
-    Turn,
-    TurnAccumulator,
-)
+from theater.daemon.observation.attachment import AttachmentManager
+from theater.daemon.observation.completion import CompletionTracker
+from theater.daemon.observation.failures import FailureTracker
+from theater.daemon.observation.identity import history_correlation_is_ambiguous
+from theater.daemon.observation.reducer import QuietClock, Reducer
+from theater.daemon.observation.turns import Turn, TurnAccumulator
 from theater.daemon.registry import Registry
 from theater.harness import (
     HARNESSES,
     Harness,
     HarnessObserver,
-    ScreenConfidence,
-    ScreenKind,
-    status_after,
 )
 from theater.harness import (
     normalize as normalize_harness,
@@ -119,18 +46,10 @@ from theater.harness.source import (
     SourceContractError,
 )
 from theater.models import JobState, Status, Tier
-from theater.provenance import (
-    normalize_provenance,
-)
-from theater.transcript_identity import (
-    TRANSCRIPT_IDENTITY_LOST_CODE,
-    transcript_identity_recovery_message,
-)
+from theater.provenance import normalize_provenance
 
 logger = logging.getLogger("theater.observer")
 
-#: Fallback timings. ``config.ObserverSection`` owns the literal so the
-#: default and the settable value cannot drift. Tests use these directly.
 _DEFAULTS = ObserverSection()
 
 POLL_INTERVAL = _DEFAULTS.poll_interval
@@ -159,8 +78,6 @@ class Observer:
     ):
         self.registry = registry
         self.store = registry.store
-        #: Empty map is legitimate — "observe nothing" — which socket-level
-        #: tests want, since real harness roots point at ~/.claude and ~/.vibe.
         self.harnesses = HARNESSES if harnesses is None else harnesses
         self.poll = poll
         self.search = search
@@ -169,55 +86,76 @@ class Observer:
         self.awaiting = awaiting
         self.screen = screen
         self.rescue = rescue
-        #: When set, turn-end events for a participant with a running job
-        #: finish that job with the assistant text as the result.
         self.jobs = jobs
         self._tasks: dict[str, asyncio.Task] = {}
-        #: Participants whose watcher ended by itself. Not restarted.
         self._retired: set[str] = set()
-        #: Participants we cannot observe, warned about once each.
         self._unobservable: set[str] = set()
-        #: Per-job count of consecutive turn ends that did not match.
-        self._unmatched: dict[str, int] = {}
-        #: First wall-clock occurrence of each still-persistent source failure.
-        self._source_errors: dict[tuple[str, str], float] = {}
-        #: Transcript path -> participant id, for the live-binding guarantee.
-        self._bound_transcripts: dict[str, str] = {}
-        self._binding_correlation: dict[str, str] = {}
-        self._binding_sessions: dict[str, str | None] = {}
-        self._sources: dict[str, Source] = {}
-        self._receipt_candidates: dict[str, tuple[str, str]] = {}
-        self._reset_watch_state: set[str] = set()
-        #: Live quarantine state.
-        self._identity_lost: set[str] = set()
-        self._identity_loss_replayed: set[str] = set()
-        #: Pending identity-loss confirmations: pid -> (location, count).
-        self._identity_loss_pending: dict[str, tuple[str, int]] = {}
         self._supervisor: asyncio.Task | None = None
         self._stopping = asyncio.Event()
+
+        # Concrete collaborators, explicitly wired.
+        self._completion = CompletionTracker(self.store, self.registry, jobs_fn=lambda: self.jobs)
+        self._failures = FailureTracker(
+            self.store,
+            self.registry,
+            wall_now_fn=self._wall_now,
+            grace_fn=self._grace,
+            jobs_fn=lambda: self.jobs,
+        )
+        self._attachments = AttachmentManager(
+            self.store,
+            self.registry,
+            timing_fn=timing.ready_lag,
+        )
+        self._reducer = Reducer(
+            self.store,
+            self.registry,
+            wall_now_fn=self._wall_now,
+            capture_fn=self._capture_for_reducer,
+            monotonic_fn=self._monotonic,
+            config_fn=lambda: self,
+            jobs_fn=lambda: self.jobs,
+        )
 
     # ---- call-time hooks for monkeypatched globals ---------------------
 
     @staticmethod
     def _wall_now() -> float:
-        """Read ``wall_now`` from the facade at call-time for monkeypatch support."""
         from theater.daemon import observer as _facade
 
         return _facade.wall_now()
 
     @staticmethod
     def _open_participant_source(*args, **kwargs):
-        """Read ``open_participant_source`` from the facade at call-time."""
         from theater.daemon import observer as _facade
 
         return _facade.open_participant_source(*args, **kwargs)
 
     @staticmethod
     def _grace() -> float:
-        """Read ``OBSERVATION_FAILURE_GRACE`` from the facade at call-time."""
         from theater.daemon import observer as _facade
 
         return _facade.OBSERVATION_FAILURE_GRACE
+
+    @staticmethod
+    def _monotonic() -> float:
+        """Read time.monotonic from the facade at call-time for monkeypatch support."""
+        from theater.daemon import observer as _facade
+
+        return _facade.time.monotonic()
+
+    def _finish(
+        self,
+        handle: str,
+        result_text: str,
+        *,
+        error_code: str | None = None,
+        state: JobState = JobState.DONE,
+        raw_result: str | object | None = RAW_RESULT_UNSET,
+    ) -> None:
+        self._completion._finish(
+            handle, result_text, error_code=error_code, state=state, raw_result=raw_result
+        )
 
     # ---- lifecycle -----------------------------------------------------
 
@@ -225,8 +163,6 @@ class Observer:
         if not self.harnesses:
             logger.debug("no harnesses configured; observation disabled")
             return
-        # Seed watcher-local quarantine caches before the socket can service a
-        # send against a participant whose restart audit has not been replayed.
         self._reconcile()
         self._supervisor = asyncio.create_task(self._supervise())
 
@@ -243,12 +179,11 @@ class Observer:
         self._supervisor = None
 
     async def reset_for_operator_bind(self, pid: str) -> None:
-        """Stop a live watcher so it reopens from the operator-pinned location."""
         task = self._tasks.pop(pid, None)
         self._retired.discard(pid)
-        self._reset_watch_state.discard(pid)
-        self._clear_source_errors(pid, include_identity_lost=True)
-        self._identity_loss_replayed.discard(pid)
+        self._attachments._reset_watch_state.discard(pid)
+        self._failures.clear_source_errors(pid, include_identity_lost=True)
+        self._failures._identity_loss_replayed.discard(pid)
         if task is not None:
             task.cancel()
             with contextlib.suppress(Exception, asyncio.CancelledError):
@@ -262,111 +197,27 @@ class Observer:
         *,
         prior_owner: str | None = None,
     ) -> None:
-        """Mirror an accepted operator binding in the live collision table."""
-        _record_operator_binding_fn(
+        self._attachments.record_operator_binding(
             pid,
             location,
             session_id,
             prior_owner=prior_owner,
-            store=self.store,
-            bound_transcripts=self._bound_transcripts,
-            binding_correlation=self._binding_correlation,
-            binding_sessions=self._binding_sessions,
-            release_transcript_fn=self._release_transcript,
-            clear_source_errors_fn=self._clear_source_errors,
+            clear_source_errors_fn=self._failures.clear_source_errors,
         )
 
     def transcript_identity_lost(self, pid: str) -> bool:
-        """Pure cached predicate; only the watch path may enter quarantine."""
-        participant = self.store.get_participant(pid)
-        if participant is None or participant.status is Status.DEAD:
-            return False
-        return pid in self._identity_lost
+        return self._failures.transcript_identity_lost(pid)
 
     def _restore_transcript_identity_loss(self, pid: str) -> None:
-        """Replay retained audit once for this watcher lifecycle."""
-        _restore_id_loss_fn(
-            pid,
-            store=self.store,
-            jobs=self.jobs,
-            identity_lost=self._identity_lost,
-            identity_loss_replayed=self._identity_loss_replayed,
-            source_errors=self._source_errors,
-            finish_fn=self._finish,
-            wall_now_fn=self._wall_now,
-            grace=self._grace(),
-        )
+        self._failures.restore_transcript_identity_loss(pid, finish_fn=self._finish)
 
     def _sweep_identity_lost_grace(self, pid: str, failed_at: float | None = None) -> None:
-        """Re-evaluate running jobs against the identity-loss grace window."""
-        _sweep_grace_fn(
-            pid,
-            failed_at,
-            store=self.store,
-            jobs=self.jobs,
-            finish_fn=self._finish,
-            source_errors=self._source_errors,
-            wall_now_fn=self._wall_now,
-            grace=self._grace(),
-        )
-
-    def _evidence_is_bound_to_another_live_participant(
-        self, pid: str, evidence: IdentityLossEvidence
-    ) -> bool:
-        """Whether loss evidence names a transcript another live participant owns."""
-        return evidence_is_bound_to_another_live(
-            pid,
-            evidence.location,
-            evidence.session_id,
-            self._bound_transcripts,
-            self._binding_sessions,
-            self.store,
-            self.registry,
-        )
-
-    def _location_bound_to_another_live(self, pid: str, location: str) -> bool:
-        """Whether *location* is claimed by a different live participant."""
-        return location_bound_to_another_live(
-            pid, location, self._bound_transcripts, self.store, self.registry
-        )
-
-    def _session_id_bound_to_another_live(self, pid: str, session_id: str | None) -> bool:
-        """Whether *session_id* is claimed by a different live participant."""
-        return session_id_bound_to_another_live(
-            pid,
-            session_id,
-            self._bound_transcripts,
-            self._binding_sessions,
-            self.store,
-            self.registry,
-        )
-
-    def _confirm_identity_loss(self, pid: str, evidence: IdentityLossEvidence) -> bool:
-        """Require consecutive relocate windows with the same evidence location."""
-        return _confirm_identity_loss_fn(
-            pid, evidence, identity_loss_pending=self._identity_loss_pending
-        )
-
-    def _reset_identity_loss_confirmation(self, pid: str) -> None:
-        """Semantic progress on the pinned source resets confirmation."""
-        _reset_id_loss_fn(pid, identity_loss_pending=self._identity_loss_pending)
+        self._failures.sweep_identity_lost_grace(pid, failed_at, finish_fn=self._finish)
 
     def mark_transcript_identity_lost(self, pid: str, reason: str) -> None:
-        """Enter quarantine from positive evidence in the observation path."""
-        participant = self.store.get_participant(pid)
-        if participant is None or participant.status is Status.DEAD:
-            return
-        self._handle_source_error(
-            pid,
-            Batch(
-                waiting=True,
-                error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
-                error=transcript_identity_recovery_message(pid, reason),
-            ),
-        )
+        self._failures.mark_transcript_identity_lost(pid, reason, finish_fn=self._finish)
 
     async def _sleep(self, seconds: float) -> None:
-        """Wait, but wake immediately on shutdown."""
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self._stopping.wait(), timeout=seconds)
 
@@ -398,8 +249,6 @@ class Observer:
                 self._warn_unobservable(pid, p)
                 continue
             observer = harness.observer
-            # A transcript is found by cwd; a screen by pane. So cwd is
-            # required for one loop and irrelevant to the other.
             if observer.has_transcript and not p.cwd:
                 self._warn_unobservable(pid, p)
                 continue
@@ -433,7 +282,6 @@ class Observer:
         self._restore_transcript_identity_loss(pid)
         clock = QuietClock()
         turns = TurnAccumulator()
-
         try:
             try:
                 self._register_source(pid, source)
@@ -442,13 +290,11 @@ class Observer:
                 return
             while not self._stopping.is_set():
                 try:
-                    if pid in self._reset_watch_state:
-                        self._reset_watch_state.discard(pid)
+                    if pid in self._attachments._reset_watch_state:
+                        self._attachments._reset_watch_state.discard(pid)
                         clock = QuietClock()
                         turns = TurnAccumulator()
                     if self.transcript_identity_lost(pid):
-                        # Sweep before screen so a broken third-party screen
-                        # classifier cannot starve job terminalization.
                         self._sweep_identity_lost_grace(pid)
                         await self._screen_only(pid, observer, clock)
                         await self._sleep(self.search)
@@ -456,21 +302,56 @@ class Observer:
                     batch = await source.read()
                     self._validate_batch(source, batch)
                     if batch.waiting:
-                        self._update_source_error(pid, batch)
+                        self._failures.update_source_error(pid, batch, finish_fn=self._finish)
                         await self._screen_only(pid, observer, clock)
                         await self._sleep(self.search)
                         continue
-                    self._report_source_error(pid, batch)
+                    self._failures.report_source_error(pid, batch, finish_fn=self._finish)
                     if not self._accept_attachment(pid, source, batch):
                         await self._screen_only(pid, observer, clock)
                         await self._sleep(self.search)
                         continue
-                    self._clear_source_error_on_progress(pid, batch)
-                    if self._apply(pid, batch, clock, turns):
-                        self._unblock_on_semantic_progress(pid, batch)
-                        await self._on_progress(pid, observer, batch, clock)
+                    self._failures.clear_source_error_on_progress(pid, batch)
+                    if self._reducer.apply(
+                        pid,
+                        batch,
+                        clock,
+                        turns,
+                        answer_turn_fn=self._answer_turn,
+                        settle_fn=self._settle,
+                        turn_result_fn=self._turn_result,
+                    ):
+                        self._reducer.unblock_on_semantic_progress(pid, batch)
+                        await self._reducer.on_progress(pid, observer, batch, clock)
                     else:
-                        await self._on_quiet(pid, observer, source, clock, turns)
+                        await self._reducer.on_quiet(
+                            pid,
+                            observer,
+                            source,
+                            clock,
+                            turns,
+                            validate_batch_fn=self._validate_batch,
+                            report_source_error_fn=lambda p, b: self._failures.report_source_error(
+                                p, b, finish_fn=self._finish
+                            ),
+                            accept_attachment_fn=self._accept_attachment,
+                            apply_fn=lambda p, b, c, t: self._reducer.apply(
+                                p,
+                                b,
+                                c,
+                                t,
+                                answer_turn_fn=self._answer_turn,
+                                settle_fn=self._settle,
+                                turn_result_fn=self._turn_result,
+                            ),
+                            on_progress_fn=self._reducer.on_progress,
+                            evidence_bound_fn=self._evidence_is_bound_to_another_live_participant,
+                            confirm_identity_loss_fn=self._confirm_identity_loss,
+                            mark_identity_lost_fn=self.mark_transcript_identity_lost,
+                            reset_identity_loss_fn=self._reset_identity_loss_confirmation,
+                            is_untrusted_rotation_fn=self._is_untrusted_rotation,
+                            rescue_jobs_fn=self._rescue_jobs,
+                        )
                 except asyncio.CancelledError:
                     raise
                 except SourceContractError:
@@ -480,19 +361,47 @@ class Observer:
                     logger.exception("observing %s failed", pid)
                 await self._sleep(self.poll)
         finally:
-            self._clear_source_errors(pid, include_identity_lost=True)
-            self._identity_loss_replayed.discard(pid)
-            self._reset_watch_state.discard(pid)
-            self._receipt_candidates.pop(pid, None)
-            self._sources.pop(pid, None)
-            self._release_transcript(pid)
+            self._failures.clear_source_errors(pid, include_identity_lost=True)
+            self._failures._identity_loss_replayed.discard(pid)
+            self._attachments._reset_watch_state.discard(pid)
+            self._attachments._receipt_candidates.pop(pid, None)
+            self._attachments._sources.pop(pid, None)
+            self._attachments.release_transcript(pid)
             try:
                 await source.aclose()
             except (Exception, asyncio.CancelledError):
                 logger.debug("closing source for %s failed", pid, exc_info=True)
 
+    async def _watch_screen(self, pid: str, harness_name: str) -> None:
+        """Derive status from the rendered screen, for a parser-less harness."""
+        from theater.constants.observation import IDLE_CONFIRMATIONS
+
+        observer = self.harnesses[harness_name].observer
+        idle_streak = 0
+        ended = False
+        while not self._stopping.is_set():
+            try:
+                p = self.store.get_participant(pid)
+                if p is None or p.status is Status.DEAD:
+                    return
+                capture = await self._capture(p.tmux_pane) if p.tmux_pane else None
+                if capture is not None:
+                    idle_streak = idle_streak + 1 if observer.is_idle_screen(capture) else 0
+                    if idle_streak >= IDLE_CONFIRMATIONS:
+                        if not ended:
+                            ended = True
+                            self._end_turn_from_screen(pid, capture)
+                        self._settle(pid, Status.IDLE)
+                    elif idle_streak == 0:
+                        ended = False
+                        self._settle(pid, Status.WORKING)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("observing screen of %s failed", pid)
+            await self._sleep(self.screen)
+
     def _open_source(self, pid: str, observer: HarnessObserver) -> Source | None:
-        """Build the source for a participant, from what the registry knows."""
         p = self.store.get_participant(pid)
         if p is None:
             return None
@@ -514,12 +423,14 @@ class Observer:
         return source
 
     def _register_source(self, pid: str, source: Source) -> None:
-        self._sources[pid] = source
-        self._stage_pending_receipt(pid, source)
+        self._attachments.register_source(
+            pid,
+            source,
+            clear_source_errors_fn=self._failures.clear_source_errors,
+        )
 
     @staticmethod
     def _validate_batch(source: Source, batch: Batch) -> None:
-        """Reject contradictory source facts without stranding a candidate."""
         if not (batch.waiting and batch.attached is not None):
             return
         source.discard_attachment()
@@ -527,145 +438,53 @@ class Observer:
             f"{type(source).__name__} returned a batch that is both waiting and attached"
         )
 
+    # ---- legacy private method wrappers (explicit forwarding) ----------
+
     def _record_usage(self, pid: str, event) -> bool:
-        """Persist a usage report, returning whether it was new."""
-        return record_usage(pid, event, store=self.store, jobs=self.jobs)
+        return self._reducer.record_usage(pid, event)
 
     def _apply(self, pid: str, batch: Batch, clock: QuietClock, turns: TurnAccumulator) -> bool:
-        """Put a batch on the bus and move the participant's status."""
-        return apply_batch(
+        return self._reducer.apply(
             pid,
             batch,
             clock,
             turns,
-            store=self.store,
-            registry=self.registry,
-            jobs=self.jobs,
-            record_usage_fn=self._record_usage,
-            settle_fn=self._settle,
             answer_turn_fn=self._answer_turn,
-            turn_result_fn=turn_result,
+            settle_fn=self._settle,
+            turn_result_fn=self._turn_result,
         )
 
     @staticmethod
     def _has_semantic_progress(batch: Batch) -> bool:
-        """Whether a batch says something about the participant, not just its source."""
-        return has_semantic_progress(batch)
+        return Reducer.has_semantic_progress(batch)
 
     def _unblock_on_semantic_progress(self, pid: str, batch: Batch) -> None:
-        """Raw bookkeeping cannot overrule a modal found by the screen arm."""
-        if self._has_semantic_progress(batch):
-            self._unblock(pid)
+        self._reducer.unblock_on_semantic_progress(pid, batch)
 
     async def _on_progress(
-        self,
-        pid: str,
-        observer: HarnessObserver,
-        batch: Batch,
-        clock: QuietClock,
+        self, pid: str, observer: HarnessObserver, batch: Batch, clock: QuietClock
     ) -> None:
-        """Reset only the clocks justified by this batch's evidence."""
-        if self._has_semantic_progress(batch):
-            clock.stir()
-            return
-        clock.stir_raw()
-        await self._screen_status_due(pid, observer, clock)
+        await self._reducer.on_progress(pid, observer, batch, clock)
 
     def _handle_source_error(self, pid: str, batch: Batch) -> None:
-        """Report broken exact correlation and bound affected awaits."""
-        _handle_source_error_fn(
-            pid,
-            batch,
-            store=self.store,
-            jobs=self.jobs,
-            source_errors=self._source_errors,
-            identity_lost=self._identity_lost,
-            bus_append_fn=self.store.bus_append,
-            finish_fn=self._finish,
-            wall_now_fn=self._wall_now,
-            grace=self._grace(),
-        )
+        self._failures.handle_source_error(pid, batch, finish_fn=self._finish)
 
     def _update_source_error(self, pid: str, batch: Batch) -> None:
-        if batch.error_code is None:
-            self._clear_source_errors(pid)
-            return
-        self._handle_source_error(pid, batch)
+        self._failures.update_source_error(pid, batch, finish_fn=self._finish)
 
     def _report_source_error(self, pid: str, batch: Batch) -> None:
-        if batch.error_code is not None:
-            self._handle_source_error(pid, batch)
+        self._failures.report_source_error(pid, batch, finish_fn=self._finish)
 
     def _clear_source_error_on_progress(self, pid: str, batch: Batch) -> None:
-        _clear_error_on_progress_fn(
-            pid,
-            batch,
-            source_errors=self._source_errors,
-            identity_lost=self._identity_lost,
-            identity_loss_pending=self._identity_loss_pending,
-            reset_identity_loss_confirmation_fn=self._reset_identity_loss_confirmation,
-        )
+        self._failures.clear_source_error_on_progress(pid, batch)
 
     def _clear_source_errors(self, pid: str, *, include_identity_lost: bool = False) -> None:
-        _clear_source_errors_fn(
-            pid,
-            source_errors=self._source_errors,
-            identity_lost=self._identity_lost,
-            identity_loss_pending=self._identity_loss_pending,
-            include_identity_lost=include_identity_lost,
-        )
+        self._failures.clear_source_errors(pid, include_identity_lost=include_identity_lost)
 
     def _turn_result(self, event, turn: Turn) -> tuple[str, str | object | None]:
-        return turn_result(event, turn)
-
-    async def _watch_screen(self, pid: str, harness_name: str) -> None:
-        """Derive status from the rendered screen, for a parser-less harness."""
-        observer = self.harnesses[harness_name].observer
-        idle_streak = 0
-        ended = False
-
-        while not self._stopping.is_set():
-            try:
-                p = self.store.get_participant(pid)
-                if p is None or p.status is Status.DEAD:
-                    return
-                capture = await self._capture(p.tmux_pane) if p.tmux_pane else None
-                if capture is not None:
-                    idle_streak = idle_streak + 1 if observer.is_idle_screen(capture) else 0
-                    if idle_streak >= IDLE_CONFIRMATIONS:
-                        if not ended:
-                            ended = True
-                            self._end_turn_from_screen(pid, capture)
-                        self._settle(pid, Status.IDLE)
-                    elif idle_streak == 0:
-                        ended = False
-                        self._settle(pid, Status.WORKING)
-                    # A streak of one is undecided.
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("observing screen of %s failed", pid)
-            await self._sleep(self.screen)
-
-    def _end_turn_from_screen(self, pid: str, capture: str) -> None:
-        """Record a turn boundary that was seen rather than read."""
-        text = end_turn_from_screen_text(capture)
-        self.store.bus_append(
-            "agent.assistant",
-            from_id=pid,
-            payload={
-                "text": text,
-                "tool": None,
-                "ts": None,
-                "turn_end": True,
-                "index": -1,
-                "source": "screen",
-            },
-        )
-        self._answer_turn(pid, text, raw_result=None)
+        return self._reducer.turn_result(event, turn)
 
     async def _capture(self, pane: str) -> str | None:
-        """The pane's rendered text, or None if it could not be read."""
         from theater.tmux import client as tmux
 
         try:
@@ -673,9 +492,12 @@ class Observer:
         except Exception:
             return None
 
+    async def _capture_for_reducer(self, pane: str) -> str | None:
+        """Read _capture at call-time so instance monkeypatches take effect."""
+        return await self._capture(pane)
+
     def _unblock(self, pid: str) -> None:
-        """New output means the agent is working, whatever the screen said."""
-        unblock(pid, store=self.store, registry=self.registry)
+        self._reducer._unblock(pid)
 
     async def _on_quiet(
         self,
@@ -685,232 +507,136 @@ class Observer:
         clock: QuietClock,
         turns: TurnAccumulator,
     ) -> None:
-        """Nothing arrived this tick. Run the three quiet timers.
-
-        All read the same silence, and none may reset another: see
-        QuietClock for what happens when they share a clock.
-        """
-        now = time.monotonic()
-        clock.begin_quiet(now)
-
-        # Ask the source whether it should be reading somewhere else.
-        if clock.quiet_for(now) > self.relocate:
-            batch = await source.refresh()
-            self._validate_batch(source, batch)
-            self._report_source_error(pid, batch)
-            untrusted_refresh = batch.attached is not None and self._is_untrusted_rotation(
-                pid, batch.attached
-            )
-            if untrusted_refresh:
-                source.discard_attachment()
-            accepted = not untrusted_refresh and self._accept_attachment(pid, source, batch)
-            if accepted and self._apply(pid, batch, clock, turns):
-                await self._on_progress(pid, observer, batch, clock)
-                return
-            evidence = await source.probe_identity_loss()
-            if (
-                evidence is not None
-                and not self._evidence_is_bound_to_another_live_participant(pid, evidence)
-                and await self._screen_is_positively_working(pid, observer)
-            ):
-                if self._confirm_identity_loss(pid, evidence):
-                    self.mark_transcript_identity_lost(
-                        pid,
-                        (
-                            "a newer same-harness/cwd transcript candidate appeared while the "
-                            "trusted pin was inert and the pane was visibly working: "
-                            f"{evidence.location}"
-                        ),
-                    )
-                clock.quiet_since = now
-                return
-            # A relocate window that found no admissible evidence breaks the
-            # consecutive chain. Reset so the next qualifying window starts fresh.
-            self._reset_identity_loss_confirmation(pid)
-            clock.quiet_since = now
-
-        if clock.screen_quiet_for(now) > self.awaiting:
-            await self._check_idle_screen(pid, observer)
-            clock.screen_quiet_since = now  # throttle
-
-        if clock.rescue_quiet_for(now) > self.rescue:
-            oldest = None
-            if self.jobs is not None:
-                oldest = self.store.oldest_running_job_for_target(pid)
-            if oldest is None:
-                clock.rescue_since = now  # throttle
-            elif self._wall_now() - oldest.created_at > self.rescue:
-                await self._rescue_jobs(pid, observer, clock)
-                clock.rescue_since = now  # throttle
+        await self._reducer.on_quiet(
+            pid,
+            observer,
+            source,
+            clock,
+            turns,
+            validate_batch_fn=self._validate_batch,
+            report_source_error_fn=lambda p, b: self._failures.report_source_error(
+                p, b, finish_fn=self._finish
+            ),
+            accept_attachment_fn=self._accept_attachment,
+            apply_fn=lambda p, b, c, t: self._reducer.apply(
+                p,
+                b,
+                c,
+                t,
+                answer_turn_fn=self._answer_turn,
+                settle_fn=self._settle,
+                turn_result_fn=self._turn_result,
+            ),
+            on_progress_fn=self._reducer.on_progress,
+            evidence_bound_fn=self._evidence_is_bound_to_another_live_participant,
+            confirm_identity_loss_fn=self._confirm_identity_loss,
+            mark_identity_lost_fn=self.mark_transcript_identity_lost,
+            reset_identity_loss_fn=self._reset_identity_loss_confirmation,
+            is_untrusted_rotation_fn=self._is_untrusted_rotation,
+            rescue_jobs_fn=self._rescue_jobs,
+        )
 
     async def _screen_only(self, pid: str, observer: HarnessObserver, clock: QuietClock) -> None:
-        """The screen arm of ``_on_quiet``, for a source that has not attached.
-
-        One arm of the three, not all of them, and that is the whole point of
-        keeping it separate rather than calling ``_on_quiet`` here.
-        """
-        await self._screen_status_due(pid, observer, clock)
+        await self._reducer.screen_only(pid, observer, clock)
 
     async def _screen_status_due(
         self, pid: str, observer: HarnessObserver, clock: QuietClock
     ) -> None:
-        """Run the independently throttled status-only screen arm when due."""
-        now = time.monotonic()
-        if clock.screen_quiet_since is None:
-            clock.screen_quiet_since = now
-        if clock.screen_quiet_for(now) > self.awaiting:
-            await self._check_idle_screen(pid, observer)
-            clock.screen_quiet_since = now  # throttle
+        await self._reducer._screen_status_due(pid, observer, clock)
 
     def _is_untrusted_rotation(self, pid: str, attached: Attachment) -> bool:
-        return _is_untrusted_rotation_fn(pid, attached, self.store)
+        return self._attachments.is_untrusted_rotation(pid, attached)
 
     async def _screen_is_positively_working(self, pid: str, observer: HarnessObserver) -> bool:
-        p = self.store.get_participant(pid)
-        if p is None or p.status is Status.DEAD or not p.tmux_pane:
-            return False
-        capture = await self._capture(p.tmux_pane)
-        if capture is None:
-            return False
-        reading = observer.screen_reading(capture)
-        self._apply_screen_reading(pid, reading)
-        return reading.kind is ScreenKind.WORKING and reading.confidence is ScreenConfidence.HIGH
+        return await self._reducer.screen_is_positively_working(pid, observer)
 
     def _accept_attachment(self, pid: str, source: Source, batch: Batch) -> bool:
-        return _accept_attachment_fn(
+        return self._attachments.accept_attachment(
             pid,
             source,
             batch,
-            store=self.store,
-            registry=self.registry,
-            sources=self._sources,
-            bound_transcripts=self._bound_transcripts,
-            binding_correlation=self._binding_correlation,
-            binding_sessions=self._binding_sessions,
             handle_source_error_fn=self._handle_source_error,
             on_attach_fn=self._on_attach,
-            clear_source_errors_fn=self._clear_source_errors,
+            clear_source_errors_fn=self._failures.clear_source_errors,
         )
 
+    def _handle_attachment_ambiguity(self, pid: str, attached: Attachment) -> None:
+        self._attachments._handle_attachment_ambiguity(pid, attached, self._handle_source_error)
+
+    def _revoke_binding(self, location: str, owner: str) -> None:
+        self._attachments._revoke_binding(location, owner)
+
     def _has_cwd_competitor(self, pid: str, collision_domain: str | None) -> bool:
-        return has_cwd_competitor(pid, collision_domain, self.store, self.registry, self._sources)
+        from theater.daemon.observation.identity import has_cwd_competitor
+
+        return has_cwd_competitor(
+            pid, collision_domain, self.store, self.registry, self._attachments._sources
+        )
 
     def _trusted_dead_owner_blocks(self, pid: str, attached: Attachment) -> bool:
+        from theater.daemon.observation.identity import trusted_dead_owner_blocks
+
         return trusted_dead_owner_blocks(pid, attached, self.store, self.registry)
 
     def history_is_ambiguous(self, pid: str, history: History) -> bool:
-        """Whether a short-lived history read is only a contested cwd guess."""
         return history_correlation_is_ambiguous(self.registry, pid, history)
 
     def transcript_receipt(self, pid: str, *, location: str, session_id: str) -> str:
-        """Stage exact receipt evidence without persisting it before admission."""
-        source = self._sources.get(pid)
-        if source is None:
-            self._receipt_candidates[pid] = (location, session_id)
-            return "staged"
-        return self._stage_receipt_source(pid, source, location=location, session_id=session_id)
+        return self._attachments.transcript_receipt(
+            pid,
+            location=location,
+            session_id=session_id,
+            clear_source_errors_fn=self._failures.clear_source_errors,
+        )
 
     def _stage_pending_receipt(self, pid: str, source: Source) -> None:
-        candidate = self._receipt_candidates.pop(pid, None)
-        if candidate is None:
-            return
-        location, session_id = candidate
-        self._stage_receipt_source(pid, source, location=location, session_id=session_id)
+        self._attachments.stage_pending_receipt(
+            pid,
+            source,
+            clear_source_errors_fn=self._failures.clear_source_errors,
+        )
 
     def _stage_receipt_source(
         self, pid: str, source: Source, *, location: str, session_id: str
     ) -> str:
-        return _stage_receipt_source_fn(
+        return self._attachments._stage_receipt_source(
             pid,
             source,
             location=location,
             session_id=session_id,
-            store=self.store,
-            binding_correlation=self._binding_correlation,
-            binding_sessions=self._binding_sessions,
-            clear_source_errors_fn=self._clear_source_errors,
+            clear_source_errors_fn=self._failures.clear_source_errors,
         )
 
     def _on_attach(self, pid: str, attached: Attachment) -> None:
-        _on_attach_fn(
+        self._attachments.on_attach(
             pid,
             attached,
-            store=self.store,
-            registry=self.registry,
-            bound_transcripts=self._bound_transcripts,
-            binding_correlation=self._binding_correlation,
-            binding_sessions=self._binding_sessions,
-            release_transcript_fn=self._release_transcript,
             settle_fn=self._settle,
             settle_from_event_fn=self._settle_from_event,
             answer_turn_fn=self._answer_turn,
-            turn_result_fn=turn_result,
-            timing_fn=timing.ready_lag,
+            turn_result_fn=self._turn_result,
         )
 
     def _settle_from_event(self, pid: str, event) -> None:
-        """Settle status and answer a turn from an attach-time event."""
-        self._settle(pid, status_after(event))
-        if event.turn_end:
-            result_text, raw_result = self._turn_result(event, Turn(""))
-            self._answer_turn(pid, result_text, raw_result=raw_result)
+        self._reducer.settle_from_event(
+            pid, event, answer_turn_fn=self._answer_turn, turn_result_fn=self._turn_result
+        )
 
     def _release_transcript(self, pid: str) -> None:
-        """Drop a participant's claim on its transcript, if it still holds it."""
-        _release_transcript_fn(
-            pid,
-            bound_transcripts=self._bound_transcripts,
-            binding_correlation=self._binding_correlation,
-            binding_sessions=self._binding_sessions,
-        )
+        self._attachments.release_transcript(pid)
 
     def _settle(self, pid: str, desired: Status) -> None:
-        settle(pid, desired, store=self.store, registry=self.registry)
+        self._reducer.settle(pid, desired)
 
     async def _check_idle_screen(self, pid: str, observer: HarnessObserver) -> None:
-        """Map the rendered screen to a status, for any non-DEAD participant.
-
-        The mapping is applied regardless of confidence. Being wrong here costs
-        a mislabel in the display; the send gate, which is built on the same
-        ``screen_reading``, requires ``high`` confidence because being wrong
-        there makes a pane permanently unreachable. The asymmetry is deliberate.
-        """
-        p = self.store.get_participant(pid)
-        if p is None or p.status is Status.DEAD:
-            return
-        if not p.tmux_pane:
-            return
-        capture = await self._capture(p.tmux_pane)
-        if capture is None:
-            return
-        reading = observer.screen_reading(capture)
-        self._apply_screen_reading(pid, reading)
+        await self._reducer.check_idle_screen(pid, observer)
 
     def _apply_screen_reading(self, pid: str, reading) -> None:
-        apply_screen_reading(pid, reading, store=self.store, registry=self.registry)
+        self._reducer.apply_screen_reading(pid, reading)
 
     async def _rescue_jobs(self, pid: str, observer: HarnessObserver, clock: QuietClock) -> None:
-        """Finish a job whose turn end was never read, so the caller unblocks."""
-        if self.jobs is None or not self.store.running_jobs_for_target(pid):
-            return
-        p = self.store.get_participant(pid)
-        if p is None or not p.tmux_pane:
-            return
-        capture = await self._capture(p.tmux_pane)
-        if capture is None:
-            return
-        if observer.screen_reading(capture).kind is not ScreenKind.PROMPT:
-            return
-        logger.warning(
-            "no turn end seen for %s after %.0fs of quiet; finishing its jobs",
-            pid,
-            self.rescue,
-        )
-        self._release_jobs(
-            pid,
-            clock.last_text,
-            error_code=RESCUE_CODE,
-            raw_result=None,
+        await self._completion.rescue_jobs(
+            pid, observer, clock, rescue_timeout=self.rescue, capture_fn=self._capture
         )
 
     def _answer_turn(
@@ -921,16 +647,7 @@ class Observer:
         *,
         raw_result: str | object | None = RAW_RESULT_UNSET,
     ) -> None:
-        _answer_turn_fn(
-            pid,
-            result_text,
-            heard,
-            store=self.store,
-            jobs=self.jobs,
-            unmatched=self._unmatched,
-            raw_result=raw_result,
-            finish_fn=self._finish,
-        )
+        self._completion.answer_turn(pid, result_text, heard, raw_result=raw_result)
 
     def _release_jobs(
         self,
@@ -940,49 +657,111 @@ class Observer:
         error_code: str | None = None,
         raw_result: str | object | None = RAW_RESULT_UNSET,
     ) -> None:
-        _release_jobs_fn(
-            pid,
-            result_text,
-            error_code=error_code,
-            raw_result=raw_result,
-            store=self.store,
-            jobs=self.jobs,
-            finish_fn=self._finish,
+        self._completion.release_jobs(
+            pid, result_text, error_code=error_code, raw_result=raw_result
         )
 
     def _finish_identity_lost_jobs(self, pid: str, result_text: str) -> None:
-        finish_identity_lost_jobs(
+        self._completion.finish_identity_lost_jobs(pid, result_text)
+
+    # ---- legacy instance-state properties for test monkeypatching ------
+
+    @property
+    def _unmatched(self) -> dict[str, int]:
+        return self._completion._unmatched
+
+    @_unmatched.setter
+    def _unmatched(self, value: dict[str, int]) -> None:
+        self._completion._unmatched = value
+
+    @property
+    def _source_errors(self) -> dict:
+        return self._failures._source_errors
+
+    @_source_errors.setter
+    def _source_errors(self, value) -> None:
+        self._failures._source_errors = value
+
+    @property
+    def _identity_lost(self) -> set[str]:
+        return self._failures._identity_lost
+
+    @property
+    def _identity_loss_replayed(self) -> set[str]:
+        return self._failures._identity_loss_replayed
+
+    @_identity_loss_replayed.setter
+    def _identity_loss_replayed(self, value: set[str]) -> None:
+        self._failures._identity_loss_replayed = value
+
+    @property
+    def _identity_loss_pending(self) -> dict:
+        return self._failures._identity_loss_pending
+
+    @_identity_loss_pending.setter
+    def _identity_loss_pending(self, value: dict) -> None:
+        self._failures._identity_loss_pending = value
+
+    @property
+    def _bound_transcripts(self) -> dict[str, str]:
+        return self._attachments._bound_transcripts
+
+    @_bound_transcripts.setter
+    def _bound_transcripts(self, value: dict[str, str]) -> None:
+        self._attachments._bound_transcripts = value
+
+    @property
+    def _binding_correlation(self) -> dict[str, str]:
+        return self._attachments._binding_correlation
+
+    @property
+    def _binding_sessions(self) -> dict[str, str | None]:
+        return self._attachments._binding_sessions
+
+    @property
+    def _sources(self) -> dict[str, Source]:
+        return self._attachments._sources
+
+    @property
+    def _receipt_candidates(self) -> dict[str, tuple[str, str]]:
+        return self._attachments._receipt_candidates
+
+    @property
+    def _reset_watch_state(self) -> set[str]:
+        return self._attachments._reset_watch_state
+
+    @_reset_watch_state.setter
+    def _reset_watch_state(self, value: set[str]) -> None:
+        self._attachments._reset_watch_state = value
+
+    def _evidence_is_bound_to_another_live_participant(
+        self, pid: str, evidence: IdentityLossEvidence
+    ) -> bool:
+        return self._failures.evidence_is_bound_to_another_live(
             pid,
-            result_text,
-            store=self.store,
-            jobs=self.jobs,
-            finish_fn=self._finish,
+            evidence,
+            bound_transcripts=self._attachments._bound_transcripts,
+            binding_sessions=self._attachments._binding_sessions,
         )
 
-    def _finish(
-        self,
-        handle: str,
-        result_text: str,
-        *,
-        error_code: str | None = None,
-        state: JobState = JobState.DONE,
-        raw_result: str | object | None = RAW_RESULT_UNSET,
-    ) -> None:
-        """Resolve one job. The result is already clipped by the parser."""
-        assert self.jobs is not None
-        self._unmatched.pop(handle, None)
-        if raw_result is RAW_RESULT_UNSET:
-            self.jobs.finish(
-                handle,
-                state=state,
-                result=result_text or "",
-                error_code=error_code,
-            )
-        else:
-            self.jobs.finish(
-                handle,
-                state=state,
-                result=result_text or "",
-                error_code=error_code,
-                raw_result=raw_result,
-            )
+    def _location_bound_to_another_live(self, pid: str, location: str) -> bool:
+        return self._failures._location_bound_to_another_live(
+            pid, location, self._attachments._bound_transcripts
+        )
+
+    def _session_id_bound_to_another_live(self, pid: str, session_id: str | None) -> bool:
+        return self._failures._session_id_bound_to_another_live(
+            pid,
+            session_id,
+            self._attachments._bound_transcripts,
+            self._attachments._binding_sessions,
+        )
+
+    def _confirm_identity_loss(self, pid: str, evidence: IdentityLossEvidence) -> bool:
+        return self._failures.confirm_identity_loss(pid, evidence)
+
+    def _reset_identity_loss_confirmation(self, pid: str) -> None:
+        self._failures.reset_identity_loss_confirmation(pid)
+
+    def _end_turn_from_screen(self, pid: str, capture: str) -> None:
+        self._reducer.end_turn_from_screen(pid, capture, answer_turn_fn=self._answer_turn)
