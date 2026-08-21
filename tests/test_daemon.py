@@ -194,12 +194,7 @@ async def test_spawn_response_format_refuses_resume_that_drops_prompt_before_sid
 
 
 async def test_a_freshly_spawned_participant_is_idle_before_hello(client, fake_tmux):
-    """A spawned participant is IDLE from the moment it is created.
-
-    Before the STARTING status was removed, a participant that never said
-    hello could be pinned at STARTING forever. Starting at IDLE deletes that
-    failure class entirely.
-    """
+    """A spawned participant is IDLE from the moment it is created."""
     record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
     assert record["status"] == "idle"
 

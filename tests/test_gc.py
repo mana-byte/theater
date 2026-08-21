@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from theater.config import RetentionSection
 from theater.daemon.gc import SweepResult, sweep
 from theater.daemon.jobs import JobManager, JobState
@@ -443,7 +445,27 @@ async def test_active_identity_loss_audit_survives_batched_bus_retention(store):
     assert [row[0] for row in store.conn.execute(bus.select()).fetchall()] == [loss_id]
 
 
-async def test_cleared_identity_loss_audit_returns_to_normal_retention(store):
+@pytest.mark.parametrize(
+    ("kind", "payload", "deleted", "remaining"),
+    [
+        ("operator.transcript_unbind", "{}", 1, ["operator.transcript_unbind"]),
+        (
+            "agent.transcript_receipt",
+            json.dumps({"admission": "accepted"}),
+            1,
+            ["agent.transcript_receipt"],
+        ),
+        (
+            "agent.transcript_receipt",
+            json.dumps({"admission": "staged"}),
+            0,
+            ["agent.observation_error", "agent.transcript_receipt"],
+        ),
+    ],
+)
+async def test_identity_loss_audit_retention_follows_clearing_events(
+    store, kind, payload, deleted, remaining
+):
     _participant(store, status=Status.IDLE)
     old_ts = now() - 30 * _DAY
     _bus(
@@ -453,14 +475,12 @@ async def test_cleared_identity_loss_audit_returns_to_normal_retention(store):
         to_id="p1",
         payload=json.dumps({"code": TRANSCRIPT_IDENTITY_LOST_CODE}),
     )
-    _bus(store, kind="operator.transcript_unbind", ts=now(), to_id="p1", payload="{}")
+    _bus(store, kind=kind, ts=now(), to_id="p1", payload=payload)
 
     result = await sweep(store, _retention(bus_days=7, batch=1))
 
-    assert result.bus == 1
-    assert [row._mapping["kind"] for row in store.conn.execute(bus.select())] == [
-        "operator.transcript_unbind"
-    ]
+    assert result.bus == deleted
+    assert [row._mapping["kind"] for row in store.conn.execute(bus.select())] == remaining
 
 
 async def test_send_refused_of_same_age_survives(store):
