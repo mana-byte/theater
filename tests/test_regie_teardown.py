@@ -173,3 +173,71 @@ async def test_a_failed_mouse_restore_does_not_block_status_restore(monkeypatch,
     await _app(mouse_set=True, mouse_prev="off", status_set=True, status_prev="on")._teardown()
     # Mouse restore failed, but status restore still happened.
     assert ("set", "status", "on", "$1") in tmux_calls
+
+
+# ---- wrapper dispatch ---------------------------------------------------
+
+
+async def test_teardown_dispatches_through_app_wrappers_in_order():
+    """Monkeypatched RegieApp wrappers must be called, in teardown order."""
+    calls: list[str] = []
+    app = _app(mouse_set=True, return_key_set=True)
+
+    async def fake_restore_mouse():
+        calls.append("restore_mouse")
+
+    async def fake_restore_status():
+        calls.append("restore_status")
+
+    async def fake_unbind_return_key():
+        calls.append("unbind_return_key")
+
+    app._restore_mouse = fake_restore_mouse
+    app._restore_status = fake_restore_status
+    app._unbind_return_key = fake_unbind_return_key
+    await app._teardown()
+    assert calls == ["restore_mouse", "restore_status", "unbind_return_key"]
+
+
+async def test_mount_dispatches_through_app_wrappers_in_order(monkeypatch):
+    """Monkeypatched RegieApp wrappers must be called, in mount order."""
+    calls: list[str] = []
+    app = RegieApp()
+
+    monkeypatch.setattr(app_mod.tmux, "current_pane", lambda: "%1")
+
+    async def fake_display_message(fmt, *, target=None):
+        return {"#{window_id}": "@1", "#{session_id}": "$1", "#{session_name}": "s"}[fmt]
+
+    async def fake_show_option(name, *, target):
+        return None
+
+    async def fake_set_option(name, value, *, target):
+        pass
+
+    async def fake_bind_key_if_free(table, key, command, *, note):
+        return True
+
+    monkeypatch.setattr(app_mod.tmux, "display_message", fake_display_message)
+    monkeypatch.setattr(app_mod.tmux, "show_option", fake_show_option)
+    monkeypatch.setattr(app_mod.tmux, "set_option", fake_set_option)
+    monkeypatch.setattr(app_mod.tmux, "bind_key_if_free", fake_bind_key_if_free)
+
+    async def fake_bind_return_key():
+        calls.append("bind_return_key")
+
+    async def fake_enable_mouse():
+        calls.append("enable_mouse")
+
+    async def fake_hide_status():
+        calls.append("hide_status")
+
+    app._bind_return_key = fake_bind_return_key
+    app._enable_mouse = fake_enable_mouse
+    app._hide_status = fake_hide_status
+    await app._session.discover_and_setup(
+        bind_return_key=app._bind_return_key,
+        enable_mouse=app._enable_mouse,
+        hide_status=app._hide_status,
+    )
+    assert calls == ["bind_return_key", "enable_mouse", "hide_status"]

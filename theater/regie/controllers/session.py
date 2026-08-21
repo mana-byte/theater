@@ -20,8 +20,7 @@ from typing import Any, Protocol
 
 logger = logging.getLogger("theater.regie")
 
-#: Note tag on the <prefix> h return key, so teardown can tell "ours" from
-#: a binding someone else made after we installed it.
+# Note tag on the <prefix> h return key, so teardown can tell ours from theirs.
 _RETURN_KEY_NOTE = "theater-regie-return"
 
 
@@ -108,12 +107,21 @@ class SessionController:
         self._return_key_set: bool = False
         self._torn_down: bool = False
 
-    async def discover_and_setup(self) -> None:
+    async def discover_and_setup(
+        self,
+        *,
+        bind_return_key: Any = None,
+        enable_mouse: Any = None,
+        hide_status: Any = None,
+    ) -> None:
         """Sequential pane/window/session/name discovery, then mouse and status.
 
         Preserves exact mount ordering: partial discovery of pane, then
         window/session/name; return-key bind whenever a pane exists even if
         later display discovery fails; then enable mouse; then hide status.
+        When hooks are provided, they are called instead of the controller's
+        own methods so the app's legacy wrappers (and any monkeypatched
+        subclass overrides) stay in the dispatch path.
         """
         my_pane = self._ops.current_pane()
         if my_pane:
@@ -126,9 +134,9 @@ class SessionController:
                 )
             except Exception as exc:
                 logger.debug("could not discover window/session id: %s", exc)
-            await self._bind_return_key()
-        await self._enable_mouse()
-        await self._hide_status()
+            await (bind_return_key if bind_return_key is not None else self._bind_return_key)()
+        await (enable_mouse if enable_mouse is not None else self._enable_mouse)()
+        await (hide_status if hide_status is not None else self._hide_status)()
 
     async def _enable_mouse(self) -> None:
         """Turn tmux mouse reporting on for the régie's session."""
@@ -194,12 +202,21 @@ class SessionController:
         except Exception as exc:
             logger.debug("could not unbind <prefix> h return key: %s", exc)
 
-    async def teardown(self, *, staged_pane: str | None) -> None:
+    async def teardown(
+        self,
+        *,
+        staged_pane: str | None,
+        restore_mouse: Any = None,
+        restore_status: Any = None,
+        unbind_return_key: Any = None,
+    ) -> None:
         """Leave tmux as we found it: nothing staged, options restored.
 
         Preserves exact teardown ordering: mark torn down first; break staged
         pane best-effort; restore mouse; restore status; unbind owned return
-        key. Each failure is isolated so later restores still run.
+        key. Each failure is isolated so later restores still run. When hooks
+        are provided, they are called instead of the controller's own methods
+        so the app's legacy wrappers stay in the dispatch path.
         """
         if self._torn_down:
             return
@@ -209,6 +226,6 @@ class SessionController:
                 await self._ops.break_pane(staged_pane)
             except Exception as exc:
                 logger.debug("unstage on exit failed: %s", exc)
-        await self._restore_mouse()
-        await self._restore_status()
-        await self._unbind_return_key()
+        await (restore_mouse if restore_mouse is not None else self._restore_mouse)()
+        await (restore_status if restore_status is not None else self._restore_status)()
+        await (unbind_return_key if unbind_return_key is not None else self._unbind_return_key)()

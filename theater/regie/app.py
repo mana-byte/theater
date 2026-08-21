@@ -438,7 +438,13 @@ class RegieApp(App):
         # agree or Textual and tmux disagree about the sidebar edge.
         self.query_one("#sidebar").styles.width = self.settings.regie.sidebar_width
         # Discover our own pane/window/session and set up tmux options.
-        await self._session.discover_and_setup()
+        # Dispatches through the app's own wrappers so subclass overrides and
+        # monkeypatch seams stay in the call path.
+        await self._session.discover_and_setup(
+            bind_return_key=self._bind_return_key,
+            enable_mouse=self._enable_mouse,
+            hide_status=self._hide_status,
+        )
         self._apply_theme()
         self._cost_window_hours = self._validate_cost_window()
         self.query_one("#usage-period", UsagePeriodBar).period_label = self._cost_window_label
@@ -708,7 +714,12 @@ class RegieApp(App):
         await self._session._unbind_return_key()
 
     async def _teardown(self) -> None:
-        await self._session.teardown(staged_pane=self.staged_pane)
+        await self._session.teardown(
+            staged_pane=self.staged_pane,
+            restore_mouse=self._restore_mouse,
+            restore_status=self._restore_status,
+            unbind_return_key=self._unbind_return_key,
+        )
 
     async def action_quit(self) -> None:
         """Quit, but put the stage back first.
