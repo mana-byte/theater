@@ -42,11 +42,7 @@ participants = Table(
 Index("idx_participants_pane", participants.c.tmux_pane)
 Index("idx_participants_parent", participants.c.parent_id)
 Index("idx_participants_status", participants.c.status)
-# The reaper calls list_participants() on every tick and filters out dead
-# rows. SQLite will not use a plain index for a != predicate, so the scan
-# grows with total history. A partial index makes that cost proportional
-# to LIVE participants regardless of how much dead history accumulates:
-# measured at 73,000 dead rows, 2.714 ms → 0.097 ms.
+# Partial index: makes the reaper's list_participants() scan proportional to live rows.
 Index(
     "idx_participants_live",
     participants.c.created_at,
@@ -66,10 +62,7 @@ jobs = Table(
     Column("error_code", Text),
     Column("created_at", REAL, nullable=False),
     Column("finished_at", REAL),
-    # JSON transport persistence. response_format stores the raw serialized
-    # JSON schema hint; structured_result stores the complete bare JSON
-    # response without clipping; structured_status is null when JSON was not
-    # requested and later becomes "parsed" or "unavailable".
+    # JSON transport: response_format, structured_result, structured_status.
     Column("response_format", Text),
     Column("structured_result", Text),
     Column("structured_status", Text),
@@ -87,10 +80,7 @@ bus = Table(
     Column("to_id", Text),
     Column("kind", Text, nullable=False),
     Column("payload", Text),
-    # AUTOINCREMENT, not bare rowid: `bus_tail(after_id=...)` uses the id
-    # as a read cursor, and plain rowids are reused once the highest row
-    # is deleted. A reused id would make a reader skip events it has
-    # never seen.
+    # AUTOINCREMENT not bare rowid: bus_tail(after_id=...) uses id as a read cursor.
     sqlite_autoincrement=True,
 )
 
@@ -112,23 +102,17 @@ touch = Table(
     Column("job_handle", Text, nullable=False),
     Column("path", Text, nullable=False),
     Column("mode", Text, nullable=False),
-    # Null sha = file absent at that point: null before is a creation,
-    # null after is a deletion. Same before and after means touched but
-    # not changed — the pair is what makes drift detection work.
+    # Null sha = file absent: null before is creation, null after is deletion.
     Column("sha_before", Text),
     Column("sha_after", Text),
     sqlite_autoincrement=True,
 )
 
-# Two read patterns: "all rows for this path, newest first" and "all rows
-# for this job handle" — the path index serves the first, the job-handle
-# index serves the second.
+# Two read patterns: "all rows for this path, newest first" and "all rows for this job handle".
 Index("idx_touch_path", touch.c.path)
 Index("idx_touch_job", touch.c.job_handle)
 
-# Generic key/value store for daemon state that must outlive derived data —
-# most notably the send-sequence counter, which cannot be derived from the
-# jobs table once a future GC starts deleting old job rows.
+# Generic key/value store for daemon state that must outlive derived data.
 meta = Table(
     "meta",
     metadata,
@@ -136,9 +120,7 @@ meta = Table(
     Column("value", Text, nullable=False),
 )
 
-# Tree-scoped scratchpad. The daemon mints a random short id for each
-# entry; an optional caller-supplied key updates an existing entry or
-# inserts if absent.
+# Tree-scoped scratchpad; optional caller-supplied key updates or inserts.
 tree_kv = Table(
     "tree_kv",
     metadata,
@@ -157,11 +139,7 @@ Index(
     tree_kv.c.repo_root,
 )
 
-# Named shared worktrees: multiple live children can share one linked
-# worktree (same directory, same branch, same index/HEAD). The key is
-# (repo_root, name) so the same name in two repositories does not collide.
-# Only Theater-created named worktrees appear here — a join reuses a row
-# the daemon recognises, never an arbitrary pre-existing branch or directory.
+# Named shared worktrees: key is (repo_root, name); only Theater-created worktrees appear here.
 named_worktrees = Table(
     "named_worktrees",
     metadata,

@@ -138,8 +138,7 @@ async def sweep(
         scratchpad=result.scratchpad,
     )
 
-    # Phase 3: participants — after jobs, so a participant whose last job
-    # just went becomes eligible in the same sweep.
+    # Phase 3: participants — after jobs so newly-eligible ones are deleted in the same sweep.
     part_deleted = _sweep_participants(store, retention.batch)
     result = SweepResult(
         bus=result.bus,
@@ -151,8 +150,7 @@ async def sweep(
     )
     await asyncio.sleep(0)
 
-    # Phase 4: receipt tokens — after participant cleanup, so orphaned tokens
-    # from rows deleted in this sweep vanish in the same pass.
+    # Phase 4: receipt tokens — after participant cleanup so orphans vanish in the same pass.
     store.cleanup_receipt_tokens()
     await asyncio.sleep(0)
 
@@ -165,9 +163,7 @@ async def sweep(
         scratchpad=result.scratchpad,
     )
 
-    # Phase 5: scratchpad — delete rows whose spawn tree has no live
-    # participant. A root can be dead while descendants remain live, so
-    # compute the roots of all live participants and retain their rows.
+    # Phase 5: scratchpad — delete rows whose spawn tree has no live participant.
     kv_deleted = await _sweep_scratchpad(store, retention.batch)
     result = SweepResult(
         bus=result.bus,
@@ -189,8 +185,7 @@ async def sweep(
         scratchpad=result.scratchpad,
     )
 
-    # The WAL was measured at 4.12 MB live and grows with churn; checkpointing
-    # costs approximately nothing (measured ~0 ms).
+    # WAL checkpoint: ~0 ms cost, prevents unbounded WAL growth.
     store.conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
 
     return result
@@ -248,8 +243,7 @@ async def _sweep_jobs_and_touch(store: Store, cutoff: float, batch: int) -> tupl
     total_jobs = 0
     total_touch = 0
     while True:
-        # Select the next batch of handles to delete. We need the handles
-        # both to find the touch rows and to delete the job rows.
+        # Select the next batch of handles to delete (needed for both touch and job row deletion).
         stmt = (
             select(jobs.c.handle)
             .where(jobs.c.finished_at.is_not(None))
@@ -261,10 +255,7 @@ async def _sweep_jobs_and_touch(store: Store, cutoff: float, batch: int) -> tupl
         if not handles:
             break
 
-        # One transaction so touch and job rows go together. The store's
-        # long-lived connection is AUTOCOMMIT and cannot begin() on itself
-        # after first use — see JobManager._finish_with_touches for the same
-        # precedent.
+        # One transaction so touch and job rows go together (see JobManager._finish_with_touches).
         with store.engine.begin() as conn:
             touch_result = conn.execute(delete(touch).where(touch.c.job_handle.in_(handles)))
             job_result = conn.execute(delete(jobs).where(jobs.c.handle.in_(handles)))
@@ -323,10 +314,7 @@ async def _sweep_bus(store: Store, cutoff: float, batch: int, refused_cap: int) 
     """
     total = 0
     protected = await _active_identity_loss_audit_ids(store, batch)
-    # Age-based deletion: everything old except send.refused.
-    # SQLAlchemy Core's delete() does not support .limit(), so select the
-    # ids first and then delete by id — the same subquery pattern the jobs
-    # phase uses.
+    # Age-based deletion: everything old except send.refused; select ids first (no .limit()).
     after_id = 0
     while True:
         sub = (

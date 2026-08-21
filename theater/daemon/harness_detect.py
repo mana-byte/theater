@@ -62,17 +62,7 @@ def detect_harness(
     name = match_binary(pane_command, HARNESSES)
     if name:
         return name
-    # The pane root is the harness process for a Theater-spawned or
-    # wrapper-launched session.  ``proc.descendants`` excludes it, so consult
-    # it directly before the descendant walk.  This closes the false-negative
-    # where the foreground is a tool subprocess (not the harness, not a
-    # descendant) and detection would otherwise return "unknown".
-    #
-    # When a snapshot is supplied, the root comm is read from the already
-    # parsed process table — no ``ps`` of its own.  Without one, the single-
-    # pane callers (``adopt``, the delivery gate)
-    # get a fresh ``proc.comm`` fork so the root check is as current as the
-    # pane facts it is compared against.
+    # The pane root is the harness for Theater-spawned sessions; proc.descendants excludes it.
     if pane_pid > 0:
         root_comm = snapshot.comm(pane_pid) if snapshot is not None else proc.comm(pane_pid)
         if root_comm:
@@ -90,9 +80,7 @@ def detect_harness(
     return "unknown"
 
 
-#: Interactive shells a pane falls back to when the program running in it
-#: exits. Not exhaustive and does not need to be: a name missing from this set
-#: only costs a refusal we could have made, never a wrong delivery.
+#: Interactive shells a pane falls back to when the program exits; not exhaustive.
 SHELLS = frozenset(
     {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "xonsh", "elvish"}
 )
@@ -198,13 +186,7 @@ def match_binary(command: str, harnesses) -> str | None:
         names = {harness.binary} | harness.binaries
         if basename in names or normalised in names or command in names:
             return harness.name
-    # tmux truncates pane_current_command at 15 characters.  A pane basename
-    # of exactly that length may be a truncated form of a longer binary name
-    # (e.g. ``.opencode-wrapp`` ← ``.opencode-wrapped``).  The observation-
-    # key index, built at registration time, maps each harness's truncated
-    # forms so this resolves without process evidence.  The resolved name
-    # must be in the injected ``harnesses`` dict — the caller may pass a
-    # restricted set, and the global index is broader than that.
+    # tmux truncates at 15 chars; observation-key index resolves truncated forms.
     if len(basename) == 15:
         obs = observation_lookup(basename)
         if obs is not None and obs in harnesses:

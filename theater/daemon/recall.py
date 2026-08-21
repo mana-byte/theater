@@ -39,13 +39,10 @@ from theater.harness import HARNESSES, supports_resume
 from theater.harness import normalize as normalize_harness
 from theater.provenance import is_trusted_provenance
 
-#: Ceiling on ``task`` and ``result`` text in the timeline. Full text lives
-#: behind ``recall_read``, which the sibling agent owns.
+#: Ceiling on ``task`` and ``result`` text in the timeline; full text lives behind ``recall_read``.
 CLIP = 300
 
-#: Default and maximum points per path timeline. Counted after gaps are
-#: interleaved, so a depth of 5 means five points total — not five jobs
-#: plus the gaps between them.
+#: Default and maximum points per path timeline; counted after gaps are interleaved.
 DEFAULT_DEPTH = 5
 
 
@@ -160,9 +157,7 @@ def _dirty_set(cwd: str) -> set[str]:
     for line in result.stdout.splitlines():
         if not line:
             continue
-        # --porcelain: "XY path", XY = two status chars then a space.
-        # Do NOT strip — the leading char may itself be a space.
-        # Renames show "XY  old -> new"; take the new path.
+        # --porcelain: "XY path"; do NOT strip; renames show "XY  old -> new", take new path.
         path = line[3:]
         if " -> " in path:
             path = path.split(" -> ", 1)[1]
@@ -194,8 +189,7 @@ def _build_timeline(
     result: dict[str, dict] = {}
 
     for path in repo_paths:
-        # Inner join on participants: rows we cannot attribute to a repo
-        # are excluded, which is the correct failure mode.
+        # Inner join on participants: rows we cannot attribute to a repo are excluded.
         stmt = (
             select(
                 touch.c.job_handle,
@@ -221,12 +215,7 @@ def _build_timeline(
                 )
             )
             .where(touch.c.path == path)
-            # startswith(autoescape=True), not like(f"{root}%"): LIKE
-            # treats `_` and `%` as wildcards, both legal in a directory
-            # name — a privacy wall that widens on punctuation is no wall.
-            # The boundary is enforced too: exact root equality OR a prefix
-            # that ends at a path separator, so ``/work/repo`` does not
-            # match a sibling at ``/work/repo-secret``.
+            # startswith(autoescape=True) not like(): LIKE treats _/% as wildcards.
             .where(
                 or_(
                     participants.c.cwd == git_root,
@@ -237,16 +226,11 @@ def _build_timeline(
         )
         rows = store.conn.execute(stmt).fetchall()
 
-        # Reads (sha_before == sha_after) are a count, not timeline
-        # points — rendering them as points buries the writes.
+        # Reads (sha_before == sha_after) are a count, not timeline points.
         writes = [r for r in rows if r.sha_before != r.sha_after]
         reads = len(rows) - len(writes)
 
-        # Gap detection in descending order: a gap exists when this
-        # row's sha_after does not match the sha_before of the row
-        # above (newer). ``_seen_prev`` is needed because
-        # ``prev_before`` can be None legitimately (a creation), and
-        # a ``is not None`` guard would suppress a real gap there.
+        # Gap detection: gap when sha_after != prev sha_before; _seen_prev needed for None.
         timeline: list[dict] = []
         prev_before: str | None = None
         _seen_prev = False
@@ -278,11 +262,7 @@ def _build_timeline(
                 "resume": resume,
                 "cwd": row.cwd,
                 "branch": row.branch,
-                # Lineage (who spawned the editor, None for a root) and
-                # provenance (who ordered this job — a `send` caller is
-                # often a sibling) are different questions. Bare ids: a
-                # parent can sit outside the caller's repo, so its cwd
-                # and session id stay behind the privacy wall above.
+                # Lineage (parent) and provenance (caller) differ; bare ids keep parents private.
                 "parent_id": row.parent_id,
                 "caller_id": row.caller_id,
                 "outcome": row.outcome,
@@ -297,11 +277,7 @@ def _build_timeline(
             prev_before = row.sha_before
             _seen_prev = True
 
-        # ``dirty`` means the working tree differs from HEAD, not
-        # "differs from where the last job left it" — that is
-        # ``current`` against the newest point's sha_after, which the
-        # caller reads off the timeline without us collapsing two
-        # facts into one flag.
+        # ``dirty`` means working tree differs from HEAD; ``current`` vs sha_after detects drift.
         abs_path = Path(git_root) / path
         current = blob_sha(abs_path)
         dirty = path in dirty_set
@@ -353,11 +329,7 @@ def _normalise_paths(paths: list[str], git_root: str) -> list[str]:
     return out
 
 
-#: Sentinel for ``precomputed_root`` — distinguishes "not provided" from
-#: "provided but ``None``" (caller's cwd is not a git repo).  Without this,
-#: a legitimately-``None`` precomputed root would make ``recall()`` re-call
-#: ``_git_root`` synchronously on the event loop — exactly the blocking
-#: pattern this migration set out to eliminate.
+#: Sentinel for precomputed_root — distinguishes "not provided" from "provided but None".
 _UNSET: Any = object()
 
 
@@ -404,8 +376,7 @@ def recall(
     cwd = caller_cwd or str(Path.cwd())
     root = precomputed_root if precomputed_root is not _UNSET else _git_root(cwd)
     if root is None:
-        # Not a git repo: no dirty set, no root to normalise against.
-        # Degraded but not broken.
+        # Not a git repo: no dirty set, no root to normalise against — degraded but not broken.
         root = cwd
 
     repo_paths = _normalise_paths(paths, root)
