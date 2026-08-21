@@ -57,3 +57,15 @@ REGIE_FOOTER_ANIM_FRAMES = round(REGIE_FOOTER_ANIM_DURATION / REGIE_FOOTER_ANIM_
 
 #: Maximum rows the usage breakdown overlay may cover.
 REGIE_USAGE_BREAKDOWN_MAX_HEIGHT = 12
+
+#: Empty-tree call-to-action shortcut text.
+REGIE_EMPTY_TREE_SHORTCUT = "Ctrl+P"
+#: Style for the empty-tree shortcut text.
+REGIE_EMPTY_TREE_SHORTCUT_STYLE = "$text-accent bold"
+#: Tail appended after the shortcut in the empty-tree hint.
+REGIE_EMPTY_TREE_TAIL = " to get started"
+#: Full empty-tree hint, shortcut plus tail.
+REGIE_EMPTY_TREE_HINT = f"{REGIE_EMPTY_TREE_SHORTCUT}{REGIE_EMPTY_TREE_TAIL}"
+
+#: Leaf spinner/animation timer interval in seconds.
+REGIE_LEAF_SPINNER_INTERVAL = 0.1
