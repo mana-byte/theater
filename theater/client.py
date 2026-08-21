@@ -35,6 +35,7 @@ import subprocess
 import sys
 
 from theater import paths, protocol
+from theater.constants.daemon import RPC_DEFAULT_MAX_WAIT_SECONDS
 from theater.protocol import RemoteError
 from theater.tmux import client as tmux
 
@@ -139,7 +140,7 @@ class DaemonClient:
         budget plus slack; everything else shares CALL_TIMEOUT.
         """
         if method == "jobs.await":
-            return float(params.get("max_wait", 150.0)) + CALL_TIMEOUT
+            return float(params.get("max_wait", RPC_DEFAULT_MAX_WAIT_SECONDS)) + CALL_TIMEOUT
         return CALL_TIMEOUT
 
     async def call(self, method: str, **params) -> object:

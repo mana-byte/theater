@@ -7,6 +7,7 @@ import logging
 from collections.abc import Callable
 from typing import NoReturn
 
+from theater.constants.daemon import BUS_KIND_SEND_REFUSED
 from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS as SEND_CLAIM_TTL
 from theater.daemon.harness_detect import (
     PaneHarnessVerdict,
@@ -59,7 +60,7 @@ def _refuse_send(
     without knowing the list.
     """
     daemon.store.bus_append(
-        "send.refused",
+        BUS_KIND_SEND_REFUSED,
         from_id=caller_id,
         to_id=target_id,
         payload={"reason": reason, "detail": str(exc)},
@@ -278,7 +279,6 @@ async def _send(daemon, params: dict) -> dict:
         target_id=target_id,
         kind="send",
         prompt=prompt,
-        # The target's cwd, not the caller's.
         cwd=target.cwd,
         response_format=response_format,
     )

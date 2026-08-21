@@ -15,6 +15,7 @@ from pathlib import Path
 from theater import timing
 from theater.constants.worktree import (
     GIT_MISSING_RC,
+    GIT_QUERY_TIMEOUT_SECONDS,
     GIT_TIMEOUT_RC,
     WORKTREE_DIR,
 )
@@ -61,7 +62,7 @@ def is_git_repo(path: str) -> bool:
             check=False,
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=GIT_QUERY_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.SubprocessError):
         return False
@@ -83,7 +84,7 @@ def repo_root(path: str) -> str | None:
             check=False,
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=GIT_QUERY_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -112,7 +113,7 @@ def main_repo_root(path: str, child_id: str | None = None) -> str | None:
             check=False,
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=GIT_QUERY_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.SubprocessError):
         result = None

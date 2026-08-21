@@ -48,8 +48,7 @@ _FALLBACK = {
     "accent": "magenta",
 }
 
-#: Timestamp and participant id are deliberately not themed. They are
-#: scaffolding around the event, and `dim` reads as such against any palette.
+#: Timestamp and participant id are not themed; dim reads as scaffolding against any palette.
 _MUTED = "dim"
 
 
@@ -64,8 +63,7 @@ def kind_style(kind: str, variables: Mapping[str, str] | None = None) -> str:
         return "default"
     if variables is None:
         return _FALLBACK[role]
-    # A missing slot is not a crash — themes will be user-supplied, and a
-    # missing variable is worth one dull line rather than a dead panel.
+    # Missing slot is not a crash: a dull line is better than a dead panel.
     return variables.get(role) or _FALLBACK[role]
 
 

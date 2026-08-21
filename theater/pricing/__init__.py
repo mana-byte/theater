@@ -11,8 +11,7 @@ from theater.harness.base import TokenUsage
 _PRICES_PATH = Path(__file__).parent / "model_prices.json"
 _PRICES: dict[str, dict] | None = None
 
-# Maps OpenCode's zero-cost reported pair to a LiteLLM catalog row with matching rates.
-# Vibe uses native stats first; a missing Vibe cache rate means full input price for bit-exactness.
+# Maps OpenCode's zero-cost model to a LiteLLM catalog row with matching rates.
 _ALIASES = {
     "openai-foundry/zai-glm-5-2": "cloudflare/@cf/zai-org/glm-5.2",
 }

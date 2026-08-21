@@ -12,7 +12,12 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from theater.constants.worktree import INDETERMINATE_RCS
+from theater.constants.worktree import (
+    GIT_QUERY_TIMEOUT_SECONDS,
+    GIT_WORKTREE_ADD_TIMEOUT_SECONDS,
+    GIT_WORKTREE_REMOVE_TIMEOUT_SECONDS,
+    INDETERMINATE_RCS,
+)
 from theater.daemon.worktrees.paths import (
     named_branch_name,
     named_worktree_path,
@@ -51,7 +56,7 @@ def create_named_worktree(
         check=False,
         capture_output=True,
         text=True,
-        timeout=5,
+        timeout=GIT_QUERY_TIMEOUT_SECONDS,
     )
     if check.returncode == 0:
         raise BadRequest(
@@ -75,7 +80,7 @@ def create_named_worktree(
         check=False,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=GIT_WORKTREE_ADD_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
         raise BadRequest(
@@ -148,7 +153,7 @@ def verify_named_worktree(
         check=False,
         capture_output=True,
         text=True,
-        timeout=5,
+        timeout=GIT_QUERY_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
         raise BadRequest(
@@ -190,7 +195,7 @@ def remove_named_worktree(
         check=False,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=GIT_WORKTREE_REMOVE_TIMEOUT_SECONDS,
     )
     worktree_removed = wt_result.returncode == 0
 
@@ -203,7 +208,7 @@ def remove_named_worktree(
             check=False,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=GIT_WORKTREE_REMOVE_TIMEOUT_SECONDS,
         )
         worktree_removed = not Path(wt_path).exists()
         if not worktree_removed:
@@ -224,7 +229,7 @@ def remove_named_worktree(
             check=False,
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=GIT_QUERY_TIMEOUT_SECONDS,
         )
         branch_removed = br_result.returncode == 0
 
@@ -236,7 +241,7 @@ def remove_named_worktree(
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=GIT_QUERY_TIMEOUT_SECONDS,
             )
             if verify.returncode == 0:
                 result.errors.append(f"branch delete: {stderr}")

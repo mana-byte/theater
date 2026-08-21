@@ -23,3 +23,38 @@ SEND_SEQ_META_KEY = "send_seq"
 
 #: Meta key prefix for per-participant receipt tokens; the participant id is appended.
 RECEIPT_TOKEN_PREFIX = "receipt_token:"
+
+#: Default time budget for jobs.await when the caller does not specify one.
+RPC_DEFAULT_MAX_WAIT_SECONDS = 150.0
+
+#: Transcript kinds reported by read_transcript and recall_read; ERROR is not a conversation turn.
+TRANSCRIPT_READABLE_KINDS = ("assistant", "user", "tool_call", "tool_result")
+
+#: Bus kind for refused sends; GC protects it from age-based deletion and caps it separately.
+BUS_KIND_SEND_REFUSED = "send.refused"
+
+#: Bus kind for agent observation errors in the transcript-identity audit stream.
+BUS_KIND_AGENT_OBSERVATION_ERROR = "agent.observation_error"
+
+#: Bus kind for agent transcript events in the audit stream.
+BUS_KIND_AGENT_TRANSCRIPT = "agent.transcript"
+
+#: Bus kind for agent transcript receipts in the audit stream.
+BUS_KIND_AGENT_TRANSCRIPT_RECEIPT = "agent.transcript_receipt"
+
+#: Bus kind for operator transcript bind events in the audit stream.
+BUS_KIND_OPERATOR_TRANSCRIPT_BIND = "operator.transcript_bind"
+
+#: Bus kind for operator transcript unbind events in the audit stream.
+BUS_KIND_OPERATOR_TRANSCRIPT_UNBIND = "operator.transcript_unbind"
+
+#: The full set of bus kinds that participate in transcript-identity quarantine audit.
+TRANSCRIPT_AUDIT_KINDS = frozenset(
+    {
+        BUS_KIND_AGENT_OBSERVATION_ERROR,
+        BUS_KIND_AGENT_TRANSCRIPT,
+        BUS_KIND_AGENT_TRANSCRIPT_RECEIPT,
+        BUS_KIND_OPERATOR_TRANSCRIPT_BIND,
+        BUS_KIND_OPERATOR_TRANSCRIPT_UNBIND,
+    }
+)

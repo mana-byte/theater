@@ -58,6 +58,7 @@ from pathlib import Path
 
 from sqlalchemy import insert, update
 
+from theater.constants.daemon import RPC_DEFAULT_MAX_WAIT_SECONDS
 from theater.daemon.blob import blob_sha
 from theater.daemon.schema import jobs as jobs_table
 from theater.daemon.schema import touch as touch_table
@@ -78,7 +79,7 @@ __all__ = [
 
 
 #: How long to wait for a job to finish if the caller does not specify.
-DEFAULT_MAX_WAIT = 150.0
+DEFAULT_MAX_WAIT = RPC_DEFAULT_MAX_WAIT_SECONDS
 STRUCTURED_PARSED = "parsed"
 STRUCTURED_UNAVAILABLE = "unavailable"
 _RAW_UNSET = object()

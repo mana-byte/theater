@@ -6,6 +6,14 @@ import json
 
 from sqlalchemy import insert, select
 
+from theater.constants.daemon import (
+    BUS_KIND_AGENT_TRANSCRIPT,
+    BUS_KIND_AGENT_TRANSCRIPT_RECEIPT,
+    BUS_KIND_OPERATOR_TRANSCRIPT_BIND,
+    BUS_KIND_OPERATOR_TRANSCRIPT_UNBIND,
+    BUS_KIND_SEND_REFUSED,
+    TRANSCRIPT_AUDIT_KINDS,
+)
 from theater.daemon.persistence.database import Database
 from theater.daemon.schema import bus
 from theater.models import now
@@ -51,7 +59,7 @@ class BusRepository:
 
     def refusal_counts(self, *, since: float | None = None) -> dict[str, int]:
         """Sends refused before a job existed, counted by reason."""
-        query = select(bus.c.payload).where(bus.c.kind == "send.refused")
+        query = select(bus.c.payload).where(bus.c.kind == BUS_KIND_SEND_REFUSED)
         if since is not None:
             query = query.where(bus.c.ts >= since)
         counts: dict[str, int] = {}
@@ -76,33 +84,23 @@ class BusRepository:
         rows = self._db.conn.execute(
             select(bus.c.kind, bus.c.payload, bus.c.ts)
             .where(bus.c.to_id == participant_id)
-            .where(
-                bus.c.kind.in_(
-                    [
-                        "agent.observation_error",
-                        "agent.transcript",
-                        "agent.transcript_receipt",
-                        "operator.transcript_bind",
-                        "operator.transcript_unbind",
-                    ]
-                )
-            )
+            .where(bus.c.kind.in_(tuple(TRANSCRIPT_AUDIT_KINDS)))
             .order_by(bus.c.id.desc())
         ).fetchall()
         for row in rows:
             kind = row.kind
             payload = row.payload
             if kind in {
-                "agent.transcript",
-                "operator.transcript_bind",
-                "operator.transcript_unbind",
+                BUS_KIND_AGENT_TRANSCRIPT,
+                BUS_KIND_OPERATOR_TRANSCRIPT_BIND,
+                BUS_KIND_OPERATOR_TRANSCRIPT_UNBIND,
             }:
                 return None
             try:
                 decoded = json.loads(payload or "{}")
             except ValueError:
                 continue
-            if kind == "agent.transcript_receipt" and decoded.get("admission") == "accepted":
+            if kind == BUS_KIND_AGENT_TRANSCRIPT_RECEIPT and decoded.get("admission") == "accepted":
                 return None
             found = decoded.get("code")
             if found == code:
