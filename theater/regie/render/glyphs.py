@@ -6,23 +6,27 @@ overlay mechanism that the send animation uses to replace single characters.
 
 from __future__ import annotations
 
+# ruff: noqa: I001
 from collections.abc import Mapping
 
 from textual.content import Content
 
 from theater.constants.regie import (
-    BRANCH,
-    LAST_BRANCH,
-    RAIL,
-    SEND_STYLE,
-    SPINNER_FRAMES,
-    WORKING_HARNESS_STYLES,
+    REGIE_SEND_TRACE_STYLE as SEND_STYLE,
+    REGIE_SPINNER_FRAMES as SPINNER_FRAMES,
+    REGIE_TREE_BRANCH as BRANCH,
+    REGIE_TREE_LAST_BRANCH as LAST_BRANCH,
+    REGIE_TREE_RAIL as RAIL,
+    REGIE_WORKING_HARNESS_STYLES as WORKING_HARNESS_STYLES,
 )
 from theater.formatting import short_id, tilde
 from theater.harness import harness_icon
 
 #: An overlay glyph may use the default send style, or carry its own style.
 type OverlayGlyph = str | tuple[str, str]
+
+#: A cell within one three-row leaf, used for local overlays.
+type LeafCell = tuple[int, int]
 
 
 def spinner_frame(frame: int) -> str:
@@ -179,7 +183,7 @@ def node_label(
     cwd_segments: int = 2,
     frame: int = 0,
     is_first_root: bool = False,
-    overlay: Mapping[tuple[int, int], OverlayGlyph] | None = None,
+    overlay: Mapping[LeafCell, OverlayGlyph] | None = None,
 ) -> Content:
     """Three rows of Content for one participant leaf.
 
@@ -210,24 +214,21 @@ def node_label(
     from theater.regie.render.layout import shorten_path
 
     glyph, glyph_style = _status_glyph(node, frame)
-    # Unmanaged panes stuff a tmux pane id into "id" and have no name,
-    # so the slot falls back to the short id rather than showing nothing.
+    # Unmanaged panes stuff a tmux pane id into "id" with no name, so fall back to short id.
     sid = node.get("name") or short_id(node.get("id"))
     id_style = _id_style(node)
     cwd = shorten_path(tilde(node.get("cwd")), keep=cwd_segments)
     harness = node.get("harness", "?")
     harness_pulse = node.get("status") == "working"
 
-    # Row 1: the rail leading down into this node's branch. Suppressed for
-    # the first root — the invisible super-root has nothing above it.
+    # Row 1: the rail leading into this branch; suppressed for the first root (nothing above it).
     row1_parts: list = []
     if not is_first_root:
         lead = _rail_above(prefix)
         if lead:
             row1_parts.append((lead, "$text dim"))
 
-    # Row 2: rails, glyph, harness name, short id. The id is split out so
-    # the dim-italic reach mark applies to the id portion only.
+    # Row 2: rails, glyph, harness, short id; the id is split out so dim-italic applies to it only.
     row2_parts: list = []
     if prefix:
         row2_parts.append((prefix, "$text dim"))

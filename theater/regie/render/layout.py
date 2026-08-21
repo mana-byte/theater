@@ -23,13 +23,18 @@ resolved natively by Textual against the active theme.
 
 from __future__ import annotations
 
+# ruff: noqa: I001
 from textual.content import Content
 
-from theater.constants.regie import BRANCH, GAP, LAST_BRANCH, RAIL
+from theater.constants.regie import (
+    REGIE_TREE_BRANCH as BRANCH,
+    REGIE_TREE_GAP as GAP,
+    REGIE_TREE_LAST_BRANCH as LAST_BRANCH,
+    REGIE_TREE_RAIL as RAIL,
+)
 from theater.regie.render.glyphs import node_label
 
-#: A stable row identity for widget reconciliation. The first element
-#: namespaces the row kind so a pane id and a participant id never collide.
+#: A stable row identity for widget reconciliation; the first element namespaces the row kind.
 type Key = tuple[str, str]
 
 
@@ -48,8 +53,7 @@ def shorten_path(path: str | None, keep: int = 2) -> str:
     if not path:
         return "-"
 
-    # Separate a leading ``~`` (or ``~/``) prefix from the segments that
-    # follow, so the home mark is carried through without being counted.
+    # Separate a leading ``~`` (or ``~/``) prefix so the home mark is carried without being counted.
     prefix = ""
     rest = path
     if rest.startswith("~/"):
@@ -109,8 +113,7 @@ def _walk(
             branch = LAST_BRANCH if last else BRANCH
             child_prefix = prefix + (GAP if last else RAIL)
             first_root = False
-        # cont_prefix for row 3 is the same rail/gap children at this depth
-        # inherit — already computed as child_prefix.
+        # cont_prefix for row 3 is the rail/gap children inherit — already child_prefix.
         cont_prefix = child_prefix
         key: Key = ("p", node.get("id", ""))
         rows.append((prefix + branch, node, key, cont_prefix, first_root))

@@ -10,21 +10,23 @@ depth *d* owns columns ``4d..4d+3`` and its vertical line sits at ``4d``.
 
 from __future__ import annotations
 
+# ruff: noqa: I001
 from collections import deque
 from typing import NamedTuple
 
 from textual.content import Content
 
-from theater.constants.regie import BRANCH, LAST_BRANCH, LEAF_ROWS, RAIL
+from theater.constants.regie import (
+    REGIE_TREE_BRANCH as BRANCH,
+    REGIE_TREE_LAST_BRANCH as LAST_BRANCH,
+    REGIE_TREE_LEAF_ROWS as LEAF_ROWS,
+    REGIE_TREE_RAIL as RAIL,
+)
 from theater.regie.render.glyphs import _rail_above
 from theater.regie.render.layout import Key, is_root_prefix
 
-#: A cell of the rail grid: ``(row, column)``, where *row* counts rendered
-#: rows across the whole tree — leaf *i* owns rows ``3i``, ``3i+1``, ``3i+2``.
+#: A cell of the rail grid: ``(row, column)``, *row* counts rendered rows across the tree.
 type Cell = tuple[int, int]
-
-#: A cell within one three-row leaf, used for local overlays.
-type LeafCell = tuple[int, int]
 
 #: One step from a cell to the next, as ``(row delta, column delta)``.
 type Direction = tuple[int, int]
@@ -246,8 +248,7 @@ def _await_route(path: list[Cell]) -> list[Cell]:
     """
     if len(path) < 2:
         return path
-    # Only the dashes and the space after them: each end's branch glyph is
-    # already the first or last cell of the path.
+    # Only dashes and space after: each end's branch glyph is already first or last cell.
     steps = range(1, len(BRANCH))
     row, col = path[0]
     if path[1] != (row, col + 1):

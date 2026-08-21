@@ -15,16 +15,17 @@ from __future__ import annotations
 
 # ruff: noqa: I001
 from theater.constants.regie import (
-    BRANCH as _BRANCH,
-    GAP as _GAP,
-    LAST_BRANCH as _LAST_BRANCH,
-    LEAF_ROWS,
-    RAIL as _RAIL,
-    SEND_STYLE,
-    SPINNER_FRAMES as _SPINNER_FRAMES,
-    WORKING_HARNESS_STYLES as _WORKING_HARNESS_STYLES,
+    REGIE_SEND_TRACE_STYLE as SEND_STYLE,
+    REGIE_SPINNER_FRAMES as _SPINNER_FRAMES,
+    REGIE_TREE_BRANCH as _BRANCH,
+    REGIE_TREE_GAP as _GAP,
+    REGIE_TREE_LAST_BRANCH as _LAST_BRANCH,
+    REGIE_TREE_LEAF_ROWS as LEAF_ROWS,
+    REGIE_TREE_RAIL as _RAIL,
+    REGIE_WORKING_HARNESS_STYLES as _WORKING_HARNESS_STYLES,
 )
 from theater.regie.render.glyphs import (
+    LeafCell,
     OverlayGlyph,
     _append_working_harness_parts,
     _append_working_harness_text,
@@ -54,7 +55,6 @@ from theater.regie.render.routing import (
     AwaitCell,
     Cell,
     Direction,
-    LeafCell,
     _await_route,
     _rail_cells,
     _rail_leaves,
