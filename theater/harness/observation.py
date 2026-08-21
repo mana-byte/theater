@@ -51,7 +51,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from theater.harness.base import Event, NativeChild
+from theater.harness.contracts.events import Event
+from theater.harness.contracts.launch import NativeChild
 from theater.harness.source import StreamPoint, TranscriptCandidate
 from theater.provenance import TranscriptProvenance, normalize_provenance
 

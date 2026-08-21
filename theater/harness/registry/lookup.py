@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shutil
 
-from theater.harness.base import Harness
+from theater.harness.contracts.harness import Harness
 from theater.harness.registry import (
     _ALIASES,
     _BROKEN,

@@ -40,7 +40,7 @@ from pathlib import Path
 
 from theater.config import HARNESS_NAME, ConfigError
 from theater.formatting import display_width as _display_width
-from theater.harness.base import Harness
+from theater.harness.contracts.harness import Harness
 from theater.harness.observation import HarnessObserver
 
 logger = logging.getLogger("theater.harness.plugins")

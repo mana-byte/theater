@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from theater.harness.base import Event
+from theater.harness.contracts.events import Event
 from theater.models import Status
 from theater.provenance import (
     TranscriptProvenance,
