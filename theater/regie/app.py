@@ -83,6 +83,11 @@ from theater.regie.controllers.animation import (  # noqa: F401
 )
 from theater.regie.controllers.navigation import NavigationState, UpDecision
 from theater.regie.controllers.polling import PollingController
+from theater.regie.controllers.staging import (
+    StageController,
+    StageOutcome,
+    StageResult,
+)
 from theater.regie.controllers.usage import (
     ActivateOutcome,
     FetchAccept,
@@ -346,6 +351,7 @@ class RegieApp(App):
         self._anim_timer: Timer | None = None
         self._nav = NavigationState()
         self._usage = UsagePanelState()
+        self._staging = StageController(self.settings.regie, panes)
 
     @property
     def bus_cursor(self) -> int:
@@ -1069,54 +1075,40 @@ class RegieApp(App):
         self._render_tree()
         self._sync_usage_metric()
 
+    def _notify_stage_result(self, result: StageResult | None) -> None:
+        """Issue the same notifications inline staging used to produce."""
+        if result is None:
+            return
+        if result.outcome is StageOutcome.NO_NODE:
+            self.notify("nothing to stage", severity="warning")
+        elif result.outcome is StageOutcome.NO_PANE:
+            self.notify(f"{(result.node_id or '?')[:8]} has no pane", severity="warning")
+        elif result.outcome is StageOutcome.NO_WINDOW:
+            self.notify("régie window not discovered — cannot stage", severity="error")
+        elif result.outcome is StageOutcome.UNSTAGE_FAILED:
+            self.notify(f"unstage failed: {result.error}", severity="error")
+        elif result.outcome is StageOutcome.JOIN_FAILED:
+            self.notify(f"stage failed: {result.error}", severity="error")
+
     async def action_stage(self) -> None:
         """Stage the selected agent: join its pane into the régie's window.
 
-        If something is already staged, break it back out to a hidden window
-        first. Then join the new pane in and resize it to fill the stage area.
+        Delegates staging mechanics to ``StageController`` and performs the
+        app-side reactions (notifications, reactive assignment) based on the
+        returned outcome.
         """
-        if self._usage_keyboard_metric is not None:
-            return
-        node = selected_participant(self.tree_lines, self.cursor)
-        if node is None:
-            self.notify("nothing to stage", severity="warning")
-            return
-        pane = node.get("tmux_pane")
-        if not pane:
-            self.notify(f"{node.get('id', '?')[:8]} has no pane", severity="warning")
-            return
-        if not self.my_window:
-            self.notify("régie window not discovered — cannot stage", severity="error")
-            return
-
-        if self.staged_pane and self.staged_pane != pane:
-            try:
-                await panes.break_pane(self.staged_pane)
-            except Exception as exc:
-                logger.debug("unstage failed: %s", exc)
-
-        if self.staged_pane == pane:
-            # Toggle: unstaging the current occupant
-            try:
-                await panes.break_pane(pane)
-                self.staged_pane = None
-            except Exception as exc:
-                self.notify(f"unstage failed: {exc}", severity="error")
-            return
-
-        try:
-            await panes.join_pane(pane, target_window=self.my_window)
-            self.staged_pane = pane
-            # Resize the régie pane, not the staged one: tmux gives the rest
-            # to the staged pane, and this avoids knowing the window's
-            # column count.
-            if self.my_pane:
-                try:
-                    await panes.resize_pane(self.my_pane, width=self.settings.regie.sidebar_width)
-                except Exception as exc:
-                    logger.debug("resize after stage failed: %s", exc)
-        except Exception as exc:
-            self.notify(f"stage failed: {exc}", severity="error")
+        result = await self._staging.stage(
+            tree_lines=self.tree_lines,
+            cursor=self.cursor,
+            staged_pane=self.staged_pane,
+            my_window=self.my_window,
+            my_pane=self.my_pane,
+            footer_active=self._usage_keyboard_metric is not None,
+            selected_participant_fn=selected_participant,
+        )
+        if result.staged_pane != self.staged_pane:
+            self.staged_pane = result.staged_pane
+        self._notify_stage_result(result)
 
     async def action_kill(self) -> None:
         """Kill the selected participant."""
@@ -1243,22 +1235,27 @@ class RegieApp(App):
     async def action_focus_stage(self) -> None:
         """Stage the selected agent if needed, then focus it. Bound to `l`.
 
-        The way back is `<prefix> h`, not a régie key — see `_bind_return_key`.
+        Delegates staging and focus decisions to ``StageController`` and
+        performs only the app-side reactions (reactive assignment, pane
+        selection, error notification). The way back is `<prefix> h`.
         """
-        node = selected_participant(self.tree_lines, self.cursor)
-        pane = node.get("tmux_pane") if node else None
-        if not (pane and pane == self.staged_pane):
-            await self.action_stage()
-            if self.staged_pane != pane:
-                # Staging failed, or there was nothing to stage: action_stage
-                # already notified why. Don't focus whatever was staged before.
-                return
-        if not self.staged_pane:
-            return
-        try:
-            await panes.select_pane(self.staged_pane)
-        except Exception as exc:
-            self.notify(f"focus failed: {exc}", severity="error")
+        result = await self._staging.focus(
+            tree_lines=self.tree_lines,
+            cursor=self.cursor,
+            staged_pane=self.staged_pane,
+            my_window=self.my_window,
+            my_pane=self.my_pane,
+            footer_active=self._usage_keyboard_metric is not None,
+            selected_participant_fn=selected_participant,
+        )
+        if result.staged_pane != self.staged_pane:
+            self.staged_pane = result.staged_pane
+        self._notify_stage_result(result.stage_result)
+        if result.should_select and result.pane:
+            try:
+                await panes.select_pane(result.pane)
+            except Exception as exc:
+                self.notify(f"focus failed: {exc}", severity="error")
 
     # ---- tree rendering with cursor ------------------------------------
 
