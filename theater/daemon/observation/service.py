@@ -105,7 +105,7 @@ class Observer:
         self._attachments = AttachmentManager(
             self.store,
             self.registry,
-            timing_fn=timing.ready_lag,
+            timing_fn=lambda *a, **kw: timing.ready_lag(*a, **kw),  # noqa: PLW0108
         )
         self._reducer = Reducer(
             self.store,
@@ -686,6 +686,10 @@ class Observer:
     def _identity_lost(self) -> set[str]:
         return self._failures._identity_lost
 
+    @_identity_lost.setter
+    def _identity_lost(self, value: set[str]) -> None:
+        self._failures._identity_lost = value
+
     @property
     def _identity_loss_replayed(self) -> set[str]:
         return self._failures._identity_loss_replayed
@@ -714,17 +718,33 @@ class Observer:
     def _binding_correlation(self) -> dict[str, str]:
         return self._attachments._binding_correlation
 
+    @_binding_correlation.setter
+    def _binding_correlation(self, value: dict[str, str]) -> None:
+        self._attachments._binding_correlation = value
+
     @property
     def _binding_sessions(self) -> dict[str, str | None]:
         return self._attachments._binding_sessions
+
+    @_binding_sessions.setter
+    def _binding_sessions(self, value: dict[str, str | None]) -> None:
+        self._attachments._binding_sessions = value
 
     @property
     def _sources(self) -> dict[str, Source]:
         return self._attachments._sources
 
+    @_sources.setter
+    def _sources(self, value: dict[str, Source]) -> None:
+        self._attachments._sources = value
+
     @property
     def _receipt_candidates(self) -> dict[str, tuple[str, str]]:
         return self._attachments._receipt_candidates
+
+    @_receipt_candidates.setter
+    def _receipt_candidates(self, value: dict[str, tuple[str, str]]) -> None:
+        self._attachments._receipt_candidates = value
 
     @property
     def _reset_watch_state(self) -> set[str]:
