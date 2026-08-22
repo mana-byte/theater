@@ -17,7 +17,7 @@ processes:
   forwards, never touches SQLite or tmux directly.
 - **régie** — a Textual TUI; also just a client, holds no state the daemon lacks.
 
-Python 3.12+, ~31,500 lines, ~80 test files. `theater` is the CLI entry point
+Python 3.12+, ~31,500 lines, 77 test modules. `theater` is the CLI entry point
 (`theater.cli:main`).
 
 ## The one constraint
@@ -76,7 +76,7 @@ theater/
 ├── proc.py             process facts from `ps` / `/proc` / `lsof`: descendants, open files
 ├── daemon/             the registry server (only writer of SQLite + tmux)
 │   ├── observation/    status policy, job completion, rescue, identity, screen, turns
-│   │   ├── service.py  the watch loop and orchestration (largest module)
+│   │   ├── service.py  the watch loop and observation orchestration root
 │   │   └── reducer.py  QuietClock — the three quiet timers live here
 │   ├── persistence/    store, database, repositories (participants, jobs, bus, …)
 │   ├── rpc/            handler modules registered via @method into METHODS

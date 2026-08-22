@@ -289,8 +289,8 @@ the observer uses, when a caller needs the untruncated text.
 
 ## 6. Observation
 
-The observer (`theater/daemon/observation/service.py`, the largest module at
-~790 lines) tails the transcript files the harnesses already write.
+The observer (`theater/daemon/observation/service.py`, ~790 lines) tails
+the transcript files the harnesses already write.
 `theater/daemon/observer.py` is a compatibility facade that re-exports the
 observation package.
 
@@ -665,7 +665,7 @@ theater/
 ├── formatting.py 158   shared CLI/régie rendering, no rich/textual
 ├── proc.py 222         process facts from ps / proc / lsof
 ├── daemon/
-│   ├── observation/    service.py 788 (watch loop, largest module)
+│   ├── observation/    service.py 788 (watch loop, observation orchestration root)
 │   │   ├── reducer.py  398 — QuietClock, three quiet timers, status policy
 │   │   ├── identity.py 209 · completion.py 186 · failures.py 230
 │   │   ├── screen.py 47 · turns.py 128 · attachment.py 349
@@ -717,7 +717,7 @@ theater/
     └── tree.py 121    compatibility facade re-exporting render modules
 ```
 
-Roughly 31,500 lines, ~80 test files (~39,500 test lines).
+Roughly 31,500 lines, 77 test modules (~39,500 test lines).
 
 The modular refactor decomposed the daemon's monolithic observer, methods,
 store, and server into packages (`observation/`, `rpc/`, `persistence/`,
