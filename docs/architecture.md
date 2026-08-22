@@ -48,16 +48,16 @@ layer become optional. Until then they are load-bearing.
             │  NDJSON over unix socket ($THEATER_HOME/daemon.sock)
             │                      │                     │
             ▼                      ▼                     ▼
-  ┌───────────────────────────────────────────────────────────────┐
-  │                          theater daemon                        │
-  │                                                                │
-  │   methods ── registry ── store (SQLite)      observer          │
-  │      │          │           │                   │              │
-  │      │        rails       jobs ◄────────────────┘ turn-end     │
-  │      │                                                          │
-  │   spawner ──► tmux new-window                                  │
-  │   send    ──► tmux send-keys                                   │
-  └───────────────────────────────────────────────────────────────┘
+   ┌───────────────────────────────────────────────────────────────┐
+   │                          theater daemon                        │
+   │                                                                │
+   │   rpc ── registry ── persistence (SQLite)    observation       │
+   │      │          │           │                   │              │
+   │      │        rails       jobs ◄────────────────┘ turn-end     │
+   │      │                                                          │
+   │   spawning ──► tmux new-window                                  │
+   │   send    ──► tmux send-keys                                   │
+   └───────────────────────────────────────────────────────────────┘
                               │  tails
                               ▼
               ~/.vibe/logs/... , ~/.claude/projects/...
@@ -71,8 +71,7 @@ Three kinds of process:
 - **the régie** — a Textual TUI, also just a client
 
 The daemon is the only thing that writes to SQLite or shells out to tmux. The
-MCP server does neither; it forwards. This is why the MCP layer is 358 lines
-and testable without a daemon at all.
+MCP server does neither; it forwards.
 
 ---
 
@@ -181,8 +180,8 @@ the framing above is auditable by eye with `nc`. Errors carry a `code` that
 maps to a `TheaterError` subclass, so a client can branch on `busy` versus
 `human_present` without parsing prose.
 
-The daemon exposes 16 methods (`theater/daemon/methods.py`); the MCP server
-exposes 12 tools to agents (`theater/mcp/server.py`), namespaced `theater_*`.
+The daemon exposes 33 methods (`theater/daemon/rpc/`); the MCP server
+exposes 14 tools to agents (`theater/mcp/server.py`), namespaced `theater_*`.
 The two sets are not the same and should not be: `shutdown`, `adopt`, and
 `bus.tail` are operator verbs, not agent verbs.
 
@@ -290,8 +289,10 @@ the observer uses, when a caller needs the untruncated text.
 
 ## 6. Observation
 
-The observer (`theater/daemon/observer.py`, the largest module at 607 lines)
-tails the transcript files the harnesses already write.
+The observer (`theater/daemon/observation/service.py`, ~790 lines) tails
+the transcript files the harnesses already write.
+`theater/daemon/observer.py` is a compatibility facade that re-exports the
+observation package.
 
 **Why not have agents self-report?** Two reasons, and the second is decisive:
 
@@ -322,10 +323,12 @@ onto. Job 2 is harness-agnostic policy, and it is where every observation bug in
 this project has been.
 
 So job 1 is a replaceable seam and job 2 is not. Job 1 belongs to a
-`HarnessObserver` (`theater/harness/observation.py`) which every harness carries
+`HarnessObserver` (`theater/harness/contracts/observation.py`, re-exported by
+the `harness/observation.py` facade) which every harness carries
 as `harness.observer`, and which the reducer holds *instead of* the harness — so
 the launch path and the observe path share no object. `observer.open_source()`
-returns a `Source` (`theater/harness/source.py`); the default, inherited from
+returns a `Source` (`theater/harness/contracts/source.py`, re-exported by
+`harness/source.py`); the default, inherited from
 `TranscriptObserver`, is `TranscriptSource`, the file tailing that used to live
 inline in the observer. An observer that replaces it returns `Batch(events,
 progressed, status, attached, waiting)` from `read()` and the reducer's policy
@@ -561,10 +564,11 @@ a historical planning record and has been left unedited.
 
 ## 9. Harness abstraction
 
-Two objects since v1.6. `theater/harness/base.py` defines `Harness`, which knows
-how to *start* a CLI; `theater/harness/observation.py` defines
-`HarnessObserver`, which knows how to *watch* one. A harness constructs its
-observer and carries it as `harness.observer`.
+Two objects since v1.6. `theater/harness/contracts/harness.py` (re-exported by
+the `harness/base.py` facade) defines `Harness`, which knows how to *start* a
+CLI; `theater/harness/contracts/observation.py` (re-exported by
+`harness/observation.py`) defines `HarnessObserver`, which knows how to *watch*
+one. A harness constructs its observer and carries it as `harness.observer`.
 
 | Method | On | Answers |
 |---|---|---|
@@ -628,7 +632,8 @@ imports neither `rich` nor `textual`, so the plain CLI stays dependency-light
 and the two never drift on how a tier or status is spelled. The lineage rails
 (`├── │`) are the one thing the régie draws that the CLI does not: they need
 sibling and ancestor position, which the shared depth-only walk cannot express,
-so `regie/tree.py` keeps its own traversal.
+so `regie/render/routing.py` keeps its own traversal (re-exported by the
+`regie/tree.py` facade).
 
 Two tmux courtesies belong to the régie rather than the daemon, because they
 are properties of *being on screen*: it enables the session's `mouse` option
@@ -647,43 +652,80 @@ no prompt and no parent, so the régie gains no privileged path to the daemon.
 
 ```
 theater/
-├── cli.py 443            argparse; daemon mcp ls spawn bus kill adopt harnesses regie stop
-├── client.py 130         DaemonClient, autostarts the daemon
-├── protocol.py 46        NDJSON framing, PROTOCOL_VERSION = 1
-├── models.py 170         Tier, Status, Participant, Job, error codes
-├── paths.py 35           $THEATER_HOME layout
-├── formatting.py 109     shared CLI/régie rendering, no rich/textual
+├── cli/                __init__.py 133 (entry point + main) · parser.py 287 · render.py 117
+│                       errors.py · commands/ (bus, identity, introspection, maintenance,
+│                       participants, process)
+├── config/             load.py 95 · models.py 148 · validation.py · describe.py
+├── constants/          __init__.py + cli, core, daemon, harness, limits, observation,
+│                       regie, tmux, worktree
+├── models.py 325       Tier, Status, Participant, Job, error codes
+├── client.py 234       DaemonClient, autostarts the daemon
+├── protocol.py 114     NDJSON framing, PROTOCOL_VERSION = 1
+├── paths.py 71         $THEATER_HOME layout
+├── formatting.py 158   shared CLI/régie rendering, no rich/textual
+├── proc.py 222         process facts from ps / proc / lsof
 ├── daemon/
-│   ├── observer.py 607   status policy, job completion and rescue
-│   ├── server.py 348     lifecycle only: socket, pidfile, reaper, wiring
-│   ├── methods.py 332    17 RPC handlers
-│   ├── registry.py 233   tier assignment, pane eviction, lineage
-│   ├── store.py 276      SQLite over SQLAlchemy Core, synchronous on purpose
-│   ├── jobs.py 181       JobManager, asyncio.Event per handle
-│   ├── gc.py 357         the retention sweep: bus, jobs+touch, participants
-│   ├── worktree.py        git worktree per child (theater/<id>), named shared worktrees (theater/named/<name>)
-│   ├── spawner.py 145    LaunchPlan → tmux window
-│   ├── rails.py 144      depth / cycle / budget
-│   ├── harness_detect.py 85
-│   ├── schema.py 85      table metadata, the one place columns are declared
-│   ├── lineage.py 73     ancestor_ids, depth_of, root_of, subtree_ids
-│   └── migrations/       alembic env + versions/
-├── harness/  __init__.py 330 (registry + install) · base.py 335
-│            source.py 371 (the observer's job-1 seam) · plugins.py 183 (loader)
-│            builtin/plugins/  opencode.py 706 (a database, not a file)
-│                              codex.py 414 · claude.py 367 · vibe.py 284
-├── mcp/      tools.py 206 · server.py 152
-├── tmux/     client.py 261 · panes.py 167 · presence.py 56
-└── regie/    app.py 534 · tree.py 131 · palette.py 64 · bus_view.py 37
+│   ├── observation/    service.py 788 (watch loop, observation orchestration root)
+│   │   ├── reducer.py  398 — QuietClock, three quiet timers, status policy
+│   │   ├── identity.py 209 · completion.py 186 · failures.py 230
+│   │   ├── screen.py 47 · turns.py 128 · attachment.py 349
+│   ├── persistence/    store.py 410 (SQLite over SQLAlchemy Core, sync on purpose)
+│   │   ├── database.py 84 · repositories/ (participants, jobs, bus, metadata,
+│   │   │   receipts, scratchpad, statistics, usage, worktrees)
+│   ├── rpc/            33 @method handlers across admin, jobs, participants, recall,
+│   │                   scratchpad, sending, spawning, transcripts, usage
+│   ├── runtime/        lifecycle.py 193 · socket.py 111 · maintenance.py 135
+│   ├── spawning/       service.py 443 · planning.py 150 · resume.py 148 · models.py 56
+│   ├── worktrees/      repository.py 133 · unique.py 233 · named.py 289 · paths.py 99
+│   ├── observer.py 141       compatibility facade re-exporting observation/
+│   ├── store.py 16          compatibility facade re-exporting persistence/
+│   ├── methods.py 101       compatibility facade re-exporting rpc/
+│   ├── server.py 205        lifecycle only: socket, pidfile, wiring
+│   ├── spawner.py 25        compatibility facade re-exporting spawning/
+│   ├── worktree.py 69       compatibility facade re-exporting worktrees/
+│   ├── registry.py 391     tier assignment, pane eviction, lineage
+│   ├── jobs.py 438          JobManager, asyncio.Event per handle
+│   ├── gc.py 484            the retention sweep: bus, jobs+touch, participants
+│   ├── rails.py 258         depth / cycle / budget
+│   ├── recall.py 392 / recall_read.py 495  path-touch history + segment reader (v2)
+│   ├── harness_detect.py 223 · lineage.py 73 · lock.py 206 · blob.py 48
+│   ├── schema.py 178  table metadata, the one place columns are declared
+│   └── migrations/     alembic env + versions/
+├── harness/
+│   ├── contracts/      harness.py 166 · source.py 285 · observation.py 332
+│   │                   launch.py 86 · events.py 133
+│   ├── registry/       lookup.py 108 · install.py 116 · capabilities.py 90 · claims.py 163
+│   ├── transcript/     source.py 595 (file-tailing, the observer's job-1 seam)
+│   │                   observer.py 249 · attachment.py 52
+│   ├── builtin/plugins/  opencode.py 1411 (a database, not a file)
+│   │                      codex.py 1053 · claude.py 1013 · vibe.py 1203
+│   ├── base.py 63          compatibility facade re-exporting contracts
+│   ├── observation.py 38   compatibility facade re-exporting contracts + transcript
+│   ├── source.py 43        compatibility facade re-exporting contracts + transcript
+│   └── plugins.py 427     the plugin loader
+├── mcp/      server.py 526 (14 agent tools, composition surface) · session.py 53
+│   ├── toolsets/       delegation.py 310 · participants.py 78 · recall.py 59 · transcripts.py 34
+│   └── tools.py 42     compatibility facade re-exporting toolsets + session
+├── tmux/     client.py 86 · command.py 121 · panes.py 311 · presence.py 53
+│            delivery.py 60 · facts.py 123 · options.py 90
+└── regie/    app.py 1203 (Textual app, composition surface) · palette.py 257 · bus_view.py 84
+    ├── controllers/    session.py 234 · navigation.py 124 · polling.py 203
+    │                   staging.py 242 · animation.py 356 · usage.py 212
+    ├── render/        layout.py 211 · glyphs.py 262 · routing.py 300
+    ├── widgets/       chrome.py 36 · leaf.py 186 · tree.py 268
+    │                   usage_breakdown.py 185 · usage_footer.py 408
+    └── tree.py 121    compatibility facade re-exporting render modules
 ```
 
-Roughly 9,200 lines, 572 tests.
+Roughly 31,200 lines, 77 test modules (~39,500 test lines).
 
-The v1.1 refactor split `daemon/server.py` (lifecycle vs. methods vs. harness
-detection), broke the `store ↔ jobs` import cycle by moving `Job` into
-`models.py`, gave the observer's watch loop an explicit cursor object, and
-consolidated four hand-rolled tree walks into `lineage.py`. It found three real
-bugs in the process, which is the argument for having done it.
+The modular refactor decomposed the daemon's monolithic observer, methods,
+store, and server into packages (`observation/`, `rpc/`, `persistence/`,
+`runtime/`, `spawning/`, `worktrees/`), split the harness contracts and
+transcript into sub-packages, moved MCP tool bodies into `toolsets/`, and broke
+the régie into `controllers/`, `render/`, and `widgets/`. The old module paths
+survive as compatibility facades that re-export the new packages, so existing
+imports continue to work unchanged.
 
 ---
 

@@ -17,7 +17,7 @@ processes:
   forwards, never touches SQLite or tmux directly.
 - **régie** — a Textual TUI; also just a client, holds no state the daemon lacks.
 
-Python 3.12+, ~16,300 lines, 65 test files. `theater` is the CLI entry point
+Python 3.12+, ~31,200 lines, 77 test modules. `theater` is the CLI entry point
 (`theater.cli:main`).
 
 ## The one constraint
@@ -64,33 +64,59 @@ changes by hand or under `nix develop`.
 
 ```
 theater/
-├── cli.py            argparse entry point
-├── client.py         DaemonClient (autostarts the daemon)
-├── protocol.py       NDJSON framing over unix socket, PROTOCOL_VERSION = 1 (NOT JSON-RPC)
-├── models.py         Tier, Status, Participant, Job, error codes
-├── paths.py          $THEATER_HOME layout
-├── formatting.py     shared CLI/régie rendering — imports neither rich nor textual
-├── proc.py           process facts from `ps` / `/proc` / `lsof`: descendants, open files
-├── daemon/           the registry server (only writer of SQLite + tmux)
-│   ├── observer.py   largest module: status policy, job completion, 60s rescue
-│   ├── methods.py    RPC handlers (daemon exposes more verbs than MCP does)
-│   ├── registry.py   tier assignment, pane eviction, lineage
-│   ├── store.py      SQLite over SQLAlchemy Core — synchronous ON PURPOSE
-│   ├── jobs.py       JobManager, one asyncio.Event per handle
-│   ├── gc.py         retention sweep: bus, jobs+touch, dead participants
-│   ├── rails.py      depth / cycle / budget guards
-│   ├── spawner.py / worktree.py    LaunchPlan → tmux window; git worktree per child
+├── cli/                entry point, parser, commands, render
+│   └── commands/       bus, identity, introspection, maintenance, participants, process
+├── config/             config loading, models, validation, describe
+├── constants/          immutable values split by domain (cli, core, daemon, harness, …)
+├── models.py           Tier, Status, Participant, Job, error codes
+├── client.py           DaemonClient (NDJSON over Unix socket, autostarts the daemon)
+├── protocol.py         NDJSON framing, PROTOCOL_VERSION = 1 (NOT JSON-RPC)
+├── paths.py            $THEATER_HOME layout
+├── formatting.py       shared CLI/régie rendering — imports neither rich nor textual
+├── proc.py             process facts from `ps` / `/proc` / `lsof`: descendants, open files
+├── daemon/             the registry server (only writer of SQLite + tmux)
+│   ├── observation/    status policy, job completion, rescue, identity, screen, turns
+│   │   ├── service.py  the watch loop and observation orchestration root
+│   │   └── reducer.py  QuietClock — the three quiet timers live here
+│   ├── persistence/    store, database, repositories (participants, jobs, bus, …)
+│   ├── rpc/            handler modules registered via @method into METHODS
+│   ├── runtime/        socket dispatch, maintenance loops, lifecycle
+│   ├── spawning/       launch planning, resume, service
+│   ├── worktrees/      unique and named shared worktree paths and repos
+│   ├── observer.py     compatibility facade — re-exports the observation package
+│   ├── store.py        compatibility facade — re-exports the persistence package
+│   ├── methods.py      compatibility facade — re-exports the rpc package
+│   ├── server.py       lifecycle only: socket, pidfile, wiring (composition surface)
+│   ├── spawner.py / worktree.py   compatibility facades for spawning/worktrees
+│   ├── registry.py     tier assignment, pane eviction, lineage
+│   ├── jobs.py         JobManager, one asyncio.Event per handle
+│   ├── gc.py           retention sweep: bus, jobs+touch, dead participants
+│   ├── rails.py        depth / cycle / budget guards
 │   ├── recall.py / recall_read.py  path-touch history + segment reader (v2)
-│   ├── schema.py     the one place table columns are declared
-│   └── migrations/   alembic env + versions/
-├── harness/          plugin loader + adapters (no privileged built-in tier)
-│   ├── base.py       Harness — how to START a CLI (plan_launch)
-│   ├── observation.py  HarnessObserver — how to WATCH one
-│   ├── source.py     the observer's replaceable "get the text" seam
-│   └── builtin/plugins/  claude.py · codex.py · opencode.py · vibe.py
-├── mcp/              server.py (12 agent tools) · tools.py
-├── tmux/            client.py · panes.py · presence.py
-└── regie/           app.py · tree.py · palette.py · bus_view.py
+│   ├── schema.py       the one place table columns are declared
+│   └── migrations/     alembic env + versions/
+├── harness/            plugin loader + adapters (no privileged built-in tier)
+│   ├── contracts/       Harness, Source, HarnessObserver, launch, events
+│   ├── registry/       plugin lookup, install, capabilities, claims
+│   ├── transcript/     transcript-file source, observer, attachment
+│   ├── builtin/plugins/  claude.py · codex.py · opencode.py · vibe.py
+│   ├── base.py         compatibility facade — re-exports contracts
+│   ├── observation.py  compatibility facade — re-exports contracts + transcript
+│   ├── source.py       compatibility facade — re-exports contracts + transcript
+│   └── plugins.py      the plugin loader
+├── mcp/                server.py (14 agent tools) · session.py · toolsets/
+│   ├── toolsets/       delegation, participants, recall, transcripts
+│   ├── server.py       composition surface — registers @mcp.tool entries
+│   └── tools.py        compatibility facade — re-exports toolsets + session
+├── tmux/               client.py · command.py · panes.py · presence.py · delivery · facts · options
+└── regie/              Textual TUI
+    ├── controllers/    animation, navigation, polling, session, staging, usage
+    ├── render/         layout, glyphs, routing
+    ├── widgets/        chrome, leaf, tree, usage breakdown, usage footer
+    ├── app.py          the Textual application (composition surface)
+    ├── tree.py         compatibility facade — re-exports render modules
+    ├── palette.py      ctrl+p command-palette entries
+    └── bus_view.py     live event-stream widget
 ```
 
 ## Conventions
@@ -125,7 +151,7 @@ theater/
   Do not add screen-scraping heuristics here (one was removed for this).
 - **`AWAITING_INPUT` is a display hint** — never gate a control decision on it.
 - **The three quiet timers stay separate** (`RELOCATE`, `AWAITING_INPUT`,
-  `RESCUE` in `observer.py`). Sharing them was a v1 bug; the comments call it a
+  `RESCUE` in `observation/reducer.py`). Sharing them was a v1 bug; the comments call it a
   scar, not a preference.
 - **Approval has no default** anywhere — it is chosen per-spawn (`manual` /
   `edits` / `yolo`). This is the whole safety story for an unwatched child; do not

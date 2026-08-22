@@ -16,7 +16,7 @@ Theater lets agents running in different harnesses — Claude Code, Codex, Vibe 
 │       └──────────────────┴───────────────────┘       │
 │                          │                           │
 │                  theater mcp (stdio)                 │
-│                          │  JSON-RPC                 │
+│                          │  NDJSON over Unix socket  │
 │                   theater daemon                     │
 │                   (registry + bus)                   │
 │                          │                           │
@@ -594,18 +594,56 @@ for r in completed:
 ## Project layout
 
 ```
-config.example.toml   every setting with its default, safe to copy
+config.example.toml       every setting with its default, safe to copy
 theater/
-  cli.py          theater binary entry point
-  models.py       Participant, Status, Tier domain types
-  client.py       DaemonClient — JSON-RPC over a Unix socket
-  protocol.py     wire protocol definitions
-  paths.py        XDG-style home directory layout
-  daemon/         the registry server
-  mcp/            the stdio MCP server and tool implementations
-  harness/        the plugin loader, and the adapters that ship in builtin/plugins/
-  regie/          Textual TUI
-  tmux/           tmux client wrapper
+  cli/                    entry point, parser, commands, render
+  config/                 config loading, models, validation
+  constants/              immutable values split by domain
+  models.py               Participant, Status, Tier, Job, error codes
+  client.py               DaemonClient (NDJSON over Unix socket, autostarts the daemon)
+  protocol.py             wire protocol definitions (NDJSON, not JSON-RPC)
+  paths.py                $THEATER_HOME layout
+  formatting.py           shared CLI/régie rendering — imports neither rich nor textual
+  proc.py                 process facts from ps / proc / lsof
+  daemon/                 the registry server (only writer of SQLite + tmux)
+    observation/          status policy, job completion, rescue, identity, screen, turns
+    persistence/          store, database, repositories (participants, jobs, bus, …)
+    rpc/                  handler modules registered via @method into METHODS
+    runtime/              socket dispatch, maintenance loops, lifecycle
+    spawning/             launch planning, resume, service
+    worktrees/            unique and named shared worktree paths and repos
+    observer.py           compatibility facade re-exporting the observation package
+    store.py              compatibility facade re-exporting the persistence package
+    methods.py            compatibility facade re-exporting the rpc package
+    server.py             lifecycle only: socket, pidfile, wiring (composition surface)
+    spawner.py / worktree.py   compatibility facades for the spawning/worktrees packages
+    registry.py           tier assignment, pane eviction, lineage
+    jobs.py               JobManager, one asyncio.Event per handle
+    gc.py                 retention sweep: bus, jobs+touch, dead participants
+    rails.py              depth / cycle / budget guards
+    schema.py             the one place table columns are declared
+    migrations/           alembic env + versions/
+  harness/                plugin loader + adapters
+    contracts/            Harness, Source, HarnessObserver, launch, events
+    registry/             plugin lookup, install, capabilities, claims
+    transcript/           transcript-file source and observer, attachment
+    builtin/plugins/      claude.py · codex.py · opencode.py · vibe.py
+    base.py / source.py / observation.py   compatibility facades
+  mcp/                    stdio MCP server and tool implementations
+    toolsets/              delegation, participants, recall, transcripts
+    session.py             Session — tool-call context shared with the daemon
+    server.py              14 agent tools (composition surface)
+    tools.py              compatibility facade re-exporting toolsets
+  tmux/                   client, command, panes, presence, delivery, facts, options
+  regie/                  Textual TUI
+    controllers/           animation, navigation, polling, session, staging, usage
+    render/                layout, glyphs, routing
+    widgets/               chrome, leaf, tree, usage breakdown and footer
+    app.py                 the Textual application (composition surface)
+    tree.py                compatibility facade re-exporting render modules
+    palette.py             ctrl+p command-palette entries
+    bus_view.py            live event-stream widget
+  pricing/                usage pricing tables
 docs/
   init_idea.md            original design sketch
   init_idea_grilled.md    spec — why each decision went the way it did
