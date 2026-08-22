@@ -45,18 +45,13 @@ from theater.harness.contracts.observation import HarnessObserver
 
 logger = logging.getLogger("theater.harness.plugins")
 
-#: Prefixed so a plugin can never take the import slot of a real module. The
-#: source is in the name too, so a local override does not evict the shipped one.
+#: Prefixed so a plugin can never take the import slot of a real module.
 MODULE_PREFIX = "theater_harness_plugin_"
 
-#: Prefixed so a ``_``-helper module can never take the import slot of a real
-#: module. Keyed by source and a hash of the directory path, so two same-named
-#: helpers in two scanned directories cannot collide — each gets its own
-#: mangled name in ``sys.modules``.
+#: Prefixed so a ``_``-helper module can never take a real module's import slot.
 HELPER_PREFIX = "theater_harness_helper_"
 
-#: Where a plugin came from. "Why is this harness behaving unexpectedly" is
-#: usually answered by "not the file you think".
+#: Where a plugin came from.
 SHIPPED = "shipped"
 LOCAL = "local"
 
@@ -150,17 +145,13 @@ class _HelperFinder(importlib.abc.MetaPathFinder):
             try:
                 spec.loader.exec_module(mod)
             except (Exception, SystemExit) as exc:
-                # Match the plugin import path (line 283): catch everything
-                # except KeyboardInterrupt, which is a user interrupt, not a
-                # broken plugin. Pop the half-executed module so a later
-                # rescan does not find it cached and skip exec_module.
+                # Catch all but KeyboardInterrupt; pop half-executed module so rescan won't cache.
                 sys.modules.pop(mangled, None)
                 raise PluginError(
                     f"{helper_path}: failed to import helper {fullname!r}: {exc!r}"
                 ) from exc
             except KeyboardInterrupt:
-                # The user pressed ctrl-C; clean up the half-executed helper
-                # so it is not reused by a later rescan, then propagate.
+                # Clean up the half-executed helper so it is not reused by a later rescan.
                 sys.modules.pop(mangled, None)
                 raise
         self.resolved.add(fullname)
@@ -257,10 +248,7 @@ def scan(directory: Path, *, source: str, skip: Iterable[str] = ()) -> list[Plug
         try:
             harness = _load_one(path, source)
         except (Exception, SystemExit) as exc:
-            # PluginError messages already start with the file path (every
-            # raise in _load_one formats it in). A bare exception from a
-            # property getter or similar does not, so prefix it here to
-            # keep every rejected-plugin message readable in `theater harnesses`.
+            # PluginError starts with the file path; prefix bare exceptions so message is readable.
             msg = str(exc) if isinstance(exc, PluginError) else f"{path}: {exc!r}"
             found.append(Plugin(path=path, source=source, name=path.stem, error=msg))
             continue
@@ -276,17 +264,9 @@ def _load_one(path: Path, source: str) -> Harness:
         raise PluginError(f"{path}: not loadable as a Python module")
 
     module = importlib.util.module_from_spec(spec)
-    # Registered before execution: dataclasses and `typing.get_type_hints`
-    # resolve annotations via sys.modules, and a plugin using either would fail
-    # on its own import line otherwise.
+    # Registered before execution: dataclasses/typing.get_type_hints resolve via sys.modules.
     sys.modules[module_name] = module
-    # A ``_``-prefixed helper beside the plugin is importable (``import _shared``)
-    # via a meta path finder that loads it lazily under a mangled name keyed by
-    # source and directory. No bare helper name survives in ``sys.modules``
-    # after the plugin loads — the context manager removes the finder and any
-    # bare names it resolved. Helpers are loaded lazily: a helper nobody
-    # imports is never executed, and a broken helper's error names the helper
-    # file. A helper may import another helper in the same directory.
+    # A ``_``-prefixed helper beside the plugin is importable via a meta path finder, loaded lazily.
     with _HelperFinder(path.parent, source):
         try:
             spec.loader.exec_module(module)
