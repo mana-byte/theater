@@ -2,6 +2,18 @@
 
 from __future__ import annotations
 
+#: Shared fallback session for the dashboard and daemon-created agent windows.
+TMUX_DEFAULT_SESSION = "theater"
+
+#: Name shown for the singleton régie window created by the bare CLI.
+TMUX_REGIE_WINDOW_NAME = "régie"
+
+#: Window-local marker used to find an existing régie without matching titles.
+TMUX_REGIE_WINDOW_OPTION = "@theater_regie"
+
+#: Marker value written to the régie window option.
+TMUX_REGIE_WINDOW_OPTION_VALUE = "1"
+
 # Ceiling for one local tmux subprocess before it is considered wedged.
 TMUX_RUN_TIMEOUT_SECONDS = 10.0
 

@@ -95,6 +95,8 @@ class RegieSection:
     sidebar_width: int = field(default=52, metadata={"min": 40})
     #: Off by default: the tree is what the régie is for. While hidden the bus is not polled at all.
     bus_visible: bool = False
+    #: Animate initial and newly discovered participant leaves as text being typed.
+    startup_reveal: bool = True
     #: Which cost window the price footer shows: "day", "week", "month", or "year".
     cost_window: str = "day"
 

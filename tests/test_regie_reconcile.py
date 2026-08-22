@@ -148,7 +148,9 @@ def tmux(monkeypatch):
 
 def make_app(**regie) -> RegieApp:
     """An app with slow timers so the only refreshes are the ones at mount."""
-    settings = Config(regie=RegieSection(tree_interval=60, bus_interval=60, **regie))
+    values = {"tree_interval": 60, "bus_interval": 60, "startup_reveal": False}
+    values.update(regie)
+    settings = Config(regie=RegieSection(**values))
     app = RegieApp(settings)
     app.notify = lambda msg, **kw: None  # type: ignore[method-assign]
     return app

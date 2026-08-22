@@ -340,13 +340,22 @@ just been swept, it gave back 22.9 MB. It is never run in the background for
 that reason: an hourly lock over a growing file is a worse problem than a large
 file.
 
-### `theater regie`
+### `theater` / `theater regie`
 
-Launch the régie TUI — a full-screen view of all sessions and their activity. Must be run inside tmux:
+Run `theater` to start or attach to Theater's tmux session, ensure the daemon is
+running, and open the régie. The explicit `theater regie` form still requires an
+existing tmux session and runs in the current pane:
 
 ```sh
+theater
 theater regie
 ```
+
+The shared `theater` session remains alive while agent windows remain. Multiple
+clients attached to that session share its selected window, as they do in tmux
+normally. Quitting a régie opened by the bare `theater` command detaches the
+current client; it does not stop the tmux session or the Theater daemon. The
+explicit `theater regie` command only exits the TUI.
 
 Children hang off their parent on lineage rails, so a sibling is never mistaken for a nephew. `ctrl+p` opens the command palette, which carries a `Spawn <harness>` entry for every harness Theater can drive — that starts a plain CLI in the current session, with no prompt and no parent.
 
@@ -410,6 +419,7 @@ bus_interval  = 0.4
 bus_batch     = 50
 cwd_segments  = 2         # trailing cwd segments kept in the sidebar tree
 sidebar_width = 60        # sidebar columns; used for both Textual and tmux
+startup_reveal = true     # type initial and newly spawned leaves into the tree
 
 [rails]
 depth_cap = 3             # how deep a spawn chain may go

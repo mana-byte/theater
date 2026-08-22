@@ -23,7 +23,7 @@ keystrokes". ``paste-buffer -p`` wraps the buffer in bracketed-paste markers
 *if the application asked for them* (DECSET 2004) and sends it plain
 otherwise, so tmux makes that decision from the receiver's own declared
 capability rather than from a guess in a table here. All four supported
-CLIs request it; ``#{bracket_paste_flag}`` reports 1 for each.
+CLIs request it, and the real-server tests assert that the markers arrive.
 
 The buffer is named per pane so two concurrent sends cannot paste each
 other's text, and deleted on the way out even if the paste fails, so a

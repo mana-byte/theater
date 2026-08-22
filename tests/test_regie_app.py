@@ -31,6 +31,7 @@ from theater.constants import (
     USAGE_AVERAGE_WINDOW_DAYS,
     USAGE_AVERAGE_WINDOW_HOURS,
 )
+from theater.constants.regie import REGIE_NEW_LEAF_REVEAL_COLUMNS_PER_FRAME
 from theater.protocol import RemoteError
 from theater.regie import app as app_mod
 from theater.regie.app import RegieApp
@@ -283,7 +284,9 @@ def make_app(**regie) -> tuple[RegieApp, list[tuple[str, str]]]:
     the ones at mount and the ones an action asks for. A one-second tree poll
     would otherwise race every assertion about what was called.
     """
-    settings = Config(regie=RegieSection(tree_interval=60, bus_interval=60, **regie))
+    values = {"tree_interval": 60, "bus_interval": 60, "startup_reveal": False}
+    values.update(regie)
+    settings = Config(regie=RegieSection(**values))
     app = RegieApp(settings)
     notes: list[tuple[str, str]] = []
     app.notify = lambda msg, **kw: notes.append(  # type: ignore[method-assign]
@@ -1091,6 +1094,111 @@ async def test_an_empty_tree_says_so_instead_of_rendering_nothing(daemon, tmux):
         assert not empty.has_class("tree-cursor")
         assert not empty.has_class("tree-staged")
         assert not empty.has_class("tree-alt")
+
+
+async def test_reveal_types_initial_and_new_leaves_once(daemon, tmux, monkeypatch):
+    monkeypatch.setattr(app_mod, "STARTUP_REVEAL_INTERVAL", 60.0)
+    app, _ = make_app(startup_reveal=True)
+
+    async with app.run_test() as pilot:
+        panel = app.query_one("#tree-panel", app_mod.TreePanel)
+        parent = panel._key_widgets[("p", PARENT["id"])]
+        assert str(parent.render()) == "\n\n"
+        assert app._leaf_reveal_timer is not None
+
+        app._tick_leaf_reveal()
+        assert max(map(len, str(parent.render()).splitlines())) <= 1
+
+        for _ in range(200):
+            if not app._leaf_reveal.active:
+                break
+            app._tick_leaf_reveal()
+        assert not app._leaf_reveal.active
+        assert app._leaf_reveal_timer is None
+        assert "vibe" in str(parent.render())
+
+        await app._refresh_tree()
+        assert "vibe" in str(parent.render())
+
+        newcomer = {**CHILD, "id": "new-participant", "harness": "opencode"}
+        daemon["answers"]["participants.tree"] = [{**PARENT, "children": [CHILD, newcomer]}]
+        await app._refresh_tree()
+        added = panel._key_widgets[("p", "new-participant")]
+        assert str(added.render()) == "\n\n"
+        assert app._leaf_reveal_timer is not None
+
+        app._tick_leaf_reveal()
+        assert (
+            max(map(len, str(added.render()).splitlines()))
+            <= REGIE_NEW_LEAF_REVEAL_COLUMNS_PER_FRAME
+        )
+        for _ in range(100):
+            if not app._leaf_reveal.active:
+                break
+            app._tick_leaf_reveal()
+        assert "opencode" in str(added.render())
+
+        daemon["answers"]["participants.tree"] = [{**PARENT, "children": [CHILD]}]
+        await app._refresh_tree()
+        await pilot.pause()
+        daemon["answers"]["participants.tree"] = [{**PARENT, "children": [CHILD, newcomer]}]
+        await app._refresh_tree()
+        assert "opencode" in str(panel._key_widgets[("p", "new-participant")].render())
+        assert app._leaf_reveal_timer is None
+
+
+async def test_startup_reveal_types_the_empty_hint_once(daemon, tmux, monkeypatch):
+    monkeypatch.setattr(app_mod, "STARTUP_REVEAL_INTERVAL", 60.0)
+    daemon["answers"]["participants.tree"] = []
+    app, _ = make_app(startup_reveal=True)
+
+    async with app.run_test():
+        panel = app.query_one("#tree-panel", app_mod.TreePanel)
+        empty = panel.query_one(app_mod.EmptyTreeState)
+        assert str(empty.render()) == ""
+
+        app._tick_leaf_reveal()
+        assert str(empty.render()) == "C"
+        for _ in range(len(app_mod.EMPTY_TREE_HINT) + 1):
+            app._tick_leaf_reveal()
+        assert str(empty.render()) == app_mod.EMPTY_TREE_HINT
+        assert app._leaf_reveal_timer is None
+
+        daemon["answers"]["participants.tree"] = [PARENT]
+        await app._refresh_tree()
+        leaf = panel._key_widgets[("p", PARENT["id"])]
+        assert str(leaf.render()) == "\n\n"
+        app._tick_leaf_reveal()
+        assert (
+            max(map(len, str(leaf.render()).splitlines()))
+            <= REGIE_NEW_LEAF_REVEAL_COLUMNS_PER_FRAME
+        )
+
+
+async def test_disabled_startup_reveal_never_starts_a_timer(daemon, tmux):
+    app, _ = make_app(startup_reveal=False)
+    async with app.run_test():
+        assert app._leaf_reveal.started
+        assert not app._leaf_reveal.active
+        assert app._leaf_reveal_timer is None
+        panel = app.query_one("#tree-panel", app_mod.TreePanel)
+        assert "vibe" in str(panel._key_widgets[("p", PARENT["id"])].render())
+
+
+async def test_startup_reveal_waits_for_first_successful_tree_poll(daemon, tmux, monkeypatch):
+    monkeypatch.setattr(app_mod, "STARTUP_REVEAL_INTERVAL", 60.0)
+    daemon["broken"] = {"participants.tree"}
+    app, _ = make_app(startup_reveal=True)
+
+    async with app.run_test():
+        assert not app._leaf_reveal.started
+        assert app._leaf_reveal_timer is None
+
+        daemon["broken"].clear()
+        await app._refresh_tree()
+        assert app._leaf_reveal.started
+        assert app._leaf_reveal.active
+        assert app._leaf_reveal_timer is not None
 
 
 async def test_a_daemon_that_will_not_answer_does_not_stop_the_regie(daemon, tmux):

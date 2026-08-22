@@ -19,8 +19,12 @@ without a tmux binary can still use `-m "not tmux"`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
+import pty
 import shlex
 import shutil
+import signal
 import sys
 import tempfile
 from pathlib import Path
@@ -30,11 +34,12 @@ import pytest
 
 from theater.daemon.methods import _check_pane_identity
 from theater.models import StaleTarget
-from theater.tmux import client
+from theater.tmux import bootstrap, client
 
 pytestmark = pytest.mark.tmux
 
 RIG = Path(__file__).parent / "rig" / "pane_app.py"
+RIG_READY = "RIG READY"
 SESSION = "theater-rig"
 
 #: Bracketed-paste markers, DEC's names for them.
@@ -52,6 +57,8 @@ def tmux_server():
     root = tempfile.mkdtemp(prefix="thr", dir="/tmp")
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("TMUX_TMPDIR", root)
+        # tmux refuses to attach a client when TERM has no clear capability.
+        mp.setenv("TERM", "xterm")
         # Inherited TMUX/TMUX_PANE would point at the developer's own server
         # and make tmux refuse to nest.
         mp.delenv("TMUX", raising=False)
@@ -78,14 +85,77 @@ async def _wait_for(predicate, *, timeout: float = 5.0, interval: float = 0.05):
         await asyncio.sleep(interval)
 
 
-async def _bracket_paste_flag(pane: str) -> str:
-    return await client.display_message("#{bracket_paste_flag}", target=pane)
+async def test_regie_bootstrap_reuses_its_real_tmux_window(tmux_server, tmp_path):
+    command = ["sleep", "30"]
+    first = await bootstrap.ensure_regie_window(str(tmp_path), command=command)
+    second = await bootstrap.ensure_regie_window(str(tmp_path), command=command)
+
+    assert first == second
+    rows = await client.run(
+        "list-windows",
+        "-t",
+        f"{first[0]}:",
+        "-F",
+        "#{window_id}\t#{@theater_regie}",
+    )
+    assert [row for row in rows.splitlines() if row.endswith("\t1")] == [f"{first[1]}\t1"]
 
 
-async def _declared_bracketed_paste(pane: str) -> bool | None:
-    """Truthy only on "1" -- tmux answers "0" before the program is up, and a
-    non-empty string is not the same thing as a yes."""
-    return True if await _bracket_paste_flag(pane) == "1" else None
+async def _session_attached(session: str, expected: str) -> bool:
+    attached = await client.run(
+        "display-message",
+        "-p",
+        "-t",
+        f"{session}:",
+        "#{session_attached}",
+    )
+    return attached == expected
+
+
+async def test_detach_current_client_really_detaches_and_keeps_session(tmux_server, tmp_path):
+    pane = await client.new_window(
+        session=tmux_server,
+        name="detach",
+        cwd=str(tmp_path),
+        command=["sleep", "30"],
+    )
+    window = await client.display_message("#{window_id}", target=pane)
+    await client.run("select-window", "-t", window)
+
+    pid, master_fd = pty.fork()
+    if pid == 0:
+        os.execvp("tmux", ["tmux", "attach-session", "-t", tmux_server])
+
+    reaped = False
+    try:
+        await _wait_for(lambda: _session_attached(tmux_server, "1"))
+        await client.run(
+            "respawn-pane",
+            "-k",
+            "-t",
+            pane,
+            "--",
+            sys.executable,
+            "-c",
+            "from theater.tmux.bootstrap import detach_current_client; detach_current_client()",
+        )
+        await _wait_for(lambda: _session_attached(tmux_server, "0"))
+        assert tmux_server in await client.sessions()
+        _, status = await asyncio.to_thread(os.waitpid, pid, 0)
+        reaped = True
+        assert os.waitstatus_to_exitcode(status) == 0
+    finally:
+        os.close(master_fd)
+        if not reaped:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGTERM)
+            with contextlib.suppress(ChildProcessError):
+                await asyncio.to_thread(os.waitpid, pid, 0)
+
+
+async def _rig_ready(pane: str) -> bool:
+    screen = await client.run("capture-pane", "-p", "-t", pane, check=False)
+    return RIG_READY in screen
 
 
 async def _start_rig(
@@ -119,9 +189,8 @@ async def _start_rig(
         inner = " ".join(shlex.quote(a) for a in argv)
         argv = ["sh", "-c", f"{inner}; exec sh"]
     pane = await client.new_window(session=session, name="rig", cwd=str(tmp_path), command=argv)
-    # The rig declares DECSET 2004 as its first act, so the flag turning 1 is
-    # both "it is up" and "a paste will be bracketed".
-    await _wait_for(lambda: _declared_bracketed_paste(pane))
+    # The marker follows DECSET 2004 in one flush, so tmux has consumed the declaration.
+    await _wait_for(lambda: _rig_ready(pane))
     return pane, log
 
 

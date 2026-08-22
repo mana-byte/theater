@@ -65,6 +65,7 @@ from theater.constants.regie import (
     REGIE_HIDDEN_TREE_CURSOR,
     REGIE_MAX_AWAIT_ANIMS,
     REGIE_MAX_TRACE_ANIMS,
+    REGIE_STARTUP_REVEAL_INTERVAL_SECONDS,
     REGIE_TRACE_ANIM_INTERVAL,
     REGIE_USAGE_METRIC_DOWN,
     REGIE_USAGE_METRIC_LEFT,
@@ -87,6 +88,7 @@ from theater.regie.controllers.animation import (  # noqa: F401
 )
 from theater.regie.controllers.navigation import NavigationState, UpDecision
 from theater.regie.controllers.polling import PollingController
+from theater.regie.controllers.reveal import LeafRevealController
 from theater.regie.controllers.session import (
     _RETURN_KEY_NOTE,  # noqa: F401 — legacy alias
     SessionController,
@@ -190,6 +192,7 @@ TRACE_ANIM_INTERVAL = REGIE_TRACE_ANIM_INTERVAL
 MAX_TRACE_ANIMS = REGIE_MAX_TRACE_ANIMS
 MAX_AWAIT_ANIMS = REGIE_MAX_AWAIT_ANIMS
 AWAIT_ANIM_TTL = REGIE_AWAIT_ANIM_TTL
+STARTUP_REVEAL_INTERVAL = REGIE_STARTUP_REVEAL_INTERVAL_SECONDS
 
 
 class RegieApp(App):
@@ -302,6 +305,8 @@ class RegieApp(App):
         self._tree_revision = 0
         #: Runs only while something is in flight — an idle régie costs no frames.
         self._anim_timer: Timer | None = None
+        self._leaf_reveal = LeafRevealController(enabled=self.settings.regie.startup_reveal)
+        self._leaf_reveal_timer: Timer | None = None
         self._nav = NavigationState()
         self._usage = UsagePanelState()
         self._staging = StageController(self.settings.regie, panes)
@@ -404,7 +409,13 @@ class RegieApp(App):
 
     async def on_mount(self) -> None:
         self._client = DaemonClient()
-        await self._client.connect()
+        try:
+            await self._client.connect()
+        except ConnectionError as exc:
+            logger.warning("daemon connection failed during régie startup: %s", exc)
+            self.notify(f"daemon connection failed: {exc}", severity="error")
+            self.exit()
+            return
         # Width is imperative: App.CSS is parsed once; must match action_stage.
         self.query_one("#sidebar").styles.width = self.settings.regie.sidebar_width
         # Discover pane/window/session and set up tmux options through the app's own wrappers.
@@ -574,6 +585,7 @@ class RegieApp(App):
         return _COST_WINDOWS["day"]
 
     async def on_unmount(self) -> None:
+        self._stop_leaf_reveal()
         # Best effort: catches paths that never reach action_quit's teardown.
         await self._teardown()
         if self._client:
@@ -910,9 +922,36 @@ class RegieApp(App):
             return
         panel._lines_data = self.tree_lines
         panel.lines = self.tree_lines
+        self._sync_leaf_reveal(panel)
         cursor = self._visible_tree_cursor()
         panel.apply_cursor(cursor, self.staged_pane)
         panel.scroll_to_cursor(cursor)
+
+    def _sync_leaf_reveal(self, panel: TreePanel) -> None:
+        keys = panel.leaf_keys()
+        if not self._leaf_reveal.needs_sync(keys):
+            return
+        frame = self._leaf_reveal.observe(panel.reveal_widths(self._leaf_reveal.sync_keys(keys)))
+        panel.set_reveals(frame.widths)
+        if frame.active and self._leaf_reveal_timer is None:
+            self._leaf_reveal_timer = self.set_interval(
+                STARTUP_REVEAL_INTERVAL, self._tick_leaf_reveal
+            )
+
+    def _tick_leaf_reveal(self) -> None:
+        panel = self._panel()
+        if panel is None:
+            return
+        keys = panel.leaf_keys()
+        frame = self._leaf_reveal.tick(panel.reveal_widths(self._leaf_reveal.sync_keys(keys)))
+        panel.set_reveals(frame.widths)
+        if not frame.active:
+            self._stop_leaf_reveal()
+
+    def _stop_leaf_reveal(self) -> None:
+        if self._leaf_reveal_timer is not None:
+            self._leaf_reveal_timer.stop()
+            self._leaf_reveal_timer = None
 
     def _visible_tree_cursor(self) -> int:
         return HIDDEN_TREE_CURSOR if self._usage_keyboard_metric is not None else self.cursor

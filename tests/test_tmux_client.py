@@ -380,6 +380,25 @@ async def test_unset_option_uses_u_so_the_global_value_applies_again(monkeypatch
     assert argv[-1] == "mouse"
 
 
+async def test_show_window_option_is_window_scoped(monkeypatch):
+    captured = _capture(monkeypatch, "@theater_regie 1\n")
+    assert await client.show_window_option("@theater_regie", target="@4") == "1"
+    argv = captured[0]
+    assert argv[0] == "show-options"
+    assert "-w" in argv
+    assert argv[argv.index("-t") + 1] == "@4"
+
+
+async def test_set_window_option_is_window_scoped(monkeypatch):
+    captured = _capture(monkeypatch)
+    await client.set_window_option("@theater_regie", "1", target="@4")
+    argv = captured[0]
+    assert argv[0] == "set-option"
+    assert "-w" in argv
+    assert argv[argv.index("-t") + 1] == "@4"
+    assert argv[-2:] == ["@theater_regie", "1"]
+
+
 # ---- key bindings --------------------------------------------------------
 
 

@@ -79,6 +79,7 @@ class AgentLeaf(Static):
         key: Key | None = None,
         cwd_segments: int = 2,
         is_first_root: bool = False,
+        reveal: int | None = None,
         **kwargs,
     ) -> None:
         super().__init__("", **kwargs)
@@ -88,6 +89,7 @@ class AgentLeaf(Static):
         self._key = key or ("p", node.get("id", ""))
         self._cwd_segments = cwd_segments
         self._is_first_root = is_first_root
+        self._reveal = reveal
         self._frame: int = 0
         self._timer: Timer | None = None
         #: Heavy line glyphs a tree-route animation is drawing on this leaf.
@@ -108,7 +110,28 @@ class AgentLeaf(Static):
             frame=self._frame,
             is_first_root=self._is_first_root,
             overlay=self._overlay,
+            reveal=self._reveal,
         )
+
+    @property
+    def required_reveal_width(self) -> int:
+        """Largest full-text row width for startup reveal completion."""
+        content = node_label(
+            self._node,
+            self._prefix,
+            cont_prefix=self._cont_prefix,
+            cwd_segments=self._cwd_segments,
+            frame=self._frame,
+            is_first_root=self._is_first_root,
+        )
+        return max((len(line) for line in content.plain.splitlines()), default=0)
+
+    def set_reveal(self, reveal: int | None) -> None:
+        """Set the visible startup columns, or None for the full leaf."""
+        if reveal == self._reveal:
+            return
+        self._reveal = reveal
+        self.update(self._render_label(), layout=False)
 
     def set_overlay(self, overlay: LeafOverlay | None) -> None:
         """Draw (or stop drawing) the send trace on this leaf.

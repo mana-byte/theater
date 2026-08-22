@@ -58,6 +58,9 @@ REGIE_FOOTER_ANIM_FRAMES = round(REGIE_FOOTER_ANIM_DURATION / REGIE_FOOTER_ANIM_
 #: Maximum rows the usage breakdown overlay may cover.
 REGIE_USAGE_BREAKDOWN_MAX_HEIGHT = 12
 
+#: Stable key for the placeholder shown when the tree is empty.
+REGIE_EMPTY_TREE_KEY = ("empty", "")
+
 #: Empty-tree call-to-action shortcut text.
 REGIE_EMPTY_TREE_SHORTCUT = "Ctrl+P"
 #: Style for the empty-tree shortcut text.
@@ -69,6 +72,24 @@ REGIE_EMPTY_TREE_HINT = f"{REGIE_EMPTY_TREE_SHORTCUT}{REGIE_EMPTY_TREE_TAIL}"
 
 #: Leaf spinner/animation timer interval in seconds.
 REGIE_LEAF_SPINNER_INTERVAL = 0.1
+
+#: Delay between startup typing frames, in seconds.
+REGIE_STARTUP_REVEAL_INTERVAL_SECONDS = 0.035
+
+#: Visible columns added to each leaf on a startup typing frame.
+REGIE_STARTUP_REVEAL_COLUMNS_PER_FRAME = 1
+
+#: Visible columns added to a newly discovered leaf on each frame.
+REGIE_NEW_LEAF_REVEAL_COLUMNS_PER_FRAME = 5
+
+#: Frames between the start of adjacent leaves.
+REGIE_STARTUP_REVEAL_STAGGER_FRAMES = 2
+
+#: Hard deadline for the one-shot startup animation.
+REGIE_STARTUP_REVEAL_MAX_SECONDS = 4.0
+
+#: Skip startup animation when an unusually large tree would repaint too much.
+REGIE_STARTUP_REVEAL_MAX_LEAVES = 100
 
 #: Suppresses the tree highlight while the footer owns the keyboard cursor.
 REGIE_HIDDEN_TREE_CURSOR = -1

@@ -167,8 +167,7 @@ def test_watch_and_json_cannot_be_combined():
 
 @pytest.mark.parametrize("flag", ["--version", "-v"])
 def test_version_flag_prints_the_version_and_exits_clean(flag, capsys):
-    """Both spellings print `theater <version>` and exit 0, above the
-    required subcommand — argparse resolves --version during parsing."""
+    """Both spellings print `theater <version>` and exit before dispatch."""
     from theater import __version__
 
     with pytest.raises(SystemExit) as exc:
@@ -177,11 +176,8 @@ def test_version_flag_prints_the_version_and_exits_clean(flag, capsys):
     assert capsys.readouterr().out.strip() == f"theater {__version__}"
 
 
-def test_a_bare_invocation_still_requires_a_subcommand():
-    """--version is optional; without it a subcommand is still mandatory."""
-    with pytest.raises(SystemExit) as exc:
-        parse()
-    assert exc.value.code != 0
+def test_a_bare_invocation_selects_the_default_launcher():
+    assert parse().command is None
 
 
 # ---- bus ----------------------------------------------------------------

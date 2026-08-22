@@ -79,6 +79,9 @@ sidebar_width = 52
 # rather than skipping whatever arrived meanwhile.
 bus_visible = false
 
+# Type initial and newly spawned participant leaves into the régie.
+startup_reveal = true
+
 # Which cost window the price footer shows: "day", "week", "month", or "year".
 # The total cost is fetched for this period and animated on each refresh.
 # The daily average is always computed from the last 30 days regardless.

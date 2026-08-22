@@ -13,10 +13,9 @@ the kernel must not translate CR, and it must not turn 0x03 into SIGINT, or the
 log would show what the terminal discipline decided rather than what tmux
 wrote.
 
-Declaring 2004 is also the readiness signal. tmux exposes the flag as
-`#{bracket_paste_flag}`, so a test can wait for it to turn 1 and know both that
-the program is up and that `paste-buffer -p` will bracket -- the same fact
-`deliver_text` relies on for every real harness.
+The readiness marker follows DECSET 2004 in the same flush. Once `capture-pane`
+shows the marker, tmux has consumed the declaration and the program is ready.
+The byte log then proves whether `paste-buffer -p` added the bracket markers.
 
 `--modal-on` paints a marker on the screen when a given substring arrives. That
 is for the screen-reading work in a later phase, where a harness must be told
@@ -57,8 +56,7 @@ def main() -> int:
     saved = termios.tcgetattr(fd)
     tty.setraw(fd)
 
-    # Order matters: the flag has to be set before the test is told we are up,
-    # and the test is watching the flag, so the write is the announcement.
+    # DECSET precedes the marker in one flush, so the marker confirms the declaration.
     sys.stdout.write("\x1b[?2004h")
     sys.stdout.write(READY + "\r\n")
     sys.stdout.flush()

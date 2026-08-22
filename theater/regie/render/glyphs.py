@@ -21,6 +21,7 @@ from theater.constants.regie import (
 )
 from theater.formatting import short_id, tilde
 from theater.harness import harness_icon
+from theater.regie.render.reveal import clip_parts
 
 #: An overlay glyph may use the default send style, or carry its own style.
 type OverlayGlyph = str | tuple[str, str]
@@ -184,6 +185,7 @@ def node_label(
     frame: int = 0,
     is_first_root: bool = False,
     overlay: Mapping[LeafCell, OverlayGlyph] | None = None,
+    reveal: int | None = None,
 ) -> Content:
     """Three rows of Content for one participant leaf.
 
@@ -252,6 +254,11 @@ def node_label(
         row1_parts = _overlay_row(row1_parts, {c: g for (r, c), g in overlay.items() if r == 0})
         row2_parts = _overlay_row(row2_parts, {c: g for (r, c), g in overlay.items() if r == 1})
         row3_parts = _overlay_row(row3_parts, {c: g for (r, c), g in overlay.items() if r == 2})
+
+    if reveal is not None:
+        row1_parts = clip_parts(row1_parts, reveal)
+        row2_parts = clip_parts(row2_parts, reveal)
+        row3_parts = clip_parts(row3_parts, reveal)
 
     return Content.assemble(
         *row1_parts,

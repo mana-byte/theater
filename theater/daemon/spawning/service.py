@@ -13,10 +13,10 @@ from collections.abc import Sequence
 
 from theater import paths, timing
 from theater.constants.harness import (
-    SPAWN_FALLBACK_TMUX_SESSION,
     SPAWN_KILL_POLL_ATTEMPTS,
     SPAWN_KILL_POLL_INTERVAL_SECONDS,
 )
+from theater.constants.tmux import TMUX_DEFAULT_SESSION
 from theater.daemon import workers
 from theater.daemon import worktrees as worktree_mod
 from theater.daemon.registry import Registry
@@ -270,7 +270,7 @@ class Spawner:
             existing = await tmux.sessions()
             if requested in existing:
                 return requested
-        return await tmux.ensure_session(SPAWN_FALLBACK_TMUX_SESSION, cwd=cwd)
+        return await tmux.ensure_session(TMUX_DEFAULT_SESSION, cwd=cwd)
 
     async def _spawn_named_worktree(
         self, *, root: str, name: str, base_branch: str | None

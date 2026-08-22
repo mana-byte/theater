@@ -10,8 +10,16 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from textual.content import Content
 from textual.selection import Selection
 from textual.widgets import Static
+
+from theater.constants.regie import (
+    REGIE_EMPTY_TREE_SHORTCUT,
+    REGIE_EMPTY_TREE_SHORTCUT_STYLE,
+    REGIE_EMPTY_TREE_TAIL,
+)
+from theater.regie.render.reveal import StyledPart, clip_parts
 
 
 class NonSelectableStatic(Static):
@@ -26,6 +34,11 @@ class NonSelectableStatic(Static):
 class EmptyTreeState(NonSelectableStatic):
     """Full-panel call to action shown while the participant tree is empty."""
 
+    _PARTS: tuple[StyledPart, ...] = (
+        (REGIE_EMPTY_TREE_SHORTCUT, REGIE_EMPTY_TREE_SHORTCUT_STYLE),
+        (REGIE_EMPTY_TREE_TAIL, "$text-muted"),
+    )
+
     DEFAULT_CSS = """
     EmptyTreeState {
         width: 1fr;
@@ -34,3 +47,23 @@ class EmptyTreeState(NonSelectableStatic):
         text-align: center;
     }
     """
+
+    def __init__(self, *, reveal: int | None = None, **kwargs) -> None:
+        self._reveal = reveal
+        super().__init__("", **kwargs)
+        self._render_content()
+
+    @property
+    def required_reveal_width(self) -> int:
+        return sum(len(part if isinstance(part, str) else part[0]) for part in self._PARTS)
+
+    def set_reveal(self, reveal: int | None) -> None:
+        """Set visible startup characters, or None for the full hint."""
+        if reveal == self._reveal:
+            return
+        self._reveal = reveal
+        self._render_content()
+
+    def _render_content(self) -> None:
+        parts = self._PARTS if self._reveal is None else clip_parts(self._PARTS, self._reveal)
+        self.update(Content.assemble(*parts), layout=False)

@@ -40,6 +40,24 @@ async def unset_option(name: str, *, target: str) -> None:
     await run("set-option", "-u", "-t", target, name, check=False)
 
 
+async def show_window_option(name: str, *, target: str) -> str | None:
+    """Return a window-local option value, or None when it is unset."""
+    from theater.tmux.client import run
+
+    out = await run("show-options", "-w", "-t", target, name, check=False)
+    if not out.strip():
+        return None
+    parts = out.split(None, 1)
+    return parts[1].strip() if len(parts) == 2 else None
+
+
+async def set_window_option(name: str, value: str, *, target: str) -> None:
+    """Set a window-local option without changing the whole session."""
+    from theater.tmux.client import run
+
+    await run("set-option", "-w", "-t", target, name, value)
+
+
 # ---- key bindings (`#{key}` expands to empty; `#{key_string}` holds the name)
 
 

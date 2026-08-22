@@ -15,6 +15,7 @@ from theater.cli.commands.introspection import (
     cmd_models,
     cmd_stats,
 )
+from theater.cli.commands.launch import cmd_launch
 from theater.cli.commands.maintenance import (
     cmd_gc,
     cmd_restart,
@@ -37,6 +38,7 @@ from theater.cli.commands.process import (
 )
 
 COMMANDS = {
+    None: cmd_launch,
     "daemon": cmd_daemon,
     "mcp": cmd_mcp,
     "transcript-receipt": cmd_transcript_receipt,

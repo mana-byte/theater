@@ -9,6 +9,7 @@ usage-breakdown overlay to the remaining height on resize.
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Collection
 
 from textual import events
 from textual.containers import Vertical, VerticalScroll
@@ -17,11 +18,7 @@ from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Label
 
-from theater.constants.regie import (
-    REGIE_EMPTY_TREE_SHORTCUT,
-    REGIE_EMPTY_TREE_SHORTCUT_STYLE,
-    REGIE_EMPTY_TREE_TAIL,
-)
+from theater.constants.regie import REGIE_EMPTY_TREE_KEY
 from theater.regie.controllers.animation import LeafOverlay
 from theater.regie.render.layout import Key, is_root_prefix
 from theater.regie.widgets.chrome import EmptyTreeState
@@ -66,7 +63,7 @@ class TreePanel(VerticalScroll):
     lines: reactive[list[tuple[Content, dict, Key, str, str]]] = reactive([])
 
     #: Key for the placeholder shown when the tree is empty.
-    _EMPTY_KEY: Key = ("empty", "")
+    _EMPTY_KEY: Key = REGIE_EMPTY_TREE_KEY
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -76,6 +73,8 @@ class TreePanel(VerticalScroll):
         self._key_widgets: dict[Key, Widget] = {}
         #: Which leaves currently carry a send trace, so the next frame knows which to clear.
         self._overlaid: set[Key] = set()
+        #: Startup reveal widths by initially-visible key; absent keys render fully.
+        self._reveals: dict[Key, int] = {}
 
     DEFAULT_CSS = """
     TreePanel {
@@ -175,6 +174,7 @@ class TreePanel(VerticalScroll):
                 key=key,
                 cwd_segments=cwd_segments,
                 is_first_root=first_root,
+                reveal=self._reveals.get(key),
             )
         else:
             widget = Label(label)
@@ -188,14 +188,34 @@ class TreePanel(VerticalScroll):
             if key != self._EMPTY_KEY:
                 self._remove_widget(self._key_widgets.pop(key))
         if self._EMPTY_KEY not in self._key_widgets:
-            widget = EmptyTreeState(
-                Content.assemble(
-                    (REGIE_EMPTY_TREE_SHORTCUT, REGIE_EMPTY_TREE_SHORTCUT_STYLE),
-                    (REGIE_EMPTY_TREE_TAIL, "$text-muted"),
-                )
-            )
+            widget = EmptyTreeState(reveal=self._reveals.get(self._EMPTY_KEY))
             self._key_widgets[self._EMPTY_KEY] = widget
             self.mount(widget)
+
+    def leaf_keys(self) -> tuple[Key, ...]:
+        """Return current leaf keys without rendering their content."""
+        return tuple(
+            key
+            for key, widget in self._key_widgets.items()
+            if isinstance(widget, AgentLeaf | EmptyTreeState)
+        )
+
+    def reveal_widths(self, keys: Collection[Key]) -> dict[Key, int]:
+        """Return full row widths for the requested reveal keys."""
+        selected = set(keys)
+        widths: dict[Key, int] = {}
+        for key, widget in self._key_widgets.items():
+            if key in selected and isinstance(widget, AgentLeaf | EmptyTreeState):
+                widths[key] = widget.required_reveal_width
+        return widths
+
+    def set_reveals(self, reveals: dict[Key, int]) -> None:
+        """Apply one complete startup frame by stable tree key."""
+        self._reveals = dict(reveals)
+        for key, widget in self._key_widgets.items():
+            reveal = self._reveals.get(key)
+            if isinstance(widget, AgentLeaf | EmptyTreeState):
+                widget.set_reveal(reveal)
 
     def _remove_widget(self, widget: Widget) -> None:
         """Remove a widget via Textual's public API.

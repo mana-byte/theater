@@ -142,7 +142,7 @@ def _parser() -> argparse.ArgumentParser:
         action="version",
         version=f"theater {__version__}",
     )
-    sub = p.add_subparsers(dest="command", required=True)
+    sub = p.add_subparsers(dest="command", required=False)
 
     _add_process_parsers(sub)
     _add_receipt_parser(sub)

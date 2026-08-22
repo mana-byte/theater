@@ -60,7 +60,9 @@ from theater.tmux.options import (  # noqa: F401
     bind_key_if_free,
     key_bound,
     set_option,
+    set_window_option,
     show_option,
+    show_window_option,
     unbind_key_if_owned,
     unset_option,
 )

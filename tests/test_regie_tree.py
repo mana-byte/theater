@@ -406,6 +406,13 @@ def test_non_working_statuses_do_not_pulse_harness_and_name_text():
     assert not any(style.startswith("#") for style in _styles(awaiting))
 
 
+def test_startup_reveal_is_applied_after_route_overlay():
+    label = node_label(PARENT, overlay={(1, 20): "X"}, reveal=5)
+    rows = _rows(label)
+    assert all(len(row) <= 5 for row in rows)
+    assert "X" not in str(label)
+
+
 # ---- cwd_segments driven by config ----------------------------------------
 
 

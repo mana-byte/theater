@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from theater.constants.tmux import TMUX_DEFAULT_SESSION
+
 #: Name the theater MCP server is registered under inside each harness.
 HARNESS_MCP_SERVER_NAME = "theater"
 
@@ -15,7 +17,7 @@ HARNESS_APPROVAL_POLICIES = ("manual", "edits", "yolo")
 HARNESS_EVENT_TEXT_MAX_CHARS = 2000
 
 #: Session name when no tmux session is requested or found.
-SPAWN_FALLBACK_TMUX_SESSION = "theater"
+SPAWN_FALLBACK_TMUX_SESSION = TMUX_DEFAULT_SESSION
 
 #: Poll attempts when confirming a pane is gone after kill-pane.
 SPAWN_KILL_POLL_ATTEMPTS = 5
