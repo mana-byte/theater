@@ -17,10 +17,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: main
-      - uses: astral-sh/setup-uv@v6
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           enable-cache: true
       - run: uv sync --frozen --group dev
@@ -42,7 +43,7 @@ jobs:
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
-      - uses: peter-evans/create-pull-request@v7
+      - uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7
         if: steps.diff.outputs.changed == 'true'
         with:
           token: ${{ secrets.PR_AUTOMATION_TOKEN }}
