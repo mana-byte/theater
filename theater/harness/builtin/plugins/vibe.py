@@ -878,8 +878,7 @@ class VibeObserver(TranscriptObserver):
         want = str(Path(cwd).resolve()) if cwd else None
         if want is None:
             return None
-        # Directory names start with a fixed-width UTC timestamp; reverse lexicographic is newest.
-        # When session_id is None, two siblings in the same cwd match; observer refuses second.
+        # Fixed-width UTC timestamp in dir names; reverse lexicographic = newest. Siblings match.
         matches: list[Path] = []
         seen = 0
         for d in sorted(self.root.glob("session_*"), reverse=True):
