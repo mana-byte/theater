@@ -66,6 +66,23 @@ def test_partial_section_leaves_siblings_at_default():
     assert loaded.source("rails.budget") == "default"
 
 
+def test_dashboard_settings_override_defaults():
+    write(
+        "[regie]\n"
+        'dashboard_sentences = ["make it clear", "keep it small"]\n'
+        "dashboard_sentence_hold_seconds = 5.5\n"
+        "dashboard_sentence_char_interval = 0.08\n"
+        "dashboard_tip_hold_seconds = 3.5\n"
+        "dashboard_tip_char_interval = 0.02\n"
+    )
+    loaded = cfg.load()
+    assert loaded.regie.dashboard_sentences == ["make it clear", "keep it small"]
+    assert loaded.regie.dashboard_sentence_hold_seconds == 5.5
+    assert loaded.regie.dashboard_sentence_char_interval == 0.08
+    assert loaded.regie.dashboard_tip_hold_seconds == 3.5
+    assert loaded.regie.dashboard_tip_char_interval == 0.02
+
+
 def test_whole_number_is_accepted_for_an_interval():
     """`poll_interval = 1` means one second, not a type error."""
     write("[observer]\npoll_interval = 1\n")
@@ -155,6 +172,14 @@ def test_non_string_theme_is_fatal():
     assert "must be a string" in str(exc.value)
 
 
+@pytest.mark.parametrize("sentence", ["", "   "])
+def test_blank_dashboard_sentence_is_fatal(sentence):
+    write(f"[regie]\ndashboard_sentences = [{sentence!r}]\n".replace("'", '"'))
+    with pytest.raises(cfg.ConfigError) as exc:
+        cfg.load()
+    assert "entries must not be blank" in str(exc.value)
+
+
 def test_section_must_be_a_table():
     write('rails = "yes"\n')
     with pytest.raises(cfg.ConfigError) as exc:
@@ -171,6 +196,10 @@ def test_section_must_be_a_table():
         "[regie]\nbus_batch = 0\n",
         "[regie]\ncwd_segments = 0\n",
         "[regie]\nsidebar_width = 10\n",
+        "[regie]\ndashboard_sentence_hold_seconds = 0.0\n",
+        "[regie]\ndashboard_sentence_char_interval = 0.0\n",
+        "[regie]\ndashboard_tip_hold_seconds = 0.0\n",
+        "[regie]\ndashboard_tip_char_interval = 0.0\n",
     ],
 )
 def test_out_of_range_is_fatal(body):

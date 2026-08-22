@@ -79,13 +79,29 @@ sidebar_width = 52
 # rather than skipping whatever arrived meanwhile.
 bus_visible = false
 
-# Type initial and newly spawned participant leaves into the régie.
+# Type the initial tree and later agent-spawned child leaves into the régie.
+# User-spawned and resumed roots from the palette appear immediately.
 startup_reveal = true
 
 # Which cost window the price footer shows: "day", "week", "month", or "year".
 # The total cost is fetched for this period and animated on each refresh.
 # The daily average is always computed from the last 30 days regardless.
 cost_window = "day"
+
+# Optional replacement for the built-in inspirational sentences.
+# dashboard_sentences = ["build something worth maintaining"]
+
+# Seconds a dashboard sentence stays fully visible before typing out.
+dashboard_sentence_hold_seconds = 10.0
+
+# Seconds between characters while typing a dashboard sentence in or out.
+dashboard_sentence_char_interval = 0.1
+
+# Seconds a dashboard tip stays fully visible before typing out.
+dashboard_tip_hold_seconds = 6.0
+
+# Seconds between characters while typing a dashboard tip in or out.
+dashboard_tip_char_interval = 0.04
 
 
 [rails]

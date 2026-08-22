@@ -110,7 +110,9 @@ theater/
 │   └── tools.py        compatibility facade — re-exports toolsets + session
 ├── tmux/               client.py · command.py · panes.py · presence.py · delivery · facts · options
 └── regie/              Textual TUI
+    ├── animations/     reusable animation state and frame helpers
     ├── controllers/    animation, navigation, polling, session, staging, usage
+    ├── dashboard/      unstaged welcome content and widgets
     ├── render/         layout, glyphs, routing
     ├── widgets/        chrome, leaf, tree, usage breakdown, usage footer
     ├── app.py          the Textual application (composition surface)

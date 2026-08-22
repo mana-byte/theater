@@ -19,7 +19,7 @@ from textual.widget import Widget
 from textual.widgets import Label
 
 from theater.constants.regie import REGIE_EMPTY_TREE_KEY
-from theater.regie.controllers.animation import LeafOverlay
+from theater.regie.animations.routes import LeafOverlay
 from theater.regie.render.layout import Key, is_root_prefix
 from theater.regie.widgets.chrome import EmptyTreeState
 from theater.regie.widgets.leaf import AgentLeaf

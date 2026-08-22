@@ -19,7 +19,7 @@ from theater.constants.regie import (
     REGIE_EMPTY_TREE_SHORTCUT_STYLE,
     REGIE_EMPTY_TREE_TAIL,
 )
-from theater.regie.render.reveal import StyledPart, clip_parts
+from theater.regie.animations.reveal import StyledPart, clip_parts
 
 
 class NonSelectableStatic(Static):
@@ -50,8 +50,7 @@ class EmptyTreeState(NonSelectableStatic):
 
     def __init__(self, *, reveal: int | None = None, **kwargs) -> None:
         self._reveal = reveal
-        super().__init__("", **kwargs)
-        self._render_content()
+        super().__init__(self._hint_content(), **kwargs)
 
     @property
     def required_reveal_width(self) -> int:
@@ -62,8 +61,8 @@ class EmptyTreeState(NonSelectableStatic):
         if reveal == self._reveal:
             return
         self._reveal = reveal
-        self._render_content()
+        self.update(self._hint_content(), layout=False)
 
-    def _render_content(self) -> None:
+    def _hint_content(self) -> Content:
         parts = self._PARTS if self._reveal is None else clip_parts(self._PARTS, self._reveal)
-        self.update(Content.assemble(*parts), layout=False)
+        return Content.assemble(*parts)

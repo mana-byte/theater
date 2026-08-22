@@ -81,6 +81,7 @@ _CHECKERS = {
     "str": (_check_str, "a string"),
     "str | None": (_check_str, "a string"),
     "list[str]": (_check_str_list, "a list of strings"),
+    "list[str] | None": (_check_str_list, "a list of strings"),
 }
 
 
@@ -110,6 +111,12 @@ def _build_section(path: Path, name: str, cls: type, raw: Any) -> Any:
             _fail(path, f"'{dotted}' must be >= {minimum}, got {parsed}")
         if isinstance(parsed, float) and not math.isfinite(parsed):
             _fail(path, f"'{dotted}' must be finite, got {parsed}")
+        if (
+            f.metadata.get("nonempty_items")
+            and isinstance(parsed, list)
+            and any(not item.strip() for item in parsed)
+        ):
+            _fail(path, f"'{dotted}' entries must not be blank")
         values[f.name] = parsed
         sources[dotted] = "config.toml"
 

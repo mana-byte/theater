@@ -31,10 +31,11 @@ from theater.constants import (
     USAGE_AVERAGE_WINDOW_DAYS,
     USAGE_AVERAGE_WINDOW_HOURS,
 )
-from theater.constants.regie import REGIE_NEW_LEAF_REVEAL_COLUMNS_PER_FRAME
+from theater.constants.regie import REGIE_DASHBOARD_TIPS, REGIE_NEW_LEAF_REVEAL_COLUMNS_PER_FRAME
 from theater.protocol import RemoteError
 from theater.regie import app as app_mod
 from theater.regie.app import RegieApp
+from theater.regie.dashboard.widgets import AnimatedDashboardText, WelcomeDashboard
 from theater.regie.tree import SEND_STYLE, send_path
 
 PARENT = {
@@ -299,6 +300,10 @@ def _styles(widget) -> list[str]:
     return [span.style for span in widget.render().spans]
 
 
+def _painted(widget) -> str:
+    return "\n".join(widget.render_line(y).text for y in range(widget.size.height))
+
+
 def _overlay_styles(widget) -> list[str]:
     styles = []
     for glyph in (widget._overlay or {}).values():
@@ -362,6 +367,9 @@ async def test_mount_fills_the_tree_and_the_bus(daemon, tmux):
         ]
         stack = app.query_one("#tree-stack")
         assert [child.id for child in stack.children] == ["tree-panel", "usage-breakdown"]
+        # The welcome dashboard sits beside the sidebar, visible until staged.
+        dashboard = app.query_one("#welcome-dashboard", app_mod.WelcomeDashboard)
+        assert not dashboard.has_class("-staged")
 
 
 async def test_mount_fetches_all_usage_windows_with_one_rpc(daemon, tmux):
@@ -1083,6 +1091,7 @@ async def test_an_empty_tree_says_so_instead_of_rendering_nothing(daemon, tmux):
         assert len(panel.children) == 1
         empty = panel.query_one(app_mod.EmptyTreeState)
         assert str(empty.render()) == app_mod.EMPTY_TREE_HINT
+        assert app_mod.EMPTY_TREE_HINT in _painted(empty)
         assert empty.region == panel.content_region
         assert empty.region.height > 1
         assert empty.region.width > len(app_mod.EMPTY_TREE_HINT)
@@ -1096,7 +1105,7 @@ async def test_an_empty_tree_says_so_instead_of_rendering_nothing(daemon, tmux):
         assert not empty.has_class("tree-alt")
 
 
-async def test_reveal_types_initial_and_new_leaves_once(daemon, tmux, monkeypatch):
+async def test_reveal_types_initial_and_agent_spawned_leaves_once(daemon, tmux, monkeypatch):
     monkeypatch.setattr(app_mod, "STARTUP_REVEAL_INTERVAL", 60.0)
     app, _ = make_app(startup_reveal=True)
 
@@ -1120,7 +1129,27 @@ async def test_reveal_types_initial_and_new_leaves_once(daemon, tmux, monkeypatc
         await app._refresh_tree()
         assert "vibe" in str(parent.render())
 
-        newcomer = {**CHILD, "id": "new-participant", "harness": "opencode"}
+        user_spawn = {
+            **PARENT,
+            "id": "user-spawn",
+            "harness": "codex",
+            "parent_id": None,
+        }
+        daemon["answers"]["participants.tree"] = [
+            {**PARENT, "children": [CHILD]},
+            user_spawn,
+        ]
+        await app._refresh_tree()
+        root = panel._key_widgets[("p", "user-spawn")]
+        assert "codex" in str(root.render())
+        assert app._leaf_reveal_timer is None
+
+        newcomer = {
+            **CHILD,
+            "id": "new-participant",
+            "harness": "opencode",
+            "parent_id": PARENT["id"],
+        }
         daemon["answers"]["participants.tree"] = [{**PARENT, "children": [CHILD, newcomer]}]
         await app._refresh_tree()
         added = panel._key_widgets[("p", "new-participant")]
@@ -1162,17 +1191,14 @@ async def test_startup_reveal_types_the_empty_hint_once(daemon, tmux, monkeypatc
         for _ in range(len(app_mod.EMPTY_TREE_HINT) + 1):
             app._tick_leaf_reveal()
         assert str(empty.render()) == app_mod.EMPTY_TREE_HINT
+        assert app_mod.EMPTY_TREE_HINT in _painted(empty)
         assert app._leaf_reveal_timer is None
 
         daemon["answers"]["participants.tree"] = [PARENT]
         await app._refresh_tree()
         leaf = panel._key_widgets[("p", PARENT["id"])]
-        assert str(leaf.render()) == "\n\n"
-        app._tick_leaf_reveal()
-        assert (
-            max(map(len, str(leaf.render()).splitlines()))
-            <= REGIE_NEW_LEAF_REVEAL_COLUMNS_PER_FRAME
-        )
+        assert "vibe" in str(leaf.render())
+        assert app._leaf_reveal_timer is None
 
 
 async def test_disabled_startup_reveal_never_starts_a_timer(daemon, tmux):
@@ -1444,6 +1470,171 @@ async def test_the_staged_line_is_marked_in_the_tree(daemon, tmux):
         panel = app.query_one("#tree-panel", app_mod.TreePanel)
         assert panel.children[0].has_class("tree-staged")
         assert not panel.children[1].has_class("tree-staged")
+
+
+# ---- dashboard ---------------------------------------------------------------
+
+
+async def test_dashboard_is_one_centered_column_with_tip_below_sentence(daemon, tmux):
+    app, _ = make_app(
+        dashboard_sentence_char_interval=60.0,
+        dashboard_tip_char_interval=60.0,
+    )
+    async with app.run_test(size=(120, 40)):
+        sidebar = app.query_one("#sidebar", app_mod.Vertical)
+        dashboard = app.query_one("#welcome-dashboard", WelcomeDashboard)
+        assert dashboard.region.x == sidebar.region.x + sidebar.region.width
+        sentence = app.query_one("#dashboard-sentence", AnimatedDashboardText)
+        tip = app.query_one("#dashboard-tip", AnimatedDashboardText)
+        harnesses = app.query_one("#dashboard-harnesses", app_mod.NonSelectableStatic)
+        assert sentence.region.y < tip.region.y
+        assert sentence.region.x == tip.region.x == dashboard.region.x
+        assert sentence.region.width == tip.region.width == dashboard.region.width
+        assert str(sentence.styles.text_align) == "center"
+        assert str(tip.styles.text_align) == "center"
+        copy_mid = (sentence.region.y + tip.region.bottom) / 2
+        dashboard_mid = (dashboard.region.y + dashboard.region.bottom) / 2
+        assert abs(copy_mid - dashboard_mid) <= 2
+        assert harnesses.region.x < sentence.region.x + sentence.region.width // 2
+        assert harnesses.region.bottom < dashboard.region.bottom
+        assert str(harnesses.styles.text_align) == "left"
+
+
+async def test_dashboard_harness_list_uses_the_daemon_availability(daemon, tmux):
+    daemon["answers"]["harnesses"] = [
+        {"name": "codex", "installed": True, "error": None},
+        {"name": "vibe", "installed": False, "error": None},
+    ]
+    app, _ = make_app()
+    async with app.run_test():
+        harnesses = app.query_one("#dashboard-harnesses", app_mod.NonSelectableStatic)
+        assert str(harnesses.render()) == "✓ codex\n✗ vibe"
+
+
+async def test_dashboard_custom_sentences_are_randomized_but_tips_are_ordered(daemon, tmux):
+    configured = ["make it clear", "keep it small"]
+    app, _ = make_app(
+        dashboard_sentences=configured,
+        dashboard_sentence_char_interval=60.0,
+        dashboard_tip_char_interval=60.0,
+    )
+    async with app.run_test():
+        sentence = app.query_one("#dashboard-sentence", AnimatedDashboardText)
+        tip = app.query_one("#dashboard-tip", AnimatedDashboardText)
+        assert sentence.controller.parts in tuple((item,) for item in configured)
+        assert sentence.controller.randomized
+        assert not tip.controller.randomized
+
+
+async def test_empty_dashboard_sentence_config_disables_only_the_sentence(daemon, tmux):
+    app, _ = make_app(dashboard_sentences=[])
+    async with app.run_test():
+        assert len(app.query("#dashboard-sentence")) == 0
+        assert len(app.query("#dashboard-tip")) == 1
+
+
+async def test_hovering_the_dashboard_tip_does_not_paint_its_row(daemon, tmux):
+    app, _ = make_app(dashboard_tip_char_interval=60.0)
+    async with app.run_test() as pilot:
+        tip = app.query_one("#dashboard-tip", AnimatedDashboardText)
+        before = tip.styles.background
+        await pilot.hover(tip)
+        await pilot.pause()
+        assert tip.styles.background == before
+
+
+async def test_staging_hides_and_unstaging_restores_the_dashboard(daemon, tmux):
+    app, _ = make_app(
+        dashboard_sentence_char_interval=60.0,
+        dashboard_tip_char_interval=60.0,
+    )
+    async with app.run_test() as pilot:
+        dashboard = app.query_one("#welcome-dashboard", WelcomeDashboard)
+        sentence = app.query_one("#dashboard-sentence", AnimatedDashboardText)
+        tip = app.query_one("#dashboard-tip", AnimatedDashboardText)
+        assert not dashboard.has_class("-staged")
+        assert dashboard.styles.display != "none"
+        assert sentence.timer is not None
+        assert tip.timer is not None
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.staged_pane == "%10"
+        assert dashboard.has_class("-staged")
+        assert dashboard.styles.display == "none"
+        assert sentence.timer is None
+        assert tip.timer is None
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.staged_pane is None
+        assert not dashboard.has_class("-staged")
+        assert dashboard.styles.display != "none"
+        assert sentence.timer is not None
+        assert tip.timer is not None
+
+
+async def test_system_commands_drop_keys_but_keep_theme_and_quit(daemon, tmux):
+    """The built-in Keys submenu is removed; Theme and Quit survive."""
+    app, _ = make_app()
+    async with app.run_test():
+        titles = [cmd.title for cmd in app.get_system_commands(app.screen)]
+        assert "Keys" not in titles
+        assert "Theme" in titles
+        assert "Quit" in titles
+
+
+async def test_dashboard_rows_use_independent_configured_speeds(daemon, tmux):
+    app, _ = make_app(
+        dashboard_sentence_char_interval=0.2,
+        dashboard_tip_char_interval=0.03,
+    )
+    async with app.run_test():
+        sentence = app.query_one("#dashboard-sentence", AnimatedDashboardText)
+        tip = app.query_one("#dashboard-tip", AnimatedDashboardText)
+        assert sentence.controller.initial_delay == 0.2
+        assert tip.controller.initial_delay == 0.03
+        assert tip.controller.initial_delay < sentence.controller.initial_delay
+
+
+async def test_dashboard_sentence_and_tip_use_cursor_only_while_typing(daemon, tmux):
+    app, _ = make_app(
+        dashboard_sentence_char_interval=60.0,
+        dashboard_tip_char_interval=60.0,
+    )
+    async with app.run_test():
+        sentence = app.query_one("#dashboard-sentence", AnimatedDashboardText)
+        tip = app.query_one("#dashboard-tip", AnimatedDashboardText)
+        sentence._tick()
+        tip._tick()
+        assert str(sentence.render()).endswith("█")
+        assert str(tip.render()).endswith("█")
+        while sentence.controller.phase != "holding":
+            sentence._tick()
+        while tip.controller.phase != "holding":
+            tip._tick()
+        assert "█" not in str(sentence.render())
+        assert "█" not in str(tip.render())
+        tip_styles = [span.style for span in tip.render().spans if span.style]
+        assert any("dim" in style for style in tip_styles)
+        assert any("accent" in style for style in tip_styles)
+
+
+async def test_clicking_tip_advances_immediately_and_replaces_timer(daemon, tmux):
+    app, _ = make_app(
+        dashboard_sentence_char_interval=60.0,
+        dashboard_tip_char_interval=60.0,
+    )
+    async with app.run_test() as pilot:
+        tip = app.query_one("#dashboard-tip", AnimatedDashboardText)
+        old_timer = tip.timer
+        assert old_timer is not None
+        await pilot.click("#dashboard-tip")
+        await pilot.pause()
+        assert tip.controller.index == 1
+        assert tip.controller.visible == 1
+        assert tip.controller.parts == REGIE_DASHBOARD_TIPS[1]
+        assert tip.timer is not None
+        assert tip.timer is not old_timer
+        assert old_timer._task is None
 
 
 # ---- focus ---------------------------------------------------------------

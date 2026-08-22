@@ -24,7 +24,8 @@ from theater.constants.regie import (
     REGIE_FOOTER_ANIM_FRAMES,
     REGIE_FOOTER_ANIM_INTERVAL,
 )
-from theater.regie.render.glyphs import working_harness_style
+from theater.regie.animations.footer import _advance_float, _advance_int, _pulsing_value
+from theater.regie.animations.pulse import advance_pulse_frame
 from theater.regie.widgets.chrome import NonSelectableStatic
 
 FOOTER_ANIM_INTERVAL = REGIE_FOOTER_ANIM_INTERVAL
@@ -39,43 +40,6 @@ def _fmt_tokens(n: int) -> str:
     if n >= 1_000:
         return f"{n / 1_000:.0f}k"
     return str(n)
-
-
-def _pulsing_value(
-    value: str,
-    *,
-    frame: int,
-    active: bool,
-    value_style: str,
-) -> Content:
-    """Render one footer value with the tree's working-harness grey wave."""
-    if not active:
-        return Content.assemble((value, value_style))
-    parts: list[str | tuple[str, str]] = []
-    offset = 0
-    for char in value:
-        if char.isspace():
-            parts.append(char)
-            continue
-        parts.append((char, working_harness_style(frame, offset)))
-        offset += 1
-    return Content.assemble(*parts)
-
-
-def _advance_float(value: float, target: float, step: float, formatter) -> float:
-    """Move one frame, snapping once the remaining change is no longer visible."""
-    candidate = value + step
-    if (step >= 0 and candidate >= target) or (step < 0 and candidate <= target):
-        return target
-    return target if formatter(candidate) == formatter(target) else candidate
-
-
-def _advance_int(value: int, target: int, step: int) -> int:
-    """Move one integral frame, clamping at the target."""
-    candidate = value + step
-    if (step >= 0 and candidate >= target) or (step < 0 and candidate <= target):
-        return target
-    return target if _fmt_tokens(candidate) == _fmt_tokens(target) else candidate
 
 
 class UsageMetricTile(Vertical):
@@ -251,7 +215,7 @@ class PriceFooter(Widget):
             self._start_timer()
 
     def _tick(self) -> None:
-        self._frame = (self._frame + 1) % 10
+        self._frame = advance_pulse_frame(self._frame)
         if self._price_active():
             self._price_display = _advance_float(
                 self._price_display, self._price_target, self._price_step, self._fmt_price
@@ -382,11 +346,11 @@ class StatsFooter(Widget):
             self._start_timer()
 
     def _tick(self) -> None:
-        self._frame = (self._frame + 1) % 10
+        self._frame = advance_pulse_frame(self._frame)
         for index in range(3):
             if self._active(index):
                 self._display[index] = _advance_int(
-                    self._display[index], self._targets[index], self._steps[index]
+                    self._display[index], self._targets[index], self._steps[index], _fmt_tokens
                 )
         self._render_values()
         if not any(self._active(index) for index in range(3)):

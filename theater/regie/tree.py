@@ -24,6 +24,7 @@ from theater.constants.regie import (
     REGIE_TREE_RAIL as _RAIL,
     REGIE_WORKING_HARNESS_STYLES as _WORKING_HARNESS_STYLES,
 )
+from theater.regie.animations.pulse import working_harness_style
 from theater.regie.render.glyphs import (
     LeafCell,
     OverlayGlyph,
@@ -36,7 +37,6 @@ from theater.regie.render.glyphs import (
     _status_glyph,
     node_label,
     spinner_frame,
-    working_harness_style,
 )
 from theater.regie.render.layout import (
     Key,

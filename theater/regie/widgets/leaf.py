@@ -21,7 +21,8 @@ from textual.timer import Timer
 from textual.widgets import Static
 
 from theater.constants.regie import REGIE_LEAF_SPINNER_INTERVAL
-from theater.regie.controllers.animation import LeafOverlay
+from theater.regie.animations.routes import LeafOverlay
+from theater.regie.animations.spinner import advance_spinner_frame
 from theater.regie.render.glyphs import node_label
 from theater.regie.render.layout import Key
 
@@ -146,7 +147,7 @@ class AgentLeaf(Static):
         self.update(self._render_label(), layout=False)
 
     def _tick(self) -> None:
-        self._frame = (self._frame + 1) % 10
+        self._frame = advance_spinner_frame(self._frame)
         self.update(self._render_label(), layout=False)
 
     def _start_timer(self) -> None:

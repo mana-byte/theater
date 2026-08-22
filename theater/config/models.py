@@ -95,10 +95,23 @@ class RegieSection:
     sidebar_width: int = field(default=52, metadata={"min": 40})
     #: Off by default: the tree is what the régie is for. While hidden the bus is not polled at all.
     bus_visible: bool = False
-    #: Animate initial and newly discovered participant leaves as text being typed.
+    #: Animate the initial tree and later agent-spawned child leaves.
     startup_reveal: bool = True
     #: Which cost window the price footer shows: "day", "week", "month", or "year".
     cost_window: str = "day"
+    #: Optional replacement for the built-in inspirational sentence corpus.
+    dashboard_sentences: list[str] | None = field(
+        default=None,
+        metadata={"nonempty_items": True},
+    )
+    #: Seconds a dashboard sentence stays fully visible before typing out.
+    dashboard_sentence_hold_seconds: float = field(default=10.0, metadata={"min": MIN_INTERVAL})
+    #: Seconds between characters while typing a dashboard sentence in or out.
+    dashboard_sentence_char_interval: float = field(default=0.1, metadata={"min": MIN_INTERVAL})
+    #: Seconds a dashboard tip stays fully visible before typing out.
+    dashboard_tip_hold_seconds: float = field(default=6.0, metadata={"min": MIN_INTERVAL})
+    #: Seconds between characters while typing a dashboard tip in or out.
+    dashboard_tip_char_interval: float = field(default=0.04, metadata={"min": MIN_INTERVAL})
 
 
 #: Section name -> dataclass. Drives parsing and the unknown-section check.

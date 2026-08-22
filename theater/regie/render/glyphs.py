@@ -13,31 +13,20 @@ from textual.content import Content
 
 from theater.constants.regie import (
     REGIE_SEND_TRACE_STYLE as SEND_STYLE,
-    REGIE_SPINNER_FRAMES as SPINNER_FRAMES,
     REGIE_TREE_BRANCH as BRANCH,
     REGIE_TREE_LAST_BRANCH as LAST_BRANCH,
     REGIE_TREE_RAIL as RAIL,
-    REGIE_WORKING_HARNESS_STYLES as WORKING_HARNESS_STYLES,
 )
 from theater.formatting import short_id, tilde
 from theater.harness import harness_icon
-from theater.regie.render.reveal import clip_parts
+from theater.regie.animations.pulse import working_harness_style
+from theater.regie.animations.spinner import spinner_frame
 
 #: An overlay glyph may use the default send style, or carry its own style.
 type OverlayGlyph = str | tuple[str, str]
 
 #: A cell within one three-row leaf, used for local overlays.
 type LeafCell = tuple[int, int]
-
-
-def spinner_frame(frame: int) -> str:
-    """The braille character at *frame*, wrapping at 10."""
-    return SPINNER_FRAMES[frame % len(SPINNER_FRAMES)]
-
-
-def working_harness_style(frame: int, offset: int = 0) -> str:
-    """The grayscale style for a working harness character at *offset*."""
-    return WORKING_HARNESS_STYLES[(offset - frame) % len(WORKING_HARNESS_STYLES)]
 
 
 def _append_working_harness_text(
@@ -212,7 +201,8 @@ def node_label(
     ``Content.assemble`` is used rather than line-by-line ``append`` because
     ``Content.append`` returns a new object rather than mutating in place.
     """
-    # Function-level import avoids a layout ↔ glyphs import cycle.
+    # Function-level imports avoid layout ↔ glyphs and reveal ↔ glyphs cycles.
+    from theater.regie.animations.reveal import clip_parts
     from theater.regie.render.layout import shorten_path
 
     glyph, glyph_style = _status_glyph(node, frame)

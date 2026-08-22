@@ -28,9 +28,9 @@ from theater import paths
 EXAMPLE = Path(__file__).resolve().parent.parent / "config.example.toml"
 
 #: Settings whose default is None, which TOML cannot express: writing the key
-#: down at all would change behaviour, so they are the two the example leaves
+#: down at all would change behaviour, so these are the ones the example leaves
 #: commented. Named here so their absence is asserted rather than tolerated.
-NO_DEFAULT = {"theater.favourite", "regie.theme"}
+NO_DEFAULT = {"theater.favourite", "regie.theme", "regie.dashboard_sentences"}
 
 
 def default_of(f) -> object:
@@ -87,13 +87,11 @@ def test_every_setting_is_written_down(load):
     assert not missing, f"absent from {EXAMPLE.name}: {', '.join(missing)}"
 
 
-def test_the_two_unwritable_settings_stay_unwritten(load):
+def test_unset_settings_stay_unwritten(load):
     """Guard the exemption: NO_DEFAULT must not quietly grow stale.
 
-    Both of these mean "unset", and TOML has no word for that — writing either
-    one down would set a favourite or a theme for everybody who copies the
-    file. If a default ever becomes expressible, this fails and the key should
-    move out of the exemption rather than the exemption widening.
+    These mean "unset", and TOML has no word for that. If a default ever becomes
+    expressible, this fails and the key should move out of the exemption.
     """
     full = load(EXAMPLE.read_text())
     for dotted in NO_DEFAULT:

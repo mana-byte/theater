@@ -2,16 +2,16 @@
 
 Layout:
     ┌──────────────────────┬──────────────────────────┐
-    │ tree (top)           │  stage                   │
-    │                      │  (tmux pane, not ours)   │
-    │ bus (bottom)         │                          │
+    │ tree (top)           │  welcome dashboard       │
+    │                      │  (sentence + tips)       │
+    │ bus (bottom)         │  replaced by tmux stage  │
     └──────────────────────┴──────────────────────────┘
 
-The tree and bus are Textual widgets. The stage is not a widget — it is a
-real tmux pane in the same window. The régie is itself a pane in that window,
-and the stage occupies the space next to it. When the user selects an agent,
-the daemon tells tmux to join that agent's pane into the stage window; the
-régie then re-asserts its own pane layout so the tree stays visible.
+The tree and bus are Textual widgets. The right side is a welcome dashboard
+showing an animated sentence and rotating usage tips while no participant is staged.
+When the user selects an agent, the daemon tells tmux to join that agent's pane
+into the stage area, covering the dashboard; the régie then re-asserts its own
+pane layout so the tree stays visible. Unstaging restores the dashboard.
 
 Keybindings:
     j/k or up/down  navigate the tree and usage footer
@@ -34,16 +34,18 @@ from __future__ import annotations
 
 import contextlib
 import logging
+from collections.abc import Iterable
 from pathlib import Path
 from typing import ClassVar
 
 from rich.text import Text
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding, BindingType
 from textual.containers import Vertical
 from textual.content import Content
 from textual.dom import DOMNode
 from textual.reactive import reactive
+from textual.screen import Screen
 from textual.timer import Timer
 from textual.widgets import RichLog, Static  # noqa: F401 — tests query app_mod.Static
 
@@ -65,6 +67,7 @@ from theater.constants.regie import (
     REGIE_HIDDEN_TREE_CURSOR,
     REGIE_MAX_AWAIT_ANIMS,
     REGIE_MAX_TRACE_ANIMS,
+    REGIE_PALETTE_KEYS_COMMAND_TITLE,
     REGIE_STARTUP_REVEAL_INTERVAL_SECONDS,
     REGIE_TRACE_ANIM_INTERVAL,
     REGIE_USAGE_METRIC_DOWN,
@@ -73,8 +76,13 @@ from theater.constants.regie import (
     REGIE_USAGE_METRIC_UP,
     REGIE_USAGE_POLL_INTERVAL_SECONDS,
 )
-from theater.regie.bus_view import format_bus_line
-from theater.regie.controllers.animation import (  # noqa: F401
+from theater.regie.animations.footer import (  # noqa: F401
+    _advance_float,
+    _advance_int,
+    _pulsing_value,
+)
+from theater.regie.animations.reveal import LeafRevealController
+from theater.regie.animations.routes import (  # noqa: F401
     _AWAIT_TRACE_GLYPHS,
     _RAIL_ARMS,
     _SEND_TRACE_GLYPHS,
@@ -86,9 +94,9 @@ from theater.regie.controllers.animation import (  # noqa: F401
     _await_route_style,
     _send_trace_glyph,
 )
+from theater.regie.bus_view import format_bus_line
 from theater.regie.controllers.navigation import NavigationState, UpDecision
 from theater.regie.controllers.polling import PollingController
-from theater.regie.controllers.reveal import LeafRevealController
 from theater.regie.controllers.session import (
     _RETURN_KEY_NOTE,  # noqa: F401 — legacy alias
     SessionController,
@@ -105,6 +113,7 @@ from theater.regie.controllers.usage import (
     UsagePanelState,
     UsageQueries,
 )
+from theater.regie.dashboard.widgets import WelcomeDashboard
 from theater.regie.palette import (
     ResumeDeadSessionCommand,
     ResumeDeadSessionCommands,
@@ -155,10 +164,7 @@ from theater.regie.widgets.usage_footer import (  # noqa: F401
     StatsFooter,
     UsageMetricTile,
     UsagePeriodBar,
-    _advance_float,
-    _advance_int,
     _fmt_tokens,
-    _pulsing_value,
 )
 from theater.tmux import client as tmux
 from theater.tmux import panes
@@ -406,6 +412,21 @@ class RegieApp(App):
             # Applied here: a reactive default fires no watcher; false-vs-false would mount visible.
             bus.set_class(not self.bus_visible, "-hidden")
             yield bus
+        yield WelcomeDashboard(
+            self.harnesses,
+            sentences=self.settings.regie.dashboard_sentences,
+            sentence_hold_seconds=self.settings.regie.dashboard_sentence_hold_seconds,
+            sentence_char_interval=self.settings.regie.dashboard_sentence_char_interval,
+            tip_hold_seconds=self.settings.regie.dashboard_tip_hold_seconds,
+            tip_char_interval=self.settings.regie.dashboard_tip_char_interval,
+            id="welcome-dashboard",
+        )
+
+    def get_system_commands(self, screen: Screen) -> Iterable[SystemCommand]:
+        """Replace Textual's keys submenu with the unstaged dashboard tips."""
+        for command in super().get_system_commands(screen):
+            if command.title != REGIE_PALETTE_KEYS_COMMAND_TITLE:
+                yield command
 
     async def on_mount(self) -> None:
         self._client = DaemonClient()
@@ -541,6 +562,9 @@ class RegieApp(App):
             logger.debug("harness list unavailable: %s", exc)
             return
         self.harnesses = rows
+        dashboard = self._dashboard()
+        if dashboard is not None:
+            dashboard.update_harnesses(rows)
 
     def _apply_theme(self) -> None:
         """Switch to the configured theme, or say why not.
@@ -916,6 +940,13 @@ class RegieApp(App):
         except Exception:
             return None
 
+    def _dashboard(self) -> WelcomeDashboard | None:
+        """Return the mounted welcome dashboard when it exists."""
+        try:
+            return self.query_one("#welcome-dashboard", WelcomeDashboard)
+        except Exception:
+            return None
+
     def _render_tree(self) -> None:
         panel = self._panel()
         if panel is None:
@@ -931,7 +962,13 @@ class RegieApp(App):
         keys = panel.leaf_keys()
         if not self._leaf_reveal.needs_sync(keys):
             return
-        frame = self._leaf_reveal.observe(panel.reveal_widths(self._leaf_reveal.sync_keys(keys)))
+        agent_spawns = {
+            key for _, node, key, _, _ in self.tree_lines if key[0] == "p" and node.get("parent_id")
+        }
+        frame = self._leaf_reveal.observe(
+            panel.reveal_widths(self._leaf_reveal.sync_keys(keys)),
+            animate_new=agent_spawns,
+        )
         panel.set_reveals(frame.widths)
         if frame.active and self._leaf_reveal_timer is None:
             self._leaf_reveal_timer = self.set_interval(
@@ -972,8 +1009,11 @@ class RegieApp(App):
         panel.apply_cursor(cursor, self.staged_pane)
         panel.scroll_to_cursor(cursor)
 
-    def watch_staged_pane(self, _pane: str | None) -> None:
-        """Redraw the tree so the staged pane gets its background."""
+    def watch_staged_pane(self, pane: str | None) -> None:
+        """Sync the tree marker and the unstaged dashboard."""
+        dashboard = self._dashboard()
+        if dashboard is not None:
+            dashboard.set_staged(pane is not None)
         panel = self._panel()
         if panel is None:
             return

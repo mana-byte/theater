@@ -419,7 +419,7 @@ bus_interval  = 0.4
 bus_batch     = 50
 cwd_segments  = 2         # trailing cwd segments kept in the sidebar tree
 sidebar_width = 60        # sidebar columns; used for both Textual and tmux
-startup_reveal = true     # type initial and newly spawned leaves into the tree
+startup_reveal = true     # animate initial tree and later agent-spawned children
 
 [rails]
 depth_cap = 3             # how deep a spawn chain may go

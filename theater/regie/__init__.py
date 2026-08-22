@@ -2,8 +2,9 @@
 
 The régie is itself a tmux pane — we adopt the user's session rather than
 nesting. Left side: a lineage tree with live status. Bottom-left: scrolling
-inter-agent traffic. Right side: the stage, a real tmux pane showing the
-selected agent fully interactive.
+inter-agent traffic. Right side: a welcome dashboard (animated sentence and
+usage tips) when no participant is staged; a real tmux pane — the stage —
+replaces it once an agent is joined in, and the dashboard returns when it leaves.
 
 The régie is read-mostly: navigate, select, zoom, kill, and one write action
 — spawn. All prompting happens by focusing the stage and typing at the real

@@ -79,7 +79,7 @@ REGIE_STARTUP_REVEAL_INTERVAL_SECONDS = 0.035
 #: Visible columns added to each leaf on a startup typing frame.
 REGIE_STARTUP_REVEAL_COLUMNS_PER_FRAME = 1
 
-#: Visible columns added to a newly discovered leaf on each frame.
+#: Visible columns added to an agent-spawned leaf on each frame.
 REGIE_NEW_LEAF_REVEAL_COLUMNS_PER_FRAME = 5
 
 #: Frames between the start of adjacent leaves.
@@ -93,6 +93,141 @@ REGIE_STARTUP_REVEAL_MAX_LEAVES = 100
 
 #: Suppresses the tree highlight while the footer owns the keyboard cursor.
 REGIE_HIDDEN_TREE_CURSOR = -1
+
+#: Textual system-command title replaced by the dashboard tips.
+REGIE_PALETTE_KEYS_COMMAND_TITLE = "Keys"
+
+#: Availability markers and styles for the dashboard's compact harness list.
+REGIE_DASHBOARD_HARNESS_AVAILABLE_GLYPH = "✓"
+REGIE_DASHBOARD_HARNESS_UNAVAILABLE_GLYPH = "✗"
+REGIE_DASHBOARD_HARNESS_AVAILABLE_STYLE = "$success"
+REGIE_DASHBOARD_HARNESS_UNAVAILABLE_STYLE = "$text-muted"
+
+#: Style for highlighted words in the dashboard sentence animation.
+REGIE_DASHBOARD_HIGHLIGHT_STYLE = "$accent bold"
+
+#: Rectangular block glyph used by cycling dashboard text.
+REGIE_DASHBOARD_CURSOR_GLYPH = "█"
+#: Distinct theme-aware style for the main dashboard cursor.
+REGIE_DASHBOARD_CURSOR_STYLE = "$secondary"
+#: Dim cursor style used by the dashboard tip animation.
+REGIE_DASHBOARD_TIP_CURSOR_STYLE = "$text-muted dim"
+#: Base style for dashboard tip text.
+REGIE_DASHBOARD_TIP_STYLE = "$text-muted dim"
+#: Accent style for actionable fragments in dashboard tips.
+REGIE_DASHBOARD_TIP_HIGHLIGHT_STYLE = "$text-accent bold"
+
+_H = REGIE_DASHBOARD_HIGHLIGHT_STYLE
+
+#: Sentences cycled in the centered dashboard; each has at least one highlighted part.
+REGIE_DASHBOARD_SENTENCES: tuple[tuple[str | tuple[str, str], ...], ...] = (
+    (("imagine", _H), " writing code that reads like prose"),
+    (("building", _H), " tools that build tools is recursion worth chasing"),
+    ("the best ", ("debugger", _H), " is a good night's sleep"),
+    ("every function is a ", ("promise", _H), "; every type is a contract"),
+    (("simplicity", _H), " is the ultimate sophistication in software"),
+    (("imagine", _H), " a world where tests write themselves"),
+    (("building", _H), " software is an act of empathy for future readers"),
+    ("the ", ("compiler", _H), " is your friend, not your enemy"),
+    (("naming", _H), " things is hard; unnamed things are harder"),
+    ("good ", ("abstractions", _H), " earn their weight; bad ones exact it"),
+    (("imagine", _H), " pairing with someone who always reads the docs"),
+    (("building", _H), " is a conversation between intent and constraint"),
+    ("every bug is a ", ("feature", _H), " you did not understand yet"),
+    ("the ", ("REPL", _H), " is a lab bench for ideas"),
+    (("imagine", _H), " if every error message apologized"),
+    (("building", _H), " systems that heal themselves is not a dream"),
+    (("complexity", _H), " is a debt you pay with interest"),
+    ("the ", ("function", _H), " is the unit of thought"),
+    (("imagine", _H), " a type system that catches your typos"),
+    (("building", _H), " software is gardening, not architecture"),
+    ("a good ", ("test suite", _H), " is a love letter to your future self"),
+    (("imagine", _H), " refactoring without fear"),
+    (("building", _H), " software is a series of small wins"),
+    ("the ", ("terminal", _H), " is a musical instrument; learn to play it"),
+    (("imagine", _H), " a codebase where every file earns its keep"),
+    (("building", _H), " software is a craft, not an assembly line"),
+    ("the best code is no code; the second best is ", ("small", _H), " code"),
+    (("imagine", _H), " a pull request that teaches you something"),
+    (("building", _H), " trust in software means building tests"),
+    ("every ", ("interface", _H), " is a story you tell the caller"),
+    (("imagine", _H), " if documentation wrote itself"),
+    (("building", _H), " is how programmers think out loud"),
+)
+del _H
+
+_D = REGIE_DASHBOARD_TIP_STYLE
+_T = REGIE_DASHBOARD_TIP_HIGHLIGHT_STYLE
+
+#: Cycling tips covering the régie's user-facing controls and discovery surfaces.
+REGIE_DASHBOARD_TIPS: tuple[tuple[str | tuple[str, str], ...], ...] = (
+    (("Tips: use ", _D), ("j/k or ↑/↓", _T), (" to move through the agent tree", _D)),
+    (
+        ("Tips: press ", _D),
+        ("j or ↓", _T),
+        (" past the last agent to enter usage stats", _D),
+    ),
+    (
+        ("Tips: use ", _D),
+        ("h/j/k/l or arrows", _T),
+        (" to move through usage stats", _D),
+    ),
+    (("Tips: press ", _D), ("k or ↑", _T), (" from the top stats row to return", _D)),
+    (("Tips: press ", _D), ("Enter", _T), (" to stage or unstage an agent", _D)),
+    (
+        ("Tips: outside usage stats, ", _D),
+        ("l", _T),
+        (" stages and focuses the selected agent", _D),
+    ),
+    (
+        ("Tips: when the key is free, Theater binds ", _D),
+        ("<prefix> h", _T),
+        (" to return from the stage", _D),
+    ),
+    (
+        ("Tips: ", _D),
+        ("single-click", _T),
+        (" an agent to select it; ", _D),
+        ("double-click", _T),
+        (" to stage it", _D),
+    ),
+    (
+        ("Tips: hover a ", _D),
+        ("usage tile", _T),
+        (" for per-harness stats for today, this week, and this month", _D),
+    ),
+    (("Tips: press ", _D), ("Ctrl+P", _T), (" to open the command palette", _D)),
+    (
+        ("Tips: use the ", _D),
+        ("palette", _T),
+        (" to spawn any available harness", _D),
+    ),
+    (
+        ("Tips: use the ", _D),
+        ("palette", _T),
+        (" to resume a compatible dead session", _D),
+    ),
+    (
+        ("Tips: use the ", _D),
+        ("palette", _T),
+        (" to show or hide inter-agent bus traffic", _D),
+    ),
+    (("Tips: use the ", _D), ("palette", _T), (" to change the régie theme", _D)),
+    (("Tips: use the ", _D), ("palette", _T), (" to save an SVG screenshot", _D)),
+    (("Tips: press ", _D), ("x", _T), (" to kill the selected managed session", _D)),
+    (
+        ("Tips: press ", _D),
+        ("q", _T),
+        (" to exit; the daemon and agent sessions keep running", _D),
+    ),
+    (
+        ("Tips: set ", _D),
+        ("regie.cost_window", _T),
+        (" to day, week, month, or year", _D),
+    ),
+    (("Tips: ", _D), ("click this tip", _T), (" to show the next one", _D)),
+)
+del _D, _T
 
 #: Footer keyboard navigation: left arrow mapping.
 REGIE_USAGE_METRIC_LEFT = {"output": "input", "cache": "output", "average": "cost"}
