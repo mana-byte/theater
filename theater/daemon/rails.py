@@ -51,8 +51,7 @@ from theater.models import BadRequest
 logger = logging.getLogger("theater.rails")
 
 #: Fallbacks for direct calls; config.RailsSection owns the literals so they cannot drift.
-#: Depth: roots are 0, children 1; cap 3 means root → child → child → child but no further.
-#: Budget: a count of participants in a tree, not dollars; stops runaway spawning.
+#: Depth cap 3 means root→child→child→child; budget is a participant count, not dollars.
 _DEFAULTS = RailsSection()
 
 DEFAULT_DEPTH_CAP = _DEFAULTS.depth_cap

@@ -12,11 +12,7 @@ from theater.provenance import is_trusted_provenance
 TRANSCRIPT_IDENTITY_LOST_CODE = "transcript_identity_lost"
 TRANSCRIPT_SOURCE_UNAVAILABLE_CODE = "transcript_source_unavailable"
 
-#: RFC 3986 scheme grammar followed by ``://``. A location matching this is
-#: treated as opaque; a relative path whose first segment ends in a colon
-#: (``a://b``) would also match and be treated as opaque. That collision is
-#: accepted — such paths do not occur as transcript locations, and the
-#: alternative disambiguation heuristics are worse than the case they fix.
+#: RFC 3986 scheme grammar + ``://``; opaque — never expanduser/resolve/stat. ``a://b`` also matches
 _OPAQUE_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
 
 

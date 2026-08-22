@@ -80,8 +80,7 @@ class TurnAccumulator:
     _raw_blocks: list[str] = field(default_factory=list)
     #: User text seen since the last boundary.
     _heard: list[str] = field(default_factory=list)
-    #: Turn ids already handled, newest last. A deque and a set together: the
-    #: set answers the question, the deque decides what to forget.
+    #: Turn ids already handled, newest last; set answers, deque decides what to forget.
     _answered: deque[str] = field(default_factory=deque)
     _seen: set[str] = field(default_factory=set)
 

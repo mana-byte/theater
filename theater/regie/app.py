@@ -272,16 +272,14 @@ class RegieApp(App):
         Binding("q", "quit", "quit"),
     ]
 
-    #: ctrl+p opens the palette. Ours adds one `Spawn <harness>` entry per
-    #: registered harness on top of Textual's system commands.
+    #: ctrl+p opens the palette; ours adds one `Spawn <harness>` entry per registered harness.
     COMMANDS = App.COMMANDS | {SpawnCommand, ViewCommands, ResumeDeadSessionCommand}
 
     title = "theater régie"
 
     cursor: reactive[int] = reactive(0)
     tree_lines: reactive[list[tuple[Content, dict, Key, str, str]]] = reactive([])
-    #: Whether the bus panel is showing. Toggled from the palette, not a key:
-    #: a once-a-session decision. Hiding it pauses the poll (see _refresh_bus).
+    #: Whether the bus panel is showing — a once-a-session palette decision; hiding pauses the poll.
     bus_visible: reactive[bool] = reactive(False)
     #: The pane id currently on stage (joined into our window), or None.
     staged_pane: reactive[str | None] = reactive(None)
@@ -289,14 +287,12 @@ class RegieApp(App):
     def __init__(self, settings: Config | None = None):
         super().__init__()
         self._client: DaemonClient | None = None
-        #: The whole config, not just [regie]: the palette needs
-        #: theater.favourite. Injectable for tests.
+        #: The whole config, not just [regie]: palette needs theater.favourite. Injectable.
         self.settings = settings or Config()
         self._cost_window_hours = _COST_WINDOWS.get(self.settings.regie.cost_window, 24.0)
         self._cost_window_period = "day"
         self._cost_window_label = _COST_WINDOW_LABELS["day"]
-        #: What the daemon says it can spawn, or None (before mount or on
-        #: failure). The palette reads None as "ask the local registry".
+        #: What the daemon can spawn, or None (before mount/failure); palette reads None as local.
         self.harnesses: list[dict] | None = None
         self.bus_visible = self.settings.regie.bus_visible
         #: Controllers extracted from the composition root.
@@ -304,8 +300,7 @@ class RegieApp(App):
         self._anim_ctrl = RouteAnimationController()
         #: Bumped whenever tree_lines is replaced; shared with the animation controller.
         self._tree_revision = 0
-        #: Runs only while something is in flight — an idle régie costs no
-        #: frames, the same bargain AgentLeaf's spinner makes.
+        #: Runs only while something is in flight — an idle régie costs no frames.
         self._anim_timer: Timer | None = None
         self._nav = NavigationState()
         self._usage = UsagePanelState()

@@ -24,13 +24,7 @@ from theater.harness import describe
 from theater.mcp import tools
 from theater.mcp.tools import Session
 
-#: `spawn_session`'s description, with the harness list left open.
-#:
-#: Filled from the local registry, which is a hint and not the authority: the
-#: daemon built its own when it started, and a config edit leaves them
-#: disagreeing. `list_harnesses` asks the daemon for anything load-bearing.
-#: The schema is the whole of what an agent knows — nothing load-bearing
-#: lives only here; every directive is repeated in the tool it applies to.
+#: `spawn_session`'s description — harness list from local registry (hint); daemon is authoritative.
 INSTRUCTIONS = """Theater makes the other agents on this machine addressable,
 so you can hand work to them and collect it back.
 

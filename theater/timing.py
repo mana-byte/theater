@@ -17,8 +17,7 @@ GIT_MS = 200.0
 PROC_MS = 50.0
 WORKERS_MS = 500.0
 
-#: Past this, a readiness lag is not a spawn measurement: every participant is
-#: re-watched when the daemon restarts, and `created_at` can be hours old.
+#: Past this, a readiness lag is not a spawn measurement: re-watched on restart, created_at is old.
 READY_LAG_MAX_S = 60.0
 LAG_INTERVAL_S = 0.5
 LAG_WARN_S = 0.25
