@@ -50,8 +50,7 @@ from theater.models import BadRequest
 
 logger = logging.getLogger("theater.rails")
 
-#: Fallbacks for direct calls; config.RailsSection owns the literals so they cannot drift.
-#: Depth cap 3 means root→child→child→child; budget is a participant count, not dollars.
+#: Fallbacks (config-owned); depth 3 = root→child→child→child; budget = participant count, not $.
 _DEFAULTS = RailsSection()
 
 DEFAULT_DEPTH_CAP = _DEFAULTS.depth_cap
