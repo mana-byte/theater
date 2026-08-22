@@ -219,6 +219,23 @@ async def test_await_will_not_block_for_longer_than_the_ceiling(
     assert seen == [jobs_mod.MAX_AWAIT]
 
 
+async def test_await_ceiling_reads_compatibility_facade(client, fake_tmux, daemon, monkeypatch):
+    from theater.daemon import methods
+
+    seen: list[float] = []
+    real = daemon.jobs.await_jobs
+
+    async def spy(handles, max_wait):
+        seen.append(max_wait)
+        return await real(handles, max_wait=0.01)
+
+    monkeypatch.setattr(methods, "MAX_AWAIT", 0.02)
+    monkeypatch.setattr(daemon.jobs, "await_jobs", spy)
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+    await client.call("jobs.await", handles=[record["handle"]], max_wait=3600)
+    assert seen == [0.02]
+
+
 # ---- bus events ---------------------------------------------------------
 
 

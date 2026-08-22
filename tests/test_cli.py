@@ -599,10 +599,12 @@ def test_restart_refuses_to_start_a_second_daemon(monkeypatch, capsys):
             return {"stopping": True}  # says yes, never lets go
 
     monkeypatch.setattr(maintenance_mod, "DaemonClient", Deaf)
-    monkeypatch.setattr(maintenance_mod, "STOP_TIMEOUT", 0.1)
+    monkeypatch.setattr(cli, "STOP_TIMEOUT", 0.1)
     monkeypatch.setattr(maintenance_mod, "call_sync", _explode_on_call)
     assert cli.cmd_restart(parse("restart")) == 1
-    assert "still holding" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert "still holding" in error
+    assert "after 0.1s" in error
 
 
 def _explode_on_call(*a, **k):

@@ -15,8 +15,7 @@ import pytest
 
 from theater import harness as harness_registry
 from theater import paths
-from theater.daemon import methods  # noqa: F401 — compatibility import for side-effect registration
-from theater.daemon.rpc import jobs as jobs_mod
+from theater.daemon import methods
 from theater.daemon.rpc import participants as participants_mod
 from theater.harness import HARNESSES
 from theater.protocol import RemoteError
@@ -828,7 +827,7 @@ async def test_await_records_active_wait_edges(client, fake_tmux, monkeypatch):
     # about *which* rows an await writes, and a wall-clock threshold is flaky
     # on a loaded machine. The one test about timing patches it too, on both
     # sides of the wait.
-    monkeypatch.setattr(jobs_mod, "AWAIT_ANNOUNCE_AFTER", 0.0)
+    monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
     parent = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
     child = await client.call(
         "spawn",
@@ -860,7 +859,7 @@ async def test_await_records_active_wait_edges(client, fake_tmux, monkeypatch):
 
 async def test_await_records_one_pair_per_handle(client, fake_tmux, monkeypatch):
     """Two children, two edges — and every start closed exactly once."""
-    monkeypatch.setattr(jobs_mod, "AWAIT_ANNOUNCE_AFTER", 0.0)
+    monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
     parent = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
     children = [
         await client.call(
@@ -895,7 +894,7 @@ async def test_await_that_returns_immediately_does_not_record_active_wait(
     client, fake_tmux, monkeypatch
 ):
     """A finished job is not something to be blocked on, delay or no delay."""
-    monkeypatch.setattr(jobs_mod, "AWAIT_ANNOUNCE_AFTER", 0.0)
+    monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
     parent = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
     child = await client.call(
         "spawn",
@@ -919,7 +918,7 @@ async def test_await_that_returns_immediately_does_not_record_active_wait(
 
 async def test_await_with_one_finished_job_records_nothing(client, fake_tmux, monkeypatch):
     """One terminal job ends the whole call at entry — so no edge is live."""
-    monkeypatch.setattr(jobs_mod, "AWAIT_ANNOUNCE_AFTER", 0.0)
+    monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
     parent = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
     running = await client.call(
         "spawn",
@@ -997,12 +996,12 @@ async def test_await_announces_once_it_has_really_blocked(client, fake_tmux, mon
 
     # Threshold above the wait: the caller gave up before the régie would ever
     # have been told it was waiting.
-    monkeypatch.setattr(jobs_mod, "AWAIT_ANNOUNCE_AFTER", 5.0)
+    monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 5.0)
     await client.call("jobs.await", **call)
     assert await _await_events(client) == []
 
     # Same call, threshold under the wait.
-    monkeypatch.setattr(jobs_mod, "AWAIT_ANNOUNCE_AFTER", 0.0)
+    monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
     await client.call("jobs.await", **call)
     assert [e["kind"] for e in await _await_events(client)] == [
         "job.await.start",
@@ -1012,7 +1011,7 @@ async def test_await_announces_once_it_has_really_blocked(client, fake_tmux, mon
 
 async def test_await_refused_by_the_rails_records_nothing(client, fake_tmux, monkeypatch):
     """A refused await never happened: no row for the régie to animate."""
-    monkeypatch.setattr(jobs_mod, "AWAIT_ANNOUNCE_AFTER", 0.0)
+    monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
     parent = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
     child = await client.call(
         "spawn",
@@ -1036,7 +1035,7 @@ async def test_await_refused_by_the_rails_records_nothing(client, fake_tmux, mon
 
 async def test_await_that_raises_still_closes_its_starts(daemon, client, fake_tmux, monkeypatch):
     """An exception inside the wait must not strand the animation."""
-    monkeypatch.setattr(jobs_mod, "AWAIT_ANNOUNCE_AFTER", 0.0)
+    monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
     parent = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
     child = await client.call(
         "spawn",
@@ -1073,7 +1072,7 @@ async def test_a_start_that_fails_halfway_still_closes_what_was_written(
     daemon, client, fake_tmux, monkeypatch
 ):
     """Half the start rows out, then the disk refuses — close those halves."""
-    monkeypatch.setattr(jobs_mod, "AWAIT_ANNOUNCE_AFTER", 0.0)
+    monkeypatch.setattr(methods, "AWAIT_ANNOUNCE_AFTER", 0.0)
     parent = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
     children = [
         await client.call(

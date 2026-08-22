@@ -8,7 +8,9 @@ from collections.abc import Callable
 from typing import NoReturn
 
 from theater.constants.daemon import BUS_KIND_SEND_REFUSED
-from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS as SEND_CLAIM_TTL
+
+# Definition re-exported by the methods facade; runtime reads the facade for legacy patches.
+from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS as SEND_CLAIM_TTL  # noqa: F401
 from theater.daemon.harness_detect import (
     PaneHarnessVerdict,
     compare_detected_harness,
@@ -41,6 +43,13 @@ from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
     transcript_identity_recovery_message,
 )
+
+
+def _send_claim_ttl() -> float:
+    from theater.daemon import methods as _facade
+
+    return _facade.SEND_CLAIM_TTL
+
 
 logger = logging.getLogger(__name__)
 
@@ -260,7 +269,7 @@ async def _send(daemon, params: dict) -> dict:
     _check_transcript_send_preflight(daemon, target, refuse)
 
     # Busy is any running job that carried a prompt; past SEND_CLAIM_TTL it no longer blocks.
-    stale = now() - SEND_CLAIM_TTL
+    stale = now() - _send_claim_ttl()
     if [
         j
         for j in daemon.store.running_jobs_for_target(target_id)

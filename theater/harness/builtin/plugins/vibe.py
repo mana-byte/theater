@@ -92,7 +92,7 @@ _SCREEN_IDLE_PROMPTS = (*IDLE_PROMPTS, ">")
 #: Permission box footer. Frame furniture, not echoed. Case-sensitive: picker footers not approval.
 APPROVAL_MARKER = "Esc reject"
 
-#: Substring in spinner line while in flight. Matches plain and queued; safety: `Esc` co-occurs.
+#: WORKING_MARKER is safe only with same-line WORKING_MARKER_KEY inside _SPINNER_TAIL_LINES.
 WORKING_MARKER = "to interrupt"
 
 #: Second token that must co-occur with `WORKING_MARKER` on the same tail line.

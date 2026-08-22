@@ -5,14 +5,15 @@ from __future__ import annotations
 import asyncio
 import logging
 
+# Definitions re-exported by the methods facade; runtime reads the facade for legacy patches.
 from theater.constants.daemon import (
-    RPC_AWAIT_ANNOUNCE_DELAY_SECONDS as AWAIT_ANNOUNCE_AFTER,
+    RPC_AWAIT_ANNOUNCE_DELAY_SECONDS as AWAIT_ANNOUNCE_AFTER,  # noqa: F401
 )
 from theater.constants.daemon import (
     RPC_DEFAULT_MAX_WAIT_SECONDS as DEFAULT_MAX_WAIT,
 )
 from theater.constants.daemon import (
-    RPC_MAX_AWAIT_SECONDS as MAX_AWAIT,
+    RPC_MAX_AWAIT_SECONDS as MAX_AWAIT,  # noqa: F401
 )
 from theater.daemon.rails import check_cycle, check_wait_cycle
 from theater.daemon.rpc.params import _require
@@ -24,6 +25,19 @@ from theater.transcript_identity import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _max_await() -> float:
+    from theater.daemon import methods as _facade
+
+    return _facade.MAX_AWAIT
+
+
+def _await_announce_after() -> float:
+    from theater.daemon import methods as _facade
+
+    return _facade.AWAIT_ANNOUNCE_AFTER
+
 
 _JOB_ERROR_MESSAGES = {
     "transcript_correlation_failed": (
@@ -74,7 +88,7 @@ async def _jobs_await(daemon, params: dict) -> list[dict]:
     handles = params.get("handles") or []
     if not handles:
         raise BadRequest("at least one handle is required")
-    max_wait = min(max(float(params.get("max_wait", DEFAULT_MAX_WAIT)), 0.0), MAX_AWAIT)
+    max_wait = min(max(float(params.get("max_wait", DEFAULT_MAX_WAIT)), 0.0), _max_await())
     caller_id = params.get("caller_id")
 
     known = {h: daemon.jobs.get(h) for h in handles}
@@ -152,7 +166,7 @@ async def _await_announced(
     waiter = asyncio.create_task(daemon.jobs.await_jobs(handles, max_wait=max_wait))
     try:
         if edges:
-            finished, _ = await asyncio.wait({waiter}, timeout=AWAIT_ANNOUNCE_AFTER)
+            finished, _ = await asyncio.wait({waiter}, timeout=_await_announce_after())
             if not finished:
                 _open_await(daemon, caller_id, edges, token, announced)
         return await waiter

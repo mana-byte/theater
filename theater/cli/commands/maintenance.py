@@ -11,7 +11,15 @@ import time
 from theater import paths
 from theater.cli.render import _format_bytes, _format_floor
 from theater.client import DaemonClient, call_sync
-from theater.constants.cli import CLI_STOP_TIMEOUT_SECONDS as STOP_TIMEOUT
+
+# Definition re-exported by the cli facade; runtime reads the facade for legacy patches.
+from theater.constants.cli import CLI_STOP_TIMEOUT_SECONDS as STOP_TIMEOUT  # noqa: F401
+
+
+def _stop_timeout() -> float:
+    from theater import cli as _facade
+
+    return _facade.STOP_TIMEOUT
 
 
 def cmd_gc(args) -> int:
@@ -118,7 +126,7 @@ def _await_daemon_gone(timeout: float | None = None) -> bool:
     wait is patchable — otherwise a test for the timeout path has to take the
     full timeout.
     """
-    deadline = time.monotonic() + (STOP_TIMEOUT if timeout is None else timeout)
+    deadline = time.monotonic() + (_stop_timeout() if timeout is None else timeout)
     while not _daemon_released() and time.monotonic() < deadline:
         time.sleep(0.05)
     return _daemon_released()
@@ -143,7 +151,7 @@ def cmd_restart(args) -> int:
     if _shutdown_running_daemon() and not _await_daemon_gone():
         held = paths.socket_path() if paths.socket_path().exists() else paths.pidfile_path()
         print(
-            f"theater: daemon still holding {held} after {STOP_TIMEOUT:g}s "
+            f"theater: daemon still holding {held} after {_stop_timeout():g}s "
             "— not starting a second one",
             file=sys.stderr,
         )

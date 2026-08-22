@@ -290,6 +290,21 @@ async def test_send_allowed_after_job_exceeds_ttl(client, fake_tmux, daemon, mon
     assert fake_tmux.sent[1] == ("%1", "second")
 
 
+async def test_send_ttl_reads_compatibility_facade(client, fake_tmux, daemon, monkeypatch):
+    import theater.daemon.rpc.sending as sending_mod
+    from theater.daemon import methods
+
+    target = await _target(client, daemon)
+    await client.call("send", target=target["id"], prompt="first")
+
+    real_now = sending_mod.now()
+    monkeypatch.setattr(methods, "SEND_CLAIM_TTL", 0.1)
+    monkeypatch.setattr(sending_mod, "now", lambda: real_now + 1.0)
+
+    job = await client.call("send", target=target["id"], prompt="second")
+    assert job["state"] == "running"
+
+
 async def test_send_then_await_result(client, fake_tmux, daemon):
     """send → await → result: the full live-delivery loop."""
     target = await _target(client, daemon)
