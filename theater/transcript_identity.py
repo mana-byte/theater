@@ -12,8 +12,7 @@ from theater.provenance import is_trusted_provenance
 TRANSCRIPT_IDENTITY_LOST_CODE = "transcript_identity_lost"
 TRANSCRIPT_SOURCE_UNAVAILABLE_CODE = "transcript_source_unavailable"
 
-#: RFC 3986 scheme grammar followed by ``://``; opaque — never expanduser/resolve/stat it.
-#: A relative path like ``a://b`` also matches, but such paths do not occur as transcript locations.
+#: RFC 3986 scheme grammar + ``://``; opaque — never expanduser/resolve/stat. ``a://b`` also matches
 _OPAQUE_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
 
 
