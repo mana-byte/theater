@@ -89,8 +89,7 @@ IDLE_PROMPTS = ("❯", "❯ ", "> ❯")
 #: A superset of `IDLE_PROMPTS`: a real capture can render the prompt as bare `>`.
 _SCREEN_IDLE_PROMPTS = (*IDLE_PROMPTS, ">")
 
-#: Footer of every permission box. `Esc reject` is frame furniture — cannot appear in echoed output.
-#: Case matters: picker footers (`Esc Cancel`, `Esc Close`, `Esc Back`, `Esc exit`) NOT approval.
+#: Permission box footer. Frame furniture, not echoed. Case-sensitive: picker footers not approval.
 APPROVAL_MARKER = "Esc reject"
 
 #: Substring in spinner line while in flight. Matches plain and queued; safety: `Esc` co-occurs.
