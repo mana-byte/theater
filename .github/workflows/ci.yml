@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+      - name: Sync dependencies
+        run: uv sync --locked --group dev
+      - name: Ruff check
+        run: uv run ruff check
+      - name: Ruff format check
+        run: uv run ruff format --check
+      - name: Mypy
+        run: uv run mypy
+      - name: Pytest with coverage
+        run: uv run pytest --cov
+      - name: Migrate fresh database to Alembic head
+        env:
+          THEATER_HOME: ${{ runner.temp }}/theater-home
+        run: |
+          mkdir -p "$THEATER_HOME"
+          uv run alembic upgrade head
+      - name: Alembic schema check
+        env:
+          THEATER_HOME: ${{ runner.temp }}/theater-home
+        run: uv run alembic check
+
+  compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        python-version: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install "${{ matrix.python-version }}"
+      - name: Sync dependencies
+        run: uv sync --locked --group dev --python "${{ matrix.python-version }}"
+      - name: Pytest
+        run: uv run pytest
