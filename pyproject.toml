@@ -43,6 +43,9 @@ dev = [
     "ruff>=0.16.2",
 ]
 
+[tool.uv]
+exclude-newer = "2 days"
+
 [tool.ruff]
 # 88 would flag 50 lines; 100 flags 5. The wide ones are prose — docstrings and
 # error messages that explain a decision — and folding them costs more than the
