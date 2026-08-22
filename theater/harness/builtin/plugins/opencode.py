@@ -131,10 +131,7 @@ DB_NAME = "opencode-stable.db"
 #: Seconds `opencode models` gets before `theater models --discover` gives up.
 MODELS_TIMEOUT = 20
 
-#: The two spellings of the working footer, rendered by the Prompt component. Both must be matched.
-#:
-#: Do NOT shorten to `"interrupt"`: `index.tsx:1569` renders `· interrupted` after abort.
-#: Neither full spelling is a substring of `· interrupted`. Matched in `_in_screen_tail` with guard.
+#: Working footer spellings. Do NOT shorten to interrupt: interrupted contains it. Guarded in tail.
 WORKING_MARKERS = ("esc interrupt", "again to interrupt")
 
 #: The idle footer's right-hand hint. Also present while working — guards footer drew, not idle.
