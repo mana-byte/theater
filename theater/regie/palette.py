@@ -50,12 +50,10 @@ def entries(
     rows: list[tuple[str, str, str]] = []
     for row in _order(describe() if harnesses is None else harnesses, favourite):
         if row.get("error"):
-            # A plugin that would not load; an entry here could only offer a
-            # spawn that cannot happen.
+            # A plugin that would not load; an entry here could only offer a spawn that cannot work.
             continue
         if not row.get("installed", True):
-            # Listed, not hidden: hiding it looks like Theater cannot drive
-            # this harness at all, when the truth is the binary is not on PATH.
+            # Listed, not hidden: hiding it looks like Theater cannot drive this harness at all.
             help_text = f"{row['binary']} is not on PATH here — this will fail"
         else:
             help_text = f"Start {row['binary']} here, unparented, with no prompt"

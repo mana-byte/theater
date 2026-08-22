@@ -20,8 +20,7 @@ from rich.text import Text
 
 from theater.formatting import event_stamp, event_summary, event_who
 
-#: Event kind -> theme slot. A Textual theme guarantees six hues, so kinds
-#: that share a meaning share a colour: lifecycle is `accent`, errors are `error`.
+#: Event kind -> theme slot; kinds that share a meaning share a colour (accent, error).
 _BUS_KIND_ROLES = {
     "agent.user": "success",
     "agent.assistant": "primary",
@@ -37,8 +36,7 @@ _BUS_KIND_ROLES = {
     "participant.dead": "error",
 }
 
-#: Fallback colours for when no theme is available. Used by tests and by
-#: callers with no running app.
+#: Fallback colours for when no theme is available (tests, callers with no running app).
 _FALLBACK = {
     "success": "green",
     "primary": "cyan",
