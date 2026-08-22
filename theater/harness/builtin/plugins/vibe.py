@@ -83,63 +83,40 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("theater.harness.vibe")
 
-#: Vibe's idle prompt is `❯` (U+276F). Anything after the prompt is someone
-#: typing — presence, not idleness — so these stay exact matches.
+#: Vibe's idle prompt is `❯` (U+276F). Anything after is someone typing — presence, not idleness.
 IDLE_PROMPTS = ("❯", "❯ ", "> ❯")
 
-#: A superset of `IDLE_PROMPTS`: a real capture can render the prompt as bare
-#: `>` (ASCII), which the exact tuple above does not include.
+#: A superset of `IDLE_PROMPTS`: a real capture can render the prompt as bare `>`.
 _SCREEN_IDLE_PROMPTS = (*IDLE_PROMPTS, ">")
 
-#: Footer of every permission box, regardless of tool or question. Chosen over
-#: the question text because `Esc reject` is frame furniture — the CLI's own
-#: navigation hint — and cannot appear in echoed output. Case matters: vibe's
-#: picker footers render `Esc Cancel`, `Esc Close`, `Esc Back`, `Esc exit`,
-#: and `Esc cancel` — all user menus that must NOT be classified as approval.
+#: Footer of every permission box. `Esc reject` is frame furniture — cannot appear in echoed output.
+#: Case matters: picker footers (`Esc Cancel`, `Esc Close`, `Esc Back`, `Esc exit`) NOT approval.
 APPROVAL_MARKER = "Esc reject"
 
-#: Substring in the spinner line while a turn is in flight. Vibe has two
-#: spellings (`loading.py:170-177`): plain `(9m45s Esc/Ctrl+C to interrupt)`
-#: and queued `(1m23s Esc to interrupt · ...)`. The substring `to interrupt`
-#: matches both, but is also ordinary English prose an agent can echo. Safety
-#: rests on three things together: the substring, `WORKING_MARKER_KEY` (`Esc`)
-#: co-occurring on the same tail line, and the `_SPINNER_TAIL_LINES` window.
-#: Do not separate any of the three — none alone is enough.
+#: Substring in spinner line while in flight. Matches plain and queued; safety: `Esc` co-occurs.
 WORKING_MARKER = "to interrupt"
 
 #: Second token that must co-occur with `WORKING_MARKER` on the same tail line.
 WORKING_MARKER_KEY = "Esc"
 
-#: Workspace-trust dialog body text (`trust_folder_dialog.py:95-97`), rendered
-#: on its own line so it survives wrapping. Chosen over the title (varies by
-#: context) and button labels (could appear in echoed output). Whole-capture
-#: match, not tail-scoped: the trust dialog only appears at startup with no
-#: agent output on the pane.
+#: Workspace-trust dialog body text, on its own line so it survives wrapping. Whole-capture.
 TRUST_MARKER = "Malicious configs can modify"
 
-#: A real capture has a separator and cwd/token footer below the prompt, so
-#: `is_idle_screen` (last line only) does not fire on a real screen.
+#: A real capture has separator and footer below the prompt, so `is_idle_screen` does not fire.
 _SCREEN_TAIL_LINES = 6
 
-#: The spinner sits 6 lines above the bottom; the queued hint is longer and
-#: may wrap on a narrow terminal, so 8 leaves a 2-line margin.
+#: Spinner 6 lines above bottom; queued hint may wrap on narrow terminal, 8 leaves 2-line margin.
 _SPINNER_TAIL_LINES = 8
 
-#: Directories scanned newest first; a live session is near the top, so this
-#: bounds the cost of a home directory with thousands of old sessions.
+#: Directories scanned newest first; bounds the cost of a home directory with thousands of sessions.
 _SCAN_LIMIT = 200
 
-#: Written before Vibe starts. Its presence tells a restarted daemon that this
-#: participant's save directory is process-isolated and therefore safe to scan
-#: by cwd across Vibe's session rotations.
+#: Written before Vibe starts. Tells a restarted daemon this save dir is process-isolated.
 ISOLATION_MARKER = ".theater-vibe-source"
 _MARKER_VERSION = 1
 _MARKER_KEY = "vibe-domain-marker.key"
 
-#: Vibe tool names that modify a file, mapped to the argument key that carries
-#: the path (`write_file.py:30`, `edit.py:35`). `grep` is excluded: its `path`
-#: is a search root, not a file. `bash` is excluded: parsing a shell command
-#: string means guessing at quoting, and a wrong path is worse than none.
+#: Vibe tools that modify a file, mapped to the arg key carrying the path. `grep`/`bash` excluded.
 _WRITE_TOOLS: dict[str, str] = {
     "write_file": "file_path",
     "edit": "file_path",
@@ -338,16 +315,13 @@ def _in_screen_tail(capture: str, markers: tuple[str, ...], limit: int) -> bool:
 class VibeHarness(Harness):
     name = "vibe"
     binary = "vibe"
-    #: Stacked bars, echoing the Mistral mark. A lozenge or an "M" would both
-    #: collide with the asterisk-family glyphs a third harness is likely to want.
+    #: Stacked bars, echoing the Mistral mark.
     icon = "▤"
-    #: What an agent might call itself at registration. A spelling that does not
-    #: normalize is observed as nothing at all, so these are not cosmetic.
+    #: Registration aliases; a non-normalizing spelling is observed as nothing.
     aliases = ("Vibe", "mistral-vibe", "mistral_vibe")
 
     def __init__(self, root: Path | None = None, correlation_root: Path | None = None):
-        #: `root` is the observer's business alone — nothing about launching
-        #: vibe depends on where it writes.
+        #: `root` is the observer's business — nothing about launching depends on where it writes.
         self.observer: VibeObserver = VibeObserver(root=root, correlation_root=correlation_root)
 
     # ---- launching ------------------------------------------------------
@@ -370,8 +344,7 @@ class VibeHarness(Harness):
                 "transport": "stdio",
                 "command": theater_binary(),
                 "args": ["mcp", "--id", participant_id],
-                # Vibe's own 60s default would cut off `await_sessions` before
-                # the daemon's 300s ceiling.
+                # Vibe's 60s default cuts off `await_sessions` before the daemon's 300s ceiling.
                 "tool_timeout_sec": MCP_TOOL_TIMEOUT,
             }
         ]
@@ -380,29 +353,18 @@ class VibeHarness(Harness):
             argv.append("--yolo")
         elif approval == "edits":
             argv += ["--agent", "accept-edits"]
-        # --resume appends to the same messages.jsonl and keeps the same session
-        # id (`_runtime.py:256-269`). The positional prompt is still honoured
-        # on resume, so `resume_takes_prompt` stays True.
+        # --resume appends to the same messages.jsonl, keeps the session id; prompt still honoured.
         if resume is not None:
             argv += ["--resume", resume]
         if prompt:
             argv.append(prompt)
         env = {"VIBE_MCP_SERVERS": json.dumps(servers)}
-        # No `--model` flag: the same VIBE_* override carries the model. Set
-        # unconditionally, empty when no model was asked for. Empty means "use
-        # the configured default" — same as an unset variable. A non-empty
-        # value would be inherited by descendants that did not name one,
-        # putting a child on a model nobody chose.
+        # No `--model` flag: the same VIBE_* override carries the model. Empty = configured default.
         env["VIBE_ACTIVE_MODEL"] = model or ""
         files: dict[Path, str] = {}
         transcript_domain: Path | None = None
         if resume is None:
-            # Vibe's environment layer uses ``__`` for nested fields. Every
-            # session and compaction produced by this process now lands below
-            # one participant-owned root, so no cwd guess can reach a sibling.
-            # Theater-spawned Vibe sessions deliberately leave the user's
-            # shared Vibe history. Resume re-enters only through the daemon's
-            # trusted predecessor validation.
+            # Vibe's env uses `__` for nested fields. All sessions land under one root.
             save_dir = self.observer.participant_root(participant_id)
             env["VIBE_SESSION_LOGGING__SAVE_DIR"] = str(save_dir)
             files[save_dir / ISOLATION_MARKER] = isolation_marker_text(
@@ -557,14 +519,10 @@ class _VibeSource(Source):
         self._baseline: tuple[int, int, int] | None = None
         self._meta_fingerprint: tuple[int, int, int, int] | None = None
         self._cached_meta: dict | None = None
-        # A genuinely new Theater launch may incur its first model call before
-        # the observer attaches. A resume/adoption/restart must baseline current
-        # totals instead, or it would recount history.
+        # A new launch may incur a model call before the observer attaches; resume baselines totals.
         self._count_initial = after is not None and session_id is None and known_location is None
 
-    # These complete the concrete TranscriptSource surface asserted by the
-    # trusted-pin and quarantine tests. They intentionally do not belong on the
-    # Source ABC, whose inputs need not be file-backed.
+    # These complete the TranscriptSource surface asserted by the trusted-pin and quarantine tests.
     @property
     def path(self) -> Path | None:
         return self._inner.path
@@ -761,8 +719,7 @@ class _VibeSource(Source):
         if inp_rate is None or out_rate is None:
             return None
         cache_rate = self._price(cached_price, positive=False)
-        # Vibe's null cached rate means full input price, not an unavailable
-        # price. This reproduces its own session_cost exactly.
+        # Vibe's null cached rate means full input price, not an unavailable price.
         if cache_rate is None:
             cache_rate = inp_rate
         return (
@@ -793,10 +750,7 @@ class VibeObserver(TranscriptObserver):
         self.correlation_root = correlation_root
         self.isolated = isolated
         self.relocate_by_cwd = True
-        #: Set in `find_transcript` (the one call that receives the
-        #: participant's cwd) so `parse` can relativise the absolute paths
-        #: vibe's tool arguments carry. A path that cannot be relativised is
-        #: dropped rather than emitted as an absolute.
+        #: Set in `find_transcript` so `parse` can relativise absolute paths vibe's tool args carry.
         self._cwd: str | None = None
 
     def participant_root(self, participant_id: str) -> Path:
@@ -924,15 +878,8 @@ class VibeObserver(TranscriptObserver):
         want = str(Path(cwd).resolve()) if cwd else None
         if want is None:
             return None
-        # Directory names start with a fixed-width UTC timestamp, so reverse
-        # lexicographic order is newest first without parsing anything.
-        # When session_id is None — the window after spawn before the observer
-        # discovers it — two siblings in the same cwd both match, and returning
-        # the newest for either participant is a mis-attribution. The
-        # observer's binding check (`_accept_attachment`) is the cross-cutting guarantee
-        # that refuses the second binding; this method returns the newest match
-        # so rotation (vibe opens a new session directory every turn) still
-        # works, and logs the ambiguity so it is not silent.
+        # Directory names start with a fixed-width UTC timestamp; reverse lexicographic is newest.
+        # When session_id is None, two siblings in the same cwd match; observer refuses second.
         matches: list[Path] = []
         seen = 0
         for d in sorted(self.root.glob("session_*"), reverse=True):
@@ -1078,8 +1025,7 @@ class VibeObserver(TranscriptObserver):
                 st = d.stat()
             except OSError:
                 return False
-            # Stat, not the name: the name's timestamp has no timezone
-            # marker and the caller's floor is a unix epoch.
+            # Stat, not the name: its timestamp has no timezone, and the caller's floor is epoch.
             if getattr(st, "st_birthtime", st.st_ctime) < after:
                 return False
         return self._meta_cwd(d) == want
@@ -1172,9 +1118,7 @@ class VibeObserver(TranscriptObserver):
             )
         if calls:
             return out
-        # No tool calls: the agent has finished its turn. No turn_id: the
-        # records carry no id of any kind, so synthesising one from the index
-        # would be a lie the moment a record is re-read after a relocate.
+        # No tool calls: the agent has finished its turn. No turn_id: records carry no id.
         if out:
             last = out[-1]
             out[-1] = Event(
@@ -1255,7 +1199,5 @@ class VibeObserver(TranscriptObserver):
         return ScreenReading(kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW)
 
 
-#: What the loader looks for. An instance, not the class: see
-#: docs/harness-plugins.md. Shipped adapters meet the same contract as anything
-#: dropped in $THEATER_HOME/harnesses, which is the point of shipping them here.
+#: What the loader looks for. An instance, not the class: see docs/harness-plugins.md.
 HARNESS = VibeHarness()

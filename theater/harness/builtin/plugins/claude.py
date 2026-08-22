@@ -84,66 +84,40 @@ logger = logging.getLogger("theater.harness.claude")
 CLAUDE_RECEIPT_COMMAND = "claude-receipt"
 CLAUDE_RECEIPT_EVENTS = ("SessionStart", "PreCompact")
 
-#: Screen lines that mean "waiting for you". Anything after the prompt is
-#: someone typing, which is presence, not idleness — so these stay exact.
+#: Screen lines that mean "waiting for you".
 IDLE_PROMPTS = (">", "> ")
 
-#: Footer of every approval dialog, regardless of the question. Chosen over
-#: the question text (`Do you want to`) because that can appear in echoed
-#: output. `Esc to cancel` is frame furniture, not agent text.
+#: Footer of every approval dialog — chosen over the question text (can appear in echoed output).
 APPROVAL_MARKER = "Esc to cancel"
 
-#: Workspace-trust onboarding dialog's primary option label. Unique to that
-#: dialog and rendered on its own line. Cannot collide with the two neighbour
-#: trust dialogs (`Trust this directory?` — remote-control add-server, and
-#: `Trust gateway <host>` — cloud-gateway TLS pinning), which use different
-#: labels. An option label, not body text, so it will not appear in echoed output.
+#: Workspace-trust onboarding dialog's primary option label, unique to that dialog.
 TRUST_MARKER = "Yes, I trust this folder"
 
-#: Status footer segment while a turn is in flight. The footer swaps this for
-#: `IDLE_FOOTER` when the turn ends, so the two are mutually exclusive.
+#: Status footer segment while a turn is in flight; mutually exclusive with IDLE_FOOTER.
 WORKING_MARKER = "esc to interrupt"
 
-#: Status footer segment while waiting for input. A real capture has this
-#: footer below the prompt, so `is_idle_screen` (last line only) does not fire.
-#: Not the `manual mode on` indicator to its left: that is drawn while idle
-#: *and* working, and its text changes with the approval mode.
+#: Status footer segment while waiting for input. Not the `manual mode on` indicator.
 IDLE_FOOTER = "? for shortcuts"
 
-#: Alternate idle footer shown when the agent switcher occupies the shortcut
-#: slot. The permission-mode text to its left is not enough: Claude draws it
-#: during a turn too. Match the complete chrome shape in ``screen_reading`` —
-#: tail-scoped, mode-line-prefixed and end-anchored — so agent prose cannot
-#: impersonate an idle prompt.
+#: Alternate idle footer shown when the agent switcher occupies the shortcut slot.
 IDLE_AGENTS_FOOTER = "← for agents"
-#: Claude renders a different leading glyph for manual and accept-edits modes.
-#: Both are chrome rather than agent output; the footer suffix and tail scope
-#: remain the other two guards against prose impersonating an idle prompt.
+#: Claude renders a different leading glyph for manual and accept-edits modes; both are chrome.
 MODE_LINE_PREFIXES = ("⏸", "⏵⏵")
 
-#: How far up from the bottom to look for the prompt and footer. A real
-#: capture has several lines of padding below the footer, so a window of one
-#: would miss it.
+#: How far up from the bottom to look for the prompt and footer.
 _SCREEN_TAIL_LINES = 6
 
-#: Records to read before giving up on finding a `cwd` in a candidate
-#: transcript. The first record is a `permission-mode` entry that has none;
-#: `cwd` first appears around index 2.
+#: Records to read before giving up on finding a `cwd` in a candidate transcript.
 _CWD_PROBE_RECORDS = 20
 
-#: Individual records can be hundreds of KB. Bound the probe read so scanning
-#: candidates never turns into reading whole transcripts.
+#: Bound the probe read so scanning candidates never turns into reading whole transcripts.
 _CWD_PROBE_BYTES = 256 * 1024
 
 #: Only this many newest files have their records opened during a loss probe.
-#: Listing/statting the root is unavoidable, but transcript reads stay bounded.
 _LOSS_CANDIDATE_PROBES = 8
 
 
 #: Tools that write a file, keyed by the input parameter carrying the path.
-#: MultiEdit batches several edits to one file but names it once, so it yields
-#: a single EventPath. Parameter names are grounded in the Claude Code tool
-#: schema (`file_path` for Write/Edit, `notebook_path` for NotebookEdit).
 _WRITE_TOOLS: dict[str, str] = {
     "Write": "file_path",
     "Edit": "file_path",
@@ -151,8 +125,7 @@ _WRITE_TOOLS: dict[str, str] = {
     "NotebookEdit": "notebook_path",
 }
 
-#: Tools that read a file. Grep and Glob take a directory or pattern, not a
-#: named file, so they are excluded — a wrong path is worse than a missing one.
+#: Tools that read a file. Grep and Glob take a directory or pattern, not a named file.
 _READ_TOOLS: dict[str, str] = {
     "Read": "file_path",
 }
@@ -263,9 +236,7 @@ def _relativise(path: str, cwd: str | None) -> str | None:
         return path
     if cwd is None:
         return None
-    # os.path.relpath would walk up with ``..`` for paths outside the cwd, which
-    # is a valid relative path but not one that names a file inside the repo.
-    # A path outside the working directory is not recall's business.
+    # os.path.relpath walks up with ``..`` outside the cwd — valid relative, but not a repo file.
     c = cwd.rstrip("/") + "/"
     if not (path == cwd or path.startswith(c)):
         return None
@@ -277,21 +248,15 @@ def _relativise(path: str, cwd: str | None) -> str | None:
 class ClaudeCodeHarness(Harness):
     name = "claude"
     binary = "claude"
-    #: Wrapper-renamed spellings for the unmanaged-pane sweep (``known_binaries``).
-    #: Not load-bearing for detection: ``match_binary``'s generic ``_unwrap``
-    #: already normalises ``.claude-wrapped`` → ``claude``.  Kept so a pane
-    #: running the wrapped binary is surfaced by the sweep.
+    #: Wrapper-renamed spellings for the unmanaged-pane sweep.
     binaries = frozenset({".claude-wrapped", "claude-wrapped"})
-    #: Claude Code prints this same spoked asterisk as its own spinner glyph,
-    #: so it reads as the product's mark rather than an arbitrary bullet.
+    #: Claude Code prints this spoked asterisk as its own spinner glyph.
     icon = "✻"
-    #: What an agent might call itself at registration. A spelling that does not
-    #: normalize is observed as nothing at all, so these are not cosmetic.
+    #: Registration aliases; a non-normalizing spelling is observed as nothing.
     aliases = ("claude_code", "claude-code", "Claude", "ClaudeCode")
 
     def __init__(self, root: Path | None = None):
-        #: `root` locates the transcript, which is the observer's
-        #: business alone; nothing about launching depends on it.
+        #: `root` locates the transcript; nothing about launching depends on it.
         self.observer = ClaudeCodeObserver(root=root)
 
     # ---- launching ------------------------------------------------------
@@ -319,27 +284,19 @@ class ClaudeCodeHarness(Harness):
         }
         settings_path = _claude_settings_path(participant_id)
         token_path = paths.observation_dir("claude", participant_id) / "receipt-token"
-        # `=` form: `--mcp-config` is variadic and space-separated in Claude
-        # Code 2.x, so the space form greedily consumes the prompt positional
-        # as a second config path and claude exits before the observer attaches.
+        # `=` form: `--mcp-config` is variadic in 2.x — space form greedily consumes the prompt.
         argv = ["claude", f"--mcp-config={config_path}", f"--settings={settings_path}"]
-        # Claude accepts a caller-selected UUID for a cold session. Choosing it
-        # before the pane exists removes the same-cwd creation race entirely:
-        # the registry and transcript filename share an exact id from startup.
+        # Choosing the UUID before the pane exists removes the same-cwd creation race entirely.
         native_session_id = resume or str(uuid.uuid4())
         if resume is None:
             argv.append(f"--session-id={native_session_id}")
         if model:
-            # `=` form for the same reason as --mcp-config above: a
-            # space-separated value sits next to the prompt positional, and
-            # binding tightly is the habit that keeps this argv unambiguous.
+            # `=` form, same as --mcp-config: space-separated value sits next to the prompt.
             argv.append(f"--model={model}")
         if reasoning_effort:
             argv.append(f"--effort={reasoning_effort}")
         if resume:
-            # `--resume <session-id>` resumes a specific session by id or name
-            # (CHANGELOG line 2522). Interactive mode reattaches and still
-            # accepts a prompt positional, so `resume_takes_prompt = True` holds.
+            # `--resume <id>` resumes a session; interactive reattaches and still accepts a prompt.
             argv.append(f"--resume={resume}")
         if approval == "yolo":
             argv.append("--dangerously-skip-permissions")
@@ -415,10 +372,7 @@ class _ClaudeSource(TranscriptSource):
         except OSError as exc:
             return self._source_unavailable_batch(exc)
 
-        # Materialization is the boundary between "expected" and "trusted".
-        # Promote before attaching so a deletion racing this read is handled as
-        # disappearance of a file we positively observed, not as cold-start
-        # waiting.
+        # "expected" → "trusted": promote before attach so a racing deletion is disappearance.
         self._expected_location = None
         self._known_location = path
         self._known_location_provenance = TranscriptProvenance.EXACT
@@ -437,10 +391,7 @@ class _ClaudeSource(TranscriptSource):
             self._known_location_provenance = TranscriptProvenance.EXACT
             return "accepted"
 
-        # Do not install a trusted known-location until the receipt's future
-        # path has materialized.  Detaching here is still required for
-        # SessionStart rotations: text from the preceding transcript must not
-        # be attributed after Claude has announced a new exact identity.
+        # No trusted known-location until receipt path materializes; detaching for SessionStart.
         self._expected_location = path
         self._known_location = None
         self._known_location_provenance = TranscriptProvenance.HEURISTIC
@@ -510,8 +461,7 @@ class ClaudeCodeObserver(TranscriptObserver):
         if not self.root.is_dir():
             return None
         if session_id:
-            # The filename stem is the session id, so this needs no scan and no
-            # guess about how the directory name was slugged.
+            # The filename stem is the session id — no scan, no guess about the directory slug.
             hit = next(self.root.glob(f"*/{session_id}.jsonl"), None)
             if hit is not None:
                 return hit
@@ -529,12 +479,7 @@ class ClaudeCodeObserver(TranscriptObserver):
                 if born < after:
                     continue
             candidates.append((st.st_mtime, path))
-        # Collect all matches so an ambiguity is logged, not silent: two
-        # siblings in the same cwd both match, and returning the newest for
-        # either participant is a mis-attribution. The observer's binding
-        # check (`_accept_attachment`) is the cross-cutting guarantee that refuses the
-        # second binding; this method still returns the newest match so
-        # rotation (the same agent writing a new transcript) works.
+        # Collect all matches so an ambiguity is logged, not silent: two siblings in the same cwd.
         matches: list[Path] = []
         for _, path in sorted(candidates, reverse=True):
             if self._transcript_cwd(path) == want:
@@ -998,9 +943,7 @@ class ClaudeCodeObserver(TranscriptObserver):
                         continue
                     if not isinstance(record, dict) or not record.get("isSidechain"):
                         continue
-                    # Sidechain records have no id of their own beyond the
-                    # chain they hang off; the root is the first one whose
-                    # parentUuid is absent.
+                    # Sidechain records have no id; root is first with no parentUuid.
                     root = record.get("parentUuid") or record.get("uuid")
                     if not root or root in seen:
                         continue
@@ -1066,7 +1009,5 @@ class ClaudeCodeObserver(TranscriptObserver):
         return ScreenReading(kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW)
 
 
-#: What the loader looks for. An instance, not the class: see
-#: docs/harness-plugins.md. Shipped adapters meet the same contract as anything
-#: dropped in $THEATER_HOME/harnesses, which is the point of shipping them here.
+#: What the loader looks for. An instance, not the class: see docs/harness-plugins.md.
 HARNESS = ClaudeCodeHarness()

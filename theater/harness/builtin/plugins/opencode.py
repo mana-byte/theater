@@ -125,65 +125,37 @@ from theater.transcript_identity import (
 
 logger = logging.getLogger("theater.harness.opencode")
 
-#: Reported by `opencode debug paths` as the data directory's contents. The
-#: `-stable` suffix is the release channel; a nightly writes its own file, and
-#: pointing at the wrong one finds no sessions at all rather than failing loudly.
+#: Reported by `opencode debug paths`. The `-stable` suffix is the release channel.
 DB_NAME = "opencode-stable.db"
 
 #: Seconds `opencode models` gets before `theater models --discover` gives up.
-#: It reaches the network, but a human is waiting at a terminal — long enough
-#: for a slow link, short enough to fail rather than hang.
 MODELS_TIMEOUT = 20
 
-#: The two spellings of the working footer, rendered by the Prompt component
-#: (`component/prompt/index.tsx:1587-1592`). The footer draws `esc ` followed
-#: by `"interrupt"` normally and `"again to interrupt"` after one Esc press.
-#: Both spellings must be matched.
+#: The two spellings of the working footer, rendered by the Prompt component. Both must be matched.
 #:
-#: Do NOT shorten to `"interrupt"`: `routes/session/index.tsx:1569` renders
-#: `· interrupted` in the message log after an abort, and `"interrupt"` is a
-#: substring of `"interrupted"` — an idle pane after an abort would read WORKING
-#: forever. Neither full spelling is a substring of `· interrupted`.
-#:
-#: These are footer chrome, not body text, so a bare containment test lets
-#: agent output impersonate chrome (an agent working on THIS repo prints
-#: `esc interrupt` in its own output). Matched only inside `_in_screen_tail`
-#: with a co-occurrence guard, not by whole-capture containment.
+#: Do NOT shorten to `"interrupt"`: `index.tsx:1569` renders `· interrupted` after abort.
+#: Neither full spelling is a substring of `· interrupted`. Matched in `_in_screen_tail` with guard.
 WORKING_MARKERS = ("esc interrupt", "again to interrupt")
 
-#: The idle footer's right-hand hint. Keybinding-derived: `ctrl+p` is bound
-#: to `command.palette.show` (`keybind.ts:57`), and the footer renders
-#: `{paletteShortcut()} commands`. The `commands` label survives keymap
-#: rebinding. Also present while working (the footer's right side does not
-#: change between idle and working), so it guards that the footer has drawn
-#: at all, not that the pane is idle.
+#: The idle footer's right-hand hint. Also present while working — guards footer drew, not idle.
 FOOTER_MARKER = "ctrl+p commands"
 
-#: Rendered as the header of the permission modal
-#: (`routes/session/permission.tsx:389`, also `:402` as the title).
+#: Rendered as the header of the permission modal.
 APPROVAL_MARKER = "Permission required"
 
-#: Rendered in the question modal's footer (`routes/session/question.tsx:509`,
-#: JSX `esc <span>dismiss</span>`). The full footer is
-#: `⇆ tab   ↑↓ select   enter submit   esc dismiss`.
+#: Rendered in the question modal's footer.
 QUESTION_MARKER = "esc dismiss"
 
-#: How far up from the bottom to look for the working footer. Measured from
-#: `tests/fixtures/screens/opencode_working.txt`: the footer line is the last
-#: non-blank line before the tmux status bar, with 5 non-blank lines of
-#: composer chrome above it.
+#: How far up from the bottom to look for the working footer.
 _SCREEN_TAIL_LINES = 5
 
 #: A finish that ends a step but not the turn.
 STEP_FINISH = "tool-calls"
 
-#: Events read per poll. A session that ran while the daemon was down could
-#: have thousands queued; reading them in one gulp would block the observer.
+#: Events read per poll; reading thousands queued in one gulp would block the observer.
 DRAIN_LIMIT = 500
 
-#: Extra files beside the per-participant OpenCode config. The plugin is also
-#: the capability marker: an older live process has neither file, so its source
-#: keeps the pre-receipt discovery behaviour after a Theater upgrade/restart.
+#: Extra files beside the per-participant config. The plugin is also the receipt capability marker.
 CORRELATION_PLUGIN_SUFFIX = ".opencode.mjs"
 CORRELATION_RECEIPT_SUFFIX = ".opencode-session"
 CORRELATION_READY_TIMEOUT = 30.0
@@ -300,9 +272,7 @@ def _opencode_usage(info: dict) -> TokenUsage | None:
         return None
     cache = tokens.get("cache") or {}
     cost = info.get("cost")
-    # OpenCode uses zero when it has no authoritative per-turn price. Theater's
-    # footer is an estimate, so zero deliberately falls through to model pricing
-    # rather than being recorded as a known-free turn.
+    # OpenCode uses zero when it has no per-turn price; zero falls through to model pricing.
     cost = float(cost) if isinstance(cost, (int, float)) and cost > 0 else None
     provider = info.get("providerID")
     model_id = info.get("modelID")
@@ -385,8 +355,7 @@ def _relativise(path: str, cwd: str | None) -> str | None:
     if not p.is_absolute():
         return path
     if cwd is None:
-        # Returning the absolute path would leak a home directory into the
-        # index; None drops the path, which is the safer failure mode.
+        # Returning the absolute path would leak a home directory into the index; None drops it.
         return None
     try:
         rel = p.resolve().relative_to(Path(cwd).resolve())
@@ -427,19 +396,11 @@ def _paths_from_tool(name: str, state: dict, cwd: str | None) -> tuple[EventPath
 class OpenCodeHarness(Harness):
     name = "opencode"
     binary = "opencode"
-    #: An open lozenge, distinguishable from the three already taken — `▤`
-    #: (vibe), `✻` (claude), `◉` (codex) — at one column, in any font with
-    #: Geometric Shapes.
+    #: An open lozenge, distinguishable from the three already taken.
     icon = "\u25c7"
-    #: A spelling that does not normalize is observed as nothing at all, so
-    #: these are not cosmetic.
+    #: A spelling that does not normalize is observed as nothing at all, so these are not cosmetic.
     aliases = ("open-code", "open_code", "OpenCode", "opencode-ai")
-    #: `-s` routes to the session view (app.tsx:492-496) and `--prompt` is only
-    #: read on the home screen (home.tsx:53-54, 64-67), so a prompt passed
-    #: alongside `-s` is silently dropped and the task vanishes with no error.
-    #: This is why the capability is a class attribute and not signature
-    #: introspection: a signature can express "accepts a resume flag", but it
-    #: cannot express "accepts it and drops your prompt".
+    #: `-s` routes to session view, `--prompt` only on home screen — a prompt with `-s` is dropped.
     resume_takes_prompt: bool = False
 
     def __init__(self, db: Path | None = None, correlation_dir: Path | None = None):
@@ -472,24 +433,16 @@ class OpenCodeHarness(Harness):
         }
         plugin_path = _plugin_path(config_path)
         receipt_path = _receipt_path(config_path)
-        # OpenCode keeps all processes' sessions in one machine-global SQLite
-        # database. This per-process hook supplies the correlation fact the
-        # database itself does not contain. Plugin specs from separate config
-        # sources are merged/deduplicated by OpenCode, so this does not replace
-        # plugins in the user's own config.
+        # OpenCode keeps all sessions in one global SQLite; this hook supplies a correlation fact.
         config["plugin"] = [plugin_path.resolve().as_uri()]
         argv = ["opencode"]
         if model:
-            # opencode wants `provider/model`, not a bare model name. Passed
-            # through as given: which providers a user has configured is not
-            # something this adapter can know.
+            # opencode wants `provider/model`, not a bare model name. Passed through as given.
             argv += ["--model", model]
         if approval == "yolo":
             argv.append("--auto")
         if resume is not None:
-            # `--prompt` is omitted here on purpose: `-s` routes to the session
-            # view (app.tsx:492) and `--prompt` is only read on the home screen
-            # (home.tsx:53-54, 64-67), so passing both silently drops the task.
+            # `--prompt` omitted: `-s` to session view, `--prompt` on home only — both drop task.
             argv += ["-s", resume]
         elif prompt:
             argv += ["--prompt", prompt]
@@ -497,8 +450,7 @@ class OpenCodeHarness(Harness):
             config_path: json.dumps(config, indent=2),
             plugin_path: _correlation_plugin(participant_id, receipt_path),
         }
-        # Resuming does not create a session, so there is no creation event for
-        # the hook to observe. The requested id is already an exact receipt.
+        # Resuming creates no session, so no creation event; the id is already an exact receipt.
         if resume is not None:
             files[receipt_path] = (
                 json.dumps({"participant_id": participant_id, "session_id": resume}) + "\n"
@@ -836,19 +788,13 @@ class OpenCodeSource(Source):
         self._pending: tuple[str, int] | None = None
         self._located_exact = False
         self._located_receipt_sid: str | None = None
-        #: message id -> role. Filled from the event stream and, for a message
-        #: whose creation we skipped at attach, from the `message` table.
+        #: message id -> role. Filled from the event stream; for skipped messages, `message` table.
         self._roles: dict[str, str] = {}
-        #: message id -> {part id: text}. Insertion-ordered, so joining the
-        #: values reassembles a multi-part reply in the order it was written.
+        #: message id -> {part id: text}. Insertion-ordered; joining reassembles a multi-part reply.
         self._text: dict[str, dict[str, str]] = {}
-        #: call id -> last status seen, so one tool call yields one TOOL_CALL
-        #: and one TOOL_RESULT however many updates it takes.
+        #: call id -> last status seen, so one tool call yields one TOOL_CALL and one TOOL_RESULT.
         self._tools: dict[str, str] = {}
-        #: message id -> the time of the last part it produced. The finish
-        #: event carries `time.completed` only on its *second* firing, which
-        #: is deduped away, so without this a reply would be stamped with when
-        #: the model started rather than when it stopped.
+        #: message id -> time of the last part. Without this a reply stamps start, not stop.
         self._stamp: dict[str, float] = {}
         self._finished: set[str] = set()
         self._said: set[str] = set()
@@ -935,8 +881,7 @@ class OpenCodeSource(Source):
                 return self._correlation_problem(conn) or Batch(waiting=True)
             return self._drain(conn)
         except sqlite3.Error as exc:
-            # Opened read-only under a live writer; a lock or transient error
-            # is an ordinary source failure, not positive identity loss.
+            # Read-only under a live writer; lock/transient is source failure, not identity loss.
             logger.debug("reading the opencode database failed", exc_info=True)
             return self._source_unavailable_batch(f"reading OpenCode database failed: {exc}")
 
@@ -949,8 +894,7 @@ class OpenCodeSource(Source):
         """
         self._require_decision()
         if self._receipt is None:
-            # A machine-global cwd scan can only find "newer", not "mine".
-            # Legacy sources retain their accepted session instead.
+            # A global cwd scan finds "newer", not "mine"; legacy sources keep accepted session.
             return Batch()
         conn = self._open()
         if conn is None:
@@ -1105,10 +1049,7 @@ class OpenCodeSource(Source):
         return self._conn
 
     def _locate(self, conn: sqlite3.Connection, *, pinned: bool) -> str | None:
-        # A receipt is an exact process-local claim and therefore outranks a
-        # stored session id that may have come from the old ambiguous fallback.
-        # Do not fall through while waiting: that would reintroduce the race
-        # during the few milliseconds between session creation and receipt.
+        # A receipt is an exact process-local claim; outranks stored id from the ambiguous fallback.
         if self._receipt is not None:
             sid = self._read_receipt()
             if sid is None:
@@ -1151,8 +1092,7 @@ class OpenCodeSource(Source):
             args.append(int(self._after * 1000))
         self._located_exact = False
         self._located_receipt_sid = None
-        # Legacy discovery is a candidate, not an ownership claim. The reducer
-        # rejects it when a same-cwd competitor makes it ambiguous.
+        # Legacy discovery is a candidate; reducer rejects when same-cwd competitor makes ambiguous.
         count_sql = sql.replace("SELECT id", "SELECT COUNT(*)")
         count = conn.execute(count_sql, args).fetchone()
         if count is not None and count[0] > 1:
@@ -1195,9 +1135,7 @@ class OpenCodeSource(Source):
                 error_code="transcript_correlation_failed",
                 error="OpenCode's Theater correlation plugin did not initialize",
             )
-        # A ready marker may legitimately wait forever in a promptless pane.
-        # Once a matching root session exists, the same process should already
-        # have published its exact id through session.created.
+        # Ready marker may wait in a promptless pane; once a root session exists, it should publish.
         if not self._cwd:
             return None
         sql = "SELECT 1 FROM session WHERE directory = ? AND parent_id IS NULL"
@@ -1324,9 +1262,7 @@ class OpenCodeSource(Source):
         for seq, kind, raw in rows:
             self._cursor = seq
             events.extend(self._translate(conn, kind, _loads(raw), seq))
-        # Rows consumed is progress even when none produced an event:
-        # session.updated fires throughout a turn, and reading it as silence
-        # would let the rescue timer fire mid-turn.
+        # Rows consumed is progress: session.updated through a turn, else rescue fires mid-turn.
         return Batch(events=events, progressed=True)
 
     def _translate(
@@ -1388,9 +1324,7 @@ class OpenCodeSource(Source):
         seen = self._tools.get(call)
         out: list[Event] = []
         if seen is None:
-            # `running` is the first status that carries `state.input`, so
-            # paths are available here, not before. Attached to the TOOL_CALL
-            # because the call references the file; the result is its outcome.
+            # `running` is the first status that carries `state.input`, so paths are available here.
             paths = _paths_from_tool(name or "", state, self._cwd)
             out.append(
                 Event(
@@ -1473,7 +1407,5 @@ class OpenCodeSource(Source):
         return None
 
 
-#: What the loader looks for. An instance, not the class (see
-#: docs/harness-plugins.md). Shipped adapters meet the same contract as
-#: anything in $THEATER_HOME/harnesses.
+#: What the loader looks for. An instance, not the class (see docs/harness-plugins.md).
 HARNESS = OpenCodeHarness()

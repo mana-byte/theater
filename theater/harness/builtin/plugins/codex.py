@@ -150,58 +150,31 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("theater.harness.codex")
 
-#: The composer prompt. A single glyph (U+203A), not the ASCII ">" that
-#: Claude Code uses.
+#: The composer prompt. A single glyph (U+203A), not the ASCII ">" that Claude Code uses.
 PROMPT = "\u203a"
 
-#: Present in the status bar for as long as a turn is running. Codex keeps a
-#: persistent footer under the composer, so the bottom line is never the
-#: prompt and `last_screen_line` cannot be used.
+#: Present in the status bar while a turn runs. Codex keeps a persistent footer.
 WORKING_MARKER = "esc to interrupt"
 
-#: Rendered by the approval overlay, the MCP elicitation prompt, and the auth
-#: prompt — all three are awaiting-input screens. NOT `to confirm`: the
-#: `/approvals` settings popup renders `to confirm or … to go back`, and
-#: keying on `to confirm` would classify that popup as an approval modal. The
-#: substring is loose for keymap-independence (only the key glyph varies), and
-#: safe only because of TWO guards together: (1) scoped to the tail window via
-#: `_in_screen_tail`, and (2) an `endswith` test, not containment. The tail
-#: window unavoidably contains agent output (three of five lines in a real
-#: codex idle pane are prose), and prose can contain the phrase mid-line. The
-#: footer is a whole line that ends with the marker; prose virtually never
-#: does. Both guards are required; do not drop either.
+#: Approval overlay and MCP/auth prompts. NOT `to confirm`: the `/approvals` popup renders that.
 APPROVAL_MARKER = "to cancel"
 
-#: The first-launch trust dialog. The full sentence is longer, but the
-#: paragraph wraps mid-sentence on panes narrower than ~46 columns, so only
-#: the first few words are reliable. A whole-capture match, not tail-scoped:
-#: the trust paragraph is body text above the selection rows, so tail-scoping
-#: would miss it. Safe because the trust dialog only appears at startup, when
-#: there is no agent output on the pane.
+#: First-launch trust dialog. Whole-capture, not tail-scoped: body text above the rows.
 TRUST_MARKER = "Do you trust the contents"
 
-#: How far up from the bottom to look for the composer. The footer is one
-#: line, but a multi-line composer or notice can push the prompt further up.
+#: How far up from the bottom to look for the composer.
 _SCREEN_TAIL_LINES = 5
 
-#: `session_meta` is the first record and carries `cwd`, so a candidate is
-#: probed by reading exactly one line. Observed at 18-22 KB (the payload embeds
-#: the whole system prompt), so the cap only exists to stop a pathological file
-#: from being read into memory.
+#: `session_meta` is the first record and carries `cwd`; probed by reading exactly one line.
 _CWD_PROBE_BYTES = 256 * 1024
 
-#: Bound record reads during heuristic loss detection. Directory enumeration
-#: still sees the root, but only the newest few files are opened for cwd.
+#: Bound record reads during heuristic loss detection; only the newest few files are opened for cwd.
 _LOSS_CANDIDATE_PROBES = 8
 
-#: The filename is `rollout-<local ISO with - separators>-<uuid>`. Anchoring on
-#: the fixed-width timestamp is what lets the uuid keep its own hyphens.
+#: Filename is `rollout-<ISO with - separators>-<uuid>`. Anchoring on timestamp keeps uuid hyphens.
 _STEM = re.compile(r"^rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-(.+)$")
 
-#: apply_patch hunks are delimited by these markers, one per line. The paths
-#: that follow them are repo-relative — codex's own parser
-#: (apply-patch/src/parser.rs:39-41) treats them as relative to the session
-#: cwd, so no relativisation is needed. `*** End Patch` is the terminator.
+#: apply_patch hunks are delimited by these markers. Paths after them are repo-relative.
 _PATCH_FILE_RE = re.compile(r"^\*\*\* (?:Update|Add|Delete) File: (.+)$", re.MULTILINE)
 
 
@@ -310,11 +283,9 @@ def _turn_id(payload: dict) -> str | None:
 class CodexHarness(Harness):
     name = "codex"
     binary = "codex"
-    #: A filled ring. Not another asterisk-family glyph: `✻` is taken by Claude
-    #: Code and the near-neighbours (`✳ ❋ ✺`) are hard to tell apart.
+    #: A filled ring. Not another asterisk-family glyph: `✻` is taken by Claude Code.
     icon = "\u25c9"
-    #: A spelling that does not normalize is observed as nothing at all, so
-    #: these are not cosmetic.
+    #: A spelling that does not normalize is observed as nothing at all, so these are not cosmetic.
     aliases = ("codex-cli", "codex_cli", "openai-codex", "Codex")
 
     def __init__(self, root: Path | None = None):
@@ -338,11 +309,7 @@ class CodexHarness(Harness):
             raise BadRequest(f"approval must be one of {', '.join(APPROVALS)}, got {approval!r}")
         command = json.dumps(theater_binary())
         args = json.dumps(["mcp", "--id", participant_id])
-        # `codex resume <SESSION_ID>` is a subcommand (cli/src/main.rs:181-182,
-        # 315-339), not a flag. It shares the same `-c` overrides and approval
-        # flags via the `SessionTuiCli` wrapper (main.rs:403), a newtype over
-        # TuiCli whose only structural difference is the `resume` token and
-        # session id positional.
+        # `codex resume <SESSION_ID>` is a subcommand, not a flag; shares `-c` and approval.
         argv = [
             "codex",
         ]
@@ -407,8 +374,7 @@ class _CodexSource(TranscriptSource):
 
     def __init__(self, observer: CodexObserver, **kwargs) -> None:
         super().__init__(observer, **kwargs)
-        #: The same object as `self._observer`, kept under its own name so the
-        #: codex-only `proved` call does not read as a `TranscriptObserver` API.
+        #: Same as `self._observer`, renamed so `proved` is not a `TranscriptObserver` API.
         self._codex = observer
 
     def correlation_for(self, path: Path, session_id: str | None) -> str:
@@ -418,18 +384,7 @@ class _CodexSource(TranscriptSource):
 
     def commit_attachment(self) -> None:
         super().commit_attachment()
-        # One fact, held in two places: the source's flag labels the answer,
-        # the observer's decides which key discovery asks first. Committing a
-        # guessed location clears the first, and leaving the second set would
-        # send the next lookup to that id's glob ahead of the process — which
-        # is the ordering that cannot be corrected.
-        #
-        # Defence in depth rather than a live guard: today a committed location
-        # is taken before discovery runs, a revoked one clears the id, and a
-        # source rebuilt from the registry is given heuristic provenance — so
-        # there is no path on which the stale flag is currently read. Keeping
-        # the two in step costs one line and removes the need to re-derive that
-        # every time one of those three changes.
+        # One fact in two places: source's flag labels, observer's decides which key to ask.
         self._codex._session_exact = self._session_provenance is TranscriptProvenance.EXACT
 
 
@@ -441,8 +396,7 @@ class CodexObserver(TranscriptObserver):
     for part of every day.
     """
 
-    #: The process holds its rollout open, so ownership can be shown rather
-    #: than inferred. It is the whole reason this adapter has a probe at all.
+    #: The process holds its rollout open, so ownership can be shown rather than inferred.
     proves_ownership = True
 
     def __init__(
@@ -454,20 +408,13 @@ class CodexObserver(TranscriptObserver):
     ):
         #: Injectable so tests never touch the real ~/.codex.
         self.root = root or Path.home() / ".codex" / "sessions"
-        #: The participant's launch process, when we have one to ask. Set only
-        #: on the per-participant clone `open_source_for` builds, which is why
-        #: that clone exists at all: this instance is otherwise shared by every
-        #: codex session on the machine.
+        #: The participant's launch process. Set only on the `open_source_for` clone.
         self.pane_pid = pane_pid
         self._last_model: str | None = None
-        #: Whether the id this clone was opened with is itself proof — a resume
-        #: token or a launch receipt — rather than an id read back off whatever
-        #: file an earlier cwd guess happened to pick. It decides which of the
-        #: two sharp keys is asked first; see `find_transcript`.
+        #: Whether the id this clone opened with is itself proof — token or receipt, not file-read.
         provenance = normalize_provenance(session_provenance)
         self._session_exact = session_exact or provenance is TranscriptProvenance.EXACT
-        #: Rollouts this clone has seen held open by its own process. Resolved
-        #: paths, so a candidate reached by another spelling still matches.
+        #: Rollouts held open by this clone's process; resolved so another spelling still matches.
         self._proved: set[Path] = set()
 
     def open_source(
@@ -545,9 +492,7 @@ class CodexObserver(TranscriptObserver):
         if not self.root.is_dir():
             return None
         if session_id and self._session_exact:
-            # An id that is itself proof outranks the process. It names the
-            # file directly, so it cannot be confused by a second codex in the
-            # pane, and it costs one glob rather than three subprocesses.
+            # An id that is itself proof outranks the process; names the file, one glob.
             hit = self._by_session_id(session_id)
             if hit is not None:
                 return hit
@@ -555,10 +500,7 @@ class CodexObserver(TranscriptObserver):
         if held is not None:
             return held
         if session_id:
-            # Only an id we are unsure of reaches here — one read back off a
-            # file some earlier cwd guess picked. Behind the process for that
-            # reason: taking it first would re-derive that same wrong file
-            # forever, and no later proof could ever displace it.
+            # Only an unsure id reaches here — read from a file an earlier guess picked.
             hit = self._by_session_id(session_id)
             if hit is not None:
                 return hit
@@ -603,18 +545,12 @@ class CodexObserver(TranscriptObserver):
             except OSError:
                 continue
             if after is not None:
-                # stat, never the filename: that timestamp is local time with
-                # no offset recorded, and the caller's floor is a unix epoch.
+                # stat, not the filename: its timestamp is local, no offset; caller floor is epoch.
                 born = getattr(st, "st_birthtime", st.st_ctime)
                 if born < after:
                     continue
             candidates.append((st.st_mtime, path))
-        # Collect all matches so an ambiguity is logged, not silent: two
-        # siblings in the same cwd both match, and returning the newest for
-        # either participant is a mis-attribution. The observer's binding
-        # check (`_accept_attachment`) is the cross-cutting guarantee that refuses the
-        # second binding; this method still returns the newest match so
-        # rotation (the same agent writing a new transcript) works.
+        # Collect all matches so an ambiguity is logged, not silent: two siblings in the same cwd.
         matches: list[Path] = []
         for _, path in sorted(candidates, reverse=True):
             if self._transcript_cwd(path) == want:
@@ -896,8 +832,7 @@ class CodexObserver(TranscriptObserver):
             ]
         if ptype == "agent_message":
             if payload.get("phase") == "final_answer":
-                # Repeated verbatim by the task_complete that follows it.
-                # Emitting both would double every reply on the bus.
+                # Repeated by the task_complete that follows; emitting both doubles each reply.
                 return []
             raw = payload.get("message") if isinstance(payload.get("message"), str) else ""
             return [
@@ -940,8 +875,7 @@ class CodexObserver(TranscriptObserver):
                 )
             ]
         if ptype in ("mcp_tool_call_begin", "mcp_tool_call_end"):
-            # The only visibility into MCP use, Theater's own tools included:
-            # these calls never appear as response_items.
+            # Only visibility into MCP use, Theater tools included: never in response_items.
             invocation = payload.get("invocation")
             invocation = invocation if isinstance(invocation, dict) else {}
             tool_name = ".".join(
@@ -1039,10 +973,7 @@ class CodexObserver(TranscriptObserver):
             name = payload.get("name")
             paths: tuple[EventPath, ...] = ()
             if name == "apply_patch":
-                # The patch markers are a structured grammar (parser.rs:39-41),
-                # not prose or a shell command — extracting paths from them is
-                # reading a structured field. Other custom tools (exec, wait)
-                # take freeform strings whose contents are code — those yield nothing.
+                # Patch markers are structured, not prose — path extraction reads a field.
                 raw_input = payload.get("input")
                 paths = _apply_patch_paths(raw_input if isinstance(raw_input, str) else "")
             return [
@@ -1055,8 +986,7 @@ class CodexObserver(TranscriptObserver):
                 )
             ]
         if ptype in ("custom_tool_call_output", "function_call_output"):
-            # No tool name: the record carries only `call_id`, and resolving it
-            # would mean holding state across lines, which parse() does not do.
+            # No tool name: record carries only `call_id`; resolving needs state across lines.
             raw = _flatten(payload.get("output"))
             return [
                 Event(
@@ -1067,8 +997,7 @@ class CodexObserver(TranscriptObserver):
                     raw_index=index,
                 )
             ]
-        # `message` duplicates the event_msg stream and `reasoning` is the
-        # agent's private thinking; both are dropped, as in the Claude adapter.
+        # `message` duplicates event_msg and `reasoning` is private thinking; both dropped.
         return []
 
     def native_children(self, transcript: Path) -> list[NativeChild]:
@@ -1120,7 +1049,5 @@ class CodexObserver(TranscriptObserver):
         return ScreenReading(kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW)
 
 
-#: What the loader looks for. An instance, not the class (see
-#: docs/harness-plugins.md). Shipped adapters meet the same contract as
-#: anything in $THEATER_HOME/harnesses.
+#: What the loader looks for. An instance, not the class (see docs/harness-plugins.md).
 HARNESS = CodexHarness()
