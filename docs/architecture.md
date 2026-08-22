@@ -697,12 +697,12 @@ theater/
 │   ├── registry/       lookup.py 108 · install.py 116 · capabilities.py 90 · claims.py 163
 │   ├── transcript/     source.py 595 (file-tailing, the observer's job-1 seam)
 │   │                   observer.py 249 · attachment.py 52
-│   ├── builtin/plugins/  opencode.py 706 (a database, not a file)
-│   │                      codex.py 414 · claude.py 367 · vibe.py 284
+│   ├── builtin/plugins/  opencode.py 1411 (a database, not a file)
+│   │                      codex.py 1053 · claude.py 1013 · vibe.py 1203
 │   ├── base.py 63          compatibility facade re-exporting contracts
 │   ├── observation.py 38   compatibility facade re-exporting contracts + transcript
 │   ├── source.py 43        compatibility facade re-exporting contracts + transcript
-│   └── plugins.py 183     the plugin loader
+│   └── plugins.py 427     the plugin loader
 ├── mcp/      server.py 526 (14 agent tools, composition surface) · session.py 53
 │   ├── toolsets/       delegation.py 310 · participants.py 78 · recall.py 59 · transcripts.py 34
 │   └── tools.py 42     compatibility facade re-exporting toolsets + session
@@ -717,7 +717,7 @@ theater/
     └── tree.py 121    compatibility facade re-exporting render modules
 ```
 
-Roughly 31,500 lines, 77 test modules (~39,500 test lines).
+Roughly 31,200 lines, 77 test modules (~39,500 test lines).
 
 The modular refactor decomposed the daemon's monolithic observer, methods,
 store, and server into packages (`observation/`, `rpc/`, `persistence/`,

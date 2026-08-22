@@ -17,7 +17,7 @@ processes:
   forwards, never touches SQLite or tmux directly.
 - **régie** — a Textual TUI; also just a client, holds no state the daemon lacks.
 
-Python 3.12+, ~31,500 lines, 77 test modules. `theater` is the CLI entry point
+Python 3.12+, ~31,200 lines, 77 test modules. `theater` is the CLI entry point
 (`theater.cli:main`).
 
 ## The one constraint
