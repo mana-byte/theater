@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from theater.regie.trajectory.models import decode_delta, decode_page
@@ -109,3 +111,13 @@ def test_runtime_state_rejects_mixed_participant_and_keeps_revision_precedence()
     assert state.records["r1"].summary == "new"
     with pytest.raises(TrajectoryValidationError):
         state.upsert([other])
+
+
+def test_runtime_state_counts_compact_utf8_wire_bytes() -> None:
+    state = TrajectoryStateStore().get("p1")
+    item = TrajectoryRecord.from_wire(wire_record("r1", summary="régie"))
+
+    state.upsert([item])
+
+    encoded = json.dumps(item.to_wire(), ensure_ascii=False, separators=(",", ":")).encode()
+    assert state.loaded_bytes == len(encoded)

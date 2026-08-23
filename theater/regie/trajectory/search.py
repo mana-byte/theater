@@ -227,6 +227,22 @@ def _all_record_ids(group: TrajectoryGroup) -> set[str]:
     return ids
 
 
+def _subtree_record_ids(groups: Sequence[TrajectoryGroup]) -> dict[int, frozenset[str]]:
+    indexed: dict[int, frozenset[str]] = {}
+
+    def visit(group: TrajectoryGroup) -> frozenset[str]:
+        record_ids = set(group.record_ids)
+        for child in group.children:
+            record_ids.update(visit(child))
+        result = frozenset(record_ids)
+        indexed[id(group)] = result
+        return result
+
+    for group in groups:
+        visit(group)
+    return indexed
+
+
 def _group_paths(
     groups: Sequence[TrajectoryGroup],
 ) -> dict[str, tuple[str, ...]]:
@@ -299,10 +315,11 @@ def search_records(
     matched_ids = frozenset(record.record_id for record in matched)
     positions = {record.record_id: index for index, record in enumerate(bounded_records)}
     paths = _group_paths(complete_groups)
+    subtree_ids = _subtree_record_ids(complete_groups)
     entries: list[LedgerEntry] = []
 
     def visit(group: TrajectoryGroup, depth: int) -> None:
-        if not (_all_record_ids(group) & matched_ids):
+        if not (subtree_ids[id(group)] & matched_ids):
             return
         collapsed = group.group_id in collapsed_groups
         entries.append(
@@ -321,11 +338,9 @@ def search_records(
             if record_id in matched_ids:
                 units.append((positions.get(record_id, 0), 0, record_id))
         for child in group.children:
-            if _all_record_ids(child) & matched_ids:
-                first = min(
-                    positions.get(record_id, 0)
-                    for record_id in _all_record_ids(child) & matched_ids
-                )
+            child_matches = subtree_ids[id(child)] & matched_ids
+            if child_matches:
+                first = min(positions.get(record_id, 0) for record_id in child_matches)
                 units.append((first, 1, child))
         for _position, unit_kind, unit in sorted(units, key=lambda item: item[:2]):
             if unit_kind == 0:

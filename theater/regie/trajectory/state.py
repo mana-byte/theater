@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -36,7 +37,9 @@ from theater.trajectory import (
 
 
 def _record_size(record: TrajectoryRecord) -> int:
-    return len(repr(record.to_wire()).encode("utf-8"))
+    return len(
+        json.dumps(record.to_wire(), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
 
 
 @dataclass(slots=True)
@@ -118,7 +121,7 @@ class ParticipantTrajectoryState:
     def _rebuild_groups(self) -> None:
         self.groups = group_records(self.record_list)
 
-    def _trim(self, *, evict_oldest: bool) -> None:
+    def _trim(self, *, evict_newest: bool) -> None:
         while (
             len(self.records) > TRAJECTORY_UI_RECORD_LIMIT
             or self.loaded_bytes > TRAJECTORY_UI_MAX_BYTES
@@ -126,7 +129,7 @@ class ParticipantTrajectoryState:
             if not self.records:
                 self.loaded_bytes = 0
                 break
-            record_id, record = self.records.popitem(last=evict_oldest)
+            record_id, record = self.records.popitem(last=evict_newest)
             self.loaded_bytes -= _record_size(record)
             self.reload_required = True
             if record_id == self.selected_id:
@@ -172,7 +175,7 @@ class ParticipantTrajectoryState:
             (record.record_id, record)
             for record in deterministic_record_order(self.records.values())
         )
-        self._trim(evict_oldest=older)
+        self._trim(evict_newest=older)
         self._rebuild_groups()
         if self.selected_id is None and self.records and self.follow_tail:
             self.selected_id = next(reversed(self.records))
