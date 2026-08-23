@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
+from theater.regie.trajectory import controller as controller_module
 from theater.regie.trajectory.controller import TrajectoryController
 from theater.regie.trajectory.state import TrajectoryStateStore
-from theater.trajectory import PanelState
+from theater.trajectory import PanelState, PanelStateInfo, TrajectoryParticipantState
 
 
 def wire_record(
@@ -207,11 +209,27 @@ async def test_follow_rejects_mixed_upsert_and_applies_valid_revision() -> None:
 
 
 @pytest.mark.asyncio
-async def test_follow_preserves_paused_tail_and_resync_marks_stale() -> None:
+async def test_follow_resyncs_once_and_replaces_the_follow_loop() -> None:
     follow_results: asyncio.Queue[dict[str, object]] = asyncio.Queue()
-    query = FakeClient(lambda _method, _params: page("p1", "first"))
+    resnapshot_requested = asyncio.Event()
+    replacement_follow_started = asyncio.Event()
+    snapshots = 0
+
+    def query_handler(_method: str, _params: dict[str, object]) -> dict[str, object]:
+        nonlocal snapshots
+        snapshots += 1
+        if snapshots == 2:
+            resnapshot_requested.set()
+        return page("p1", "first")
+
+    query = FakeClient(query_handler)
+    follows = 0
 
     async def follow_handler(_method: str, _params: dict[str, object]):
+        nonlocal follows
+        follows += 1
+        if follows == 2:
+            replacement_follow_started.set()
         return await follow_results.get()
 
     follow = FakeClient(follow_handler)
@@ -231,14 +249,142 @@ async def test_follow_preserves_paused_tail_and_resync_marks_stale() -> None:
     await follow_results.put(
         {"stream_id": "stream-p1", "resync_required": True, "reason": "epoch changed"}
     )
-    await asyncio.sleep(0)
+    await resnapshot_requested.wait()
+    await replacement_follow_started.wait()
 
     assert state.selected_id == "first"
     assert state.new_count == 1
-    assert state.panel.state is PanelState.STALE
-    assert state.retry_kind == "resync"
+    assert state.panel.state is PanelState.READY
+    assert state.retry_kind is None
+    assert snapshots == 2
+    assert follows == 2
     await controller.close()
     assert query.closed and follow.closed
+
+
+@pytest.mark.asyncio
+async def test_failed_automatic_resync_retains_records_and_exposes_retry() -> None:
+    follow_results: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    snapshots = 0
+    failed = asyncio.Event()
+
+    def query_handler(_method: str, _params: dict[str, object]) -> dict[str, object]:
+        nonlocal snapshots
+        snapshots += 1
+        if snapshots == 2:
+            raise RuntimeError("fresh snapshot failed")
+        return page("p1", "first")
+
+    query = FakeClient(query_handler)
+
+    async def follow_handler(_method: str, _params: dict[str, object]):
+        return await follow_results.get()
+
+    follow = FakeClient(follow_handler)
+    controller = TrajectoryController(query, follow, follow_wait=0)
+    controller.subscribe(
+        lambda state: failed.set() if state.retry_kind == "resync" and not state.resyncing else None
+    )
+    await controller.open("p1")
+    await follow_results.put({"stream_id": "stream-p1", "resync_required": True})
+    await failed.wait()
+
+    state = controller.state_for("p1")
+    assert [*state.records] == ["first"]
+    assert state.retry_kind == "resync"
+    assert "failed" in state.retry_message
+    assert snapshots == 2
+    await controller.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_generation_resync_cannot_repaint_another_participant() -> None:
+    follow_results: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    snapshot_started = asyncio.Event()
+    release_snapshot = asyncio.Event()
+    snapshots = 0
+
+    async def query_handler(_method: str, params: dict[str, object]) -> dict[str, object]:
+        nonlocal snapshots
+        if params["id"] == "a":
+            snapshots += 1
+            if snapshots == 2:
+                snapshot_started.set()
+                await release_snapshot.wait()
+            return page("a", "a-record")
+        return page("b", "b-record")
+
+    query = FakeClient(query_handler)
+
+    async def follow_handler(_method: str, _params: dict[str, object]):
+        return await follow_results.get()
+
+    follow = FakeClient(follow_handler)
+    controller = TrajectoryController(query, follow, follow_wait=0)
+    await controller.open("a")
+    await follow_results.put({"stream_id": "stream-a", "resync_required": True})
+    await snapshot_started.wait()
+    await controller.open("b", start_follow=False)
+    release_snapshot.set()
+
+    assert controller.active_participant == "b"
+    assert [*controller.state_for("b").records] == ["b-record"]
+    await controller.close()
+
+
+@pytest.mark.asyncio
+async def test_panel_only_follow_delta_updates_state_and_stops_following(monkeypatch) -> None:
+    applied = asyncio.Event()
+    delta = SimpleNamespace(
+        stream_id="stream-p1",
+        cursor="c2",
+        upserts=(),
+        panel_state=PanelStateInfo(PanelState.WAITING, participant_state="dead"),
+        resync_required=False,
+        reason=None,
+    )
+    monkeypatch.setattr(controller_module, "decode_delta", lambda _value: delta)
+    query = FakeClient(lambda _method, _params: page("p1", "first"))
+    follow = FakeClient(lambda _method, _params: object())
+    controller = TrajectoryController(query, follow, follow_wait=0)
+    controller.subscribe(
+        lambda state: (
+            applied.set()
+            if state.panel.participant_state is TrajectoryParticipantState.DEAD
+            else None
+        )
+    )
+
+    await controller.open("p1")
+    task = controller.follow_task
+    assert task is not None
+    await applied.wait()
+    await task
+
+    state = controller.state_for("p1")
+    assert [*state.records] == ["first"]
+    assert state.panel.state is PanelState.WAITING
+    assert state.panel.participant_state is TrajectoryParticipantState.DEAD
+    assert len(follow.calls) == 1
+    await controller.close()
+
+
+def test_reset_keeps_only_a_pending_resync_retry() -> None:
+    state = TrajectoryStateStore().get("p1")
+    state.mark_retry("older", "older page failed")
+    state.query = "query"
+    state.reset_ui()
+
+    assert state.retry_kind is None
+    assert state.retry_message == ""
+    assert state.query == ""
+
+    state.mark_resync("cursor rejected")
+    state.reset_ui()
+
+    assert state.retry_kind == "resync"
+    assert state.retry_message == "cursor rejected"
+    assert state.reload_required
 
 
 @pytest.mark.asyncio

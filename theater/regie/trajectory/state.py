@@ -19,6 +19,7 @@ from theater.regie.trajectory.constants import (
     TRAJECTORY_WARM_STREAM_LIMIT,
 )
 from theater.regie.trajectory.enums import FocusRegion, InspectorTab, OrderMode
+from theater.regie.trajectory.search import canonical_group_records
 from theater.trajectory import (
     PanelState,
     PanelStateInfo,
@@ -79,6 +80,7 @@ class ParticipantTrajectoryState:
     stale_message: str = ""
     retry_kind: str | None = None
     retry_message: str = ""
+    resyncing: bool = False
     reload_required: bool = False
     truncated_by_bytes: bool = False
     loading_older: bool = False
@@ -102,7 +104,7 @@ class ParticipantTrajectoryState:
 
     @property
     def record_list(self) -> list[TrajectoryRecord]:
-        return list(self.records.values())
+        return list(canonical_group_records(tuple(self.records.values()), self.groups))
 
     @property
     def selected_record(self) -> TrajectoryRecord | None:
@@ -117,6 +119,16 @@ class ParticipantTrajectoryState:
         self.stale = panel.state is PanelState.STALE
         if not self.stale:
             self.stale_message = ""
+
+    def apply_panel_state(self, panel: PanelStateInfo) -> None:
+        """Apply a live panel update without changing loaded records."""
+        self._set_panel(panel)
+        if panel.state in {PanelState.STALE, PanelState.UNAVAILABLE, PanelState.UNTRUSTED}:
+            self.retry_kind = "refresh"
+            self.retry_message = panel.message or "Retry trajectory refresh."
+        elif self.retry_kind != "resync":
+            self.retry_kind = None
+            self.retry_message = ""
 
     def _rebuild_groups(self) -> None:
         self.groups = group_records(self.record_list)
@@ -178,7 +190,7 @@ class ParticipantTrajectoryState:
         self._trim(evict_newest=older)
         self._rebuild_groups()
         if self.selected_id is None and self.records and self.follow_tail:
-            self.selected_id = next(reversed(self.records))
+            self.selected_id = self.record_list[-1].record_id
         return added, updated
 
     def upsert(
@@ -210,6 +222,7 @@ class ParticipantTrajectoryState:
         self.truncated_by_bytes = page.truncated_by_bytes
         self.loading_older = False
         self.loading = False
+        self.resyncing = False
         self.retry_kind = None
         self.retry_message = ""
         if preserve_trace:
@@ -219,14 +232,7 @@ class ParticipantTrajectoryState:
         else:
             self._apply_records(page.records)
             self.groups = page.groups or self.groups
-        self._set_panel(page.panel_state)
-        if page.panel_state.state in {
-            PanelState.STALE,
-            PanelState.UNAVAILABLE,
-            PanelState.UNTRUSTED,
-        }:
-            self.retry_kind = "refresh"
-            self.retry_message = page.panel_state.message or "Retry trajectory refresh."
+        self.apply_panel_state(page.panel_state)
         if prior_selection in self.records:
             self.selected_id = prior_selection
         elif self.records:
@@ -263,14 +269,20 @@ class ParticipantTrajectoryState:
         self.stream_id = delta.stream_id
         if delta.cursor is not None:
             self.cursor = delta.cursor
+        panel = getattr(delta, "panel_state", None)
+        if panel is not None:
+            if not isinstance(panel, PanelStateInfo):
+                raise TrajectoryValidationError("follow panel state is invalid")
+            self.apply_panel_state(panel)
         added, updated = self._apply_records([upsert.record for upsert in delta.upserts])
         if added and not self.follow_tail:
             self.new_count += added
         elif added:
             self.new_count = 0
-            self.selected_id = next(reversed(self.records))
-        self.retry_kind = None
-        self.retry_message = ""
+            self.selected_id = self.record_list[-1].record_id
+        if panel is None and self.retry_kind != "resync":
+            self.retry_kind = None
+            self.retry_message = ""
         return added, updated
 
     def mark_stale(self, message: str) -> None:
@@ -302,7 +314,7 @@ class ParticipantTrajectoryState:
         self.follow_tail = True
         self.new_count = 0
         if self.records:
-            self.selected_id = next(reversed(self.records))
+            self.selected_id = self.record_list[-1].record_id
 
     def select(self, record_id: str | None) -> bool:
         if record_id is None:
@@ -314,7 +326,11 @@ class ParticipantTrajectoryState:
         return True
 
     def move_selection(self, delta: int, visible_ids: Sequence[str] | None = None) -> str | None:
-        ids = list(visible_ids) if visible_ids is not None else list(self.records)
+        ids = (
+            list(visible_ids)
+            if visible_ids is not None
+            else [record.record_id for record in self.record_list]
+        )
         if not ids:
             self.selected_id = None
             return None
@@ -340,6 +356,8 @@ class ParticipantTrajectoryState:
 
     def reset_ui(self) -> None:
         """Reset only this participant's in-memory presentation state."""
+        resync_pending = self.retry_kind == "resync"
+        resync_message = self.retry_message
         self.query = ""
         self.lane_filters.clear()
         self.kind_filters.clear()
@@ -358,6 +376,10 @@ class ParticipantTrajectoryState:
         self.filters_open = False
         self.follow_tail = True
         self.new_count = 0
+        self.loading_older = False
+        self.retry_kind = "resync" if resync_pending else None
+        self.retry_message = resync_message if resync_pending else ""
+        self.reload_required = resync_pending
 
 
 class TrajectoryStateStore:

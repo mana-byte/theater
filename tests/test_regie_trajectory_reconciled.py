@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 from rich.console import Console
 from textual.app import App, ComposeResult
+from textual.widgets import Input
 
 from theater.regie.trajectory.constants import (
     FILTER_MAX_ROWS,
@@ -179,8 +180,64 @@ async def test_search_input_keeps_printable_navigation_keys() -> None:
     async with app.run_test(size=(100, 30)) as pilot:
         view = await populate(app, [record("r1"), record("r2", index=2, turn_id=None)])
         view.action_open_search()
-        await pilot.press(*"jklfdr y")
+        await pilot.press("j")
+        assert view.state.query == "j"
+        assert app.focused is app.query_one("#trajectory-search", Input)
+        await pilot.press(*"klfdr y")
         assert view.state.query == "jklfdr y"
+        assert app.query_one("#trajectory-search", Input).has_focus
+
+
+async def test_timeline_and_ledger_share_group_flattened_order() -> None:
+    records = [
+        record("first", index=1, turn_id="t1"),
+        record("between", index=2, turn_id=None, lane="theater", kind="theater"),
+        record("last", index=3, turn_id="t2"),
+    ]
+    app = Host()
+    async with app.run_test(size=(100, 30)):
+        view = await populate(app, records)
+        timeline = view.query_one(Timeline)
+        ledger = view.query_one(Ledger)
+        ledger_ids = tuple(
+            entry.record_id for entry in ledger.entries if entry.record_id is not None
+        )
+
+        assert timeline.span_ids == view.search_result.record_ids == ledger_ids
+        assert timeline.span_ids == ("first", "between", "last")
+
+
+async def test_duration_mode_marks_only_independently_reported_intervals() -> None:
+    records = [
+        record("missing", index=0, summary="missing timing"),
+        record(
+            "derived",
+            index=1,
+            summary="derived timing",
+            timing={"duration_ms": 10, "provenance": "derived"},
+        ),
+        record(
+            "source",
+            index=2,
+            summary="source timing",
+            timing={"duration_ms": 10, "provenance": "source"},
+        ),
+    ]
+    app = Host()
+    async with app.run_test(size=(100, 30)):
+        view = await populate(app, records)
+        view.state.select("derived")
+        view.action_toggle_mode()
+        ledger_text = app.query_one(Ledger).render().plain
+
+        derived_line = next(line for line in ledger_text.splitlines() if "derived timing" in line)
+        missing_line = next(line for line in ledger_text.splitlines() if "missing timing" in line)
+        source_line = next(line for line in ledger_text.splitlines() if "source timing" in line)
+        assert "dur" not in missing_line
+        assert "dur" not in derived_line
+        assert "dur" in source_line
+        assert view.state.selected_id == "derived"
+        assert view.query_one(Timeline).span_ids == ("missing", "derived", "source")
 
 
 async def test_filter_panel_has_selectable_counts_and_filters_records() -> None:

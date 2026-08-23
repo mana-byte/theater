@@ -197,7 +197,9 @@ class TrajectoryView(Vertical):
 
     def _finish_mount(self) -> None:
         self._refresh()
-        if self._focus_on_mount:
+        if self.state.search_open:
+            self._focus_search()
+        elif self._focus_on_mount:
             self.focus_region(self.state.focus_region)
 
     def on_unmount(self) -> None:
@@ -256,6 +258,15 @@ class TrajectoryView(Vertical):
             cache=self._search_cache,
         )
 
+    @staticmethod
+    def _set_class(
+        widget: Static | Input | FilterPanel | Inspector, class_name: str, enabled: bool
+    ) -> bool:
+        if widget.has_class(class_name) == enabled:
+            return False
+        widget.set_class(enabled, class_name)
+        return True
+
     def _refresh(self, *, recompute: bool = True) -> None:
         if recompute:
             self._recompute_search()
@@ -266,7 +277,7 @@ class TrajectoryView(Vertical):
         filter_panel = self.query_one("#trajectory-filters", FilterPanel)
         inspector = self.query_one("#trajectory-inspector", Inspector)
         search = self.query_one("#trajectory-search", Input)
-        search.set_class(not self.state.search_open, "-hidden")
+        self._set_class(search, "-hidden", not self.state.search_open)
         if search.value != self.state.query:
             search.value = self.state.query
         timeline_offset: int | None = self.state.timeline_scroll
@@ -303,11 +314,11 @@ class TrajectoryView(Vertical):
             statuses=self.state.status_filters,
             sources=self.state.source_filters,
         )
-        filter_panel.set_class(self.state.filters_open, "-open")
-        filter_panel.set_class(not self.state.filters_open, "-hidden")
+        self._set_class(filter_panel, "-open", self.state.filters_open)
+        self._set_class(filter_panel, "-hidden", not self.state.filters_open)
         inspector.set_record(self.state.selected_record, tab=self.state.inspector_tab)
         inspector.set_ratio(self.state.inspector_ratio)
-        inspector.set_class(not self.state.inspector_open, "-closed")
+        self._set_class(inspector, "-closed", not self.state.inspector_open)
         if inspector.maximized != self.state.inspector_maximized:
             inspector.toggle_maximize()
         if self.state.follow_tail:
@@ -464,10 +475,19 @@ class TrajectoryView(Vertical):
         self.state.filters_open = False
         if self.is_mounted:
             search = self.query_one("#trajectory-search", Input)
-            search.remove_class("-hidden")
             search.value = self.state.query
-            search.focus()
         self._refresh(recompute=False)
+        if self.is_mounted:
+            self._focus_search()
+
+    def _focus_search(self) -> None:
+        if self.state.search_open and self.is_mounted:
+            self.app.set_focus(self.query_one("#trajectory-search", Input), scroll_visible=False)
+
+    def _close_search(self) -> None:
+        self.state.search_open = False
+        self._refresh(recompute=False)
+        self.focus_region(self.state.focus_region)
 
     def action_toggle_filters(self) -> None:
         self.state.filters_open = not self.state.filters_open
@@ -482,8 +502,8 @@ class TrajectoryView(Vertical):
         if self.is_mounted:
             search = self.query_one("#trajectory-search", Input)
             search.value = ""
-            search.add_class("-hidden")
         self._refresh()
+        self.focus_region(FocusRegion.LEDGER)
         if self.controller is not None:
             self.run_worker(
                 self.controller.resume_follow(self.participant_id),
@@ -575,16 +595,16 @@ class TrajectoryView(Vertical):
             self.action_expand()
 
     def _search_owns_focus(self) -> bool:
-        return self.is_mounted and self.query_one("#trajectory-search", Input).has_focus
+        return self.is_mounted and self.app.focused is self.query_one("#trajectory-search", Input)
 
     def _filters_own_focus(self) -> bool:
         return self.is_mounted and self.query_one("#trajectory-filters", FilterPanel).has_focus
 
     def on_key(self, event: events.Key) -> None:
-        if self._search_owns_focus():
+        if self.state.search_open:
             if event.key == "escape":
                 event.stop()
-                self.action_return_to_tree()
+                self._close_search()
             return
         if self._filters_own_focus():
             if event.key == "escape":

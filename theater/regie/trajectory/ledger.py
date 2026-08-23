@@ -17,6 +17,7 @@ from theater.regie.trajectory.constants import (
 from theater.regie.trajectory.enums import OrderMode
 from theater.regie.trajectory.render import group_line, record_line, sanitize_text
 from theater.regie.trajectory.search import LedgerEntry, SearchResult
+from theater.regie.trajectory.timeline import supports_duration_interval
 from theater.trajectory import TrajectoryRecord
 
 
@@ -231,7 +232,10 @@ class Ledger(Static):
                         self._record_indices[line_index] or 0,
                         selected=record.record_id == self._selected_id,
                         hovered=record.record_id == self._hovered_id,
-                        duration_mode=self._order_mode == OrderMode.DURATION,
+                        duration_mode=(
+                            self._order_mode == OrderMode.DURATION
+                            and supports_duration_interval(record)
+                        ),
                         depth=entry.depth,
                     )
                 )

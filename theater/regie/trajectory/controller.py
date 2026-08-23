@@ -35,7 +35,9 @@ StateListener = Callable[[ParticipantTrajectoryState], None]
 
 def _can_follow(state: ParticipantTrajectoryState) -> bool:
     return (
-        state.panel.participant_state
+        not state.resyncing
+        and state.retry_kind != "resync"
+        and state.panel.participant_state
         not in {
             TrajectoryParticipantState.DEAD,
             TrajectoryParticipantState.EXTERNAL,
@@ -283,13 +285,16 @@ class TrajectoryController:
                 _validate_delta(delta, participant_id)
                 _validate_stream(state.stream_id, delta.stream_id, "follow")
                 if delta.resync_required:
-                    state.mark_resync(
-                        delta.reason or "The trajectory stream requires a fresh snapshot."
+                    await self._resync_from_follow(
+                        participant_id,
+                        generation,
+                        delta.reason or "The trajectory stream requires a fresh snapshot.",
                     )
-                    self._publish(state)
                     return
                 state.apply_follow(delta)
                 self._publish(state)
+                if not _can_follow(state):
+                    return
                 await asyncio.sleep(0)
         except asyncio.CancelledError:
             return
@@ -300,6 +305,42 @@ class TrajectoryController:
         finally:
             if self._follow_task is asyncio.current_task():
                 self._follow_task = None
+
+    async def _resync_from_follow(self, participant_id: str, generation: int, message: str) -> None:
+        if not self._is_current(participant_id, generation):
+            return
+        self._generation += 1
+        fresh_generation = self._generation
+        state = self.state_for(participant_id)
+        state.mark_resync(message)
+        state.resyncing = True
+        self._publish(state)
+        try:
+            page = decode_page(
+                await self._call(
+                    self.query_client,
+                    "trajectory.snapshot",
+                    id=participant_id,
+                    limit=self.page_limit,
+                )
+            )
+            _validate_page(page, participant_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if self._is_current(participant_id, fresh_generation):
+                state.resyncing = False
+                state.mark_resync(str(exc) or "Trajectory resync failed.")
+                self._publish(state)
+            return
+        if not self._is_current(participant_id, fresh_generation):
+            return
+        state.apply_snapshot(page)
+        self._publish(state)
+        if _can_follow(state):
+            self._follow_task = asyncio.create_task(
+                self._follow_loop(participant_id, fresh_generation)
+            )
 
     async def pause_follow(self, participant_id: str | None = None) -> None:
         """Pause tail movement while the long poll remains cancellable."""
@@ -315,6 +356,8 @@ class TrajectoryController:
         if participant_id is None or participant_id != self._active_participant:
             return False
         state = self.state_for(participant_id)
+        if state.resyncing:
+            return True
         resync_required = state.retry_kind == "resync"
         state.resume_follow()
         self._publish(state)
