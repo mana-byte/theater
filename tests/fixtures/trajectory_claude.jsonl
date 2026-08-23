@@ -1,0 +1,11 @@
+{"type":"user","uuid":"user-1","timestamp":"2026-08-23T10:00:00.000Z","message":{"role":"user","content":"inspect the file"}}
+{"type":"assistant","uuid":"assistant-1","timestamp":"2026-08-23T10:00:01.000Z","message":{"id":"msg-1","model":"claude-test","content":[{"type":"thinking","thinking":"explicit thought"},{"type":"text","text":"I will inspect it."},{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"src/app.py"}}],"stop_reason":"tool_use","usage":{"input_tokens":11,"output_tokens":7,"cache_creation_input_tokens":3,"cache_read_input_tokens":2}},"requestId":"request-1"}
+{"type":"user","uuid":"result-1","timestamp":"2026-08-23T10:00:02.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"file contents"}]}}
+{"type":"assistant","timestamp":"2026-08-23T10:00:03.000Z","message":{"id":"revision-1","revision":1,"content":[{"type":"text","text":"partial"}]}}
+{"type":"assistant","timestamp":"2026-08-23T10:00:04.000Z","message":{"id":"revision-1","content":[{"type":"text","text":"final"}],"revision":2,"stop_reason":"end_turn"}}
+{"type":"system","uuid":"context-1","subtype":"compact_boundary","timestamp":"2026-08-23T10:00:05.000Z","content":"context compacted"}
+{"type":"system","uuid":"timing-1","subtype":"turn_duration","timestamp":"2026-08-23T10:00:06.000Z","durationMs":1250}
+{"type":"assistant","message":{"content":[{"type":"redacted_thinking","data":"opaque"}]}}
+{"type":"assistant","timestamp":"2026-08-23T10:00:07.000Z","message":{"content":[{"type":"text","text":"fallback"}]}}
+{"type":"user","timestamp":"2026-08-23T10:00:08.000Z","message":{"content":[{"type":"tool_result","content":"unmatched result"}]}}
+not-json

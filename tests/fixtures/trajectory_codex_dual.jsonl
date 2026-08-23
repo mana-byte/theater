@@ -1,0 +1,2 @@
+{"timestamp":"2026-08-23T11:30:00.000Z","type":"event_msg","payload":{"type":"agent_message","message":"canonical answer","phase":"final_answer"}}
+{"timestamp":"2026-08-23T11:30:00.001Z","type":"response_item","payload":{"type":"message","id":"dual-message-1","role":"assistant","content":[{"type":"output_text","text":"canonical answer"}],"phase":"final_answer"}}

@@ -1,0 +1,15 @@
+{"timestamp":"2026-08-23T11:00:00.000Z","type":"session_meta","payload":{"session_id":"rollout-1","cwd":"/tmp/project","model_provider":"openai","base_instructions":"explicit context"}}
+{"timestamp":"2026-08-23T11:00:00.100Z","type":"turn_context","payload":{"turn_id":"turn-1","model":"codex-test","approval_policy":"untrusted","sandbox_policy":{"mode":"read-only"}}}
+{"timestamp":"2026-08-23T11:00:01.000Z","type":"event_msg","payload":{"type":"user_message","message":"make the change"}}
+{"timestamp":"2026-08-23T11:00:02.000Z","type":"response_item","payload":{"type":"message","id":"message-1","role":"assistant","content":[{"type":"output_text","text":"I will make the change."}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-1"}}}
+{"timestamp":"2026-08-23T11:00:03.000Z","type":"response_item","payload":{"type":"function_call","id":"item-call-1","call_id":"call-1","name":"exec","arguments":"{\"cmd\":\"pwd\"}","parent_call_id":"parent-1","status":"completed"}}
+{"timestamp":"2026-08-23T11:00:04.000Z","type":"response_item","payload":{"type":"function_call_output","id":"item-result-1","call_id":"call-1","output":[{"type":"input_text","text":"done"}]}}
+{"timestamp":"2026-08-23T11:00:05.000Z","type":"response_item","payload":{"type":"reasoning","id":"reason-1","summary":[{"type":"summary_text","text":"explicit summary"}],"content":null,"encrypted_content":"opaque"}}
+{"timestamp":"2026-08-23T11:00:06.000Z","type":"response_item","payload":{"type":"reasoning","id":"reason-hidden","summary":[],"content":null,"encrypted_content":"opaque"}}
+{"timestamp":"2026-08-23T11:00:07.000Z","type":"event_msg","payload":{"type":"mcp_tool_call_begin","call_id":"mcp-1","invocation":{"server":"theater","tool":"list_participants","arguments":{"include_dead":true}}}}
+{"timestamp":"2026-08-23T11:00:08.000Z","type":"event_msg","payload":{"type":"mcp_tool_call_end","call_id":"mcp-1","duration":{"secs":1,"nanos":500000000},"result":{"Ok":{"content":[{"type":"text","text":"participants"}],"isError":false}}}}
+{"timestamp":"2026-08-23T11:00:09.000Z","type":"event_msg","payload":{"type":"token_count","info":{"model":"codex-test","last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"cache_write_input_tokens":5,"output_tokens":30,"reasoning_output_tokens":4},"total_token_usage":{"input_tokens":100,"output_tokens":30}}}}
+{"timestamp":"2026-08-23T11:00:10.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1","last_agent_message":"done","started_at":1787482801,"completed_at":1787482810,"duration_ms":9000}}
+{"timestamp":"2026-08-23T11:00:11.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fallback"}]}}
+{"timestamp":"2026-08-23T11:00:12.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"unmatched-call","output":"unmatched"}}
+not-json
