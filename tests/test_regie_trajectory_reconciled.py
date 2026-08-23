@@ -207,6 +207,25 @@ async def test_timeline_and_ledger_share_group_flattened_order() -> None:
         assert timeline.span_ids == ("first", "between", "last")
 
 
+async def test_timeline_and_ledger_preserve_nested_group_unit_chronology() -> None:
+    records = [
+        record("step-first", index=1, turn_id="t1", step_id="s1"),
+        record("direct-middle", index=2, turn_id="t1"),
+        record("step-late", index=3, turn_id="t1", step_id="s2"),
+        record("direct-last", index=4, turn_id="t1"),
+    ]
+    app = Host()
+    async with app.run_test(size=(100, 30)):
+        view = await populate(app, records)
+        ledger = view.query_one(Ledger)
+        ledger_ids = tuple(
+            entry.record_id for entry in ledger.entries if entry.record_id is not None
+        )
+
+        assert view.query_one(Timeline).span_ids == ledger_ids
+        assert ledger_ids == ("step-first", "direct-middle", "step-late", "direct-last")
+
+
 async def test_duration_mode_marks_only_independently_reported_intervals() -> None:
     records = [
         record("missing", index=0, summary="missing timing"),

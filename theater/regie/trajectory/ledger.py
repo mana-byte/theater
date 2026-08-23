@@ -15,9 +15,13 @@ from theater.regie.trajectory.constants import (
     LEDGER_SCROLL_STEP,
 )
 from theater.regie.trajectory.enums import OrderMode
-from theater.regie.trajectory.render import group_line, record_line, sanitize_text
+from theater.regie.trajectory.render import (
+    group_line,
+    record_line,
+    sanitize_text,
+    supports_duration_interval,
+)
 from theater.regie.trajectory.search import LedgerEntry, SearchResult
-from theater.regie.trajectory.timeline import supports_duration_interval
 from theater.trajectory import TrajectoryRecord
 
 

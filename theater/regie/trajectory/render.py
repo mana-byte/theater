@@ -21,6 +21,7 @@ from theater.trajectory import (
     DetailField,
     ParticipantLink,
     Timing,
+    TimingProvenance,
     TrajectoryKind,
     TrajectoryLane,
     TrajectoryRecord,
@@ -72,6 +73,22 @@ def format_duration(timing: Timing | None) -> str:
         return f"{seconds:.1f}s"
     minutes, remainder = divmod(seconds, 60)
     return f"{int(minutes)}m {remainder:.0f}s"
+
+
+def supports_duration_interval(record: TrajectoryRecord) -> bool:
+    """Whether a record has independently reported usable interval data."""
+    timing = record.timing
+    return (
+        timing is not None
+        and timing.provenance
+        in {
+            TimingProvenance.SOURCE,
+            TimingProvenance.OBSERVED,
+        }
+        and (
+            timing.duration_ms is not None or (timing.start is not None and timing.end is not None)
+        )
+    )
 
 
 def record_line(

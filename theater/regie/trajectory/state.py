@@ -19,7 +19,7 @@ from theater.regie.trajectory.constants import (
     TRAJECTORY_WARM_STREAM_LIMIT,
 )
 from theater.regie.trajectory.enums import FocusRegion, InspectorTab, OrderMode
-from theater.regie.trajectory.search import canonical_group_records
+from theater.regie.trajectory.ordering import canonical_group_records
 from theater.trajectory import (
     PanelState,
     PanelStateInfo,
@@ -376,10 +376,8 @@ class ParticipantTrajectoryState:
         self.filters_open = False
         self.follow_tail = True
         self.new_count = 0
-        self.loading_older = False
         self.retry_kind = "resync" if resync_pending else None
         self.retry_message = resync_message if resync_pending else ""
-        self.reload_required = resync_pending
 
 
 class TrajectoryStateStore:

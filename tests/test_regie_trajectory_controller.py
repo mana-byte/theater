@@ -372,12 +372,16 @@ async def test_panel_only_follow_delta_updates_state_and_stops_following(monkeyp
 def test_reset_keeps_only_a_pending_resync_retry() -> None:
     state = TrajectoryStateStore().get("p1")
     state.mark_retry("older", "older page failed")
+    state.loading_older = True
+    state.reload_required = True
     state.query = "query"
     state.reset_ui()
 
     assert state.retry_kind is None
     assert state.retry_message == ""
     assert state.query == ""
+    assert state.loading_older
+    assert state.reload_required
 
     state.mark_resync("cursor rejected")
     state.reset_ui()

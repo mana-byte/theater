@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import TypeVar
 
 from theater.regie.trajectory.constants import MAX_SEARCH_CACHE_ENTRIES, TRAJECTORY_UI_RECORD_LIMIT
+from theater.regie.trajectory.ordering import canonical_group_records, complete_groups, group_units
 from theater.trajectory import (
     GroupKind,
     TrajectoryGroup,
@@ -15,7 +16,6 @@ from theater.trajectory import (
     TrajectoryLane,
     TrajectoryRecord,
     TrajectoryStatus,
-    group_records,
 )
 
 CacheKey = TypeVar("CacheKey")
@@ -220,13 +220,6 @@ def _filter_counts(records: Sequence[TrajectoryRecord], filters: TrajectoryFilte
     )
 
 
-def _all_record_ids(group: TrajectoryGroup) -> set[str]:
-    ids = set(group.record_ids)
-    for child in group.children:
-        ids.update(_all_record_ids(child))
-    return ids
-
-
 def _subtree_record_ids(groups: Sequence[TrajectoryGroup]) -> dict[int, frozenset[str]]:
     indexed: dict[int, frozenset[str]] = {}
 
@@ -260,42 +253,6 @@ def _group_paths(
     return paths
 
 
-def _complete_groups(
-    records: Sequence[TrajectoryRecord], groups: Sequence[TrajectoryGroup]
-) -> tuple[TrajectoryGroup, ...]:
-    if not groups:
-        return group_records(records)
-    known = {record_id for group in groups for record_id in _all_record_ids(group)}
-    if {record.record_id for record in records} <= known:
-        return tuple(groups)
-    return group_records(records)
-
-
-def canonical_group_records(
-    records: Sequence[TrajectoryRecord], groups: Sequence[TrajectoryGroup]
-) -> tuple[TrajectoryRecord, ...]:
-    """Flatten explicit groups once, preserving their declared child order."""
-    source = tuple(records[:TRAJECTORY_UI_RECORD_LIMIT])
-    complete_groups = _complete_groups(source, groups)
-    by_id = {record.record_id: record for record in source}
-    ordered: list[TrajectoryRecord] = []
-    seen: set[str] = set()
-
-    def visit(group: TrajectoryGroup) -> None:
-        for record_id in group.record_ids:
-            if record_id in seen or (record := by_id.get(record_id)) is None:
-                continue
-            seen.add(record_id)
-            ordered.append(record)
-        for child in group.children:
-            visit(child)
-
-    for group in complete_groups:
-        visit(group)
-    ordered.extend(record for record in source if record.record_id not in seen)
-    return tuple(ordered)
-
-
 def search_records(
     records: Sequence[TrajectoryRecord],
     *,
@@ -311,8 +268,8 @@ def search_records(
 ) -> SearchResult:
     """Filter source order and retain every visible structural group header."""
     source_records = tuple(records[:TRAJECTORY_UI_RECORD_LIMIT])
-    complete_groups = _complete_groups(source_records, groups)
-    bounded_records = canonical_group_records(source_records, complete_groups)
+    complete = complete_groups(source_records, groups)
+    bounded_records = canonical_group_records(source_records, complete)
     active = filters or TrajectoryFilters.from_sets(
         lanes=lane_filters,
         kinds=kind_filters,
@@ -339,8 +296,8 @@ def search_records(
         scores[record.record_id] = score
 
     matched_ids = frozenset(record.record_id for record in matched)
-    paths = _group_paths(complete_groups)
-    subtree_ids = _subtree_record_ids(complete_groups)
+    paths = _group_paths(complete)
+    subtree_ids = _subtree_record_ids(complete)
     entries: list[LedgerEntry] = []
 
     def visit(group: TrajectoryGroup, depth: int) -> None:
@@ -358,23 +315,21 @@ def search_records(
         )
         if collapsed:
             return
-        for record_id in group.record_ids:
-            if record_id in matched_ids:
+        for unit in group_units(source_records, group):
+            if isinstance(unit, str) and unit in matched_ids:
                 entries.append(
                     LedgerEntry(
                         group_id=group.group_id,
                         group_label=group.label,
-                        record_id=record_id,
+                        record_id=unit,
                         depth=depth + 1,
                         group_kind=group.kind,
                     )
                 )
-        for child in group.children:
-            child_matches = subtree_ids[id(child)] & matched_ids
-            if child_matches:
-                visit(child, depth + 1)
+            elif isinstance(unit, TrajectoryGroup) and subtree_ids[id(unit)] & matched_ids:
+                visit(unit, depth + 1)
 
-    for group in complete_groups:
+    for group in complete:
         visit(group, 0)
     return SearchResult(
         records=tuple(matched),
@@ -397,7 +352,6 @@ __all__ = [
     "SearchCache",
     "SearchResult",
     "TrajectoryFilters",
-    "canonical_group_records",
     "fuzzy_subsequence_score",
     "matches_query",
     "record_search_text",

@@ -20,18 +20,8 @@ from theater.regie.trajectory.constants import (
     TIMELINE_PADDING,
     TOOLTIP_DELAY,
 )
-from theater.regie.trajectory.render import lane_glyph, tooltip_text
-from theater.trajectory import TimingProvenance, TrajectoryRecord
-
-
-def supports_duration_interval(record: TrajectoryRecord) -> bool:
-    """Whether a record has independently reported usable interval data."""
-    timing = record.timing
-    if timing is None:
-        return False
-    return timing.provenance in {TimingProvenance.SOURCE, TimingProvenance.OBSERVED} and (
-        timing.duration_ms is not None or (timing.start is not None and timing.end is not None)
-    )
+from theater.regie.trajectory.render import lane_glyph, supports_duration_interval, tooltip_text
+from theater.trajectory import TrajectoryRecord
 
 
 class TimelineSpanHovered(Message):
@@ -326,5 +316,4 @@ __all__ = [
     "TimelineSpanClicked",
     "TimelineSpanHovered",
     "TimelineTooltipRequested",
-    "supports_duration_interval",
 ]
