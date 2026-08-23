@@ -103,30 +103,6 @@ def test_observer_attach_prose(caplog):
     assert _norm(_msgs(caplog)[0]).startswith("observer.attach 0.0ms id=pid1 harness=codex")
 
 
-# --- Signal separation ---
-
-
-def test_fast_debug_only(caplog):
-    caplog.set_level(logging.DEBUG, logger=TIMING)
-    with timing.span("t", slow_ms=10_000.0):
-        pass
-    assert _msgs(caplog, logging.INFO) == [] and len(_msgs(caplog, logging.DEBUG)) == 1
-
-
-def test_slow_info_only(caplog):
-    caplog.set_level(logging.DEBUG, logger=TIMING)
-    with timing.span("t", slow_ms=0.0):
-        pass
-    assert len(_msgs(caplog, logging.INFO)) == 1
-
-
-def test_silent_no_debug(caplog):
-    caplog.set_level(logging.INFO, logger=TIMING)
-    with timing.span("t", slow_ms=10_000.0):
-        pass
-    assert caplog.records == []
-
-
 # --- Failure injection ---
 
 
@@ -272,12 +248,6 @@ def test_set_result_validates():
 # --- emit / ready_lag ---
 
 
-def test_emit_string(caplog):
-    caplog.set_level(logging.DEBUG, logger=TIMING)
-    timing.emit("t.gap", 2000.0, slow_ms=0.0, id="abc")
-    assert _norm(_msgs(caplog)[0]) == "t.gap 0.0ms id=abc"
-
-
 def test_emit_spec_no_log_template_none(caplog):
     caplog.set_level(logging.DEBUG, logger=TIMING)
     timing.emit(BY_KEY["EVENT_LOOP_LAG"], 5.0)
@@ -291,25 +261,6 @@ def test_emit_metric_only_spec_records(monkeypatch):
     monkeypatch.setattr(engine, "_bridge", spy)
     timing.emit(BY_KEY["EVENT_LOOP_LAG"], 5.0)
     assert spy.recorded == [("theater.eventloop.lag", {})]
-
-
-def test_ready_lag_ignores_restart(caplog):
-    caplog.set_level(logging.DEBUG, logger=TIMING)
-    from theater.models import now as wall_now
-
-    timing.ready_lag("observer.watch", "abc", wall_now() - 4_000.0)
-    assert caplog.records == []
-
-
-def test_enable_trace_only_timing():
-    other = logging.getLogger("theater.observer")
-    before = other.level
-    try:
-        timing.enable_trace()
-        assert logging.getLogger(TIMING).level == logging.DEBUG
-        assert other.level == before
-    finally:
-        logging.getLogger(TIMING).setLevel(logging.NOTSET)
 
 
 def test_lag_monitor_no_debug(caplog):

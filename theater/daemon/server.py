@@ -90,20 +90,14 @@ class Daemon:
         config: Config | None = None,
         lock: DaemonLock | None = None,
     ):
-        # Lock ownership transition happens before anything that can fail.
-        # If ensure_home raises, neither the injected nor the self-acquired lock
-        # has been taken, so there is nothing to clean up.
-        if lock is not None:
-            if not lock.held:
-                raise ValueError("injected lock must already be held")
-            self._lock = lock
-        else:
-            self._lock = DaemonLock()
-            self._lock.acquire()
-        # From here on, the lock is ours; constructor failure must release it.
+        if lock is not None and not lock.held:
+            raise ValueError("injected lock must already be held")
+        self._lock = lock if lock is not None else DaemonLock()
         _owned_store: Store | None = None
         try:
             paths.ensure_home()
+            if lock is None:
+                self._lock.acquire()
             self.config = config if config is not None else load_config()
             installed = harness_registry.install(self.config)
             logger.info("harnesses: %s", ", ".join(installed) or "none")
@@ -140,7 +134,6 @@ class Daemon:
             self._conns: set[asyncio.Task] = set()
             self._send_seq = 0
         except BaseException:
-            # Close only a Store we created; never close a caller-owned Store.
             if _owned_store is not None:
                 with contextlib.suppress(Exception):
                     _owned_store.close()
@@ -220,22 +213,21 @@ async def run(options: DaemonRunOptions | None = None) -> None:
         lock = DaemonLock()
         lock.acquire()
         # Prune old raw stderr generations on every winning start.
-        from theater.constants.observability import STDERR_GENERATIONS
+        from theater.constants.observability import PROCESS_ROLE_DAEMON, STDERR_GENERATIONS
         from theater.observability.logging import generation_path, prune_stderr_generations
 
-        current: Path | None = None
-        if options.stderr_token is not None:
-            try:
-                current = generation_path(paths.home(), options.stderr_token)
-            except ValueError:
-                current = None
+        current: Path | None = (
+            generation_path(paths.home(), options.stderr_token)
+            if options.stderr_token is not None
+            else None
+        )
         prune_stderr_generations(paths.home(), current, retain=STDERR_GENERATIONS)
         settings = load_config()
         from theater.observability.runtime import configure
 
         obs = settings.observability
         runtime_handle = configure(
-            role="daemon",
+            role=PROCESS_ROLE_DAEMON,
             otlp_enabled=obs.otlp_enabled,
             otlp_protocol=obs.otlp_protocol,
             otlp_endpoint=obs.otlp_endpoint,
@@ -268,7 +260,7 @@ async def run(options: DaemonRunOptions | None = None) -> None:
                         SHUTDOWN_TIMEOUT,
                     )
                     daemon._release_files()
-                except Exception:
+                except BaseException:
                     daemon._release_files()
                     raise
             elif lock is not None:

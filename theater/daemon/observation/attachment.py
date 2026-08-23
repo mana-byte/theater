@@ -16,7 +16,7 @@ from theater.daemon.observation.identity import has_cwd_competitor, trusted_dead
 from theater.daemon.registry import Registry
 from theater.harness.source import Attachment, Batch, Source, SourceContractError
 from theater.models import Status
-from theater.observability.catalog import BY_KEY
+from theater.observability.catalog import OBSERVER_ATTACH
 from theater.provenance import (
     TranscriptProvenance,
     is_trusted_provenance,
@@ -216,7 +216,7 @@ class AttachmentManager:
                 not is_trusted_provenance(prior) or provenance_at_least(incoming, prior)
             )
             if session_id and p.session_id != session_id and can_update_identity:
-                self._timing_fn(BY_KEY["OBSERVER_ATTACH"], pid, p.created_at, harness=p.harness)
+                self._timing_fn(OBSERVER_ATTACH, pid, p.created_at, harness=p.harness)
                 p.session_id = session_id
                 p.session_correlation = attached.correlation
                 changed = True

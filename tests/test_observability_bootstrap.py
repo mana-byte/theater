@@ -10,10 +10,9 @@ import pytest
 
 from theater import paths
 from theater.client import DaemonClient
+from theater.daemon import lock as lock_mod
 from theater.daemon.lock import DaemonLock, LockHeld
 from theater.daemon.server import Daemon
-
-# ---- Daemon lock injection ----------------------------------------------
 
 
 def test_daemon_accepts_injected_held_lock(theater_home, fake_tmux):
@@ -36,8 +35,6 @@ def test_daemon_constructor_failure_releases_injected_lock(theater_home, fake_tm
     assert lock.held
     from theater.daemon.observer import Observer
 
-    orig_init = Observer.__init__
-
     def boom(self, *a, **kw):
         raise RuntimeError("observer failed")
 
@@ -45,11 +42,44 @@ def test_daemon_constructor_failure_releases_injected_lock(theater_home, fake_tm
     with pytest.raises(RuntimeError, match="observer failed"):
         Daemon(harnesses={}, lock=lock)
     assert not lock.held
-    monkeypatch.setattr(Observer, "__init__", orig_init)
 
 
-def test_daemon_constructor_failure_closes_owned_store(theater_home, fake_tmux, monkeypatch):
-    """Constructor-created Store is closed on failure; caller's is not."""
+def test_daemon_constructor_failure_releases_lock_when_ensure_home_fails(theater_home, monkeypatch):
+    lock = DaemonLock()
+    lock.acquire()
+    monkeypatch.setattr(paths, "ensure_home", lambda: (_ for _ in ()).throw(OSError("no home")))
+
+    with pytest.raises(OSError, match="no home"):
+        Daemon(harnesses={}, lock=lock)
+
+    assert not lock.held
+
+
+def test_daemon_ensures_home_before_acquiring_own_lock(theater_home, fake_tmux, monkeypatch):
+    calls: list[str] = []
+    original_ensure = paths.ensure_home
+    original_acquire = DaemonLock.acquire
+
+    def ensure_home():
+        calls.append("home")
+        return original_ensure()
+
+    def acquire(self):
+        calls.append("lock")
+        return original_acquire(self)
+
+    monkeypatch.setattr(paths, "ensure_home", ensure_home)
+    monkeypatch.setattr(DaemonLock, "acquire", acquire)
+    daemon = Daemon(harnesses={})
+    try:
+        assert calls[:2] == ["home", "lock"]
+    finally:
+        daemon._lock.release()
+
+
+def test_daemon_constructor_failure_does_not_close_caller_store(
+    theater_home, fake_tmux, monkeypatch
+):
     from theater.daemon.observer import Observer
     from theater.daemon.store import Store
 
@@ -63,9 +93,40 @@ def test_daemon_constructor_failure_closes_owned_store(theater_home, fake_tmux, 
     monkeypatch.setattr(Observer, "__init__", boom)
     with pytest.raises(RuntimeError):
         Daemon(store=caller_store, harnesses={}, lock=lock)
-    assert caller_store.conn is not None
+    assert not caller_store.conn.closed
     caller_store.close()
     assert not lock.held
+
+
+def test_daemon_constructor_failure_closes_owned_store(theater_home, fake_tmux, monkeypatch):
+    from theater.daemon import server as server_mod
+    from theater.daemon.store import Store
+
+    instances = []
+
+    class SpyStore(Store):
+        def __init__(self, path):
+            super().__init__(path)
+            self.closed = False
+            instances.append(self)
+
+        def close(self):
+            self.closed = True
+            super().close()
+
+    class FailingObserver:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("observer failed")
+
+    monkeypatch.setattr(server_mod, "Store", SpyStore)
+    monkeypatch.setattr(server_mod, "Observer", FailingObserver)
+
+    with pytest.raises(RuntimeError, match="observer failed"):
+        Daemon(harnesses={})
+
+    assert len(instances) == 1
+    assert instances[0].closed
+    assert lock_mod.is_free()
 
 
 def test_daemon_gauge_sampler_initialized_none(theater_home, fake_tmux):
@@ -74,18 +135,15 @@ def test_daemon_gauge_sampler_initialized_none(theater_home, fake_tmux):
     d._lock.release()
 
 
-# ---- DaemonClient autostart generation files -----------------------------
-
-
 async def test_autostart_creates_mode_0600_generation(theater_home, monkeypatch):
     """Parent creates a mode-0600 file and passes same fd as stdout+stderr."""
     forked_cmds: list[list[str]] = []
-    forked_fds: list[object] = []
+    forked_fds: list[tuple[object, object]] = []
 
     class FakePopen:
         def __init__(self, cmd, **kw):
             forked_cmds.append(cmd)
-            forked_fds.append(kw.get("stdout"))
+            forked_fds.append((kw.get("stdout"), kw.get("stderr")))
 
     monkeypatch.setattr("theater.client.subprocess.Popen", FakePopen)
     client = DaemonClient()
@@ -97,7 +155,7 @@ async def test_autostart_creates_mode_0600_generation(theater_home, monkeypatch)
     assert "--stderr-token" in forked_cmds[0]
     token_idx = forked_cmds[0].index("--stderr-token")
     assert len(forked_cmds[0][token_idx + 1]) == 12
-    assert forked_fds[0] is forked_fds[0]  # stdout and stderr are same object
+    assert forked_fds[0][0] is forked_fds[0][1]
 
 
 async def test_autostart_cleans_generation_on_popen_failure(theater_home, monkeypatch):
@@ -144,9 +202,6 @@ async def test_timeout_names_generic_paths_without_token(theater_home, monkeypat
     with pytest.raises(ConnectionError) as exc:
         await client._await_socket()
     assert "daemon.log" in str(exc.value)
-
-
-# ---- CLI role lifecycle --------------------------------------------------
 
 
 def test_cmd_daemon_rejects_invalid_token():
@@ -208,9 +263,6 @@ def test_cmd_daemon_keeps_generation_on_runtime_error(theater_home, monkeypatch)
     assert gen_path.exists()
 
 
-# ---- run() no-arg compatibility -----------------------------------------
-
-
 def test_run_accepts_none_options(theater_home, fake_tmux, monkeypatch):
     from theater.daemon import server as server_mod
 
@@ -235,3 +287,44 @@ def test_run_accepts_none_options(theater_home, fake_tmux, monkeypatch):
     monkeypatch.setattr(runtime_mod, "configure", lambda **kw: _FakeHandle())
     asyncio.run(server_mod.run())
     assert started.is_set()
+
+
+async def test_run_rejects_invalid_programmatic_token_and_releases_lock(theater_home, fake_tmux):
+    from theater.daemon import server as server_mod
+
+    options = server_mod.DaemonRunOptions(stderr_token="INVALID")
+    with pytest.raises(ValueError, match="invalid stderr token"):
+        await server_mod.run(options)
+    assert lock_mod.is_free()
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("close failed"), asyncio.CancelledError()])
+async def test_run_shuts_runtime_when_daemon_aclose_fails(
+    theater_home, fake_tmux, monkeypatch, failure
+):
+    from theater.daemon import server as server_mod
+    from theater.observability import runtime as runtime_mod
+
+    class Handle:
+        shutdowns = 0
+
+        def shutdown(self):
+            self.shutdowns += 1
+
+    handle = Handle()
+
+    async def serve(self):
+        return None
+
+    async def fail_close(self):
+        raise failure
+
+    monkeypatch.setattr(runtime_mod, "configure", lambda **kwargs: handle)
+    monkeypatch.setattr(Daemon, "serve", serve)
+    monkeypatch.setattr(Daemon, "aclose", fail_close)
+
+    with pytest.raises(type(failure)):
+        await server_mod.run()
+
+    assert handle.shutdowns == 1
+    assert lock_mod.is_free()

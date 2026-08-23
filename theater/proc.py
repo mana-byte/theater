@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from theater import timing
-from theater.observability.catalog import BY_KEY
+from theater.observability.catalog import PROC_LSOF, PROC_PS_COMM, PROC_PS_TABLE
 
 logger = logging.getLogger("theater.proc")
 
@@ -131,7 +131,7 @@ def _process_table() -> tuple[dict[int, list[tuple[int, str]]], dict[int, str]]:
     neither index copies it.
     """
     try:
-        with timing.span(BY_KEY["PROC_PS_TABLE"]):
+        with timing.span(PROC_PS_TABLE):
             out = subprocess.check_output(
                 ["ps", "-eo", "pid,ppid,comm"],
                 text=True,
@@ -159,7 +159,7 @@ def _process_table() -> tuple[dict[int, list[tuple[int, str]]], dict[int, str]]:
 def _comm(pid: int) -> str:
     """The command name of one process, or the empty string if it is gone."""
     try:
-        with timing.span(BY_KEY["PROC_PS_COMM"], pid=pid):
+        with timing.span(PROC_PS_COMM, pid=pid):
             out = subprocess.check_output(
                 ["ps", "-p", str(pid), "-o", "comm="],
                 text=True,
@@ -202,7 +202,7 @@ def _lsof_open_files(pid: int) -> list[Path]:
     files it did examine are still on stdout.
     """
     try:
-        with timing.span(BY_KEY["PROC_LSOF"], pid=pid):
+        with timing.span(PROC_LSOF, pid=pid):
             completed = subprocess.run(
                 ["lsof", "-n", "-P", "-p", str(pid), "-F", "n"],
                 capture_output=True,

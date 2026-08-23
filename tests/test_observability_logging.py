@@ -36,10 +36,12 @@ def test_rotating_handler(tmp_path):
     import logging
 
     path = tmp_path / "daemon.log"
-    h = make_rotating_handler(path, max_bytes=1024, backup_count=2)
-    h.emit(logging.LogRecord("theater", logging.INFO, "x.py", 1, "msg", (), None))
+    h = make_rotating_handler(path, max_bytes=128, backup_count=2)
+    for _ in range(10):
+        h.emit(logging.LogRecord("theater", logging.INFO, "x.py", 1, "message" * 8, (), None))
     h.close()
-    assert "msg" in path.read_text()
+    assert path.exists() and (tmp_path / "daemon.log.1").exists()
+    assert not (tmp_path / "daemon.log.3").exists()
 
 
 def test_create_gen_open_fd(tmp_path):

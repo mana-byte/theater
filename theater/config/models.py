@@ -30,6 +30,7 @@ from theater.constants.observability import (
     DEFAULT_SERVICE_NAME,
     MIN_EXPORT_INTERVAL_MS,
     MIN_LOG_MAX_BYTES,
+    OTLP_PROTOCOLS,
 )
 
 
@@ -131,7 +132,7 @@ class ObservabilitySection:
     #: OTLP transport protocol: "grpc" or "http".
     otlp_protocol: str = field(
         default=DEFAULT_OTLP_PROTOCOL,
-        metadata={"choices": ("grpc", "http")},
+        metadata={"choices": OTLP_PROTOCOLS},
     )
     #: Collector base endpoint. None derives localhost:4317 (grpc) or :4318 (http).
     otlp_endpoint: str | None = field(default=None, metadata={"nonempty": True})

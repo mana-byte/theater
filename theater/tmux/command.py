@@ -29,7 +29,7 @@ from theater.constants.tmux import (
     TMUX_RUN_TIMEOUT_SECONDS,
 )
 from theater.models import TheaterError
-from theater.observability.catalog import BY_KEY
+from theater.observability.catalog import TMUX_COMMAND
 
 _FORMAT_SEP = TMUX_FIELD_SEPARATOR
 _PANE_FORMAT = TMUX_PANE_FORMAT
@@ -103,7 +103,7 @@ def run_sync(*args: str, check: bool = True) -> str:
 
 async def run(*args: str, check: bool = True) -> str:
     _require()
-    with timing.span(BY_KEY["TMUX_COMMAND"], command=args[0]) as sp:
+    with timing.span(TMUX_COMMAND, command=args[0]) as sp:
         proc = await asyncio.create_subprocess_exec(
             "tmux",
             *args,

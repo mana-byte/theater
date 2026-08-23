@@ -515,12 +515,11 @@ async def lag_monitor(stopping: asyncio.Event) -> None:
 
 
 def _record_event_loop_lag(lag_s: float) -> None:
-    from theater.observability.catalog import BY_KEY
+    from theater.observability.catalog import EVENT_LOOP_LAG
 
-    spec = BY_KEY["EVENT_LOOP_LAG"]
-    if _bridge is not None and spec.metric_name is not None:
+    if _bridge is not None and EVENT_LOOP_LAG.metric_name is not None:
         with contextlib.suppress(Exception):
-            _bridge.record(spec.metric_name, lag_s * 1000.0)
+            _bridge.record(EVENT_LOOP_LAG.metric_name, lag_s * 1000.0)
 
 
 def enable_trace() -> None:

@@ -196,7 +196,14 @@ _CATALOG: tuple[OperationSpec, ...] = (
                 metric_key="command",
                 trace_key="command",
             ),
-            AttrMapping(source="cwd", prose_key="cwd", otel_log_key="cwd", trace_key="theater.cwd"),
+            AttrMapping(
+                source="cwd",
+                prose_key="cwd",
+                otel_log_key="cwd",
+                trace_key="theater.cwd",
+                log_transform=ValueTransform.STRING,
+                trace_transform=ValueTransform.STRING,
+            ),
             AttrMapping(source="rc", prose_key="rc", otel_log_key="rc"),
         ),
     ),
@@ -398,4 +405,20 @@ _validate_catalog(_CATALOG)
 
 OPERATIONS: tuple[OperationSpec, ...] = _CATALOG
 BY_KEY: Mapping[str, OperationSpec] = MappingProxyType({spec.key: spec for spec in _CATALOG})
+PROC_PS_TABLE = BY_KEY["PROC_PS_TABLE"]
+PROC_PS_COMM = BY_KEY["PROC_PS_COMM"]
+PROC_LSOF = BY_KEY["PROC_LSOF"]
+TMUX_COMMAND = BY_KEY["TMUX_COMMAND"]
+GIT_COMMAND = BY_KEY["GIT_COMMAND"]
+WORKER_TASK = BY_KEY["WORKER_TASK"]
+SPAWN_WORKTREE = BY_KEY["SPAWN_WORKTREE"]
+SPAWN_LAUNCH = BY_KEY["SPAWN_LAUNCH"]
+KILL_PANE = BY_KEY["KILL_PANE"]
+KILL_TEARDOWN = BY_KEY["KILL_TEARDOWN"]
+RPC_SERVER = BY_KEY["RPC_SERVER"]
+RPC_AWAIT = BY_KEY["RPC_AWAIT"]
+OBSERVER_ATTACH = BY_KEY["OBSERVER_ATTACH"]
+OBSERVER_WATCH = BY_KEY["OBSERVER_WATCH"]
+EVENT_LOOP_LAG = BY_KEY["EVENT_LOOP_LAG"]
+RPC_CLIENT = BY_KEY["RPC_CLIENT"]
 RESULTS: tuple[str, ...] = ("success", "error", "cancelled")

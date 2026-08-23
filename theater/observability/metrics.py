@@ -10,17 +10,12 @@ import threading
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from theater.constants.observability import GAUGE_NAMES
 from theater.observability.catalog import OperationSpec
 
 logger = logging.getLogger("theater.observability.metrics")
 
 CountSource = Callable[[], Any]
-
-_GAUGE_NAMES = (
-    "theater.participants.live",
-    "theater.participants.addressable",
-    "theater.jobs.active",
-)
 
 
 class _InstrumentEntry:
@@ -42,11 +37,9 @@ class HistogramRegistry:
         self._lock = threading.Lock()
 
     def register_from_catalog(self, specs: tuple[OperationSpec, ...]) -> None:
-        seen: set[str] = set()
         for spec in specs:
-            if spec.metric_name is None or spec.metric_name in seen:
+            if spec.metric_name is None:
                 continue
-            seen.add(spec.metric_name)
             self.get_or_create(spec.metric_name, spec.description or "", spec.unit, "exponential")
 
     def get_or_create(
@@ -104,7 +97,7 @@ class GaugeCache:
 
     __slots__ = ("_caches",)
 
-    def __init__(self, names: tuple[str, ...] = _GAUGE_NAMES) -> None:
+    def __init__(self, names: tuple[str, ...] = GAUGE_NAMES) -> None:
         self._caches: dict[str, _CachedGauge] = {name: _CachedGauge() for name in names}
 
     def set(self, name: str, value: int) -> None:

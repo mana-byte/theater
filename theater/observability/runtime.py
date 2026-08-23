@@ -13,6 +13,7 @@ from theater.constants.observability import (
     DEFAULT_EXPORT_INTERVAL_MS,
     DEFAULT_LOG_BACKUP_COUNT,
     DEFAULT_LOG_MAX_BYTES,
+    DEFAULT_OTLP_PROTOCOL,
     DEFAULT_SERVICE_NAME,
     DERIVED_GRPC_ENDPOINT,
     DERIVED_HTTP_ENDPOINT,
@@ -20,15 +21,16 @@ from theater.constants.observability import (
     EXPORT_TIMEOUT_S,
     HISTOGRAM_MAX_SCALE,
     HISTOGRAM_MAX_SIZE,
+    OTLP_PROTOCOL_GRPC,
+    OTLP_PROTOCOLS,
+    PROCESS_ROLE_DAEMON,
+    PROCESS_ROLES,
 )
 
 logger = logging.getLogger("theater.observability.runtime")
 
 _configured = False
 _guard_lock = threading.Lock()
-
-_VALID_ROLES = frozenset({"daemon", "mcp", "regie"})
-_VALID_PROTOCOLS = frozenset({"grpc", "http"})
 
 
 class ObservabilityError(Exception):
@@ -54,10 +56,14 @@ def _check_otel_available() -> None:
 def _validate_endpoint(endpoint: str) -> None:
     from urllib.parse import urlparse
 
-    parsed = urlparse(endpoint)
+    try:
+        parsed = urlparse(endpoint)
+        hostname = parsed.hostname
+    except ValueError as exc:
+        raise ObservabilityError(f"invalid otlp_endpoint {endpoint!r}: {exc}") from exc
     if parsed.scheme not in ("http", "https"):
         raise ObservabilityError(f"otlp_endpoint must be http or https, got {parsed.scheme!r}")
-    if not parsed.hostname:
+    if not hostname:
         raise ObservabilityError(f"otlp_endpoint must have a host, got {endpoint!r}")
     if parsed.query or parsed.fragment:
         raise ObservabilityError(f"otlp_endpoint must not have query/fragment, got {endpoint!r}")
@@ -65,11 +71,11 @@ def _validate_endpoint(endpoint: str) -> None:
 
 def _resolve_endpoints(protocol: str, configured: str | None) -> tuple[str, str, str]:
     if configured is None:
-        base = DERIVED_GRPC_ENDPOINT if protocol == "grpc" else DERIVED_HTTP_ENDPOINT
+        base = DERIVED_GRPC_ENDPOINT if protocol == OTLP_PROTOCOL_GRPC else DERIVED_HTTP_ENDPOINT
     else:
         base = configured
         _validate_endpoint(base)
-    if protocol == "grpc":
+    if protocol == OTLP_PROTOCOL_GRPC:
         return base, base, base
     base = base.rstrip("/")
     return f"{base}/v1/traces", f"{base}/v1/metrics", f"{base}/v1/logs"
@@ -234,11 +240,11 @@ def _validate_params(
     log_backup_count: int,
     log_level: str,
 ) -> int:
-    if role not in _VALID_ROLES:
-        raise ObservabilityError(f"role must be one of {sorted(_VALID_ROLES)}, got {role!r}")
-    if protocol not in _VALID_PROTOCOLS:
+    if role not in PROCESS_ROLES:
+        raise ObservabilityError(f"role must be one of {sorted(PROCESS_ROLES)}, got {role!r}")
+    if protocol not in OTLP_PROTOCOLS:
         raise ObservabilityError(
-            f"otlp_protocol must be one of {sorted(_VALID_PROTOCOLS)}, got {protocol!r}"
+            f"otlp_protocol must be one of {sorted(OTLP_PROTOCOLS)}, got {protocol!r}"
         )
     if not service_name.strip():
         raise ObservabilityError("service_name must not be blank")
@@ -258,7 +264,7 @@ def configure(
     *,
     role: str,
     otlp_enabled: bool = False,
-    otlp_protocol: str = "grpc",
+    otlp_protocol: str = DEFAULT_OTLP_PROTOCOL,
     otlp_endpoint: str | None = None,
     service_name: str = DEFAULT_SERVICE_NAME,
     export_interval_ms: int = DEFAULT_EXPORT_INTERVAL_MS,
@@ -289,7 +295,7 @@ def configure(
         handle = RuntimeHandle()
         file_entry: _HandlerEntry | None = None
         try:
-            if log_path is not None and role == "daemon":
+            if log_path is not None and role == PROCESS_ROLE_DAEMON:
                 from theater.observability.logging import make_rotating_handler, make_stderr_handler
 
                 file_entry = handle.add_handler(
@@ -336,7 +342,7 @@ def _build_exporters(
     protocol: str, endpoints: tuple[str, str, str], staged: _StagedResources
 ) -> tuple[Any, Any, Any]:
     traces, metrics, logs = endpoints
-    if protocol == "grpc":
+    if protocol == OTLP_PROTOCOL_GRPC:
         from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
         from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
         from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
@@ -420,9 +426,9 @@ def _attach_otel_logging(
     handle.add_handler(handler, "theater", is_otel=True)
     handle.set_logger_propagate("theater", False)
     handle.set_logger_level("theater", log_level)
-    if role == "daemon" and file_entry is not None:
+    if role == PROCESS_ROLE_DAEMON and file_entry is not None:
         handle.share_handler(file_entry, "opentelemetry")
-    elif role != "daemon":
+    elif role != PROCESS_ROLE_DAEMON:
         handle.add_handler(logging.NullHandler(), "opentelemetry")
     handle.set_logger_level("opentelemetry", logging.NOTSET)
     handle.set_logger_propagate("opentelemetry", False)

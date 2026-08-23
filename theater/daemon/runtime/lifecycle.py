@@ -13,6 +13,11 @@ import contextlib
 import logging
 
 from theater import paths, protocol, timing
+from theater.constants.observability import (
+    JOBS_ACTIVE_GAUGE,
+    PARTICIPANTS_ADDRESSABLE_GAUGE,
+    PARTICIPANTS_LIVE_GAUGE,
+)
 from theater.daemon.jobs import JobState
 from theater.daemon.lock import file_id
 from theater.models import Status
@@ -146,9 +151,9 @@ def stop(daemon) -> None:
 
 async def _start_gauge_sampler(daemon) -> None:
     sources = {
-        "theater.participants.live": daemon.registry.live_count,
-        "theater.participants.addressable": daemon.registry.addressable_count,
-        "theater.jobs.active": daemon.jobs.active_count,
+        PARTICIPANTS_LIVE_GAUGE: daemon.registry.live_count,
+        PARTICIPANTS_ADDRESSABLE_GAUGE: daemon.registry.addressable_count,
+        JOBS_ACTIVE_GAUGE: daemon.jobs.active_count,
     }
     interval = daemon.config.observability.gauge_interval_s
     sampler = create_active_gauge_sampler(interval, sources)

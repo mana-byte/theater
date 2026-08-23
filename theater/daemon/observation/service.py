@@ -47,7 +47,7 @@ from theater.harness.source import (
     SourceContractError,
 )
 from theater.models import JobState, Status, Tier
-from theater.observability.catalog import BY_KEY
+from theater.observability.catalog import OBSERVER_WATCH
 from theater.provenance import normalize_provenance
 
 logger = logging.getLogger("theater.observer")
@@ -260,7 +260,7 @@ class Observer:
             watch = self._watch if observer.has_transcript else self._watch_screen
             if observer.has_transcript:
                 self._restore_transcript_identity_loss(pid)
-            timing.ready_lag(BY_KEY["OBSERVER_WATCH"], pid, p.created_at, harness=p.harness)
+            timing.ready_lag(OBSERVER_WATCH, pid, p.created_at, harness=p.harness)
             self._tasks[pid] = asyncio.create_task(watch(pid, normalize_harness(p.harness)))
 
     def _warn_unobservable(self, pid: str, p) -> None:

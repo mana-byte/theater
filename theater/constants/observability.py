@@ -26,8 +26,19 @@ LAG_INTERVAL_S = 0.5
 #: Event-loop lag warning threshold (seconds).
 LAG_WARN_S = 0.25
 
+#: Supported OTLP transport protocols.
+OTLP_PROTOCOL_GRPC = "grpc"
+OTLP_PROTOCOL_HTTP = "http"
+OTLP_PROTOCOLS = (OTLP_PROTOCOL_GRPC, OTLP_PROTOCOL_HTTP)
+
 #: Default OTLP transport protocol.
-DEFAULT_OTLP_PROTOCOL = "grpc"
+DEFAULT_OTLP_PROTOCOL = OTLP_PROTOCOL_GRPC
+
+#: Process roles attached to OTel resources.
+PROCESS_ROLE_DAEMON = "daemon"
+PROCESS_ROLE_MCP = "mcp"
+PROCESS_ROLE_REGIE = "regie"
+PROCESS_ROLES = (PROCESS_ROLE_DAEMON, PROCESS_ROLE_MCP, PROCESS_ROLE_REGIE)
 
 #: Default service name for OTel resource attributes.
 DEFAULT_SERVICE_NAME = "theater"
@@ -79,6 +90,22 @@ HISTOGRAM_MAX_SCALE = 20
 
 #: Maximum exported error.type attribute length.
 MAX_ERROR_TYPE_LEN = 128
+
+#: Observable gauge for non-dead participants.
+PARTICIPANTS_LIVE_GAUGE = "theater.participants.live"
+
+#: Observable gauge for physically addressable participants.
+PARTICIPANTS_ADDRESSABLE_GAUGE = "theater.participants.addressable"
+
+#: Observable gauge for running jobs.
+JOBS_ACTIVE_GAUGE = "theater.jobs.active"
+
+#: Gauge names registered against the shared cache.
+GAUGE_NAMES = (
+    PARTICIPANTS_LIVE_GAUGE,
+    PARTICIPANTS_ADDRESSABLE_GAUGE,
+    JOBS_ACTIVE_GAUGE,
+)
 
 #: Derived gRPC collector endpoint when none is configured.
 DERIVED_GRPC_ENDPOINT = "http://localhost:4317"

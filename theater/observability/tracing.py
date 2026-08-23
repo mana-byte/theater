@@ -39,6 +39,7 @@ def start_span(
     tracer = _get_tracer()
     span = tracer.start_span(
         name,
+        context=parent_context,
         kind=_otel_span_kind(kind),
         attributes=dict(attributes) if attributes else None,
         record_exception=False,

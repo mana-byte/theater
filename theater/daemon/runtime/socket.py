@@ -15,7 +15,7 @@ from typing import Any
 
 from theater import protocol, timing
 from theater.models import TheaterError
-from theater.observability.catalog import BY_KEY
+from theater.observability.catalog import RPC_AWAIT, RPC_SERVER
 from theater.observability.tracing import extract_trace_context
 
 logger = logging.getLogger("theater.daemon")
@@ -101,20 +101,25 @@ async def dispatch(daemon, line: bytes, *, methods) -> bytes:
 
     parent_context = extract_trace_context(msg.get("_meta"))
 
-    spec = BY_KEY["RPC_AWAIT"] if name == "jobs.await" else BY_KEY["RPC_SERVER"]
+    spec = RPC_AWAIT if name == "jobs.await" else RPC_SERVER
     fields: dict[str, Any] = {"caller": params.get("caller_id")}
     if spec.key == "RPC_SERVER":
         fields["method"] = name
+    error: tuple[str, str] | None
     with timing.span(spec, parent_context=parent_context, **fields) as sp:
         try:
             result = await handler(daemon, params)
         except TheaterError as exc:
             sp.set_result("error", error_type=exc.code)
-            return protocol.err(req_id, exc.code, str(exc))
+            error = (exc.code, str(exc))
         except Exception as exc:
             et = f"{type(exc).__module__}.{type(exc).__qualname__}"
             sp.set_result("error", error_type=et)
             logger.exception("handler %s failed", name)
-            return protocol.err(req_id, "internal", f"{type(exc).__name__}: {exc}")
+            error = ("internal", f"{type(exc).__name__}: {exc}")
+        else:
+            error = None
 
-        return protocol.ok(req_id, result)
+    if error is not None:
+        return protocol.err(req_id, *error)
+    return protocol.ok(req_id, result)

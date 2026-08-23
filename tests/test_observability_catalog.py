@@ -105,6 +105,8 @@ def test_kill_harness_not_prose(key):
 def test_git_cwd_in_prose():
     m = next(m for m in BY_KEY["GIT_COMMAND"].attrs if m.source == "cwd")
     assert m.prose_key == "cwd"
+    assert m.log_transform == ValueTransform.STRING
+    assert m.trace_transform == ValueTransform.STRING
 
 
 def test_spawn_launch_harness_in_prose():

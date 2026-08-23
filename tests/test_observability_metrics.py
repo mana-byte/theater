@@ -7,6 +7,7 @@ import threading
 
 import pytest
 
+from theater.observability.catalog import OperationSpec
 from theater.observability.metrics import (
     GaugeCache,
     GaugeSampler,
@@ -27,6 +28,16 @@ def test_registry_conflict():
     reg.get_or_create("m", "d1", "ms")
     with pytest.raises(ValueError, match="description mismatch"):
         reg.get_or_create("m", "d2", "ms")
+
+
+def test_catalog_registration_rejects_conflicting_duplicate():
+    reg = HistogramRegistry(meter=None)
+    specs = (
+        OperationSpec("A", "a", None, "m", "first"),
+        OperationSpec("B", "b", None, "m", "second"),
+    )
+    with pytest.raises(ValueError, match="description mismatch"):
+        reg.register_from_catalog(specs)
 
 
 def test_registry_lock_released_before_record():

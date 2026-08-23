@@ -248,6 +248,43 @@ async def test_remote_error_is_raised_not_desynced(daemon_factory):
         await client.aclose()
 
 
+async def test_client_span_carries_meta_through_remote_error(daemon_factory, monkeypatch):
+    observed = {}
+
+    class Span:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            observed["exception"] = exc
+            return False
+
+    def fake_span(spec, **fields):
+        observed["spec"] = spec
+        observed["fields"] = fields
+        return Span()
+
+    carrier = {"traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"}
+    monkeypatch.setattr(client_mod, "timing_span", fake_span)
+    monkeypatch.setattr("theater.observability.tracing.inject_trace_context", lambda: carrier)
+
+    async def handler(msg):
+        return [protocol.err(msg["id"], "not_found", "missing")]
+
+    daemon = await daemon_factory(handler)
+    client = _client()
+    try:
+        with pytest.raises(RemoteError, match="not_found"):
+            await client.call("participants.get", participant_id="missing")
+    finally:
+        await client.aclose()
+
+    assert daemon.requests[0]["_meta"] == carrier
+    assert observed["spec"].key == "RPC_CLIENT"
+    assert observed["fields"] == {"method": "participants.get"}
+    assert isinstance(observed["exception"], RemoteError)
+
+
 async def test_daemon_hangup_reconnects_on_the_next_call(daemon_factory):
     async def handler(msg):
         if msg["params"].get("hangup"):

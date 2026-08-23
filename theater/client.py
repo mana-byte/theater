@@ -41,18 +41,6 @@ from theater.observability.engine import span as timing_span
 from theater.protocol import RemoteError
 from theater.tmux import client as tmux
 
-
-def _send_request(req_id: int, method: str, params: dict, meta: dict | None) -> bytes:
-    """Build a request, passing _meta when protocol.request supports it."""
-    try:
-        return protocol.request(req_id, method, params, meta=meta)  # type: ignore[call-arg]
-    except TypeError:
-        payload = {"id": req_id, "method": method, "params": params or {}}
-        if meta:
-            payload["_meta"] = dict(meta)
-        return protocol.encode(payload)
-
-
 #: How long to wait for a freshly started daemon to come up.
 START_TIMEOUT = 8.0
 
@@ -187,15 +175,14 @@ class DaemonClient:
             assert self._reader and self._writer
             self._next_id += 1
             req_id = self._next_id
-            from theater.observability.catalog import BY_KEY
+            from theater.observability.catalog import RPC_CLIENT
             from theater.observability.tracing import inject_trace_context
 
-            spec = BY_KEY["RPC_CLIENT"]
-            with timing_span(spec, method=method) as sp:
+            with timing_span(RPC_CLIENT, method=method):
                 try:
                     meta = inject_trace_context()
                     self._writer.write(
-                        _send_request(req_id, method, params, meta if meta else None)
+                        protocol.request(req_id, method, params, meta=meta if meta else None)
                     )
                     await self._writer.drain()
                     msg = await self._read_reply(req_id, self._timeout_for(method, params))
@@ -208,7 +195,6 @@ class DaemonClient:
                 if not msg.get("ok"):
                     error = msg.get("error") or {}
                     exc = RemoteError(error.get("code", "error"), error.get("message", ""))
-                    sp.set_result("error", error_type=exc.code)
                     raise exc
                 return msg.get("result")
 

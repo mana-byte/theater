@@ -22,13 +22,53 @@ VALIDATION_TESTS = [
     ('configure(role="daemon", otlp_protocol="udp")', "otlp_protocol"),
     ('configure(role="daemon", service_name="  ")', "service_name"),
     ('configure(role="daemon", log_level="VERBOSE")', "log_level"),
+    ('configure(role="daemon", otlp_endpoint="localhost:4317")', "http or https"),
+    ('configure(role="daemon", otlp_endpoint="http://host?q=1")', "query/fragment"),
+    ('configure(role="daemon", otlp_endpoint="http://[")', "invalid otlp_endpoint"),
 ]
+
+
+@pytest.mark.parametrize("call,match", VALIDATION_TESTS)
+def test_validation(call, match):
+    _run(f"""
+        from theater.observability.runtime import ObservabilityError, configure
+        try:
+            {call}
+        except ObservabilityError as exc:
+            assert {match!r} in str(exc)
+        else:
+            raise AssertionError("validation accepted bad input")
+        print("OK")
+    """)
+
+
+@pytest.mark.parametrize(
+    "protocol,endpoint,expected",
+    [
+        ("grpc", None, ("http://localhost:4317",) * 3),
+        (
+            "http",
+            "https://collector.example/prefix/",
+            (
+                "https://collector.example/prefix/v1/traces",
+                "https://collector.example/prefix/v1/metrics",
+                "https://collector.example/prefix/v1/logs",
+            ),
+        ),
+    ],
+)
+def test_endpoint_resolution(protocol, endpoint, expected):
+    from theater.observability.runtime import _resolve_endpoints
+
+    assert _resolve_endpoints(protocol, endpoint) == expected
 
 
 def test_disabled_no_sdk():
     _run("""
+        import sys
         from theater.observability.runtime import configure, is_configured
         h = configure(role="daemon", otlp_enabled=False)
+        assert not any(name.startswith("opentelemetry.sdk") for name in sys.modules)
         assert not h.closed
         h.shutdown()
         assert h.closed and is_configured()
@@ -47,6 +87,21 @@ def test_shutdown_idempotent():
     """)
 
 
+def test_second_configuration_is_rejected():
+    _run("""
+        from theater.observability.runtime import ObservabilityError, configure
+        h = configure(role="daemon")
+        h.shutdown()
+        try:
+            configure(role="daemon")
+        except ObservabilityError:
+            pass
+        else:
+            raise AssertionError("second configure succeeded")
+        print("OK")
+    """)
+
+
 def test_non_daemon_null_handler():
     _run("""
         import logging
@@ -59,21 +114,22 @@ def test_non_daemon_null_handler():
     """)
 
 
-def test_views_built_from_catalog():
-    """_build_views returns exponential aggregation views."""
-    code = """
-        from theater.observability.runtime import _build_views
-        from opentelemetry.sdk.metrics.view import ExponentialBucketHistogramAggregation
-        views = _build_views()
-        assert views
-        assert any(isinstance(v._aggregation, ExponentialBucketHistogramAggregation) for v in views)
-        print("OK")
-    """
-    r = subprocess.run(
-        [sys.executable, "-c", textwrap.dedent(code)], capture_output=True, text=True, check=False
+def test_views_built_from_catalog(monkeypatch):
+    from opentelemetry.sdk.metrics import view as view_mod
+    from opentelemetry.sdk.metrics.view import ExponentialBucketHistogramAggregation
+
+    from theater.observability.runtime import _build_views
+
+    definitions = []
+    monkeypatch.setattr(view_mod, "View", lambda **kwargs: definitions.append(kwargs) or kwargs)
+    views = _build_views()
+
+    assert views == definitions
+    assert definitions
+    assert all(
+        isinstance(definition["aggregation"], ExponentialBucketHistogramAggregation)
+        for definition in definitions
     )
-    assert r.returncode == 0, f"stdout={r.stdout}\nstderr={r.stderr}"
-    assert "OK" in r.stdout
 
 
 def test_views_passed_to_meter_provider_constructor():

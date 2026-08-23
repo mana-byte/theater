@@ -101,6 +101,7 @@ from theater.protocol import RemoteError
 from theater.tmux import client as tmux  # noqa: F401
 
 _COMMANDS = COMMANDS
+_PROCESS_COMMANDS = frozenset({None, "daemon", "mcp", "regie"})
 
 
 def _models_block(harness: str, models: list[str]) -> str:
@@ -111,11 +112,8 @@ def _models_block(harness: str, models: list[str]) -> str:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     paths.ensure_home()
-    # Long-lived process commands own their harness install and observability setup.
-    _process_commands = frozenset({None, "daemon", "mcp", "regie"})
     try:
-        # Build the harness registry before the command runs; process commands are exempt.
-        if args.command not in _process_commands and args.command != "config":
+        if args.command not in _PROCESS_COMMANDS and args.command != "config":
             harness_registry.install(config.load())
         return _COMMANDS[args.command](args)
     except (BadUsage, config.ConfigError, ObservabilityError) as exc:

@@ -19,7 +19,7 @@ from theater.constants.worktree import (
     GIT_TIMEOUT_RC,
     WORKTREE_DIR,
 )
-from theater.observability.catalog import BY_KEY
+from theater.observability.catalog import GIT_COMMAND
 
 logger = logging.getLogger("theater.worktree")
 
@@ -33,7 +33,7 @@ def _git(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
     kwargs.setdefault("encoding", "utf-8")
     kwargs.setdefault("errors", "backslashreplace")
     command = "-".join(argv[1:3])
-    with timing.span(BY_KEY["GIT_COMMAND"], command=command, cwd=kwargs.get("cwd")) as sp:
+    with timing.span(GIT_COMMAND, command=command, cwd=kwargs.get("cwd")) as sp:
         try:
             proc = subprocess.run(argv, **kwargs)  # noqa: PLW1510  (callers pass check=)
         except subprocess.TimeoutExpired as exc:

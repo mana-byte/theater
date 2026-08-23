@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import sys
 
 from theater import config
@@ -34,8 +33,7 @@ def cmd_daemon(args) -> int:
         if stderr_token is not None:
             from theater import paths
 
-            with contextlib.suppress(Exception):
-                delete_generation_file(generation_path(paths.home(), stderr_token))
+            delete_generation_file(generation_path(paths.home(), stderr_token))
         print(f"theater: {exc}", file=sys.stderr)
         return 1
     except RuntimeError as exc:
@@ -47,12 +45,13 @@ def cmd_daemon(args) -> int:
 
 
 def cmd_mcp(args) -> int:
+    from theater.constants.observability import PROCESS_ROLE_MCP
     from theater.observability.runtime import configure
 
     settings = config.load()
     obs = settings.observability
     runtime_handle = configure(
-        role="mcp",
+        role=PROCESS_ROLE_MCP,
         otlp_enabled=obs.otlp_enabled,
         otlp_protocol=obs.otlp_protocol,
         otlp_endpoint=obs.otlp_endpoint,
@@ -84,12 +83,13 @@ def cmd_regie(args) -> int:
             file=sys.stderr,
         )
         return 1
+    from theater.constants.observability import PROCESS_ROLE_REGIE
     from theater.observability.runtime import configure
 
     settings = config.load()
     obs = settings.observability
     runtime_handle = configure(
-        role="regie",
+        role=PROCESS_ROLE_REGIE,
         otlp_enabled=obs.otlp_enabled,
         otlp_protocol=obs.otlp_protocol,
         otlp_endpoint=obs.otlp_endpoint,
