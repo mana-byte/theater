@@ -367,15 +367,15 @@ def _claude_trajectory_usage(message: dict, record: dict) -> TrajectoryUsage | N
     )
 
 
-def _claude_revision(record: dict, native_id: str | None, index: int) -> int:
+def _claude_revision(record: dict) -> int:
     message = record.get("message")
     values = [record, message] if isinstance(message, dict) else [record]
     for value in values:
-        for key in ("revision", "version", "sequence", "sequence_number", "update_index"):
+        for key in ("revision", "version"):
             candidate = _trajectory_int(value.get(key))
             if candidate or value.get(key) in (0, 0.0):
                 return candidate
-    return index if native_id is not None else 0
+    return 0
 
 
 def _claude_block_native_id(
@@ -1170,7 +1170,7 @@ class ClaudeCodeObserver(TranscriptObserver):
                     summary=_safe_trajectory_text(summary),
                     status=status,
                     native_id=clean_id,
-                    revision=_claude_revision(record, clean_id, index),
+                    revision=_claude_revision(record),
                     raw_index=index,
                     event_ordinal=len(facts),
                     turn_id=turn,
@@ -1195,12 +1195,8 @@ class ClaudeCodeObserver(TranscriptObserver):
                 or turn_id
             )
             stop = message.get("stop_reason")
-            message_status = (
-                TrajectoryStatus.RUNNING
-                if stop == "tool_use"
-                else TrajectoryStatus.COMPLETED
-                if stop is not None
-                else TrajectoryStatus.UNKNOWN
+            message_status = _trajectory_status(
+                message.get("status") or record.get("status"), TrajectoryStatus.COMPLETED
             )
             usage = _claude_trajectory_usage(message, record)
             content = message.get("content")
@@ -1234,7 +1230,7 @@ class ClaudeCodeObserver(TranscriptObserver):
                         TrajectoryLane.MODEL,
                         raw,
                         native_id=native_id,
-                        status=message_status,
+                        status=_trajectory_status(block.get("status"), message_status),
                         turn=message_turn,
                         details=(_trajectory_detail("thinking", raw, format=ContentFormat.TEXT),),
                     )
@@ -1252,7 +1248,7 @@ class ClaudeCodeObserver(TranscriptObserver):
                         TrajectoryLane.TOOLS,
                         name or "tool call",
                         native_id=native_id,
-                        status=_trajectory_status(block.get("status"), TrajectoryStatus.UNKNOWN),
+                        status=_trajectory_status(block.get("status"), TrajectoryStatus.PENDING),
                         turn=message_turn,
                         call_id=call_id,
                         parent_call_id=parent_call_id,
@@ -1264,7 +1260,7 @@ class ClaudeCodeObserver(TranscriptObserver):
                     result_status = (
                         TrajectoryStatus.ERROR
                         if block.get("is_error") is True
-                        else _trajectory_status(block.get("status"), TrajectoryStatus.UNKNOWN)
+                        else _trajectory_status(block.get("status"), TrajectoryStatus.COMPLETED)
                     )
                     result_details = (
                         (
@@ -1289,7 +1285,7 @@ class ClaudeCodeObserver(TranscriptObserver):
                         status=result_status,
                         turn=message_turn,
                         call_id=call_id,
-                        parent_call_id=parent_call_id,
+                        parent_call_id=parent_call_id or call_id,
                         details=result_details,
                     )
             if not facts and (usage is not None or stop is not None):
@@ -1312,6 +1308,9 @@ class ClaudeCodeObserver(TranscriptObserver):
             blocks = content if isinstance(content, list) else []
             if isinstance(content, str):
                 blocks = [{"type": "text", "text": content}]
+            user_status = _trajectory_status(
+                message.get("status") or record.get("status"), TrajectoryStatus.COMPLETED
+            )
             for block_index, block in enumerate(blocks):
                 if not isinstance(block, dict):
                     continue
@@ -1323,13 +1322,18 @@ class ClaudeCodeObserver(TranscriptObserver):
                         TrajectoryLane.INPUT,
                         _safe_trajectory_text(block.get("text")),
                         native_id=native_id,
+                        status=_trajectory_status(block.get("status"), user_status),
                     )
                 elif block_type == "tool_result":
                     raw = _claude_content_text(block.get("content"))
+                    call_id = _trajectory_id(block.get("tool_use_id") or block.get("call_id"))
+                    parent_call_id = _trajectory_id(
+                        block.get("parent_call_id") or block.get("parentCallId")
+                    )
                     result_status = (
                         TrajectoryStatus.ERROR
                         if block.get("is_error") is True
-                        else _trajectory_status(block.get("status"), TrajectoryStatus.UNKNOWN)
+                        else _trajectory_status(block.get("status"), TrajectoryStatus.COMPLETED)
                     )
                     details = (
                         (
@@ -1352,7 +1356,8 @@ class ClaudeCodeObserver(TranscriptObserver):
                         raw,
                         native_id=native_id,
                         status=result_status,
-                        call_id=_trajectory_id(block.get("tool_use_id") or block.get("call_id")),
+                        call_id=call_id,
+                        parent_call_id=parent_call_id or call_id,
                         details=details,
                     )
             if not facts and (isinstance(content, str) or record_id is not None):
@@ -1361,6 +1366,7 @@ class ClaudeCodeObserver(TranscriptObserver):
                     TrajectoryLane.INPUT,
                     _safe_trajectory_text(content),
                     native_id=message_id or record_id,
+                    status=user_status,
                 )
             return facts
 
@@ -1409,7 +1415,11 @@ class ClaudeCodeObserver(TranscriptObserver):
                 else TrajectoryLane.MODEL,
                 summary,
                 native_id=record_id,
-                status=TrajectoryStatus.ERROR if is_error else TrajectoryStatus.UNKNOWN,
+                status=(
+                    TrajectoryStatus.ERROR
+                    if is_error
+                    else _trajectory_status(record.get("status"), TrajectoryStatus.COMPLETED)
+                ),
                 details=tuple(system_details),
             )
         return facts

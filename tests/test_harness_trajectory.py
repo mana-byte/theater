@@ -83,6 +83,13 @@ def test_claude_facts_include_ids_pairing_reasoning_usage_timing_and_system_cont
     assert call.call_id == "tool-1"
     assert call.details[0].name == "input"
     assert result.call_id == "tool-1"
+    assert result.parent_call_id == "tool-1"
+    assert result.status is TrajectoryStatus.COMPLETED
+    assert all(
+        fact.status is TrajectoryStatus.COMPLETED
+        for fact in facts
+        if fact.kind in (TrajectoryKind.USER, TrajectoryKind.ASSISTANT, TrajectoryKind.REASONING)
+    )
     assert usage.usage is not None
     assert usage.usage.model == "claude-test"
     assert usage.usage.request_id == "request-1"
@@ -105,7 +112,11 @@ def test_claude_revisions_are_monotonic_and_missing_ids_use_coordinates():
 
     assert revisions == sorted(revisions)
     assert len(revisions) == 2
+    assert next(fact for fact in facts if fact.native_id == "msg-1").revision == 0
+    shifted = ClaudeCodeObserver().parse_record(lines[1], 101).trajectory
+    assert next(fact for fact in shifted if fact.native_id == "msg-1").revision == 0
     assert fallback.native_id is None
+    assert fallback.revision == 0
     assert fallback.raw_index == 8
     assert fallback.event_ordinal == 0
 
@@ -116,7 +127,7 @@ def test_claude_unmatched_result_remains_visible():
 
     assert unmatched.kind is TrajectoryKind.TOOL_RESULT
     assert unmatched.call_id is None
-    assert unmatched.status is TrajectoryStatus.UNKNOWN
+    assert unmatched.status is TrajectoryStatus.COMPLETED
 
 
 def test_codex_facts_include_rollout_items_calls_parent_ids_reasoning_usage_and_timing():
@@ -142,7 +153,10 @@ def test_codex_facts_include_rollout_items_calls_parent_ids_reasoning_usage_and_
     assert call.details[0].name == "input"
     assert result.kind is TrajectoryKind.TOOL_RESULT
     assert result.call_id == "call-1"
+    assert result.parent_call_id == "call-1"
     assert mcp_result.kind is TrajectoryKind.TOOL_RESULT
+    assert mcp_result.parent_call_id == "mcp-1"
+    assert mcp_result.status is TrajectoryStatus.COMPLETED
     assert mcp_result.timing is not None
     assert mcp_result.timing.duration_ms == pytest.approx(1500)
     assert reasoning.summary == "explicit summary"
@@ -165,6 +179,8 @@ def test_codex_never_projects_encrypted_only_reasoning_and_keeps_unmatched_resul
     ]
     assert unmatched.kind is TrajectoryKind.TOOL_RESULT
     assert unmatched.native_id is None
+    assert unmatched.parent_call_id == "unmatched-call"
+    assert unmatched.status is TrajectoryStatus.COMPLETED
 
 
 def test_codex_missing_message_id_uses_fallback_coordinates():
@@ -191,6 +207,29 @@ def test_native_revision_is_independent_of_history_parse_order():
     }
 
     assert forward == reverse
+    shifted = CodexObserver().parse_record(lines[4], 404).trajectory
+    assert shifted[0].native_id == "item-call-1"
+    assert shifted[0].revision == 0
+
+
+def test_codex_dual_assistant_representations_have_one_canonical_fact():
+    lines = _lines("trajectory_codex_dual.jsonl")
+    control = CodexObserver()
+    rich = CodexObserver()
+
+    facts = [
+        fact
+        for index, line in enumerate(lines)
+        for fact in rich.parse_record(line, index).trajectory
+    ]
+    assistants = [fact for fact in facts if fact.kind is TrajectoryKind.ASSISTANT]
+
+    assert len(assistants) == 1
+    assert assistants[0].native_id == "dual-message-1"
+    assert assistants[0].summary == "canonical answer"
+    assert [list(rich.parse_record(line, index).events) for index, line in enumerate(lines)] == [
+        control.parse(line, index) for index, line in enumerate(lines)
+    ]
 
 
 def test_detail_fields_are_bounded_for_large_tool_input():

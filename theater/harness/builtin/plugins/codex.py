@@ -424,13 +424,13 @@ def _trajectory_status(value: object, default: TrajectoryStatus) -> TrajectorySt
     return aliases.get(value.lower().replace("-", "_"), default)
 
 
-def _codex_revision(record: dict, payload: dict, native_id: str | None, index: int) -> int:
+def _codex_revision(record: dict, payload: dict) -> int:
     for value in (payload, record):
-        for key in ("revision", "version", "sequence", "sequence_number", "update_index"):
+        for key in ("revision", "version"):
             candidate = _trajectory_int(value.get(key))
             if candidate or value.get(key) in (0, 0.0):
                 return candidate
-    return index if native_id is not None else 0
+    return 0
 
 
 def _codex_block_id(item_id: str | None, block: dict, ordinal: int) -> str | None:
@@ -1285,7 +1285,7 @@ class CodexObserver(TranscriptObserver):
                     summary=_safe_trajectory_text(summary),
                     status=status,
                     native_id=clean_id,
-                    revision=_codex_revision(record, payload, clean_id, index),
+                    revision=_codex_revision(record, payload),
                     raw_index=index,
                     event_ordinal=len(facts),
                     turn_id=turn,
@@ -1307,6 +1307,7 @@ class CodexObserver(TranscriptObserver):
                 TrajectoryLane.MODEL,
                 "session metadata",
                 native_id=session_id or record_id,
+                status=_trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED),
                 details=(_trajectory_detail("session", payload, format=ContentFormat.JSON),),
             )
             return facts
@@ -1333,6 +1334,7 @@ class CodexObserver(TranscriptObserver):
                 summary,
                 native_id=context_id,
                 turn=_codex_trajectory_turn_id(context) if isinstance(context, dict) else turn_id,
+                status=_trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED),
                 details=(_trajectory_detail("context", context, format=ContentFormat.JSON),),
             )
             return facts
@@ -1354,21 +1356,20 @@ class CodexObserver(TranscriptObserver):
                     TrajectoryLane.INPUT,
                     _safe_trajectory_text(payload.get("message")),
                     native_id=event_id,
+                    status=_trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED),
                     details=tuple(details),
                 )
                 return facts
             if event_type == "agent_message":
                 phase = payload.get("phase")
+                if phase == "final_answer":
+                    return facts
                 add(
                     TrajectoryKind.ASSISTANT,
                     TrajectoryLane.MODEL,
                     _safe_trajectory_text(payload.get("message")),
                     native_id=event_id,
-                    status=(
-                        TrajectoryStatus.COMPLETED
-                        if phase == "final_answer"
-                        else TrajectoryStatus.UNKNOWN
-                    ),
+                    status=(_trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED)),
                     details=(
                         (_trajectory_detail("phase", phase, format=ContentFormat.TEXT),)
                         if isinstance(phase, str)
@@ -1426,8 +1427,11 @@ class CodexObserver(TranscriptObserver):
                         TrajectoryLane.TOOLS,
                         tool_name or "MCP tool call",
                         native_id=event_id or call_id,
+                        status=_trajectory_status(payload.get("status"), TrajectoryStatus.PENDING),
                         call_id=call_id,
-                        parent_call_id=_trajectory_id(payload.get("parent_call_id")),
+                        parent_call_id=_trajectory_id(
+                            payload.get("parent_call_id") or payload.get("parent_id")
+                        ),
                         details=mcp_details,
                     )
                 else:
@@ -1445,9 +1449,12 @@ class CodexObserver(TranscriptObserver):
                         native_id=event_id,
                         status=TrajectoryStatus.ERROR
                         if result_error
-                        else _trajectory_status(payload.get("status"), TrajectoryStatus.UNKNOWN),
+                        else _trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED),
                         call_id=call_id,
-                        parent_call_id=_trajectory_id(payload.get("parent_call_id")),
+                        parent_call_id=_trajectory_id(
+                            payload.get("parent_call_id") or payload.get("parent_id")
+                        )
+                        or call_id,
                         details=(
                             (_trajectory_detail("result", result, format=ContentFormat.JSON),)
                             if result is not None
@@ -1463,6 +1470,7 @@ class CodexObserver(TranscriptObserver):
                         TrajectoryLane.MODEL,
                         "token usage",
                         native_id=event_id,
+                        status=TrajectoryStatus.COMPLETED,
                         usage=usage,
                     )
                 return facts
@@ -1475,7 +1483,7 @@ class CodexObserver(TranscriptObserver):
                 status = (
                     TrajectoryStatus.RUNNING
                     if event_type == "task_started"
-                    else TrajectoryStatus.UNKNOWN
+                    else _trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED)
                 )
                 add(
                     TrajectoryKind.CONTEXT,
@@ -1515,10 +1523,8 @@ class CodexObserver(TranscriptObserver):
                     if message_kind is TrajectoryKind.USER
                     else TrajectoryLane.MODEL
                 )
-                message_status = (
-                    TrajectoryStatus.COMPLETED
-                    if payload.get("phase") == "final_answer"
-                    else TrajectoryStatus.UNKNOWN
+                message_status = _trajectory_status(
+                    payload.get("status"), TrajectoryStatus.COMPLETED
                 )
                 for block_index, block in enumerate(blocks):
                     if not isinstance(block, dict):
@@ -1575,6 +1581,9 @@ class CodexObserver(TranscriptObserver):
                         TrajectoryKind.REASONING,
                         TrajectoryLane.MODEL,
                         _safe_trajectory_text(text),
+                        status=_trajectory_status(
+                            payload.get("status"), TrajectoryStatus.COMPLETED
+                        ),
                         native_id=_codex_block_id(item_id, block, part_index),
                         turn=item_turn,
                         details=(
@@ -1612,7 +1621,7 @@ class CodexObserver(TranscriptObserver):
                     TrajectoryLane.TOOLS,
                     name,
                     native_id=item_id or call_id,
-                    status=_trajectory_status(payload.get("status"), TrajectoryStatus.UNKNOWN),
+                    status=_trajectory_status(payload.get("status"), TrajectoryStatus.PENDING),
                     turn=item_turn,
                     call_id=call_id,
                     parent_call_id=parent_call_id,
@@ -1633,10 +1642,10 @@ class CodexObserver(TranscriptObserver):
                     TrajectoryLane.TOOLS,
                     output_text,
                     native_id=item_id,
-                    status=_trajectory_status(payload.get("status"), TrajectoryStatus.UNKNOWN),
+                    status=_trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED),
                     turn=item_turn,
                     call_id=call_id,
-                    parent_call_id=parent_call_id,
+                    parent_call_id=parent_call_id or call_id,
                     details=(
                         (
                             _trajectory_detail(
@@ -1671,6 +1680,7 @@ class CodexObserver(TranscriptObserver):
                 TrajectoryLane.MODEL,
                 _codex_content_text(body) or str(record_kind or ptype).replace("_", " "),
                 native_id=record_id or _trajectory_id(payload.get("id")),
+                status=_trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED),
                 details=system_details,
             )
         return facts
