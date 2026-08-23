@@ -19,10 +19,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Mapping
 from typing import Any
 
 #: Bumped when the request/response shape changes incompatibly; daemon refuses different majors.
 PROTOCOL_VERSION = 1
+# Extension: optional top-level _meta carries W3C trace context; receivers ignore unknown/malformed.
 
 #: Longest message either end reads. 64 MiB — headroom for transcripts, caps non-terminating peers.
 MAX_MESSAGE_BYTES = 64 * 1024 * 1024
@@ -93,8 +95,17 @@ def encode(payload: dict[str, Any]) -> bytes:
     return (json.dumps(payload, separators=(",", ":")) + "\n").encode()
 
 
-def request(req_id: int, method: str, params: dict[str, Any] | None = None) -> bytes:
-    return encode({"id": req_id, "method": method, "params": params or {}})
+def request(
+    req_id: int,
+    method: str,
+    params: dict[str, Any] | None = None,
+    *,
+    meta: Mapping[str, Any] | None = None,
+) -> bytes:
+    payload = {"id": req_id, "method": method, "params": params or {}}
+    if meta:
+        payload["_meta"] = dict(meta)
+    return encode(payload)
 
 
 def ok(req_id: int, result: Any) -> bytes:

@@ -10,11 +10,13 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-import math
 import socket as _socket
+from typing import Any
 
 from theater import protocol, timing
 from theater.models import TheaterError
+from theater.observability.catalog import BY_KEY
+from theater.observability.tracing import extract_trace_context
 
 logger = logging.getLogger("theater.daemon")
 
@@ -97,15 +99,22 @@ async def dispatch(daemon, line: bytes, *, methods) -> bytes:
     if handler is None:
         return protocol.err(req_id, "unknown_method", f"no method {name!r}")
 
-    # `jobs.await` is exempt because blocking is what it is *for*.
-    slow_ms = math.inf if name == "jobs.await" else timing.DEFAULT_SLOW_MS
-    try:
-        with timing.span(f"rpc.{name}", slow_ms=slow_ms, caller=params.get("caller_id")):
-            result = await handler(daemon, params)
-    except TheaterError as exc:
-        return protocol.err(req_id, exc.code, str(exc))
-    except Exception as exc:
-        logger.exception("handler %s failed", name)
-        return protocol.err(req_id, "internal", f"{type(exc).__name__}: {exc}")
+    parent_context = extract_trace_context(msg.get("_meta"))
 
-    return protocol.ok(req_id, result)
+    spec = BY_KEY["RPC_AWAIT"] if name == "jobs.await" else BY_KEY["RPC_SERVER"]
+    fields: dict[str, Any] = {"caller": params.get("caller_id")}
+    if spec.key == "RPC_SERVER":
+        fields["method"] = name
+    with timing.span(spec, parent_context=parent_context, **fields) as sp:
+        try:
+            result = await handler(daemon, params)
+        except TheaterError as exc:
+            sp.set_result("error", error_type=exc.code)
+            return protocol.err(req_id, exc.code, str(exc))
+        except Exception as exc:
+            et = f"{type(exc).__module__}.{type(exc).__qualname__}"
+            sp.set_result("error", error_type=et)
+            logger.exception("handler %s failed", name)
+            return protocol.err(req_id, "internal", f"{type(exc).__name__}: {exc}")
+
+        return protocol.ok(req_id, result)
