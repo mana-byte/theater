@@ -529,53 +529,25 @@ class TranscriptSource(Source):
             page_end_index = end_index
             if end is None and live_offset != total:
                 page_end_index = None
-            scan_start, data = self._read_reverse_window(fh, page_end)
-            at_boundary = scan_start == 0 or self._byte_at(fh, scan_start - 1) == b"\n"
-            if scan_start and not at_boundary:
-                first_newline = data.find(b"\n")
-                if first_newline < 0:
-                    raise _HistoryPageError(
-                        "history_record_too_large",
-                        "history page cannot bound a record within the reverse scan limit",
-                    )
-                data = data[first_newline + 1 :]
-                scan_start += first_newline + 1
-            lines: list[tuple[int, bytes]] = []
-            offset = scan_start
-            for raw in data.splitlines(keepends=True):
-                if not raw.endswith(b"\n"):
-                    break
-                lines.append((offset, raw[:-1]))
-                offset += len(raw)
-            selected = lines[-limit:]
-            selected_position = len(lines) - len(selected)
+            lines = self._read_page_lines(fh, page_end)
             if page_end_index is None:
-                page_start_index = selected_position
+                line_index_base = 0
                 selected_end_index: int | None = None
             else:
-                page_start_index = page_end_index - len(lines) + selected_position
+                line_index_base = page_end_index - len(lines)
                 selected_end_index = page_end_index
-            events: list[Event] = []
-            facts: list[TrajectoryFact] = []
-            for position, (record_offset, raw) in enumerate(selected):
-                line = raw.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
-                parsed = self._parse_record(line, page_start_index + position, clip_text=False)
-                decorated = self._decorate_parsed(parsed, record_offset)
-                events.extend(
-                    _bounded_history_event(event)
-                    for event in decorated.events
-                    if not event.usage_only
-                )
-                facts.extend(decorated.trajectory)
-            start = selected[0][0] if selected else page_end
-            start_index = page_start_index if page_end_index is not None else None
+            events, facts, start, start_index = self._select_page_records(
+                lines,
+                line_index_base=line_index_base,
+                page_end_index=page_end_index,
+                page_end=page_end,
+                limit=limit,
+            )
             identity = self._identity_at_boundary(fh, base_identity, page_end)
             older_identity = self._identity_at_boundary(fh, base_identity, start)
             return (
-                events[:limit],
-                facts[:limit],
+                events,
+                facts,
                 start,
                 page_end,
                 start_index,
@@ -583,6 +555,77 @@ class TranscriptSource(Source):
                 identity,
                 older_identity,
             )
+
+    @classmethod
+    def _read_page_lines(cls, fh: BinaryIO, page_end: int) -> list[tuple[int, bytes]]:
+        scan_start, data = cls._read_reverse_window(fh, page_end)
+        at_boundary = scan_start == 0 or cls._byte_at(fh, scan_start - 1) == b"\n"
+        if scan_start and not at_boundary:
+            first_newline = data.find(b"\n")
+            if first_newline < 0:
+                raise _HistoryPageError(
+                    "history_record_too_large",
+                    "history page cannot bound a record within the reverse scan limit",
+                )
+            data = data[first_newline + 1 :]
+            scan_start += first_newline + 1
+        lines: list[tuple[int, bytes]] = []
+        offset = scan_start
+        for raw in data.splitlines(keepends=True):
+            if not raw.endswith(b"\n"):
+                break
+            lines.append((offset, raw[:-1]))
+            offset += len(raw)
+        return lines
+
+    def _select_page_records(
+        self,
+        lines: list[tuple[int, bytes]],
+        *,
+        line_index_base: int,
+        page_end_index: int | None,
+        page_end: int,
+        limit: int,
+    ) -> tuple[list[Event], list[TrajectoryFact], int, int | None]:
+        selected_position = max(0, len(lines) - limit)
+        events: list[Event] = []
+        facts: list[TrajectoryFact] = []
+        selected: list[tuple[int, int]] = []
+        for position in range(len(lines) - 1, selected_position - 1, -1):
+            record_offset, raw = lines[position]
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line:
+                selected.append((position, record_offset))
+                continue
+            parsed = self._parse_record(line, line_index_base + position, clip_text=False)
+            decorated = self._decorate_parsed(parsed, record_offset)
+            candidate_events = tuple(
+                _bounded_history_event(event) for event in decorated.events if not event.usage_only
+            )
+            candidate_facts = tuple(decorated.trajectory)
+            if len(candidate_events) > limit or len(candidate_facts) > limit:
+                if not selected:
+                    raise _HistoryPageError(
+                        "history_record_too_large",
+                        "one transcript record exceeds the history page limit",
+                    )
+                break
+            if (
+                len(events) + len(candidate_events) > limit
+                or len(facts) + len(candidate_facts) > limit
+            ):
+                break
+            selected.append((position, record_offset))
+            events[0:0] = candidate_events
+            facts[0:0] = candidate_facts
+        selected.reverse()
+        if selected:
+            start_position, start = selected[0]
+            start_index = line_index_base + start_position if page_end_index is not None else None
+        else:
+            start = page_end
+            start_index = None
+        return events, facts, start, start_index
 
     def _parse_record(self, line: str, index: int, *, clip_text: bool) -> ParsedRecord:
         missing = object()

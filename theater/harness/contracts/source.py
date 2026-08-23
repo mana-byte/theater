@@ -201,12 +201,16 @@ class HistoryPage:
             raise SourceContractError("history page events must contain Event values")
         if any(not isinstance(fact, TrajectoryFact) for fact in trajectory):
             raise SourceContractError("history page trajectory must contain TrajectoryFact values")
+        if len(events) > TRAJECTORY_PAGE_RECORD_LIMIT:
+            raise SourceContractError("history page events exceed the page record limit")
+        if len(trajectory) > TRAJECTORY_PAGE_RECORD_LIMIT:
+            raise SourceContractError("history page trajectory exceeds the page record limit")
         object.__setattr__(
             self,
             "events",
-            tuple(bound_history_event(event) for event in events[:TRAJECTORY_PAGE_RECORD_LIMIT]),
+            tuple(bound_history_event(event) for event in events),
         )
-        object.__setattr__(self, "trajectory", trajectory[:TRAJECTORY_PAGE_RECORD_LIMIT])
+        object.__setattr__(self, "trajectory", trajectory)
         for name in ("cursor", "older_cursor"):
             value = getattr(self, name)
             if value is None:

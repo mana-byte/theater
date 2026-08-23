@@ -179,25 +179,37 @@ def _between_groups(
         return []
     if not turn_order:
         ordered = _order_between_records(records)
-        return [(float(ordered[0][0]), _between_group(ordered, 0))]
+        return [
+            (
+                float(ordered[0][0]),
+                _between_group(ordered, _between_group_id(("unpositioned", 0), turn_order)),
+            )
+        ]
     intervals = [_turn_interval(turn_entries[key]) for key in turn_order]
     buckets: dict[tuple[str, int], list[tuple[int, TrajectoryRecord]]] = {}
     for position, record in records:
         slot = _timestamp_slot(record, intervals)
-        bucket_key = ("record", position) if slot is None else ("slot", slot)
+        bucket_key = ("unpositioned", 0) if slot is None else ("slot", slot)
         buckets.setdefault(bucket_key, []).append((position, record))
     result: list[tuple[float, TrajectoryGroup]] = []
-    for index, (bucket_key, bucket_values) in enumerate(buckets.items()):
+    for bucket_key, bucket_values in buckets.items():
         values = _order_between_records(bucket_values)
         group_position = _between_position(bucket_key, values[0][0], turn_order, turn_first)
-        result.append((group_position, _between_group(values, index)))
+        result.append(
+            (
+                group_position,
+                _between_group(values, _between_group_id(bucket_key, turn_order)),
+            )
+        )
     return result
 
 
-def _between_group(records: Iterable[tuple[int, TrajectoryRecord]], index: int) -> TrajectoryGroup:
+def _between_group(
+    records: Iterable[tuple[int, TrajectoryRecord]], group_id: str
+) -> TrajectoryGroup:
     values = tuple(record for _position, record in records)
     return TrajectoryGroup(
-        group_id=f"between-turns:{index}",
+        group_id=group_id,
         kind=GroupKind.BETWEEN_TURNS,
         label="Between turns",
         record_ids=tuple(record.record_id for record in values),
@@ -208,9 +220,28 @@ def _order_between_records(
     records: Iterable[tuple[int, TrajectoryRecord]],
 ) -> list[tuple[int, TrajectoryRecord]]:
     values = list(records)
-    if not values or not all(record.record_id.startswith("bus:") for _, record in values):
+    if not values or not any(record.record_id.startswith("bus:") for _, record in values):
         return values
-    return sorted(values, key=lambda item: _bus_order_key(item[1], item[0]))
+    return sorted(values, key=lambda item: _between_order_key(item[1], item[0]))
+
+
+def _between_group_id(bucket: tuple[str, int], turn_order: list[tuple[str, str]]) -> str:
+    if bucket[0] == "unpositioned":
+        return "between-turns:unpositioned"
+    slot = bucket[1]
+    left = "start" if slot == 0 else _turn_boundary_token(turn_order[slot - 1])
+    right = "end" if slot == len(turn_order) else _turn_boundary_token(turn_order[slot])
+    return _bounded_group_id("between-turns", f"{left}|{right}")
+
+
+def _turn_boundary_token(turn_key: tuple[str, str]) -> str:
+    return f"{turn_key[0]}:{turn_key[1]}"
+
+
+def _between_order_key(record: TrajectoryRecord, position: int) -> tuple[int, int | str, str, int]:
+    if record.record_id.startswith("bus:"):
+        return _bus_order_key(record, position)
+    return (1, "", "", position)
 
 
 def _bus_order_key(record: TrajectoryRecord, position: int) -> tuple[int, int | str, str, int]:

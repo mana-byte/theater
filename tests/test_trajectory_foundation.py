@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -10,13 +11,20 @@ import pytest
 from theater.constants.trajectory import (
     TRAJECTORY_DETAIL_NAME_MAX_BYTES,
     TRAJECTORY_DETAIL_RECORD_MAX_BYTES,
+    TRAJECTORY_IDENTIFIER_MAX_BYTES,
     TRAJECTORY_MAX_COVERAGE_GAPS,
     TRAJECTORY_MAX_DETAILS_PER_RECORD,
     TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES,
     TRAJECTORY_TRANSCRIPT_HISTORY_WINDOW_BYTES,
 )
 from theater.harness.contracts.events import Event, EventKind
-from theater.harness.contracts.source import Batch, History, Source, SourceContractError
+from theater.harness.contracts.source import (
+    Batch,
+    History,
+    HistoryPage,
+    Source,
+    SourceContractError,
+)
 from theater.harness.contracts.trajectory import ParsedRecord, TrajectoryFact
 from theater.harness.transcript.observer import TranscriptObserver, open_participant_source
 from theater.harness.transcript.source import TranscriptSource
@@ -169,7 +177,7 @@ def test_reasoning_wire_and_status_projection_are_explicit() -> None:
         is TrajectoryStatus.COMPLETED
     )
     assert (
-        event_to_fact(Event(kind=EventKind.ASSISTANT, text="old"), historical=True).status
+        event_to_fact(Event(kind=EventKind.ASSISTANT, text="old")).status
         is TrajectoryStatus.COMPLETED
     )
     assert (
@@ -263,15 +271,34 @@ def test_reliable_timestamps_place_theater_only_between_turns() -> None:
     assert groups[1].record_ids == ("between",)
 
 
-def test_native_ids_are_namespaced_except_global_bus_ids() -> None:
+def test_source_local_native_ids_are_always_namespaced() -> None:
     native = TrajectoryFact(kind=TrajectoryKind.ASSISTANT, native_id="message-1")
     bus = TrajectoryFact(kind=TrajectoryKind.THEATER, native_id="bus:7")
     native_record = fact_to_record(native, participant_id="p", source_epoch="epoch")
     bus_record = fact_to_record(bus, participant_id="p", source_epoch="epoch")
     assert native_record.record_id == "epoch:message-1"
     assert native_record.native_id == "epoch:message-1"
-    assert bus_record.record_id == "bus:7"
-    assert bus_record.native_id == "bus:7"
+    assert bus_record.record_id == "epoch:bus:7"
+    assert bus_record.native_id == "epoch:bus:7"
+    assert (
+        bus_record.record_id
+        != fact_to_record(bus, participant_id="p", source_epoch="other").record_id
+    )
+
+
+def test_fallback_identity_is_bounded_and_deterministic() -> None:
+    value = fallback_record_id("epoch" * 200, 10**100, 10**100)
+    assert len(value.encode("utf-8")) <= TRAJECTORY_IDENTIFIER_MAX_BYTES
+    assert value == fallback_record_id("epoch" * 200, 10**100, 10**100)
+
+
+def test_identifier_controls_are_rejected_without_display_sanitization() -> None:
+    literal = TrajectoryFact(kind=TrajectoryKind.ASSISTANT, native_id=r"\x00")
+    assert literal.native_id == r"\x00"
+    with pytest.raises(TrajectoryValidationError):
+        TrajectoryFact(kind=TrajectoryKind.ASSISTANT, native_id="\x00")
+    with pytest.raises(TrajectoryValidationError):
+        DetailField.from_text("field\x00", "value")
 
 
 def test_unpositioned_bus_records_are_ordered_by_bus_id() -> None:
@@ -282,6 +309,60 @@ def test_unpositioned_bus_records_are_ordered_by_bus_id() -> None:
         )
     )
     assert groups[0].record_ids == ("bus:2", "bus:10")
+
+
+def test_between_group_ids_survive_prepend_and_regrouping() -> None:
+    first = make_record(
+        "first",
+        source_epoch="transcript",
+        raw_index=1,
+        turn_id="turn-1",
+        timing=Timing(0, 1, provenance=TimingProvenance.SOURCE),
+    )
+    second = make_record(
+        "second",
+        source_epoch="transcript",
+        raw_index=2,
+        turn_id="turn-2",
+        timing=Timing(3, 4, provenance=TimingProvenance.SOURCE),
+    )
+    between = make_record(
+        "between",
+        source_epoch="theater",
+        raw_index=1,
+        timing=Timing(2, 2.5, provenance=TimingProvenance.SOURCE),
+    )
+    initial = group_records((first, second, between))
+    prepended = group_records(
+        (make_record("bus:1", source_epoch="theater"), first, second, between)
+    )
+    initial_id = next(group.group_id for group in initial if group.record_ids == ("between",))
+    prepended_id = next(group.group_id for group in prepended if group.record_ids == ("between",))
+    assert initial_id == prepended_id
+    assert any(group.group_id == "between-turns:unpositioned" for group in prepended)
+
+
+def test_detail_rebounding_keeps_one_accurate_omission_marker() -> None:
+    marker_pattern = re.compile(r"… (\d+) bytes omitted …")
+    record = make_record(
+        "bounded",
+        details=(
+            DetailField.from_text("first", "\x00" * 12_000 + "a" * 10_000),
+            DetailField.from_text("second", "\x1b" * 12_000 + "b" * 10_000),
+            DetailField.from_text("third", "c" * 20_000),
+        ),
+    )
+    assert len(record.details) == 2
+    for detail in record.details:
+        matches = marker_pattern.findall(detail.preview.text)
+        assert len(matches) == 1
+        assert int(matches[0]) == detail.preview.omitted_bytes
+
+
+def test_history_page_rejects_silent_output_truncation() -> None:
+    events = tuple(Event(kind=EventKind.ASSISTANT, text=str(index)) for index in range(201))
+    with pytest.raises(SourceContractError):
+        HistoryPage(events=events)
 
 
 def test_adversarial_bounds_cover_names_details_groups_and_gaps() -> None:
@@ -324,7 +405,6 @@ def test_raw_text_preserves_literal_markup_and_is_bounded() -> None:
     raw = "[bold]\\literal " + "x" * (20 * 1024)
     fact = event_to_fact(
         Event(kind=EventKind.ASSISTANT, text="clipped", raw_text=raw),
-        historical=True,
     )
     assert fact.details[0].name == "raw"
     assert fact.details[0].preview.text.startswith("[bold]\\literal")
@@ -378,6 +458,31 @@ class RichObserver(LegacyCountingObserver):
                     native_id=f"native-{index}",
                     raw_index=index,
                 ),
+            ),
+        )
+
+
+class MultiRecordObserver(LegacyCountingObserver):
+    def __init__(self, path: Path, output_count: int = 2) -> None:
+        super().__init__(path)
+        self.output_count = output_count
+
+    def parse_record(self, line: str, index: int, *, clip_text: bool = True) -> ParsedRecord:
+        self.parse_calls += 1
+        return ParsedRecord(
+            events=tuple(
+                Event(kind=EventKind.ASSISTANT, text=f"{line}-event-{ordinal}", raw_index=index)
+                for ordinal in range(self.output_count)
+            ),
+            trajectory=tuple(
+                TrajectoryFact(
+                    kind=TrajectoryKind.ASSISTANT,
+                    source="multi-test",
+                    native_id=f"{line}-fact-{ordinal}",
+                    raw_index=index,
+                    event_ordinal=ordinal,
+                )
+                for ordinal in range(self.output_count)
             ),
         )
 
@@ -451,6 +556,58 @@ async def test_transcript_live_reads_emit_facts_and_history_pages_do_not_move_cu
     assert [event.text for event in live.events] == ["four"]
     assert [fact.native_id for fact in live.trajectory] == ["native-3"]
     assert observer.parse_calls == 4
+
+
+async def test_history_pages_keep_complete_multi_output_records(tmp_path) -> None:
+    path = tmp_path / "multi.jsonl"
+    path.write_text("one\ntwo\nthree\n", encoding="utf-8")
+    observer = MultiRecordObserver(path)
+    source = TranscriptSource(observer, cwd=str(tmp_path))
+    attached = await source.read()
+    assert attached.attached is not None
+    source.commit_attachment()
+
+    pages = []
+    page = await source.history_page(limit=2)
+    while True:
+        pages.append(page)
+        if page.older_cursor is None:
+            break
+        page = await source.history_page(before=page.older_cursor, limit=2)
+
+    events = [event.text for page in reversed(pages) for event in page.events]
+    facts = [fact.native_id for page in reversed(pages) for fact in page.trajectory]
+    assert events == [
+        "one-event-0",
+        "one-event-1",
+        "two-event-0",
+        "two-event-1",
+        "three-event-0",
+        "three-event-1",
+    ]
+    assert facts == [
+        "one-fact-0",
+        "one-fact-1",
+        "two-fact-0",
+        "two-fact-1",
+        "three-fact-0",
+        "three-fact-1",
+    ]
+
+
+async def test_history_page_reports_a_raw_record_over_limit(tmp_path) -> None:
+    path = tmp_path / "oversized-output.jsonl"
+    path.write_text("one\n", encoding="utf-8")
+    observer = MultiRecordObserver(path, output_count=3)
+    source = TranscriptSource(observer, cwd=str(tmp_path))
+    attached = await source.read()
+    assert attached.attached is not None
+    source.commit_attachment()
+
+    page = await source.history_page(limit=2)
+    assert page.error_code == "history_record_too_large"
+    assert page.older_cursor is None
+    assert page.has_older is False
 
 
 async def test_history_cursor_invalidates_after_rewrite_and_rotation(tmp_path) -> None:
@@ -600,9 +757,7 @@ async def test_baseline_fallback_identity_uses_source_offsets_across_reads(tmp_p
     assert newest.older_cursor is not None
     older = await fresh.history_page(before=newest.older_cursor, limit=1)
     historical_event = older.events[0]
-    historical_record = event_to_record(
-        historical_event, participant_id="p", source_epoch="epoch", historical=True
-    )
+    historical_record = event_to_record(historical_event, participant_id="p", source_epoch="epoch")
     assert live_event.raw_index == historical_event.raw_index
     assert live_event.source_offset == historical_event.source_offset
     assert live_record.record_id == historical_record.record_id

@@ -40,7 +40,6 @@ from theater.harness.contracts.launch import (
     ResumeLaunchOverlay,
     theater_binary,
 )
-from theater.harness.contracts.trajectory import FactLink, ParsedRecord, TrajectoryFact
 
 __all__ = [
     "APPROVALS",
@@ -50,14 +49,11 @@ __all__ = [
     "Event",
     "EventKind",
     "EventPath",
-    "FactLink",
     "Harness",
     "LaunchPlan",
     "NativeChild",
-    "ParsedRecord",
     "ResumeLaunchOverlay",
     "TokenUsage",
-    "TrajectoryFact",
     "clip",
     "clipper",
     "last_screen_line",

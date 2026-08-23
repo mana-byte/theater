@@ -21,7 +21,6 @@ from theater.harness.contracts.observation import (
     ScreenKind,
     ScreenReading,
 )
-from theater.harness.contracts.trajectory import ParsedRecord, TrajectoryFact
 from theater.harness.transcript.observer import (
     TranscriptObserver,
     enumerate_transcript_candidates,
@@ -30,11 +29,9 @@ from theater.harness.transcript.observer import (
 
 __all__ = [
     "HarnessObserver",
-    "ParsedRecord",
     "ScreenConfidence",
     "ScreenKind",
     "ScreenReading",
-    "TrajectoryFact",
     "TranscriptObserver",
     "enumerate_transcript_candidates",
     "open_participant_source",

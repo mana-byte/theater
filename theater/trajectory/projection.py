@@ -30,7 +30,7 @@ def fallback_record_id(
     source_offset: int | None = None,
 ) -> str:
     """Build the stable baseline identity from trusted source-local coordinates."""
-    if not source_epoch:
+    if not isinstance(source_epoch, str) or not source_epoch:
         raise ValueError("source_epoch must be non-empty")
     if type(raw_index) is not int or raw_index < 0:
         raise ValueError("raw_index must be a non-negative integer")
@@ -39,7 +39,7 @@ def fallback_record_id(
     if source_offset is not None and (type(source_offset) is not int or source_offset < 0):
         raise ValueError("source_offset must be a non-negative integer or null")
     coordinate = raw_index if source_offset is None else source_offset
-    return f"{source_epoch}:{coordinate}:{event_ordinal}"
+    return _bounded_identity(f"{source_epoch}:{coordinate}:{event_ordinal}", "fallback")
 
 
 def record_id_for_fact(fact: TrajectoryFact, source_epoch: str) -> str:
@@ -59,7 +59,6 @@ def event_to_fact(
     *,
     source: str = "baseline",
     event_ordinal: int = 0,
-    historical: bool = False,
 ) -> TrajectoryFact:
     """Project one normalized control event without assigning a participant."""
     kind, lane = _kind_and_lane(event.kind)
@@ -135,7 +134,6 @@ def event_to_record(
     source_epoch: str,
     event_ordinal: int = 0,
     source: str = "baseline",
-    historical: bool = False,
 ) -> TrajectoryRecord:
     """Project one normalized Event into a canonical trajectory record."""
     return fact_to_record(
@@ -143,7 +141,6 @@ def event_to_record(
             event,
             source=source,
             event_ordinal=event_ordinal,
-            historical=historical,
         ),
         participant_id=participant_id,
         source_epoch=source_epoch,
@@ -156,7 +153,6 @@ def project_events(
     participant_id: str,
     source_epoch: str,
     source: str = "baseline",
-    historical: bool = False,
 ) -> tuple[TrajectoryRecord, ...]:
     """Project events while assigning ordinals only within each raw record."""
     ordinals: dict[int, int] = {}
@@ -172,7 +168,6 @@ def project_events(
                 source_epoch=source_epoch,
                 event_ordinal=ordinal,
                 source=source,
-                historical=historical,
             )
         )
     return tuple(records)
@@ -239,12 +234,19 @@ def _usage(event: Event) -> TrajectoryUsage | None:
 
 
 def _namespaced_native_id(native_id: str, source_epoch: str) -> str:
-    if native_id.startswith("bus:"):
-        return native_id
-    value = f"{source_epoch}:{native_id}"
-    if len(value.encode("utf-8")) <= TRAJECTORY_IDENTIFIER_MAX_BYTES:
+    return _bounded_identity(f"{source_epoch}:{native_id}", "native")
+
+
+def _bounded_identity(value: str, prefix: str) -> str:
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("trajectory identity must contain valid UTF-8") from exc
+    if any(ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in value):
+        raise ValueError("trajectory identity must not contain control characters")
+    if len(encoded) <= TRAJECTORY_IDENTIFIER_MAX_BYTES:
         return value
-    return f"native:{sha256(value.encode('utf-8')).hexdigest()}"
+    return f"{prefix}:{sha256(encoded).hexdigest()}"
 
 
 __all__ = [
