@@ -40,6 +40,7 @@ from theater.regie.trajectory.ledger import (
     LedgerRecordHovered,
     LedgerRetryClicked,
 )
+from theater.regie.trajectory.ordering import TrajectoryOrdering, build_ordering
 from theater.regie.trajectory.render import sanitize_text
 from theater.regie.trajectory.search import FilterCounts, SearchCache, SearchResult, search_records
 from theater.regie.trajectory.state import ParticipantTrajectoryState, TrajectoryStateStore
@@ -55,6 +56,7 @@ from theater.trajectory import (
     TrajectoryKind,
     TrajectoryLane,
     TrajectoryPage,
+    TrajectoryRecord,
     TrajectoryStatus,
 )
 
@@ -216,11 +218,11 @@ class TrajectoryView(Vertical):
         if self.is_mounted:
             self._refresh()
 
-    def _make_search_key(self) -> tuple[object, ...]:
-        records = tuple((record.record_id, record.revision) for record in self.state.record_list)
+    def _make_search_key(self, records: tuple[TrajectoryRecord, ...]) -> tuple[object, ...]:
+        record_key = tuple((record.record_id, record.revision) for record in records)
         groups = tuple(self._group_signature(group) for group in self.state.groups)
         return (
-            records,
+            record_key,
             self.state.query,
             frozenset(self.state.lane_filters),
             frozenset(self.state.kind_filters),
@@ -241,13 +243,15 @@ class TrajectoryView(Vertical):
             tuple(TrajectoryView._group_signature(child) for child in group.children),
         )
 
-    def _recompute_search(self) -> None:
-        key = self._make_search_key()
+    def _recompute_search(
+        self, records: tuple[TrajectoryRecord, ...], ordering: TrajectoryOrdering
+    ) -> None:
+        key = self._make_search_key(records)
         if key == self._search_key:
             return
         self._search_key = key
         self._search_result = search_records(
-            self.state.record_list,
+            records,
             query=self.state.query,
             lane_filters=self.state.lane_filters,
             kind_filters=self.state.kind_filters,
@@ -256,6 +260,7 @@ class TrajectoryView(Vertical):
             groups=self.state.groups,
             collapsed_groups=self.state.collapsed_groups,
             cache=self._search_cache,
+            ordering=ordering,
         )
 
     @staticmethod
@@ -268,8 +273,10 @@ class TrajectoryView(Vertical):
         return True
 
     def _refresh(self, *, recompute: bool = True) -> None:
+        ordering = build_ordering(tuple(self.state.records.values()), self.state.groups)
+        records = ordering.records
         if recompute:
-            self._recompute_search()
+            self._recompute_search(records, ordering)
         if not self.is_mounted:
             return
         timeline = self.query_one("#trajectory-timeline", Timeline)
@@ -282,7 +289,7 @@ class TrajectoryView(Vertical):
             search.value = self.state.query
         timeline_offset: int | None = self.state.timeline_scroll
         if self.state.follow_tail:
-            timeline_offset = max(0, len(self.state.record_list) - timeline._available_cells())
+            timeline_offset = max(0, len(records) - timeline._available_cells())
             self.state.timeline_scroll = timeline_offset
         else:
             timeline_offset = (
@@ -291,7 +298,7 @@ class TrajectoryView(Vertical):
                 else timeline_offset
             )
         timeline.update_records(
-            self.state.record_list,
+            records,
             matched_ids=self._search_result.matched_ids,
             hovered_id=self.state.hovered_id,
             selected_id=self.state.selected_id,
@@ -300,7 +307,7 @@ class TrajectoryView(Vertical):
         )
         self.state.timeline_scroll = timeline.horizontal_offset
         ledger.update_rows(
-            self.state.record_list,
+            records,
             self._search_result,
             selected_id=self.state.selected_id,
             hovered_id=self.state.hovered_id,
@@ -357,7 +364,8 @@ class TrajectoryView(Vertical):
 
     @property
     def search_result(self) -> SearchResult:
-        self._recompute_search()
+        ordering = build_ordering(tuple(self.state.records.values()), self.state.groups)
+        self._recompute_search(ordering.records, ordering)
         return self._search_result
 
     @property

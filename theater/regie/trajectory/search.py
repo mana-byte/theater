@@ -7,8 +7,8 @@ from collections.abc import Iterable, Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from typing import TypeVar
 
-from theater.regie.trajectory.constants import MAX_SEARCH_CACHE_ENTRIES, TRAJECTORY_UI_RECORD_LIMIT
-from theater.regie.trajectory.ordering import canonical_group_records, complete_groups, group_units
+from theater.regie.trajectory.constants import MAX_SEARCH_CACHE_ENTRIES
+from theater.regie.trajectory.ordering import TrajectoryOrdering, build_ordering
 from theater.trajectory import (
     GroupKind,
     TrajectoryGroup,
@@ -220,20 +220,20 @@ def _filter_counts(records: Sequence[TrajectoryRecord], filters: TrajectoryFilte
     )
 
 
-def _subtree_record_ids(groups: Sequence[TrajectoryGroup]) -> dict[int, frozenset[str]]:
-    indexed: dict[int, frozenset[str]] = {}
+def _matching_groups(groups: Sequence[TrajectoryGroup], matched_ids: frozenset[str]) -> set[int]:
+    matches: set[int] = set()
 
-    def visit(group: TrajectoryGroup) -> frozenset[str]:
-        record_ids = set(group.record_ids)
+    def visit(group: TrajectoryGroup) -> bool:
+        found = any(record_id in matched_ids for record_id in group.record_ids)
         for child in group.children:
-            record_ids.update(visit(child))
-        result = frozenset(record_ids)
-        indexed[id(group)] = result
-        return result
+            found = visit(child) or found
+        if found:
+            matches.add(id(group))
+        return found
 
     for group in groups:
         visit(group)
-    return indexed
+    return matches
 
 
 def _group_paths(
@@ -265,11 +265,12 @@ def search_records(
     groups: Sequence[TrajectoryGroup] = (),
     collapsed_groups: Set[str] = frozenset(),
     cache: SearchCache | None = None,
+    ordering: TrajectoryOrdering | None = None,
 ) -> SearchResult:
     """Filter source order and retain every visible structural group header."""
-    source_records = tuple(records[:TRAJECTORY_UI_RECORD_LIMIT])
-    complete = complete_groups(source_records, groups)
-    bounded_records = canonical_group_records(source_records, complete)
+    ordered = ordering or build_ordering(records, groups)
+    complete = ordered.groups
+    bounded_records = ordered.records
     active = filters or TrajectoryFilters.from_sets(
         lanes=lane_filters,
         kinds=kind_filters,
@@ -297,11 +298,11 @@ def search_records(
 
     matched_ids = frozenset(record.record_id for record in matched)
     paths = _group_paths(complete)
-    subtree_ids = _subtree_record_ids(complete)
+    matching_groups = _matching_groups(complete, matched_ids)
     entries: list[LedgerEntry] = []
 
     def visit(group: TrajectoryGroup, depth: int) -> None:
-        if not (subtree_ids[id(group)] & matched_ids):
+        if id(group) not in matching_groups:
             return
         collapsed = group.group_id in collapsed_groups
         entries.append(
@@ -315,7 +316,7 @@ def search_records(
         )
         if collapsed:
             return
-        for unit in group_units(source_records, group):
+        for unit in ordered.group_units(group):
             if isinstance(unit, str) and unit in matched_ids:
                 entries.append(
                     LedgerEntry(
@@ -326,7 +327,7 @@ def search_records(
                         group_kind=group.kind,
                     )
                 )
-            elif isinstance(unit, TrajectoryGroup) and subtree_ids[id(unit)] & matched_ids:
+            elif isinstance(unit, TrajectoryGroup) and id(unit) in matching_groups:
                 visit(unit, depth + 1)
 
     for group in complete:

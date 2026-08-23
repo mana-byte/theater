@@ -22,6 +22,7 @@ from theater.regie.trajectory.inspector import (
 )
 from theater.regie.trajectory.ledger import Ledger, LedgerRetryClicked
 from theater.regie.trajectory.models import decode_delta, decode_page
+from theater.regie.trajectory.ordering import build_ordering
 from theater.regie.trajectory.render import (
     inspector_content,
     inspector_text,
@@ -35,10 +36,12 @@ from theater.regie.trajectory.view import TrajectoryParticipantSelected, Traject
 from theater.trajectory import (
     ContentFormat,
     DetailField,
+    GroupKind,
     PanelState,
     PanelStateInfo,
     Timing,
     TimingProvenance,
+    TrajectoryGroup,
     TrajectoryLane,
     TrajectoryRecord,
 )
@@ -224,6 +227,31 @@ async def test_timeline_and_ledger_preserve_nested_group_unit_chronology() -> No
 
         assert view.query_one(Timeline).span_ids == ledger_ids
         assert ledger_ids == ("step-first", "direct-middle", "step-late", "direct-last")
+
+
+def test_ordering_emits_many_nested_group_records_once_in_source_order() -> None:
+    records = [record(f"r{index}", index=index) for index in range(128)]
+    group = TrajectoryGroup(
+        group_id="group-0",
+        kind=GroupKind.STEP,
+        label="Group 0",
+        record_ids=("r0",),
+    )
+    for index in range(1, len(records)):
+        group = TrajectoryGroup(
+            group_id=f"group-{index}",
+            kind=GroupKind.STEP,
+            label=f"Group {index}",
+            record_ids=(f"r{index}",),
+            children=(group,),
+        )
+
+    ordered = build_ordering(records, (group,)).records
+
+    assert tuple(record.record_id for record in ordered) == tuple(
+        record.record_id for record in records
+    )
+    assert len({record.record_id for record in ordered}) == len(records)
 
 
 async def test_duration_mode_marks_only_independently_reported_intervals() -> None:
