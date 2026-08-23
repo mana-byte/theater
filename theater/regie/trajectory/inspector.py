@@ -11,19 +11,20 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from theater.regie.trajectory.constants import (
-    DEFAULT_INSPECTOR_RATIO,
     INSPECTOR_MIN_HEIGHT,
     INSPECTOR_RESIZE_STEP,
     INSPECTOR_SCROLL_STEP,
-    MAX_INSPECTOR_RATIO,
-    MIN_INSPECTOR_RATIO,
+    TRAJECTORY_INSPECTOR_RATIO_DEFAULT,
+    TRAJECTORY_INSPECTOR_RATIO_MAX,
+    TRAJECTORY_INSPECTOR_RATIO_MIN,
 )
-from theater.regie.trajectory.models import InspectorTab, TrajectoryRecord
+from theater.regie.trajectory.enums import InspectorTab
 from theater.regie.trajectory.render import (
     inspector_content,
     inspector_link_line_ids,
     tabs_for_record,
 )
+from theater.trajectory import TrajectoryRecord
 
 
 class InspectorTabChanged(Message):
@@ -58,7 +59,7 @@ class Inspector(Static):
     DEFAULT_CSS = f"""
     Inspector {{
         width: 1fr;
-        height: {DEFAULT_INSPECTOR_RATIO * 100:.0f}%;
+        height: {TRAJECTORY_INSPECTOR_RATIO_DEFAULT * 100:.0f}%;
         min-height: {INSPECTOR_MIN_HEIGHT};
         border-top: solid $panel;
         padding: 0 1;
@@ -74,7 +75,7 @@ class Inspector(Static):
         self._record = record
         self._tabs = tabs_for_record(record)
         self._tab = self._tabs[0]
-        self._ratio = DEFAULT_INSPECTOR_RATIO
+        self._ratio = TRAJECTORY_INSPECTOR_RATIO_DEFAULT
         self._maximized = False
         self._link_line_ids: dict[int, str] = {}
         self._resizing = False
@@ -150,7 +151,10 @@ class Inspector(Static):
             or not isfinite(float(ratio))
         ):
             raise ValueError("inspector ratio must be finite")
-        self._ratio = max(MIN_INSPECTOR_RATIO, min(MAX_INSPECTOR_RATIO, float(ratio)))
+        self._ratio = max(
+            TRAJECTORY_INSPECTOR_RATIO_MIN,
+            min(TRAJECTORY_INSPECTOR_RATIO_MAX, float(ratio)),
+        )
         self._apply_height()
         return self._ratio
 

@@ -1,35 +1,8 @@
-"""Standalone régie trajectory components.
-
-The package boundary is deliberately narrow: callers provide decoded-compatible
-daemon clients to :class:`TrajectoryController` and mount :class:`TrajectoryView`.
-All wire validation, bounded participant state, search, and focus messages stay
-inside this package until the app integration wave.
-"""
+"""Standalone Régie trajectory components and their narrow adapter surface."""
 
 from theater.regie.trajectory.controller import DaemonClientCompatible, TrajectoryController
-from theater.regie.trajectory.models import (
-    ContentFormat,
-    ContentPreview,
-    Coverage,
-    DetailField,
-    FilterDimension,
-    FocusRegion,
-    InspectorTab,
-    Lane,
-    OrderMode,
-    PanelInfo,
-    PanelStatus,
-    RecordKind,
-    RecordStatus,
-    Timing,
-    TimingProvenance,
-    TrajectoryFollow,
-    TrajectoryPage,
-    TrajectoryRecord,
-    Usage,
-    WireDecodeError,
-    clip_utf8,
-)
+from theater.regie.trajectory.enums import FilterDimension, FocusRegion, InspectorTab, OrderMode
+from theater.regie.trajectory.models import decode_delta, decode_page
 from theater.regie.trajectory.search import (
     FilterCounts,
     SearchResult,
@@ -45,41 +18,68 @@ from theater.regie.trajectory.view import (
     TrajectoryRetryRequested,
     TrajectoryView,
 )
+from theater.trajectory import (
+    ContentFormat,
+    ContentPreview,
+    DetailField,
+    LinkDirection,
+    PanelState,
+    PanelStateInfo,
+    ParticipantLink,
+    Timing,
+    TimingProvenance,
+    TrajectoryCoverage,
+    TrajectoryDelta,
+    TrajectoryGroup,
+    TrajectoryKind,
+    TrajectoryLane,
+    TrajectoryPage,
+    TrajectoryRecord,
+    TrajectoryStatus,
+    TrajectoryUpsert,
+    TrajectoryUsage,
+    TrajectoryValidationError,
+)
 
 __all__ = [
     "ContentFormat",
     "ContentPreview",
-    "Coverage",
     "DaemonClientCompatible",
     "DetailField",
     "FilterCounts",
     "FilterDimension",
     "FocusRegion",
     "InspectorTab",
-    "Lane",
+    "LinkDirection",
     "OrderMode",
-    "PanelInfo",
-    "PanelStatus",
+    "PanelState",
+    "PanelStateInfo",
+    "ParticipantLink",
     "ParticipantTrajectoryState",
-    "RecordKind",
-    "RecordStatus",
     "ReturnToTree",
     "SearchResult",
     "Timing",
     "TimingProvenance",
     "TrajectoryController",
     "TrajectoryCopyRequested",
+    "TrajectoryCoverage",
+    "TrajectoryDelta",
     "TrajectoryFilters",
-    "TrajectoryFollow",
+    "TrajectoryGroup",
+    "TrajectoryKind",
+    "TrajectoryLane",
     "TrajectoryPage",
     "TrajectoryParticipantSelected",
     "TrajectoryRecord",
     "TrajectoryRetryRequested",
     "TrajectoryStateStore",
+    "TrajectoryStatus",
+    "TrajectoryUpsert",
+    "TrajectoryUsage",
+    "TrajectoryValidationError",
     "TrajectoryView",
-    "Usage",
-    "WireDecodeError",
-    "clip_utf8",
+    "decode_delta",
+    "decode_page",
     "fuzzy_subsequence_score",
     "search_records",
 ]

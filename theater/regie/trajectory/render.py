@@ -3,67 +3,70 @@
 from __future__ import annotations
 
 import json
-import re
 
 from rich.text import Text
 
 from theater.regie.trajectory.constants import (
     KIND_GLYPHS_BY_VALUE,
     LANE_GLYPHS_BY_VALUE,
-    MAX_DETAIL_BYTES,
     MAX_TOOLTIP_BYTES,
     STYLE_DURATION,
     STYLE_MATCHED,
     TOOLTIP_DELAY,
+    TRAJECTORY_DETAIL_RECORD_MAX_BYTES,
 )
-from theater.regie.trajectory.models import (
+from theater.regie.trajectory.enums import InspectorTab
+from theater.trajectory import (
     ContentFormat,
     DetailField,
-    InspectorTab,
-    Lane,
     ParticipantLink,
-    RecordKind,
-    RecordStatus,
     Timing,
+    TrajectoryKind,
+    TrajectoryLane,
     TrajectoryRecord,
-    clip_utf8,
+    TrajectoryStatus,
+    bounded_preview,
+)
+from theater.trajectory import (
+    sanitize_text as _sanitize_text,
 )
 
-_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]")
-_ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
-
-LANE_GLYPHS = {Lane(value): glyph for value, glyph in LANE_GLYPHS_BY_VALUE.items()}
-KIND_GLYPHS = {RecordKind(value): glyph for value, glyph in KIND_GLYPHS_BY_VALUE.items()}
+LANE_GLYPHS = {TrajectoryLane(value): glyph for value, glyph in LANE_GLYPHS_BY_VALUE.items()}
+KIND_GLYPHS = {TrajectoryKind(value): glyph for value, glyph in KIND_GLYPHS_BY_VALUE.items()}
 
 
 def sanitize_text(value: str) -> str:
-    """Remove terminal controls while preserving literal data characters."""
-    return _CONTROL_RE.sub("�", _ANSI_RE.sub("", value))
+    """Make terminal controls visible while preserving literal brackets and slashes."""
+    return _sanitize_text(value)
 
 
 def plain_text(value: str) -> str:
-    """Return safe plain text for the bounded copy path."""
-    return _CONTROL_RE.sub("�", _ANSI_RE.sub("", value))
+    """Return safe plain text for bounded copy."""
+    return sanitize_text(value)
 
 
-def lane_glyph(lane: Lane) -> str:
+def _compact(value: str, limit: int) -> str:
+    return sanitize_text(value).replace("\r", " ").replace("\n", " ")[:limit]
+
+
+def lane_glyph(lane: TrajectoryLane) -> str:
     return LANE_GLYPHS.get(lane, "?")
 
 
-def kind_glyph(kind: RecordKind) -> str:
+def kind_glyph(kind: TrajectoryKind) -> str:
     return KIND_GLYPHS.get(kind, "?")
 
 
-def status_label(status: RecordStatus) -> str:
+def status_label(status: TrajectoryStatus) -> str:
     return status.value.replace("_", " ")
 
 
 def format_duration(timing: Timing | None) -> str:
-    if timing is None or not timing.supports_duration or timing.duration_ms is None:
+    if timing is None or timing.duration_ms is None:
         return "—"
     milliseconds = timing.duration_ms
     if milliseconds < 1_000:
-        return f"{milliseconds}ms"
+        return f"{milliseconds:g}ms"
     seconds = milliseconds / 1_000
     if seconds < 60:
         return f"{seconds:.1f}s"
@@ -78,32 +81,41 @@ def record_line(
     selected: bool = False,
     hovered: bool = False,
     duration_mode: bool = False,
+    depth: int = 0,
 ) -> Text:
-    """Render one compact ledger line without creating a row widget."""
+    """Render one compact, non-wrapping ledger line."""
     marker = "▶" if selected else ("·" if hovered else " ")
     duration = format_duration(record.timing)
-    line = Text()
     position = f"{index:>4}" if not duration_mode else f"dur {duration:>7}"
-    line.append(f"{marker} {position} ")
+    indent = "  " * depth
+    line = Text(no_wrap=True, overflow="crop")
+    line.append(f"{indent}{marker} {position} ")
     line.append(f"{kind_glyph(record.kind)} ")
-    line.append(f"{sanitize_text(record.source[:16]):<16} ")
-    line.append(f"{sanitize_text(record.summary[:64])} ")
+    line.append(f"{_compact(record.source, 16):<16} ")
+    line.append(f"{_compact(record.summary, 64)} ")
     line.append(f"{status_label(record.status):<11} ")
     line.append(duration, style=STYLE_DURATION if duration_mode else STYLE_MATCHED)
     return line
 
 
-def group_line(label: str, *, collapsed: bool) -> Text:
+def group_line(label: str, *, collapsed: bool, depth: int = 0) -> Text:
     glyph = "▸" if collapsed else "▾"
-    return Text(f"{glyph} {sanitize_text(label)}")
+    return Text(f"{'  ' * depth}{glyph} {_compact(label, 120)}", no_wrap=True, overflow="crop")
 
 
 def tabs_for_record(record: TrajectoryRecord | None) -> tuple[InspectorTab, ...]:
     if record is None:
         return (InspectorTab.SUMMARY,)
-    if record.kind in {RecordKind.SYSTEM, RecordKind.CONTEXT_CHANGE}:
+    if record.kind in {TrajectoryKind.SYSTEM, TrajectoryKind.CONTEXT}:
         return (InspectorTab.CURRENT, InspectorTab.PREVIOUS, InspectorTab.DIFF)
-    if record.kind in {RecordKind.ASSISTANT, RecordKind.REASONING} or record.lane == Lane.MODEL:
+    if (
+        record.kind
+        in {
+            TrajectoryKind.ASSISTANT,
+            TrajectoryKind.REASONING,
+        }
+        or record.lane is TrajectoryLane.MODEL
+    ):
         return (
             InspectorTab.SUMMARY,
             InspectorTab.OUTPUT,
@@ -111,11 +123,18 @@ def tabs_for_record(record: TrajectoryRecord | None) -> tuple[InspectorTab, ...]
             InspectorTab.USAGE,
             InspectorTab.TIMING,
         )
-    if record.kind in {RecordKind.TOOL_CALL, RecordKind.TOOL_RESULT} or record.lane == Lane.TOOLS:
+    if (
+        record.kind
+        in {
+            TrajectoryKind.TOOL_CALL,
+            TrajectoryKind.TOOL_RESULT,
+        }
+        or record.lane is TrajectoryLane.TOOLS
+    ):
         return (InspectorTab.SUMMARY, InspectorTab.INPUT, InspectorTab.RESULT, InspectorTab.TIMING)
-    if record.kind in {RecordKind.USER} or record.lane == Lane.INPUT:
+    if record.kind is TrajectoryKind.USER or record.lane is TrajectoryLane.INPUT:
         return (InspectorTab.PREVIEW, InspectorTab.RAW, InspectorTab.SOURCE)
-    if record.lane == Lane.THEATER:
+    if record.lane is TrajectoryLane.THEATER:
         return (InspectorTab.SUMMARY, InspectorTab.PAYLOAD, InspectorTab.TIMING)
     return (InspectorTab.SUMMARY, InspectorTab.TIMING)
 
@@ -128,10 +147,9 @@ _TAB_FIELD_ALIASES: dict[InspectorTab, frozenset[str]] = {
     InspectorTab.PREVIEW: frozenset({"content", "input", "preview", "prompt", "text"}),
     InspectorTab.RAW: frozenset({"raw", "raw_text", "source_text", "transcript"}),
     InspectorTab.PAYLOAD: frozenset({"data", "event", "message", "payload"}),
-    InspectorTab.USAGE: frozenset({"usage"}),
-    InspectorTab.CURRENT: frozenset({"context_current", "current", "current_context", "state"}),
+    InspectorTab.CURRENT: frozenset({"current", "context_current", "current_context", "state"}),
     InspectorTab.PREVIOUS: frozenset(
-        {"context_previous", "previous", "previous_context", "previous_state"}
+        {"previous", "context_previous", "previous_context", "previous_state"}
     ),
     InspectorTab.DIFF: frozenset({"context_diff", "diff", "changes"}),
 }
@@ -147,34 +165,41 @@ def _fields_for_tab(record: TrajectoryRecord, tab: InspectorTab) -> tuple[Detail
 
 
 def _format_detail(field: DetailField) -> str:
-    value = field.value
-    if value.format in {ContentFormat.IMAGE, ContentFormat.BINARY}:
-        return f"{value.format.value} metadata ({value.original_bytes} bytes)"
-    if value.format is ContentFormat.JSON:
+    preview = field.preview
+    if field.format in {ContentFormat.IMAGE, ContentFormat.BINARY}:
+        total = preview.encoded_bytes + preview.omitted_bytes
+        return f"{field.format.value} metadata ({total} bytes)"
+    if field.format is ContentFormat.JSON:
         try:
-            return json.dumps(json.loads(value.text), ensure_ascii=False, indent=2, sort_keys=True)
+            return json.dumps(
+                json.loads(preview.text), ensure_ascii=False, indent=2, sort_keys=True
+            )
         except (TypeError, ValueError):
-            return plain_text(value.text)
-    return plain_text(value.text)
+            return plain_text(preview.text)
+    return plain_text(preview.text)
 
 
 def _participant_line(link: ParticipantLink) -> str:
-    return f"participant {link.direction.value}: {link.participant_id} {link.label or ''}".rstrip()
+    direction = link.direction.value
+    return f"participant {direction}: {link.participant_id} ({link.relation})"
 
 
 def _inspector_lines(  # noqa: PLR0912
     record: TrajectoryRecord | None, tab: InspectorTab
-) -> tuple[list[str], list[tuple[int, str]]]:
+) -> tuple[list[str], dict[int, str]]:
     if record is None:
-        return ["No record selected."], []
+        return ["No record selected."], {}
     lines = [
         f"{record.kind.value} · {record.source} · {status_label(record.status)}",
-        record.summary,
     ]
-    link_lines: list[tuple[int, str]] = []
+    lines.extend(record.summary.split("\n"))
+    link_lines: dict[int, str] = {}
 
     def append_fields(fields: tuple[DetailField, ...]) -> None:
-        lines.extend(f"{field.name}: {_format_detail(field)}" for field in fields)
+        for field in fields:
+            values = _format_detail(field).split("\n")
+            lines.append(f"{field.name}: {values[0]}")
+            lines.extend(values[1:])
 
     if tab is InspectorTab.SUMMARY:
         append_fields(record.details[:8])
@@ -183,97 +208,85 @@ def _inspector_lines(  # noqa: PLR0912
         InspectorTab.RESULT,
         InspectorTab.PAYLOAD,
         InspectorTab.RAW,
-    }:
-        fields = _fields_for_tab(record, tab)
-        append_fields(fields or record.details)
-    elif tab in {
         InspectorTab.INPUT,
         InspectorTab.REASONING,
         InspectorTab.PREVIEW,
-        InspectorTab.CURRENT,
-        InspectorTab.PREVIOUS,
-        InspectorTab.DIFF,
     }:
         fields = _fields_for_tab(record, tab)
         if fields:
             append_fields(fields)
-        elif tab is InspectorTab.CURRENT:
-            lines.append("No current context supplied.")
-        elif tab is InspectorTab.PREVIOUS:
-            lines.append("No previous context supplied.")
-        elif tab is InspectorTab.DIFF:
-            lines.append("No context diff supplied.")
-    elif tab is InspectorTab.USAGE:
+        elif tab not in {InspectorTab.SUMMARY}:
+            lines.append(f"No {tab.value} supplied.")
+    elif tab in {InspectorTab.CURRENT, InspectorTab.PREVIOUS, InspectorTab.DIFF}:
         fields = _fields_for_tab(record, tab)
         if fields:
             append_fields(fields)
         else:
+            lines.append(f"No {tab.value} context supplied.")
+    elif tab is InspectorTab.USAGE:
+        if record.usage is not None:
             lines.append(
-                json.dumps(
-                    record.usage.to_wire() if record.usage else "No usage recorded.",
-                    ensure_ascii=False,
-                    indent=2,
-                    sort_keys=True,
-                )
+                json.dumps(record.usage.to_wire(), ensure_ascii=False, indent=2, sort_keys=True)
             )
+        else:
+            lines.append("No usage recorded.")
     elif tab is InspectorTab.TIMING:
         lines.append(f"Duration: {format_duration(record.timing)}")
-        if record.timing:
+        if record.timing is not None:
             lines.extend(
-                value
-                for value in (record.timing.started_at, record.timing.finished_at)
-                if value is not None
+                (
+                    f"Start: {record.timing.start}",
+                    f"End: {record.timing.end}",
+                    f"Provenance: {record.timing.provenance.value}",
+                )
             )
     elif tab is InspectorTab.SOURCE:
-        lines.append(f"Source: {record.source}")
-        if record.source_epoch:
-            lines.append(f"Epoch: {record.source_epoch}")
+        lines.extend((f"Source: {record.source}", f"Epoch: {record.source_epoch}"))
 
     if tab not in {InspectorTab.USAGE, InspectorTab.TIMING, InspectorTab.SOURCE}:
         for link in record.links:
             lines.append(_participant_line(link))
-            link_lines.append((len(lines) - 1, link.participant_id))
+            link_lines[len(lines) - 1] = link.participant_id
     return lines, link_lines
+
+
+def _bounded_lines(lines: list[str]) -> str:
+    return bounded_preview(
+        "\n".join(plain_text(line) for line in lines),
+        max_bytes=TRAJECTORY_DETAIL_RECORD_MAX_BYTES,
+    ).text
 
 
 def inspector_text(record: TrajectoryRecord | None, tab: InspectorTab) -> str:
     """Build the exact bounded text exposed by the active inspector tab."""
     lines, _ = _inspector_lines(record, tab)
-    text = "\n".join(plain_text(line) for line in lines)
-    clipped, _, _ = clip_utf8(text, MAX_DETAIL_BYTES)
-    return clipped
+    return _bounded_lines(lines)
 
 
 def inspector_link_line_ids(record: TrajectoryRecord | None, tab: InspectorTab) -> dict[int, str]:
-    lines, link_lines = _inspector_lines(record, tab)
-    safe_lines = [plain_text(line) for line in lines]
-    text, _, _ = clip_utf8("\n".join(safe_lines), MAX_DETAIL_BYTES)
-    visible_lines = text.splitlines()
-    result: dict[int, str] = {}
-    for entry_index, participant_id in link_lines:
-        line_index = sum(line.count("\n") + 1 for line in safe_lines[:entry_index])
-        expected = safe_lines[entry_index].splitlines()
-        if not expected:
-            continue
-        end = line_index + len(expected)
-        if end <= len(visible_lines) and visible_lines[line_index:end] == expected:
-            result.update(dict.fromkeys(range(line_index, end), participant_id))
-    return result
+    lines, links = _inspector_lines(record, tab)
+    bounded = _bounded_lines(lines).splitlines()
+    return {
+        line_index: participant_id
+        for line_index, participant_id in links.items()
+        if line_index < len(bounded) and bounded[line_index] == plain_text(lines[line_index])
+    }
 
 
 def inspector_content(record: TrajectoryRecord | None, tab: InspectorTab) -> Text:
-    safe = sanitize_text(inspector_text(record, tab))
-    safe, _, _ = clip_utf8(safe, MAX_DETAIL_BYTES)
-    return Text(safe)
+    """Return displayed inspector content without Rich markup interpretation."""
+    return Text(inspector_text(record, tab), no_wrap=False)
 
 
 def tooltip_text(record: TrajectoryRecord) -> str:
-    """Return a small bounded hover detail; keyboard inspection remains immediate."""
-    text = (
-        f"{record.kind.value} · {record.source}\n{record.summary}\n{format_duration(record.timing)}"
-    )
-    clipped, _, _ = clip_utf8(text, MAX_TOOLTIP_BYTES)
-    return clipped
+    """Return a small bounded hover detail."""
+    return bounded_preview(
+        (
+            f"{record.kind.value} · {record.source}\n"
+            f"{record.summary}\n{format_duration(record.timing)}"
+        ),
+        max_bytes=MAX_TOOLTIP_BYTES,
+    ).text
 
 
 def count_label(value: str, count: int) -> str:
@@ -282,8 +295,7 @@ def count_label(value: str, count: int) -> str:
 
 def details_size(record: TrajectoryRecord) -> int:
     return sum(
-        len(field.name.encode("utf-8")) + len(field.value.text.encode("utf-8"))
-        for field in record.details
+        len(field.name.encode("utf-8")) + field.preview.encoded_bytes for field in record.details
     )
 
 

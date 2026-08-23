@@ -1,4 +1,4 @@
-"""Generation-safe snapshot, paging, and long-poll coordination for trajectory views."""
+"""Generation-safe snapshot, paging, and long-poll coordination."""
 
 from __future__ import annotations
 
@@ -8,19 +8,24 @@ import inspect
 from collections.abc import Callable
 from typing import Protocol
 
-from theater.regie.trajectory.models import (
-    MAX_PAGE_RECORDS,
-    PanelInfo,
-    PanelStatus,
-    TrajectoryFollow,
-    TrajectoryPage,
-    WireDecodeError,
+from theater.regie.trajectory.constants import (
+    TRAJECTORY_FOLLOW_TIMEOUT_SECONDS,
+    TRAJECTORY_PAGE_RECORD_LIMIT,
 )
+from theater.regie.trajectory.models import decode_delta, decode_page
 from theater.regie.trajectory.state import ParticipantTrajectoryState, TrajectoryStateStore
+from theater.trajectory import (
+    PanelState,
+    PanelStateInfo,
+    TrajectoryDelta,
+    TrajectoryPage,
+    TrajectoryParticipantState,
+    TrajectoryValidationError,
+)
 
 
 class DaemonClientCompatible(Protocol):
-    """The tiny async surface needed from a régie daemon client."""
+    """The tiny async surface needed from a Régie daemon client."""
 
     async def call(self, method: str, **params: object) -> object: ...
 
@@ -34,14 +39,25 @@ async def _maybe_await(value: object) -> object:
     return value
 
 
-def _ensure_participant(value: object, participant_id: str, noun: str) -> object:
-    if getattr(value, "participant_id", None) != participant_id:
-        raise WireDecodeError(f"trajectory {noun} participant does not match its request")
-    return value
+def _validate_page(page: TrajectoryPage, participant_id: str) -> None:
+    if any(record.participant_id != participant_id for record in page.records):
+        raise TrajectoryValidationError("trajectory page contains a record for another participant")
+
+
+def _validate_delta(delta: TrajectoryDelta, participant_id: str) -> None:
+    if any(upsert.record.participant_id != participant_id for upsert in delta.upserts):
+        raise TrajectoryValidationError(
+            "trajectory delta contains an upsert for another participant"
+        )
+
+
+def _validate_stream(expected: str | None, actual: str | None, noun: str) -> None:
+    if actual != expected:
+        raise TrajectoryValidationError(f"{noun} stream does not match active stream")
 
 
 class TrajectoryController:
-    """Own disposable query/follow clients and reject every stale response."""
+    """Own disposable query/follow clients and reject stale responses."""
 
     def __init__(
         self,
@@ -49,15 +65,15 @@ class TrajectoryController:
         follow_client: DaemonClientCompatible | object,
         *,
         state_store: TrajectoryStateStore | None = None,
-        page_limit: int = MAX_PAGE_RECORDS,
-        follow_wait: float = 20.0,
+        page_limit: int = TRAJECTORY_PAGE_RECORD_LIMIT,
+        follow_wait: float = TRAJECTORY_FOLLOW_TIMEOUT_SECONDS,
     ) -> None:
         if query_client is follow_client:
             raise ValueError("trajectory query and follow clients must be distinct")
-        if not 1 <= page_limit <= MAX_PAGE_RECORDS:
-            raise ValueError(f"page_limit must be in [1, {MAX_PAGE_RECORDS}]")
-        if not 0 <= follow_wait <= 20:
-            raise ValueError("follow_wait must be in [0, 20]")
+        if not 1 <= page_limit <= TRAJECTORY_PAGE_RECORD_LIMIT:
+            raise ValueError(f"page_limit must be in [1, {TRAJECTORY_PAGE_RECORD_LIMIT}]")
+        if not 0 <= follow_wait <= TRAJECTORY_FOLLOW_TIMEOUT_SECONDS:
+            raise ValueError(f"follow_wait must be in [0, {TRAJECTORY_FOLLOW_TIMEOUT_SECONDS}]")
         self.query_client = query_client
         self.follow_client = follow_client
         self.state_store = state_store or TrajectoryStateStore()
@@ -86,7 +102,8 @@ class TrajectoryController:
     def state_for(self, participant_id: str) -> ParticipantTrajectoryState:
         before = set(self.state_store.participant_ids())
         state = self.state_store.get(participant_id)
-        for evicted in before - set(self.state_store.participant_ids()):
+        after = set(self.state_store.participant_ids())
+        for evicted in before - after:
             self._schedule_close_hint(evicted)
         return state
 
@@ -123,18 +140,6 @@ class TrajectoryController:
             raise TypeError(f"trajectory client does not implement {method}")
         return await _maybe_await(operation(**params))
 
-    @staticmethod
-    def _page(value: object, participant_id: str | None = None) -> TrajectoryPage:
-        if isinstance(value, TrajectoryPage):
-            return value
-        return TrajectoryPage.from_wire(value, participant_id=participant_id)
-
-    @staticmethod
-    def _follow(value: object, participant_id: str | None = None) -> TrajectoryFollow:
-        if isinstance(value, TrajectoryFollow):
-            return value
-        return TrajectoryFollow.from_wire(value, participant_id=participant_id)
-
     async def open(
         self,
         participant_id: str,
@@ -153,8 +158,9 @@ class TrajectoryController:
         generation = self._generation
         self._active_participant = participant_id
         state = self.state_for(participant_id)
+        state.loading = True
         if not state.records:
-            state.panel = PanelInfo(PanelStatus.LOADING)
+            state.panel = PanelStateInfo(PanelState.WAITING, "Loading trajectory…")
         state.retry_kind = None
         state.retry_message = ""
         self._publish(state)
@@ -162,9 +168,8 @@ class TrajectoryController:
         if before is not None:
             params["before"] = before
         try:
-            response = await self._call(self.query_client, "trajectory.snapshot", **params)
-            page = self._page(response, participant_id)
-            _ensure_participant(page, participant_id, "snapshot")
+            page = decode_page(await self._call(self.query_client, "trajectory.snapshot", **params))
+            _validate_page(page, participant_id)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -176,13 +181,18 @@ class TrajectoryController:
             return None
         state.apply_snapshot(page)
         self._publish(state)
-        if start_follow and page.panel.status not in {
-            PanelStatus.DEAD,
-            PanelStatus.EXTERNAL,
-            PanelStatus.MISSING,
-            PanelStatus.UNAVAILABLE,
-            PanelStatus.UNTRUSTED,
-        }:
+        participant_state = page.panel_state.participant_state
+        can_follow = participant_state not in {
+            TrajectoryParticipantState.DEAD,
+            TrajectoryParticipantState.EXTERNAL,
+            TrajectoryParticipantState.MISSING,
+        }
+        if (
+            start_follow
+            and can_follow
+            and page.panel_state.state not in {PanelState.UNAVAILABLE, PanelState.UNTRUSTED}
+            and page.stream_id is not None
+        ):
             await self.start_follow(participant_id, expected_generation=generation)
         return page
 
@@ -208,8 +218,9 @@ class TrajectoryController:
                 before=state.older_cursor,
                 limit=self.page_limit,
             )
-            page = self._page(response, participant_id)
-            _ensure_participant(page, participant_id, "page")
+            page = decode_page(response)
+            _validate_page(page, participant_id)
+            _validate_stream(state.stream_id, page.stream_id, "older page")
             if self._is_current(participant_id, generation):
                 state.apply_older(page)
                 self._publish(state)
@@ -220,7 +231,6 @@ class TrajectoryController:
             if self._is_current(participant_id, generation):
                 state.mark_retry("older", str(exc) or "Older trajectory page failed.")
                 self._publish(state)
-            return None
         finally:
             state.loading_older = False
         return result
@@ -246,19 +256,22 @@ class TrajectoryController:
         state = self.state_for(participant_id)
         try:
             while self._is_current(participant_id, generation):
+                if state.stream_id is None:
+                    return
                 response = await self._call(
                     self.follow_client,
                     "trajectory.follow",
                     id=participant_id,
                     stream_id=state.stream_id,
                     after=state.cursor,
-                    wait=min(20.0, self.follow_wait),
+                    wait=min(TRAJECTORY_FOLLOW_TIMEOUT_SECONDS, self.follow_wait),
                     limit=self.page_limit,
                 )
-                delta = self._follow(response, participant_id)
+                delta = decode_delta(response)
                 if not self._is_current(participant_id, generation):
                     return
-                _ensure_participant(delta, participant_id, "follow")
+                _validate_delta(delta, participant_id)
+                _validate_stream(state.stream_id, delta.stream_id, "follow")
                 if delta.resync_required:
                     state.mark_resync(
                         delta.reason or "The trajectory stream requires a fresh snapshot."
@@ -279,12 +292,13 @@ class TrajectoryController:
                 self._follow_task = None
 
     async def pause_follow(self, participant_id: str | None = None) -> None:
-        """Pause only tail movement; the long poll may continue collecting records."""
+        """Pause tail movement while the long poll remains cancellable."""
         participant_id = participant_id or self._active_participant
         if participant_id is None:
             return
-        self.state_for(participant_id).pause_follow()
-        self._publish(self.state_for(participant_id))
+        state = self.state_for(participant_id)
+        state.pause_follow()
+        self._publish(state)
 
     async def resume_follow(self, participant_id: str | None = None) -> bool:
         participant_id = participant_id or self._active_participant
@@ -341,7 +355,7 @@ class TrajectoryController:
         task.add_done_callback(self._close_hint_tasks.discard)
 
     async def close(self) -> None:
-        """Cancel follow and close both disposable client connections."""
+        """Cancel follow, issue close hints, and close both disposable clients."""
         if self._closed:
             return
         self._closed = True

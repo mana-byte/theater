@@ -2,16 +2,12 @@ from __future__ import annotations
 
 from textual.app import App, ComposeResult
 
+from theater.regie.trajectory.enums import FocusRegion
 from theater.regie.trajectory.inspector import Inspector
 from theater.regie.trajectory.ledger import Ledger
-from theater.regie.trajectory.models import (
-    FocusRegion,
-    PanelInfo,
-    PanelStatus,
-    TrajectoryRecord,
-)
 from theater.regie.trajectory.timeline import Timeline
 from theater.regie.trajectory.view import ReturnToTree, TrajectoryView
+from theater.trajectory import PanelState, PanelStateInfo, TrajectoryRecord
 
 
 def make_record(record_id: str, summary: str, *, turn_id: str | None = "t1") -> TrajectoryRecord:
@@ -20,13 +16,21 @@ def make_record(record_id: str, summary: str, *, turn_id: str | None = "t1") -> 
             "record_id": record_id,
             "revision": 1,
             "participant_id": "p1",
+            "source_epoch": "epoch",
             "lane": "model",
             "kind": "assistant",
             "source": "claude",
             "summary": summary,
             "status": "completed",
+            "raw_index": int(record_id.removeprefix("r") or 0),
             "turn_id": turn_id,
-            "details": {"output": summary},
+            "details": [
+                {
+                    "name": "output",
+                    "format": "text",
+                    "value": {"text": summary, "omitted_bytes": 0},
+                }
+            ],
         }
     )
 
@@ -38,11 +42,7 @@ class Host(App):
         self.returned = 0
 
     def compose(self) -> ComposeResult:
-        yield TrajectoryView(
-            "p1",
-            copy_request=self.copied.append,
-            id="trajectory",
-        )
+        yield TrajectoryView("p1", copy_request=self.copied.append, id="trajectory")
 
     def on_return_to_tree(self, _message: ReturnToTree) -> None:
         self.returned += 1
@@ -50,7 +50,7 @@ class Host(App):
 
 async def add_records(app: Host) -> TrajectoryView:
     view = app.query_one("#trajectory", TrajectoryView)
-    view.state.panel = PanelInfo(PanelStatus.READY)
+    view.state.panel = PanelStateInfo(PanelState.READY, participant_state="live")
     view.state.upsert([make_record("r1", "first"), make_record("r2", "second", turn_id=None)])
     view._refresh()
     return view
@@ -91,14 +91,16 @@ async def test_keys_route_regions_selection_search_reset_and_escape() -> None:
         assert app.returned == 1
 
 
-async def test_copy_is_injected_and_bounded_without_pane_access() -> None:
+async def test_copy_is_injected_and_literal_data_is_not_rich_escaped() -> None:
     copied: list[str] = []
     app = Host(copied=copied)
     async with app.run_test(size=(100, 30)) as pilot:
-        await add_records(app)
+        view = await add_records(app)
+        view.state.records["r2"] = make_record("r2", "second [literal] \\ path", turn_id=None)
+        view._refresh()
         await pilot.press("y")
         await pilot.pause()
 
         assert copied
         assert "second" in copied[0]
-        assert "[" not in copied[0] or "\\[" not in copied[0]
+        assert "[literal] \\ path" in copied[0]

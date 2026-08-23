@@ -1,97 +1,95 @@
-"""The single public adapter boundary for trajectory wire values and runtime state."""
+"""The sole Régie adapter boundary for canonical trajectory wire values."""
 
-from theater.regie.trajectory.constants import (
-    MAX_DETAIL_BYTES,
-    MAX_FIELD_BYTES,
-    MAX_INSPECTOR_RATIO,
-    MAX_LOADED_BYTES,
-    MAX_LOADED_RECORDS,
-    MAX_PAGE_RECORDS,
-    MAX_RESPONSE_BYTES,
-    MIN_INSPECTOR_RATIO,
-)
-from theater.regie.trajectory.enums import (
+from __future__ import annotations
+
+import json
+
+from theater.regie.trajectory.constants import TRAJECTORY_RESPONSE_MAX_BYTES
+from theater.regie.trajectory.enums import FilterDimension, FocusRegion, InspectorTab, OrderMode
+from theater.trajectory import (
     ContentFormat,
-    FilterDimension,
-    FocusRegion,
-    InspectorTab,
-    Lane,
-    LinkDirection,
-    OrderMode,
-    PanelStatus,
-    RecordKind,
-    RecordStatus,
-    TimingProvenance,
-)
-from theater.regie.trajectory.state import ParticipantTrajectoryState, TrajectoryStateStore
-from theater.regie.trajectory.wire import (
     ContentPreview,
-    Coverage,
     CoverageGap,
     DetailField,
-    FollowDelta,
-    GroupMetadata,
-    PanelInfo,
+    LinkDirection,
+    PanelState,
+    PanelStateInfo,
     ParticipantLink,
-    Record,
     Timing,
-    TrajectoryFollow,
+    TimingProvenance,
+    TrajectoryCoverage,
+    TrajectoryDelta,
+    TrajectoryGroup,
+    TrajectoryKind,
+    TrajectoryLane,
     TrajectoryPage,
     TrajectoryRecord,
-    Usage,
-    WireDecodeError,
+    TrajectoryStatus,
+    TrajectoryUpsert,
+    TrajectoryUsage,
+    TrajectoryValidationError,
+    bounded_preview,
     clip_utf8,
 )
 
 
-def decode_page(value: object, *, participant_id: str | None = None) -> TrajectoryPage:
-    """Decode one bounded snapshot/page response."""
-    return TrajectoryPage.from_wire(value, participant_id=participant_id)
+def decode_page(value: object) -> TrajectoryPage:
+    """Decode one canonical snapshot or older-page response."""
+    if isinstance(value, TrajectoryPage):
+        _reject_oversized(value.to_wire(), "trajectory page")
+        return value
+    _reject_oversized(value, "trajectory page")
+    return TrajectoryPage.from_wire(value)
 
 
-def decode_follow(value: object, *, participant_id: str | None = None) -> TrajectoryFollow:
-    """Decode one bounded ordinary follow response."""
-    return TrajectoryFollow.from_wire(value, participant_id=participant_id)
+def decode_delta(value: object) -> TrajectoryDelta:
+    """Decode one canonical follow response."""
+    if isinstance(value, TrajectoryDelta):
+        _reject_oversized(value.to_wire(), "trajectory delta")
+        return value
+    _reject_oversized(value, "trajectory delta")
+    return TrajectoryDelta.from_wire(value)
+
+
+def _reject_oversized(value: object, label: str) -> None:
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError):
+        return
+    if len(encoded) > TRAJECTORY_RESPONSE_MAX_BYTES:
+        raise TrajectoryValidationError(
+            f"{label} exceeds {TRAJECTORY_RESPONSE_MAX_BYTES} encoded bytes"
+        )
 
 
 __all__ = [
-    "MAX_DETAIL_BYTES",
-    "MAX_FIELD_BYTES",
-    "MAX_INSPECTOR_RATIO",
-    "MAX_LOADED_BYTES",
-    "MAX_LOADED_RECORDS",
-    "MAX_PAGE_RECORDS",
-    "MAX_RESPONSE_BYTES",
-    "MIN_INSPECTOR_RATIO",
     "ContentFormat",
     "ContentPreview",
-    "Coverage",
     "CoverageGap",
     "DetailField",
     "FilterDimension",
     "FocusRegion",
-    "FollowDelta",
-    "GroupMetadata",
     "InspectorTab",
-    "Lane",
     "LinkDirection",
     "OrderMode",
-    "PanelInfo",
-    "PanelStatus",
+    "PanelState",
+    "PanelStateInfo",
     "ParticipantLink",
-    "ParticipantTrajectoryState",
-    "Record",
-    "RecordKind",
-    "RecordStatus",
     "Timing",
     "TimingProvenance",
-    "TrajectoryFollow",
+    "TrajectoryCoverage",
+    "TrajectoryDelta",
+    "TrajectoryGroup",
+    "TrajectoryKind",
+    "TrajectoryLane",
     "TrajectoryPage",
     "TrajectoryRecord",
-    "TrajectoryStateStore",
-    "Usage",
-    "WireDecodeError",
+    "TrajectoryStatus",
+    "TrajectoryUpsert",
+    "TrajectoryUsage",
+    "TrajectoryValidationError",
+    "bounded_preview",
     "clip_utf8",
-    "decode_follow",
+    "decode_delta",
     "decode_page",
 ]
