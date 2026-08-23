@@ -1241,11 +1241,15 @@ class OpenCodeSource(Source):
         sql += " ORDER BY time_created DESC, id DESC LIMIT ?"
         params.append(limit + 1)
         rows = conn.execute(sql, params).fetchall()
-        events: list[Event] = []
-        facts: list[TrajectoryFact] = []
         selected: list[tuple[object, object, object, object]] = []
+        selected_output: list[tuple[tuple[Event, ...], tuple[TrajectoryFact, ...], int]] = []
+        event_count = 0
+        fact_count = 0
         has_more = False
         for row_index, row in enumerate(rows):
+            if row_index >= limit:
+                has_more = True
+                break
             message_id, created, updated, raw = row
             key = self._history_row_key(created, message_id)
             if key is None:
@@ -1269,7 +1273,7 @@ class OpenCodeSource(Source):
                 self._stored_facts_for_message(
                     info,
                     parts,
-                    raw_index=row_index,
+                    raw_index=self._history_coordinate(created),
                     message_revision=self._stored_revision(info, updated, created),
                 )
             )
@@ -1279,14 +1283,15 @@ class OpenCodeSource(Source):
                     error="one OpenCode message exceeds the history page limit",
                     pinned=pinned,
                 )
-            if len(events) + len(message_events) > limit or len(facts) + len(message_facts) > limit:
+            if event_count + len(message_events) > limit or fact_count + len(message_facts) > limit:
                 has_more = True
                 break
             selected.append(row)
-            events.extend(replace(event, raw_index=row_index) for event in message_events)
-            facts.extend(message_facts)
-        if len(rows) > len(selected) and selected:
-            has_more = True
+            selected_output.append(
+                (message_events, message_facts, self._history_coordinate(created))
+            )
+            event_count += len(message_events)
+            fact_count += len(message_facts)
         if not selected:
             return HistoryPage(
                 location=f"opencode://{sid}",
@@ -1295,12 +1300,18 @@ class OpenCodeSource(Source):
             )
         newest = selected[0]
         oldest = selected[-1]
+        events: list[Event] = []
+        facts: list[TrajectoryFact] = []
+        for message_events, message_facts, coordinate in reversed(selected_output):
+            events.extend(replace(event, raw_index=coordinate) for event in message_events)
+            facts.extend(message_facts)
         newest_cursor = self._encode_history_cursor(sid, identity, newest)
         older_cursor = self._encode_history_cursor(sid, identity, oldest) if has_more else None
         return HistoryPage(
             location=f"opencode://{sid}",
             events=events,
             trajectory=facts,
+            trajectory_events=(),
             cursor=newest_cursor,
             older_cursor=older_cursor,
             has_older=has_more,
@@ -1356,11 +1367,16 @@ class OpenCodeSource(Source):
         return max(0, int(value))
 
     @classmethod
+    def _history_coordinate(cls, created) -> int:
+        return cls._history_revision(created, 0)
+
+    @classmethod
     def _stored_revision(cls, data: dict, updated, created) -> int:
+        persisted = cls._history_revision(updated, created)
         revision = data.get("revision")
         if isinstance(revision, int) and not isinstance(revision, bool) and revision >= 0:
-            return revision
-        return 0
+            return max(revision, persisted)
+        return persisted
 
     @staticmethod
     def _history_fingerprint(updated, raw) -> str:
@@ -1463,7 +1479,6 @@ class OpenCodeSource(Source):
                 found_identity.get("dev") == identity["dev"]
                 and found_identity.get("ino") == identity["ino"]
                 and type(found_size) is int
-                and identity["size"] >= found_size
             )
         if not valid_identity:
             raise _OpenCodeHistoryPageError(
@@ -1507,7 +1522,8 @@ class OpenCodeSource(Source):
     ) -> tuple[list[tuple[object, object, object, object]], bool]:
         rows = conn.execute(
             "SELECT id, time_created, time_updated, data FROM part "
-            "WHERE message_id = ? AND session_id = ? ORDER BY id LIMIT ?",
+            "WHERE message_id = ? AND session_id = ? "
+            "ORDER BY time_created, id LIMIT ?",
             (message_id, sid, limit + 1),
         )
         found = list(rows)
@@ -1576,21 +1592,22 @@ class OpenCodeSource(Source):
         finish = info.get("finish")
         timing = _message_timing(info)
         usage = _trajectory_usage(info)
-        for ordinal, (part_id, created, updated, raw) in enumerate(parts):
+        ordinal = 0
+        for part_id, created, updated, raw in parts:
             part = _loads(raw)
             if not isinstance(part.get("id"), str):
                 part["id"] = str(part_id)
-            facts.extend(
-                self._stored_facts_for_part(
-                    info,
-                    part,
-                    revision=self._stored_revision(part, updated, created),
-                    raw_index=raw_index,
-                    ordinal_base=ordinal,
-                    timing=timing,
-                    usage=usage,
-                )
+            part_facts = self._stored_facts_for_part(
+                info,
+                part,
+                revision=self._stored_revision(part, updated, created),
+                raw_index=raw_index,
+                ordinal_base=ordinal,
+                timing=timing,
+                usage=usage,
             )
+            facts.extend(part_facts)
+            ordinal += max(1, len(part_facts))
         if not facts and role in ("user", "system", "developer"):
             content = _trajectory_text(info.get("content"))
             if content:
@@ -1678,18 +1695,24 @@ class OpenCodeSource(Source):
             ]
         if ptype in ("reasoning", "thinking"):
             text = _trajectory_string(part.get("text"))
+            part_timing = _part_timing(part)
+            status = (
+                TrajectoryStatus.COMPLETED
+                if part_timing is not None and part_timing.end is not None
+                else self._finish_status(info.get("finish"))
+            )
             return [
                 self._stored_fact(
                     kind=TrajectoryKind.REASONING,
                     summary=text,
-                    status=TrajectoryStatus.COMPLETED,
+                    status=status,
                     native_id=part_id,
                     fallback_id=fallback,
                     revision=revision,
                     raw_index=raw_index,
                     event_ordinal=ordinal_base,
                     turn_id=mid or None,
-                    timing=_part_timing(part),
+                    timing=part_timing,
                 )
             ]
         if ptype in ("context", "system"):
@@ -2055,7 +2078,12 @@ class OpenCodeSource(Source):
             events.extend(translated)
             trajectory.extend(facts)
         # Rows consumed is progress: session.updated through a turn, else rescue fires mid-turn.
-        return Batch(events=events, progressed=True, trajectory=trajectory)
+        return Batch(
+            events=events,
+            progressed=True,
+            trajectory=trajectory,
+            trajectory_events=(),
+        )
 
     def _translate(
         self, conn: sqlite3.Connection, kind: str, payload: dict, seq: int
@@ -2066,11 +2094,24 @@ class OpenCodeSource(Source):
         self, conn: sqlite3.Connection, kind: str, payload: dict, seq: int
     ) -> tuple[list[Event], list[TrajectoryFact]]:
         if kind == "message.part.updated.1":
+            part = payload.get("part")
+            message_id = part.get("messageID") if isinstance(part, dict) else None
+            coordinate = self._message_coordinate(conn, message_id, seq)
             events = self._on_part(conn, payload, seq)
-            return events, self._trajectory_for_part(conn, payload, seq)
+            return events, self._trajectory_for_part(
+                conn, payload, seq, raw_index=coordinate
+            )
         if kind == "message.updated.1":
+            info = payload.get("info")
+            message_id = info.get("id") if isinstance(info, dict) else None
+            coordinate = self._message_coordinate(conn, message_id, seq)
             events = self._on_message(payload, seq)
-            return events, self._trajectory_for_message(payload, seq)
+            facts = self._trajectory_for_message(conn, payload, seq, raw_index=coordinate)
+            if isinstance(info, dict):
+                finish = info.get("finish")
+                if finish and finish != STEP_FINISH and isinstance(message_id, str):
+                    self._text.pop(message_id, None)
+            return events, facts
         # session.created / session.updated: progress, not conversation.
         return [], []
 
@@ -2091,6 +2132,7 @@ class OpenCodeSource(Source):
         timing: Timing | None = None,
         usage: TrajectoryUsage | None = None,
         details: Sequence[DetailField] = (),
+        revision_hint: int | None = None,
     ) -> TrajectoryFact | None:
         native = _trajectory_identifier(native_id, "native")
         if native is None:
@@ -2122,10 +2164,46 @@ class OpenCodeSource(Source):
             )
             if previous == comparable:
                 return None
-        revision = self._trajectory_revisions.get(key, -1) + 1
+        revision = max(self._trajectory_revisions.get(key, -1) + 1, revision_hint or 0)
         self._trajectory_revisions[key] = revision
         self._trajectory_signatures[key] = candidate
         return replace(candidate, revision=revision)
+
+    def _live_revision(
+        self,
+        conn: sqlite3.Connection,
+        table: str,
+        record_id: str | None,
+        *fallbacks: object,
+    ) -> int:
+        values = list(fallbacks)
+        if table not in {"message", "part"}:
+            raise ValueError("unsupported OpenCode revision table")
+        if record_id:
+            query = (
+                "SELECT time_updated, time_created FROM message WHERE id = ?"
+                if table == "message"
+                else "SELECT time_updated, time_created FROM part WHERE id = ?"
+            )
+            row = conn.execute(
+                query,
+                (record_id,),
+            ).fetchone()
+            if row is not None:
+                values[:0] = row
+        revisions = [self._history_revision(value, 0) for value in values]
+        return max(revisions, default=0)
+
+    def _message_coordinate(
+        self, conn: sqlite3.Connection, message_id: object, fallback: int
+    ) -> int:
+        if isinstance(message_id, str) and message_id:
+            row = conn.execute(
+                "SELECT time_created FROM message WHERE id = ?", (message_id,)
+            ).fetchone()
+            if row is not None:
+                return self._history_coordinate(row[0])
+        return max(0, fallback)
 
     @staticmethod
     def _finish_status(finish: object) -> TrajectoryStatus:
@@ -2146,7 +2224,7 @@ class OpenCodeSource(Source):
         return TrajectoryStatus.UNKNOWN
 
     def _trajectory_for_part(  # noqa: PLR0912, PLR0915
-        self, conn: sqlite3.Connection, payload: dict, seq: int
+        self, conn: sqlite3.Connection, payload: dict, seq: int, *, raw_index: int
     ) -> list[TrajectoryFact]:
         part = payload.get("part")
         if not isinstance(part, dict):
@@ -2158,6 +2236,13 @@ class OpenCodeSource(Source):
         timing = _part_timing(part)
         part_id = part.get("id")
         fallback = part_id if isinstance(part_id, str) else None
+        revision_hint = self._live_revision(
+            conn,
+            "part",
+            fallback,
+            payload.get("time"),
+            seq,
+        )
         step_id = part.get("stepID") or part.get("stepId")
         if ptype == "text":
             if role == "assistant":
@@ -2178,26 +2263,33 @@ class OpenCodeSource(Source):
                 status=status,
                 native_id=part_id,
                 fallback_id=fallback,
-                raw_index=seq,
+                raw_index=raw_index,
                 event_ordinal=0,
                 turn_id=message_id or None,
                 step_id=step_id if isinstance(step_id, str) else None,
                 timing=timing,
+                revision_hint=revision_hint,
             )
             return [fact] if fact is not None else []
         if ptype in ("reasoning", "thinking"):
             text = _trajectory_string(part.get("text"))
+            status = (
+                TrajectoryStatus.COMPLETED
+                if timing is not None and timing.end is not None
+                else TrajectoryStatus.RUNNING
+            )
             fact = self._live_fact(
                 kind=TrajectoryKind.REASONING,
                 summary=text,
-                status=TrajectoryStatus.RUNNING,
+                status=status,
                 native_id=part_id,
                 fallback_id=fallback,
-                raw_index=seq,
+                raw_index=raw_index,
                 event_ordinal=0,
                 turn_id=message_id or None,
                 step_id=step_id if isinstance(step_id, str) else None,
                 timing=timing,
+                revision_hint=revision_hint,
             )
             return [fact] if fact is not None else []
         if ptype in ("context", "system"):
@@ -2208,11 +2300,12 @@ class OpenCodeSource(Source):
                 status=TrajectoryStatus.COMPLETED,
                 native_id=part_id,
                 fallback_id=fallback,
-                raw_index=seq,
+                raw_index=raw_index,
                 event_ordinal=0,
                 turn_id=message_id or None,
                 step_id=step_id if isinstance(step_id, str) else None,
                 timing=timing,
+                revision_hint=revision_hint,
             )
             return [fact] if fact is not None else []
         if ptype != "tool":
@@ -2239,7 +2332,7 @@ class OpenCodeSource(Source):
             status=self._tool_status(state_status),
             native_id=call_id,
             fallback_id=fallback,
-            raw_index=seq,
+            raw_index=raw_index,
             event_ordinal=0,
             turn_id=message_id or None,
             step_id=step_id if isinstance(step_id, str) else None,
@@ -2247,6 +2340,7 @@ class OpenCodeSource(Source):
             parent_call_id=parent_id,
             timing=timing,
             details=details,
+            revision_hint=revision_hint,
         )
         facts = [call_fact] if call_fact is not None else []
         if state_status in ("completed", "error"):
@@ -2265,7 +2359,7 @@ class OpenCodeSource(Source):
                 ),
                 native_id=f"{call_id}:result" if call_id else None,
                 fallback_id=f"{fallback}:result" if fallback else None,
-                raw_index=seq,
+                raw_index=raw_index,
                 event_ordinal=1,
                 turn_id=message_id or None,
                 step_id=step_id if isinstance(step_id, str) else None,
@@ -2273,12 +2367,15 @@ class OpenCodeSource(Source):
                 parent_call_id=parent_id,
                 timing=timing,
                 details=result_details,
+                revision_hint=revision_hint,
             )
             if result_fact is not None:
                 facts.append(result_fact)
         return facts
 
-    def _trajectory_for_message(self, payload: dict, seq: int) -> list[TrajectoryFact]:
+    def _trajectory_for_message(
+        self, conn: sqlite3.Connection, payload: dict, seq: int, *, raw_index: int
+    ) -> list[TrajectoryFact]:
         info = payload.get("info")
         if not isinstance(info, dict):
             return []
@@ -2287,6 +2384,16 @@ class OpenCodeSource(Source):
         finish = info.get("finish")
         timing = _message_timing(info)
         usage = _trajectory_usage(info)
+        time_data = _table(info.get("time"))
+        revision_hint = self._live_revision(
+            conn,
+            "message",
+            mid or None,
+            time_data.get("updated"),
+            time_data.get("completed"),
+            time_data.get("created"),
+            seq,
+        )
         if role == "assistant":
             text_parts = self._text.get(mid, {})
             if text_parts:
@@ -2299,11 +2406,12 @@ class OpenCodeSource(Source):
                         status=status,
                         native_id=part_id,
                         fallback_id=f"{mid}:text" if mid else None,
-                        raw_index=seq,
+                        raw_index=raw_index,
                         event_ordinal=ordinal,
                         turn_id=mid or None,
                         timing=timing,
                         usage=usage,
+                        revision_hint=revision_hint,
                     )
                     if fact is not None:
                         facts.append(fact)
@@ -2315,11 +2423,12 @@ class OpenCodeSource(Source):
                     status=self._finish_status(finish),
                     native_id=mid or None,
                     fallback_id=None,
-                    raw_index=seq,
+                    raw_index=raw_index,
                     event_ordinal=0,
                     turn_id=mid or None,
                     timing=timing,
                     usage=usage,
+                    revision_hint=revision_hint,
                 )
                 return [fact] if fact is not None else []
             return []
@@ -2334,10 +2443,11 @@ class OpenCodeSource(Source):
                 status=TrajectoryStatus.COMPLETED,
                 native_id=mid or None,
                 fallback_id=None,
-                raw_index=seq,
+                raw_index=raw_index,
                 event_ordinal=0,
                 turn_id=mid or None,
                 timing=timing,
+                revision_hint=revision_hint,
             )
             return [fact] if fact is not None else []
         return []

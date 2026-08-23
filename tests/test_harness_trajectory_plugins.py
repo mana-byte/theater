@@ -61,6 +61,7 @@ def test_vibe_facts_keep_ids_reasoning_and_tool_pairing() -> None:
     call = next(fact for fact in facts if fact.kind is TrajectoryKind.TOOL_CALL)
     result = next(fact for fact in facts if fact.kind is TrajectoryKind.TOOL_RESULT)
     assert call.native_id == call.call_id == "chatcmpl-tool-ad6d248698aa1cfe"
+    assert call.status is TrajectoryStatus.UNKNOWN
     assert result.call_id == call.call_id
     assert result.native_id == f"{call.call_id}:result"
     assert call.details[0].name == "arguments"
@@ -112,6 +113,8 @@ def test_opencode_facts_upsert_running_tool_to_terminal(rec, workdir) -> None:
     second_call = next(fact for fact in second.trajectory if fact.kind is TrajectoryKind.TOOL_CALL)
     result = next(fact for fact in second.trajectory if fact.kind is TrajectoryKind.TOOL_RESULT)
     assert first_call.native_id == second_call.native_id == "call-1"
+    assert first.trajectory_events == ()
+    assert first.events[0].raw_index == 1
     assert first_call.status is TrajectoryStatus.RUNNING
     assert second_call.status is TrajectoryStatus.COMPLETED
     assert second_call.revision > first_call.revision
@@ -120,6 +123,37 @@ def test_opencode_facts_upsert_running_tool_to_terminal(rec, workdir) -> None:
     rec._part({**running, "state": {"status": "completed", "output": "done"}})
     duplicate = asyncio.run(source.read())
     assert duplicate.trajectory == ()
+
+
+def test_opencode_live_and_history_revisions_share_coordinates(rec, workdir) -> None:
+    source = _source(rec, workdir)
+    message = rec.message("message-1", "assistant")
+    running = {
+        "id": "part-1",
+        "messageID": message["id"],
+        "type": "tool",
+        "callID": "call-1",
+        "tool": "read",
+        "state": {"status": "running"},
+    }
+    rec._part(running)
+
+    live = asyncio.run(source.read())
+    history = asyncio.run(source.history_page(limit=10))
+    live_call = next(fact for fact in live.trajectory if fact.kind is TrajectoryKind.TOOL_CALL)
+    stored_call = next(
+        fact for fact in history.trajectory if fact.kind is TrajectoryKind.TOOL_CALL
+    )
+
+    assert live_call.raw_index == stored_call.raw_index
+    assert live_call.revision == stored_call.revision
+
+    rec._part({**running, "state": {"status": "completed", "output": "done"}})
+    completed = asyncio.run(source.read())
+    completed_call = next(
+        fact for fact in completed.trajectory if fact.kind is TrajectoryKind.TOOL_CALL
+    )
+    assert completed_call.revision > stored_call.revision
 
 
 def test_opencode_history_page_is_keyset_and_does_not_move_live_cursor(rec, workdir) -> None:
@@ -131,13 +165,17 @@ def test_opencode_history_page_is_keyset_and_does_not_move_live_cursor(rec, work
 
     newest = asyncio.run(source.history_page(limit=2))
     assert newest.error_code is None
-    assert [event.text for event in newest.events] == ["text-4", "text-3"]
+    assert newest.trajectory_events == ()
+    assert [event.text for event in newest.events] == ["text-3", "text-4"]
     assert source._cursor == before
     assert newest.older_cursor is not None
 
     older = asyncio.run(source.history_page(before=newest.older_cursor, limit=2))
     assert older.error_code is None
-    assert [event.text for event in older.events] == ["text-2", "text-1"]
+    assert [event.text for event in older.events] == ["text-1", "text-2"]
+    assert max(event.raw_index for event in older.events) < min(
+        event.raw_index for event in newest.events
+    )
     assert source._cursor == before
 
 

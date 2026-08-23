@@ -1342,7 +1342,7 @@ class VibeObserver(TranscriptObserver):
                         native_id=call_id,
                         raw_index=index,
                         event_ordinal=ordinal,
-                        status=TrajectoryStatus.RUNNING,
+                        status=TrajectoryStatus.UNKNOWN,
                         turn_id=turn_id,
                         call_id=call_id,
                         parent_call_id=parent,
