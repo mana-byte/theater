@@ -30,7 +30,7 @@ EXAMPLE = Path(__file__).resolve().parent.parent / "config.example.toml"
 #: Settings whose default is None, which TOML cannot express: writing the key
 #: down at all would change behaviour, so these are the ones the example leaves
 #: commented. Named here so their absence is asserted rather than tolerated.
-NO_DEFAULT = {"theater.favourite", "regie.theme", "regie.dashboard_sentences"}
+NO_DEFAULT = {"theater.favourite", "regie.theme", "regie.dashboard_sentences", "observability.otlp_endpoint"}
 
 
 def default_of(f) -> object:

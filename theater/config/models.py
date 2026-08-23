@@ -21,6 +21,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from theater.constants.limits import MIN_INTERVAL
+from theater.constants.observability import (
+    DEFAULT_EXPORT_INTERVAL_MS,
+    DEFAULT_GAUGE_INTERVAL_S,
+    DEFAULT_LOG_BACKUP_COUNT,
+    DEFAULT_LOG_MAX_BYTES,
+    DEFAULT_OTLP_PROTOCOL,
+    DEFAULT_SERVICE_NAME,
+    MIN_EXPORT_INTERVAL_MS,
+    MIN_LOG_MAX_BYTES,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +124,38 @@ class RegieSection:
     dashboard_tip_char_interval: float = field(default=0.04, metadata={"min": MIN_INTERVAL})
 
 
+@dataclass(frozen=True, slots=True)
+class ObservabilitySection:
+    #: Whether to export traces, metrics, and logs via OTLP. Off by default.
+    otlp_enabled: bool = False
+    #: OTLP transport protocol: "grpc" or "http".
+    otlp_protocol: str = field(
+        default=DEFAULT_OTLP_PROTOCOL,
+        metadata={"choices": ("grpc", "http")},
+    )
+    #: Collector base endpoint. None derives localhost:4317 (grpc) or :4318 (http).
+    otlp_endpoint: str | None = field(default=None, metadata={"nonempty": True})
+    #: Service name for OTel resource attributes.
+    service_name: str = field(default=DEFAULT_SERVICE_NAME, metadata={"nonempty": True})
+    #: Metric export / processor schedule interval (milliseconds).
+    export_interval_ms: int = field(
+        default=DEFAULT_EXPORT_INTERVAL_MS,
+        metadata={"min": MIN_EXPORT_INTERVAL_MS},
+    )
+    #: Gauge sample interval (seconds).
+    gauge_interval_s: float = field(
+        default=DEFAULT_GAUGE_INTERVAL_S,
+        metadata={"min": MIN_INTERVAL},
+    )
+    #: Rotating log file size (bytes).
+    log_max_bytes: int = field(
+        default=DEFAULT_LOG_MAX_BYTES,
+        metadata={"min": MIN_LOG_MAX_BYTES},
+    )
+    #: Rotating log backup count.
+    log_backup_count: int = field(default=DEFAULT_LOG_BACKUP_COUNT, metadata={"min": 1})
+
+
 #: Section name -> dataclass. Drives parsing and the unknown-section check.
 _SECTIONS: dict[str, type] = {
     "theater": TheaterSection,
@@ -122,6 +164,7 @@ _SECTIONS: dict[str, type] = {
     "retention": RetentionSection,
     "harness": HarnessSection,
     "regie": RegieSection,
+    "observability": ObservabilitySection,
 }
 
 #: Keys are harness names; the legal set depends on the registry. Parsed by `_build_models`.
@@ -141,6 +184,7 @@ class Config:
     retention: RetentionSection = field(default_factory=RetentionSection)
     harness: HarnessSection = field(default_factory=HarnessSection)
     regie: RegieSection = field(default_factory=RegieSection)
+    observability: ObservabilitySection = field(default_factory=ObservabilitySection)
     #: Harness name -> models `spawn --model` may name. An allowlist; empty means no selection.
     models: dict[str, list[str]] = field(default_factory=dict)
     #: Harness name -> reasoning efforts `spawn --reasoning-effort` may name. An allowlist.

@@ -310,3 +310,45 @@ disabled = []
 #
 # codex   = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
 # claude  = ["low", "medium", "high"]
+
+
+[observability]
+
+# Off by default. When enabled, Theater exports traces, metrics, and
+# structured logs via OTLP to a collector. Requires the optional dependency:
+#
+#   uv pip install theater[observability]
+#
+# A missing extra with otlp_enabled = true is a fatal start-up error.
+# When disabled, no exporter thread starts and no network call is made.
+# The daemon log still rotates regardless of this setting.
+#
+# Read once, at daemon start. `theater restart` applies an edit.
+
+# Whether OTLP export is enabled.
+otlp_enabled = false
+
+# Transport protocol: "grpc" or "http".
+otlp_protocol = "grpc"
+
+# Collector base endpoint. When unset, derives http://localhost:4317 for
+# gRPC and http://localhost:4318 for HTTP. Must be an absolute http or https
+# URL with a host and no query or fragment. For HTTP, the signal paths
+# (/v1/traces, /v1/metrics, /v1/logs) are appended automatically.
+# otlp_endpoint = "http://localhost:4317"
+
+# Service name for OTel resource attributes.
+service_name = "theater"
+
+# Metric export and processor schedule interval (milliseconds).
+export_interval_ms = 5000
+
+# Gauge sample interval (seconds). Only relevant when OTLP is enabled.
+gauge_interval_s = 5.0
+
+# Rotating daemon log file size (bytes). The log rolls over at this size
+# and retains the configured number of backups.
+log_max_bytes = 10485760
+
+# Number of rotated log backups to retain.
+log_backup_count = 3

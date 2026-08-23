@@ -117,6 +117,14 @@ def _build_section(path: Path, name: str, cls: type, raw: Any) -> Any:
             and any(not item.strip() for item in parsed)
         ):
             _fail(path, f"'{dotted}' entries must not be blank")
+        choices = f.metadata.get("choices")
+        if choices is not None and isinstance(parsed, str) and parsed not in choices:
+            _fail(
+                path,
+                f"'{dotted}' must be one of {', '.join(repr(c) for c in choices)}, got {parsed!r}",
+            )
+        if f.metadata.get("nonempty") and isinstance(parsed, str) and not parsed.strip():
+            _fail(path, f"'{dotted}' must not be blank")
         values[f.name] = parsed
         sources[dotted] = "config.toml"
 

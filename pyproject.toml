@@ -22,10 +22,19 @@ dependencies = [
     # silent no-op against every database that already exists — which is what
     # v1.2 and earlier actually did. See docs/architecture.md §5.
     "alembic>=1.13",
+    # Declared directly even though MCP brings it transitively.
+    "opentelemetry-api>=1.44,<2",
 ]
 
 [project.scripts]
 theater = "theater.cli:main"
+
+[project.optional-dependencies]
+observability = [
+    "opentelemetry-sdk>=1.44,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.44,<2",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.44,<2",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -37,6 +46,9 @@ packages = ["theater"]
 [dependency-groups]
 dev = [
     "mypy>=2.3.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.44,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.44,<2",
+    "opentelemetry-sdk>=1.44,<2",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-cov>=7.1.0",
