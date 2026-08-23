@@ -127,6 +127,11 @@ class AgentLeaf(Static):
         )
         return max((len(line) for line in content.plain.splitlines()), default=0)
 
+    @property
+    def visible_reveal_width(self) -> int:
+        """Return the currently rendered reveal width."""
+        return self.required_reveal_width if self._reveal is None else self._reveal
+
     def set_reveal(self, reveal: int | None) -> None:
         """Set the visible startup columns, or None for the full leaf."""
         if reveal == self._reveal:
@@ -145,6 +150,13 @@ class AgentLeaf(Static):
             return
         self._overlay = overlay or None
         self.update(self._render_label(), layout=False)
+
+    def retire(self) -> None:
+        """Stop activity while this leaf remains mounted only to shrink away."""
+        self.set_overlay(None)
+        self.remove_class("tree-cursor")
+        self.remove_class("tree-staged")
+        self._stop_timer()
 
     def _tick(self) -> None:
         self._frame = advance_spinner_frame(self._frame)

@@ -164,6 +164,14 @@ def _styles(widget) -> list[str]:
     return [span.style for span in widget.render().spans]
 
 
+def _finish_leaf_reveal(app: RegieApp) -> None:
+    for _ in range(300):
+        if not app._leaf_reveal.active:
+            return
+        app._tick_leaf_reveal()
+    pytest.fail("leaf reveal did not finish")
+
+
 async def test_same_ids_across_refresh_yield_same_widgets(daemon, tmux):
     """The property that matters: identity, not just equality."""
     app = make_app()
@@ -203,6 +211,188 @@ async def test_a_disappeared_participant_is_unmounted(daemon, tmux):
         assert child_widget not in list(panel.children)
         assert child_widget.is_running is False
         assert child_widget.parent is None
+
+
+async def test_agent_spawned_leaf_retires_before_unmount(daemon, tmux, monkeypatch):
+    monkeypatch.setattr(app_mod, "STARTUP_REVEAL_INTERVAL", 60.0)
+    child = {**CHILD, "parent_id": PARENT["id"]}
+    daemon["answers"]["participants.tree"] = [{**PARENT, "children": [child]}]
+    app = make_app(startup_reveal=True)
+
+    async with app.run_test() as pilot:
+        panel = _panel(app)
+        key = ("p", child["id"])
+        leaf = panel._key_widgets[key]
+        _finish_leaf_reveal(app)
+        panel.apply_cursor(1, child["tmux_pane"])
+
+        daemon["answers"]["participants.tree"] = [dict(PARENT, children=[])]
+        await app._refresh_tree()
+
+        assert key not in panel._key_widgets
+        assert leaf in panel.children
+        assert not leaf.has_class("tree-cursor")
+        assert not leaf.has_class("tree-staged")
+        assert app._leaf_retirement_timer is not None
+
+        width = leaf.required_reveal_width
+        app._tick_leaf_retirement()
+        assert leaf._reveal is not None and leaf._reveal < width
+        while app._leaf_retirement.active:
+            app._tick_leaf_retirement()
+        await pilot.pause()
+
+        assert leaf not in panel.children
+        assert leaf.parent is None
+        assert app._leaf_retirement_timer is None
+
+
+async def test_retiring_middle_leaf_keeps_its_prior_slot(daemon, tmux, monkeypatch):
+    monkeypatch.setattr(app_mod, "STARTUP_REVEAL_INTERVAL", 60.0)
+    child = {**CHILD, "parent_id": PARENT["id"]}
+    third = {**THIRD, "parent_id": PARENT["id"]}
+    daemon["answers"]["participants.tree"] = [{**PARENT, "children": [child, third]}]
+    app = make_app(startup_reveal=True)
+
+    async with app.run_test():
+        panel = _panel(app)
+        parent = panel._key_widgets[("p", PARENT["id"])]
+        leaf = panel._key_widgets[("p", child["id"])]
+        sibling = panel._key_widgets[("p", third["id"])]
+        _finish_leaf_reveal(app)
+
+        daemon["answers"]["participants.tree"] = [{**PARENT, "children": [third]}]
+        await app._refresh_tree()
+
+        assert list(panel.children)[:3] == [parent, leaf, sibling]
+
+
+async def test_sequential_retirements_preserve_their_interleaved_order(daemon, tmux, monkeypatch):
+    monkeypatch.setattr(app_mod, "STARTUP_REVEAL_INTERVAL", 60.0)
+    child = {**CHILD, "parent_id": PARENT["id"]}
+    middle = {**THIRD, "parent_id": PARENT["id"]}
+    later = {**CHILD, "id": "dddddddddddd", "parent_id": PARENT["id"]}
+    daemon["answers"]["participants.tree"] = [{**PARENT, "children": [child, middle, later]}]
+    app = make_app(startup_reveal=True)
+
+    async with app.run_test():
+        panel = _panel(app)
+        parent = panel._key_widgets[("p", PARENT["id"])]
+        child_leaf = panel._key_widgets[("p", child["id"])]
+        middle_leaf = panel._key_widgets[("p", middle["id"])]
+        later_leaf = panel._key_widgets[("p", later["id"])]
+        _finish_leaf_reveal(app)
+
+        daemon["answers"]["participants.tree"] = [{**PARENT, "children": [middle, later]}]
+        await app._refresh_tree()
+        daemon["answers"]["participants.tree"] = [{**PARENT, "children": [middle]}]
+        await app._refresh_tree()
+
+        assert list(panel.children)[:4] == [parent, child_leaf, middle_leaf, later_leaf]
+
+
+async def test_retiring_mid_reveal_never_expands_or_leaves_a_reveal_timer(
+    daemon, tmux, monkeypatch
+):
+    monkeypatch.setattr(app_mod, "STARTUP_REVEAL_INTERVAL", 60.0)
+    daemon["answers"]["participants.tree"] = [dict(PARENT, children=[])]
+    app = make_app(startup_reveal=True)
+
+    async with app.run_test():
+        panel = _panel(app)
+        _finish_leaf_reveal(app)
+        child = {**CHILD, "parent_id": PARENT["id"]}
+        daemon["answers"]["participants.tree"] = [{**PARENT, "children": [child]}]
+        await app._refresh_tree()
+        leaf = panel._key_widgets[("p", child["id"])]
+        app._tick_leaf_reveal()
+        visible = leaf.visible_reveal_width
+        assert visible < leaf.required_reveal_width
+
+        daemon["answers"]["participants.tree"] = [dict(PARENT, children=[])]
+        await app._refresh_tree()
+
+        assert leaf._reveal == visible
+        assert app._leaf_reveal_timer is None
+
+
+async def test_empty_hint_waits_for_last_retiring_leaf(daemon, tmux, monkeypatch):
+    monkeypatch.setattr(app_mod, "STARTUP_REVEAL_INTERVAL", 60.0)
+    child = {**CHILD, "parent_id": PARENT["id"]}
+    daemon["answers"]["participants.tree"] = [{**PARENT, "children": [child]}]
+    app = make_app(startup_reveal=True)
+
+    async with app.run_test() as pilot:
+        panel = _panel(app)
+        leaf = panel._key_widgets[("p", child["id"])]
+        _finish_leaf_reveal(app)
+        daemon["answers"]["participants.tree"] = []
+        await app._refresh_tree()
+
+        assert leaf in panel.children
+        assert not list(panel.query(app_mod.EmptyTreeState))
+        while app._leaf_retirement.active:
+            app._tick_leaf_retirement()
+        await pilot.pause()
+
+        assert leaf not in panel.children
+        assert panel.query_one(app_mod.EmptyTreeState)
+
+
+async def test_palette_root_disappears_immediately(daemon, tmux, monkeypatch):
+    monkeypatch.setattr(app_mod, "STARTUP_REVEAL_INTERVAL", 60.0)
+    app = make_app(startup_reveal=True)
+
+    async with app.run_test() as pilot:
+        panel = _panel(app)
+        root = panel._key_widgets[("p", PARENT["id"])]
+        _finish_leaf_reveal(app)
+        daemon["answers"]["participants.tree"] = []
+        await app._refresh_tree()
+        await pilot.pause()
+
+        assert root not in panel.children
+        assert app._leaf_retirement_timer is None
+
+
+async def test_disabled_retirement_removes_agent_spawned_leaf_immediately(daemon, tmux):
+    child = {**CHILD, "parent_id": PARENT["id"]}
+    daemon["answers"]["participants.tree"] = [{**PARENT, "children": [child]}]
+    app = make_app(startup_reveal=False)
+
+    async with app.run_test() as pilot:
+        panel = _panel(app)
+        leaf = panel._key_widgets[("p", child["id"])]
+        daemon["answers"]["participants.tree"] = [dict(PARENT, children=[])]
+        await app._refresh_tree()
+        await pilot.pause()
+
+        assert leaf not in panel.children
+        assert app._leaf_retirement_timer is None
+
+
+async def test_retiring_leaf_reappears_without_a_duplicate_widget(daemon, tmux, monkeypatch):
+    monkeypatch.setattr(app_mod, "STARTUP_REVEAL_INTERVAL", 60.0)
+    child = {**CHILD, "parent_id": PARENT["id"]}
+    daemon["answers"]["participants.tree"] = [{**PARENT, "children": [child]}]
+    app = make_app(startup_reveal=True)
+
+    async with app.run_test():
+        panel = _panel(app)
+        key = ("p", child["id"])
+        leaf = panel._key_widgets[key]
+        _finish_leaf_reveal(app)
+
+        daemon["answers"]["participants.tree"] = [dict(PARENT, children=[])]
+        await app._refresh_tree()
+        assert key not in panel._key_widgets
+
+        daemon["answers"]["participants.tree"] = [{**PARENT, "children": [child]}]
+        await app._refresh_tree()
+
+        assert panel._key_widgets[key] is leaf
+        assert list(panel.children).count(leaf) == 1
+        assert app._leaf_retirement_timer is None
 
 
 async def test_a_new_participant_does_not_disturb_existing_widgets(daemon, tmux):

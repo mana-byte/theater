@@ -9,7 +9,7 @@ usage-breakdown overlay to the remaining height on resize.
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 
 from textual import events
 from textual.containers import Vertical, VerticalScroll
@@ -40,22 +40,8 @@ class TreePanel(VerticalScroll):
     the viewport. Cursor and staged highlighting are done via Textual CSS
     classes (which respect the user's theme) rather than hardcoded Rich colours.
 
-    The panel reconciles by key rather than rebuilding on every refresh: a
-    widget that survives a tick is updated in place with
-    ``AgentLeaf.update_node`` (or ``Label.update`` for separators) so that
-    per-widget state (a hover class, an animation timer) is not destroyed.
-    Widgets for rows that have disappeared are removed, and widgets for
-    new rows are mounted at the right position. Final child order always
-    matches the row order.
-
-    Removal is async in Textual — ``Widget.remove`` returns an
-    ``AwaitRemove`` and the widget stays in ``self.children`` until the
-    event loop pumps. The panel never depends on ``self.children`` for
-    positional indexing: ``apply_cursor`` and ``scroll_to_cursor`` resolve
-    widgets by key through ``self._key_widgets``, and ordering uses
-    ``move_child`` with widget references rather than integer indices. A
-    removed-but-not-yet-pumped widget still sitting in the list therefore
-    cannot corrupt the highlight or the scroll target.
+    Reconciliation preserves surviving widgets. Retiring leaves remain mounted
+    at their prior slots but leave the active-key map immediately.
     """
 
     can_focus = False
@@ -75,6 +61,10 @@ class TreePanel(VerticalScroll):
         self._overlaid: set[Key] = set()
         #: Startup reveal widths by initially-visible key; absent keys render fully.
         self._reveals: dict[Key, int] = {}
+        #: Leaves excluded from active tree keys while their reverse reveal finishes.
+        self._retiring: dict[Key, AgentLeaf] = {}
+        #: Previous row keys that anchor retiring leaves in their former order.
+        self._retiring_predecessors: dict[Key, Key | None] = {}
 
     DEFAULT_CSS = """
     TreePanel {
@@ -94,13 +84,8 @@ class TreePanel(VerticalScroll):
     def watch_lines(self, lines: list[tuple[Content, dict, Key, str, str]]) -> None:
         """Reconcile widget children with the new row list.
 
-        Existing widgets are updated in place; only new keys are mounted and
-        only gone keys are unmounted. Final child order matches the row
-        order, driven by widget references rather than integer indices so
-        that a pending async removal cannot corrupt the arithmetic.
-
-        Participant rows become ``AgentLeaf`` widgets with their own spinner
-        timers; separator and placeholder rows stay plain ``Label`` widgets.
+        Existing widgets update in place; new rows mount by key. Retiring
+        leaves stay in their saved slots until their reverse reveal completes.
         """
         if not lines:
             self._reconcile_empty()
@@ -117,20 +102,41 @@ class TreePanel(VerticalScroll):
 
         # TreePanel.app is RegieApp at runtime; Widget.app is typed App[Any].
         cwd_segments = self.app.settings.regie.cwd_segments  # type: ignore[attr-defined]
-        ordered_widgets: list[Widget] = []
+        ordered_rows: list[tuple[Key, Widget]] = []
         participant_index = 0
         for i, (label, node, key, prefix, cont_prefix) in enumerate(lines):
             widget = self._reconcile_row(label, node, key, prefix, cont_prefix, cwd_segments, i)
             if _is_participant_key(key):
                 widget.set_class(participant_index % 2 == 0, "tree-alt")
                 participant_index += 1
-            ordered_widgets.append(widget)
+            ordered_rows.append((key, widget))
 
-        # move_child takes widget references, so pending async removal cannot shift indexing.
+        ordered_widgets = self._merge_retiring(ordered_rows)
         for i, widget in enumerate(ordered_widgets):
             if i == 0:
                 continue
             self.move_child(widget, after=ordered_widgets[i - 1])
+
+    def _merge_retiring(self, rows: list[tuple[Key, Widget]]) -> list[Widget]:
+        """Insert tombstones after their saved predecessors without reordering them."""
+        groups: dict[Key | None, list[tuple[Key, AgentLeaf]]] = {}
+        for retired_key, retired_widget in self._retiring.items():
+            groups.setdefault(self._retiring_predecessors[retired_key], []).append(
+                (retired_key, retired_widget)
+            )
+
+        ordered: list[Widget] = []
+
+        def append_retirees(predecessor: Key | None) -> None:
+            for retired_key, retired_widget in groups.get(predecessor, []):
+                ordered.append(retired_widget)
+                append_retirees(retired_key)
+
+        append_retirees(None)
+        for row_key, row_widget in rows:
+            ordered.append(row_widget)
+            append_retirees(row_key)
+        return ordered
 
     def _reconcile_row(
         self,
@@ -187,6 +193,8 @@ class TreePanel(VerticalScroll):
         for key in list(self._key_widgets):
             if key != self._EMPTY_KEY:
                 self._remove_widget(self._key_widgets.pop(key))
+        if self._retiring:
+            return
         if self._EMPTY_KEY not in self._key_widgets:
             widget = EmptyTreeState(reveal=self._reveals.get(self._EMPTY_KEY))
             self._key_widgets[self._EMPTY_KEY] = widget
@@ -217,25 +225,68 @@ class TreePanel(VerticalScroll):
             if isinstance(widget, AgentLeaf | EmptyTreeState):
                 widget.set_reveal(reveal)
 
+    def retire(self, keys: Collection[Key]) -> dict[Key, int]:
+        """Turn active leaves into non-addressable tombstones and return their widths."""
+        candidates = set(keys)
+        retiring: list[tuple[Key, Key | None]] = []
+        previous: Key | None = None
+        for _, _, key, _, _ in self._lines_data:
+            if key in candidates:
+                retiring.append((key, previous))
+            previous = key
+        seen = {key for key, _ in retiring}
+        retiring.extend((key, None) for key in candidates - seen)
+
+        widths: dict[Key, int] = {}
+        for key, predecessor in retiring:
+            widget = self._key_widgets.pop(key, None)
+            if not isinstance(widget, AgentLeaf):
+                continue
+            self._reveals.pop(key, None)
+            self._overlaid.discard(key)
+            widget.retire()
+            self._retiring[key] = widget
+            self._retiring_predecessors[key] = predecessor
+            widths[key] = widget.visible_reveal_width
+        return widths
+
+    def restore_retiring(self, keys: Collection[Key]) -> None:
+        """Return leaves that reappeared before their retirement completed."""
+        for key in keys:
+            widget = self._retiring.pop(key, None)
+            if widget is not None:
+                self._retiring_predecessors.pop(key, None)
+                widget.set_reveal(None)
+                self._key_widgets[key] = widget
+
+    def set_retiring_reveals(self, reveals: Mapping[Key, int]) -> None:
+        """Apply a reverse-reveal frame to leaves outside the active key map."""
+        for key, reveal in reveals.items():
+            widget = self._retiring.get(key)
+            if widget is not None:
+                widget.set_reveal(reveal)
+
+    def finish_retiring(self, keys: Collection[Key]) -> None:
+        """Unmount tombstones whose reverse reveal reached zero columns."""
+        for key in keys:
+            widget = self._retiring.pop(key, None)
+            if widget is not None:
+                self._retiring_predecessors.pop(key, None)
+                self._remove_widget(widget)
+        if not self._retiring and not self._lines_data:
+            self._reconcile_empty()
+
     def _remove_widget(self, widget: Widget) -> None:
         """Remove a widget via Textual's public API.
 
-        ``widget.remove()`` returns an ``AwaitRemove`` and the widget stays
-        in ``self.children`` until the event loop pumps. That is fine: the
-        panel never indexes ``self.children`` positionally. Cursor and
-        staged state are resolved by key through ``self._key_widgets``, and
-        ordering uses widget references, so a pending removal cannot land
-        the highlight on the wrong row.
+        Pending Textual removals never enter the active key map.
         """
         widget.remove()
 
     def apply_cursor(self, cursor: int, staged_pane: str | None) -> None:
         """Add CSS classes to the cursor and staged lines, remove from others.
 
-        Widgets are resolved by key through ``self._key_widgets`` rather
-        than by position in ``self.children``. A pending async removal may
-        leave a stale widget in ``self.children`` for one frame; resolving
-        by key means the highlight always lands on the right row.
+        Active keys, rather than child positions, own highlighting.
         """
         for i, (_, node, key, _, _) in enumerate(self._lines_data):
             widget = self._key_widgets.get(key)

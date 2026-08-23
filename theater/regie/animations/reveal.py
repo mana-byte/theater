@@ -83,6 +83,11 @@ class LeafRevealController:
             return set(keys)
         return set(self._pending) | {key for key in keys if key not in self._seen}
 
+    def cancel(self, keys: Collection[Key]) -> None:
+        """Stop revealing keys that left the active tree."""
+        for key in keys:
+            self._pending.pop(key, None)
+
     def observe(
         self,
         required: Mapping[Key, int],

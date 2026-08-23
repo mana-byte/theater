@@ -12,6 +12,7 @@ from theater.constants.regie import (
     REGIE_WORKING_HARNESS_STYLES,
 )
 from theater.regie.animations.pulse import advance_pulse_frame, working_harness_style
+from theater.regie.animations.retirement import LeafRetirementController
 from theater.regie.animations.reveal import LeafRevealController, clip_parts
 from theater.regie.animations.spinner import advance_spinner_frame, spinner_frame
 
@@ -82,6 +83,38 @@ def test_ineligible_new_leaf_is_seen_without_being_animated():
     assert not frame.active
 
 
+def test_retirement_controller_preserves_agent_spawn_provenance_and_can_restore():
+    root = ("p", "root")
+    child = ("p", "child")
+    controller = LeafRetirementController()
+
+    assert controller.observe({root: False, child: True}).retire == set()
+    change = controller.observe({root: False})
+    assert change.retire == {child}
+
+    frame = controller.begin({child: 10})
+    assert frame.widths == {child: 10}
+    frame = controller.tick()
+    assert frame.widths == {child: 5}
+
+    change = controller.observe({root: False, child: False})
+    assert change.restore == {child}
+    assert not controller.active
+
+
+def test_retirement_controller_drops_candidate_without_a_mounted_width():
+    child = ("p", "child")
+    controller = LeafRetirementController()
+
+    controller.observe({child: True})
+    change = controller.observe({})
+    frame = controller.begin({}, candidates=change.retire)
+
+    assert not frame.active
+    assert controller.observe({child: False}).restore == set()
+    assert controller.observe({}).retire == set()
+
+
 def test_controller_skips_unusually_large_trees():
     required = {("p", str(index)): 10 for index in range(REGIE_STARTUP_REVEAL_MAX_LEAVES + 1)}
     frame = LeafRevealController().observe(required, now=0.0)
@@ -126,6 +159,7 @@ def test_animations_package_does_not_eagerly_import_back_into_render_glyphs():
                     "theater.regie.render.glyphs",
                     "theater.regie.animations.pulse",
                     "theater.regie.animations.reveal",
+                    "theater.regie.animations.retirement",
                     "theater.regie.animations.routes",
                     "theater.regie.animations.footer",
                     "theater.regie.animations.spinner",

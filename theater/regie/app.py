@@ -81,6 +81,7 @@ from theater.regie.animations.footer import (  # noqa: F401
     _advance_int,
     _pulsing_value,
 )
+from theater.regie.animations.retirement import LeafRetirementController, LeafRetirementFrame
 from theater.regie.animations.reveal import LeafRevealController
 from theater.regie.animations.routes import (  # noqa: F401
     _AWAIT_TRACE_GLYPHS,
@@ -313,6 +314,8 @@ class RegieApp(App):
         self._anim_timer: Timer | None = None
         self._leaf_reveal = LeafRevealController(enabled=self.settings.regie.startup_reveal)
         self._leaf_reveal_timer: Timer | None = None
+        self._leaf_retirement = LeafRetirementController(enabled=self.settings.regie.startup_reveal)
+        self._leaf_retirement_timer: Timer | None = None
         self._nav = NavigationState()
         self._usage = UsagePanelState()
         self._staging = StageController(self.settings.regie, panes)
@@ -610,6 +613,8 @@ class RegieApp(App):
 
     async def on_unmount(self) -> None:
         self._stop_leaf_reveal()
+        self._stop_leaf_retirement()
+        self._leaf_retirement.clear()
         # Best effort: catches paths that never reach action_quit's teardown.
         await self._teardown()
         if self._client:
@@ -746,6 +751,7 @@ class RegieApp(App):
         )
         if result.lines is None:
             return
+        self._sync_leaf_retirement(result.lines)
         self.tree_lines = result.lines
         self._tree_revision += 1
         if self.cursor >= len(self.tree_lines):
@@ -974,6 +980,51 @@ class RegieApp(App):
             self._leaf_reveal_timer = self.set_interval(
                 STARTUP_REVEAL_INTERVAL, self._tick_leaf_reveal
             )
+
+    def _sync_leaf_retirement(self, lines: list[tuple[Content, dict, Key, str, str]]) -> None:
+        """Move disappeared agent-created leaves into the reverse-reveal layer."""
+        participants = {
+            key: bool(node.get("parent_id")) for _, node, key, _, _ in lines if key[0] == "p"
+        }
+        change = self._leaf_retirement.observe(participants)
+        self._leaf_reveal.cancel(change.retire)
+        if not self._leaf_reveal.active:
+            self._stop_leaf_reveal()
+        panel = self._panel()
+        if panel is None:
+            self._leaf_retirement.begin({}, candidates=change.retire)
+            return
+        panel.restore_retiring(change.restore)
+        if change.restore and not self._leaf_retirement.active:
+            self._stop_leaf_retirement()
+        if change.retire:
+            frame = self._leaf_retirement.begin(
+                panel.retire(change.retire), candidates=change.retire
+            )
+            self._apply_leaf_retirement(panel, frame)
+
+    def _apply_leaf_retirement(self, panel: TreePanel, frame: LeafRetirementFrame) -> None:
+        """Draw one retirement frame and release leaves that reached zero width."""
+        panel.set_retiring_reveals(frame.widths)
+        panel.finish_retiring(frame.completed)
+        if frame.active and self._leaf_retirement_timer is None:
+            self._leaf_retirement_timer = self.set_interval(
+                STARTUP_REVEAL_INTERVAL, self._tick_leaf_retirement
+            )
+        if not frame.active:
+            self._stop_leaf_retirement()
+
+    def _tick_leaf_retirement(self) -> None:
+        panel = self._panel()
+        if panel is None:
+            self._stop_leaf_retirement()
+            return
+        self._apply_leaf_retirement(panel, self._leaf_retirement.tick())
+
+    def _stop_leaf_retirement(self) -> None:
+        if self._leaf_retirement_timer is not None:
+            self._leaf_retirement_timer.stop()
+            self._leaf_retirement_timer = None
 
     def _tick_leaf_reveal(self) -> None:
         panel = self._panel()
