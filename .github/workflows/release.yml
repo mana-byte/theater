@@ -26,6 +26,7 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
@@ -56,11 +57,16 @@ jobs:
           else
             VERSION="${GITHUB_REF_NAME#v}"
           fi
-          if ! printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::Version '$VERSION' is not a stable semver (N.N.N)"
+          if ! printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(rc[0-9]+)?$'; then
+            echo "::error::Version '$VERSION' must be N.N.N or N.N.NrcN"
             exit 1
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          if printf '%s' "$VERSION" | grep -qE 'rc[0-9]+$'; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Verify version matches pyproject.toml and uv.lock
         env:
@@ -143,13 +149,19 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.build.outputs.version }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
         run: |
           TAG="v${VERSION}"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/*.whl dist/*.tar.gz --clobber
           else
+            RELEASE_FLAGS=()
+            if [ "$PRERELEASE" = "true" ]; then
+              RELEASE_FLAGS+=(--prerelease)
+            fi
             gh release create "$TAG" \
               dist/*.whl dist/*.tar.gz \
               --title "$TAG" \
-              --generate-notes
+              --generate-notes \
+              "${RELEASE_FLAGS[@]}"
           fi
