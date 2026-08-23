@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from theater.daemon.persistence.database import Database
 from theater.daemon.schema import participants
-from theater.models import Participant, Status, now
+from theater.models import Participant, Status, Tier, now
 
 
 class ParticipantRepository:
@@ -136,3 +136,26 @@ class ParticipantRepository:
             .where(participants.c.status != str(Status.DEAD))
         ).fetchall()
         return [Participant.from_row(r._mapping) for r in rows]
+
+    def live_count(self) -> int:
+        """Count of participants whose status is not DEAD."""
+        return int(
+            self._db.conn.execute(
+                select(func.count())
+                .select_from(participants)
+                .where(participants.c.status != str(Status.DEAD))
+            ).scalar_one()
+        )
+
+    def addressable_count(self) -> int:
+        """Count matching ``Participant.addressable``: tier != EXTERNAL and status != DEAD."""
+        return int(
+            self._db.conn.execute(
+                select(func.count())
+                .select_from(participants)
+                .where(
+                    participants.c.tier != str(Tier.EXTERNAL),
+                    participants.c.status != str(Status.DEAD),
+                )
+            ).scalar_one()
+        )

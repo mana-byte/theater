@@ -109,6 +109,14 @@ class Store:
     def live_participants_in_cwd(self, cwd: str) -> list[Participant]:
         return self._participants.live_in_cwd(cwd)
 
+    def live_count(self) -> int:
+        """Count of participants whose status is not DEAD."""
+        return self._participants.live_count()
+
+    def addressable_count(self) -> int:
+        """Count of participants matching ``Participant.addressable`` exactly."""
+        return self._participants.addressable_count()
+
     def bind_operator_transcript(
         self,
         *,
@@ -210,6 +218,10 @@ class Store:
 
     def spawn_prompts_for_targets(self, ids: Sequence[str]) -> dict[str, str | None]:
         return self._jobs.spawn_prompts_for_targets(list(ids))
+
+    def active_job_count(self) -> int:
+        """Count of jobs whose persisted state is ``running``."""
+        return self._jobs.active_count()
 
     # ---- meta -----------------------------------------------------------
 

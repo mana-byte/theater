@@ -99,6 +99,14 @@ class Registry:
         """Distance from the root of the lineage. Roots are 0."""
         return lineage.depth_of(self.store, pid)
 
+    def live_count(self) -> int:
+        """Count of participants whose status is not DEAD."""
+        return self.store.live_count()
+
+    def addressable_count(self) -> int:
+        """Count of participants matching ``Participant.addressable``."""
+        return self.store.addressable_count()
+
     def root_of(self, pid: str) -> str:
         """The top of this participant's lineage.
 

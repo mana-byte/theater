@@ -220,6 +220,10 @@ class JobManager:
     def get(self, handle: str) -> Job | None:
         return self.store.get_job(handle)
 
+    def active_count(self) -> int:
+        """Count of jobs whose persisted state is ``running``."""
+        return self.store.active_job_count()
+
     def finish(
         self,
         handle: str,

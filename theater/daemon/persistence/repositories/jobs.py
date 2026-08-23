@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import func, insert, select, update
 
 from theater.daemon.persistence.database import Database
 from theater.daemon.schema import jobs
-from theater.models import Job
+from theater.models import Job, JobState
 
 
 class JobRepository:
@@ -109,3 +109,11 @@ class JobRepository:
         for target_id, prompt in rows:
             prompts.setdefault(target_id, prompt)
         return prompts
+
+    def active_count(self) -> int:
+        """Count of jobs whose persisted state is ``running``."""
+        return int(
+            self._db.conn.execute(
+                select(func.count()).select_from(jobs).where(jobs.c.state == str(JobState.RUNNING))
+            ).scalar_one()
+        )
