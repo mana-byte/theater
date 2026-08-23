@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from theater.constants.daemon import BUS_KIND_PARTICIPANT_SESSION_BOUNDARY
 from theater.daemon.spawner import Spawner, SpawnRequest
 from theater.harness import HARNESSES, Harness, LaunchPlan
 from theater.harness.base import ResumeLaunchOverlay
@@ -161,7 +162,7 @@ def drops_prompt_harness(monkeypatch):
 async def test_resume_reaches_plan_launch(registry, resume_harness, monkeypatch):
     """The session id travels from SpawnRequest through plan_launch."""
     monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
-    _trusted_resume(registry, harness="resume-spawn-test")
+    predecessor = _trusted_resume(registry, harness="resume-spawn-test")
     spawner = Spawner(registry)
     req = SpawnRequest(
         harness="resume-spawn-test",
@@ -170,8 +171,111 @@ async def test_resume_reaches_plan_launch(registry, resume_harness, monkeypatch)
         approval="edits",
         resume="sess-abc",
     )
-    await spawner.spawn(req)
+    successor = await spawner.spawn(req)
     assert resume_harness.seen_resume == "sess-abc"
+    boundary = next(
+        row
+        for row in registry.store.bus_tail(limit=100)
+        if row["kind"] == BUS_KIND_PARTICIPANT_SESSION_BOUNDARY
+    )
+    assert boundary["from_id"] == predecessor.id
+    assert boundary["to_id"] == successor.id
+    assert boundary["payload"] == {"reason": "resume", "predecessor_id": predecessor.id}
+
+
+async def test_failed_resume_reserve_emits_no_boundary(registry, resume_harness, monkeypatch):
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
+    predecessor = _trusted_resume(registry, harness="resume-spawn-test")
+    spawner = Spawner(registry)
+    monkeypatch.setattr(
+        spawner,
+        "_build_plan",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("plan exploded")),
+    )
+    req = SpawnRequest(
+        harness="resume-spawn-test",
+        prompt="do thing",
+        cwd="/tmp",
+        approval="edits",
+        resume="sess-abc",
+    )
+
+    with pytest.raises(RuntimeError, match="plan exploded"):
+        await spawner.reserve(req)
+
+    assert not any(
+        row["kind"] == BUS_KIND_PARTICIPANT_SESSION_BOUNDARY and row["from_id"] == predecessor.id
+        for row in registry.store.bus_tail(limit=100)
+    )
+
+
+async def test_failed_resume_launch_emits_no_boundary(
+    registry, resume_harness, fake_tmux, monkeypatch
+):
+    import theater.daemon.spawning.service as spawner_mod
+
+    monkeypatch.setattr(spawner_mod.shutil, "which", lambda b: f"/usr/bin/{b}")
+    predecessor = _trusted_resume(registry, harness="resume-spawn-test")
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="resume-spawn-test",
+        prompt="do thing",
+        cwd="/tmp",
+        approval="edits",
+        resume="sess-abc",
+    )
+    reservation = await spawner.reserve(req)
+
+    async def boom_new_window(**kwargs):
+        raise RuntimeError("tmux exploded")
+
+    monkeypatch.setattr(spawner_mod.tmux, "new_window", boom_new_window)
+    with pytest.raises(RuntimeError, match="tmux exploded"):
+        await spawner.launch(reservation)
+
+    assert not any(
+        row["kind"] == BUS_KIND_PARTICIPANT_SESSION_BOUNDARY and row["from_id"] == predecessor.id
+        for row in registry.store.bus_tail(limit=100)
+    )
+
+
+async def test_resume_boundary_failure_preserves_attached_pane(
+    registry, resume_harness, fake_tmux, monkeypatch
+):
+    import theater.daemon.spawning.service as spawner_mod
+
+    monkeypatch.setattr(spawner_mod.shutil, "which", lambda b: f"/usr/bin/{b}")
+    predecessor = _trusted_resume(registry, harness="resume-spawn-test")
+    spawner = Spawner(registry)
+    req = SpawnRequest(
+        harness="resume-spawn-test",
+        prompt="do thing",
+        cwd="/tmp",
+        approval="edits",
+        resume="sess-abc",
+    )
+    reservation = await spawner.reserve(req)
+    assert reservation.resume_predecessor is not None
+    assert reservation.resume_predecessor.id == predecessor.id
+
+    real_append = registry.store.bus_append
+
+    def fail_boundary(kind, **kwargs):
+        if kind == BUS_KIND_PARTICIPANT_SESSION_BOUNDARY:
+            raise RuntimeError("boundary unavailable")
+        return real_append(kind, **kwargs)
+
+    monkeypatch.setattr(registry.store, "bus_append", fail_boundary)
+    launched = await spawner.launch(reservation)
+
+    stored = registry.get(launched.id)
+    assert stored.tmux_pane == launched.tmux_pane
+    assert stored.tmux_pane in fake_tmux.panes
+    assert stored.status.value == "idle"
+    assert not any(
+        row["kind"] == BUS_KIND_PARTICIPANT_SESSION_BOUNDARY
+        for row in registry.store.bus_tail(limit=100)
+    )
 
 
 async def test_resume_none_does_not_reach_plan_launch(registry, resume_harness, monkeypatch):
