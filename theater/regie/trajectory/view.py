@@ -3,25 +3,28 @@
 from __future__ import annotations
 
 import inspect
+from bisect import bisect_left, bisect_right
 from collections.abc import Awaitable, Callable
 
 from textual import events
 from textual.app import ComposeResult
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Vertical
 from textual.message import Message
-from textual.widgets import Input, Static
+from textual.widget import Widget
+from textual.widgets import Input
 from textual.worker import Worker
 
 from theater.regie.trajectory.constants import (
     INSPECTOR_RESIZE_STEP,
     MAX_QUERY_BYTES,
     SEARCH_HEIGHT,
-    STATUS_HEIGHT,
     TIMELINE_HEIGHT,
+    TRAJECTORY_HORIZONTAL_PADDING,
 )
 from theater.regie.trajectory.controller import TrajectoryController
 from theater.regie.trajectory.enums import FilterDimension, FocusRegion, OrderMode
 from theater.regie.trajectory.filter_panel import (
+    FilterClearRequested,
     FilterPanel,
     FilterPanelClosed,
     FilterValueClicked,
@@ -36,6 +39,7 @@ from theater.regie.trajectory.inspector import (
 from theater.regie.trajectory.ledger import (
     Ledger,
     LedgerGroupClicked,
+    LedgerOlderClicked,
     LedgerRecordClicked,
     LedgerRecordHovered,
     LedgerRetryClicked,
@@ -49,8 +53,8 @@ from theater.regie.trajectory.timeline import (
     TimelineScrolled,
     TimelineSpanClicked,
     TimelineSpanHovered,
-    TimelineTooltipRequested,
 )
+from theater.regie.trajectory.toolbar import ToolbarActionRequested, TrajectoryToolbar
 from theater.trajectory import (
     TrajectoryGroup,
     TrajectoryKind,
@@ -104,13 +108,16 @@ class TrajectoryView(Vertical):
         height: 1fr;
         min-width: 0;
         min-height: 0;
+        layers: trajectory-base trajectory-overlay;
         background: $background;
+        padding: 0 {TRAJECTORY_HORIZONTAL_PADDING};
     }}
-    TrajectoryView > #trajectory-status {{
-        width: 1fr;
-        height: {STATUS_HEIGHT};
-        min-height: {STATUS_HEIGHT};
-        padding: 0 1;
+    TrajectoryView > #trajectory-toolbar,
+    TrajectoryView > #trajectory-timeline,
+    TrajectoryView > #trajectory-search,
+    TrajectoryView > #trajectory-ledger,
+    TrajectoryView > #trajectory-inspector {{
+        layer: trajectory-base;
     }}
     TrajectoryView > #trajectory-timeline {{
         width: 1fr;
@@ -123,22 +130,34 @@ class TrajectoryView(Vertical):
     TrajectoryView > #trajectory-filters.-open {{
         display: block;
     }}
-    TrajectoryView > #trajectory-ledger-scroll {{
+    TrajectoryView > #trajectory-ledger {{
         width: 1fr;
         height: 1fr;
         min-height: 0;
-        overflow-y: hidden;
     }}
     TrajectoryView > #trajectory-search {{
-        dock: top;
         width: 1fr;
         height: {SEARCH_HEIGHT};
-        margin: 0 1;
+        min-height: {SEARCH_HEIGHT};
+        padding: 0 1;
+        border: tall $panel;
+        background: $panel;
+    }}
+    TrajectoryView > #trajectory-search:focus {{
+        border: tall $accent;
+        background: $accent 12%;
     }}
     TrajectoryView .-hidden {{
         display: none;
     }}
     TrajectoryView #trajectory-inspector.-closed {{
+        display: none;
+    }}
+    TrajectoryView.-inspector-maximized > #trajectory-toolbar,
+    TrajectoryView.-inspector-maximized > #trajectory-timeline,
+    TrajectoryView.-inspector-maximized > #trajectory-filters,
+    TrajectoryView.-inspector-maximized > #trajectory-search,
+    TrajectoryView.-inspector-maximized > #trajectory-ledger {{
         display: none;
     }}
     """
@@ -175,16 +194,24 @@ class TrajectoryView(Vertical):
         self._search_result = SearchResult((), (), frozenset(), {}, FilterCounts())
         self._search_cache = SearchCache()
         self._search_key: tuple[object, ...] | None = None
-        self._tooltip_text = ""
+        self._ordered_records: tuple[TrajectoryRecord, ...] = ()
+        self._ordered_indices: dict[str, int] = {}
+        self._visible_ids: tuple[str, ...] = ()
+        self._visible_positions: tuple[int, ...] = ()
+        self._visible_id_set: frozenset[str] = frozenset()
+        self._visible_indices: dict[str, int] = {}
+        self._search_refresh_pending = False
         self._load_worker: Worker[TrajectoryPage | None] | None = None
 
     def compose(self) -> ComposeResult:
-        yield Static("Loading trajectory…", markup=False, id="trajectory-status")
+        yield TrajectoryToolbar(id="trajectory-toolbar")
         yield Timeline(id="trajectory-timeline")
         yield FilterPanel(id="trajectory-filters", classes="-hidden")
-        with VerticalScroll(id="trajectory-ledger-scroll"):
-            yield Ledger(id="trajectory-ledger")
-        yield Input(placeholder="Search trajectory", id="trajectory-search", classes="-hidden")
+        yield Input(
+            placeholder="⌕ Search trajectory  /",
+            id="trajectory-search",
+        )
+        yield Ledger(id="trajectory-ledger")
         yield Inspector(id="trajectory-inspector")
 
     def on_mount(self) -> None:
@@ -246,6 +273,10 @@ class TrajectoryView(Vertical):
     def _recompute_search(
         self, records: tuple[TrajectoryRecord, ...], ordering: TrajectoryOrdering
     ) -> None:
+        self._ordered_records = records
+        self._ordered_indices = {
+            record.record_id: index for index, record in enumerate(self._ordered_records)
+        }
         key = self._make_search_key(records)
         if key == self._search_key:
             return
@@ -262,41 +293,47 @@ class TrajectoryView(Vertical):
             cache=self._search_cache,
             ordering=ordering,
         )
+        self._visible_ids = tuple(
+            entry.record_id for entry in self._search_result.entries if entry.record_id is not None
+        )
+        self._visible_id_set = frozenset(self._visible_ids)
+        self._visible_indices = {
+            record_id: index for index, record_id in enumerate(self._visible_ids)
+        }
+        self._visible_positions = tuple(
+            self._ordered_indices[record_id]
+            for record_id in self._visible_ids
+            if record_id in self._ordered_indices
+        )
 
     @staticmethod
-    def _set_class(
-        widget: Static | Input | FilterPanel | Inspector, class_name: str, enabled: bool
-    ) -> bool:
+    def _set_class(widget: Widget, class_name: str, enabled: bool) -> bool:
         if widget.has_class(class_name) == enabled:
             return False
         widget.set_class(enabled, class_name)
         return True
 
     def _refresh(self, *, recompute: bool = True) -> None:
-        ordering = build_ordering(tuple(self.state.records.values()), self.state.groups)
-        records = ordering.records
-        if recompute:
+        if recompute or not self._ordered_records:
+            ordering = build_ordering(tuple(self.state.records.values()), self.state.groups)
+            records = ordering.records
             self._recompute_search(records, ordering)
+        else:
+            records = self._ordered_records
         if not self.is_mounted:
             return
         timeline = self.query_one("#trajectory-timeline", Timeline)
         ledger = self.query_one("#trajectory-ledger", Ledger)
-        filter_panel = self.query_one("#trajectory-filters", FilterPanel)
-        inspector = self.query_one("#trajectory-inspector", Inspector)
         search = self.query_one("#trajectory-search", Input)
-        self._set_class(search, "-hidden", not self.state.search_open)
-        if search.value != self.state.query:
+        if search.value != self.state.query and self.app.focused is not search:
             search.value = self.state.query
         timeline_offset: int | None = self.state.timeline_scroll
-        if self.state.follow_tail:
-            timeline_offset = max(0, len(records) - timeline._available_cells())
-            self.state.timeline_scroll = timeline_offset
-        else:
-            timeline_offset = (
-                None
-                if timeline.span_ids and timeline.horizontal_offset == timeline_offset
-                else timeline_offset
-            )
+        if (
+            not self.state.follow_tail
+            and timeline.span_ids
+            and timeline.horizontal_offset == timeline_offset
+        ):
+            timeline_offset = None
         timeline.update_records(
             records,
             matched_ids=self._search_result.matched_ids,
@@ -305,6 +342,8 @@ class TrajectoryView(Vertical):
             duration_mode=self.state.order_mode is OrderMode.DURATION,
             scroll_offset=timeline_offset,
         )
+        if self.state.follow_tail:
+            timeline.scroll_to_tail()
         self.state.timeline_scroll = timeline.horizontal_offset
         ledger.update_rows(
             records,
@@ -312,22 +351,12 @@ class TrajectoryView(Vertical):
             selected_id=self.state.selected_id,
             hovered_id=self.state.hovered_id,
             order_mode=self.state.order_mode,
+            has_older=self.state.has_older,
+            loading_older=self.state.loading_older,
             retry_message=self.state.retry_message if self.state.retry_kind else None,
         )
-        filter_panel.update_filters(
-            self._search_result.counts,
-            lanes=self.state.lane_filters,
-            kinds=self.state.kind_filters,
-            statuses=self.state.status_filters,
-            sources=self.state.source_filters,
-        )
-        self._set_class(filter_panel, "-open", self.state.filters_open)
-        self._set_class(filter_panel, "-hidden", not self.state.filters_open)
-        inspector.set_record(self.state.selected_record, tab=self.state.inspector_tab)
-        inspector.set_ratio(self.state.inspector_ratio)
-        self._set_class(inspector, "-closed", not self.state.inspector_open)
-        if inspector.maximized != self.state.inspector_maximized:
-            inspector.toggle_maximize()
+        self._sync_filter_panel(update_options=True)
+        self._sync_inspector()
         if self.state.follow_tail:
             ledger.scroll_to_record(self.state.selected_id)
         self._update_status()
@@ -348,18 +377,30 @@ class TrajectoryView(Vertical):
             pieces.append("loading older")
         if self.state.retry_kind:
             pieces.append("retry available")
-        if self.state.query:
-            pieces.append(f"search: {self.state.query}")
         if self.state.reload_required:
             pieces.append("loaded window bounded; reload marker")
         if self.state.truncated_by_bytes:
             pieces.append("page byte cap reached")
         if self.state.filters_open:
             pieces.append("filters open")
-        if self._tooltip_text:
-            pieces.append(self._tooltip_text)
-        self.query_one("#trajectory-status", Static).update(
-            sanitize_text(" · ".join(pieces)), layout=False
+        toolbar_message = sanitize_text(" · ".join(pieces[1:]))
+        toolbar_message = toolbar_message.replace("\r", " ").replace("\n", " · ")
+        toolbar = self.query_one("#trajectory-toolbar", TrajectoryToolbar)
+        toolbar.update_state(
+            status=status,
+            message=toolbar_message,
+            record_count=len(self.state.records),
+            visible_count=len(self._search_result.records),
+            active_filters=(
+                len(self.state.lane_filters)
+                + len(self.state.kind_filters)
+                + len(self.state.status_filters)
+                + len(self.state.source_filters)
+            ),
+            query=self.state.query,
+            mode=self.state.order_mode,
+            follow_tail=self.state.follow_tail,
+            new_count=self.state.new_count,
         )
 
     @property
@@ -377,20 +418,61 @@ class TrajectoryView(Vertical):
         if region is FocusRegion.INSPECTOR:
             self.state.inspector_open = True
         if self.is_mounted:
+            if region is FocusRegion.INSPECTOR:
+                self._sync_inspector()
             widget = {
                 FocusRegion.TIMELINE: self.query_one("#trajectory-timeline", Timeline),
                 FocusRegion.LEDGER: self.query_one("#trajectory-ledger", Ledger),
                 FocusRegion.INSPECTOR: self.query_one("#trajectory-inspector", Inspector),
             }[region]
             widget.focus()
-            if region is FocusRegion.INSPECTOR:
-                widget.remove_class("-closed")
         return region
+
+    def _sync_inspector(self) -> None:
+        if not self.is_mounted:
+            return
+        inspector = self.query_one("#trajectory-inspector", Inspector)
+        inspector.set_record(
+            self.state.selected_record,
+            tab=self.state.inspector_tab,
+            render=self.state.inspector_open,
+        )
+        inspector.set_ratio(self.state.inspector_ratio)
+        self._set_class(inspector, "-closed", not self.state.inspector_open)
+        if inspector.maximized != self.state.inspector_maximized:
+            inspector.toggle_maximize()
+        self.set_class(self.state.inspector_maximized, "-inspector-maximized")
+
+    def _sync_filter_panel(self, *, update_options: bool = False) -> None:
+        if not self.is_mounted:
+            return
+        panel = self.query_one("#trajectory-filters", FilterPanel)
+        if self.state.filters_open and update_options:
+            panel.update_filters(
+                self._search_result.counts,
+                lanes=self.state.lane_filters,
+                kinds=self.state.kind_filters,
+                statuses=self.state.status_filters,
+                sources=self.state.source_filters,
+            )
+        self._set_class(panel, "-open", self.state.filters_open)
+        self._set_class(panel, "-hidden", not self.state.filters_open)
+
+    def _sync_selection(self, *, scroll: bool = True) -> None:
+        if not self.is_mounted:
+            return
+        record_id = self.state.selected_id
+        self.query_one("#trajectory-timeline", Timeline).set_selected(record_id)
+        self.query_one("#trajectory-ledger", Ledger).set_selected(record_id)
+        self._sync_inspector()
+        if scroll:
+            self._scroll_to_record(record_id)
+        self._update_status()
 
     def _scroll_to_record(self, record_id: str | None) -> None:
         if record_id is None or not self.is_mounted:
             return
-        if record_id not in self._search_result.record_ids:
+        if record_id not in self._visible_id_set:
             return
         ledger = self.query_one("#trajectory-ledger", Ledger)
         ledger.scroll_to_record(record_id)
@@ -398,10 +480,10 @@ class TrajectoryView(Vertical):
         self.state.timeline_scroll = timeline.scroll_span_into_view(record_id)
 
     def _selected_visible_ids(self) -> tuple[str, ...]:
-        return self._search_result.record_ids
+        return self._visible_ids
 
     def _pause_if_older(self, record_id: str | None) -> None:
-        records = self.state.record_list
+        records = self._ordered_records
         if self.state.follow_tail and records and record_id != records[-1].record_id:
             self.state.pause_follow()
 
@@ -418,11 +500,32 @@ class TrajectoryView(Vertical):
             and not self.state.loading_older
         ):
             self.run_worker(
-                self.controller.load_older(self.participant_id), name="trajectory-older"
+                self.controller.load_older(self.participant_id),
+                name="trajectory-older",
+                group="trajectory-older",
+                exclusive=True,
             )
-        self.state.move_selection(delta, visible_ids)
-        self._refresh(recompute=False)
-        self._scroll_to_record(self.state.selected_id)
+        if visible_ids:
+            current = self._visible_indices.get(before) if before is not None else None
+            if current is None:
+                order_index = self._ordered_indices.get(before or "")
+                if order_index is None:
+                    target = 0 if delta > 0 else len(visible_ids) - 1
+                elif delta > 0:
+                    target = min(
+                        len(visible_ids) - 1,
+                        bisect_right(self._visible_positions, order_index),
+                    )
+                else:
+                    target = max(0, bisect_left(self._visible_positions, order_index) - 1)
+            else:
+                target = max(0, min(len(visible_ids) - 1, current + delta))
+            self.state.select(visible_ids[target])
+            if delta < 0:
+                self.state.pause_follow()
+        else:
+            self.state.select(None)
+        self._sync_selection()
 
     def action_select_next(self) -> None:
         self._select(1)
@@ -436,8 +539,7 @@ class TrajectoryView(Vertical):
         record_id = timeline.move_span(-1)
         self._pause_if_older(record_id)
         self.state.select(record_id)
-        self._refresh(recompute=False)
-        self._scroll_to_record(record_id)
+        self._sync_selection()
 
     def action_timeline_next(self) -> None:
         self.focus_region(FocusRegion.TIMELINE)
@@ -445,8 +547,7 @@ class TrajectoryView(Vertical):
         record_id = timeline.move_span(1)
         self._pause_if_older(record_id)
         self.state.select(record_id)
-        self._refresh(recompute=False)
-        self._scroll_to_record(record_id)
+        self._sync_selection()
 
     def action_collapse(self) -> None:
         record = self.state.selected_record
@@ -484,7 +585,8 @@ class TrajectoryView(Vertical):
         if self.is_mounted:
             search = self.query_one("#trajectory-search", Input)
             search.value = self.state.query
-        self._refresh(recompute=False)
+        self._sync_filter_panel()
+        self._update_status()
         if self.is_mounted:
             self._focus_search()
 
@@ -494,16 +596,16 @@ class TrajectoryView(Vertical):
 
     def _close_search(self) -> None:
         self.state.search_open = False
-        self._refresh(recompute=False)
         self.focus_region(self.state.focus_region)
 
     def action_toggle_filters(self) -> None:
         self.state.filters_open = not self.state.filters_open
         if self.state.filters_open:
             self.state.search_open = False
-        self._refresh(recompute=False)
+        self._sync_filter_panel(update_options=True)
+        self._update_status()
         if self.state.filters_open and self.is_mounted:
-            self.query_one("#trajectory-filters", FilterPanel).focus()
+            self.query_one("#trajectory-filters", FilterPanel).focus_options()
 
     def action_reset(self) -> None:
         self.state.reset_ui()
@@ -523,13 +625,11 @@ class TrajectoryView(Vertical):
         visible = self._selected_visible_ids()
         self.state.select(visible[0] if visible else None)
         self.state.timeline_scroll = 0
-        self._refresh(recompute=False)
-        self._scroll_to_record(self.state.selected_id)
+        self._sync_selection()
 
     def action_tail(self) -> None:
         self.state.resume_follow()
-        self._refresh(recompute=False)
-        self._scroll_to_record(self.state.selected_id)
+        self._sync_selection()
         if self.controller is not None:
             self.run_worker(
                 self.controller.resume_follow(self.participant_id), name="trajectory-follow"
@@ -539,23 +639,22 @@ class TrajectoryView(Vertical):
         if self.state.selected_record is not None:
             self.state.inspector_open = True
             self.focus_region(FocusRegion.INSPECTOR)
-            self._refresh(recompute=False)
 
     def action_cycle_region(self, delta: int = 1) -> None:
         regions = tuple(FocusRegion)
         index = regions.index(self.state.focus_region)
         self.focus_region(regions[(index + delta) % len(regions)])
-        self._refresh(recompute=False)
 
     def action_resize_inspector(self, delta: float) -> None:
         self.state.set_ratio(self.state.inspector_ratio + delta)
-        self._refresh(recompute=False)
+        if self.is_mounted:
+            self.query_one("#trajectory-inspector", Inspector).set_ratio(self.state.inspector_ratio)
 
     def action_toggle_inspector_maximize(self) -> None:
         if not self.state.inspector_open:
             return
         self.state.inspector_maximized = not self.state.inspector_maximized
-        self._refresh(recompute=False)
+        self._sync_inspector()
 
     async def _retry(self) -> None:
         if self.controller is not None:
@@ -596,7 +695,6 @@ class TrajectoryView(Vertical):
         elif self.state.focus_region is FocusRegion.INSPECTOR:
             inspector = self.query_one("#trajectory-inspector", Inspector)
             self.state.inspector_tab = inspector.move_tab(delta)
-            self._refresh(recompute=False)
         elif delta < 0:
             self.action_collapse()
         else:
@@ -606,13 +704,18 @@ class TrajectoryView(Vertical):
         return self.is_mounted and self.app.focused is self.query_one("#trajectory-search", Input)
 
     def _filters_own_focus(self) -> bool:
-        return self.is_mounted and self.query_one("#trajectory-filters", FilterPanel).has_focus
+        return (
+            self.is_mounted and self.query_one("#trajectory-filters", FilterPanel).has_focus_within
+        )
 
     def on_key(self, event: events.Key) -> None:
         if self.state.search_open:
             if event.key == "escape":
                 event.stop()
                 self._close_search()
+            elif self.is_mounted and event.is_printable and event.character is not None:
+                event.stop()
+                self.query_one("#trajectory-search", Input).insert_text_at_cursor(event.character)
             return
         if self._filters_own_focus():
             if event.key == "escape":
@@ -659,33 +762,56 @@ class TrajectoryView(Vertical):
         self.state.query = event.value.encode("utf-8")[:MAX_QUERY_BYTES].decode(
             "utf-8", errors="ignore"
         )
+        if not self._search_refresh_pending:
+            self._search_refresh_pending = self.call_after_refresh(self._refresh_search)
+
+    def _refresh_search(self) -> None:
+        self._search_refresh_pending = False
         self._refresh()
+
+    def on_input_blurred(self, event: Input.Blurred) -> None:
+        if event.input.id == "trajectory-search":
+            self.state.search_open = False
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "trajectory-search":
+            return
+        event.stop()
+        self._close_search()
+
+    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        widget = event.widget
+        search = self.query_one("#trajectory-search", Input)
+        if widget is search:
+            self.state.search_open = True
+            return
+        regions = (
+            (FocusRegion.TIMELINE, self.query_one("#trajectory-timeline", Timeline)),
+            (FocusRegion.LEDGER, self.query_one("#trajectory-ledger", Ledger)),
+            (FocusRegion.INSPECTOR, self.query_one("#trajectory-inspector", Inspector)),
+        )
+        ancestors = set(widget.ancestors)
+        for region, container in regions:
+            if widget is container or container in ancestors:
+                self.state.focus_region = region
+                break
 
     def on_timeline_span_hovered(self, message: TimelineSpanHovered) -> None:
         self.state.hovered_id = message.record_id
         if self.is_mounted:
             self.query_one("#trajectory-timeline", Timeline).set_hovered(message.record_id)
             self.query_one("#trajectory-ledger", Ledger).set_hovered(message.record_id)
-            if message.record_id is None:
-                self._tooltip_text = ""
-            self._update_status()
 
     def on_timeline_span_clicked(self, message: TimelineSpanClicked) -> None:
         self._pause_if_older(message.record_id)
         self.state.select(message.record_id)
         self.state.focus_region = FocusRegion.TIMELINE
-        self._refresh(recompute=False)
-        self._scroll_to_record(message.record_id)
-
-    def on_timeline_tooltip_requested(self, message: TimelineTooltipRequested) -> None:
-        self._tooltip_text = message.text if message.record_id is not None else ""
-        if self.is_mounted:
-            self._update_status()
+        self._sync_selection()
 
     def on_timeline_scrolled(self, message: TimelineScrolled) -> None:
         self.state.timeline_scroll = message.offset
         timeline = self.query_one("#trajectory-timeline", Timeline)
-        if message.offset < max(0, len(self.state.record_list) - timeline._available_cells()):
+        if message.offset < timeline.tail_offset:
             self.state.pause_follow()
             self._update_status()
 
@@ -694,15 +820,13 @@ class TrajectoryView(Vertical):
         if self.is_mounted:
             self.query_one("#trajectory-timeline", Timeline).set_hovered(message.record_id)
             self.query_one("#trajectory-ledger", Ledger).set_hovered(message.record_id)
-            self._update_status()
 
     def on_ledger_record_clicked(self, message: LedgerRecordClicked) -> None:
         self._pause_if_older(message.record_id)
         self.state.select(message.record_id)
         self.state.inspector_open = True
         self.state.focus_region = FocusRegion.INSPECTOR
-        self._refresh(recompute=False)
-        self._scroll_to_record(message.record_id)
+        self._sync_selection()
 
     def on_ledger_group_clicked(self, message: LedgerGroupClicked) -> None:
         if message.group_id in self.state.collapsed_groups:
@@ -713,6 +837,15 @@ class TrajectoryView(Vertical):
 
     def on_ledger_retry_clicked(self, _message: LedgerRetryClicked) -> None:
         self.action_retry()
+
+    def on_ledger_older_clicked(self, _message: LedgerOlderClicked) -> None:
+        if self.controller is not None and self.state.has_older and not self.state.loading_older:
+            self.run_worker(
+                self.controller.load_older(self.participant_id),
+                name="trajectory-older",
+                group="trajectory-older",
+                exclusive=True,
+            )
 
     def on_filter_value_clicked(self, message: FilterValueClicked) -> None:
         if message.dimension is FilterDimension.LANE:
@@ -743,8 +876,28 @@ class TrajectoryView(Vertical):
 
     def on_filter_panel_closed(self, _message: FilterPanelClosed) -> None:
         self.state.filters_open = False
-        self._refresh(recompute=False)
+        self._sync_filter_panel()
+        self._update_status()
         self.focus_region(self.state.focus_region)
+
+    def on_filter_clear_requested(self, _message: FilterClearRequested) -> None:
+        self.state.lane_filters.clear()
+        self.state.kind_filters.clear()
+        self.state.status_filters.clear()
+        self.state.source_filters.clear()
+        self._refresh()
+        self.query_one("#trajectory-filters", FilterPanel).focus_options()
+
+    def on_toolbar_action_requested(self, message: ToolbarActionRequested) -> None:
+        actions = {
+            "search": self.action_open_search,
+            "filters": self.action_toggle_filters,
+            "mode": self.action_toggle_mode,
+            "follow": self.action_tail,
+        }
+        action = actions.get(message.action)
+        if action is not None:
+            action()
 
     def on_inspector_participant_link_clicked(
         self, message: InspectorParticipantLinkClicked

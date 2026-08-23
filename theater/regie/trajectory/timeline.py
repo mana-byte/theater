@@ -1,31 +1,38 @@
-"""Fixed-top, one-cell-per-record timeline widget."""
+"""Interactive four-lane trajectory overview."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from bisect import bisect_left, bisect_right
+from collections.abc import Sequence
+from typing import ClassVar
 
-from rich.text import Text
+from rich.segment import Segment
+from rich.style import Style
 from textual import events
+from textual.geometry import Size
 from textual.message import Message
-from textual.timer import Timer
-from textual.widgets import Static
+from textual.scroll_view import ScrollView
+from textual.strip import Strip
 
 from theater.regie.trajectory.constants import (
-    STYLE_DURATION,
-    STYLE_HOVERED,
-    STYLE_MATCHED,
-    STYLE_SELECTED,
-    STYLE_UNMATCHED,
+    TIMELINE_CONTENT_HEIGHT,
     TIMELINE_HEIGHT,
-    TIMELINE_PADDING,
-    TOOLTIP_DELAY,
+    TIMELINE_LABEL_WIDTH,
+    TIMELINE_LANE_HEIGHT,
+    TIMELINE_ORDER_CELL_WIDTH,
 )
-from theater.regie.trajectory.render import lane_glyph, supports_duration_interval, tooltip_text
-from theater.trajectory import TrajectoryRecord
+from theater.regie.trajectory.enums import OrderMode
+from theater.regie.trajectory.render import tooltip_text
+from theater.regie.trajectory.timeline_layout import (
+    TimelineLayout,
+    TimelineSpan,
+    build_timeline_layout,
+)
+from theater.trajectory import TrajectoryLane, TrajectoryRecord, TrajectoryStatus
 
 
 class TimelineSpanHovered(Message):
-    """A pointer or keyboard moved over one timeline span."""
+    """Pointer or keyboard moved over one timeline span."""
 
     def __init__(self, record_id: str | None) -> None:
         super().__init__()
@@ -33,45 +40,69 @@ class TimelineSpanHovered(Message):
 
 
 class TimelineSpanClicked(Message):
-    """A pointer selected one timeline span."""
+    """Pointer selected one timeline span."""
 
     def __init__(self, record_id: str | None) -> None:
         super().__init__()
         self.record_id = record_id
 
 
-class TimelineTooltipRequested(Message):
-    """The delayed tooltip hook fired for a span."""
-
-    def __init__(self, record_id: str | None, text: str = "") -> None:
-        super().__init__()
-        self.record_id = record_id
-        self.text = text
-
-
 class TimelineScrolled(Message):
-    """The native horizontal viewport changed."""
+    """Horizontal timeline viewport changed."""
 
     def __init__(self, offset: int) -> None:
         super().__init__()
         self.offset = offset
 
 
-class Timeline(Static):
-    """Render one fixed-width glyph per record with native horizontal scrolling."""
+class Timeline(ScrollView):
+    """Render lane spans with Textual's line API and native scrolling."""
 
     can_focus = True
+    COMPONENT_CLASSES: ClassVar[set[str]] = {
+        "trajectory-timeline--error",
+        "trajectory-timeline--hovered",
+        "trajectory-timeline--input",
+        "trajectory-timeline--label",
+        "trajectory-timeline--model",
+        "trajectory-timeline--muted",
+        "trajectory-timeline--running",
+        "trajectory-timeline--selected",
+        "trajectory-timeline--theater",
+        "trajectory-timeline--tools",
+        "trajectory-timeline--track",
+    }
 
     DEFAULT_CSS = f"""
     Timeline {{
         width: 1fr;
         height: {TIMELINE_HEIGHT};
         min-height: {TIMELINE_HEIGHT};
-        padding: 0 {TIMELINE_PADDING};
         overflow-x: auto;
         overflow-y: hidden;
+        scrollbar-size: 1 1;
+        background: $surface;
+        border-bottom: solid $panel;
+    }}
+    Timeline:focus {{
+        border-bottom: solid $accent;
+    }}
+    Timeline > .trajectory-timeline--label {{ color: $text-muted; text-style: bold; }}
+    Timeline > .trajectory-timeline--track {{ background: $surface; }}
+    Timeline > .trajectory-timeline--input {{ background: $primary; }}
+    Timeline > .trajectory-timeline--model {{ background: $accent; }}
+    Timeline > .trajectory-timeline--tools {{ background: $warning; }}
+    Timeline > .trajectory-timeline--theater {{ background: $secondary; }}
+    Timeline > .trajectory-timeline--error {{ background: $error; }}
+    Timeline > .trajectory-timeline--running {{ background: $warning; }}
+    Timeline > .trajectory-timeline--muted {{ opacity: 32%; }}
+    Timeline > .trajectory-timeline--hovered {{ background: $foreground 55%; }}
+    Timeline > .trajectory-timeline--selected {{
+        background: $foreground 35%;
     }}
     """
+
+    _LANES = tuple(TrajectoryLane)
 
     def __init__(
         self,
@@ -81,21 +112,28 @@ class Timeline(Static):
         selected_id: str | None = None,
         duration_mode: bool = False,
         scroll_offset: int = 0,
-        tooltip_hook: Callable[[TrajectoryRecord], None] | None = None,
         **kwargs,
     ) -> None:
-        super().__init__("", markup=False, **kwargs)
+        super().__init__(**kwargs)
         self._records: tuple[TrajectoryRecord, ...] = ()
+        self._records_by_id: dict[str, TrajectoryRecord] = {}
         self._span_ids: tuple[str, ...] = ()
+        self._span_indices: dict[str, int] = {}
         self._span_index = 0
         self._hovered_id: str | None = None
-        self._selected_id: str | None = selected_id
+        self._selected_id = selected_id
         self._matched_ids: frozenset[str] = frozenset()
         self._duration_mode = duration_mode
+        self._layout = build_timeline_layout((), OrderMode.ORDER)
+        self._span_by_id: dict[str, TimelineSpan] = {}
+        self._lane_spans: dict[TrajectoryLane, tuple[TimelineSpan, ...]] = dict.fromkeys(
+            self._LANES, ()
+        )
+        self._lane_starts: dict[TrajectoryLane, tuple[int, ...]] = dict.fromkeys(self._LANES, ())
+        self._lane_max_ends: dict[TrajectoryLane, tuple[int, ...]] = dict.fromkeys(self._LANES, ())
         self._scroll_offset = max(0, int(scroll_offset))
         self._viewport_width = 0
-        self._tooltip_timer: Timer | None = None
-        self._tooltip_hook = tooltip_hook
+        self.virtual_size = Size(TIMELINE_LABEL_WIDTH + 1, TIMELINE_CONTENT_HEIGHT)
         self.update_records(
             records,
             matched_ids=matched_ids,
@@ -125,24 +163,129 @@ class Timeline(Static):
         return self._duration_mode
 
     @property
+    def projection(self) -> TimelineLayout:
+        return self._layout
+
+    @property
     def horizontal_offset(self) -> int:
         return self._scroll_offset
 
-    def _render_timeline(self) -> Text:
-        content = Text(no_wrap=True, overflow="crop")
-        for record in self._records:
-            if record.record_id == self._hovered_id:
-                style = STYLE_HOVERED
-            elif record.record_id == self._selected_id:
-                style = STYLE_SELECTED
-            elif record.record_id not in self._matched_ids:
-                style = STYLE_UNMATCHED
-            else:
-                style = STYLE_MATCHED
-            if self._duration_mode and supports_duration_interval(record):
-                style = f"{style} {STYLE_DURATION}".strip()
-            content.append(lane_glyph(record.lane), style=style)
-        return content
+    @property
+    def tail_offset(self) -> int:
+        return max(0, self._layout.width - self._available_cells())
+
+    def _component(self, name: str) -> Style:
+        return self.get_component_rich_style(f"trajectory-timeline--{name}")
+
+    def _lane_style(self, lane: TrajectoryLane) -> Style:
+        return self._component(lane.value)
+
+    def _span_style(self, record: TrajectoryRecord) -> Style:
+        style = self._lane_style(record.lane)
+        if record.status in {TrajectoryStatus.ERROR, TrajectoryStatus.INTERRUPTED}:
+            style += self._component("error")
+        elif record.status in {TrajectoryStatus.PENDING, TrajectoryStatus.RUNNING}:
+            style += self._component("running")
+        if record.record_id not in self._matched_ids:
+            style += self._component("muted")
+        if record.record_id == self._selected_id:
+            style += self._component("selected")
+        if record.record_id == self._hovered_id:
+            style += self._component("hovered")
+        return style
+
+    def _lane_row(self, y: int) -> tuple[TrajectoryLane, int] | None:
+        if y < 0:
+            return None
+        lane_index, row = divmod(y, TIMELINE_LANE_HEIGHT)
+        if lane_index >= len(self._LANES):
+            return None
+        return self._LANES[lane_index], row
+
+    def _label(self, y: int) -> tuple[str, Style]:
+        lane_row = self._lane_row(y)
+        if lane_row is not None:
+            lane, row = lane_row
+            label = lane.value.upper() if row == TIMELINE_LANE_HEIGHT // 2 else ""
+            return label, self._component("label")
+        return "", self._component("label")
+
+    @staticmethod
+    def _solid_strip(styles: list[Style], width: int) -> Strip:
+        if not styles:
+            return Strip.blank(width)
+        segments: list[Segment] = []
+        start = 0
+        active = styles[0]
+        for index, style in enumerate(styles[1:], start=1):
+            if style == active:
+                continue
+            segments.append(Segment(" " * (index - start), active))
+            start = index
+            active = style
+        segments.append(Segment(" " * (width - start), active))
+        return Strip(segments, width)
+
+    def _lane_strip(self, lane: TrajectoryLane, start: int, width: int) -> Strip:
+        styles = [self._component("track")] * width
+        spans = self._lane_spans[lane]
+        first = bisect_right(self._lane_max_ends[lane], start)
+        last = bisect_left(self._lane_starts[lane], start + width)
+        visible_spans = spans[first:last]
+        for span in sorted(visible_spans, key=lambda item: item.width, reverse=True):
+            record = self._records_by_id.get(span.record_id)
+            if record is None:
+                continue
+            style = self._span_style(record)
+            for x in range(max(0, span.x - start), min(width, span.end - start)):
+                styles[x] = style
+        return self._solid_strip(styles, width)
+
+    def render_line(self, y: int) -> Strip:
+        scroll_x, scroll_y = self.scroll_offset
+        y += int(scroll_y)
+        width = max(1, self.size.width)
+        label_width = min(TIMELINE_LABEL_WIDTH, max(1, width - 1))
+        chart_width = max(1, width - label_width)
+        if y >= TIMELINE_CONTENT_HEIGHT:
+            return Strip.blank(width, self.rich_style)
+        label, label_style = self._label(y)
+        label_strip = Strip(
+            [Segment(label[:label_width].ljust(label_width), label_style)], label_width
+        )
+        chart_start = int(scroll_x)
+        if (lane_row := self._lane_row(y)) is not None:
+            lane, _row = lane_row
+            chart = self._lane_strip(lane, chart_start, chart_width)
+        else:
+            chart = Strip.blank(chart_width, self._component("track"))
+        return Strip.join((label_strip, chart))
+
+    def _index_spans(self) -> None:
+        self._span_by_id = {span.record_id: span for span in self._layout.spans}
+        for lane in self._LANES:
+            spans = tuple(
+                sorted(
+                    (span for span in self._layout.spans if span.lane is lane),
+                    key=lambda span: span.x,
+                )
+            )
+            starts = tuple(span.x for span in spans)
+            furthest = 0
+            max_ends: list[int] = []
+            for span in spans:
+                furthest = max(furthest, span.end)
+                max_ends.append(furthest)
+            self._lane_spans[lane] = spans
+            self._lane_starts[lane] = starts
+            self._lane_max_ends[lane] = tuple(max_ends)
+
+    def _visible_anchor(self) -> tuple[str, int] | None:
+        candidates = [span for span in self._layout.spans if span.end > self._scroll_offset]
+        if not candidates:
+            return None
+        span = min(candidates, key=lambda item: (item.x, item.width))
+        return span.record_id, span.x - self._scroll_offset
 
     def update_records(
         self,
@@ -154,160 +297,186 @@ class Timeline(Static):
         duration_mode: bool = False,
         scroll_offset: int | None = None,
     ) -> None:
-        old_span_ids = self._span_ids
-        old_scroll_offset = self._scroll_offset
-        anchor_index = min(old_scroll_offset, max(0, len(old_span_ids) - 1))
-        anchor_id = old_span_ids[anchor_index] if old_span_ids else None
+        old_anchor = self._visible_anchor()
+        old_offset = self._scroll_offset
         self._records = tuple(records)
+        self._records_by_id = {record.record_id: record for record in self._records}
         self._span_ids = tuple(record.record_id for record in self._records)
+        self._span_indices = {record_id: index for index, record_id in enumerate(self._span_ids)}
         self._matched_ids = (
-            frozenset(record.record_id for record in self._records)
-            if matched_ids is None
-            else frozenset(matched_ids)
+            frozenset(self._span_ids) if matched_ids is None else frozenset(matched_ids)
         )
         self._selected_id = selected_id
+        self._hovered_id = hovered_id if hovered_id in self._records_by_id else None
         self._duration_mode = duration_mode
-        if selected_id in self._span_ids:
-            self._span_index = self._span_ids.index(selected_id)
-        if hovered_id in self._span_ids:
-            self._hovered_id = hovered_id
-        else:
-            self._hovered_id = None
-        if self._span_ids:
-            self._span_index = min(self._span_index, len(self._span_ids) - 1)
-        else:
-            self._span_index = 0
-        requested_offset = old_scroll_offset if scroll_offset is None else int(scroll_offset)
-        if scroll_offset is None and anchor_id in self._span_ids:
-            requested_offset += self._span_ids.index(anchor_id) - anchor_index
-        if scroll_offset is not None or requested_offset != self._scroll_offset:
-            self.set_scroll_offset(requested_offset, repaint=False)
-        self.update(self._render_timeline(), layout=False)
+        mode = OrderMode.DURATION if duration_mode else OrderMode.ORDER
+        self._layout = build_timeline_layout(
+            self._records,
+            mode,
+            minimum_width=self._available_cells(),
+        )
+        self._index_spans()
+        if selected_id in self._span_indices:
+            self._span_index = self._span_indices[selected_id]
+        self._span_index = min(self._span_index, max(0, len(self._span_ids) - 1))
+        self.virtual_size = Size(TIMELINE_LABEL_WIDTH + self._layout.width, TIMELINE_CONTENT_HEIGHT)
+        requested = old_offset if scroll_offset is None else int(scroll_offset)
+        if scroll_offset is None and old_anchor is not None:
+            anchor_id, screen_x = old_anchor
+            new_anchor = self._span_by_id.get(anchor_id)
+            if new_anchor is not None:
+                requested = new_anchor.x - screen_x
+        self.set_scroll_offset(requested, repaint=False)
+        self.refresh()
 
     def _available_cells(self) -> int:
-        width = self._viewport_width or self.region.width
-        return max(1, width - 2 * TIMELINE_PADDING)
+        width = self._viewport_width or self.size.width or self.region.width
+        return max(1, width - TIMELINE_LABEL_WIDTH)
 
     def set_scroll_offset(self, offset: int, *, repaint: bool = True) -> int:
         if isinstance(offset, bool):
             raise TypeError("timeline scroll offset must be an integer")
-        self._scroll_offset = max(
-            0, min(int(offset), max(0, len(self._records) - self._available_cells()))
-        )
+        self._scroll_offset = max(0, min(int(offset), self.tail_offset))
         if self.is_mounted:
-            self.scroll_to(x=self._scroll_offset, animate=False)
+            self.scroll_x = self._scroll_offset
         if repaint:
             self.refresh()
         return self._scroll_offset
 
+    def scroll_to_tail(self) -> int:
+        return self.set_scroll_offset(self.tail_offset)
+
     def scroll_span_into_view(self, record_id: str | None) -> int:
-        if record_id not in self._span_ids:
+        span = self._span_by_id.get(record_id or "")
+        if span is None:
             return self._scroll_offset
-        index = self._span_ids.index(record_id)
         width = self._available_cells()
-        if index < self._scroll_offset:
-            self.set_scroll_offset(index)
-        elif index >= self._scroll_offset + width:
-            self.set_scroll_offset(index - width + 1)
+        if span.x < self._scroll_offset:
+            self.set_scroll_offset(span.x)
+        elif span.end > self._scroll_offset + width:
+            self.set_scroll_offset(span.end - width)
         return self._scroll_offset
 
-    def _record_at(self, x: int) -> TrajectoryRecord | None:
-        index = x + self._scroll_offset - TIMELINE_PADDING
-        if index < 0 or index >= len(self._records):
+    def _record_at(self, x: int, y: int) -> TrajectoryRecord | None:
+        lane_row = self._lane_row(y)
+        if lane_row is None:
             return None
-        return self._records[index]
+        chart_x = x - TIMELINE_LABEL_WIDTH + self._scroll_offset
+        if chart_x < 0:
+            return None
+        lane, _row = lane_row
+        spans = self._lane_spans[lane]
+        index = bisect_right(self._lane_starts[lane], chart_x) - 1
+        matches: list[TimelineSpan] = []
+        while index >= 0:
+            if self._lane_max_ends[lane][index] <= chart_x:
+                break
+            span = spans[index]
+            if chart_x < span.end:
+                matches.append(span)
+            index -= 1
+        if not matches:
+            return None
+        span = min(matches, key=lambda item: (item.width, -item.x))
+        return self._records_by_id.get(span.record_id)
 
-    def _set_hover(self, record: TrajectoryRecord | None, *, immediate: bool = False) -> None:
+    def _set_hover(
+        self,
+        record: TrajectoryRecord | None,
+        *,
+        notify: bool = True,
+        update_tooltip: bool = True,
+    ) -> None:
         record_id = record.record_id if record else None
-        if record_id == self._hovered_id and not immediate:
+        if record_id == self._hovered_id:
+            if update_tooltip:
+                self.tooltip = tooltip_text(record) if record is not None else None
             return
         self._hovered_id = record_id
         if record_id is not None:
-            self._span_index = self._span_ids.index(record_id)
-        self.update(self._render_timeline(), layout=False)
-        self.post_message(TimelineSpanHovered(record_id))
-        self._schedule_tooltip(record, immediate=immediate)
+            self._span_index = self._span_indices[record_id]
+        if update_tooltip:
+            self.tooltip = tooltip_text(record) if record is not None else None
+        self.refresh()
+        if notify:
+            self.post_message(TimelineSpanHovered(record_id))
 
     def set_hovered(self, record_id: str | None) -> None:
-        record = (
-            self._records[self._span_ids.index(record_id)] if record_id in self._span_ids else None
+        self._set_hover(
+            self._records_by_id.get(record_id or ""),
+            notify=False,
+            update_tooltip=False,
         )
-        self._set_hover(record, immediate=False)
 
-    def _schedule_tooltip(self, record: TrajectoryRecord | None, *, immediate: bool) -> None:
-        if self._tooltip_timer is not None:
-            self._tooltip_timer.stop()
-            self._tooltip_timer = None
-        if record is None:
-            self.post_message(TimelineTooltipRequested(None, ""))
+    def set_selected(self, record_id: str | None) -> None:
+        selected_id = record_id if record_id in self._span_indices else None
+        if selected_id == self._selected_id:
             return
-        if immediate:
-            self._emit_tooltip(record)
-        else:
-            self._tooltip_timer = self.set_timer(TOOLTIP_DELAY, lambda: self._emit_tooltip(record))
-
-    def _emit_tooltip(self, record: TrajectoryRecord) -> None:
-        self._tooltip_timer = None
-        text = tooltip_text(record)
-        self.post_message(TimelineTooltipRequested(record.record_id, text))
-        if self._tooltip_hook is not None:
-            self._tooltip_hook(record)
+        self._selected_id = selected_id
+        if selected_id is not None:
+            self._span_index = self._span_indices[selected_id]
+        self.refresh()
 
     def move_span(self, delta: int) -> str | None:
         if not self._span_ids:
             return None
         self._span_index = max(0, min(len(self._span_ids) - 1, self._span_index + delta))
         record = self._records[self._span_index]
-        self._set_hover(record, immediate=True)
+        self._set_hover(record)
         self.scroll_span_into_view(record.record_id)
         return record.record_id
 
     def select_span(self, record_id: str | None) -> None:
-        if record_id is None or record_id not in self._span_ids:
+        if record_id not in self._span_indices:
             return
-        self._span_index = self._span_ids.index(record_id)
-        self._selected_id = record_id
+        self.set_selected(record_id)
         self.scroll_span_into_view(record_id)
-        self._set_hover(self._records[self._span_index], immediate=True)
+        self._set_hover(self._records[self._span_index])
 
     def on_resize(self, event: events.Resize) -> None:
+        was_at_tail = self._scroll_offset == self.tail_offset
+        old_width = self._available_cells()
         self._viewport_width = max(1, event.size.width)
-        self.scroll_span_into_view(self._selected_id or self._hovered_id)
+        if self._available_cells() != old_width:
+            self.update_records(
+                self._records,
+                matched_ids=self._matched_ids,
+                hovered_id=self._hovered_id,
+                selected_id=self._selected_id,
+                duration_mode=self._duration_mode,
+            )
+            if was_at_tail:
+                self.scroll_to_tail()
 
     def on_mouse_move(self, event: events.MouseMove) -> None:
-        self._set_hover(self._record_at(int(event.x)))
+        self._set_hover(self._record_at(int(event.x), int(event.y)))
 
     def on_leave(self, _event: events.Leave) -> None:
         self._set_hover(None)
 
     def on_click(self, event: events.Click) -> None:
-        record = self._record_at(int(event.x))
+        record = self._record_at(int(event.x), int(event.y))
         if record is None:
             return
         event.stop()
-        self._set_hover(record, immediate=True)
+        self._set_hover(record)
         self._selected_id = record.record_id
-        self.update(self._render_timeline(), layout=False)
+        self.refresh()
         self.post_message(TimelineSpanClicked(record.record_id))
 
     def on_mouse_scroll_left(self, event: events.MouseScrollLeft) -> None:
         event.stop()
-        self.set_scroll_offset(self._scroll_offset - 1)
+        self.set_scroll_offset(self._scroll_offset - TIMELINE_ORDER_CELL_WIDTH)
 
     def on_mouse_scroll_right(self, event: events.MouseScrollRight) -> None:
         event.stop()
-        self.set_scroll_offset(self._scroll_offset + 1)
+        self.set_scroll_offset(self._scroll_offset + TIMELINE_ORDER_CELL_WIDTH)
 
-    def watch_scroll_x(self, _old_value: float, new_value: float) -> None:
-        maximum = max(0, len(self._records) - self._available_cells())
-        self._scroll_offset = max(0, min(int(new_value), maximum))
+    def watch_scroll_x(self, old_value: float, new_value: float) -> None:
+        super().watch_scroll_x(old_value, new_value)
+        self._scroll_offset = max(0, min(int(new_value), self.tail_offset))
         if self.is_mounted:
             self.post_message(TimelineScrolled(self._scroll_offset))
-
-    def on_unmount(self) -> None:
-        if self._tooltip_timer is not None:
-            self._tooltip_timer.stop()
-            self._tooltip_timer = None
 
 
 __all__ = [
@@ -315,5 +484,4 @@ __all__ = [
     "TimelineScrolled",
     "TimelineSpanClicked",
     "TimelineSpanHovered",
-    "TimelineTooltipRequested",
 ]

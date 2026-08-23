@@ -61,7 +61,7 @@ TRAJECTORY_MUTABLE_UPDATE_COALESCE_MS = 50
 # Maximum server-side follow wait in seconds.
 TRAJECTORY_FOLLOW_TIMEOUT_SECONDS = 20.0
 # Pointer tooltip delay in milliseconds.
-TRAJECTORY_TOOLTIP_DELAY_MS = 150
+TRAJECTORY_TOOLTIP_DELAY_MS = 50
 # Default trajectory inspector height ratio.
 TRAJECTORY_INSPECTOR_RATIO_DEFAULT = 0.35
 # Minimum trajectory inspector height ratio.

@@ -1,17 +1,25 @@
-"""Selectable lane, kind, status, and source filter chooser."""
+"""Native selectable filters for the loaded trajectory window."""
 
 from __future__ import annotations
 
 from rich.text import Text
 from textual import events
+from textual.app import ComposeResult
+from textual.containers import Horizontal, Vertical
 from textual.message import Message
-from textual.widgets import Static
+from textual.widgets import Button, Label, SelectionList
 
-from theater.regie.trajectory.constants import FILTER_MAX_ROWS, STYLE_FILTER_CURSOR
+from theater.regie.trajectory.constants import (
+    FILTER_HEADER_HEIGHT,
+    FILTER_MAX_ROWS,
+    TOOLBAR_HEIGHT,
+)
 from theater.regie.trajectory.enums import FilterDimension
 from theater.regie.trajectory.render import sanitize_text
 from theater.regie.trajectory.search import FilterCounts
 from theater.trajectory import TrajectoryKind, TrajectoryLane, TrajectoryStatus
+
+FilterValue = tuple[FilterDimension, str]
 
 
 class FilterValueClicked(Message):
@@ -24,79 +32,128 @@ class FilterValueClicked(Message):
 
 
 class FilterPanelClosed(Message):
-    """The chooser requested focus return to the trajectory region."""
+    """The chooser requested focus return to trajectory."""
 
 
-class FilterPanel(Static):
-    """Show every available filter value with its current structural count."""
+class FilterClearRequested(Message):
+    """The chooser requested clearing every active filter."""
 
-    can_focus = True
+
+class FilterPanel(Vertical):
+    """Show typed filter options through Textual's native selection list."""
 
     DEFAULT_CSS = f"""
     FilterPanel {{
         width: 1fr;
-        height: auto;
+        height: {FILTER_MAX_ROWS};
         max-height: {FILTER_MAX_ROWS};
-        padding: 0 1;
-        overflow-y: auto;
+        dock: top;
+        layer: trajectory-overlay;
+        offset-y: {TOOLBAR_HEIGHT};
         background: $panel;
+        border: solid $accent 45%;
+        padding: 0 1;
+    }}
+    FilterPanel > #trajectory-filter-header {{
+        width: 1fr;
+        height: {FILTER_HEADER_HEIGHT};
+        align-vertical: middle;
+    }}
+    FilterPanel #trajectory-filter-title {{
+        width: auto;
+        min-width: 10;
+        height: 3;
+        content-align: left middle;
+        text-style: bold;
+        color: $text;
+    }}
+    FilterPanel #trajectory-filter-summary {{
+        width: 1fr;
+        height: 3;
+        content-align: left middle;
+        color: $text-muted;
+        padding: 0 1;
+    }}
+    FilterPanel Button {{
+        min-width: 8;
+        height: 3;
+        content-align: center middle;
+        border: none !important;
+        margin: 0 0 0 1;
+        color: $text-muted;
+        background: $surface;
+    }}
+    FilterPanel Button:hover,
+    FilterPanel Button:focus {{
+        color: $text;
+        background: $accent 20%;
+    }}
+    FilterPanel SelectionList {{
+        width: 1fr;
+        height: 1fr;
+        border: none;
+        padding: 0;
+        background: $surface;
+    }}
+    FilterPanel SelectionList > .option-list--option {{
+        padding: 1 1;
+    }}
+    FilterPanel SelectionList > .option-list--option-highlighted {{
+        background: $accent 20%;
+        color: $text;
+        text-style: bold;
+    }}
+    FilterPanel SelectionList > .option-list--option-hover {{
+        background: $accent 10%;
     }}
     """
 
     def __init__(self, **kwargs) -> None:
-        super().__init__("", markup=False, **kwargs)
-        self._options: list[tuple[FilterDimension, str]] = []
+        super().__init__(**kwargs)
+        self._options: list[FilterValue] = []
         self._cursor = 0
-        self._lines: list[str] = []
         self._scroll_offset = 0
+        self._updating = False
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(id="trajectory-filter-header"):
+            yield Label("FILTERS", id="trajectory-filter-title")
+            yield Label("No active filters", id="trajectory-filter-summary")
+            yield Button("Clear", id="trajectory-filter-clear", compact=True, flat=True)
+            yield Button("Done", id="trajectory-filter-done", compact=True, flat=True)
+        yield SelectionList[FilterValue](id="trajectory-filter-options", compact=True)
 
     @property
-    def options(self) -> tuple[tuple[FilterDimension, str], ...]:
+    def options(self) -> tuple[FilterValue, ...]:
         return tuple(self._options)
+
+    @staticmethod
+    def _prompt(dimension: FilterDimension, value: str, count: int, selected: bool) -> Text:
+        prompt = Text(no_wrap=True, overflow="ellipsis")
+        prompt.append(f"{dimension.value.upper():<7}", style="bold cyan")
+        prompt.append(f" {sanitize_text(value.replace('_', ' '))}")
+        prompt.append(f"  {count:>4}", style="dim")
+        if selected:
+            prompt.append("  active", style="green")
+        return prompt
 
     def _append_dimension(
         self,
         dimension: FilterDimension,
         values: list[tuple[str, int]],
         selected: set[str],
-        lines: list[str],
+        choices: list[tuple[Text, FilterValue, bool]],
     ) -> None:
         for value, count in values:
-            self._options.append((dimension, value))
-            marker = "✓" if value in selected else " "
-            label = value.replace("_", " ")
-            lines.append(f"{marker} {dimension.value:<6} {sanitize_text(label)} ({count})")
-
-    def _scroll_cursor_into_view(self) -> None:
-        if not self._options:
-            self._scroll_offset = 0
-            return
-        viewport = min(FILTER_MAX_ROWS, max(1, len(self._options)))
-        max_offset = max(0, len(self._options) - viewport)
-        offset = max(0, min(self._scroll_offset, max_offset))
-        if self._cursor < offset:
-            offset = self._cursor
-        elif self._cursor >= offset + viewport:
-            offset = self._cursor - viewport + 1
-        self._scroll_offset = max(0, min(offset, max_offset))
-
-    def _visible_lines(self) -> tuple[int, list[str]]:
-        start = self._scroll_offset
-        return start, self._lines[start : start + FILTER_MAX_ROWS]
-
-    def _render_options(self, lines: list[str]) -> None:
-        self._lines = lines
-        self._scroll_cursor_into_view()
-        start, visible_lines = self._visible_lines()
-        content = Text(no_wrap=True, overflow="crop")
-        for visible_index, (index, line) in enumerate(enumerate(visible_lines, start=start)):
-            if visible_index:
-                content.append("\n")
-            content.append(line, style=STYLE_FILTER_CURSOR if index == self._cursor else None)
-        self.update(
-            content if visible_lines else Text("No filter values in the loaded window."),
-            layout=True,
-        )
+            option = (dimension, value)
+            self._options.append(option)
+            choices.append(
+                (
+                    self._prompt(dimension, value, count, value in selected),
+                    option,
+                    value in selected,
+                )
+            )
 
     def update_filters(
         self,
@@ -107,66 +164,115 @@ class FilterPanel(Static):
         statuses: set[TrajectoryStatus],
         sources: set[str],
     ) -> None:
+        highlighted: FilterValue | None = None
+        scroll_y = 0
+        selection_list = (
+            self.query_one("#trajectory-filter-options", SelectionList) if self.is_mounted else None
+        )
+        if selection_list is not None:
+            scroll_y = int(selection_list.scroll_y)
+            if selection_list.highlighted is not None and self._options:
+                index = min(selection_list.highlighted, len(self._options) - 1)
+                highlighted = self._options[index]
         self._options = []
-        lines: list[str] = []
+        choices: list[tuple[Text, FilterValue, bool]] = []
         self._append_dimension(
             FilterDimension.LANE,
             [(lane.value, counts.lanes.get(lane, 0)) for lane in TrajectoryLane],
             {lane.value for lane in lanes},
-            lines,
+            choices,
         )
         self._append_dimension(
             FilterDimension.KIND,
             [(kind.value, counts.kinds.get(kind, 0)) for kind in TrajectoryKind],
             {kind.value for kind in kinds},
-            lines,
+            choices,
         )
         self._append_dimension(
             FilterDimension.STATUS,
             [(status.value, counts.statuses.get(status, 0)) for status in TrajectoryStatus],
             {status.value for status in statuses},
-            lines,
+            choices,
         )
         source_values = sorted(set(counts.sources) | sources)
         self._append_dimension(
             FilterDimension.SOURCE,
             [(source, counts.sources.get(source, 0)) for source in source_values],
             sources,
-            lines,
+            choices,
         )
-        self._cursor = min(self._cursor, max(0, len(self._options) - 1))
-        self._render_options(lines)
-
-    def _activate_cursor(self) -> None:
-        if not self._options:
+        active_count = len(lanes) + len(kinds) + len(statuses) + len(sources)
+        if not self.is_mounted:
             return
-        dimension, value = self._options[self._cursor]
+        self._updating = True
+        try:
+            selection_list = self.query_one("#trajectory-filter-options", SelectionList)
+            selection_list.clear_options()
+            selection_list.add_options(choices)
+            if highlighted in self._options:
+                selection_list.highlighted = self._options.index(highlighted)
+            elif self._options:
+                selection_list.highlighted = min(self._cursor, len(self._options) - 1)
+            self._cursor = selection_list.highlighted or 0
+            selection_list.scroll_y = scroll_y
+            self._scroll_offset = int(selection_list.scroll_y)
+        finally:
+            self._updating = False
+        summary = "No active filters" if not active_count else f"{active_count} active"
+        self.query_one("#trajectory-filter-summary", Label).update(summary)
+
+    def focus_options(self) -> None:
+        if self.is_mounted:
+            self.query_one("#trajectory-filter-options", SelectionList).focus()
+
+    def _sync_scroll_state(self) -> None:
+        if not self.is_mounted:
+            return
+        selection_list = self.query_one("#trajectory-filter-options", SelectionList)
+        self._scroll_offset = int(selection_list.scroll_y)
+
+    def on_selection_list_selection_highlighted(
+        self, message: SelectionList.SelectionHighlighted[FilterValue]
+    ) -> None:
+        if message.selection_list.id != "trajectory-filter-options":
+            return
+        self._cursor = message.selection_index
+        self.call_after_refresh(self._sync_scroll_state)
+
+    def on_selection_list_selection_toggled(
+        self, message: SelectionList.SelectionToggled[FilterValue]
+    ) -> None:
+        if self._updating or message.selection_list.id != "trajectory-filter-options":
+            return
+        dimension, value = message.selection.value
         self.post_message(FilterValueClicked(dimension, value))
+        message.stop()
+
+    def on_button_pressed(self, message: Button.Pressed) -> None:
+        if message.button.id == "trajectory-filter-clear":
+            self.post_message(FilterClearRequested())
+        elif message.button.id == "trajectory-filter-done":
+            self.post_message(FilterPanelClosed())
+        else:
+            return
+        message.stop()
 
     def on_key(self, event: events.Key) -> None:
-        if event.key in {"up", "k"}:
+        selection_list = self.query_one("#trajectory-filter-options", SelectionList)
+        if event.key == "j":
             event.stop()
-            self._cursor = max(0, self._cursor - 1)
-            self._render_options(self._lines)
-        elif event.key in {"down", "j"}:
+            selection_list.action_cursor_down()
+        elif event.key == "k":
             event.stop()
-            self._cursor = min(max(0, len(self._options) - 1), self._cursor + 1)
-            self._render_options(self._lines)
-        elif event.key in {"enter", "space"}:
-            event.stop()
-            self._activate_cursor()
+            selection_list.action_cursor_up()
         elif event.key == "escape":
             event.stop()
             self.post_message(FilterPanelClosed())
 
-    def on_click(self, event: events.Click) -> None:
-        index = int(event.y) + self._scroll_offset
-        if index < 0 or index >= len(self._options):
-            return
-        event.stop()
-        self._cursor = index
-        self._render_options(self._lines)
-        self._activate_cursor()
 
-
-__all__ = ["FilterPanel", "FilterPanelClosed", "FilterValueClicked"]
+__all__ = [
+    "FilterClearRequested",
+    "FilterPanel",
+    "FilterPanelClosed",
+    "FilterValueClicked",
+]

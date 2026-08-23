@@ -77,6 +77,7 @@ from theater.constants.regie import (
     REGIE_USAGE_METRIC_UP,
     REGIE_USAGE_POLL_INTERVAL_SECONDS,
 )
+from theater.constants.trajectory import TRAJECTORY_TOOLTIP_DELAY_MS
 from theater.regie.animations.footer import (  # noqa: F401
     _advance_float,
     _advance_int,
@@ -217,6 +218,8 @@ STARTUP_REVEAL_INTERVAL = REGIE_STARTUP_REVEAL_INTERVAL_SECONDS
 
 class RegieApp(App):
     """The theater control panel."""
+
+    TOOLTIP_DELAY = TRAJECTORY_TOOLTIP_DELAY_MS / 1_000
 
     CSS = """
     Screen {
