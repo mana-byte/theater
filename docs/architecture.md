@@ -180,6 +180,13 @@ the framing above is auditable by eye with `nc`. Errors carry a `code` that
 maps to a `TheaterError` subclass, so a client can branch on `busy` versus
 `human_present` without parsing prose.
 
+Requests may carry an optional top-level `_meta` object for W3C trace-context
+propagation (see [§13](#13-observability)). This is an additive extension: old
+daemons already ignore unknown top-level keys, new daemons accept requests
+without `_meta`, and no protocol version bump is needed. Trace metadata lives
+in `_meta`, never inside `params` — handlers must not see or reject it.
+Receivers ignore unknown or malformed `_meta` keys.
+
 The daemon exposes 33 methods (`theater/daemon/rpc/`); the MCP server
 exposes 14 tools to agents (`theater/mcp/server.py`), namespaced `theater_*`.
 The two sets are not the same and should not be: `shutdown`, `adopt`, and
@@ -657,7 +664,15 @@ theater/
 │                       participants, process)
 ├── config/             load.py 95 · models.py 148 · validation.py · describe.py
 ├── constants/          __init__.py + cli, core, daemon, harness, limits, observation,
-│                       regie, tmux, worktree
+│                       observability, regie, tmux, worktree
+├── observability/      one package, one process-level lifecycle (see §13)
+│   ├── catalog.py        immutable operation/attribute specs (frozen, slotted)
+│   ├── engine.py         timing context, prose rendering, log extras, metric bridge
+│   ├── metrics.py        histogram registry, views, cached gauges, GaugeSampler
+│   ├── tracing.py        span lifecycle, explicit W3C inject/extract
+│   ├── logging.py        owned handlers, rotation, stderr-generation pruning
+│   └── runtime.py        process-level composition and RuntimeHandle shutdown
+├── timing.py           compatibility facade — re-exports observability engine
 ├── models.py 325       Tier, Status, Participant, Job, error codes
 ├── client.py 234       DaemonClient, autostarts the daemon
 ├── protocol.py 114     NDJSON framing, PROTOCOL_VERSION = 1
@@ -751,3 +766,189 @@ imports continue to work unchanged.
   `is_idle_screen` is already deliberately conservative about.
 
 `docs/v2_ideas.md` covers where this goes next.
+
+---
+
+## 13. Observability
+
+Theater ships an opt-in observability stack: structured stdlib logging, optional
+OpenTelemetry export (traces, metrics, logs), and W3C trace-context propagation
+across the NDJSON transport. All of it lives in one package,
+`theater/observability/`, with one process-level lifecycle.
+
+### Package ownership and dependency rules
+
+```
+theater/observability/
+├── __init__.py   small public API, no SDK import
+├── catalog.py    immutable operation/attribute specifications (frozen, slotted)
+├── engine.py     timing context, exact prose rendering, log extras, metric bridge
+├── metrics.py    histogram registry, views, cached gauges, GaugeSampler
+├── tracing.py    span lifecycle, explicit W3C inject/extract
+├── logging.py    owned handlers, rotation, stderr-generation pruning
+└── runtime.py    process-level composition and RuntimeHandle shutdown
+```
+
+`theater/timing.py` is a compatibility facade that re-exports the engine and
+preserves every existing public signature, so call sites that import `timing`
+continue to work unchanged.
+
+Dependency direction is strictly layered: `constants/observability.py` imports
+no feature package; `catalog.py` imports only dataclasses, enums, and constants;
+`metrics.py`, `tracing.py`, and `engine.py` may import `catalog.py`; `runtime.py`
+composes logging, metrics, and tracing. Lower modules never import `runtime`.
+Domain objects (`Registry`, `JobManager`, repositories) never import OpenTelemetry.
+Only `runtime._build_otel()` imports SDK/exporter modules, and only after
+configuration says export is enabled.
+
+### Process logging roles
+
+The daemon has two log files that must never share an inode:
+
+- **`daemon.log`** — the routine human-readable log. A `RotatingFileHandler`
+  attaches directly to the `theater` logger with the existing formatter
+  (`%(asctime)s %(levelname)-7s %(name)s %(message)s`). Rotation is **always
+  active**, regardless of whether OTLP export is enabled — this is the fix for
+  the 25 MB/9 h unbounded growth that motivated the whole design. Default 10 MB
+  per file, 3 backups. `theater.propagate = False` prevents duplicate root
+  output. A direct foreground daemon (`theater daemon`) also attaches a stderr
+  handler with the same formatter; an autostarted daemon does not mirror routine
+  logs into raw stderr.
+- **`daemon.<token>.stderr.log`** — raw crash output. When `DaemonClient`
+  autostarts a daemon, the parent generates 12 lowercase hex chars with
+  `secrets.token_hex(6)`, creates a mode-0600 file under Theater home, and
+  passes the same open fd as the child's stdout and stderr. The child does not
+  reopen or redirect stderr — it inherited the correct descriptor. Token
+  exists only for safe cleanup, pruning, and error reporting.
+
+A `RotatingFileHandler` renames its file on rollover; an inherited raw fd would
+continue writing to the renamed inode, which is why the two must never be the
+same file.
+
+Generation files are pruned by mtime immediately after the winner acquires the
+lock, before config and handler setup. Retention count includes the current
+generation; the current path is pinned regardless of mtime. Only `LockHeld`
+(the singleton race loser) deletes its own generation — every other failure
+keeps it, whether before or after lock acquisition.
+
+MCP and régie do not alter their logging setup when OTLP is disabled. When
+enabled, they attach only the OTel `LoggingHandler` to `theater` and set
+`propagate = False`. MCP stdout remains protocol-only — never attach a stdout
+handler. There is no local MCP/régie log file.
+
+`logging.basicConfig` was removed from the daemon start path; `runtime.configure()`
+delegates all owned handler work to `observability/logging.py`.
+
+### Opt-in OTLP export
+
+Export is off by default (`otlp_enabled = false`). When off, Theater starts no
+exporter thread and makes no network call; daemon log rotation still runs.
+
+Enable it by installing the optional dependency and setting the config key:
+
+```sh
+pip install -e '.[observability]'
+```
+
+```toml
+[observability]
+otlp_enabled = true
+```
+
+Missing optional packages with `otlp_enabled = true` is fatal with an
+actionable error: `install theater[observability] or disable
+observability.otlp_enabled`.
+
+#### Protocol and endpoint semantics
+
+`otlp_protocol` is `grpc` or `http`. `otlp_endpoint` is a collector **base**
+endpoint, not a signal-specific URL.
+
+| Protocol | Default endpoint | Signal URLs |
+|---|---|---|
+| gRPC | `http://localhost:4317` | passed unchanged to all three exporters |
+| HTTP | `http://localhost:4318` | `/v1/traces`, `/v1/metrics`, `/v1/logs` appended |
+
+Do not silently pair gRPC with port 4318. A configured endpoint must be an
+absolute `http` or `https` URL with a host and no query or fragment; a path
+prefix is allowed and receives the HTTP signal suffixes. Blank configured
+endpoints are rejected.
+
+Only the tracer provider is published globally — MCP SDK middleware obtains its
+tracer through the global API. Meter and logger providers stay private to
+Theater. `configure()` returns an idempotently closable `RuntimeHandle`; a
+module guard rejects a second configuration attempt in the same process,
+including after shutdown. Global tracer providers cannot be reset safely.
+
+Resource attributes on every owned provider: `service.name` (default `theater`),
+`service.version` (installed distribution version, fallback `unknown`), and
+`theater.process.role` (`daemon`, `mcp`, or `regie`).
+
+### Trace chain and additive NDJSON `_meta`
+
+Theater carries W3C trace context from MCP to the daemon over the existing
+NDJSON transport by adding an optional top-level `_meta` object to requests.
+This is additive — no `PROTOCOL_VERSION` bump — because old daemons already
+ignore unknown top-level keys and new daemons accept requests without `_meta`.
+Trace metadata never goes inside `params`, where handlers could see or reject
+it.
+
+An explicit `TraceContextTextMapPropagator` is used rather than the global
+composite propagator; Theater propagates only `traceparent` and `tracestate`,
+never baggage. Injection returns an empty mapping when no valid current span
+context exists; callers omit `_meta` when empty. Extraction requires a
+non-empty mapping, catches malformed-carrier errors, and returns `None` unless
+the extracted span context is valid.
+
+The expected trace chain when a client MCP supports SEP-414 and supplies valid
+context:
+
+```
+client MCP span
+  MCP SDK SERVER span        (built-in OpenTelemetryMiddleware, untouched)
+    Theater daemon RPC CLIENT span
+      daemon RPC SERVER span
+        internal Theater spans
+```
+
+Theater does not write custom MCP tracing middleware. It reuses MCP SDK 2.0's
+default `OpenTelemetryMiddleware` as-is. External client support is an
+integration fact to verify, not a guaranteed property of every harness.
+
+`RPC_CLIENT` (trace-only, `TraceKind.CLIENT`) wraps the `DaemonClient.call()`
+path: started after connection and request ID allocation, kept open through
+response validation and remote-error conversion. `RPC_SERVER`
+(`TraceKind.SERVER`) wraps dispatch; `RPC_AWAIT` uses a separate spec for
+`jobs.await`. Dispatch owns the RPC histogram — no second daemon-side RPC span
+or metric exists.
+
+### Daemon-only SQLite gauge sampling
+
+Three observable gauges back the dashboard metrics: `theater.participants.live`,
+`theater.participants.addressable`, and `theater.jobs.active`. They are backed
+only by cached integers — never by live queries.
+
+`GaugeSampler` runs on the daemon event loop because Store's SQLite connection
+is loop-thread-only. It updates a lock-protected cache at each sample interval.
+OTel exporter callbacks run on exporter threads and read **only that cache**;
+they never query SQLite or call domain services. This keeps export failure
+from blocking observation and keeps SQLite access on the thread that owns it.
+
+The sampler starts only after reconciliation and only when an active Theater
+metric bridge exists (which implies successful OTLP setup). A directly
+constructed test or embedded daemon may carry an enabled config without
+process bootstrap, so the gate is the bridge, not the config flag. Until a
+source has produced a value, its callback emits no observation rather than a
+false zero. Per-gauge read failures are caught and logged independently so one
+broken query does not suppress others. `stop()` is awaited before `Store.close()`.
+
+### Accepted limitation: raw stderr generation
+
+Raw stderr generation files are intentionally not rotated while a daemon is
+alive. They normally contain only interpreter or native crash output and
+accidental direct writes; routine Python logs go to the bounded rotating
+`daemon.log`. Per-generation retention (3 files total, including current) bounds
+old files, not one pathological current generation. Rotating an arbitrary
+inherited file descriptor requires a pipe or fd-reopen protocol; phase 1
+deliberately avoids that complexity. The observed growth source — 25 MB/9 h of
+routine logs — is moved to the bounded rotating `daemon.log`.

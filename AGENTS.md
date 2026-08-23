@@ -68,6 +68,15 @@ theater/
 │   └── commands/       bus, identity, introspection, maintenance, participants, process
 ├── config/             config loading, models, validation, describe
 ├── constants/          immutable values split by domain (cli, core, daemon, harness, …)
+│   └── observability.py  numeric/string constants, configurable defaults, timing thresholds
+├── observability/      one package, one process-level lifecycle — see §13 of architecture.md
+│   ├── catalog.py        immutable operation/attribute specs (frozen, slotted data)
+│   ├── engine.py         timing context, prose rendering, log extras, metric bridge
+│   ├── metrics.py        histogram registry, views, cached gauges, GaugeSampler
+│   ├── tracing.py        span lifecycle, explicit W3C inject/extract
+│   ├── logging.py        owned handlers, rotation, stderr-generation pruning
+│   └── runtime.py        process-level composition and RuntimeHandle shutdown
+├── timing.py           compatibility facade — re-exports observability engine, preserves old API
 ├── models.py           Tier, Status, Participant, Job, error codes
 ├── client.py           DaemonClient (NDJSON over Unix socket, autostarts the daemon)
 ├── protocol.py         NDJSON framing, PROTOCOL_VERSION = 1 (NOT JSON-RPC)
@@ -180,6 +189,14 @@ theater/
   the whole file. Plain deletion does not shrink the file, and every path that
   reports a sweep has to say so — a user who deletes 94% of the database and
   sees the same file size reports GC as broken.
+- **Observability has one process-level lifecycle.** `server.run()` owns daemon
+  observability setup and shutdown; `cmd_daemon` owns only argument translation
+  and exit codes. `runtime.configure()` is called exactly once — global tracer
+  providers cannot be reset safely, so a second configure attempt is rejected.
+  `daemon.log` (rotating) and `daemon.<token>.stderr.log` (raw crash output)
+  are never the same file. Gauge sampling runs on the daemon event loop because
+  Store's SQLite connection is loop-thread-only; exporter callbacks read only a
+  cache and never query SQLite. See §13 of architecture.md.
 
 ## When adding a harness
 

@@ -69,7 +69,12 @@ re-arms the participant.
 pip install -e .
 ```
 
-This installs the `theater` binary.
+This installs the `theater` binary. OpenTelemetry export is an optional extra —
+see [Observability](#observability) below:
+
+```sh
+pip install -e '.[observability]'
+```
 
 ### Nix
 
@@ -461,6 +466,77 @@ Deliberately not configurable: the default approval mode. There is none anywhere
 in Theater, because the choice is the whole safety story for a child nobody is
 watching, and a key setting it to `yolo` once and forever defeats that.
 
+### Observability
+
+Theater writes a rotating human-readable log and, when explicitly enabled,
+exports traces, metrics, and structured logs via OpenTelemetry. Export is off
+by default — Theater starts no exporter thread and makes no network call
+unless you ask.
+
+To enable export, install the optional dependency and set the config key:
+
+```sh
+pip install -e '.[observability]'
+```
+
+```toml
+[observability]
+otlp_enabled = true
+# otlp_protocol = "grpc"               # or "http"
+# otlp_endpoint = "http://localhost:4317"  # gRPC default; HTTP default is 4318
+# service_name = "theater"
+# export_interval_ms = 5000
+# gauge_interval_s = 5.0
+# log_max_bytes = 10485760              # 10 MB per file
+# log_backup_count = 3
+```
+
+`otlp_endpoint` is a collector **base** endpoint, not a signal-specific URL.
+For gRPC (default) the base endpoint is passed unchanged to all three
+exporters; the default is `http://localhost:4317`. For HTTP the base endpoint
+gets `/v1/traces`, `/v1/metrics`, and `/v1/logs` appended; the default is
+`http://localhost:4318`. Do not pair gRPC with port 4318. A configured
+endpoint must be an absolute `http` or `https` URL with a host and no query
+or fragment.
+
+Missing optional packages with `otlp_enabled = true` is fatal with an
+actionable message: `install theater[observability] or disable
+observability.otlp_enabled`.
+
+`theater restart` applies any change — config is read once at daemon start.
+
+#### Log files
+
+The daemon writes two files under `$THEATER_HOME` that are never the same file:
+
+| File | Contents | Rotation |
+|---|---|---|
+| `daemon.log` | routine Python logs | always active, 10 MB active file + 3 backups |
+| `daemon.<token>.stderr.log` | raw interpreter/native crash output | not rotated; 3 generations kept by mtime |
+
+Routine log growth — the observed 25 MB over 9 hours — goes to the bounded
+rotating `daemon.log`. Raw stderr files are pruned to 3 total (including the
+current generation) on each daemon start. A direct `theater daemon` keeps
+stderr on the terminal and creates no generation file.
+
+#### Restart and troubleshooting
+
+- **Config changes require `theater restart`.** Config is read once at daemon
+  start and never written by Theater.
+- **`theater stop` followed by `theater daemon` or any client command** starts
+  a fresh daemon. The first client command autostarts one if none is running.
+- **If the daemon fails to start**, check `$THEATER_HOME/daemon.log` for
+  routine errors and the newest `daemon.*.stderr.log` for crash output. A
+  timeout waiting for the socket names the exact generation file when one was
+  created, or `daemon.log` plus the `daemon.*.stderr.log` pattern otherwise.
+- **OTLP enabled but nothing exports**: confirm the collector is reachable at
+  the configured endpoint; a misconfigured endpoint shows up as export errors
+  in `daemon.log`.
+- **An existing global tracer provider causes a startup refusal** — Theater
+  inspects `get_tracer_provider()` and rejects anything that is not a
+  `ProxyTracerProvider`, because publishing over a real provider it does not
+  own would silently export only some signals.
+
 ### Teaching Theater a new CLI
 
 One way: write a plugin. A Python file that implements the adapter, dropped in
@@ -609,6 +685,8 @@ theater/
   cli/                    entry point, parser, commands, render
   config/                 config loading, models, validation
   constants/              immutable values split by domain
+  observability/          one package, one process-level lifecycle (logging, metrics, tracing)
+  timing.py               compatibility facade re-exporting the observability engine
   models.py               Participant, Status, Tier, Job, error codes
   client.py               DaemonClient (NDJSON over Unix socket, autostarts the daemon)
   protocol.py             wire protocol definitions (NDJSON, not JSON-RPC)
