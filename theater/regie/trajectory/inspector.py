@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+from math import isfinite
+
+from rich.text import Text
 from textual import events
 from textual.message import Message
+from textual.widget import Widget
 from textual.widgets import Static
 
-from theater.regie.trajectory.models import (
+from theater.regie.trajectory.constants import (
+    DEFAULT_INSPECTOR_RATIO,
+    INSPECTOR_MIN_HEIGHT,
+    INSPECTOR_RESIZE_STEP,
+    INSPECTOR_SCROLL_STEP,
     MAX_INSPECTOR_RATIO,
     MIN_INSPECTOR_RATIO,
-    InspectorTab,
-    TrajectoryRecord,
 )
+from theater.regie.trajectory.models import InspectorTab, TrajectoryRecord
 from theater.regie.trajectory.render import inspector_content, tabs_for_record
 
 
@@ -24,39 +31,38 @@ class InspectorTabChanged(Message):
 
 
 class InspectorParticipantLinkClicked(Message):
-    """A later app integration can stage this participant without knowing widgets."""
+    """A rendered participant link was activated."""
 
     def __init__(self, participant_id: str) -> None:
         super().__init__()
         self.participant_id = participant_id
 
 
-class InspectorMessageRequested(Message):
-    """A later app integration can open a message action for a participant."""
+class InspectorResizeRequested(Message):
+    """A deliberate keyboard or mouse gesture requested a drawer resize."""
 
-    def __init__(self, participant_id: str, text: str) -> None:
+    def __init__(self, delta: float) -> None:
         super().__init__()
-        self.participant_id = participant_id
-        self.text = text
+        self.delta = delta
 
 
 class Inspector(Static):
-    """Render tabs and content in one bounded drawer widget."""
+    """Render bounded tab content and keep ordinary wheel input for content."""
 
     can_focus = True
 
-    DEFAULT_CSS = """
-    Inspector {
+    DEFAULT_CSS = f"""
+    Inspector {{
         width: 1fr;
-        height: 35%;
-        min-height: 4;
+        height: {DEFAULT_INSPECTOR_RATIO * 100:.0f}%;
+        min-height: {INSPECTOR_MIN_HEIGHT};
         border-top: solid $panel;
         padding: 0 1;
         overflow-y: auto;
-    }
-    Inspector.-maximized {
+    }}
+    Inspector.-maximized {{
         height: 1fr;
-    }
+    }}
     """
 
     def __init__(self, record: TrajectoryRecord | None = None, **kwargs) -> None:
@@ -64,8 +70,10 @@ class Inspector(Static):
         self._record = record
         self._tabs = tabs_for_record(record)
         self._tab = self._tabs[0]
-        self._ratio = 0.35
+        self._ratio = DEFAULT_INSPECTOR_RATIO
         self._maximized = False
+        self._link_line_ids: dict[int, str] = {}
+        self._resizing = False
         self._render_content()
 
     @property
@@ -96,7 +104,20 @@ class Inspector(Static):
         labels = [f"[{tab.value}]" if tab == self._tab else tab.value for tab in self._tabs]
         heading = "  ".join(labels)
         content = inspector_content(self._record, self._tab)
-        self.update(f"{heading}\n{content.plain}", layout=False)
+        rendered = Text(heading, no_wrap=True, overflow="crop")
+        rendered.append("\n")
+        rendered.append_text(content)
+        self._link_line_ids = {}
+        if self._record is not None:
+            link_ids = {link.participant_id for link in self._record.links}
+            for line_index, line in enumerate(content.plain.splitlines(), start=1):
+                if line.startswith("participant "):
+                    for participant_id in link_ids:
+                        if participant_id in line:
+                            self._link_line_ids[line_index] = participant_id
+                            break
+        self.update(rendered, layout=False)
+        self.scroll_to(y=0, animate=False)
 
     def set_record(
         self, record: TrajectoryRecord | None, *, tab: InspectorTab | None = None
@@ -122,8 +143,12 @@ class Inspector(Static):
         return self.set_tab(self._tabs[index])
 
     def set_ratio(self, ratio: float) -> float:
-        if not isinstance(ratio, (int, float)) or isinstance(ratio, bool):
-            raise TypeError("inspector ratio must be numeric")
+        if (
+            not isinstance(ratio, (int, float))
+            or isinstance(ratio, bool)
+            or not isfinite(float(ratio))
+        ):
+            raise ValueError("inspector ratio must be finite")
         self._ratio = max(MIN_INSPECTOR_RATIO, min(MAX_INSPECTOR_RATIO, float(ratio)))
         self.styles.height = f"{self._ratio * 100:.2f}%"
         return self._ratio
@@ -142,22 +167,60 @@ class Inspector(Static):
         if participant_id:
             self.post_message(InspectorParticipantLinkClicked(participant_id))
 
-    def emit_message_request(self, participant_id: str, text: str) -> None:
-        if participant_id:
-            self.post_message(InspectorMessageRequested(participant_id, text[:2048]))
+    def on_click(self, event: events.Click) -> None:
+        participant_id = self._link_line_ids.get(int(event.y) + int(self.scroll_y))
+        if participant_id is None:
+            return
+        event.stop()
+        self.emit_participant_link(participant_id)
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key in {"ctrl+left", "ctrl+up"}:
+            event.stop()
+            self.post_message(InspectorResizeRequested(-INSPECTOR_RESIZE_STEP))
+        elif event.key in {"ctrl+right", "ctrl+down"}:
+            event.stop()
+            self.post_message(InspectorResizeRequested(INSPECTOR_RESIZE_STEP))
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        if event.button == 1 and int(event.y) == 0:
+            event.stop()
+            self._resizing = True
+            self.capture_mouse()
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        if not self._resizing:
+            return
+        event.stop()
+        parent = self.parent
+        height = parent.region.height if isinstance(parent, Widget) else self.region.height
+        if height:
+            self.post_message(InspectorResizeRequested(event.delta_y / height))
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        if self._resizing:
+            event.stop()
+            self._resizing = False
+            self.release_mouse()
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         event.stop()
-        self.resize_by(-0.02)
+        if event.shift:
+            self.post_message(InspectorResizeRequested(-INSPECTOR_RESIZE_STEP))
+        else:
+            self.scroll_relative(y=-INSPECTOR_SCROLL_STEP, animate=False)
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
         event.stop()
-        self.resize_by(0.02)
+        if event.shift:
+            self.post_message(InspectorResizeRequested(INSPECTOR_RESIZE_STEP))
+        else:
+            self.scroll_relative(y=INSPECTOR_SCROLL_STEP, animate=False)
 
 
 __all__ = [
     "Inspector",
-    "InspectorMessageRequested",
     "InspectorParticipantLinkClicked",
+    "InspectorResizeRequested",
     "InspectorTabChanged",
 ]

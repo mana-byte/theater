@@ -5,7 +5,9 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence, Set
 from dataclasses import dataclass, field
+from typing import TypeVar
 
+from theater.regie.trajectory.constants import MAX_SEARCH_CACHE_ENTRIES
 from theater.regie.trajectory.models import (
     GroupMetadata,
     Lane,
@@ -13,6 +15,9 @@ from theater.regie.trajectory.models import (
     RecordStatus,
     TrajectoryRecord,
 )
+
+CacheKey = TypeVar("CacheKey")
+CacheValue = TypeVar("CacheValue")
 
 
 def fuzzy_subsequence_score(query: str, candidate: str) -> int | None:
@@ -87,6 +92,48 @@ class FilterCounts:
     kinds: Mapping[RecordKind, int] = field(default_factory=dict)
     statuses: Mapping[RecordStatus, int] = field(default_factory=dict)
     sources: Mapping[str, int] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class SearchCache:
+    """Bounded corpus, query, and filter cache keyed by record revision."""
+
+    corpus: dict[tuple[str, int], str] = field(default_factory=dict)
+    query_scores: dict[tuple[str, int, str], int | None] = field(default_factory=dict)
+    filter_matches: dict[tuple[str, int, tuple[object, ...]], bool] = field(default_factory=dict)
+
+    def _trim(self, cache: dict[CacheKey, CacheValue]) -> None:
+        while len(cache) > MAX_SEARCH_CACHE_ENTRIES:
+            del cache[next(iter(cache))]
+
+    def searchable(self, record: TrajectoryRecord) -> str:
+        key = (record.record_id, record.revision)
+        text = self.corpus.get(key)
+        if text is None:
+            text = record_search_text(record).casefold()
+            self.corpus[key] = text
+            self._trim(self.corpus)
+        return text
+
+    def score(self, record: TrajectoryRecord, query: str) -> int | None:
+        key = (record.record_id, record.revision, query)
+        if key not in self.query_scores:
+            self.query_scores[key] = fuzzy_subsequence_score(query, self.searchable(record))
+            self._trim(self.query_scores)
+        return self.query_scores[key]
+
+    def passes(self, record: TrajectoryRecord, filters: TrajectoryFilters) -> bool:
+        filter_key = (
+            tuple(sorted(lane.value for lane in filters.lanes)),
+            tuple(sorted(kind.value for kind in filters.kinds)),
+            tuple(sorted(status.value for status in filters.statuses)),
+            tuple(sorted(filters.sources)),
+        )
+        key = (record.record_id, record.revision, filter_key)
+        if key not in self.filter_matches:
+            self.filter_matches[key] = _passes_filters(record, filters)
+            self._trim(self.filter_matches)
+        return self.filter_matches[key]
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +234,7 @@ def search_records(
     source_filters: Iterable[str] = (),
     groups: Sequence[GroupMetadata] = (),
     collapsed_groups: Set[str] = frozenset(),
+    cache: SearchCache | None = None,
 ) -> SearchResult:
     """Filter in source order and retain group headers for every visible match."""
     active = filters or TrajectoryFilters.from_sets(
@@ -199,9 +247,17 @@ def search_records(
     matched: list[TrajectoryRecord] = []
     scores: dict[str, int] = {}
     for record in records:
-        if not _passes_filters(record, active):
+        if cache is not None:
+            passes = cache.passes(record, active)
+        else:
+            passes = _passes_filters(record, active)
+        if not passes:
             continue
-        score = fuzzy_subsequence_score(normalized_query, record_search_text(record))
+        score = (
+            cache.score(record, normalized_query)
+            if cache is not None
+            else fuzzy_subsequence_score(normalized_query, record_search_text(record))
+        )
         if score is None:
             continue
         matched.append(record)
@@ -247,6 +303,7 @@ def matches_query(record: TrajectoryRecord, query: str) -> bool:
 __all__ = [
     "FilterCounts",
     "LedgerEntry",
+    "SearchCache",
     "SearchResult",
     "TrajectoryFilters",
     "fuzzy_subsequence_score",

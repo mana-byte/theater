@@ -12,12 +12,11 @@ from theater.regie.trajectory.models import (
     MAX_PAGE_RECORDS,
     PanelInfo,
     PanelStatus,
-    ParticipantTrajectoryState,
     TrajectoryFollow,
     TrajectoryPage,
-    TrajectoryStateStore,
     WireDecodeError,
 )
+from theater.regie.trajectory.state import ParticipantTrajectoryState, TrajectoryStateStore
 
 
 class DaemonClientCompatible(Protocol):
@@ -53,6 +52,8 @@ class TrajectoryController:
         page_limit: int = MAX_PAGE_RECORDS,
         follow_wait: float = 20.0,
     ) -> None:
+        if query_client is follow_client:
+            raise ValueError("trajectory query and follow clients must be distinct")
         if not 1 <= page_limit <= MAX_PAGE_RECORDS:
             raise ValueError(f"page_limit must be in [1, {MAX_PAGE_RECORDS}]")
         if not 0 <= follow_wait <= 20:
@@ -68,6 +69,7 @@ class TrajectoryController:
         self._listeners: dict[int, StateListener] = {}
         self._next_listener = 0
         self._closed = False
+        self._close_hint_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def generation(self) -> int:
@@ -82,7 +84,11 @@ class TrajectoryController:
         return self._follow_task
 
     def state_for(self, participant_id: str) -> ParticipantTrajectoryState:
-        return self.state_store.get(participant_id)
+        before = set(self.state_store.participant_ids())
+        state = self.state_store.get(participant_id)
+        for evicted in before - set(self.state_store.participant_ids()):
+            self._schedule_close_hint(evicted)
+        return state
 
     def subscribe(self, listener: StateListener) -> Callable[[], None]:
         """Register a synchronous repaint hook and return its removal function."""
@@ -140,6 +146,9 @@ class TrajectoryController:
         if self._closed:
             raise RuntimeError("trajectory controller is closed")
         await self._cancel_follow()
+        previous = self._active_participant
+        if previous is not None and previous != participant_id:
+            self._schedule_close_hint(previous)
         self._generation += 1
         generation = self._generation
         self._active_participant = participant_id
@@ -313,6 +322,23 @@ class TrajectoryController:
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
+    async def _best_effort_close(self, participant_id: str) -> None:
+        try:
+            await self._call(self.query_client, "trajectory.close", id=participant_id)
+        except Exception:
+            return
+
+    def _schedule_close_hint(self, participant_id: str) -> None:
+        if self._closed:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._best_effort_close(participant_id))
+        self._close_hint_tasks.add(task)
+        task.add_done_callback(self._close_hint_tasks.discard)
+
     async def close(self) -> None:
         """Cancel follow and close both disposable client connections."""
         if self._closed:
@@ -320,6 +346,14 @@ class TrajectoryController:
         self._closed = True
         self._generation += 1
         await self._cancel_follow()
+        participants = set(self.state_store.participant_ids())
+        if self._active_participant is not None:
+            participants.add(self._active_participant)
+        for participant_id in participants:
+            await self._best_effort_close(participant_id)
+        if self._close_hint_tasks:
+            await asyncio.gather(*self._close_hint_tasks, return_exceptions=True)
+            self._close_hint_tasks.clear()
         seen: set[int] = set()
         for client in (self.query_client, self.follow_client):
             if id(client) in seen:

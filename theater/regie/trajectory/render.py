@@ -7,8 +7,16 @@ import re
 
 from rich.text import Text
 
-from theater.regie.trajectory.models import (
+from theater.regie.trajectory.constants import (
+    KIND_GLYPHS_BY_VALUE,
+    LANE_GLYPHS_BY_VALUE,
     MAX_DETAIL_BYTES,
+    MAX_TOOLTIP_BYTES,
+    STYLE_DURATION,
+    STYLE_MATCHED,
+    TOOLTIP_DELAY,
+)
+from theater.regie.trajectory.models import (
     ContentFormat,
     InspectorTab,
     Lane,
@@ -19,48 +27,16 @@ from theater.regie.trajectory.models import (
     clip_utf8,
 )
 
-TOOLTIP_DELAY = 0.150
-
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]")
 _ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 
-LANE_GLYPHS = {
-    Lane.INPUT: "›",
-    Lane.MODEL: "◆",
-    Lane.TOOLS: "⚙",
-    Lane.THEATER: "◇",
-    Lane.UNKNOWN: "?",
-}
-
-KIND_GLYPHS = {
-    RecordKind.TURN: "↻",
-    RecordKind.STEP: "·",
-    RecordKind.USER: "›",
-    RecordKind.ASSISTANT: "◆",
-    RecordKind.REASONING: "∴",
-    RecordKind.TOOL_CALL: "⚙",
-    RecordKind.TOOL_RESULT: "✓",
-    RecordKind.SYSTEM: "§",
-    RecordKind.CONTEXT_CHANGE: "⇄",
-    RecordKind.SPAWN: "＋",
-    RecordKind.RESUME: "↺",
-    RecordKind.SEND: "→",
-    RecordKind.RECEIVE: "←",
-    RecordKind.AWAIT_START: "…",
-    RecordKind.AWAIT_END: "✓",
-    RecordKind.KILL: "×",
-    RecordKind.JOB_FAILURE: "!",
-    RecordKind.SESSION_BOUNDARY: "║",
-    RecordKind.OBSERVATION_ERROR: "!",
-    RecordKind.UNKNOWN: "?",
-}
+LANE_GLYPHS = {Lane(value): glyph for value, glyph in LANE_GLYPHS_BY_VALUE.items()}
+KIND_GLYPHS = {RecordKind(value): glyph for value, glyph in KIND_GLYPHS_BY_VALUE.items()}
 
 
 def sanitize_text(value: str) -> str:
-    """Remove terminal controls and escape Rich markup before display or copy."""
-    value = _ANSI_RE.sub("", value)
-    value = _CONTROL_RE.sub("�", value)
-    return value.replace("[", "\\[").replace("]", "\\]")
+    """Remove terminal controls while preserving literal data characters."""
+    return _CONTROL_RE.sub("�", _ANSI_RE.sub("", value))
 
 
 def plain_text(value: str) -> str:
@@ -105,12 +81,13 @@ def record_line(
     marker = "▶" if selected else ("·" if hovered else " ")
     duration = format_duration(record.timing)
     line = Text()
-    line.append(f"{marker} {index:>4} ")
+    position = f"{index:>4}" if not duration_mode else f"dur {duration:>7}"
+    line.append(f"{marker} {position} ")
     line.append(f"{kind_glyph(record.kind)} ")
     line.append(f"{sanitize_text(record.source[:16]):<16} ")
     line.append(f"{sanitize_text(record.summary[:64])} ")
     line.append(f"{status_label(record.status):<11} ")
-    line.append(duration)
+    line.append(duration, style=STYLE_DURATION if duration_mode else STYLE_MATCHED)
     return line
 
 
@@ -122,6 +99,8 @@ def group_line(label: str, *, collapsed: bool) -> Text:
 def tabs_for_record(record: TrajectoryRecord | None) -> tuple[InspectorTab, ...]:
     if record is None:
         return (InspectorTab.SUMMARY,)
+    if record.kind in {RecordKind.SYSTEM, RecordKind.CONTEXT_CHANGE}:
+        return (InspectorTab.CURRENT, InspectorTab.PREVIOUS, InspectorTab.DIFF)
     if record.kind in {RecordKind.ASSISTANT, RecordKind.REASONING} or record.lane == Lane.MODEL:
         return (
             InspectorTab.SUMMARY,
@@ -136,8 +115,6 @@ def tabs_for_record(record: TrajectoryRecord | None) -> tuple[InspectorTab, ...]
         return (InspectorTab.PREVIEW, InspectorTab.RAW, InspectorTab.SOURCE)
     if record.lane == Lane.THEATER:
         return (InspectorTab.SUMMARY, InspectorTab.PAYLOAD, InspectorTab.TIMING)
-    if record.kind in {RecordKind.SYSTEM, RecordKind.CONTEXT_CHANGE}:
-        return (InspectorTab.CURRENT, InspectorTab.PREVIOUS, InspectorTab.DIFF)
     return (InspectorTab.SUMMARY, InspectorTab.TIMING)
 
 
@@ -220,7 +197,7 @@ def tooltip_text(record: TrajectoryRecord) -> str:
     text = (
         f"{record.kind.value} · {record.source}\n{record.summary}\n{format_duration(record.timing)}"
     )
-    clipped, _, _ = clip_utf8(text, 2 * 1024)
+    clipped, _, _ = clip_utf8(text, MAX_TOOLTIP_BYTES)
     return clipped
 
 
