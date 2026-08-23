@@ -14,9 +14,10 @@ from theater.regie.trajectory.constants import (
     LEDGER_OVERSCAN_ROWS,
     LEDGER_SCROLL_STEP,
 )
-from theater.regie.trajectory.models import OrderMode, TrajectoryRecord
+from theater.regie.trajectory.enums import OrderMode
 from theater.regie.trajectory.render import group_line, record_line, sanitize_text
 from theater.regie.trajectory.search import LedgerEntry, SearchResult
+from theater.trajectory import TrajectoryRecord
 
 
 class LedgerRecordHovered(Message):
@@ -202,13 +203,24 @@ class Ledger(Static):
                 if content.plain:
                     content.append("\n")
                 if self.retry_line_index == line_index:
-                    content.append(f"↻ Retry: {sanitize_text(self._retry_message or '')}")
+                    retry = (
+                        sanitize_text(self._retry_message or "")
+                        .replace("\r", " ")
+                        .replace("\n", " ")
+                    )
+                    content.append(f"↻ Retry: {retry}")
                     rendered_ids.append(None)
                     continue
                 entry = self._entries[line_index]
                 rendered_ids.append(entry.record_id)
                 if entry.is_header:
-                    content.append_text(group_line(entry.group_label, collapsed=entry.collapsed))
+                    content.append_text(
+                        group_line(
+                            entry.group_label,
+                            collapsed=entry.collapsed,
+                            depth=entry.depth,
+                        )
+                    )
                     continue
                 record = self._records.get(entry.record_id or "")
                 if record is None:
@@ -220,6 +232,7 @@ class Ledger(Static):
                         selected=record.record_id == self._selected_id,
                         hovered=record.record_id == self._hovered_id,
                         duration_mode=self._order_mode == OrderMode.DURATION,
+                        depth=entry.depth,
                     )
                 )
                 rendered_records += 1
@@ -258,10 +271,17 @@ class Ledger(Static):
         self._render_rows()
 
     def _entry_at(self, y: int) -> LedgerEntry | None:
-        line = y + self._scroll_offset
+        padding = self.styles.padding.top
+        padding_top = int(getattr(padding, "value", padding) or 0)
+        line = y - padding_top + self._scroll_offset
         if line < 0 or line >= len(self._entries):
             return None
         return self._entries[line]
+
+    def _line_at(self, y: int) -> int:
+        padding = self.styles.padding.top
+        padding_top = int(getattr(padding, "value", padding) or 0)
+        return y - padding_top + self._scroll_offset
 
     def _hover_at(self, y: int) -> None:
         entry = self._entry_at(y)
@@ -291,7 +311,7 @@ class Ledger(Static):
         self._hover_at(-1)
 
     def on_click(self, event: events.Click) -> None:
-        line = int(event.y) + self._scroll_offset
+        line = self._line_at(int(event.y))
         if self.retry_line_index == line:
             event.stop()
             self.post_message(LedgerRetryClicked())

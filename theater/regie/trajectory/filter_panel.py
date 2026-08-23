@@ -8,14 +8,10 @@ from textual.message import Message
 from textual.widgets import Static
 
 from theater.regie.trajectory.constants import FILTER_MAX_ROWS, STYLE_FILTER_CURSOR
-from theater.regie.trajectory.models import (
-    FilterDimension,
-    Lane,
-    RecordKind,
-    RecordStatus,
-)
+from theater.regie.trajectory.enums import FilterDimension
 from theater.regie.trajectory.render import sanitize_text
 from theater.regie.trajectory.search import FilterCounts
+from theater.trajectory import TrajectoryKind, TrajectoryLane, TrajectoryStatus
 
 
 class FilterValueClicked(Message):
@@ -106,28 +102,28 @@ class FilterPanel(Static):
         self,
         counts: FilterCounts,
         *,
-        lanes: set[Lane],
-        kinds: set[RecordKind],
-        statuses: set[RecordStatus],
+        lanes: set[TrajectoryLane],
+        kinds: set[TrajectoryKind],
+        statuses: set[TrajectoryStatus],
         sources: set[str],
     ) -> None:
         self._options = []
         lines: list[str] = []
         self._append_dimension(
             FilterDimension.LANE,
-            [(lane.value, counts.lanes.get(lane, 0)) for lane in Lane],
+            [(lane.value, counts.lanes.get(lane, 0)) for lane in TrajectoryLane],
             {lane.value for lane in lanes},
             lines,
         )
         self._append_dimension(
             FilterDimension.KIND,
-            [(kind.value, counts.kinds.get(kind, 0)) for kind in RecordKind],
+            [(kind.value, counts.kinds.get(kind, 0)) for kind in TrajectoryKind],
             {kind.value for kind in kinds},
             lines,
         )
         self._append_dimension(
             FilterDimension.STATUS,
-            [(status.value, counts.statuses.get(status, 0)) for status in RecordStatus],
+            [(status.value, counts.statuses.get(status, 0)) for status in TrajectoryStatus],
             {status.value for status in statuses},
             lines,
         )

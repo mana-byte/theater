@@ -20,8 +20,8 @@ from theater.regie.trajectory.constants import (
     TIMELINE_PADDING,
     TOOLTIP_DELAY,
 )
-from theater.regie.trajectory.models import TrajectoryRecord
 from theater.regie.trajectory.render import lane_glyph, tooltip_text
+from theater.trajectory import TrajectoryRecord
 
 
 class TimelineSpanHovered(Message):
@@ -181,7 +181,7 @@ class Timeline(Static):
         else:
             self._span_index = 0
         requested_offset = old_scroll_offset if scroll_offset is None else int(scroll_offset)
-        if anchor_id in self._span_ids:
+        if scroll_offset is None and anchor_id in self._span_ids:
             requested_offset += self._span_ids.index(anchor_id) - anchor_index
         if scroll_offset is not None or requested_offset != self._scroll_offset:
             self.set_scroll_offset(requested_offset, repaint=False)

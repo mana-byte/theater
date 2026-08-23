@@ -13,12 +13,14 @@ from textual.widgets import Input, Static
 from textual.worker import Worker
 
 from theater.regie.trajectory.constants import (
+    INSPECTOR_RESIZE_STEP,
     MAX_QUERY_BYTES,
     SEARCH_HEIGHT,
     STATUS_HEIGHT,
     TIMELINE_HEIGHT,
 )
 from theater.regie.trajectory.controller import TrajectoryController
+from theater.regie.trajectory.enums import FilterDimension, FocusRegion, OrderMode
 from theater.regie.trajectory.filter_panel import (
     FilterPanel,
     FilterPanelClosed,
@@ -37,15 +39,6 @@ from theater.regie.trajectory.ledger import (
     LedgerRecordHovered,
     LedgerRetryClicked,
 )
-from theater.regie.trajectory.models import (
-    FilterDimension,
-    FocusRegion,
-    Lane,
-    OrderMode,
-    RecordKind,
-    RecordStatus,
-    TrajectoryPage,
-)
 from theater.regie.trajectory.render import sanitize_text
 from theater.regie.trajectory.search import FilterCounts, SearchCache, SearchResult, search_records
 from theater.regie.trajectory.state import ParticipantTrajectoryState, TrajectoryStateStore
@@ -55,6 +48,13 @@ from theater.regie.trajectory.timeline import (
     TimelineSpanClicked,
     TimelineSpanHovered,
     TimelineTooltipRequested,
+)
+from theater.trajectory import (
+    TrajectoryGroup,
+    TrajectoryKind,
+    TrajectoryLane,
+    TrajectoryPage,
+    TrajectoryStatus,
 )
 
 
@@ -206,10 +206,7 @@ class TrajectoryView(Vertical):
 
     def _make_search_key(self) -> tuple[object, ...]:
         records = tuple((record.record_id, record.revision) for record in self.state.record_list)
-        groups = tuple(
-            (group.group_id, group.label, group.record_ids, group.turn_id, group.step_id)
-            for group in self.state.groups
-        )
+        groups = tuple(self._group_signature(group) for group in self.state.groups)
         return (
             records,
             self.state.query,
@@ -219,6 +216,17 @@ class TrajectoryView(Vertical):
             frozenset(self.state.source_filters),
             groups,
             frozenset(self.state.collapsed_groups),
+        )
+
+    @staticmethod
+    def _group_signature(group: TrajectoryGroup) -> tuple[object, ...]:
+        return (
+            group.group_id,
+            group.label,
+            group.record_ids,
+            group.turn_id,
+            group.step_id,
+            tuple(TrajectoryView._group_signature(child) for child in group.children),
         )
 
     def _recompute_search(self) -> None:
@@ -247,14 +255,25 @@ class TrajectoryView(Vertical):
         ledger = self.query_one("#trajectory-ledger", Ledger)
         filter_panel = self.query_one("#trajectory-filters", FilterPanel)
         inspector = self.query_one("#trajectory-inspector", Inspector)
+        timeline_offset: int | None = self.state.timeline_scroll
+        if self.state.follow_tail:
+            timeline_offset = max(0, len(self.state.record_list) - timeline._available_cells())
+            self.state.timeline_scroll = timeline_offset
+        else:
+            timeline_offset = (
+                None
+                if timeline.span_ids and timeline.horizontal_offset == timeline_offset
+                else timeline_offset
+            )
         timeline.update_records(
             self.state.record_list,
             matched_ids=self._search_result.matched_ids,
             hovered_id=self.state.hovered_id,
             selected_id=self.state.selected_id,
             duration_mode=self.state.order_mode is OrderMode.DURATION,
-            scroll_offset=self.state.timeline_scroll,
+            scroll_offset=timeline_offset,
         )
+        self.state.timeline_scroll = timeline.horizontal_offset
         ledger.update_rows(
             self.state.record_list,
             self._search_result,
@@ -277,12 +296,16 @@ class TrajectoryView(Vertical):
         inspector.set_class(not self.state.inspector_open, "-closed")
         if inspector.maximized != self.state.inspector_maximized:
             inspector.toggle_maximize()
+        if self.state.follow_tail:
+            ledger.scroll_to_record(self.state.selected_id)
         self._update_status()
 
     def _update_status(self) -> None:
-        status = self.state.panel.status.value
+        status = self.state.panel.state.value
         message = self.state.panel.message or self.state.stale_message
         pieces = [status]
+        if self.state.loading:
+            pieces.append("loading")
         if message:
             pieces.append(message)
         if self.state.follow_tail:
@@ -395,13 +418,25 @@ class TrajectoryView(Vertical):
     def action_collapse(self) -> None:
         record = self.state.selected_record
         if record is not None:
-            self.state.collapsed_groups.add(record.group_id)
+            path = self._search_result.path_for_record(record.record_id)
+            if path:
+                self.state.collapsed_groups.add(path[-1])
             self._refresh()
 
     def action_expand(self) -> None:
         record = self.state.selected_record
         if record is not None:
-            self.state.collapsed_groups.discard(record.group_id)
+            path = self._search_result.path_for_record(record.record_id)
+            if path:
+                target = next(
+                    (
+                        group_id
+                        for group_id in reversed(path)
+                        if group_id in self.state.collapsed_groups
+                    ),
+                    path[-1],
+                )
+                self.state.collapsed_groups.discard(target)
             self._refresh()
 
     def action_toggle_mode(self) -> None:
@@ -559,8 +594,8 @@ class TrajectoryView(Vertical):
             "tab": lambda: self.action_cycle_region(1),
             "shift+tab": lambda: self.action_cycle_region(-1),
             "escape": self.action_return_to_tree,
-            "ctrl+left": lambda: self.action_resize_inspector(-0.02),
-            "ctrl+right": lambda: self.action_resize_inspector(0.02),
+            "ctrl+left": lambda: self.action_resize_inspector(-INSPECTOR_RESIZE_STEP),
+            "ctrl+right": lambda: self.action_resize_inspector(INSPECTOR_RESIZE_STEP),
         }
         action = actions.get(event.key)
         if action is None:
@@ -599,6 +634,10 @@ class TrajectoryView(Vertical):
 
     def on_timeline_scrolled(self, message: TimelineScrolled) -> None:
         self.state.timeline_scroll = message.offset
+        timeline = self.query_one("#trajectory-timeline", Timeline)
+        if message.offset < max(0, len(self.state.record_list) - timeline._available_cells()):
+            self.state.pause_follow()
+            self._update_status()
 
     def on_ledger_record_hovered(self, message: LedgerRecordHovered) -> None:
         self.state.hovered_id = message.record_id
@@ -627,19 +666,19 @@ class TrajectoryView(Vertical):
 
     def on_filter_value_clicked(self, message: FilterValueClicked) -> None:
         if message.dimension is FilterDimension.LANE:
-            lane = Lane(message.value)
+            lane = TrajectoryLane(message.value)
             if lane in self.state.lane_filters:
                 self.state.lane_filters.remove(lane)
             else:
                 self.state.lane_filters.add(lane)
         elif message.dimension is FilterDimension.KIND:
-            kind = RecordKind(message.value)
+            kind = TrajectoryKind(message.value)
             if kind in self.state.kind_filters:
                 self.state.kind_filters.remove(kind)
             else:
                 self.state.kind_filters.add(kind)
         elif message.dimension is FilterDimension.STATUS:
-            status = RecordStatus(message.value)
+            status = TrajectoryStatus(message.value)
             if status in self.state.status_filters:
                 self.state.status_filters.remove(status)
             else:

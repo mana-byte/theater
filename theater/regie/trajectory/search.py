@@ -1,4 +1,4 @@
-"""Chronology-preserving fuzzy search and structural ledger filtering."""
+"""Chronology-preserving fuzzy search and nested group filtering."""
 
 from __future__ import annotations
 
@@ -7,13 +7,15 @@ from collections.abc import Iterable, Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from typing import TypeVar
 
-from theater.regie.trajectory.constants import MAX_SEARCH_CACHE_ENTRIES
-from theater.regie.trajectory.models import (
-    GroupMetadata,
-    Lane,
-    RecordKind,
-    RecordStatus,
+from theater.regie.trajectory.constants import MAX_SEARCH_CACHE_ENTRIES, TRAJECTORY_UI_RECORD_LIMIT
+from theater.trajectory import (
+    GroupKind,
+    TrajectoryGroup,
+    TrajectoryKind,
+    TrajectoryLane,
     TrajectoryRecord,
+    TrajectoryStatus,
+    group_records,
 )
 
 CacheKey = TypeVar("CacheKey")
@@ -57,9 +59,9 @@ def record_search_text(record: TrajectoryRecord) -> str:
         record.parent_call_id or "",
     ]
     values.extend(field.name for field in record.details)
-    values.extend(field.value.text for field in record.details)
+    values.extend(field.preview.text for field in record.details)
     values.extend(link.participant_id for link in record.links)
-    values.extend(link.label or "" for link in record.links)
+    values.extend(link.relation for link in record.links)
     return " ".join(values)
 
 
@@ -67,18 +69,18 @@ def record_search_text(record: TrajectoryRecord) -> str:
 class TrajectoryFilters:
     """Independent filter sets used by one participant's view."""
 
-    lanes: frozenset[Lane] = frozenset()
-    kinds: frozenset[RecordKind] = frozenset()
-    statuses: frozenset[RecordStatus] = frozenset()
+    lanes: frozenset[TrajectoryLane] = frozenset()
+    kinds: frozenset[TrajectoryKind] = frozenset()
+    statuses: frozenset[TrajectoryStatus] = frozenset()
     sources: frozenset[str] = frozenset()
 
     @classmethod
     def from_sets(
         cls,
         *,
-        lanes: Iterable[Lane] = (),
-        kinds: Iterable[RecordKind] = (),
-        statuses: Iterable[RecordStatus] = (),
+        lanes: Iterable[TrajectoryLane] = (),
+        kinds: Iterable[TrajectoryKind] = (),
+        statuses: Iterable[TrajectoryStatus] = (),
         sources: Iterable[str] = (),
     ) -> TrajectoryFilters:
         return cls(frozenset(lanes), frozenset(kinds), frozenset(statuses), frozenset(sources))
@@ -86,17 +88,17 @@ class TrajectoryFilters:
 
 @dataclass(frozen=True, slots=True)
 class FilterCounts:
-    """Counts for each filter dimension, while other active filters remain applied."""
+    """Counts for each filter dimension while the other filters remain applied."""
 
-    lanes: Mapping[Lane, int] = field(default_factory=dict)
-    kinds: Mapping[RecordKind, int] = field(default_factory=dict)
-    statuses: Mapping[RecordStatus, int] = field(default_factory=dict)
+    lanes: Mapping[TrajectoryLane, int] = field(default_factory=dict)
+    kinds: Mapping[TrajectoryKind, int] = field(default_factory=dict)
+    statuses: Mapping[TrajectoryStatus, int] = field(default_factory=dict)
     sources: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
 class SearchCache:
-    """Bounded corpus, query, and filter cache keyed by record revision."""
+    """Bounded searchable corpus and filter results keyed by record revision."""
 
     corpus: dict[tuple[str, int], str] = field(default_factory=dict)
     query_scores: dict[tuple[str, int, str], int | None] = field(default_factory=dict)
@@ -138,12 +140,14 @@ class SearchCache:
 
 @dataclass(frozen=True, slots=True)
 class LedgerEntry:
-    """A structural group header or an actual record row."""
+    """A nested group header or an actual record row."""
 
     group_id: str
     group_label: str
     record_id: str | None = None
     collapsed: bool = False
+    depth: int = 0
+    group_kind: GroupKind | None = None
 
     @property
     def is_header(self) -> bool:
@@ -152,29 +156,21 @@ class LedgerEntry:
 
 @dataclass(frozen=True, slots=True)
 class SearchResult:
-    """Filtered records plus headers retained for honest hierarchy."""
+    """Filtered records plus structural headers retained for visible matches."""
 
     records: tuple[TrajectoryRecord, ...]
     entries: tuple[LedgerEntry, ...]
     matched_ids: frozenset[str]
     scores: Mapping[str, int]
     counts: FilterCounts
+    group_paths: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     @property
     def record_ids(self) -> tuple[str, ...]:
         return tuple(record.record_id for record in self.records)
 
-
-def _group_labels(
-    records: Sequence[TrajectoryRecord], groups: Sequence[GroupMetadata] = ()
-) -> dict[str, str]:
-    labels = {group.group_id: group.label for group in groups}
-    for record in records:
-        labels.setdefault(
-            record.group_id,
-            f"Turn {record.turn_id}" if record.turn_id else "Between turns",
-        )
-    return labels
+    def path_for_record(self, record_id: str | None) -> tuple[str, ...]:
+        return self.group_paths.get(record_id or "", ())
 
 
 def _passes_filters(record: TrajectoryRecord, filters: TrajectoryFilters) -> bool:
@@ -200,21 +196,22 @@ def _passes_other_filters(
 
 
 def _filter_counts(records: Sequence[TrajectoryRecord], filters: TrajectoryFilters) -> FilterCounts:
-    lane_counts: Counter[Lane] = Counter()
-    kind_counts: Counter[RecordKind] = Counter()
-    status_counts: Counter[RecordStatus] = Counter()
+    lane_counts: Counter[TrajectoryLane] = Counter()
+    kind_counts: Counter[TrajectoryKind] = Counter()
+    status_counts: Counter[TrajectoryStatus] = Counter()
     source_counts: Counter[str] = Counter()
     for record in records:
         for name in ("lanes", "kinds", "statuses", "sources"):
-            if _passes_other_filters(record, filters, name):
-                if name == "lanes":
-                    lane_counts[record.lane] += 1
-                elif name == "kinds":
-                    kind_counts[record.kind] += 1
-                elif name == "statuses":
-                    status_counts[record.status] += 1
-                else:
-                    source_counts[record.source] += 1
+            if not _passes_other_filters(record, filters, name):
+                continue
+            if name == "lanes":
+                lane_counts[record.lane] += 1
+            elif name == "kinds":
+                kind_counts[record.kind] += 1
+            elif name == "statuses":
+                status_counts[record.status] += 1
+            else:
+                source_counts[record.source] += 1
     return FilterCounts(
         lanes=dict(lane_counts),
         kinds=dict(kind_counts),
@@ -223,20 +220,56 @@ def _filter_counts(records: Sequence[TrajectoryRecord], filters: TrajectoryFilte
     )
 
 
+def _all_record_ids(group: TrajectoryGroup) -> set[str]:
+    ids = set(group.record_ids)
+    for child in group.children:
+        ids.update(_all_record_ids(child))
+    return ids
+
+
+def _group_paths(
+    groups: Sequence[TrajectoryGroup],
+) -> dict[str, tuple[str, ...]]:
+    paths: dict[str, tuple[str, ...]] = {}
+
+    def visit(group: TrajectoryGroup, parent: tuple[str, ...]) -> None:
+        path = (*parent, group.group_id)
+        for record_id in group.record_ids:
+            paths.setdefault(record_id, path)
+        for child in group.children:
+            visit(child, path)
+
+    for group in groups:
+        visit(group, ())
+    return paths
+
+
+def _complete_groups(
+    records: Sequence[TrajectoryRecord], groups: Sequence[TrajectoryGroup]
+) -> tuple[TrajectoryGroup, ...]:
+    if not groups:
+        return group_records(records)
+    known = {record_id for group in groups for record_id in _all_record_ids(group)}
+    if {record.record_id for record in records} <= known:
+        return tuple(groups)
+    return group_records(records)
+
+
 def search_records(
     records: Sequence[TrajectoryRecord],
     *,
     query: str = "",
     filters: TrajectoryFilters | None = None,
-    lane_filters: Iterable[Lane] = (),
-    kind_filters: Iterable[RecordKind] = (),
-    status_filters: Iterable[RecordStatus] = (),
+    lane_filters: Iterable[TrajectoryLane] = (),
+    kind_filters: Iterable[TrajectoryKind] = (),
+    status_filters: Iterable[TrajectoryStatus] = (),
     source_filters: Iterable[str] = (),
-    groups: Sequence[GroupMetadata] = (),
+    groups: Sequence[TrajectoryGroup] = (),
     collapsed_groups: Set[str] = frozenset(),
     cache: SearchCache | None = None,
 ) -> SearchResult:
-    """Filter in source order and retain group headers for every visible match."""
+    """Filter source order and retain every visible structural group header."""
+    bounded_records = tuple(records[:TRAJECTORY_UI_RECORD_LIMIT])
     active = filters or TrajectoryFilters.from_sets(
         lanes=lane_filters,
         kinds=kind_filters,
@@ -246,11 +279,10 @@ def search_records(
     normalized_query = query.casefold().strip()
     matched: list[TrajectoryRecord] = []
     scores: dict[str, int] = {}
-    for record in records:
-        if cache is not None:
-            passes = cache.passes(record, active)
-        else:
-            passes = _passes_filters(record, active)
+    for record in bounded_records:
+        passes = (
+            cache.passes(record, active) if cache is not None else _passes_filters(record, active)
+        )
         if not passes:
             continue
         score = (
@@ -263,35 +295,63 @@ def search_records(
         matched.append(record)
         scores[record.record_id] = score
 
-    labels = _group_labels(records, groups)
+    complete_groups = _complete_groups(bounded_records, groups)
+    matched_ids = frozenset(record.record_id for record in matched)
+    positions = {record.record_id: index for index, record in enumerate(bounded_records)}
+    paths = _group_paths(complete_groups)
     entries: list[LedgerEntry] = []
-    last_group: str | None = None
-    visible_ids = frozenset(record.record_id for record in matched)
-    for record in matched:
-        group_id = record.group_id
-        if group_id != last_group:
-            entries.append(
-                LedgerEntry(
-                    group_id=group_id,
-                    group_label=labels[group_id],
-                    collapsed=group_id in collapsed_groups,
-                )
+
+    def visit(group: TrajectoryGroup, depth: int) -> None:
+        if not (_all_record_ids(group) & matched_ids):
+            return
+        collapsed = group.group_id in collapsed_groups
+        entries.append(
+            LedgerEntry(
+                group_id=group.group_id,
+                group_label=group.label,
+                collapsed=collapsed,
+                depth=depth,
+                group_kind=group.kind,
             )
-            last_group = group_id
-        if group_id not in collapsed_groups:
-            entries.append(
-                LedgerEntry(
-                    group_id=group_id,
-                    group_label=labels[group_id],
-                    record_id=record.record_id,
+        )
+        if collapsed:
+            return
+        units: list[tuple[int, int, str | TrajectoryGroup]] = []
+        for record_id in group.record_ids:
+            if record_id in matched_ids:
+                units.append((positions.get(record_id, 0), 0, record_id))
+        for child in group.children:
+            if _all_record_ids(child) & matched_ids:
+                first = min(
+                    positions.get(record_id, 0)
+                    for record_id in _all_record_ids(child) & matched_ids
                 )
-            )
+                units.append((first, 1, child))
+        for _position, unit_kind, unit in sorted(units, key=lambda item: item[:2]):
+            if unit_kind == 0:
+                assert isinstance(unit, str)
+                entries.append(
+                    LedgerEntry(
+                        group_id=group.group_id,
+                        group_label=group.label,
+                        record_id=unit,
+                        depth=depth + 1,
+                        group_kind=group.kind,
+                    )
+                )
+            else:
+                assert isinstance(unit, TrajectoryGroup)
+                visit(unit, depth + 1)
+
+    for group in complete_groups:
+        visit(group, 0)
     return SearchResult(
         records=tuple(matched),
         entries=tuple(entries),
-        matched_ids=visible_ids,
+        matched_ids=matched_ids,
         scores=scores,
-        counts=_filter_counts(records, active),
+        counts=_filter_counts(bounded_records, active),
+        group_paths=paths,
     )
 
 

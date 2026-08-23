@@ -8,37 +8,35 @@ from dataclasses import dataclass, field
 from math import isfinite
 
 from theater.regie.trajectory.constants import (
-    DEFAULT_INSPECTOR_RATIO,
-    MAX_IDENTIFIER_BYTES,
-    MAX_INSPECTOR_RATIO,
-    MAX_LOADED_BYTES,
-    MAX_LOADED_RECORDS,
-    MAX_PARTICIPANT_STATES,
-    MAX_QUERY_BYTES,
-    MIN_INSPECTOR_RATIO,
+    TRAJECTORY_DETAIL_FIELD_MAX_BYTES,
+    TRAJECTORY_IDENTIFIER_MAX_BYTES,
+    TRAJECTORY_INSPECTOR_RATIO_DEFAULT,
+    TRAJECTORY_INSPECTOR_RATIO_MAX,
+    TRAJECTORY_INSPECTOR_RATIO_MIN,
+    TRAJECTORY_UI_MAX_BYTES,
+    TRAJECTORY_UI_RECORD_LIMIT,
+    TRAJECTORY_WARM_STREAM_LIMIT,
 )
-from theater.regie.trajectory.enums import (
-    FocusRegion,
-    InspectorTab,
-    Lane,
-    OrderMode,
-    PanelStatus,
-    RecordKind,
-    RecordStatus,
-)
-from theater.regie.trajectory.wire import (
-    Coverage,
-    GroupMetadata,
-    PanelInfo,
-    TrajectoryFollow,
+from theater.regie.trajectory.enums import FocusRegion, InspectorTab, OrderMode
+from theater.trajectory import (
+    PanelState,
+    PanelStateInfo,
+    TrajectoryCoverage,
+    TrajectoryDelta,
+    TrajectoryGroup,
+    TrajectoryKind,
+    TrajectoryLane,
     TrajectoryPage,
     TrajectoryRecord,
-    clip_utf8,
+    TrajectoryStatus,
+    TrajectoryValidationError,
+    deterministic_record_order,
+    group_records,
 )
 
 
 def _record_size(record: TrajectoryRecord) -> int:
-    return record.estimated_bytes
+    return len(repr(record.to_wire()).encode("utf-8"))
 
 
 @dataclass(slots=True)
@@ -46,13 +44,15 @@ class ParticipantTrajectoryState:
     """Bounded mutable UI state for one participant; never persisted."""
 
     participant_id: str
-    panel: PanelInfo = field(default_factory=lambda: PanelInfo(PanelStatus.LOADING))
+    panel: PanelStateInfo = field(
+        default_factory=lambda: PanelStateInfo(PanelState.WAITING, "Loading trajectory…")
+    )
     stream_id: str | None = None
     cursor: str | None = None
     older_cursor: str | None = None
     has_older: bool = False
-    coverage: Coverage = field(default_factory=Coverage)
-    groups: tuple[GroupMetadata, ...] = ()
+    coverage: TrajectoryCoverage = field(default_factory=TrajectoryCoverage)
+    groups: tuple[TrajectoryGroup, ...] = ()
     records: OrderedDict[str, TrajectoryRecord] = field(default_factory=OrderedDict)
     loaded_bytes: int = 0
     follow_tail: bool = True
@@ -61,14 +61,14 @@ class ParticipantTrajectoryState:
     hovered_id: str | None = None
     collapsed_groups: set[str] = field(default_factory=set)
     query: str = ""
-    lane_filters: set[Lane] = field(default_factory=set)
-    kind_filters: set[RecordKind] = field(default_factory=set)
-    status_filters: set[RecordStatus] = field(default_factory=set)
+    lane_filters: set[TrajectoryLane] = field(default_factory=set)
+    kind_filters: set[TrajectoryKind] = field(default_factory=set)
+    status_filters: set[TrajectoryStatus] = field(default_factory=set)
     source_filters: set[str] = field(default_factory=set)
     order_mode: OrderMode = OrderMode.ORDER
     timeline_scroll: int = 0
     inspector_tab: InspectorTab = InspectorTab.SUMMARY
-    inspector_ratio: float = DEFAULT_INSPECTOR_RATIO
+    inspector_ratio: float = TRAJECTORY_INSPECTOR_RATIO_DEFAULT
     inspector_maximized: bool = False
     inspector_open: bool = False
     focus_region: FocusRegion = FocusRegion.LEDGER
@@ -79,28 +79,23 @@ class ParticipantTrajectoryState:
     reload_required: bool = False
     truncated_by_bytes: bool = False
     loading_older: bool = False
+    loading: bool = True
     search_open: bool = False
     filters_open: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.participant_id, str) or not self.participant_id:
             raise ValueError("participant_id must be a non-empty string")
-        if len(self.participant_id.encode("utf-8")) > MAX_IDENTIFIER_BYTES:
+        if len(self.participant_id.encode("utf-8")) > TRAJECTORY_IDENTIFIER_MAX_BYTES:
             raise ValueError("participant_id is too large")
-        if (
-            not isinstance(self.inspector_ratio, (int, float))
-            or isinstance(self.inspector_ratio, bool)
-            or not isfinite(float(self.inspector_ratio))
-        ):
-            raise ValueError("inspector ratio must be finite")
-        self.inspector_ratio = max(
-            MIN_INSPECTOR_RATIO, min(MAX_INSPECTOR_RATIO, float(self.inspector_ratio))
-        )
+        self.set_ratio(self.inspector_ratio)
         if not isinstance(self.timeline_scroll, int) or isinstance(self.timeline_scroll, bool):
             raise TypeError("timeline scroll must be an integer")
         self.timeline_scroll = max(0, self.timeline_scroll)
-        if len(self.query.encode("utf-8")) > MAX_QUERY_BYTES:
-            self.query = clip_utf8(self.query, MAX_QUERY_BYTES)[0]
+        if len(self.query.encode("utf-8")) > TRAJECTORY_DETAIL_FIELD_MAX_BYTES:
+            self.query = self.query.encode("utf-8")[:TRAJECTORY_DETAIL_FIELD_MAX_BYTES].decode(
+                "utf-8", errors="ignore"
+            )
 
     @property
     def record_list(self) -> list[TrajectoryRecord]:
@@ -114,14 +109,20 @@ class ParticipantTrajectoryState:
     def at_tail(self) -> bool:
         return self.follow_tail
 
-    def _set_panel(self, panel: PanelInfo) -> None:
+    def _set_panel(self, panel: PanelStateInfo) -> None:
         self.panel = panel
-        self.stale = panel.status == PanelStatus.STALE
+        self.stale = panel.state is PanelState.STALE
         if not self.stale:
             self.stale_message = ""
 
+    def _rebuild_groups(self) -> None:
+        self.groups = group_records(self.record_list)
+
     def _trim(self, *, evict_oldest: bool) -> None:
-        while len(self.records) > MAX_LOADED_RECORDS or self.loaded_bytes > MAX_LOADED_BYTES:
+        while (
+            len(self.records) > TRAJECTORY_UI_RECORD_LIMIT
+            or self.loaded_bytes > TRAJECTORY_UI_MAX_BYTES
+        ):
             if not self.records:
                 self.loaded_bytes = 0
                 break
@@ -133,20 +134,21 @@ class ParticipantTrajectoryState:
             if record_id == self.hovered_id:
                 self.hovered_id = None
 
-    def upsert(
+    def _apply_records(
         self, records: Sequence[TrajectoryRecord], *, older: bool = False
     ) -> tuple[int, int]:
-        """Apply records by stable ID and revision, returning (added, updated)."""
         added = 0
         updated = 0
-        older_added: list[TrajectoryRecord] = []
         candidates: OrderedDict[str, TrajectoryRecord] = OrderedDict()
         for record in records:
-            if record.participant_id == self.participant_id and (
-                record.record_id not in candidates
-                or record.revision > candidates[record.record_id].revision
-            ):
+            if not isinstance(record, TrajectoryRecord):
+                raise TrajectoryValidationError("runtime records must contain trajectory records")
+            if record.participant_id != self.participant_id:
+                raise TrajectoryValidationError("record participant does not match runtime state")
+            current = candidates.get(record.record_id)
+            if current is None or record.revision > current.revision:
                 candidates[record.record_id] = record
+        older_added: list[TrajectoryRecord] = []
         for record in candidates.values():
             existing = self.records.get(record.record_id)
             if existing is not None and record.revision <= existing.revision:
@@ -155,27 +157,45 @@ class ParticipantTrajectoryState:
                 self.loaded_bytes -= _record_size(existing)
                 self.records[record.record_id] = record
                 updated += 1
+            elif older:
+                older_added.append(record)
+                added += 1
             else:
-                if older:
-                    older_added.append(record)
-                else:
-                    self.records[record.record_id] = record
+                self.records[record.record_id] = record
                 added += 1
             self.loaded_bytes += _record_size(record)
         if older_added:
             self.records = OrderedDict(
                 [(record.record_id, record) for record in older_added] + list(self.records.items())
             )
+        self.records = OrderedDict(
+            (record.record_id, record)
+            for record in deterministic_record_order(self.records.values())
+        )
         self._trim(evict_oldest=older)
+        self._rebuild_groups()
         if self.selected_id is None and self.records and self.follow_tail:
             self.selected_id = next(reversed(self.records))
         return added, updated
 
+    def upsert(
+        self, records: Sequence[TrajectoryRecord], *, older: bool = False
+    ) -> tuple[int, int]:
+        """Apply records by stable ID and revision, returning added and updated counts."""
+        return self._apply_records(records, older=older)
+
     def apply_snapshot(self, page: TrajectoryPage) -> None:
-        """Replace loaded records with a validated snapshot."""
-        if page.participant_id != self.participant_id:
-            raise ValueError("snapshot participant does not match runtime state")
+        """Replace loaded records with a validated canonical snapshot."""
         prior_selection = self.selected_id
+        prior_records = OrderedDict(self.records)
+        prior_bytes = self.loaded_bytes
+        prior_groups = self.groups
+        preserve_trace = (
+            page.panel_state.state
+            in {PanelState.STALE, PanelState.UNAVAILABLE, PanelState.UNTRUSTED}
+            and bool(self.records)
+            and not page.records
+        )
         self.records.clear()
         self.loaded_bytes = 0
         self.stream_id = page.stream_id
@@ -183,14 +203,27 @@ class ParticipantTrajectoryState:
         self.older_cursor = page.older_cursor
         self.has_older = page.has_older
         self.coverage = page.coverage
-        self.groups = page.groups
         self.reload_required = False
         self.truncated_by_bytes = page.truncated_by_bytes
         self.loading_older = False
+        self.loading = False
         self.retry_kind = None
         self.retry_message = ""
-        self._set_panel(page.panel)
-        self.upsert(page.records)
+        if preserve_trace:
+            self.records = prior_records
+            self.loaded_bytes = prior_bytes
+            self.groups = prior_groups
+        else:
+            self._apply_records(page.records)
+            self.groups = page.groups or self.groups
+        self._set_panel(page.panel_state)
+        if page.panel_state.state in {
+            PanelState.STALE,
+            PanelState.UNAVAILABLE,
+            PanelState.UNTRUSTED,
+        }:
+            self.retry_kind = "refresh"
+            self.retry_message = page.panel_state.message or "Retry trajectory refresh."
         if prior_selection in self.records:
             self.selected_id = prior_selection
         elif self.records:
@@ -199,34 +232,38 @@ class ParticipantTrajectoryState:
             self.selected_id = None
 
     def apply_older(self, page: TrajectoryPage) -> None:
-        if page.participant_id != self.participant_id:
-            raise ValueError("older page participant does not match runtime state")
+        if page.stream_id is not None and self.stream_id not in {None, page.stream_id}:
+            raise TrajectoryValidationError("older page stream does not match runtime state")
         self.loading_older = False
+        if page.stream_id is not None:
+            self.stream_id = page.stream_id
         self.older_cursor = page.older_cursor
         self.has_older = page.has_older
         self.coverage = page.coverage
-        known_groups = {group.group_id: group for group in self.groups}
-        known_groups.update({group.group_id: group for group in page.groups})
-        self.groups = tuple(known_groups.values())
         self.truncated_by_bytes = page.truncated_by_bytes
+        self._set_panel(page.panel_state)
         self.retry_kind = None
         self.retry_message = ""
-        self.upsert(page.records, older=True)
+        if page.panel_state.state in {
+            PanelState.STALE,
+            PanelState.UNAVAILABLE,
+            PanelState.UNTRUSTED,
+        }:
+            self.retry_kind = "older"
+            self.retry_message = page.panel_state.message or "Retry older trajectory page."
+        self._apply_records(page.records, older=True)
 
-    def apply_follow(self, delta: TrajectoryFollow) -> tuple[int, int]:
-        """Apply a follow delta without moving a paused tail."""
-        if delta.participant_id != self.participant_id:
-            raise ValueError("follow participant does not match runtime state")
-        if delta.stream_id is not None:
-            self.stream_id = delta.stream_id
+    def apply_follow(self, delta: TrajectoryDelta) -> tuple[int, int]:
+        """Apply canonical follow upserts without moving a paused tail."""
+        if self.stream_id is not None and delta.stream_id != self.stream_id:
+            raise TrajectoryValidationError("follow stream does not match runtime state")
+        self.stream_id = delta.stream_id
         if delta.cursor is not None:
             self.cursor = delta.cursor
-        if delta.panel is not None:
-            self._set_panel(delta.panel)
-        added, updated = self.upsert(delta.upserts)
+        added, updated = self._apply_records([upsert.record for upsert in delta.upserts])
         if added and not self.follow_tail:
             self.new_count += added
-        elif added and self.follow_tail:
+        elif added:
             self.new_count = 0
             self.selected_id = next(reversed(self.records))
         self.retry_kind = None
@@ -236,9 +273,14 @@ class ParticipantTrajectoryState:
     def mark_stale(self, message: str) -> None:
         self.stale = True
         self.stale_message = message
-        self.panel = PanelInfo(PanelStatus.STALE, message, retryable=True)
+        self.panel = PanelStateInfo(
+            PanelState.STALE,
+            message,
+            participant_state=self.panel.participant_state,
+        )
         self.retry_kind = "refresh"
         self.retry_message = message
+        self.loading = False
 
     def mark_retry(self, kind: str, message: str) -> None:
         self.retry_kind = kind
@@ -287,7 +329,10 @@ class ParticipantTrajectoryState:
     def set_ratio(self, ratio: float) -> float:
         if not isinstance(ratio, (int, float)) or isinstance(ratio, bool) or not isfinite(ratio):
             raise ValueError("inspector ratio must be finite")
-        self.inspector_ratio = max(MIN_INSPECTOR_RATIO, min(MAX_INSPECTOR_RATIO, float(ratio)))
+        self.inspector_ratio = max(
+            TRAJECTORY_INSPECTOR_RATIO_MIN,
+            min(TRAJECTORY_INSPECTOR_RATIO_MAX, float(ratio)),
+        )
         return self.inspector_ratio
 
     def reset_ui(self) -> None:
@@ -298,7 +343,7 @@ class ParticipantTrajectoryState:
         self.status_filters.clear()
         self.source_filters.clear()
         self.collapsed_groups.clear()
-        self.selected_id = next(reversed(self.records), None)
+        self.selected_id = None
         self.hovered_id = None
         self.order_mode = OrderMode.ORDER
         self.timeline_scroll = 0
@@ -317,7 +362,7 @@ class ParticipantTrajectoryState:
 class TrajectoryStateStore:
     """Small LRU of participant UI state with no persistence hooks."""
 
-    def __init__(self, *, max_participants: int = MAX_PARTICIPANT_STATES) -> None:
+    def __init__(self, *, max_participants: int = TRAJECTORY_WARM_STREAM_LIMIT) -> None:
         if max_participants < 1:
             raise ValueError("max_participants must be positive")
         self.max_participants = max_participants
@@ -326,7 +371,7 @@ class TrajectoryStateStore:
     def get(self, participant_id: str) -> ParticipantTrajectoryState:
         if not isinstance(participant_id, str) or not participant_id:
             raise ValueError("participant_id must be a non-empty string")
-        if len(participant_id.encode("utf-8")) > MAX_IDENTIFIER_BYTES:
+        if len(participant_id.encode("utf-8")) > TRAJECTORY_IDENTIFIER_MAX_BYTES:
             raise ValueError("participant_id is too large")
         if participant_id in self._states:
             state = self._states.pop(participant_id)
