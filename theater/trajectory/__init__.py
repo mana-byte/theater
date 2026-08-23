@@ -1,0 +1,133 @@
+"""Process-neutral trajectory domain values and pure projections."""
+
+from __future__ import annotations
+
+from theater.trajectory.bounds import bounded_preview, clip_utf8
+from theater.trajectory.models import (
+    ContentFormat,
+    ContentPreview,
+    CoverageGap,
+    DetailField,
+    Format,
+    GroupKind,
+    Kind,
+    Lane,
+    LinkDirection,
+    PanelState,
+    PanelStateInfo,
+    ParticipantLink,
+    RecordKind,
+    RecordStatus,
+    Status,
+    Timing,
+    TimingProvenance,
+    TrajectoryContentFormat,
+    TrajectoryCoverage,
+    TrajectoryDelta,
+    TrajectoryDetail,
+    TrajectoryDetailField,
+    TrajectoryGroup,
+    TrajectoryKind,
+    TrajectoryLane,
+    TrajectoryPage,
+    TrajectoryPanelState,
+    TrajectoryPanelStateInfo,
+    TrajectoryRecord,
+    TrajectoryRecordKind,
+    TrajectoryRecordStatus,
+    TrajectoryStatus,
+    TrajectoryTiming,
+    TrajectoryTimingProvenance,
+    TrajectoryUpsert,
+    TrajectoryUsage,
+    TrajectoryValidationError,
+    Usage,
+    bound_detail_fields,
+    escape_rich_text,
+)
+from theater.trajectory.wire import from_wire, to_wire
+
+__all__ = [
+    "ContentFormat",
+    "ContentPreview",
+    "CoverageGap",
+    "DetailField",
+    "Format",
+    "GroupKind",
+    "Kind",
+    "Lane",
+    "LinkDirection",
+    "PanelState",
+    "PanelStateInfo",
+    "ParticipantLink",
+    "RecordKind",
+    "RecordStatus",
+    "Status",
+    "Timing",
+    "TimingProvenance",
+    "TrajectoryContentFormat",
+    "TrajectoryCoverage",
+    "TrajectoryDelta",
+    "TrajectoryDetail",
+    "TrajectoryDetailField",
+    "TrajectoryGroup",
+    "TrajectoryKind",
+    "TrajectoryLane",
+    "TrajectoryPage",
+    "TrajectoryPanelState",
+    "TrajectoryPanelStateInfo",
+    "TrajectoryRecord",
+    "TrajectoryRecordKind",
+    "TrajectoryRecordStatus",
+    "TrajectoryStatus",
+    "TrajectoryTiming",
+    "TrajectoryTimingProvenance",
+    "TrajectoryUpsert",
+    "TrajectoryUsage",
+    "TrajectoryValidationError",
+    "Usage",
+    "bound_detail_fields",
+    "bounded_preview",
+    "clip_utf8",
+    "deduplicate_records",
+    "deterministic_record_order",
+    "escape_rich_text",
+    "event_to_fact",
+    "event_to_record",
+    "fact_to_record",
+    "fallback_record_id",
+    "from_wire",
+    "group_records",
+    "merge_records",
+    "newer_record",
+    "project_events",
+    "project_facts",
+    "record_id_for_fact",
+    "to_wire",
+]
+
+
+def __getattr__(name: str):
+    if name in {
+        "event_to_fact",
+        "event_to_record",
+        "fallback_record_id",
+        "fact_to_record",
+        "project_events",
+        "project_facts",
+        "record_id_for_fact",
+    }:
+        from theater.trajectory import projection
+
+        return getattr(projection, name)
+    if name in {
+        "deduplicate_records",
+        "deterministic_record_order",
+        "group_records",
+        "merge_records",
+        "newer_record",
+    }:
+        from theater.trajectory import grouping
+
+        return getattr(grouping, name)
+    raise AttributeError(name)

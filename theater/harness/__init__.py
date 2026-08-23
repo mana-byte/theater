@@ -54,9 +54,12 @@ from theater.harness.contracts.source import (
     Attachment,
     Batch,
     History,
+    HistoryPage,
     Source,
     StreamPoint,
+    TrajectoryHistoryPage,
 )
+from theater.harness.contracts.trajectory import FactLink, ParsedRecord, TrajectoryFact
 from theater.harness.plugins import Plugin, PluginError
 from theater.harness.registry import (  # noqa: F401
     _ALIASES,
@@ -128,11 +131,14 @@ __all__ = [
     "Event",
     "EventKind",
     "EventPath",
+    "FactLink",
     "Harness",
     "HarnessObserver",
     "History",
+    "HistoryPage",
     "LaunchPlan",
     "NativeChild",
+    "ParsedRecord",
     "Plugin",
     "PluginError",
     "ResumeLaunchOverlay",
@@ -141,6 +147,8 @@ __all__ = [
     "ScreenReading",
     "Source",
     "StreamPoint",
+    "TrajectoryFact",
+    "TrajectoryHistoryPage",
     "TranscriptObserver",
     "TranscriptSource",
     "check_model",

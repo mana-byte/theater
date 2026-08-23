@@ -16,13 +16,16 @@ from theater.harness.contracts.source import (
     Attachment,
     Batch,
     History,
+    HistoryPage,
     IdentityLossEvidence,
     ReceiptAdmission,
     Source,
     SourceContractError,
     StreamPoint,
+    TrajectoryHistoryPage,
     TranscriptCandidate,
 )
+from theater.harness.contracts.trajectory import FactLink, ParsedRecord, TrajectoryFact
 from theater.harness.transcript.attachment import attach_point
 from theater.harness.transcript.source import TranscriptSource
 
@@ -31,12 +34,17 @@ logger = logging.getLogger("theater.harness.source")
 __all__ = [
     "Attachment",
     "Batch",
+    "FactLink",
     "History",
+    "HistoryPage",
     "IdentityLossEvidence",
+    "ParsedRecord",
     "ReceiptAdmission",
     "Source",
     "SourceContractError",
     "StreamPoint",
+    "TrajectoryFact",
+    "TrajectoryHistoryPage",
     "TranscriptCandidate",
     "TranscriptSource",
     "attach_point",

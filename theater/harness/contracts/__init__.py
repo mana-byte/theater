@@ -31,21 +31,37 @@ from theater.harness.contracts.observation import (
     ScreenKind,
     ScreenReading,
 )
+from theater.harness.contracts.source import (
+    Batch,
+    History,
+    HistoryPage,
+    Source,
+    TrajectoryHistoryPage,
+)
+from theater.harness.contracts.trajectory import FactLink, ParsedRecord, TrajectoryFact
 
 __all__ = [
     "APPROVALS",
+    "Batch",
     "Event",
     "EventKind",
     "EventPath",
+    "FactLink",
     "Harness",
     "HarnessObserver",
+    "History",
+    "HistoryPage",
     "LaunchPlan",
     "NativeChild",
+    "ParsedRecord",
     "ResumeLaunchOverlay",
     "ScreenConfidence",
     "ScreenKind",
     "ScreenReading",
+    "Source",
     "TokenUsage",
+    "TrajectoryFact",
+    "TrajectoryHistoryPage",
     "clip",
     "clipper",
     "last_screen_line",

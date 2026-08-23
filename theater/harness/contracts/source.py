@@ -37,7 +37,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+from theater.constants.trajectory import TRAJECTORY_PAGE_RECORD_LIMIT
 from theater.harness.contracts.events import Event
+from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.models import Status
 from theater.provenance import TranscriptProvenance
 
@@ -174,6 +176,43 @@ class History:
 
 
 @dataclass(frozen=True, slots=True)
+class HistoryPage:
+    """An independent bounded history read that never advances a live cursor."""
+
+    location: str | None = None
+    events: Sequence[Event] = ()
+    trajectory: Sequence[TrajectoryFact] = ()
+    cursor: str | None = None
+    older_cursor: str | None = None
+    has_older: bool = False
+    error_code: str | None = None
+    error: str | None = None
+    provenance: str = str(TranscriptProvenance.HEURISTIC)
+    pinned: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "events", tuple(self.events))
+        object.__setattr__(self, "trajectory", tuple(self.trajectory))
+        if any(not isinstance(event, Event) for event in self.events):
+            raise SourceContractError("history page events must contain Event values")
+        if any(not isinstance(fact, TrajectoryFact) for fact in self.trajectory):
+            raise SourceContractError("history page trajectory must contain TrajectoryFact values")
+        if type(self.has_older) is not bool or type(self.pinned) is not bool:
+            raise SourceContractError("history page booleans must be booleans")
+
+    @property
+    def facts(self) -> tuple[TrajectoryFact, ...]:
+        return tuple(self.trajectory)
+
+    @property
+    def correlation(self) -> str:
+        return self.provenance
+
+
+TrajectoryHistoryPage = HistoryPage
+
+
+@dataclass(frozen=True, slots=True)
 class Batch:
     """One poll's worth of facts from a source.
 
@@ -204,6 +243,13 @@ class Batch:
     #: Persistent channel failure; reducer reports it and retries for late recovery.
     error_code: str | None = None
     error: str | None = None
+    #: Rich facts are additive; the reducer continues to consume only events.
+    trajectory: Sequence[TrajectoryFact] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "trajectory", tuple(self.trajectory))
+        if any(not isinstance(fact, TrajectoryFact) for fact in self.trajectory):
+            raise SourceContractError("batch trajectory must contain TrajectoryFact values")
 
 
 class Source(ABC):
@@ -279,6 +325,38 @@ class Source(ABC):
         the honest answer for a source that can only see forward.
         """
         return History()
+
+    async def history_page(
+        self,
+        *,
+        before: str | None = None,
+        limit: int = TRAJECTORY_PAGE_RECORD_LIMIT,
+    ) -> HistoryPage:
+        """Read a bounded baseline page without changing the live watcher cursor.
+
+        The base contract can expose only a newest-page fallback. It therefore
+        never invents an older cursor and reports paging as unavailable when a
+        caller asks for one.
+        """
+        if type(limit) is not int or limit <= 0:
+            return HistoryPage(
+                error_code="invalid_limit", error="history page limit must be positive"
+            )
+        limit = min(limit, TRAJECTORY_PAGE_RECORD_LIMIT)
+        if before is not None:
+            return HistoryPage(
+                error_code="history_paging_unavailable",
+                error="this source provides a bounded newest page but cannot page older history",
+            )
+        history = await self.history(last_n=limit)
+        return HistoryPage(
+            location=history.location,
+            events=history.events,
+            error_code=history.error_code,
+            error=history.error,
+            provenance=history.correlation,
+            pinned=history.pinned,
+        )
 
     async def aclose(self) -> None:
         """Release anything held open. Called once, when the watcher stops."""

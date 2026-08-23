@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from theater.harness.contracts.events import Event
 from theater.harness.contracts.observation import HarnessObserver
 from theater.harness.contracts.source import StreamPoint, TranscriptCandidate
+from theater.harness.contracts.trajectory import ParsedRecord
 from theater.provenance import TranscriptProvenance, normalize_provenance
 
 if TYPE_CHECKING:
@@ -247,3 +248,7 @@ class TranscriptObserver(HarnessObserver):
         The bus clips; `read_transcript` does not, which is the whole reason that
         tool exists.
         """
+
+    def parse_record(self, line: str, index: int, *, clip_text: bool = True) -> ParsedRecord:
+        """Adapt the legacy parser once; richer adapters may override this seam."""
+        return ParsedRecord(events=tuple(self.parse(line, index, clip_text=clip_text)))
