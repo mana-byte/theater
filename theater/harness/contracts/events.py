@@ -110,6 +110,8 @@ class Event:
     raw_text: str | None = None
     #: Per-turn token usage, when available.
     usage: TokenUsage | None = None
+    #: Byte offset of the source record when the source can provide one.
+    source_offset: int | None = None
 
     @property
     def usage_only(self) -> bool:

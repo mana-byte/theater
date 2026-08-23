@@ -8,22 +8,38 @@ knows the input is a file.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import errno
+import hashlib
+import json
 import logging
 import os
+from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, BinaryIO, cast
 
+from theater.constants.trajectory import (
+    TRAJECTORY_CURSOR_MAX_BYTES,
+    TRAJECTORY_PAGE_RECORD_LIMIT,
+    TRAJECTORY_TRANSCRIPT_CURSOR_FINGERPRINT_BYTES,
+    TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES,
+    TRAJECTORY_TRANSCRIPT_HISTORY_WINDOW_BYTES,
+)
 from theater.harness.contracts.events import Event
 from theater.harness.contracts.source import (
     Attachment,
     Batch,
     History,
+    HistoryPage,
     IdentityLossEvidence,
     ReceiptAdmission,
     Source,
+    SourceContractError,
     StreamPoint,
+    bound_history_event,
 )
+from theater.harness.contracts.trajectory import ParsedRecord, TrajectoryFact
 from theater.harness.transcript.attachment import attach_point
 from theater.provenance import (
     TranscriptProvenance,
@@ -40,6 +56,16 @@ if TYPE_CHECKING:
     from theater.harness.transcript.observer import TranscriptObserver
 
 logger = logging.getLogger("theater.harness.source")
+
+
+def _bounded_history_event(event: Event) -> Event:
+    return bound_history_event(event)
+
+
+class _HistoryPageError(ValueError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class TranscriptSource(Source):
@@ -273,6 +299,99 @@ class TranscriptSource(Source):
             pinned=pinned,
         )
 
+    async def history_page(
+        self, *, before: str | None = None, limit: int = TRAJECTORY_PAGE_RECORD_LIMIT
+    ) -> HistoryPage:
+        """Read a bounded JSONL window without touching the live tail cursor."""
+        if type(limit) is not int or limit <= 0:
+            return HistoryPage(
+                error_code="invalid_limit", error="history page limit must be positive"
+            )
+        limit = min(limit, TRAJECTORY_PAGE_RECORD_LIMIT)
+        pinned = self._known_location is not None
+        path = self.path
+        if path is None and self._known_location is not None:
+            if reason := self._trusted_known_location_unavailable_reason():
+                return HistoryPage(
+                    error_code=TRANSCRIPT_IDENTITY_LOST_CODE, error=reason, pinned=True
+                )
+            path = await self._upgraded(self._known_location)
+        if path is None:
+            path = await self._locate(session_id=self._session_id)
+        if path is None:
+            return HistoryPage(pinned=pinned)
+        if path_error := self._history_path_error(path, pinned=pinned):
+            if before is not None and path_error.error_code is None:
+                return HistoryPage(
+                    location=path_error.location,
+                    error_code="history_cursor_invalid",
+                    error="history cursor cannot be used because the transcript is unavailable",
+                    provenance=path_error.correlation,
+                    pinned=path_error.pinned,
+                )
+            return HistoryPage(
+                location=path_error.location,
+                error_code=path_error.error_code,
+                error=path_error.error,
+                provenance=path_error.correlation,
+                pinned=path_error.pinned,
+            )
+        try:
+            end, end_index, cursor_identity = (
+                self._decode_page_cursor(before, path) if before is not None else (None, None, None)
+            )
+            live_offset = self.offset if before is None and self.path == path else None
+            live_index = self.index if before is None and self.path == path else None
+            (
+                events,
+                facts,
+                start,
+                page_end,
+                start_index,
+                page_end_index,
+                identity,
+                older_identity,
+            ) = await asyncio.to_thread(
+                self._read_page,
+                path,
+                end=end,
+                end_index=end_index if before is not None else live_index,
+                live_offset=live_offset,
+                limit=limit,
+                expected_identity=cursor_identity,
+            )
+        except _HistoryPageError as exc:
+            return HistoryPage(error_code=exc.code, error=str(exc), pinned=pinned)
+        except ValueError as exc:
+            return HistoryPage(error_code="history_cursor_invalid", error=str(exc), pinned=pinned)
+        except OSError as exc:
+            if exc.errno == errno.ENOENT and self._path_is_trusted_pin(path):
+                return HistoryPage(
+                    error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
+                    error=f"trusted transcript pin {str(path)!r} no longer exists on disk",
+                    pinned=True,
+                )
+            return HistoryPage(
+                error_code=TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
+                error=f"transcript source {str(path)!r} is unavailable: {exc}",
+                pinned=pinned,
+            )
+        session_id = self._observer.session_id(path)
+        return HistoryPage(
+            location=str(path),
+            events=events,
+            trajectory=facts,
+            cursor=self._encode_page_cursor(path, page_end, page_end_index, identity),
+            older_cursor=(
+                self._encode_page_cursor(path, start, start_index, older_identity)
+                if 0 < start < page_end
+                else None
+            ),
+            has_older=0 < start < page_end,
+            provenance=self.correlation_for(path, session_id),
+            pinned=pinned,
+        )
+
     def _history_path_error(self, path: Path, *, pinned: bool) -> History | None:
         """Validate a history location without turning generic I/O into loss."""
         try:
@@ -356,17 +475,383 @@ class TranscriptSource(Source):
     def _read_all(self, path: Path, *, strict: bool = False) -> list[Event]:
         events: list[Event] = []
         try:
-            with path.open(encoding="utf-8", errors="replace") as fh:
+            with path.open("rb") as fh:
+                offset = 0
                 for index, raw in enumerate(fh):
-                    line = raw.strip()
+                    line = raw.decode("utf-8", errors="replace").strip()
                     if line:
-                        events.extend(self._observer.parse(line, index, clip_text=False))
+                        parsed = self._parse_record(line, index, clip_text=False)
+                        decorated = self._decorate_parsed(parsed, offset)
+                        events.extend(decorated.events)
+                    offset += len(raw)
         except OSError:
             if strict:
                 raise
             # A transcript that vanished mid-read is the same non-event here.
             return []
         return events
+
+    def _read_page(
+        self,
+        path: Path,
+        *,
+        end: int | None,
+        end_index: int | None,
+        live_offset: int | None,
+        limit: int,
+        expected_identity: dict[str, object] | None,
+    ) -> tuple[
+        list[Event],
+        list[TrajectoryFact],
+        int,
+        int,
+        int | None,
+        int | None,
+        dict[str, object],
+        dict[str, object],
+    ]:
+        with path.open("rb") as fh:
+            stat = os.fstat(fh.fileno())
+            total = int(stat.st_size)
+            if expected_identity is not None:
+                self._validate_page_identity(fh, stat, expected_identity)
+                snapshot_size = cast(int, expected_identity["size"])
+            else:
+                snapshot_size = total
+            page_end = total if end is None else end
+            if page_end < 0 or page_end > snapshot_size or page_end > total:
+                raise ValueError("history cursor is outside the transcript")
+            base_identity = (
+                dict(expected_identity)
+                if expected_identity is not None
+                else self._page_file_identity(fh, stat, boundary_offset=page_end)
+            )
+            page_end_index = end_index
+            if end is None and live_offset != total:
+                page_end_index = None
+            lines = self._read_page_lines(fh, page_end)
+            if page_end_index is None:
+                line_index_base = 0
+                selected_end_index: int | None = None
+            else:
+                line_index_base = page_end_index - len(lines)
+                selected_end_index = page_end_index
+            events, facts, start, start_index = self._select_page_records(
+                lines,
+                line_index_base=line_index_base,
+                page_end_index=page_end_index,
+                page_end=page_end,
+                limit=limit,
+            )
+            identity = self._identity_at_boundary(fh, base_identity, page_end)
+            older_identity = self._identity_at_boundary(fh, base_identity, start)
+            return (
+                events,
+                facts,
+                start,
+                page_end,
+                start_index,
+                selected_end_index,
+                identity,
+                older_identity,
+            )
+
+    @classmethod
+    def _read_page_lines(cls, fh: BinaryIO, page_end: int) -> list[tuple[int, bytes]]:
+        scan_start, data = cls._read_reverse_window(fh, page_end)
+        at_boundary = scan_start == 0 or cls._byte_at(fh, scan_start - 1) == b"\n"
+        if scan_start and not at_boundary:
+            first_newline = data.find(b"\n")
+            if first_newline < 0:
+                raise _HistoryPageError(
+                    "history_record_too_large",
+                    "history page cannot bound a record within the reverse scan limit",
+                )
+            data = data[first_newline + 1 :]
+            scan_start += first_newline + 1
+        lines: list[tuple[int, bytes]] = []
+        offset = scan_start
+        for raw in data.splitlines(keepends=True):
+            if not raw.endswith(b"\n"):
+                break
+            lines.append((offset, raw[:-1]))
+            offset += len(raw)
+        return lines
+
+    def _select_page_records(
+        self,
+        lines: list[tuple[int, bytes]],
+        *,
+        line_index_base: int,
+        page_end_index: int | None,
+        page_end: int,
+        limit: int,
+    ) -> tuple[list[Event], list[TrajectoryFact], int, int | None]:
+        selected_position = max(0, len(lines) - limit)
+        events: list[Event] = []
+        facts: list[TrajectoryFact] = []
+        selected: list[tuple[int, int]] = []
+        for position in range(len(lines) - 1, selected_position - 1, -1):
+            record_offset, raw = lines[position]
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line:
+                selected.append((position, record_offset))
+                continue
+            parsed = self._parse_record(line, line_index_base + position, clip_text=False)
+            decorated = self._decorate_parsed(parsed, record_offset)
+            candidate_events = tuple(
+                _bounded_history_event(event) for event in decorated.events if not event.usage_only
+            )
+            candidate_facts = tuple(decorated.trajectory)
+            if len(candidate_events) > limit or len(candidate_facts) > limit:
+                if not selected:
+                    raise _HistoryPageError(
+                        "history_record_too_large",
+                        "one transcript record exceeds the history page limit",
+                    )
+                break
+            if (
+                len(events) + len(candidate_events) > limit
+                or len(facts) + len(candidate_facts) > limit
+            ):
+                break
+            selected.append((position, record_offset))
+            events[0:0] = candidate_events
+            facts[0:0] = candidate_facts
+        selected.reverse()
+        if selected:
+            start_position, start = selected[0]
+            start_index = line_index_base + start_position if page_end_index is not None else None
+        else:
+            start = page_end
+            start_index = None
+        return events, facts, start, start_index
+
+    def _parse_record(self, line: str, index: int, *, clip_text: bool) -> ParsedRecord:
+        missing = object()
+        parser = getattr(self._observer, "parse_record", missing)
+        if parser is missing:
+            return ParsedRecord(
+                events=tuple(self._observer.parse(line, index, clip_text=clip_text))
+            )
+        if not callable(parser):
+            raise SourceContractError("TranscriptObserver.parse_record must be callable")
+        parsed = parser(line, index, clip_text=clip_text)
+        if not isinstance(parsed, ParsedRecord):
+            raise SourceContractError("TranscriptObserver.parse_record must return ParsedRecord")
+        return parsed
+
+    @staticmethod
+    def _decorate_parsed(parsed: ParsedRecord, source_offset: int) -> ParsedRecord:
+        return ParsedRecord(
+            events=tuple(replace(event, source_offset=source_offset) for event in parsed.events),
+            trajectory=tuple(
+                replace(fact, source_offset=source_offset) for fact in parsed.trajectory
+            ),
+        )
+
+    @staticmethod
+    def _byte_at(fh: BinaryIO, offset: int) -> bytes:
+        fh.seek(offset)
+        return fh.read(1)
+
+    @classmethod
+    def _read_reverse_window(cls, fh: BinaryIO, page_end: int) -> tuple[int, bytes]:
+        if page_end <= 0:
+            return 0, b""
+        minimum = max(0, page_end - TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES)
+        scan_start = max(0, page_end - TRAJECTORY_TRANSCRIPT_HISTORY_WINDOW_BYTES)
+        fh.seek(scan_start)
+        data = fh.read(page_end - scan_start)
+        while scan_start > minimum:
+            at_boundary = scan_start == 0 or cls._byte_at(fh, scan_start - 1) == b"\n"
+            first_newline = data.find(b"\n")
+            if at_boundary or (first_newline >= 0 and first_newline < len(data) - 1):
+                break
+            new_start = max(minimum, scan_start - TRAJECTORY_TRANSCRIPT_HISTORY_WINDOW_BYTES)
+            fh.seek(new_start)
+            prefix = fh.read(scan_start - new_start)
+            data = prefix + data
+            scan_start = new_start
+        at_boundary = scan_start == 0 or cls._byte_at(fh, scan_start - 1) == b"\n"
+        first_newline = data.find(b"\n")
+        if not at_boundary and (first_newline < 0 or first_newline == len(data) - 1):
+            raise _HistoryPageError(
+                "history_record_too_large",
+                "history page cannot bound a record within the reverse scan limit",
+            )
+        return scan_start, data
+
+    @staticmethod
+    def _page_path_key(path: Path) -> str:
+        return hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()[:24]
+
+    @classmethod
+    def _encode_page_cursor(
+        cls,
+        path: Path,
+        end: int,
+        end_index: int | None,
+        identity: dict[str, object],
+    ) -> str:
+        payload = {
+            "v": 3,
+            "path": cls._page_path_key(path),
+            "identity": identity,
+            "end": end,
+            "end_index": end_index,
+        }
+        encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        return "trj1." + base64.urlsafe_b64encode(encoded).decode("ascii").rstrip("=")
+
+    @classmethod
+    def _decode_page_cursor(
+        cls, cursor: str | None, path: Path
+    ) -> tuple[int, int | None, dict[str, object]]:
+        if not isinstance(cursor, str) or not cursor.startswith("trj1."):
+            raise ValueError("history cursor is not valid for a transcript source")
+        try:
+            if len(cursor.encode("utf-8")) > TRAJECTORY_CURSOR_MAX_BYTES:
+                raise ValueError("history cursor is too large")
+        except UnicodeEncodeError as exc:
+            raise ValueError("history cursor is malformed") from exc
+        try:
+            raw = base64.urlsafe_b64decode(cursor[5:] + "=" * (-len(cursor[5:]) % 4))
+            payload = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError, binascii.Error, json.JSONDecodeError) as exc:
+            raise ValueError("history cursor is malformed") from exc
+        if not isinstance(payload, dict):
+            raise ValueError(  # noqa: TRY004
+                "history cursor does not belong to this transcript source"
+            )
+        end = payload.get("end")
+        end_index = payload.get("end_index")
+        if (
+            set(payload) != {"v", "path", "identity", "end", "end_index"}
+            or payload.get("v") != 3
+            or payload.get("path") != cls._page_path_key(path)
+            or type(end) is not int
+            or end < 0
+            or (end_index is not None and type(end_index) is not int)
+            or (isinstance(end_index, int) and end_index < 0)
+            or not isinstance(payload.get("identity"), dict)
+        ):
+            raise ValueError("history cursor does not belong to this transcript source")
+        identity = cast(dict[str, object], payload["identity"])
+        return end, cast(int | None, end_index), identity
+
+    @classmethod
+    def _page_file_identity(
+        cls,
+        fh: BinaryIO,
+        stat: os.stat_result,
+        *,
+        snapshot_size: int | None = None,
+        boundary_offset: int | None = None,
+    ) -> dict[str, object]:
+        sample_size = TRAJECTORY_TRANSCRIPT_CURSOR_FINGERPRINT_BYTES
+        size = int(stat.st_size) if snapshot_size is None else snapshot_size
+        boundary = size if boundary_offset is None else boundary_offset
+        if boundary < 0 or boundary > size:
+            raise ValueError("history cursor boundary is outside the transcript")
+        fh.seek(0)
+        head = fh.read(min(sample_size, size))
+        boundary_start = max(0, boundary - sample_size)
+        fh.seek(boundary_start)
+        boundary_bytes = fh.read(boundary - boundary_start)
+        return {
+            "dev": int(stat.st_dev),
+            "ino": int(stat.st_ino),
+            "size": size,
+            "mtime_ns": int(stat.st_mtime_ns),
+            "ctime_ns": int(stat.st_ctime_ns),
+            "head": base64.urlsafe_b64encode(head).decode("ascii"),
+            "boundary_offset": boundary,
+            "boundary": base64.urlsafe_b64encode(boundary_bytes).decode("ascii"),
+        }
+
+    @classmethod
+    def _identity_at_boundary(
+        cls, fh: BinaryIO, base: dict[str, object], boundary_offset: int
+    ) -> dict[str, object]:
+        snapshot_size = base["size"]
+        if type(snapshot_size) is not int or boundary_offset < 0 or boundary_offset > snapshot_size:
+            raise ValueError("history cursor boundary is outside the transcript")
+        start = max(0, boundary_offset - TRAJECTORY_TRANSCRIPT_CURSOR_FINGERPRINT_BYTES)
+        fh.seek(start)
+        boundary = fh.read(boundary_offset - start)
+        identity = dict(base)
+        identity["boundary_offset"] = boundary_offset
+        identity["boundary"] = base64.urlsafe_b64encode(boundary).decode("ascii")
+        return identity
+
+    @classmethod
+    def _validate_page_identity(
+        cls, fh: BinaryIO, stat: os.stat_result, expected: dict[str, object]
+    ) -> None:
+        required = {
+            "dev",
+            "ino",
+            "size",
+            "mtime_ns",
+            "ctime_ns",
+            "head",
+            "boundary_offset",
+            "boundary",
+        }
+        if set(expected) != required:
+            raise ValueError("history cursor is invalid because its identity is malformed")
+        dev = expected["dev"]
+        ino = expected["ino"]
+        snapshot_size = expected["size"]
+        mtime_ns = expected["mtime_ns"]
+        ctime_ns = expected["ctime_ns"]
+        head_value = expected["head"]
+        boundary_offset = expected["boundary_offset"]
+        boundary_value = expected["boundary"]
+        if not (
+            type(dev) is int
+            and type(ino) is int
+            and type(snapshot_size) is int
+            and snapshot_size >= 0
+            and type(mtime_ns) is int
+            and type(ctime_ns) is int
+            and isinstance(head_value, str)
+            and type(boundary_offset) is int
+            and 0 <= boundary_offset <= snapshot_size
+            and isinstance(boundary_value, str)
+        ):
+            raise ValueError("history cursor is invalid because its identity is malformed")
+        try:
+            head = base64.urlsafe_b64decode(head_value)
+            boundary = base64.urlsafe_b64decode(boundary_value)
+        except (ValueError, TypeError, binascii.Error) as exc:
+            raise ValueError("history cursor is invalid because its identity is malformed") from exc
+        if int(stat.st_dev) != dev or int(stat.st_ino) != ino:
+            raise ValueError("history cursor is invalid because the transcript changed")
+        if int(stat.st_size) < snapshot_size:
+            raise ValueError("history cursor is invalid because the transcript shrank")
+        if boundary_offset > int(stat.st_size):
+            raise ValueError("history cursor is invalid because its boundary is unavailable")
+        if int(stat.st_size) == snapshot_size and (
+            int(stat.st_mtime_ns) != mtime_ns or int(stat.st_ctime_ns) != ctime_ns
+        ):
+            raise ValueError("history cursor is invalid because the transcript changed")
+        current = cls._page_file_identity(
+            fh,
+            stat,
+            snapshot_size=snapshot_size,
+            boundary_offset=boundary_offset,
+        )
+        if current["head"] != expected["head"]:
+            raise ValueError("history cursor is invalid because the transcript prefix changed")
+        if current["boundary"] != expected["boundary"]:
+            raise ValueError("history cursor is invalid because the transcript prefix changed")
+        if (
+            len(head) > TRAJECTORY_TRANSCRIPT_CURSOR_FINGERPRINT_BYTES
+            or len(boundary) > TRAJECTORY_TRANSCRIPT_CURSOR_FINGERPRINT_BYTES
+        ):
+            raise ValueError("history cursor is invalid because its identity is malformed")
 
     # ---- internals ------------------------------------------------------
 
@@ -538,8 +1023,8 @@ class TranscriptSource(Source):
         session_id = self._observer.session_id(path)
         last_event: Event | None = None
         if last_line is not None:
-            parsed = self._observer.parse(last_line, lines - 1)
-            semantic = [event for event in parsed if not event.usage_only]
+            parsed = self._parse_record(last_line, lines - 1, clip_text=True)
+            semantic = [event for event in parsed.events if not event.usage_only]
             last_event = semantic[-1] if semantic else None
         self._pending = (path, size, lines, mtime, session_id)
         return Attachment(
@@ -582,14 +1067,20 @@ class TranscriptSource(Source):
             # A record is still being written; partial JSON is not parseable.
             self.mtime = mtime
             return Batch()
+        record_offset = offset
         offset += len(head) + 1
 
         events: list[Event] = []
+        trajectory: list[TrajectoryFact] = []
         for raw in head.split(b"\n"):
             line = raw.decode("utf-8", errors="replace")
-            events.extend(self._observer.parse(line, index))
+            parsed = self._parse_record(line, index, clip_text=True)
+            decorated = self._decorate_parsed(parsed, record_offset)
+            events.extend(decorated.events)
+            trajectory.extend(decorated.trajectory)
+            record_offset += len(raw) + 1
             index += 1
 
         progressed = offset != self.offset
         self.offset, self.index, self.mtime = offset, index, mtime
-        return Batch(events=events, progressed=progressed)
+        return Batch(events=events, progressed=progressed, trajectory=trajectory)
