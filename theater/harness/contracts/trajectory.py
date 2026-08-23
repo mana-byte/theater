@@ -94,18 +94,30 @@ class ParsedRecord:
 
     events: Sequence[Event] = ()
     trajectory: Sequence[TrajectoryFact] = ()
+    #: None projects all control events; an explicit sequence can suppress duplicate views.
+    trajectory_events: Sequence[Event] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "events", tuple(self.events))
         object.__setattr__(self, "trajectory", tuple(self.trajectory))
+        if self.trajectory_events is not None:
+            object.__setattr__(self, "trajectory_events", tuple(self.trajectory_events))
         if any(not isinstance(event, Event) for event in self.events):
             raise TrajectoryValidationError("parsed events must contain Event values")
         if any(not isinstance(fact, TrajectoryFact) for fact in self.trajectory):
             raise TrajectoryValidationError("parsed trajectory must contain TrajectoryFact values")
+        if self.trajectory_events is not None and any(
+            not isinstance(event, Event) for event in self.trajectory_events
+        ):
+            raise TrajectoryValidationError("trajectory events must contain Event values")
 
     @property
     def facts(self) -> tuple[TrajectoryFact, ...]:
         return tuple(self.trajectory)
+
+    @property
+    def baseline_events(self) -> tuple[Event, ...]:
+        return tuple(self.events if self.trajectory_events is None else self.trajectory_events)
 
 
 def _enum(enum_type: type, value: object, label: str):

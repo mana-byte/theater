@@ -274,9 +274,13 @@ def _trajectory_int(value: object) -> int:
 
 
 def _trajectory_float(value: object) -> float | None:
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
-        return float(value)
-    return None
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _trajectory_time(value: object) -> float | None:

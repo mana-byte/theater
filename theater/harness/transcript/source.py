@@ -345,6 +345,7 @@ class TranscriptSource(Source):
             (
                 events,
                 facts,
+                trajectory_events,
                 start,
                 page_end,
                 start_index,
@@ -381,6 +382,7 @@ class TranscriptSource(Source):
             location=str(path),
             events=events,
             trajectory=facts,
+            trajectory_events=trajectory_events,
             cursor=self._encode_page_cursor(path, page_end, page_end_index, identity),
             older_cursor=(
                 self._encode_page_cursor(path, start, start_index, older_identity)
@@ -503,6 +505,7 @@ class TranscriptSource(Source):
     ) -> tuple[
         list[Event],
         list[TrajectoryFact],
+        list[Event],
         int,
         int,
         int | None,
@@ -536,7 +539,7 @@ class TranscriptSource(Source):
             else:
                 line_index_base = page_end_index - len(lines)
                 selected_end_index = page_end_index
-            events, facts, start, start_index = self._select_page_records(
+            events, facts, trajectory_events, start, start_index = self._select_page_records(
                 lines,
                 line_index_base=line_index_base,
                 page_end_index=page_end_index,
@@ -548,6 +551,7 @@ class TranscriptSource(Source):
             return (
                 events,
                 facts,
+                trajectory_events,
                 start,
                 page_end,
                 start_index,
@@ -586,10 +590,11 @@ class TranscriptSource(Source):
         page_end_index: int | None,
         page_end: int,
         limit: int,
-    ) -> tuple[list[Event], list[TrajectoryFact], int, int | None]:
+    ) -> tuple[list[Event], list[TrajectoryFact], list[Event], int, int | None]:
         selected_position = max(0, len(lines) - limit)
         events: list[Event] = []
         facts: list[TrajectoryFact] = []
+        trajectory_events: list[Event] = []
         selected: list[tuple[int, int]] = []
         for position in range(len(lines) - 1, selected_position - 1, -1):
             record_offset, raw = lines[position]
@@ -603,6 +608,9 @@ class TranscriptSource(Source):
                 _bounded_history_event(event) for event in decorated.events if not event.usage_only
             )
             candidate_facts = tuple(decorated.trajectory)
+            candidate_trajectory_events = tuple(
+                _bounded_history_event(event) for event in decorated.baseline_events
+            )
             if len(candidate_events) > limit or len(candidate_facts) > limit:
                 if not selected:
                     raise _HistoryPageError(
@@ -613,11 +621,13 @@ class TranscriptSource(Source):
             if (
                 len(events) + len(candidate_events) > limit
                 or len(facts) + len(candidate_facts) > limit
+                or len(trajectory_events) + len(candidate_trajectory_events) > limit
             ):
                 break
             selected.append((position, record_offset))
             events[0:0] = candidate_events
             facts[0:0] = candidate_facts
+            trajectory_events[0:0] = candidate_trajectory_events
         selected.reverse()
         if selected:
             start_position, start = selected[0]
@@ -625,7 +635,7 @@ class TranscriptSource(Source):
         else:
             start = page_end
             start_index = None
-        return events, facts, start, start_index
+        return events, facts, trajectory_events, start, start_index
 
     def _parse_record(self, line: str, index: int, *, clip_text: bool) -> ParsedRecord:
         missing = object()
@@ -647,6 +657,14 @@ class TranscriptSource(Source):
             events=tuple(replace(event, source_offset=source_offset) for event in parsed.events),
             trajectory=tuple(
                 replace(fact, source_offset=source_offset) for fact in parsed.trajectory
+            ),
+            trajectory_events=(
+                None
+                if parsed.trajectory_events is None
+                else tuple(
+                    replace(event, source_offset=source_offset)
+                    for event in parsed.trajectory_events
+                )
             ),
         )
 
@@ -1072,15 +1090,22 @@ class TranscriptSource(Source):
 
         events: list[Event] = []
         trajectory: list[TrajectoryFact] = []
+        trajectory_events: list[Event] = []
         for raw in head.split(b"\n"):
             line = raw.decode("utf-8", errors="replace")
             parsed = self._parse_record(line, index, clip_text=True)
             decorated = self._decorate_parsed(parsed, record_offset)
             events.extend(decorated.events)
             trajectory.extend(decorated.trajectory)
+            trajectory_events.extend(decorated.baseline_events)
             record_offset += len(raw) + 1
             index += 1
 
         progressed = offset != self.offset
         self.offset, self.index, self.mtime = offset, index, mtime
-        return Batch(events=events, progressed=progressed, trajectory=trajectory)
+        return Batch(
+            events=events,
+            progressed=progressed,
+            trajectory=trajectory,
+            trajectory_events=trajectory_events,
+        )

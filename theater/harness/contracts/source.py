@@ -186,6 +186,8 @@ class HistoryPage:
     location: str | None = None
     events: Sequence[Event] = ()
     trajectory: Sequence[TrajectoryFact] = ()
+    #: None projects all control events into trajectory records.
+    trajectory_events: Sequence[Event] | None = None
     cursor: str | None = None
     older_cursor: str | None = None
     has_older: bool = False
@@ -197,20 +199,30 @@ class HistoryPage:
     def __post_init__(self) -> None:
         events = tuple(self.events)
         trajectory = tuple(self.trajectory)
+        trajectory_events = (
+            None if self.trajectory_events is None else tuple(self.trajectory_events)
+        )
         if any(not isinstance(event, Event) for event in events):
             raise SourceContractError("history page events must contain Event values")
         if any(not isinstance(fact, TrajectoryFact) for fact in trajectory):
             raise SourceContractError("history page trajectory must contain TrajectoryFact values")
+        if trajectory_events is not None and any(
+            not isinstance(event, Event) for event in trajectory_events
+        ):
+            raise SourceContractError("history page trajectory_events must contain Event values")
         if len(events) > TRAJECTORY_PAGE_RECORD_LIMIT:
             raise SourceContractError("history page events exceed the page record limit")
         if len(trajectory) > TRAJECTORY_PAGE_RECORD_LIMIT:
             raise SourceContractError("history page trajectory exceeds the page record limit")
+        if trajectory_events is not None and len(trajectory_events) > TRAJECTORY_PAGE_RECORD_LIMIT:
+            raise SourceContractError("history page trajectory_events exceed the page record limit")
         object.__setattr__(
             self,
             "events",
             tuple(bound_history_event(event) for event in events),
         )
         object.__setattr__(self, "trajectory", trajectory)
+        object.__setattr__(self, "trajectory_events", trajectory_events)
         for name in ("cursor", "older_cursor"):
             value = getattr(self, name)
             if value is None:
@@ -278,11 +290,19 @@ class Batch:
     error: str | None = None
     #: Rich facts are additive; the reducer continues to consume only events.
     trajectory: Sequence[TrajectoryFact] = ()
+    #: None projects all control events into trajectory records.
+    trajectory_events: Sequence[Event] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "trajectory", tuple(self.trajectory))
+        if self.trajectory_events is not None:
+            object.__setattr__(self, "trajectory_events", tuple(self.trajectory_events))
         if any(not isinstance(fact, TrajectoryFact) for fact in self.trajectory):
             raise SourceContractError("batch trajectory must contain TrajectoryFact values")
+        if self.trajectory_events is not None and any(
+            not isinstance(event, Event) for event in self.trajectory_events
+        ):
+            raise SourceContractError("batch trajectory_events must contain Event values")
 
 
 class Source(ABC):

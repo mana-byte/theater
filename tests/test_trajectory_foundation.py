@@ -487,6 +487,13 @@ class MultiRecordObserver(LegacyCountingObserver):
         )
 
 
+class SuppressingObserver(LegacyCountingObserver):
+    def parse_record(self, line: str, index: int, *, clip_text: bool = True) -> ParsedRecord:
+        self.parse_calls += 1
+        event = Event(kind=EventKind.ASSISTANT, text=line, raw_index=index)
+        return ParsedRecord(events=(event,), trajectory_events=())
+
+
 class RawObserver(LegacyCountingObserver):
     def parse(self, line: str, index: int, *, clip_text: bool = True) -> list[Event]:
         self.parse_calls += 1
@@ -556,6 +563,25 @@ async def test_transcript_live_reads_emit_facts_and_history_pages_do_not_move_cu
     assert [event.text for event in live.events] == ["four"]
     assert [fact.native_id for fact in live.trajectory] == ["native-3"]
     assert observer.parse_calls == 4
+
+
+async def test_transcript_source_keeps_control_events_out_of_opted_out_trajectory(tmp_path) -> None:
+    path = tmp_path / "duplicate.jsonl"
+    path.write_text("one\n", encoding="utf-8")
+    source = TranscriptSource(SuppressingObserver(path), cwd=str(tmp_path))
+    attached = await source.read()
+    assert attached.attached is not None
+    source.commit_attachment()
+
+    page = await source.history_page(limit=1)
+    assert [event.text for event in page.events] == ["one"]
+    assert page.trajectory_events == ()
+
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("two\n")
+    batch = await source.read()
+    assert [event.text for event in batch.events] == ["two"]
+    assert batch.trajectory_events == ()
 
 
 async def test_history_pages_keep_complete_multi_output_records(tmp_path) -> None:

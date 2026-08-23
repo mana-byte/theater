@@ -338,9 +338,13 @@ def _trajectory_int(value: object) -> int:
 
 
 def _trajectory_float(value: object) -> float | None:
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
-        return float(value)
-    return None
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _trajectory_time(value: object) -> float | None:
@@ -440,6 +444,10 @@ def _codex_block_id(item_id: str | None, block: dict, ordinal: int) -> str | Non
     if item_id is None:
         return None
     return item_id if ordinal == 0 else f"{item_id}:content:{ordinal}"
+
+
+def _codex_scoped_id(value: str | None, suffix: str) -> str | None:
+    return _trajectory_id(f"{value}:{suffix}") if value is not None else None
 
 
 def _codex_content_text(value: object) -> str:
@@ -1042,9 +1050,17 @@ class CodexObserver(TranscriptObserver):
         record = self._decode(line)
         if record is None:
             return ParsedRecord()
+        events = tuple(self._parse_decoded(record, index, clip_text=clip_text))
+        payload = record.get("payload")
+        redundant = (
+            record.get("type") == "event_msg"
+            and isinstance(payload, dict)
+            and payload.get("type") in {"user_message", "agent_message"}
+        )
         return ParsedRecord(
-            events=tuple(self._parse_decoded(record, index, clip_text=clip_text)),
+            events=events,
             trajectory=tuple(self._trajectory_facts(record, index)),
+            trajectory_events=() if redundant else None,
         )
 
     def _parse_decoded(self, record: dict, index: int, *, clip_text: bool = True) -> list[Event]:
@@ -1317,7 +1333,9 @@ class CodexObserver(TranscriptObserver):
             context = context if context is not None else payload.get("state")
             if context is None:
                 context = payload
-            context_id = _trajectory_id(payload.get("id")) or turn_id or record_id
+            context_id = _trajectory_id(payload.get("id")) or record_id
+            if context_id is None:
+                context_id = _codex_scoped_id(turn_id, str(record_kind))
             model = None
             if isinstance(context, dict):
                 model = _trajectory_id(context.get("model") or context.get("model_name"))
@@ -1345,56 +1363,26 @@ class CodexObserver(TranscriptObserver):
                 payload.get("id") or payload.get("message_id") or payload.get("item_id")
             )
             if event_type == "user_message":
-                details = []
-                for name in ("images", "local_images", "audio", "local_audio", "text_elements"):
-                    if payload.get(name):
-                        details.append(
-                            _trajectory_detail(name, payload.get(name), format=ContentFormat.JSON)
-                        )
-                add(
-                    TrajectoryKind.USER,
-                    TrajectoryLane.INPUT,
-                    _safe_trajectory_text(payload.get("message")),
-                    native_id=event_id,
-                    status=_trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED),
-                    details=tuple(details),
-                )
                 return facts
             if event_type == "agent_message":
-                phase = payload.get("phase")
-                if phase == "final_answer":
-                    return facts
-                add(
-                    TrajectoryKind.ASSISTANT,
-                    TrajectoryLane.MODEL,
-                    _safe_trajectory_text(payload.get("message")),
-                    native_id=event_id,
-                    status=(_trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED)),
-                    details=(
-                        (_trajectory_detail("phase", phase, format=ContentFormat.TEXT),)
-                        if isinstance(phase, str)
-                        else ()
-                    ),
-                )
                 return facts
             if event_type == "task_complete":
                 completed_timing = _codex_timing(record, payload, timestamp)
                 add(
-                    TrajectoryKind.ASSISTANT,
+                    TrajectoryKind.CONTEXT,
                     TrajectoryLane.MODEL,
-                    _safe_trajectory_text(payload.get("last_agent_message")),
-                    native_id=_trajectory_id(payload.get("id")) or turn_id,
+                    "turn completed",
+                    native_id=_trajectory_id(payload.get("id"))
+                    or _codex_scoped_id(turn_id, "completed"),
                     status=TrajectoryStatus.COMPLETED,
                     turn=_turn_id(payload),
                     fact_timing=completed_timing,
                     details=(
-                        (
-                            _trajectory_detail(
-                                "duration_ms", payload.get("duration_ms"), format=ContentFormat.JSON
-                            ),
-                        )
-                        if payload.get("duration_ms") is not None
-                        else ()
+                        _trajectory_detail(
+                            "output",
+                            payload.get("last_agent_message"),
+                            format=ContentFormat.TEXT,
+                        ),
                     ),
                 )
                 return facts
@@ -1404,7 +1392,7 @@ class CodexObserver(TranscriptObserver):
                     TrajectoryKind.ERROR,
                     TrajectoryLane.THEATER,
                     f"turn aborted: {_safe_trajectory_text(reason)}",
-                    native_id=event_id or turn_id,
+                    native_id=event_id or _codex_scoped_id(turn_id, "aborted"),
                     status=TrajectoryStatus.INTERRUPTED,
                     turn=_turn_id(payload),
                 )
@@ -1426,7 +1414,7 @@ class CodexObserver(TranscriptObserver):
                         TrajectoryKind.TOOL_CALL,
                         TrajectoryLane.TOOLS,
                         tool_name or "MCP tool call",
-                        native_id=event_id or call_id,
+                        native_id=event_id or _codex_scoped_id(call_id, "call"),
                         status=_trajectory_status(payload.get("status"), TrajectoryStatus.PENDING),
                         call_id=call_id,
                         parent_call_id=_trajectory_id(
@@ -1446,7 +1434,7 @@ class CodexObserver(TranscriptObserver):
                         TrajectoryKind.TOOL_RESULT,
                         TrajectoryLane.TOOLS,
                         raw,
-                        native_id=event_id,
+                        native_id=event_id or _codex_scoped_id(call_id, "result"),
                         status=TrajectoryStatus.ERROR
                         if result_error
                         else _trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED),
@@ -1489,7 +1477,7 @@ class CodexObserver(TranscriptObserver):
                     TrajectoryKind.CONTEXT,
                     TrajectoryLane.MODEL,
                     event_type.replace("_", " "),
-                    native_id=event_id or turn_id,
+                    native_id=event_id or _codex_scoped_id(turn_id, event_type),
                     status=status,
                     turn=_turn_id(payload),
                     details=(
@@ -1515,7 +1503,7 @@ class CodexObserver(TranscriptObserver):
                     TrajectoryKind.USER
                     if role == "user"
                     else TrajectoryKind.SYSTEM
-                    if role == "system"
+                    if role in {"system", "developer"}
                     else TrajectoryKind.ASSISTANT
                 )
                 lane = (

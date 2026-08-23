@@ -144,7 +144,9 @@ def test_codex_facts_include_rollout_items_calls_parent_ids_reasoning_usage_and_
     complete = next(
         fact
         for fact in facts
-        if fact.native_id == "turn-1" and fact.kind is TrajectoryKind.ASSISTANT
+        if fact.native_id == "turn-1:completed"
+        and fact.kind is TrajectoryKind.CONTEXT
+        and fact.summary == "turn completed"
     )
 
     assert call.kind is TrajectoryKind.TOOL_CALL
@@ -166,6 +168,7 @@ def test_codex_facts_include_rollout_items_calls_parent_ids_reasoning_usage_and_
     assert usage.usage.cache_read_tokens == 20
     assert usage.usage.cache_write_tokens == 5
     assert complete.status is TrajectoryStatus.COMPLETED
+    assert complete.summary == "turn completed"
     assert complete.timing is not None
     assert complete.timing.duration_ms == 9000
 
@@ -230,6 +233,9 @@ def test_codex_dual_assistant_representations_have_one_canonical_fact():
     assert [list(rich.parse_record(line, index).events) for index, line in enumerate(lines)] == [
         control.parse(line, index) for index, line in enumerate(lines)
     ]
+    event_record = rich.parse_record(lines[0], 0)
+    assert event_record.events
+    assert event_record.baseline_events == ()
 
 
 def test_detail_fields_are_bounded_for_large_tool_input():
@@ -256,3 +262,19 @@ def test_detail_fields_are_bounded_for_large_tool_input():
     assert preview.omitted_bytes > 0
     assert preview.encoded_bytes <= 16 * 1024
     assert fact.summary == "exec"
+
+
+@pytest.mark.parametrize(
+    ("observer", "record"),
+    [
+        (ClaudeCodeObserver(), {"type": "system", "durationMs": 10**400}),
+        (
+            CodexObserver(),
+            {"type": "turn_context", "payload": {"duration_ms": 10**400}},
+        ),
+    ],
+)
+def test_trajectory_numeric_overflow_does_not_break_parsing(observer, record):
+    parsed = observer.parse_record(json.dumps(record), 0)
+
+    assert isinstance(parsed, ParsedRecord)
