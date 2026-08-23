@@ -542,6 +542,109 @@ async def test_usage_tiles_hover_as_whole_widgets_and_share_one_snapshot(daemon,
         assert client.asked("usage_by_harness") == [{}, {}]
 
 
+async def test_usage_detail_click_enter_cache_per_open_and_preserve_mode_on_reopen(daemon, tmux):
+    compact = daemon["answers"]["usage_by_harness"]
+
+    def period(value: int, cost: int, active_days: int) -> dict:
+        return {
+            "input_tokens": value,
+            "output_tokens": value * 2,
+            "reasoning_output_tokens": value,
+            "cache_read_input_tokens": value,
+            "cache_creation_input_tokens": value,
+            "cost_microcents": cost,
+            "active_days": active_days,
+        }
+
+    detailed = {
+        "since": {"day": 1, "week": 1, "month": 1},
+        "harnesses": [
+            {
+                "harness": "vibe",
+                "today": period(100, 100_000_000, 1),
+                "week": period(200, 200_000_000, 2),
+                "month": period(300, 300_000_000, 3),
+                "models": [
+                    {
+                        "model": "alpha-long-model-name",
+                        "today": period(40, 40_000_000, 1),
+                        "week": period(80, 80_000_000, 1),
+                        "month": period(120, 120_000_000, 2),
+                    },
+                    {
+                        "model": None,
+                        "today": period(60, 60_000_000, 1),
+                        "week": period(120, 120_000_000, 2),
+                        "month": period(180, 180_000_000, 3),
+                    },
+                ],
+            },
+            {
+                "harness": "claude",
+                "today": period(50, 50_000_000, 1),
+                "week": period(100, 100_000_000, 1),
+                "month": period(150, 150_000_000, 1),
+                "models": [],
+            },
+        ],
+        "totals": {
+            "today": period(150, 150_000_000, 2),
+            "week": period(300, 300_000_000, 3),
+            "month": period(450, 450_000_000, 4),
+        },
+    }
+
+    def usage_answer(params):
+        return detailed if params.get("detailed") else compact
+
+    daemon["answers"]["usage_by_harness"] = usage_answer
+    app, _ = make_app()
+    async with app.run_test(size=(80, 30)) as pilot:
+        input_tile = app.query_one("#in-col", app_mod.UsageMetricTile)
+        await pilot.click(input_tile, offset=(0, 0))
+        await pilot.pause()
+
+        client = daemon["client"]
+        panel = app.query_one("#usage-breakdown", app_mod.UsageBreakdownPanel)
+        assert app._usage.detailed
+        assert client.asked("usage_by_harness").count({}) == 1
+        assert client.asked("usage_by_harness").count({"detailed": True}) == 1
+        assert panel.max_scroll_y == 0
+        rendered = _usage_breakdown_text(panel)
+        assert "alpha-long-model-name" not in rendered
+        assert "alpha" in rendered
+        assert "unknown model†" in rendered
+        assert "total" in rendered
+        assert "† model not recorded" in rendered
+
+        app._usage_pointer_metric = None
+        app._select_usage_metric("average")
+        assert "$0.750" in _usage_breakdown_text(panel)
+        assert app._usage.detailed
+        assert client.asked("usage_by_harness").count({}) == 1
+        assert client.asked("usage_by_harness").count({"detailed": True}) == 1
+
+        await pilot.press("enter")
+        assert not app._usage.detailed
+        assert client.asked("usage_by_harness").count({}) == 1
+        await pilot.press("enter")
+        assert app._usage.detailed
+        assert client.asked("usage_by_harness").count({}) == 1
+        assert client.asked("usage_by_harness").count({"detailed": True}) == 1
+
+        await pilot.press("up", "up")
+        assert app._usage_keyboard_metric is None
+        assert not panel.has_class("-visible")
+        assert app._usage.detailed_breakdown is None
+        assert not app._usage.detailed_attempted
+        await pilot.hover(input_tile, offset=(0, 0))
+        await pilot.pause()
+        assert panel.has_class("-visible")
+        assert app._usage.detailed
+        assert client.asked("usage_by_harness").count({}) == 1
+        assert client.asked("usage_by_harness").count({"detailed": True}) == 2
+
+
 async def test_usage_breakdown_rebuilds_only_when_metric_changes(daemon, tmux):
     app, _ = make_app()
     async with app.run_test() as pilot:
@@ -559,6 +662,72 @@ async def test_usage_breakdown_rebuilds_only_when_metric_changes(daemon, tmux):
         await pilot.hover("#out-col")
         await pilot.pause()
         assert body.content is not input_table
+
+
+async def test_late_compact_response_is_cached_without_replacing_detailed_snapshot(daemon, tmux):
+    started = asyncio.Event()
+    release = asyncio.Event()
+    compact = daemon["answers"]["usage_by_harness"]
+    detailed = {
+        "since": {},
+        "harnesses": [
+            {
+                "harness": "vibe",
+                "today": {},
+                "week": {},
+                "month": {},
+                "models": [{"model": "model", "today": {}, "week": {}, "month": {}}],
+            }
+        ],
+        "totals": {"today": {}, "week": {}, "month": {}},
+    }
+
+    async def usage_answer(params):
+        if params.get("detailed"):
+            return detailed
+        started.set()
+        await release.wait()
+        return compact
+
+    daemon["answers"]["usage_by_harness"] = usage_answer
+    app, _ = make_app()
+    async with app.run_test() as pilot:
+        client = daemon["client"]
+        input_tile = app.query_one("#in-col", app_mod.UsageMetricTile)
+        await pilot.hover(input_tile)
+        await started.wait()
+        await pilot.click(input_tile)
+        await pilot.pause()
+
+        panel = app.query_one("#usage-breakdown", app_mod.UsageBreakdownPanel)
+        assert app._usage.detailed
+        assert "total" in _usage_breakdown_text(panel)
+        detailed_rendered = _usage_breakdown_text(panel)
+
+        release.set()
+        await pilot.pause()
+        assert app._usage.detailed_breakdown == detailed
+        assert app._usage.breakdown == compact
+        assert _usage_breakdown_text(panel) == detailed_rendered
+
+        await pilot.click(input_tile, offset=(0, 0))
+        await pilot.pause()
+        assert not app._usage.detailed
+        assert app._usage.breakdown == compact
+        assert client.asked("usage_by_harness").count({}) == 1
+
+
+async def test_detailed_mode_on_old_daemon_keeps_compact_rows_and_shows_hint(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test() as pilot:
+        await pilot.click("#in-col", offset=(0, 0))
+        await pilot.pause()
+
+        rendered = _usage_breakdown_text(
+            app.query_one("#usage-breakdown", app_mod.UsageBreakdownPanel)
+        )
+        assert "1k" in rendered
+        assert "model details unavailable — restart daemon for model details" in rendered
 
 
 async def test_usage_breakdown_renders_cost_average_unknown_and_old_daemon(daemon, tmux):
@@ -617,7 +786,7 @@ async def test_usage_breakdown_overlay_sits_above_footer_without_moving_it(
 
         assert panel.has_class("-visible")
         assert panel.region.bottom == period.region.y
-        assert panel.size.height <= 12
+        assert panel.styles.max_height.value == stack.size.height
         assert tree.region == tree_region
         assert period.region == period_region
         assert stats.region == stats_region
@@ -626,10 +795,10 @@ async def test_usage_breakdown_overlay_sits_above_footer_without_moving_it(
         assert panel.background_colors[1] != stats.background_colors[1]
         assert panel.styles.border_bottom[0] == ""
         if bus_visible and height == 24:
-            # Bus + footer exceed 24 rows; padding makes two rows irreducible.
+            # Bus + footer leave one row; the overlay drops vertical padding.
             assert stack.size.height == 1
-            assert panel.region.height == 2
-            assert panel.region.y == -1
+            assert panel.region.y >= 0
+            assert panel.region.height == stack.size.height
             assert panel.region.bottom == period.region.y
         elif stack.size.height >= 3:
             title = panel.query_one("#usage-breakdown-title", app_mod.NonSelectableStatic)
@@ -690,8 +859,73 @@ async def test_usage_breakdown_tracks_tree_stack_resize_without_lag(daemon, tmux
                 assert panel.region.y >= 0
                 assert panel.region.height <= stack.size.height
 
-        assert panel.styles.max_height.value == app_mod.USAGE_BREAKDOWN_MAX_HEIGHT
-        assert panel.region.height == app_mod.USAGE_BREAKDOWN_MAX_HEIGHT
+        assert panel.styles.max_height.value == stack.size.height
+        assert panel.region.height > 12
+        assert panel.max_scroll_y == 0
+
+
+async def test_detailed_usage_overlay_grows_and_only_scrolls_when_constrained(daemon, tmux):
+    period = {"cost_microcents": 100_000_000, "active_days": 1}
+    detailed = {
+        "since": {},
+        "harnesses": [
+            {
+                "harness": f"very-long-harness-name-{index}",
+                "today": period,
+                "week": period,
+                "month": period,
+                "models": [
+                    {
+                        "model": f"very-long-model-name-{index}",
+                        "today": period,
+                        "week": period,
+                        "month": period,
+                    },
+                    {"model": None, "today": period, "week": period, "month": period},
+                ],
+            }
+            for index in range(6)
+        ],
+        "totals": {"today": period, "week": period, "month": period},
+    }
+    compact = daemon["answers"]["usage_by_harness"]
+
+    def usage_answer(params):
+        return detailed if params.get("detailed") else compact
+
+    daemon["answers"]["usage_by_harness"] = usage_answer
+    app, _ = make_app(sidebar_width=40, bus_visible=True)
+    async with app.run_test(size=(80, 48)) as pilot:
+        tree = app.query_one("#tree-panel", app_mod.TreePanel)
+        period_bar = app.query_one("#usage-period", app_mod.UsagePeriodBar)
+        stats = app.query_one("#stats-footer", app_mod.StatsFooter)
+        price = app.query_one("#price-footer", app_mod.PriceFooter)
+        regions = (tree.region, period_bar.region, stats.region, price.region)
+
+        await pilot.click("#price-col", offset=(0, 0))
+        await pilot.pause()
+
+        panel = app.query_one("#usage-breakdown", app_mod.UsageBreakdownPanel)
+        body = panel.query_one("#usage-breakdown-content", app_mod.NonSelectableStatic)
+        table = body.content
+        assert isinstance(table, Table)
+        assert table.box is None
+        assert len(table.rows) >= 24
+        assert table.columns[0].overflow == "ellipsis"
+        assert all(column.width == 8 for column in table.columns[1:])
+        assert panel.region.bottom == period_bar.region.y
+        assert (tree.region, period_bar.region, stats.region, price.region) == regions
+        assert panel.styles.max_height.value == app.query_one("#tree-stack").size.height
+        assert panel.max_scroll_y > 0
+        rendered = _usage_breakdown_text(panel)
+        assert "very-long-harness-name" not in rendered
+        assert "very-long-model-name" not in rendered
+        assert "† model not recorded" in rendered
+
+        await pilot.resize_terminal(80, 80)
+        assert panel.region.bottom == period_bar.region.y
+        assert panel.region.height > len(table.rows)
+        assert panel.max_scroll_y == 0
 
 
 def test_usage_breakdown_titles_use_single_cell_footer_glyphs():
@@ -765,11 +999,8 @@ async def test_usage_breakdown_narrow_zebra_table_keeps_numeric_cells_whole(daem
         assert "deliberately-long-harness-name" not in rendered
         assert "…" in rendered
         assert rendered.count("$999.999") == 45
-        assert panel.region.height == 12
-        assert panel.max_scroll_y > 0
-        panel.scroll_down(animate=False, immediate=True)
-        await pilot.pause()
-        assert panel.scroll_y > 0
+        assert panel.region.height > 12
+        assert panel.max_scroll_y == 0
         assert body.allow_select is False
         assert body.get_selection(SELECT_ALL) is None
         assert len(table.row_styles) == 2

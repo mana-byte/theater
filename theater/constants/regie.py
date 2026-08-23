@@ -55,8 +55,22 @@ REGIE_FOOTER_ANIM_DURATION = 2.0
 #: Number of frames in one footer animation cycle.
 REGIE_FOOTER_ANIM_FRAMES = round(REGIE_FOOTER_ANIM_DURATION / REGIE_FOOTER_ANIM_INTERVAL)
 
-#: Maximum rows the usage breakdown overlay may cover.
-REGIE_USAGE_BREAKDOWN_MAX_HEIGHT = 12
+#: Minimum width reserved for usage labels before terminal ellipsis.
+REGIE_USAGE_BREAKDOWN_LABEL_MIN_WIDTH = 7
+#: Fixed width for each right-aligned usage period cell.
+REGIE_USAGE_BREAKDOWN_NUMERIC_WIDTH = 8
+#: Rich table cell padding used by compact and detailed usage tables.
+REGIE_USAGE_BREAKDOWN_TABLE_PADDING = (0, 1)
+#: Indentation applied to model rows beneath a harness summary.
+REGIE_USAGE_BREAKDOWN_MODEL_INDENT = "  "
+#: Blank rows inserted between detailed harness groups.
+REGIE_USAGE_BREAKDOWN_GROUP_SPACER_ROWS = 1
+#: Rich row styles for the detailed hierarchy.
+REGIE_USAGE_BREAKDOWN_HARNESS_STYLE = "bold"
+REGIE_USAGE_BREAKDOWN_MODEL_STYLE = "dim"
+REGIE_USAGE_BREAKDOWN_TOTAL_STYLE = "bold"
+#: Marker for a usage row whose historical model attribution was nullable.
+REGIE_USAGE_BREAKDOWN_UNKNOWN_MODEL_MARKER = "†"
 
 #: Stable key for the placeholder shown when the tree is empty.
 REGIE_EMPTY_TREE_KEY = ("empty", "")
@@ -195,6 +209,13 @@ REGIE_DASHBOARD_TIPS: tuple[tuple[str | tuple[str, str], ...], ...] = (
         ("Tips: hover a ", _D),
         ("usage tile", _T),
         (" for per-harness stats for today, this week, and this month", _D),
+    ),
+    (
+        ("Tips: ", _D),
+        ("click a usage tile", _T),
+        (" or press ", _D),
+        ("Enter", _T),
+        (" in the footer to toggle per-model details", _D),
     ),
     (("Tips: press ", _D), ("Ctrl+P", _T), (" to open the command palette", _D)),
     (

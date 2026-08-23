@@ -293,6 +293,60 @@ def test_usage_by_harness_uses_each_calendar_boundary_and_metric_semantics(store
     assert row["month"]["input_tokens"] == 1
 
 
+def test_detailed_usage_by_harness_keeps_used_models_and_global_active_days(store):
+    day_since = datetime(2026, 9, 1).timestamp()
+    week_since = datetime(2026, 8, 31).timestamp()
+    base = {
+        "participant_id": "p1",
+        "tree_root_id": "p1",
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "output_tokens": 0,
+    }
+    for key, harness, model, timestamp, input_tokens, cost in (
+        ("alpha-old", "codex", "alpha", datetime(2026, 8, 31, 12), 10, 100),
+        ("alpha-today", "codex", "alpha", datetime(2026, 9, 1, 10), 2, 20),
+        ("beta-today", "codex", "beta", datetime(2026, 9, 1, 11), 3, 30),
+        ("unknown-model", "vibe", None, datetime(2026, 9, 1, 12), 4, 40),
+        ("unused", "codex", "unused", datetime(2026, 8, 30, 12), 99, 990),
+    ):
+        assert store.record_usage(
+            **base,
+            usage_key=key,
+            harness=harness,
+            model=model,
+            ts=timestamp.timestamp(),
+            input_tokens=input_tokens,
+            cost_microcents=cost,
+        )
+
+    result = store.usage_by_harness_detailed(
+        day_since=day_since,
+        week_since=week_since,
+        month_since=day_since,
+    )
+    by_harness = {row["harness"]: row for row in result["harnesses"]}
+    codex_models = {row["model"]: row for row in by_harness["codex"]["models"]}
+
+    assert set(codex_models) == {"alpha", "beta"}
+    assert codex_models["alpha"]["week"]["input_tokens"] == 12
+    assert codex_models["beta"]["today"]["cost_microcents"] == 30
+    assert by_harness["vibe"]["models"][0]["model"] is None
+    assert by_harness["codex"]["week"]["input_tokens"] == 15
+    assert result["totals"]["today"] == {
+        "input_tokens": 9,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "cost_microcents": 90,
+        "active_days": 1,
+    }
+    assert result["totals"]["week"]["cost_microcents"] == 190
+    assert result["totals"]["week"]["active_days"] == 2
+
+
 # ---- Job structured fields ------------------------------------------------
 
 

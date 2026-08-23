@@ -16,7 +16,7 @@ pane layout so the tree stays visible. Unstaging restores the dashboard.
 Keybindings:
     j/k or up/down  navigate the tree and usage footer
     h/l or left/right  navigate usage footer rows
-    Enter           stage the selected agent (join its pane into this window)
+    Enter           stage the selected agent in the tree; toggle detailed usage in the footer
     l               stage the selected agent (if needed) and focus it
     <prefix> h      return focus to régie from the stage (claimed only if free)
     x               kill the selected agent's pane
@@ -154,7 +154,6 @@ from theater.regie.widgets.tree import (  # noqa: F401
     _is_participant_key,
 )
 from theater.regie.widgets.usage_breakdown import (
-    USAGE_BREAKDOWN_MAX_HEIGHT,
     UsageBreakdownPanel,
 )
 from theater.regie.widgets.usage_footer import (  # noqa: F401
@@ -467,6 +466,39 @@ class RegieApp(App):
         self._usage_pointer_metric = message.metric
         self._sync_usage_metric()
 
+    def on_usage_metric_tile_clicked(self, message: UsageMetricTile.Clicked) -> None:
+        """Toggle the shared detailed view from any point in a usage tile."""
+        self._usage_pointer_metric = message.metric
+        self._sync_usage_metric()
+        self._toggle_usage_detailed()
+
+    def _render_usage_breakdown(self) -> None:
+        metric = self._usage_active_metric
+        if metric is None:
+            return
+        if self._usage.detailed:
+            result = self._usage.detailed_breakdown
+            message = self._usage.detailed_message
+        else:
+            result = self._usage_breakdown
+            message = self._usage_breakdown_message
+        self.query_one("#usage-breakdown", UsageBreakdownPanel).render_state(
+            metric,
+            result=result,
+            message=message,
+            detailed=self._usage.detailed,
+        )
+
+    def _ensure_compact_usage_fetch(self) -> None:
+        generation = self._usage.begin_compact_fetch()
+        if generation is not None:
+            self.run_worker(self._fetch_usage_breakdown(generation), exclusive=False)
+
+    def _ensure_detailed_usage_fetch(self) -> None:
+        generation = self._usage.begin_detailed_fetch()
+        if generation is not None:
+            self.run_worker(self._fetch_detailed_usage_breakdown(generation), exclusive=False)
+
     def _activate_usage_metric(self, metric: str) -> None:
         outcome = self._usage.activate(metric)
         if outcome is not ActivateOutcome.NO_CHANGE:
@@ -476,15 +508,28 @@ class RegieApp(App):
         panel.set_class(True, "-visible")
         if outcome is ActivateOutcome.FIRST_OPEN:
             self._constrain_usage_breakdown()
-            generation = self._usage.begin_first_open()
-            panel.render_state(metric)
-            self.run_worker(self._fetch_usage_breakdown(generation), exclusive=False)
+            self._usage.begin_first_open()
+            self._render_usage_breakdown()
+            if self._usage.detailed:
+                self._ensure_detailed_usage_fetch()
+            else:
+                self._ensure_compact_usage_fetch()
         elif outcome is ActivateOutcome.SWITCH:
-            panel.render_state(
-                metric,
-                result=self._usage_breakdown,
-                message=self._usage_breakdown_message,
-            )
+            self._render_usage_breakdown()
+            if self._usage.detailed:
+                self._ensure_detailed_usage_fetch()
+            else:
+                self._ensure_compact_usage_fetch()
+
+    def _toggle_usage_detailed(self) -> None:
+        if self._usage_active_metric is None:
+            return
+        self._usage.toggle_detailed()
+        self._render_usage_breakdown()
+        if self._usage.detailed:
+            self._ensure_detailed_usage_fetch()
+        else:
+            self._ensure_compact_usage_fetch()
 
     def _sync_usage_metric(self) -> None:
         outcome = self._usage.sync(self._usage_keyboard_metric)
@@ -512,8 +557,7 @@ class RegieApp(App):
         """Clamp the overlay to its tree stack."""
         panel = self.query_one("#usage-breakdown", UsageBreakdownPanel)
         stack = self.query_one("#tree-stack", Vertical)
-        # Bottom-docked overflow clips upward instead of scrolling.
-        panel.styles.max_height = min(USAGE_BREAKDOWN_MAX_HEIGHT, stack.size.height)
+        panel.constrain_to_height(stack.size.height)
 
     def _hide_usage_breakdown_if_unhovered(self) -> None:
         node: DOMNode | None = self.mouse_over
@@ -539,13 +583,22 @@ class RegieApp(App):
             )
             is FetchAccept.ACCEPTED
         )
-        if accepted:
-            assert self._usage_active_metric is not None
-            self.query_one("#usage-breakdown", UsageBreakdownPanel).render_state(
-                self._usage_active_metric,
-                result=fetched.result,
-                message=fetched.message,
+        if accepted and not self._usage.detailed:
+            self._render_usage_breakdown()
+
+    async def _fetch_detailed_usage_breakdown(self, generation: int) -> None:
+        """Fetch and retain one detailed snapshot for all five metrics."""
+        if self._client is None:
+            return
+        fetched = await UsageQueries(self._client).fetch_detailed_breakdown()
+        accepted = (
+            self._usage.accept_detailed_fetch(
+                generation=generation, result=fetched.result, message=fetched.message
             )
+            is FetchAccept.ACCEPTED
+        )
+        if accepted and self._usage.detailed:
+            self._render_usage_breakdown()
 
     async def _load_harnesses(self) -> None:
         """Ask the daemon what it can spawn, for the palette to offer.
@@ -1161,6 +1214,9 @@ class RegieApp(App):
         app-side reactions (notifications, reactive assignment) based on the
         returned outcome.
         """
+        if self._usage_keyboard_metric is not None:
+            self._toggle_usage_detailed()
+            return
         result = await self._staging.stage(
             tree_lines=self.tree_lines,
             cursor=self.cursor,

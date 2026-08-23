@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from sqlalchemy import ColumnElement, case, distinct, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -164,3 +166,112 @@ class UsageRepository:
                 }
             )
         return result
+
+    def by_harness_detailed(
+        self, *, day_since: float, week_since: float, month_since: float
+    ) -> dict[str, list[dict] | dict[str, dict]]:
+        """Aggregate the displayed periods by harness and model in fixed scans."""
+        periods = {
+            "today": day_since,
+            "week": week_since,
+            "month": month_since,
+        }
+        columns = {
+            "input_tokens": usage.c.input_tokens,
+            "output_tokens": usage.c.output_tokens,
+            "cache_creation_input_tokens": usage.c.cache_creation_input_tokens,
+            "cache_read_input_tokens": usage.c.cache_read_input_tokens,
+            "reasoning_output_tokens": usage.c.reasoning_output_tokens,
+            "cost_microcents": usage.c.cost_microcents,
+        }
+        local_date = func.date(usage.c.ts, "unixepoch", "localtime")
+        selected: list[ColumnElement] = [usage.c.harness, usage.c.model]
+        for period, since in periods.items():
+            for name, column in columns.items():
+                selected.append(
+                    func.coalesce(func.sum(case((usage.c.ts >= since, column), else_=0)), 0).label(
+                        f"{period}_{name}"
+                    )
+                )
+            selected.append(
+                func.count(distinct(case((usage.c.ts >= since, local_date)))).label(
+                    f"{period}_active_days"
+                )
+            )
+
+        lower_bound = min(periods.values())
+        rows = self._db.conn.execute(
+            select(*selected)
+            .where(usage.c.ts >= lower_bound)
+            .group_by(usage.c.harness, usage.c.model)
+            .order_by(usage.c.harness, usage.c.model)
+        ).fetchall()
+
+        summary_selected: list[ColumnElement] = [usage.c.harness]
+        for period, since in periods.items():
+            for name, column in columns.items():
+                summary_selected.append(
+                    func.coalesce(func.sum(case((usage.c.ts >= since, column), else_=0)), 0).label(
+                        f"{period}_{name}"
+                    )
+                )
+            summary_selected.append(
+                func.count(distinct(case((usage.c.ts >= since, local_date)))).label(
+                    f"{period}_active_days"
+                )
+            )
+        summary_rows = self._db.conn.execute(
+            select(*summary_selected)
+            .where(usage.c.ts >= lower_bound)
+            .group_by(usage.c.harness)
+            .order_by(usage.c.harness)
+        ).fetchall()
+
+        harnesses: dict[str, dict] = {}
+        for row in summary_rows:
+            values = row._mapping
+            harness_name = values["harness"]
+            harnesses[harness_name] = {
+                "harness": harness_name,
+                **{period: self._period_values(values, period, columns) for period in periods},
+                "models": [],
+            }
+        for row in rows:
+            values = row._mapping
+            harness_name = values["harness"]
+            harness = harnesses[harness_name]
+            harness["models"].append(
+                {
+                    "model": values["model"],
+                    **{period: self._period_values(values, period, columns) for period in periods},
+                }
+            )
+
+        total_selected: list[ColumnElement] = []
+        for period, since in periods.items():
+            for name, column in columns.items():
+                total_selected.append(
+                    func.coalesce(func.sum(case((usage.c.ts >= since, column), else_=0)), 0).label(
+                        f"{period}_{name}"
+                    )
+                )
+            total_selected.append(
+                func.count(distinct(case((usage.c.ts >= since, local_date)))).label(
+                    f"{period}_active_days"
+                )
+            )
+        total_row = self._db.conn.execute(
+            select(*total_selected).where(usage.c.ts >= lower_bound)
+        ).fetchone()
+        assert total_row is not None
+        totals = {
+            period: self._period_values(total_row._mapping, period, columns) for period in periods
+        }
+        return {"harnesses": list(harnesses.values()), "totals": totals}
+
+    @staticmethod
+    def _period_values(values, period: str, columns: Mapping[str, ColumnElement]) -> dict:
+        return {
+            **{name: values[f"{period}_{name}"] for name in columns},
+            "active_days": values[f"{period}_active_days"],
+        }

@@ -60,6 +60,11 @@ class UsageMetricTile(Vertical):
             super().__init__()
             self.metric = metric
 
+    class Clicked(Message):
+        def __init__(self, metric: str) -> None:
+            super().__init__()
+            self.metric = metric
+
     class Left(Message):
         pass
 
@@ -72,6 +77,9 @@ class UsageMetricTile(Vertical):
 
     def on_leave(self, _event: events.Leave) -> None:
         self.post_message(self.Left())
+
+    def on_click(self, _event: events.Click) -> None:
+        self.post_message(self.Clicked(self.metric))
 
 
 class UsagePeriodBar(NonSelectableStatic):

@@ -201,6 +201,17 @@ async def test_usage_by_harness_covers_week_crossing_month_and_zero_fills_plugin
     unknown = rows[-1]
     assert unknown["today"]["active_days"] == 1
     assert sum(row["week"]["input_tokens"] for row in rows) == 13
+    assert set(result) == {"since", "harnesses"}
+    assert all("models" not in row for row in rows)
+
+    detailed = await client.call("usage_by_harness", detailed=True)
+
+    assert set(detailed) == {"since", "harnesses", "totals"}
+    detailed_rows = {row["harness"]: row for row in detailed["harnesses"]}
+    assert detailed_rows["vibe"]["models"] == []
+    assert detailed_rows["codex"]["models"][0]["model"] == "model"
+    assert detailed["totals"]["week"]["active_days"] == 2
+    assert detailed["totals"]["today"]["cost_microcents"] == 30
 
 
 async def test_usage_by_harness_does_not_zero_fill_plugins_that_failed_to_load(client, monkeypatch):

@@ -1,7 +1,7 @@
 """Usage-panel state and daemon usage queries.
 
 ``UsagePanelState`` owns overlay state: pointer/active metric, cached
-breakdown result, error message, and a generation counter for stale
+breakdown results, detailed-mode preference, and the generation guard for stale
 rejection. ``UsageQueries`` owns daemon usage RPC calls plus
 compatibility/error classification. Neither holds a reference to the app,
 Textual widgets, or tmux.
@@ -56,6 +56,12 @@ class UsagePanelState:
     active_metric: str | None = None
     breakdown: dict | None = None
     message: str | None = None
+    detailed: bool = False
+    detailed_breakdown: dict | None = None
+    detailed_message: str | None = None
+    detailed_attempted: bool = False
+    detailed_fetching: bool = False
+    compact_fetching: bool = False
     generation: int = 0
 
     def resolve_metric(self, keyboard_metric: str | None) -> str | None:
@@ -81,18 +87,53 @@ class UsagePanelState:
         return ActivateOutcome.NO_CHANGE
 
     def begin_first_open(self) -> int:
-        """Clear cache and increment generation for a new fetch. Return generation."""
+        """Clear the compact cache and increment generation for a new fetch."""
         self.generation += 1
+        self.compact_fetching = False
         self.breakdown = None
         self.message = None
         return self.generation
 
+    def begin_compact_fetch(self) -> int | None:
+        """Start one compact fetch for the current panel generation."""
+        if (
+            self.active_metric is None
+            or self.compact_fetching
+            or self.breakdown is not None
+            or self.message is not None
+        ):
+            return None
+        self.compact_fetching = True
+        return self.generation
+
+    def toggle_detailed(self) -> bool:
+        """Toggle the shared detail mode."""
+        self.detailed = not self.detailed
+        return self.detailed
+
+    def begin_detailed_fetch(self) -> int | None:
+        """Start the one lazy detailed fetch allowed for this overlay session."""
+        if (
+            not self.detailed
+            or self.active_metric is None
+            or self.detailed_attempted
+            or self.detailed_fetching
+        ):
+            return None
+        self.detailed_fetching = True
+        return self.generation
+
     def clear(self) -> None:
-        """Reset active metric, cache, and message; increment generation."""
+        """Close the overlay while retaining the shared detailed preference."""
         self.active_metric = None
         self.breakdown = None
         self.message = None
+        self.detailed_breakdown = None
+        self.detailed_message = None
+        self.detailed_attempted = False
         self.generation += 1
+        self.compact_fetching = False
+        self.detailed_fetching = False
 
     def sync(self, keyboard_metric: str | None) -> SyncOutcome:
         """Resolve metric and report which transition the app should perform.
@@ -118,10 +159,25 @@ class UsagePanelState:
         metric) or ``REJECTED`` when the generation is stale or the panel is
         inactive.
         """
-        if generation != self.generation or self.active_metric is None:
+        if generation != self.generation:
+            return FetchAccept.REJECTED
+        self.compact_fetching = False
+        if self.active_metric is None:
             return FetchAccept.REJECTED
         self.breakdown = result
         self.message = message
+        return FetchAccept.ACCEPTED
+
+    def accept_detailed_fetch(
+        self, *, generation: int, result: dict | None, message: str | None
+    ) -> FetchAccept:
+        """Cache a current detailed response, even if mode changed while it loaded."""
+        if generation != self.generation or self.active_metric is None:
+            return FetchAccept.REJECTED
+        self.detailed_fetching = False
+        self.detailed_attempted = True
+        self.detailed_breakdown = result
+        self.detailed_message = message
         return FetchAccept.ACCEPTED
 
     def set_pointer(self, metric: str | None) -> None:
@@ -179,6 +235,41 @@ class UsageQueries:
             logger.debug("per-harness usage unavailable: %s", exc)
             message = "per-harness stats unavailable"
         return BreakdownResult(result=result, message=message)
+
+    async def fetch_detailed_breakdown(self) -> BreakdownResult:
+        """Fetch detailed usage, falling back to compact data for older daemons."""
+        detail_hint = "model details unavailable — restart daemon for model details"
+        try:
+            response = await self._client.call("usage_by_harness", detailed=True)
+        except Exception as exc:
+            logger.debug("detailed per-harness usage unavailable: %s", exc)
+            return await self._compact_detail_fallback(detail_hint)
+
+        if isinstance(response, dict) and self._is_detailed_response(response):
+            return BreakdownResult(result=response)
+        if isinstance(response, dict):
+            # A daemon that ignores the additive parameter returns the old shape.
+            return BreakdownResult(result=response, message=detail_hint)
+        logger.debug(
+            "detailed per-harness usage returned %s, expected dict",
+            type(response).__name__,
+        )
+        return await self._compact_detail_fallback(detail_hint)
+
+    async def _compact_detail_fallback(self, message: str) -> BreakdownResult:
+        compact = await self.fetch_breakdown()
+        return BreakdownResult(result=compact.result, message=message)
+
+    @staticmethod
+    def _is_detailed_response(response: Any) -> bool:
+        if not isinstance(response, dict):
+            return False
+        harnesses = response.get("harnesses")
+        if not isinstance(harnesses, list) or not isinstance(response.get("totals"), dict):
+            return False
+        return all(
+            isinstance(row, dict) and isinstance(row.get("models"), list) for row in harnesses
+        )
 
     async def fetch_summary(self, *, window: float, period: str) -> SummaryResult:
         """Fetch usage_summary, falling back to legacy on unknown_method.

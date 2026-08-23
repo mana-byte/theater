@@ -78,6 +78,7 @@ def test_tip_corpus_covers_regie_capabilities():
         "double-click",
         "usage tile",
         "today, this week, and this month",
+        "per-model details",
         "Ctrl+P",
         "spawn",
         "resume",

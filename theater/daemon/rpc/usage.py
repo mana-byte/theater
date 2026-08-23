@@ -99,11 +99,21 @@ async def _usage_by_harness(daemon, params: dict) -> dict:
     month_since = _calendar_period_since("month", timestamp)
     assert day_since is not None and week_since is not None and month_since is not None
     boundaries = {"day": day_since, "week": week_since, "month": month_since}
-    observed = daemon.store.usage_by_harness(
-        day_since=day_since,
-        week_since=week_since,
-        month_since=month_since,
-    )
+    detailed = params.get("detailed") is True
+    if detailed:
+        aggregated = daemon.store.usage_by_harness_detailed(
+            day_since=day_since,
+            week_since=week_since,
+            month_since=month_since,
+        )
+        observed = aggregated["harnesses"]
+    else:
+        aggregated = None
+        observed = daemon.store.usage_by_harness(
+            day_since=day_since,
+            week_since=week_since,
+            month_since=month_since,
+        )
     observed_by_name = {row["harness"]: row for row in observed}
     empty_period = {
         "input_tokens": 0,
@@ -128,20 +138,25 @@ async def _usage_by_harness(daemon, params: dict) -> dict:
     rows = []
     for name in names:
         row = observed_by_name.get(name)
-        rows.append(
-            row
-            if row is not None
-            else {
+        if row is None:
+            row = {
                 "harness": name,
                 "today": dict(empty_period),
                 "week": dict(empty_period),
                 "month": dict(empty_period),
             }
-        )
-    return {
+            if detailed:
+                row["models"] = []
+        elif detailed:
+            row = {**row, "models": list(row.get("models", []))}
+        rows.append(row)
+    result = {
         "since": boundaries,
         "harnesses": rows,
     }
+    if detailed:
+        result["totals"] = aggregated["totals"]
+    return result
 
 
 def _calendar_period_since(period: object, timestamp: float) -> float | None:

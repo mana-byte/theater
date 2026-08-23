@@ -15,14 +15,23 @@ from textual import events
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
 from textual.content import Content
+from textual.geometry import Spacing
 from textual.message import Message
 
 from theater.constants import MICROCENTS_PER_DOLLAR
-from theater.constants.regie import REGIE_USAGE_BREAKDOWN_MAX_HEIGHT
+from theater.constants.regie import (
+    REGIE_USAGE_BREAKDOWN_GROUP_SPACER_ROWS,
+    REGIE_USAGE_BREAKDOWN_HARNESS_STYLE,
+    REGIE_USAGE_BREAKDOWN_LABEL_MIN_WIDTH,
+    REGIE_USAGE_BREAKDOWN_MODEL_INDENT,
+    REGIE_USAGE_BREAKDOWN_MODEL_STYLE,
+    REGIE_USAGE_BREAKDOWN_NUMERIC_WIDTH,
+    REGIE_USAGE_BREAKDOWN_TABLE_PADDING,
+    REGIE_USAGE_BREAKDOWN_TOTAL_STYLE,
+    REGIE_USAGE_BREAKDOWN_UNKNOWN_MODEL_MARKER,
+)
 from theater.regie.widgets.chrome import NonSelectableStatic
 from theater.regie.widgets.usage_footer import _fmt_tokens
-
-USAGE_BREAKDOWN_MAX_HEIGHT = REGIE_USAGE_BREAKDOWN_MAX_HEIGHT
 
 
 class UsageBreakdownPanel(VerticalScroll):
@@ -30,33 +39,46 @@ class UsageBreakdownPanel(VerticalScroll):
 
     can_focus = False
 
-    DEFAULT_CSS = f"""
-    UsageBreakdownPanel {{
+    def __init__(self, *args, **kwargs) -> None:
+        self._normal_padding: Spacing | None = None
+        super().__init__(*args, **kwargs)
+
+    def constrain_to_height(self, height: int) -> None:
+        """Keep the docked overlay within its available stack height."""
+        if self._normal_padding is None:
+            self._normal_padding = self.styles.padding
+        if height < self._normal_padding.height:
+            self.styles.padding = (0, self._normal_padding.left)
+        else:
+            self.styles.padding = self._normal_padding
+        self.styles.max_height = height
+
+    DEFAULT_CSS = """
+    UsageBreakdownPanel {
         display: none;
         dock: bottom;
         layer: overlay;
         width: 100%;
         height: auto;
-        max-height: {USAGE_BREAKDOWN_MAX_HEIGHT};
         padding: 1;
         /* Softer than the active tile's 10% wash. */
         background: $accent 8%;
         scrollbar-size: 1 1;
-    }}
-    UsageBreakdownPanel.-visible {{
+    }
+    UsageBreakdownPanel.-visible {
         display: block;
-    }}
-    UsageBreakdownPanel > Static {{
+    }
+    UsageBreakdownPanel > Static {
         width: 100%;
         height: auto;
-    }}
-    #usage-breakdown-title {{
+    }
+    #usage-breakdown-title {
         color: $text-accent;
         text-style: bold;
-    }}
-    #usage-breakdown-note {{
+    }
+    #usage-breakdown-note {
         color: $text-muted;
-    }}
+    }
     """
 
     _METRIC_TITLES: ClassVar[dict[str, str]] = {
@@ -129,6 +151,7 @@ class UsageBreakdownPanel(VerticalScroll):
         *,
         result: dict | None = None,
         message: str | None = None,
+        detailed: bool = False,
     ) -> None:
         title = self._METRIC_TITLES[metric]
         glyph = self._METRIC_GLYPHS.get(metric)
@@ -137,14 +160,63 @@ class UsageBreakdownPanel(VerticalScroll):
         content = self.query_one("#usage-breakdown-content", NonSelectableStatic)
         note = self.query_one("#usage-breakdown-note", NonSelectableStatic)
         note.update("")
-        if message is not None:
-            content.update(Content.assemble((message, "$text-muted")))
-            return
         rows = result.get("harnesses") if isinstance(result, dict) else None
-        if not isinstance(rows, list):
-            content.update(Content.assemble(("loading…", "$text-muted")))
+        detailed_payload = detailed and self._is_detailed_result(result)
+        if not isinstance(rows, list) or (message is not None and result is None):
+            content.update(Content.assemble((message or "loading…", "$text-muted")))
             return
+        if detailed_payload:
+            assert isinstance(result, dict)
+            table = self._detailed_table(content, metric, rows, result)
+        else:
+            table = self._compact_table(content, metric, rows)
+        content.update(table)
 
+        notes: list[str] = []
+        if any(isinstance(row, dict) and row.get("harness") == "unknown" for row in rows):
+            notes.append("* pre-upgrade")
+        if detailed_payload and any(
+            isinstance(row, dict)
+            and any(
+                isinstance(model, dict) and model.get("model") is None
+                for model in row.get("models", [])
+            )
+            for row in rows
+        ):
+            notes.append(f"{REGIE_USAGE_BREAKDOWN_UNKNOWN_MODEL_MARKER} model not recorded")
+        if message is not None:
+            notes.append(message)
+        note.update(" · ".join(notes))
+
+    @staticmethod
+    def _is_detailed_result(result: dict | None) -> bool:
+        if not isinstance(result, dict):
+            return False
+        rows = result.get("harnesses")
+        if not isinstance(rows, list) or not isinstance(result.get("totals"), dict):
+            return False
+        return all(isinstance(row, dict) and isinstance(row.get("models"), list) for row in rows)
+
+    @staticmethod
+    def _add_columns(table: Table) -> None:
+        table.add_column(
+            "harness",
+            ratio=1,
+            min_width=REGIE_USAGE_BREAKDOWN_LABEL_MIN_WIDTH,
+            no_wrap=True,
+            overflow="ellipsis",
+        )
+        for heading in ("today", "week", "month"):
+            table.add_column(
+                heading,
+                width=REGIE_USAGE_BREAKDOWN_NUMERIC_WIDTH,
+                justify="right",
+                no_wrap=True,
+                overflow="crop",
+            )
+
+    @classmethod
+    def _new_table(cls, content: NonSelectableStatic) -> Table:
         panel_background = content.background_colors[1]
         zebra_background = panel_background.blend(content.colors[3], 0.04)
         # Rich row_styles needs resolved colors; ANSI Color.blend returns its target.
@@ -157,19 +229,15 @@ class UsageBreakdownPanel(VerticalScroll):
             box=None,
             expand=True,
             pad_edge=False,
-            padding=(0, 1),
+            padding=REGIE_USAGE_BREAKDOWN_TABLE_PADDING,
             header_style=Style(dim=True),
             row_styles=row_styles,
         )
-        table.add_column("harness", ratio=1, min_width=7, no_wrap=True, overflow="ellipsis")
-        for heading in ("today", "week", "month"):
-            table.add_column(
-                heading,
-                width=8,
-                justify="right",
-                no_wrap=True,
-                overflow="crop",
-            )
+        cls._add_columns(table)
+        return table
+
+    def _compact_table(self, content: NonSelectableStatic, metric: str, rows: list) -> Table:
+        table = self._new_table(content)
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -180,6 +248,53 @@ class UsageBreakdownPanel(VerticalScroll):
                 for period in ("today", "week", "month")
             ]
             table.add_row(label, *values)
-        if any(isinstance(row, dict) and row.get("harness") == "unknown" for row in rows):
-            note.update("* pre-upgrade")
-        content.update(table)
+        return table
+
+    def _detailed_table(
+        self, content: NonSelectableStatic, metric: str, rows: list, result: dict
+    ) -> Table:
+        table = self._new_table(content)
+        rendered_harnesses = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if rendered_harnesses:
+                for _ in range(REGIE_USAGE_BREAKDOWN_GROUP_SPACER_ROWS):
+                    table.add_row("", "", "", "")
+            harness = str(row.get("harness", "unknown"))
+            label = "unknown*" if harness == "unknown" else harness
+            values = [
+                self._format_metric(metric, row.get(period, {}))
+                for period in ("today", "week", "month")
+            ]
+            table.add_row(label, *values, style=REGIE_USAGE_BREAKDOWN_HARNESS_STYLE)
+            rendered_harnesses += 1
+            models = row.get("models", [])
+            if not isinstance(models, list):
+                continue
+            for model_row in models:
+                if not isinstance(model_row, dict):
+                    continue
+                model = model_row.get("model")
+                model_label = (
+                    f"unknown model{REGIE_USAGE_BREAKDOWN_UNKNOWN_MODEL_MARKER}"
+                    if model is None
+                    else f"{REGIE_USAGE_BREAKDOWN_MODEL_INDENT}{model}"
+                )
+                if model is None:
+                    model_label = f"{REGIE_USAGE_BREAKDOWN_MODEL_INDENT}{model_label}"
+                values = [
+                    self._format_metric(metric, model_row.get(period, {}))
+                    for period in ("today", "week", "month")
+                ]
+                table.add_row(model_label, *values, style=REGIE_USAGE_BREAKDOWN_MODEL_STYLE)
+
+        totals = result.get("totals", {})
+        if not isinstance(totals, dict):
+            totals = {}
+        total_values = [
+            self._format_metric(metric, totals.get(period, {}))
+            for period in ("today", "week", "month")
+        ]
+        table.add_row("total", *total_values, style=REGIE_USAGE_BREAKDOWN_TOTAL_STYLE)
+        return table

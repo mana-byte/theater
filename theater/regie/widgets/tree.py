@@ -23,7 +23,7 @@ from theater.regie.animations.routes import LeafOverlay
 from theater.regie.render.layout import Key, is_root_prefix
 from theater.regie.widgets.chrome import EmptyTreeState
 from theater.regie.widgets.leaf import AgentLeaf
-from theater.regie.widgets.usage_breakdown import USAGE_BREAKDOWN_MAX_HEIGHT, UsageBreakdownPanel
+from theater.regie.widgets.usage_breakdown import UsageBreakdownPanel
 
 
 def _is_participant_key(key: Key) -> bool:
@@ -336,4 +336,4 @@ class TreeStack(Vertical):
         with contextlib.suppress(Exception):
             panel = self.query_one(UsageBreakdownPanel)
             if panel.has_class("-visible"):
-                panel.styles.max_height = min(USAGE_BREAKDOWN_MAX_HEIGHT, event.size.height)
+                panel.constrain_to_height(event.size.height)

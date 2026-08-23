@@ -398,6 +398,14 @@ class Store:
             day_since=day_since, week_since=week_since, month_since=month_since
         )
 
+    def usage_by_harness_detailed(
+        self, *, day_since: float, week_since: float, month_since: float
+    ) -> dict:
+        """Aggregate the displayed periods by harness, model, and global total."""
+        return self._usage.by_harness_detailed(
+            day_since=day_since, week_since=week_since, month_since=month_since
+        )
+
     # ---- bus ----------------------------------------------------------
 
     def bus_append(
