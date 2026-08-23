@@ -94,6 +94,7 @@ class Observer:
         self._unobservable: set[str] = set()
         self._supervisor: asyncio.Task | None = None
         self._stopping = asyncio.Event()
+        self._trajectory_capture = None
 
         # Concrete collaborators, explicitly wired.
         self._completion = CompletionTracker(self.store, self.registry, jobs_fn=lambda: self.jobs)
@@ -179,6 +180,19 @@ class Observer:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
         self._supervisor = None
+
+    def set_trajectory_capture(self, callback) -> None:
+        """Install the optional synchronous trajectory batch sink."""
+        self._trajectory_capture = callback
+
+    def _capture_trajectory(self, pid: str, batch: Batch) -> None:
+        callback = self._trajectory_capture
+        if callback is None:
+            return
+        try:
+            callback(pid, batch)
+        except BaseException:
+            logger.exception("trajectory capture failed for %s", pid)
 
     async def reset_for_operator_bind(self, pid: str) -> None:
         task = self._tasks.pop(pid, None)
@@ -304,6 +318,7 @@ class Observer:
                     batch = await source.read()
                     self._validate_batch(source, batch)
                     if batch.waiting:
+                        self._capture_trajectory(pid, batch)
                         self._failures.update_source_error(pid, batch, finish_fn=self._finish)
                         await self._screen_only(pid, observer, clock)
                         await self._sleep(self.search)
@@ -313,6 +328,7 @@ class Observer:
                         await self._screen_only(pid, observer, clock)
                         await self._sleep(self.search)
                         continue
+                    self._capture_trajectory(pid, batch)
                     self._failures.clear_source_error_on_progress(pid, batch)
                     if self._reducer.apply(
                         pid,

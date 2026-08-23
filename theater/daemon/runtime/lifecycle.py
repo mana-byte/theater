@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import logging
 
 from theater import paths, protocol, timing
@@ -168,6 +169,13 @@ async def aclose(daemon, *, close_timeout: float, shutdown_workers) -> None:
     daemon.stop()
     if daemon._server:
         daemon._server.close()
+    trajectory = getattr(daemon, "trajectory", None)
+    if trajectory is not None:
+        close = getattr(trajectory, "aclose", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
     await daemon.observer.aclose()
     if daemon._reaper:
         daemon._reaper.cancel()
