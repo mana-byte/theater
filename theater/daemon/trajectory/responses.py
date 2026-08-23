@@ -72,10 +72,7 @@ def fit_page(
             truncated_by_bytes=byte_truncated,
         )
 
-    coverage = _bounded_coverage(
-        stream,
-        lambda candidate: wire_bytes(build(0, _OLDER_CURSOR_PLACEHOLDER, candidate).to_wire()),
-    )
+    minimum_coverage = _coverage(stream, ())
 
     low = 0
     high = len(records)
@@ -83,7 +80,7 @@ def fit_page(
     while low <= high:
         count = (low + high) // 2
         older = has_older or count < len(records)
-        page = build(count, _OLDER_CURSOR_PLACEHOLDER if older else None, coverage)
+        page = build(count, _OLDER_CURSOR_PLACEHOLDER if older else None, minimum_coverage)
         if wire_bytes(page.to_wire()) <= TRAJECTORY_RESPONSE_MAX_BYTES:
             best = count
             low = count + 1
@@ -93,6 +90,10 @@ def fit_page(
         raise ValueError("trajectory response envelope exceeds the wire limit")
     byte_truncated = best < len(records)
     older = has_older or byte_truncated
+    coverage = _fit_coverage(
+        stream,
+        lambda candidate: build(best, _OLDER_CURSOR_PLACEHOLDER if older else None, candidate),
+    )
     marker = records[-best].record_id if best else None
     cursor = make_older(source_before, bus_before, marker) if older else None
     return build(best, cursor, coverage)
@@ -158,7 +159,7 @@ def stale_page(stream: TrajectoryStream, *, daemon_epoch: str, message: str) -> 
             coverage=coverage,
         )
 
-    coverage = _bounded_coverage(stream, lambda candidate: wire_bytes(build(candidate).to_wire()))
+    coverage = _fit_coverage(stream, build)
     return build(coverage)
 
 
@@ -176,6 +177,17 @@ def wire_bytes(value: dict[str, object]) -> int:
     return len(protocol.ok(TRAJECTORY_RESPONSE_SIZING_REQUEST_ID, value))
 
 
+def _fit_coverage(
+    stream: TrajectoryStream,
+    build: Callable[[TrajectoryCoverage], TrajectoryPage],
+) -> TrajectoryCoverage:
+    minimum = _coverage(stream, ())
+    fixed_bytes = wire_bytes(build(minimum).to_wire()) - _value_bytes(minimum.to_wire())
+    return _bounded_coverage(
+        stream, lambda candidate: fixed_bytes + _value_bytes(candidate.to_wire())
+    )
+
+
 def _bounded_coverage(
     stream: TrajectoryStream,
     fits: Callable[[TrajectoryCoverage], int],
@@ -183,27 +195,33 @@ def _bounded_coverage(
     """Return recent coverage gaps whose complete response stays within the cap."""
     gaps = tuple(stream.gaps)
 
-    def build(retained: tuple[CoverageGap, ...]) -> TrajectoryCoverage:
-        omitted = len(gaps) - len(retained)
-        marker = (
-            (CoverageGap("coverage", f"{omitted} older coverage gaps omitted"),) if omitted else ()
-        )
-        return TrajectoryCoverage(
-            transcript_floor=stream.transcript_floor,
-            theater_floor=stream.theater_floor,
-            gaps=(*marker, *retained),
-        )
-
     retained: tuple[CoverageGap, ...] = ()
     for gap in reversed(gaps):
         candidate = (gap, *retained)
-        if fits(build(candidate)) > TRAJECTORY_RESPONSE_MAX_BYTES:
+        if fits(_coverage(stream, candidate)) > TRAJECTORY_RESPONSE_MAX_BYTES:
             break
         retained = candidate
-    coverage = build(retained)
+    coverage = _coverage(stream, retained)
     if fits(coverage) > TRAJECTORY_RESPONSE_MAX_BYTES:
         raise ValueError("trajectory coverage exceeds the wire limit")
     return coverage
+
+
+def _value_bytes(value: dict[str, object]) -> int:
+    return len(protocol.encode(value)) - 1
+
+
+def _coverage(
+    stream: TrajectoryStream,
+    retained: tuple[CoverageGap, ...],
+) -> TrajectoryCoverage:
+    omitted = len(stream.gaps) - len(retained)
+    marker = (CoverageGap("coverage", f"{omitted} older coverage gaps omitted"),) if omitted else ()
+    return TrajectoryCoverage(
+        transcript_floor=stream.transcript_floor,
+        theater_floor=stream.theater_floor,
+        gaps=(*marker, *retained),
+    )
 
 
 __all__ = [

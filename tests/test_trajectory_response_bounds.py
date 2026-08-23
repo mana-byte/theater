@@ -129,6 +129,21 @@ def test_empty_page_bounds_large_coverage_gaps_deterministically() -> None:
     assert retained == tuple(gaps[-len(retained) :])
 
 
+def test_records_take_priority_over_large_coverage_gaps() -> None:
+    records = tuple(_record(index, "x" * 16_384) for index in range(70))
+    gaps = [
+        CoverageGap("s" * 256, "g" * 16_384, start=f"start-{index}", end=f"end-{index}")
+        for index in range(TRAJECTORY_MAX_COVERAGE_GAPS)
+    ]
+
+    without_gaps = _page(_stream(), records)
+    with_gaps = _page(_stream(gaps=gaps), records)
+
+    assert with_gaps.records == without_gaps.records
+    assert with_gaps.coverage.gaps[0].stream == "coverage"
+    assert len(_frame(with_gaps.to_wire())) <= TRAJECTORY_RESPONSE_MAX_BYTES
+
+
 def test_multibyte_response_content_is_sized_as_encoded_bytes() -> None:
     ascii_page = _page(_stream(), (_record(0, "x" * 100),))
     multibyte_page = _page(_stream(), (_record(0, "é" * 100),))
