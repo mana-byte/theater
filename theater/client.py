@@ -33,11 +33,25 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 from theater import paths, protocol
 from theater.constants.daemon import RPC_DEFAULT_MAX_WAIT_SECONDS
+from theater.observability.engine import span as timing_span
 from theater.protocol import RemoteError
 from theater.tmux import client as tmux
+
+
+def _send_request(req_id: int, method: str, params: dict, meta: dict | None) -> bytes:
+    """Build a request, passing _meta when protocol.request supports it."""
+    try:
+        return protocol.request(req_id, method, params, meta=meta)  # type: ignore[call-arg]
+    except TypeError:
+        payload = {"id": req_id, "method": method, "params": params or {}}
+        if meta:
+            payload["_meta"] = dict(meta)
+        return protocol.encode(payload)
+
 
 #: How long to wait for a freshly started daemon to come up.
 START_TIMEOUT = 8.0
@@ -53,6 +67,8 @@ class DaemonClient:
         self._writer: asyncio.StreamWriter | None = None
         self._next_id = 0
         self._lock = asyncio.Lock()
+        #: The exact stderr generation path from the last autostart, or None.
+        self._stderr_path: Path | None = None
 
     async def connect(self) -> None:
         """Open the connection if we do not have one.
@@ -72,11 +88,14 @@ class DaemonClient:
                 raise
         else:
             return
-        await self._start_daemon()
+        self._stderr_path = await self._start_daemon()
         self._reader, self._writer = await self._await_socket()
 
-    async def _start_daemon(self) -> None:
+    async def _start_daemon(self) -> Path | None:
         """Launch a detached daemon, unless one is already coming up.
+
+        Returns the stderr generation path when a process was spawned, or
+        None when herd suppression found a held lock.
 
         start_new_session detaches it from our process group so that killing the
         agent that happened to start it does not take the daemon with it.
@@ -93,26 +112,39 @@ class DaemonClient:
         Racy by construction: the daemon can take the lock between our check
         and our fork. That costs one wasted process and is caught downstream.
         """
-        # Local import keeps the daemon package off the MCP server's import path.
         from theater.daemon import lock
 
         if not lock.is_free():
-            return
+            return None
         paths.ensure_home()
-        # Blocking on purpose: forking is blocking, and this runs once on cold start.
-        log = paths.log_path().open("ab")
+        from theater.constants.observability import STDERR_TOKEN_RETRIES
+        from theater.observability.logging import create_generation_file, delete_generation_file
+
+        path, token, fd = create_generation_file(paths.home(), retries=STDERR_TOKEN_RETRIES)
+        child_stderr = os.fdopen(fd, "wb", closefd=True)
+        popened = False
         try:
             subprocess.Popen(  # noqa: ASYNC220
-                [sys.executable, "-m", "theater.cli", "daemon"],
-                stdout=log,
-                stderr=log,
+                [
+                    sys.executable,
+                    "-m",
+                    "theater.cli",
+                    "daemon",
+                    "--stderr-token",
+                    token,
+                ],
+                stdout=child_stderr,
+                stderr=child_stderr,
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
                 env=os.environ.copy(),
             )
+            popened = True
         finally:
-            # Popen has dup'd the fd into the child; close ours to avoid leaking it.
-            log.close()
+            child_stderr.close()
+            if not popened:
+                delete_generation_file(path)
+        return path
 
     async def _await_socket(self):
         sock = paths.socket_path()
@@ -128,8 +160,14 @@ class DaemonClient:
                 last = exc
                 await asyncio.sleep(delay)
                 delay = min(delay * 1.6, 0.25)
+        # Name the exact spawned generation when known; otherwise safe generic paths.
+        if self._stderr_path is not None:
+            raise ConnectionError(
+                f"daemon did not come up within {START_TIMEOUT}s; see {self._stderr_path}"
+            ) from last
         raise ConnectionError(
-            f"daemon did not come up within {START_TIMEOUT}s; see {paths.log_path()}"
+            f"daemon did not come up within {START_TIMEOUT}s; see {paths.log_path()} "
+            f"or {paths.home() / 'daemon.*.stderr.log'}"
         ) from last
 
     @staticmethod
@@ -144,27 +182,35 @@ class DaemonClient:
         return CALL_TIMEOUT
 
     async def call(self, method: str, **params) -> object:
-        # The lock covers connect() too: racers on a poisoned connection would orphan the loser.
         async with self._lock:
             await self.connect()
             assert self._reader and self._writer
             self._next_id += 1
             req_id = self._next_id
-            try:
-                self._writer.write(protocol.request(req_id, method, params))
-                await self._writer.drain()
-                msg = await self._read_reply(req_id, self._timeout_for(method, params))
-            except asyncio.CancelledError:
-                # Awaiting during cancellation is unsafe; tear down without waiting for close.
-                self._discard()
-                raise
-            except (TimeoutError, ConnectionError, OSError):
-                await self._drop()
-                raise
-        if not msg.get("ok"):
-            error = msg.get("error") or {}
-            raise RemoteError(error.get("code", "error"), error.get("message", ""))
-        return msg.get("result")
+            from theater.observability.catalog import BY_KEY
+            from theater.observability.tracing import inject_trace_context
+
+            spec = BY_KEY["RPC_CLIENT"]
+            with timing_span(spec, method=method) as sp:
+                try:
+                    meta = inject_trace_context()
+                    self._writer.write(
+                        _send_request(req_id, method, params, meta if meta else None)
+                    )
+                    await self._writer.drain()
+                    msg = await self._read_reply(req_id, self._timeout_for(method, params))
+                except asyncio.CancelledError:
+                    self._discard()
+                    raise
+                except (TimeoutError, ConnectionError, OSError):
+                    await self._drop()
+                    raise
+                if not msg.get("ok"):
+                    error = msg.get("error") or {}
+                    exc = RemoteError(error.get("code", "error"), error.get("message", ""))
+                    sp.set_result("error", error_type=exc.code)
+                    raise exc
+                return msg.get("result")
 
     async def _read_reply(self, req_id: int, timeout: float) -> dict:
         """Read until the reply to req_id arrives, or the budget runs out.

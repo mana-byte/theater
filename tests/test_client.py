@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 
 import pytest
 
@@ -315,4 +316,6 @@ async def test_autostart_spawns_when_nothing_holds_the_lock(theater_home, monkey
 
     await DaemonClient()._start_daemon()
     assert len(forked) == 1
-    assert forked[0][-2:] == ["theater.cli", "daemon"]
+    assert forked[0][:2] == [sys.executable, "-m"]
+    assert "daemon" in forked[0]
+    assert "--stderr-token" in forked[0]

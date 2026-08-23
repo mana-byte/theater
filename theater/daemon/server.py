@@ -30,6 +30,8 @@ import asyncio
 import contextlib
 import logging
 import signal
+from dataclasses import dataclass
+from pathlib import Path
 
 from theater import harness as harness_registry
 from theater import paths, protocol, timing  # noqa: F401 — compatibility imports
@@ -59,6 +61,15 @@ from theater.tmux import client as tmux  # noqa: F401 — monkeypatched via serv
 logger = logging.getLogger("theater.daemon")
 
 
+@dataclass(frozen=True, slots=True)
+class DaemonRunOptions:
+    """Typed options for production daemon startup."""
+
+    log_level: str = "INFO"
+    timing: bool = False
+    stderr_token: str | None = None
+
+
 def _check_socket_path(sock) -> None:
     socket_mod.check_socket_path(sock, maximum=MAX_SOCKET_PATH)
 
@@ -77,17 +88,30 @@ class Daemon:
         store: Store | None = None,
         harnesses: dict[str, Harness] | None = None,
         config: Config | None = None,
+        lock: DaemonLock | None = None,
     ):
-        paths.ensure_home()
-        # Construction opens SQLite, so the process lock must be acquired first.
-        self._lock = DaemonLock()
-        self._lock.acquire()
+        # Lock ownership transition happens before anything that can fail.
+        # If ensure_home raises, neither the injected nor the self-acquired lock
+        # has been taken, so there is nothing to clean up.
+        if lock is not None:
+            if not lock.held:
+                raise ValueError("injected lock must already be held")
+            self._lock = lock
+        else:
+            self._lock = DaemonLock()
+            self._lock.acquire()
+        # From here on, the lock is ours; constructor failure must release it.
+        _owned_store: Store | None = None
         try:
-            # Read once, never reloaded.
+            paths.ensure_home()
             self.config = config if config is not None else load_config()
             installed = harness_registry.install(self.config)
             logger.info("harnesses: %s", ", ".join(installed) or "none")
-            self.store = store or Store(paths.db_path())
+            if store is not None:
+                self.store = store
+            else:
+                _owned_store = Store(paths.db_path())
+                self.store = _owned_store
             self.registry = Registry(self.store)
             self.spawner = Spawner(self.registry)
             self.jobs = JobManager(self.store)
@@ -109,17 +133,17 @@ class Daemon:
             self._reaper: asyncio.Task | None = None
             self._gc: asyncio.Task | None = None
             self._lag: asyncio.Task | None = None
-            # The reaper skips participant ids while their explicit kill is in flight.
+            self._gauge_sampler = None
             self._explicit_kills: set[str] = set()
-            # Socket identity prevents shutdown from unlinking a successor's path.
             self._sock_id: tuple[int, int] | None = None
             self._stopping = asyncio.Event()
-            # One task per open connection, so shutdown can end them.
             self._conns: set[asyncio.Task] = set()
-            # Monotonic counter for send-job handle uniqueness.
             self._send_seq = 0
         except BaseException:
-            # No object exists to close after construction fails, so release the lock here.
+            # Close only a Store we created; never close a caller-owned Store.
+            if _owned_store is not None:
+                with contextlib.suppress(Exception):
+                    _owned_store.close()
             self._lock.release()
             raise
 
@@ -185,21 +209,70 @@ class Daemon:
 # ---- entrypoint --------------------------------------------------------
 
 
-async def run() -> None:
-    daemon = Daemon()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        with contextlib.suppress(NotImplementedError):
-            loop.add_signal_handler(sig, daemon.stop)
+async def run(options: DaemonRunOptions | None = None) -> None:
+    if options is None:
+        options = DaemonRunOptions()
+    runtime_handle = None
+    daemon = None
+    lock = None
     try:
+        paths.ensure_home()
+        lock = DaemonLock()
+        lock.acquire()
+        # Prune old raw stderr generations on every winning start.
+        from theater.constants.observability import STDERR_GENERATIONS
+        from theater.observability.logging import generation_path, prune_stderr_generations
+
+        current: Path | None = None
+        if options.stderr_token is not None:
+            try:
+                current = generation_path(paths.home(), options.stderr_token)
+            except ValueError:
+                current = None
+        prune_stderr_generations(paths.home(), current, retain=STDERR_GENERATIONS)
+        settings = load_config()
+        from theater.observability.runtime import configure
+
+        obs = settings.observability
+        runtime_handle = configure(
+            role="daemon",
+            otlp_enabled=obs.otlp_enabled,
+            otlp_protocol=obs.otlp_protocol,
+            otlp_endpoint=obs.otlp_endpoint,
+            service_name=obs.service_name,
+            export_interval_ms=obs.export_interval_ms,
+            log_level=options.log_level,
+            log_max_bytes=obs.log_max_bytes,
+            log_backup_count=obs.log_backup_count,
+            log_path=paths.log_path(),
+            foreground=options.stderr_token is None,
+        )
+        if options.timing:
+            timing.enable_trace()
+        lock_to_transfer = lock
+        lock = None
+        daemon = Daemon(config=settings, lock=lock_to_transfer)
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            with contextlib.suppress(NotImplementedError):
+                loop.add_signal_handler(sig, daemon.stop)
         await daemon.serve()
     finally:
-        # Bounded, and the socket and lock go regardless.
         try:
-            await asyncio.wait_for(daemon.aclose(), SHUTDOWN_TIMEOUT)
-        except TimeoutError:
-            logger.error(  # noqa: TRY400
-                "shutdown did not finish within %.0fs; releasing socket and lock",
-                SHUTDOWN_TIMEOUT,
-            )
-            daemon._release_files()
+            if daemon is not None:
+                try:
+                    await asyncio.wait_for(daemon.aclose(), SHUTDOWN_TIMEOUT)
+                except TimeoutError:
+                    logger.error(  # noqa: TRY400
+                        "shutdown did not finish within %.0fs; releasing socket and lock",
+                        SHUTDOWN_TIMEOUT,
+                    )
+                    daemon._release_files()
+                except Exception:
+                    daemon._release_files()
+                    raise
+            elif lock is not None:
+                lock.release()
+        finally:
+            if runtime_handle is not None:
+                runtime_handle.shutdown()

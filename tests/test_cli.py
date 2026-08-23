@@ -1121,7 +1121,13 @@ def test_regie_refuses_to_run_outside_tmux(monkeypatch, capsys):
 
 def test_regie_hands_the_config_to_the_app(monkeypatch):
     import theater.regie.app as app_mod
+    from theater.observability import runtime as runtime_mod
 
+    class _FakeHandle:
+        def shutdown(self) -> None:
+            pass
+
+    monkeypatch.setattr(runtime_mod, "configure", lambda **kw: _FakeHandle())
     monkeypatch.setattr(cli.tmux, "inside_tmux", lambda: True)
     seen: list = []
     monkeypatch.setattr(app_mod, "run_regie", seen.append)
@@ -1132,7 +1138,7 @@ def test_regie_hands_the_config_to_the_app(monkeypatch):
 def test_daemon_reports_a_refusal_to_start(monkeypatch, capsys):
     import theater.daemon.server as server_mod
 
-    async def refuse():
+    async def refuse(options=None):
         raise RuntimeError("another daemon holds the lock")
 
     monkeypatch.setattr(server_mod, "run", refuse)
@@ -1143,7 +1149,7 @@ def test_daemon_reports_a_refusal_to_start(monkeypatch, capsys):
 def test_daemon_exits_quietly_on_ctrl_c(monkeypatch):
     import theater.daemon.server as server_mod
 
-    async def interrupted():
+    async def interrupted(options=None):
         raise KeyboardInterrupt
 
     monkeypatch.setattr(server_mod, "run", interrupted)
@@ -1152,7 +1158,13 @@ def test_daemon_exits_quietly_on_ctrl_c(monkeypatch):
 
 def test_mcp_serves_the_id_it_was_given(monkeypatch):
     import theater.mcp.server as server_mod
+    from theater.observability import runtime as runtime_mod
 
+    class _FakeHandle:
+        def shutdown(self) -> None:
+            pass
+
+    monkeypatch.setattr(runtime_mod, "configure", lambda **kw: _FakeHandle())
     seen: list = []
     monkeypatch.setattr(server_mod, "main", lambda pid, harness: seen.append((pid, harness)))
     assert cli.cmd_mcp(parse("mcp", "--id", "p-abc", "--harness", "vibe")) == 0

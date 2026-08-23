@@ -124,6 +124,11 @@ def _add_process_parsers(sub) -> None:
             "itself, which the flag cannot."
         ),
     )
+    daemon.add_argument(
+        "--stderr-token",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
 
     mcp = sub.add_parser("mcp", help="Run the per-agent MCP server on stdio.")
     mcp.add_argument("--id", dest="participant_id", default=None)
