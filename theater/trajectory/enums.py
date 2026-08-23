@@ -90,6 +90,14 @@ class PanelState(StrEnum):
     STALE = "stale"
 
 
+class TrajectoryParticipantState(StrEnum):
+    LIVE = "live"
+    DEAD = "dead"
+    EXTERNAL = "external"
+    MISSING = "missing"
+    UNKNOWN = "unknown"
+
+
 __all__ = [
     "ContentFormat",
     "GroupKind",
@@ -98,6 +106,7 @@ __all__ = [
     "TimingProvenance",
     "TrajectoryKind",
     "TrajectoryLane",
+    "TrajectoryParticipantState",
     "TrajectoryStatus",
     "TrajectoryValidationError",
 ]

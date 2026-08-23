@@ -17,6 +17,7 @@ from theater.trajectory.enums import (
     TimingProvenance,
     TrajectoryKind,
     TrajectoryLane,
+    TrajectoryParticipantState,
     TrajectoryStatus,
     TrajectoryValidationError,
 )
@@ -36,62 +37,30 @@ from theater.trajectory.records import (
     TrajectoryUsage,
 )
 
-Lane = TrajectoryLane
-Kind = TrajectoryKind
-Status = TrajectoryStatus
-Format = ContentFormat
-Usage = TrajectoryUsage
-RecordKind = TrajectoryKind
-RecordStatus = TrajectoryStatus
-TrajectoryDetailField = DetailField
-TrajectoryContentFormat = ContentFormat
-TrajectoryDetail = DetailField
-TrajectoryPanelState = PanelState
-TrajectoryPanelStateInfo = PanelStateInfo
-TrajectoryRecordKind = TrajectoryKind
-TrajectoryRecordStatus = TrajectoryStatus
-TrajectoryTiming = Timing
-TrajectoryTimingProvenance = TimingProvenance
-
 __all__ = [
     "ContentFormat",
     "ContentPreview",
     "CoverageGap",
     "DetailField",
-    "Format",
     "GroupKind",
-    "Kind",
-    "Lane",
     "LinkDirection",
     "PanelState",
     "PanelStateInfo",
     "ParticipantLink",
-    "RecordKind",
-    "RecordStatus",
-    "Status",
     "Timing",
     "TimingProvenance",
-    "TrajectoryContentFormat",
     "TrajectoryCoverage",
     "TrajectoryDelta",
-    "TrajectoryDetail",
-    "TrajectoryDetailField",
     "TrajectoryGroup",
     "TrajectoryKind",
     "TrajectoryLane",
     "TrajectoryPage",
-    "TrajectoryPanelState",
-    "TrajectoryPanelStateInfo",
+    "TrajectoryParticipantState",
     "TrajectoryRecord",
-    "TrajectoryRecordKind",
-    "TrajectoryRecordStatus",
     "TrajectoryStatus",
-    "TrajectoryTiming",
-    "TrajectoryTimingProvenance",
     "TrajectoryUpsert",
     "TrajectoryUsage",
     "TrajectoryValidationError",
-    "Usage",
     "bound_detail_fields",
     "escape_rich_text",
     "sanitize_text",

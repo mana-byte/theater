@@ -8,7 +8,9 @@ from typing import Self
 
 from theater.constants.trajectory import (
     TRAJECTORY_DETAIL_FIELD_MAX_BYTES,
+    TRAJECTORY_DETAIL_NAME_MAX_BYTES,
     TRAJECTORY_DETAIL_RECORD_MAX_BYTES,
+    TRAJECTORY_MAX_DETAILS_PER_RECORD,
 )
 from theater.trajectory.enums import ContentFormat, TrajectoryValidationError
 from theater.trajectory.validation import enum_value, integer, keys, mapping, string
@@ -42,38 +44,86 @@ def _control_safe(value: str) -> bool:
     )
 
 
-def _fit_prefix(data: bytes, budget: int) -> str:
-    return data[:budget].decode("utf-8", errors="ignore")
+def _sanitized_char(char: str) -> str:
+    codepoint = ord(char)
+    if (codepoint < 0x20 and char not in "\n\r\t") or 0x7F <= codepoint <= 0x9F:
+        return f"\\x{codepoint:02x}"
+    return char
 
 
-def _fit_suffix(data: bytes, budget: int) -> str:
-    return data[-budget:].decode("utf-8", errors="ignore") if budget else ""
+def _take_display_prefix(value: str, budget: int) -> tuple[str, int, int]:
+    selected: list[str] = []
+    source_bytes = 0
+    display_bytes = 0
+    for index, char in enumerate(value):
+        displayed = _sanitized_char(char)
+        displayed_bytes = len(displayed.encode("utf-8"))
+        if display_bytes + displayed_bytes > budget:
+            return "".join(selected), index, source_bytes
+        selected.append(displayed)
+        source_bytes += len(char.encode("utf-8"))
+        display_bytes += displayed_bytes
+    return "".join(selected), len(value), source_bytes
+
+
+def _take_display_suffix(value: str, budget: int, lower_bound: int) -> tuple[str, int, int]:
+    selected: list[str] = []
+    source_bytes = 0
+    display_bytes = 0
+    start = len(value)
+    for index in range(len(value) - 1, lower_bound - 1, -1):
+        displayed = _sanitized_char(value[index])
+        displayed_bytes = len(displayed.encode("utf-8"))
+        if display_bytes + displayed_bytes > budget:
+            break
+        selected.append(displayed)
+        source_bytes += len(value[index].encode("utf-8"))
+        display_bytes += displayed_bytes
+        start = index
+    return "".join(reversed(selected)), start, source_bytes
 
 
 def _clip_text(value: str, max_bytes: int) -> tuple[str, int]:
-    data = value.encode("utf-8")
-    total = len(data)
-    if total <= max_bytes:
-        return value, 0
-    omitted_guess = total - max_bytes
-    for _ in range(8):
-        marker = f"… {omitted_guess} bytes omitted …"
-        marker_bytes = len(marker.encode("utf-8"))
-        available = max_bytes - marker_bytes
-        if available < 0:
+    total = len(value.encode("utf-8"))
+    display_bytes = 0
+    for char in value:
+        display_bytes += len(_sanitized_char(char).encode("utf-8"))
+        if display_bytes > max_bytes:
             break
-        head = _fit_prefix(data, available // 2)
-        tail = _fit_suffix(data, available - len(head.encode("utf-8")))
-        omitted = total - len(head.encode("utf-8")) - len(tail.encode("utf-8"))
-        marker = f"… {omitted} bytes omitted …"
-        result = head + marker + tail
-        if omitted == omitted_guess and len(result.encode("utf-8")) <= max_bytes:
+    else:
+        return sanitize_text(value), 0
+    marker = f"… {total} bytes omitted …"
+    for _ in range(12):
+        marker_bytes = len(marker.encode("utf-8"))
+        if marker_bytes >= max_bytes:
+            return "", total
+        available = max_bytes - marker_bytes
+        head_budget = available // 2
+        head, head_end, head_source_bytes = _take_display_prefix(value, head_budget)
+        tail, _tail_start, tail_source_bytes = _take_display_suffix(
+            value, available - len(head.encode("utf-8")), head_end
+        )
+        omitted = total - head_source_bytes - tail_source_bytes
+        next_marker = f"… {omitted} bytes omitted …"
+        result = head + next_marker + tail
+        if next_marker == marker and len(result.encode("utf-8")) <= max_bytes:
             return result, omitted
-        omitted_guess = omitted
-    marker = "…"
-    if len(marker.encode("utf-8")) > max_bytes:
-        marker = ""
+        marker = next_marker
+    marker_bytes = len(marker.encode("utf-8"))
+    if marker_bytes > max_bytes:
+        return "", total
     return marker, total
+
+
+def bounded_text(value: str, *, max_bytes: int, label: str, nonempty: bool = False) -> str:
+    if not isinstance(value, str):
+        raise TrajectoryValidationError(f"{label} must be a string")
+    safe = sanitize_text(value)
+    if nonempty and not safe:
+        raise TrajectoryValidationError(f"{label} must be a non-empty string")
+    if len(safe.encode("utf-8")) > max_bytes:
+        raise TrajectoryValidationError(f"{label} exceeds {max_bytes} encoded bytes")
+    return safe
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,8 +155,13 @@ class ContentPreview:
     def from_text(cls, value: str, *, max_bytes: int = TRAJECTORY_DETAIL_FIELD_MAX_BYTES) -> Self:
         if type(max_bytes) is not int or max_bytes <= 0:
             raise TrajectoryValidationError("content preview max_bytes must be a positive integer")
-        safe = sanitize_text(value)
-        text, omitted = _clip_text(safe, min(max_bytes, TRAJECTORY_DETAIL_FIELD_MAX_BYTES))
+        if not isinstance(value, str):
+            raise TrajectoryValidationError("trajectory text must be a string")
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise TrajectoryValidationError("trajectory text must contain valid UTF-8") from exc
+        text, omitted = _clip_text(value, min(max_bytes, TRAJECTORY_DETAIL_FIELD_MAX_BYTES))
         return cls(text=text, omitted_bytes=omitted)
 
     @property
@@ -133,9 +188,16 @@ class DetailField:
     format: ContentFormat = ContentFormat.TEXT
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not self.name:
-            raise TrajectoryValidationError("detail field name must be a non-empty string")
-        object.__setattr__(self, "name", sanitize_text(self.name))
+        object.__setattr__(
+            self,
+            "name",
+            bounded_text(
+                self.name,
+                max_bytes=TRAJECTORY_DETAIL_NAME_MAX_BYTES,
+                label="detail field name",
+                nonempty=True,
+            ),
+        )
         if isinstance(self.value, str):
             object.__setattr__(self, "value", ContentPreview.from_text(self.value))
         elif not isinstance(self.value, ContentPreview):
@@ -177,27 +239,33 @@ def bound_detail_fields(fields: Iterable[DetailField]) -> tuple[DetailField, ...
     """Apply per-field and aggregate byte limits in input order."""
     bounded: list[DetailField] = []
     remaining = TRAJECTORY_DETAIL_RECORD_MAX_BYTES
-    for field_value in fields:
+    for index, field_value in enumerate(fields):
+        if index >= TRAJECTORY_MAX_DETAILS_PER_RECORD:
+            break
         if not isinstance(field_value, DetailField):
             raise TrajectoryValidationError("record details must contain DetailField values")
         preview = field_value.preview
-        if remaining <= 0:
-            clipped = ContentPreview(
-                text="", omitted_bytes=preview.encoded_bytes + preview.omitted_bytes
-            )
-        elif preview.encoded_bytes <= remaining:
+        name_bytes = len(field_value.name.encode("utf-8"))
+        value_budget = remaining - name_bytes
+        if value_budget <= 0:
+            break
+        if preview.encoded_bytes <= min(value_budget, TRAJECTORY_DETAIL_FIELD_MAX_BYTES):
             clipped = preview
         else:
             clipped = ContentPreview.from_text(
                 preview.text,
-                max_bytes=min(remaining, TRAJECTORY_DETAIL_FIELD_MAX_BYTES),
+                max_bytes=min(value_budget, TRAJECTORY_DETAIL_FIELD_MAX_BYTES),
             )
             clipped = ContentPreview(
                 text=clipped.text,
                 omitted_bytes=clipped.omitted_bytes + preview.omitted_bytes,
             )
+        if not clipped.text and preview.text:
+            break
         bounded.append(DetailField(field_value.name, clipped, field_value.format))
-        remaining -= clipped.encoded_bytes
+        remaining -= name_bytes + clipped.encoded_bytes
+        if remaining <= 0:
+            break
     return tuple(bounded)
 
 
@@ -205,6 +273,7 @@ __all__ = [
     "ContentPreview",
     "DetailField",
     "bound_detail_fields",
+    "bounded_text",
     "escape_rich_text",
     "sanitize_text",
 ]

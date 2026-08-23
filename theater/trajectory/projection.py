@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from hashlib import sha256
 
+from theater.constants.trajectory import TRAJECTORY_IDENTIFIER_MAX_BYTES
 from theater.harness.contracts.events import Event, EventKind
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.trajectory.content import ContentFormat, DetailField
@@ -20,7 +22,13 @@ from theater.trajectory.records import (
 )
 
 
-def fallback_record_id(source_epoch: str, raw_index: int, event_ordinal: int) -> str:
+def fallback_record_id(
+    source_epoch: str,
+    raw_index: int,
+    event_ordinal: int,
+    *,
+    source_offset: int | None = None,
+) -> str:
     """Build the stable baseline identity from trusted source-local coordinates."""
     if not source_epoch:
         raise ValueError("source_epoch must be non-empty")
@@ -28,12 +36,22 @@ def fallback_record_id(source_epoch: str, raw_index: int, event_ordinal: int) ->
         raise ValueError("raw_index must be a non-negative integer")
     if type(event_ordinal) is not int or event_ordinal < 0:
         raise ValueError("event_ordinal must be a non-negative integer")
-    return f"{source_epoch}:{raw_index}:{event_ordinal}"
+    if source_offset is not None and (type(source_offset) is not int or source_offset < 0):
+        raise ValueError("source_offset must be a non-negative integer or null")
+    coordinate = raw_index if source_offset is None else source_offset
+    return f"{source_epoch}:{coordinate}:{event_ordinal}"
 
 
 def record_id_for_fact(fact: TrajectoryFact, source_epoch: str) -> str:
-    """Prefer a native source id and otherwise use the stable fallback."""
-    return fact.native_id or fallback_record_id(source_epoch, fact.raw_index, fact.event_ordinal)
+    """Namespace local native ids and use source coordinates for fallbacks."""
+    if fact.native_id is not None:
+        return _namespaced_native_id(fact.native_id, source_epoch)
+    return fallback_record_id(
+        source_epoch,
+        fact.raw_index,
+        fact.event_ordinal,
+        source_offset=fact.source_offset,
+    )
 
 
 def event_to_fact(
@@ -45,13 +63,7 @@ def event_to_fact(
 ) -> TrajectoryFact:
     """Project one normalized control event without assigning a participant."""
     kind, lane = _kind_and_lane(event.kind)
-    status = (
-        TrajectoryStatus.ERROR
-        if event.kind is EventKind.ERROR
-        else TrajectoryStatus.COMPLETED
-        if historical or event.kind is EventKind.USER or event.turn_end or event.usage_only
-        else TrajectoryStatus.RUNNING
-    )
+    status = TrajectoryStatus.ERROR if event.kind is EventKind.ERROR else TrajectoryStatus.COMPLETED
     timing = (
         Timing(start=event.ts, provenance=TimingProvenance.SOURCE) if event.ts is not None else None
     )
@@ -68,6 +80,7 @@ def event_to_fact(
         summary=event.text,
         status=status,
         raw_index=event.raw_index,
+        source_offset=event.source_offset,
         event_ordinal=event_ordinal,
         turn_id=event.turn_id,
         timing=timing,
@@ -96,8 +109,13 @@ def fact_to_record(
         source=source or fact.source,
         summary=fact.summary,
         status=fact.status,
-        native_id=fact.native_id,
+        native_id=(
+            _namespaced_native_id(fact.native_id, source_epoch)
+            if fact.native_id is not None
+            else None
+        ),
         raw_index=fact.raw_index,
+        source_offset=fact.source_offset,
         event_ordinal=fact.event_ordinal,
         turn_id=fact.turn_id,
         step_id=fact.step_id,
@@ -144,8 +162,9 @@ def project_events(
     ordinals: dict[int, int] = {}
     records: list[TrajectoryRecord] = []
     for event in events:
-        ordinal = ordinals.get(event.raw_index, 0)
-        ordinals[event.raw_index] = ordinal + 1
+        coordinate = event.source_offset if event.source_offset is not None else event.raw_index
+        ordinal = ordinals.get(coordinate, 0)
+        ordinals[coordinate] = ordinal + 1
         records.append(
             event_to_record(
                 event,
@@ -217,6 +236,15 @@ def _usage(event: Event) -> TrajectoryUsage | None:
         cache_write_tokens=event.usage.cache_creation_input_tokens,
         cost_usd=event.usage.cost_usd,
     )
+
+
+def _namespaced_native_id(native_id: str, source_epoch: str) -> str:
+    if native_id.startswith("bus:"):
+        return native_id
+    value = f"{source_epoch}:{native_id}"
+    if len(value.encode("utf-8")) <= TRAJECTORY_IDENTIFIER_MAX_BYTES:
+        return value
+    return f"native:{sha256(value.encode('utf-8')).hexdigest()}"
 
 
 __all__ = [

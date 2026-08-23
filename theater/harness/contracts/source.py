@@ -34,14 +34,18 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
-from theater.constants.trajectory import TRAJECTORY_PAGE_RECORD_LIMIT
+from theater.constants.trajectory import (
+    TRAJECTORY_CURSOR_MAX_BYTES,
+    TRAJECTORY_PAGE_RECORD_LIMIT,
+)
 from theater.harness.contracts.events import Event
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.models import Status
 from theater.provenance import TranscriptProvenance
+from theater.trajectory.content import ContentPreview
 
 ReceiptAdmission = Literal["accepted", "staged"]
 
@@ -191,12 +195,32 @@ class HistoryPage:
     pinned: bool = False
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "events", tuple(self.events))
-        object.__setattr__(self, "trajectory", tuple(self.trajectory))
-        if any(not isinstance(event, Event) for event in self.events):
+        events = tuple(self.events)
+        trajectory = tuple(self.trajectory)
+        if any(not isinstance(event, Event) for event in events):
             raise SourceContractError("history page events must contain Event values")
-        if any(not isinstance(fact, TrajectoryFact) for fact in self.trajectory):
+        if any(not isinstance(fact, TrajectoryFact) for fact in trajectory):
             raise SourceContractError("history page trajectory must contain TrajectoryFact values")
+        object.__setattr__(
+            self,
+            "events",
+            tuple(bound_history_event(event) for event in events[:TRAJECTORY_PAGE_RECORD_LIMIT]),
+        )
+        object.__setattr__(self, "trajectory", trajectory[:TRAJECTORY_PAGE_RECORD_LIMIT])
+        for name in ("cursor", "older_cursor"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            try:
+                encoded_length = len(value.encode("utf-8")) if isinstance(value, str) else 0
+            except UnicodeEncodeError as exc:
+                raise SourceContractError(f"history page {name} is not valid UTF-8") from exc
+            if (
+                not isinstance(value, str)
+                or not value
+                or encoded_length > TRAJECTORY_CURSOR_MAX_BYTES
+            ):
+                raise SourceContractError(f"history page {name} exceeds identifier bounds")
         if type(self.has_older) is not bool or type(self.pinned) is not bool:
             raise SourceContractError("history page booleans must be booleans")
 
@@ -207,6 +231,11 @@ class HistoryPage:
     @property
     def correlation(self) -> str:
         return self.provenance
+
+
+def bound_history_event(event: Event) -> Event:
+    raw_text = ContentPreview.from_text(event.raw_text).text if event.raw_text is not None else None
+    return replace(event, text=ContentPreview.from_text(event.text).text, raw_text=raw_text)
 
 
 TrajectoryHistoryPage = HistoryPage
@@ -349,9 +378,10 @@ class Source(ABC):
                 error="this source provides a bounded newest page but cannot page older history",
             )
         history = await self.history(last_n=limit)
+        events = tuple(bound_history_event(event) for event in history.events[:limit])
         return HistoryPage(
             location=history.location,
-            events=history.events,
+            events=events,
             error_code=history.error_code,
             error=history.error,
             provenance=history.correlation,

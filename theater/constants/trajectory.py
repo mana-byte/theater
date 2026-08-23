@@ -6,6 +6,26 @@ from __future__ import annotations
 TRAJECTORY_DETAIL_FIELD_MAX_BYTES = 16 * 1024
 # Maximum encoded detail bytes retained by one record.
 TRAJECTORY_DETAIL_RECORD_MAX_BYTES = 32 * 1024
+# Maximum encoded bytes in one identifier.
+TRAJECTORY_IDENTIFIER_MAX_BYTES = 512
+# Maximum encoded bytes in one source label.
+TRAJECTORY_SOURCE_MAX_BYTES = 256
+# Maximum encoded bytes in one opaque trajectory cursor.
+TRAJECTORY_CURSOR_MAX_BYTES = 4 * 1024
+# Maximum encoded bytes in one detail name.
+TRAJECTORY_DETAIL_NAME_MAX_BYTES = 256
+# Maximum detail fields retained by one record.
+TRAJECTORY_MAX_DETAILS_PER_RECORD = 64
+# Maximum participant links retained by one record.
+TRAJECTORY_MAX_LINKS_PER_RECORD = 64
+# Maximum record ids retained by one group.
+TRAJECTORY_MAX_GROUP_RECORD_IDS = 200
+# Maximum child groups retained by one group.
+TRAJECTORY_MAX_GROUP_CHILDREN = 200
+# Maximum groups retained by one page.
+TRAJECTORY_MAX_PAGE_GROUPS = 200
+# Maximum coverage gaps retained by one page.
+TRAJECTORY_MAX_COVERAGE_GAPS = 64
 # Maximum records requested in one trajectory page or follow batch.
 TRAJECTORY_PAGE_RECORD_LIMIT = 200
 # Maximum encoded bytes in one trajectory response.
@@ -42,17 +62,27 @@ TRAJECTORY_INSPECTOR_RATIO_MIN = 0.20
 TRAJECTORY_INSPECTOR_RATIO_MAX = 0.75
 
 __all__ = [
+    "TRAJECTORY_CURSOR_MAX_BYTES",
     "TRAJECTORY_DETAIL_FIELD_MAX_BYTES",
+    "TRAJECTORY_DETAIL_NAME_MAX_BYTES",
     "TRAJECTORY_DETAIL_RECORD_MAX_BYTES",
     "TRAJECTORY_FOLLOW_TIMEOUT_SECONDS",
+    "TRAJECTORY_IDENTIFIER_MAX_BYTES",
     "TRAJECTORY_IDLE_TTL_SECONDS",
     "TRAJECTORY_INSPECTOR_RATIO_DEFAULT",
     "TRAJECTORY_INSPECTOR_RATIO_MAX",
     "TRAJECTORY_INSPECTOR_RATIO_MIN",
+    "TRAJECTORY_MAX_COVERAGE_GAPS",
+    "TRAJECTORY_MAX_DETAILS_PER_RECORD",
+    "TRAJECTORY_MAX_GROUP_CHILDREN",
+    "TRAJECTORY_MAX_GROUP_RECORD_IDS",
+    "TRAJECTORY_MAX_LINKS_PER_RECORD",
+    "TRAJECTORY_MAX_PAGE_GROUPS",
     "TRAJECTORY_MUTABLE_UPDATE_COALESCE_MS",
     "TRAJECTORY_PAGE_RECORD_LIMIT",
     "TRAJECTORY_PARTICIPANT_CACHE_MAX_BYTES",
     "TRAJECTORY_RESPONSE_MAX_BYTES",
+    "TRAJECTORY_SOURCE_MAX_BYTES",
     "TRAJECTORY_TOOLTIP_DELAY_MS",
     "TRAJECTORY_TOTAL_CACHE_MAX_BYTES",
     "TRAJECTORY_TRANSCRIPT_CURSOR_FINGERPRINT_BYTES",

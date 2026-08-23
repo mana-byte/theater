@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from hashlib import sha256
 from json import dumps
 
+from theater.constants.trajectory import TRAJECTORY_IDENTIFIER_MAX_BYTES
 from theater.trajectory.enums import GroupKind, TimingProvenance
 from theater.trajectory.page import TrajectoryGroup
 from theater.trajectory.records import TrajectoryRecord
@@ -59,143 +61,245 @@ def deterministic_record_order(records: Iterable[TrajectoryRecord]) -> tuple[Tra
         ordered.extend(
             sorted(
                 streams[source_epoch],
-                key=lambda record: (record.raw_index, record.event_ordinal, record.record_id),
+                key=lambda record: (
+                    record.source_offset if record.source_offset is not None else record.raw_index,
+                    record.event_ordinal,
+                    record.record_id,
+                ),
             )
         )
     return tuple(ordered)
 
 
 def group_records(records: Iterable[TrajectoryRecord]) -> tuple[TrajectoryGroup, ...]:
-    """Build Turn → Step groups and an honest Between turns fallback group."""
+    """Build turn/step groups without inventing cross-stream chronology."""
     ordered = deterministic_record_order(records)
-    cross_stream = len({record.source_epoch for record in ordered}) > 1
-    if cross_stream and not _positionable_streams(ordered):
-        return (_between_group(ordered),) if ordered else ()
-    turn_entries: dict[str, list[TrajectoryRecord]] = {}
-    turn_order: list[str] = []
-    turn_first: dict[str, int] = {}
-    between: list[TrajectoryRecord] = []
-    between_first: int | None = None
+    if not ordered:
+        return ()
+    turn_entries: dict[tuple[str, str], list[TrajectoryRecord]] = {}
+    turn_order: list[tuple[str, str]] = []
+    turn_first: dict[tuple[str, str], int] = {}
+    record_step: dict[str, str | None] = {}
     for position, record in enumerate(ordered):
         if record.turn_id is None:
-            if between_first is None:
-                between_first = position
-            between.append(record)
             continue
-        if record.turn_id not in turn_entries:
-            turn_entries[record.turn_id] = []
-            turn_order.append(record.turn_id)
-            turn_first[record.turn_id] = position
-        turn_entries[record.turn_id].append(record)
+        key = (record.source_epoch, record.turn_id)
+        _ensure_turn(turn_entries, turn_order, turn_first, key, position)
+        turn_entries[key].append(record)
+        record_step[record.record_id] = record.step_id
 
-    groups: list[tuple[int, TrajectoryGroup]] = []
-    if between:
+    call_targets: dict[str, tuple[tuple[str, str], str | None] | None] = {}
+    for record in ordered:
+        if record.call_id is None or record.turn_id is None:
+            continue
+        call_target = ((record.source_epoch, record.turn_id), record.step_id)
+        if record.call_id in call_targets and call_targets[record.call_id] != call_target:
+            call_targets[record.call_id] = None
+        else:
+            call_targets[record.call_id] = call_target
+
+    unpositioned: list[tuple[int, TrajectoryRecord]] = []
+    for position, record in enumerate(ordered):
+        if record.turn_id is not None:
+            continue
+        linked_target: tuple[tuple[str, str], str | None] | None = None
+        if record.parent_call_id is not None:
+            linked_target = call_targets.get(record.parent_call_id)
+        if linked_target is None:
+            unpositioned.append((position, record))
+            continue
+        turn_key, parent_step = linked_target
+        _ensure_turn(turn_entries, turn_order, turn_first, turn_key, position)
+        turn_entries[turn_key].append(record)
+        record_step[record.record_id] = record.step_id or parent_step
+
+    groups: list[tuple[float, TrajectoryGroup]] = []
+    for turn_key in turn_order:
+        turn_records = turn_entries[turn_key]
         groups.append(
             (
-                between_first if between_first is not None else 0,
-                TrajectoryGroup(
-                    group_id="between-turns",
-                    kind=GroupKind.BETWEEN_TURNS,
-                    label="Between turns",
-                    record_ids=tuple(record.record_id for record in between),
-                ),
+                float(turn_first[turn_key]),
+                _turn_group(turn_key, turn_records, record_step),
             )
         )
-    for turn_id in turn_order:
-        turn_records = turn_entries[turn_id]
-        children = _step_groups(turn_records, turn_id)
-        direct = tuple(record.record_id for record in turn_records if record.step_id is None)
-        groups.append(
-            (
-                turn_first[turn_id],
-                TrajectoryGroup(
-                    group_id=f"turn:{turn_id}",
-                    kind=GroupKind.TURN,
-                    label=f"Turn {turn_id}",
-                    record_ids=direct,
-                    children=children,
-                    turn_id=turn_id,
-                ),
-            )
-        )
-    grouped = tuple(group for _position, group in sorted(groups, key=lambda item: item[0]))
-    if cross_stream and _reliable_boundary_times(grouped, ordered):
-        return tuple(
-            group
-            for _time, _position, group in sorted(
-                (
-                    (_group_time(group, ordered), position, group)
-                    for position, group in enumerate(grouped)
-                ),
-                key=lambda item: (item[0], item[1]),
-            )
-        )
-    return grouped
+
+    between_groups = _between_groups(unpositioned, turn_order, turn_entries, turn_first)
+    groups.extend(between_groups)
+    return tuple(group for _position, group in sorted(groups, key=lambda item: item[0]))
 
 
-def _between_group(records: Iterable[TrajectoryRecord]) -> TrajectoryGroup:
+def _ensure_turn(
+    entries: dict[tuple[str, str], list[TrajectoryRecord]],
+    order: list[tuple[str, str]],
+    first: dict[tuple[str, str], int],
+    key: tuple[str, str],
+    position: int,
+) -> None:
+    if key not in entries:
+        entries[key] = []
+        order.append(key)
+        first[key] = position
+
+
+def _turn_group(
+    turn_key: tuple[str, str],
+    records: Iterable[TrajectoryRecord],
+    steps: dict[str, str | None],
+) -> TrajectoryGroup:
+    source_epoch, turn_id = turn_key
     values = tuple(records)
+    children = _step_groups(values, turn_key, steps)
+    direct = tuple(
+        record.record_id for record in values if steps.get(record.record_id, record.step_id) is None
+    )
     return TrajectoryGroup(
-        group_id="between-turns",
+        group_id=_bounded_group_id("turn", source_epoch, turn_id),
+        kind=GroupKind.TURN,
+        label=f"Turn {turn_id}",
+        record_ids=direct,
+        children=children,
+        turn_id=turn_id,
+    )
+
+
+def _bounded_group_id(prefix: str, source_epoch: str, *parts: str) -> str:
+    value = ":".join((prefix, source_epoch, *parts))
+    if len(value.encode("utf-8")) <= TRAJECTORY_IDENTIFIER_MAX_BYTES:
+        return value
+    return f"{prefix}:{sha256(value.encode('utf-8')).hexdigest()}"
+
+
+def _between_groups(
+    records: list[tuple[int, TrajectoryRecord]],
+    turn_order: list[tuple[str, str]],
+    turn_entries: dict[tuple[str, str], list[TrajectoryRecord]],
+    turn_first: dict[tuple[str, str], int],
+) -> list[tuple[float, TrajectoryGroup]]:
+    if not records:
+        return []
+    if not turn_order:
+        ordered = _order_between_records(records)
+        return [(float(ordered[0][0]), _between_group(ordered, 0))]
+    intervals = [_turn_interval(turn_entries[key]) for key in turn_order]
+    buckets: dict[tuple[str, int], list[tuple[int, TrajectoryRecord]]] = {}
+    for position, record in records:
+        slot = _timestamp_slot(record, intervals)
+        bucket_key = ("record", position) if slot is None else ("slot", slot)
+        buckets.setdefault(bucket_key, []).append((position, record))
+    result: list[tuple[float, TrajectoryGroup]] = []
+    for index, (bucket_key, bucket_values) in enumerate(buckets.items()):
+        values = _order_between_records(bucket_values)
+        group_position = _between_position(bucket_key, values[0][0], turn_order, turn_first)
+        result.append((group_position, _between_group(values, index)))
+    return result
+
+
+def _between_group(records: Iterable[tuple[int, TrajectoryRecord]], index: int) -> TrajectoryGroup:
+    values = tuple(record for _position, record in records)
+    return TrajectoryGroup(
+        group_id=f"between-turns:{index}",
         kind=GroupKind.BETWEEN_TURNS,
         label="Between turns",
         record_ids=tuple(record.record_id for record in values),
     )
 
 
-def _positionable_streams(records: tuple[TrajectoryRecord, ...]) -> bool:
-    call_ids = {record.call_id for record in records if record.call_id is not None}
-    if any(record.parent_call_id in call_ids for record in records):
-        return True
-    return all(
+def _order_between_records(
+    records: Iterable[tuple[int, TrajectoryRecord]],
+) -> list[tuple[int, TrajectoryRecord]]:
+    values = list(records)
+    if not values or not all(record.record_id.startswith("bus:") for _, record in values):
+        return values
+    return sorted(values, key=lambda item: _bus_order_key(item[1], item[0]))
+
+
+def _bus_order_key(record: TrajectoryRecord, position: int) -> tuple[int, int | str, str, int]:
+    value = record.record_id.removeprefix("bus:")
+    try:
+        return (0, int(value), value, position)
+    except ValueError:
+        return (1, value, value, position)
+
+
+def _turn_interval(records: Iterable[TrajectoryRecord]) -> tuple[float, float] | None:
+    values = tuple(records)
+    if not values or any(not _reliable_time(record) for record in values):
+        return None
+    starts: list[float] = []
+    ends: list[float] = []
+    for record in values:
+        assert record.timing is not None
+        if record.timing.start is None or record.timing.end is None:
+            return None
+        starts.append(record.timing.start)
+        ends.append(record.timing.end)
+    return min(starts), max(ends)
+
+
+def _reliable_time(record: TrajectoryRecord) -> bool:
+    return (
         record.timing is not None
         and record.timing.start is not None
+        and record.timing.end is not None
         and record.timing.provenance in (TimingProvenance.SOURCE, TimingProvenance.OBSERVED)
-        for record in records
     )
 
 
-def _reliable_boundary_times(
-    groups: tuple[TrajectoryGroup, ...], records: tuple[TrajectoryRecord, ...]
-) -> bool:
-    if not groups:
-        return False
-    by_id = {record.record_id: record for record in records}
-    return all(_group_time(group, records) is not None for group in groups) and all(
+def _timestamp_slot(
+    record: TrajectoryRecord, intervals: list[tuple[float, float] | None]
+) -> int | None:
+    if not _reliable_time(record) or not intervals:
+        return None
+    assert (
         record.timing is not None
         and record.timing.start is not None
-        and record.timing.provenance in (TimingProvenance.SOURCE, TimingProvenance.OBSERVED)
-        for record in by_id.values()
+        and record.timing.end is not None
     )
+    start, end = record.timing.start, record.timing.end
+    if intervals[0] is not None and end <= intervals[0][0]:
+        return 0
+    for index in range(len(intervals) - 1):
+        left, right = intervals[index], intervals[index + 1]
+        if left is not None and right is not None and left[1] <= start and end <= right[0]:
+            return index + 1
+    if intervals[-1] is not None and start >= intervals[-1][1]:
+        return len(intervals)
+    return None
 
 
-def _group_time(group: TrajectoryGroup, records: tuple[TrajectoryRecord, ...]) -> float | None:
-    by_id = {record.record_id: record for record in records}
-    record_ids = list(group.record_ids)
-    for child in group.children:
-        record_ids.extend(child.record_ids)
-    times: list[float] = []
-    for record_id in record_ids:
-        record = by_id.get(record_id)
-        if record is None or record.timing is None or record.timing.start is None:
-            continue
-        times.append(record.timing.start)
-    return min(times) if times else None
+def _between_position(
+    bucket: tuple[str, int],
+    fallback: int,
+    turn_order: list[tuple[str, str]],
+    first: dict[tuple[str, str], int],
+) -> float:
+    if bucket[0] != "slot" or not turn_order:
+        return float(fallback)
+    slot = bucket[1]
+    if slot == 0:
+        return float(first[turn_order[0]]) - 0.5
+    if slot == len(turn_order):
+        return float(first[turn_order[-1]]) + 0.5
+    return (float(first[turn_order[slot - 1]]) + float(first[turn_order[slot]])) / 2
 
 
-def _step_groups(records: Iterable[TrajectoryRecord], turn_id: str) -> tuple[TrajectoryGroup, ...]:
+def _step_groups(
+    records: Iterable[TrajectoryRecord], turn_key: tuple[str, str], steps: dict[str, str | None]
+) -> tuple[TrajectoryGroup, ...]:
     entries: dict[str, list[TrajectoryRecord]] = {}
     order: list[str] = []
     for record in records:
-        if record.step_id is None:
+        step_id = steps.get(record.record_id, record.step_id)
+        if step_id is None:
             continue
-        if record.step_id not in entries:
-            entries[record.step_id] = []
-            order.append(record.step_id)
-        entries[record.step_id].append(record)
+        if step_id not in entries:
+            entries[step_id] = []
+            order.append(step_id)
+        entries[step_id].append(record)
+    source_epoch, turn_id = turn_key
     return tuple(
         TrajectoryGroup(
-            group_id=f"step:{turn_id}:{step_id}",
+            group_id=_bounded_group_id("step", source_epoch, turn_id, step_id),
             kind=GroupKind.STEP,
             label=f"Step {step_id}",
             record_ids=tuple(record.record_id for record in entries[step_id]),

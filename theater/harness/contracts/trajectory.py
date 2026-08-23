@@ -5,12 +5,17 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from theater.constants.trajectory import (
+    TRAJECTORY_IDENTIFIER_MAX_BYTES,
+    TRAJECTORY_MAX_LINKS_PER_RECORD,
+    TRAJECTORY_SOURCE_MAX_BYTES,
+)
 from theater.harness.contracts.events import Event
 from theater.trajectory.content import (
     ContentPreview,
     DetailField,
     bound_detail_fields,
-    sanitize_text,
+    bounded_text,
 )
 from theater.trajectory.enums import (
     TrajectoryKind,
@@ -29,11 +34,26 @@ class FactLink:
     relation: str = "related"
 
     def __post_init__(self) -> None:
-        if not isinstance(self.target_id, str) or not self.target_id:
-            raise TrajectoryValidationError("fact link target_id must be a non-empty string")
-        if not isinstance(self.relation, str) or not self.relation:
-            raise TrajectoryValidationError("fact link relation must be a non-empty string")
-        object.__setattr__(self, "relation", sanitize_text(self.relation))
+        object.__setattr__(
+            self,
+            "target_id",
+            bounded_text(
+                self.target_id,
+                max_bytes=TRAJECTORY_IDENTIFIER_MAX_BYTES,
+                label="fact link target_id",
+                nonempty=True,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "relation",
+            bounded_text(
+                self.relation,
+                max_bytes=TRAJECTORY_IDENTIFIER_MAX_BYTES,
+                label="fact link relation",
+                nonempty=True,
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +77,7 @@ class TrajectoryFact:
     usage: TrajectoryUsage | None = None
     details: tuple[DetailField, ...] = ()
     links: tuple[FactLink, ...] = ()
+    source_offset: int | None = None
 
     def __post_init__(self) -> None:
         _validate_fact_text(self)
@@ -99,11 +120,18 @@ def _enum(enum_type: type, value: object, label: str):
 
 
 def _validate_fact_text(fact: TrajectoryFact) -> None:
-    if not isinstance(fact.source, str) or not fact.source:
-        raise TrajectoryValidationError("fact.source must be a non-empty string")
+    object.__setattr__(
+        fact,
+        "source",
+        bounded_text(
+            fact.source,
+            max_bytes=TRAJECTORY_SOURCE_MAX_BYTES,
+            label="fact.source",
+            nonempty=True,
+        ),
+    )
     if not isinstance(fact.summary, str):
         raise TrajectoryValidationError("fact.summary must be a string")
-    object.__setattr__(fact, "source", sanitize_text(fact.source))
     object.__setattr__(fact, "summary", ContentPreview.from_text(fact.summary).text)
     object.__setattr__(fact, "kind", _enum(TrajectoryKind, fact.kind, "fact.kind"))
     if fact.lane is not None:
@@ -112,18 +140,40 @@ def _validate_fact_text(fact: TrajectoryFact) -> None:
 
 
 def _validate_fact_identity(fact: TrajectoryFact) -> None:
-    if fact.native_id is not None and (not isinstance(fact.native_id, str) or not fact.native_id):
-        raise TrajectoryValidationError("fact.native_id must be a non-empty string or null")
+    if fact.native_id is not None:
+        object.__setattr__(
+            fact,
+            "native_id",
+            bounded_text(
+                fact.native_id,
+                max_bytes=TRAJECTORY_IDENTIFIER_MAX_BYTES,
+                label="fact.native_id",
+                nonempty=True,
+            ),
+        )
     if type(fact.revision) is not int or fact.revision < 0:
         raise TrajectoryValidationError("fact.revision must be a non-negative integer")
+    if fact.source_offset is not None and (
+        type(fact.source_offset) is not int or fact.source_offset < 0
+    ):
+        raise TrajectoryValidationError("fact.source_offset must be a non-negative integer or null")
     for name in ("raw_index", "event_ordinal"):
         value = getattr(fact, name)
         if type(value) is not int or value < 0:
             raise TrajectoryValidationError(f"fact.{name} must be a non-negative integer")
     for name in ("turn_id", "step_id", "call_id", "parent_call_id"):
         value = getattr(fact, name)
-        if value is not None and (not isinstance(value, str) or not value):
-            raise TrajectoryValidationError(f"fact.{name} must be a non-empty string or null")
+        if value is not None:
+            object.__setattr__(
+                fact,
+                name,
+                bounded_text(
+                    value,
+                    max_bytes=TRAJECTORY_IDENTIFIER_MAX_BYTES,
+                    label=f"fact.{name}",
+                    nonempty=True,
+                ),
+            )
 
 
 def _validate_fact_payload(fact: TrajectoryFact) -> None:
@@ -138,6 +188,10 @@ def _validate_fact_collections(fact: TrajectoryFact) -> None:
         raise TrajectoryValidationError("fact.details must contain DetailField values")
     if any(not isinstance(value, FactLink) for value in fact.links):
         raise TrajectoryValidationError("fact.links must contain FactLink values")
+    if len(fact.links) > TRAJECTORY_MAX_LINKS_PER_RECORD:
+        raise TrajectoryValidationError(
+            f"fact.links exceeds {TRAJECTORY_MAX_LINKS_PER_RECORD} values"
+        )
 
 
 __all__ = ["FactLink", "ParsedRecord", "TrajectoryFact"]
