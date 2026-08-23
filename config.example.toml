@@ -317,7 +317,7 @@ disabled = []
 # Off by default. When enabled, Theater exports traces, metrics, and
 # structured logs via OTLP to a collector. Requires the optional dependency:
 #
-#   uv pip install theater[observability]
+#   uv sync --extra observability
 #
 # A missing extra with otlp_enabled = true is a fatal start-up error.
 # When disabled, no exporter thread starts and no network call is made.

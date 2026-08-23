@@ -790,15 +790,15 @@ theater/observability/
 ```
 
 `theater/timing.py` is a compatibility facade that re-exports the engine and
-preserves every existing public signature, so call sites that import `timing`
-continue to work unchanged.
+preserves existing calls, so call sites that import `timing` continue to work
+unchanged.
 
 Dependency direction is strictly layered: `constants/observability.py` imports
 no feature package; `catalog.py` imports only dataclasses, enums, and constants;
 `metrics.py`, `tracing.py`, and `engine.py` may import `catalog.py`; `runtime.py`
 composes logging, metrics, and tracing. Lower modules never import `runtime`.
 Domain objects (`Registry`, `JobManager`, repositories) never import OpenTelemetry.
-Only `runtime._build_otel()` imports SDK/exporter modules, and only after
+Only setup helpers in `runtime.py` import SDK/exporter modules, and only after
 configuration says export is enabled.
 
 ### Process logging roles
@@ -924,7 +924,7 @@ or metric exists.
 
 ### Daemon-only SQLite gauge sampling
 
-Three observable gauges back the dashboard metrics: `theater.participants.live`,
+Three observable gauges provide runtime metrics: `theater.participants.live`,
 `theater.participants.addressable`, and `theater.jobs.active`. They are backed
 only by cached integers — never by live queries.
 

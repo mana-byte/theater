@@ -43,11 +43,11 @@ def _check_otel_available() -> None:
     except ImportError as exc:
         logger.error(  # noqa: TRY400
             "OpenTelemetry SDK or exporters not found: "
-            "install theater[observability] or disable observability.otlp_enabled"
+            "install the observability extra or disable observability.otlp_enabled"
         )
         raise ObservabilityError(
             "OpenTelemetry SDK or exporters not found: "
-            "install theater[observability] or disable observability.otlp_enabled"
+            "install the observability extra or disable observability.otlp_enabled"
         ) from exc
 
 

@@ -500,8 +500,8 @@ endpoint must be an absolute `http` or `https` URL with a host and no query
 or fragment.
 
 Missing optional packages with `otlp_enabled = true` is fatal with an
-actionable message: `install theater[observability] or disable
-observability.otlp_enabled`.
+actionable message to install the observability extra or disable
+`observability.otlp_enabled`.
 
 `theater restart` applies any change — config is read once at daemon start.
 
