@@ -30,6 +30,8 @@ TRAJECTORY_MAX_COVERAGE_GAPS = 64
 TRAJECTORY_PAGE_RECORD_LIMIT = 200
 # Maximum encoded bytes in one trajectory response.
 TRAJECTORY_RESPONSE_MAX_BYTES = 1 << 20
+# Largest signed 64-bit request id used to size trajectory response envelopes.
+TRAJECTORY_RESPONSE_SIZING_REQUEST_ID = -(1 << 63)
 # Maximum cached encoded bytes for one participant stream.
 TRAJECTORY_PARTICIPANT_CACHE_MAX_BYTES = 4 << 20
 # Maximum cached encoded bytes across all participant streams.
@@ -91,6 +93,7 @@ __all__ = [
     "TRAJECTORY_PAGE_RECORD_LIMIT",
     "TRAJECTORY_PARTICIPANT_CACHE_MAX_BYTES",
     "TRAJECTORY_RESPONSE_MAX_BYTES",
+    "TRAJECTORY_RESPONSE_SIZING_REQUEST_ID",
     "TRAJECTORY_SOURCE_MAX_BYTES",
     "TRAJECTORY_TOOLTIP_DELAY_MS",
     "TRAJECTORY_TOTAL_CACHE_MAX_BYTES",

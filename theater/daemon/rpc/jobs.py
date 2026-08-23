@@ -234,7 +234,7 @@ def _close_await(
             job_state = state
             if job_state is None:
                 job = jobs_by_handle.get(handle)
-                job_state = "completed" if job and job.state != JobState.RUNNING else "timeout"
+                job_state = _await_outcome(job)
             daemon.store.bus_append(
                 BUS_KIND_JOB_AWAIT_END,
                 from_id=caller_id,
@@ -248,6 +248,14 @@ def _close_await(
             )
         except Exception:
             logger.exception("could not close await %s on %s", token, handle)
+
+
+def _await_outcome(job: Job | None) -> str:
+    if job is None or job.state == JobState.RUNNING:
+        return "timeout"
+    if job.state == JobState.DONE:
+        return "completed"
+    return "error"
 
 
 @method("jobs.status")

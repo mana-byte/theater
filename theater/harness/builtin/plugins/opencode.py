@@ -2098,9 +2098,7 @@ class OpenCodeSource(Source):
             message_id = part.get("messageID") if isinstance(part, dict) else None
             coordinate = self._message_coordinate(conn, message_id, seq)
             events = self._on_part(conn, payload, seq)
-            return events, self._trajectory_for_part(
-                conn, payload, seq, raw_index=coordinate
-            )
+            return events, self._trajectory_for_part(conn, payload, seq, raw_index=coordinate)
         if kind == "message.updated.1":
             info = payload.get("info")
             message_id = info.get("id") if isinstance(info, dict) else None

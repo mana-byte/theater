@@ -141,9 +141,7 @@ def test_opencode_live_and_history_revisions_share_coordinates(rec, workdir) -> 
     live = asyncio.run(source.read())
     history = asyncio.run(source.history_page(limit=10))
     live_call = next(fact for fact in live.trajectory if fact.kind is TrajectoryKind.TOOL_CALL)
-    stored_call = next(
-        fact for fact in history.trajectory if fact.kind is TrajectoryKind.TOOL_CALL
-    )
+    stored_call = next(fact for fact in history.trajectory if fact.kind is TrajectoryKind.TOOL_CALL)
 
     assert live_call.raw_index == stored_call.raw_index
     assert live_call.revision == stored_call.revision

@@ -246,6 +246,47 @@ async def test_await_end_outcome_is_per_handle(daemon, fake_tmux, monkeypatch):
         await client.aclose()
 
 
+@pytest.mark.parametrize("job_state", ["crashed", "killed"])
+async def test_await_end_records_terminal_failures_as_errors(
+    daemon, fake_tmux, monkeypatch, job_state
+):
+    monkeypatch.setattr("theater.daemon.methods.AWAIT_ANNOUNCE_AFTER", 0.0)
+    from theater.client import DaemonClient
+
+    client = DaemonClient(autostart=False)
+    await client.connect()
+    try:
+        caller = await client.call("hello", harness="vibe", pane="%2", cwd="/tmp")
+        child = await client.call(
+            "spawn",
+            harness="vibe",
+            prompt="hi",
+            approval="manual",
+            cwd="/tmp",
+            parent_id=caller["id"],
+        )
+        waiting = asyncio.create_task(
+            jobs_rpc._jobs_await(
+                daemon,
+                {
+                    "handles": [child["handle"]],
+                    "caller_id": caller["id"],
+                    "max_wait": 1.0,
+                },
+            )
+        )
+        for _ in range(100):
+            if any(row["kind"] == "job.await.start" for row in daemon.store.bus_tail()):
+                break
+            await asyncio.sleep(0.001)
+        daemon.jobs.finish(child["handle"], state=job_state, result="failed")
+        await waiting
+        end = next(row for row in daemon.store.bus_tail() if row["kind"] == "job.await.end")
+        assert end["payload"]["state"] == "error"
+    finally:
+        await client.aclose()
+
+
 async def test_await_elapsed_starts_at_announcement_and_is_nonnegative(
     daemon, fake_tmux, monkeypatch
 ):
