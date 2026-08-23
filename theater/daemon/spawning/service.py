@@ -12,6 +12,7 @@ import shutil
 from collections.abc import Sequence
 
 from theater import paths, timing
+from theater.constants.daemon import BUS_KIND_PARTICIPANT_SESSION_BOUNDARY
 from theater.constants.harness import (
     SPAWN_KILL_POLL_ATTEMPTS,
     SPAWN_KILL_POLL_INTERVAL_SECONDS,
@@ -117,6 +118,7 @@ class Spawner:
             session=session,
             name=name,
             req=req,
+            resume_predecessor=resume_predecessor,
         )
 
     async def launch(self, reservation: Reservation) -> Participant:
@@ -144,12 +146,24 @@ class Spawner:
         except Exception:
             info = None
         try:
-            return self.registry.attach_pane(
+            attached = self.registry.attach_pane(
                 participant.id, pane, pane_pid=info.pane_pid if info else None
             )
         except BaseException:
             await self.cleanup_reservation(participant)
             raise
+        predecessor = reservation.resume_predecessor
+        if predecessor is not None:
+            try:
+                self.registry.store.bus_append(
+                    BUS_KIND_PARTICIPANT_SESSION_BOUNDARY,
+                    from_id=predecessor.id,
+                    to_id=participant.id,
+                    payload={"reason": "resume", "predecessor_id": predecessor.id},
+                )
+            except Exception:
+                logger.exception("could not record resume boundary for %s", participant.id)
+        return attached
 
     async def spawn(self, req: SpawnRequest) -> Participant:
         """Reserve then launch in one call."""

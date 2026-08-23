@@ -54,3 +54,4 @@ class Reservation:
     session: str
     name: str
     req: SpawnRequest
+    resume_predecessor: Participant | None = None

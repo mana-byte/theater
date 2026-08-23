@@ -7,6 +7,7 @@ Also owns ``_resume_state``, the generic resume pre-flight verdict used by
 from __future__ import annotations
 
 from theater import proc
+from theater.constants.daemon import BUS_KIND_PARTICIPANT_KILL_REQUESTED
 from theater.daemon import workers
 from theater.daemon.harness_detect import detect_harness, match_binary
 from theater.daemon.rpc.params import _require
@@ -194,6 +195,11 @@ async def _kill(daemon, params: dict) -> dict:
             return {"id": pid, "killed": False, "reason": "already_dead"}
 
     # finish is first-terminal-write-wins. The marker tells the reaper to leave this alone.
+    daemon.store.bus_append(
+        BUS_KIND_PARTICIPANT_KILL_REQUESTED,
+        from_id=caller_id,
+        to_id=pid,
+    )
     daemon._explicit_kills.add(pid)
     try:
         participant = await daemon.spawner.kill_pane(pid)

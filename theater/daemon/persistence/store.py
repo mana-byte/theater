@@ -13,7 +13,10 @@ façade because they span multiple repositories within one transaction.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+import logging
+from collections.abc import Callable, Collection, Sequence
+from contextlib import suppress
+from copy import deepcopy
 from pathlib import Path
 
 from sqlalchemy import insert, update
@@ -22,6 +25,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from theater.constants.daemon import (
     BUS_KIND_OPERATOR_TRANSCRIPT_BIND,
     BUS_KIND_OPERATOR_TRANSCRIPT_UNBIND,
+    BUS_PARTICIPANT_PAGE_MAX_LIMIT,
 )
 from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories.bus import BusRepository
@@ -35,6 +39,10 @@ from theater.daemon.persistence.repositories.usage import UsageRepository
 from theater.daemon.persistence.repositories.worktrees import WorktreeRepository
 from theater.daemon.schema import bus, participants
 from theater.models import Job, Participant, Status, now
+
+logger = logging.getLogger("theater.store")
+
+BusListener = Callable[[dict], None]
 
 
 class Store:
@@ -59,8 +67,10 @@ class Store:
         self._worktrees = WorktreeRepository(self._db)
         self._usage = UsageRepository(self._db)
         self._statistics = StatisticsRepository(self._db)
+        self._bus_listeners: list[BusListener] = []
 
     def close(self) -> None:
+        self._bus_listeners.clear()
         self._db.close()
 
     # ---- participants -------------------------------------------------
@@ -126,6 +136,8 @@ class Store:
     ) -> int:
         """Move transcript ownership and append the audit row atomically."""
         target_values = ParticipantRepository._participant_values(target)
+        listeners = tuple(self._bus_listeners)
+        listener_rows: list[dict] = []
         with self.engine.begin() as conn:
             if prior_owner is not None:
                 conn.execute(
@@ -137,22 +149,36 @@ class Store:
                         transcript_location=None,
                     )
                 )
-                conn.execute(
+                unbind_payload = {
+                    "actor_surface": "cli",
+                    "target": prior_owner.id,
+                    "transferred_to": target.id,
+                    "path": audit_payload.get("path"),
+                }
+                unbind_ts = now()
+                unbind_payload_text = json.dumps(unbind_payload)
+                unbind_result = conn.execute(
                     insert(bus).values(
-                        ts=now(),
+                        ts=unbind_ts,
                         from_id="cli",
                         to_id=prior_owner.id,
                         kind=BUS_KIND_OPERATOR_TRANSCRIPT_UNBIND,
-                        payload=json.dumps(
-                            {
-                                "actor_surface": "cli",
-                                "target": prior_owner.id,
-                                "transferred_to": target.id,
-                                "path": audit_payload.get("path"),
-                            }
-                        ),
+                        payload=unbind_payload_text,
                     )
                 )
+                if listeners:
+                    unbind_pk = unbind_result.inserted_primary_key
+                    assert unbind_pk is not None
+                    listener_rows.append(
+                        self._bus_row(
+                            unbind_pk[0],
+                            unbind_ts,
+                            "cli",
+                            prior_owner.id,
+                            BUS_KIND_OPERATOR_TRANSCRIPT_UNBIND,
+                            unbind_payload_text,
+                        )
+                    )
             conn.execute(
                 sqlite_insert(participants)
                 .values(**target_values)
@@ -161,18 +187,33 @@ class Store:
                     set_={k: v for k, v in target_values.items() if k != "id"},
                 )
             )
+            bind_ts = now()
+            bind_payload_text = json.dumps(audit_payload)
             result = conn.execute(
                 insert(bus).values(
-                    ts=now(),
+                    ts=bind_ts,
                     from_id="cli",
                     to_id=target.id,
                     kind=BUS_KIND_OPERATOR_TRANSCRIPT_BIND,
-                    payload=json.dumps(audit_payload),
+                    payload=bind_payload_text,
                 )
             )
             pk = result.inserted_primary_key
             assert pk is not None
-            return pk[0]
+            if listeners:
+                listener_rows.append(
+                    self._bus_row(
+                        pk[0],
+                        bind_ts,
+                        "cli",
+                        target.id,
+                        BUS_KIND_OPERATOR_TRANSCRIPT_BIND,
+                        bind_payload_text,
+                    )
+                )
+        if listeners:
+            self._notify_bus_listeners(listener_rows, listeners)
+        return pk[0]
 
     # ---- jobs ----------------------------------------------------------
 
@@ -408,6 +449,43 @@ class Store:
 
     # ---- bus ----------------------------------------------------------
 
+    def register_bus_listener(self, listener: BusListener) -> None:
+        """Register one synchronous best-effort post-commit bus listener."""
+        if listener not in self._bus_listeners:
+            self._bus_listeners.append(listener)
+
+    def unregister_bus_listener(self, listener: BusListener) -> None:
+        """Remove a bus listener; repeated removal is harmless."""
+        with suppress(ValueError):
+            self._bus_listeners.remove(listener)
+
+    @staticmethod
+    def _bus_row(
+        row_id: int,
+        timestamp: float,
+        from_id: str | None,
+        to_id: str | None,
+        kind: str,
+        payload_text: str | None,
+    ) -> dict:
+        return {
+            "id": row_id,
+            "ts": timestamp,
+            "from_id": from_id,
+            "to_id": to_id,
+            "kind": kind,
+            "payload": json.loads(payload_text) if payload_text else None,
+        }
+
+    def _notify_bus_listeners(self, rows: list[dict], listeners: tuple[BusListener, ...]) -> None:
+        """Notify listeners after commit without letting one failure escape."""
+        for row in rows:
+            for listener in listeners:
+                try:
+                    listener(deepcopy(row))
+                except Exception:
+                    logger.exception("bus listener failed for row %s", row.get("id"))
+
     def bus_append(
         self,
         kind: str,
@@ -416,7 +494,36 @@ class Store:
         to_id: str | None = None,
         payload: dict | None = None,
     ) -> int:
-        return self._bus.append(kind, from_id=from_id, to_id=to_id, payload=payload)
+        listeners = tuple(self._bus_listeners)
+        timestamp = now() if listeners else None
+        row_id = self._bus.append(
+            kind,
+            from_id=from_id,
+            to_id=to_id,
+            payload=payload,
+            timestamp=timestamp,
+        )
+        if listeners:
+            assert timestamp is not None
+            payload_text = json.dumps(payload) if payload else None
+            row = self._bus_row(row_id, timestamp, from_id, to_id, kind, payload_text)
+            self._notify_bus_listeners([row], listeners)
+        return row_id
+
+    def bus_page_for_participant(
+        self,
+        participant_id: str,
+        *,
+        before_id: int | str | None = None,
+        limit: int = BUS_PARTICIPANT_PAGE_MAX_LIMIT,
+        kinds: Collection[str],
+    ) -> list[dict]:
+        return self._bus.page_for_participant(
+            participant_id,
+            before_id=before_id,
+            limit=limit,
+            kinds=kinds,
+        )
 
     def bus_tail(self, limit: int = 100, *, after_id: int = 0) -> list[dict]:
         return self._bus.tail(limit, after_id=after_id)

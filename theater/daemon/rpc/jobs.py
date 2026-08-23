@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+
+from theater.constants.daemon import BUS_KIND_JOB_AWAIT_END, BUS_KIND_JOB_AWAIT_START
 
 # Definitions re-exported by the methods facade; runtime reads the facade for legacy patches.
 from theater.constants.daemon import (
@@ -63,7 +66,7 @@ _JOB_ERROR_MESSAGES = {
 
 
 @method("jobs.await")
-async def _jobs_await(daemon, params: dict) -> list[dict]:
+async def _jobs_await(daemon, params: dict) -> list[dict]:  # noqa: PLR0912
     """Wait for one or more jobs to finish, up to max_wait seconds.
 
     A handle nobody knows is an error, not an empty list. `await_jobs`
@@ -120,20 +123,37 @@ async def _jobs_await(daemon, params: dict) -> list[dict]:
         ]
 
     await_token = new_id()
-    announced: list[tuple[str, str]] = []
+    announced: list[tuple[str, str, float]] = []
+    jobs: list[Job] | None = None
+    outcome: str | None = None
     try:
         with daemon.jobs.waiting(caller_id, targets):
-            jobs = await _await_announced(
-                daemon,
-                handles=handles,
-                max_wait=max_wait,
-                caller_id=caller_id,
-                edges=await_edges,
-                token=await_token,
-                announced=announced,
-            )
+            try:
+                jobs = await _await_announced(
+                    daemon,
+                    handles=handles,
+                    max_wait=max_wait,
+                    caller_id=caller_id,
+                    edges=await_edges,
+                    token=await_token,
+                    announced=announced,
+                )
+            except asyncio.CancelledError:
+                outcome = "cancelled"
+                raise
+            except BaseException:
+                outcome = "error"
+                raise
     finally:
-        _close_await(daemon, caller_id, announced, await_token)
+        _close_await(
+            daemon,
+            caller_id,
+            announced,
+            await_token,
+            state=outcome,
+            jobs=jobs,
+        )
+    assert jobs is not None
     rows = []
     for job in jobs:
         row = job.to_dict()
@@ -152,7 +172,7 @@ async def _await_announced(
     caller_id: str | None,
     edges: list[tuple[str, str]],
     token: str,
-    announced: list[tuple[str, str]],
+    announced: list[tuple[str, str, float]],
 ) -> list[Job]:
     """Wait for the jobs, announcing the wait only if it lasts long enough.
 
@@ -182,36 +202,49 @@ def _open_await(
     caller_id: str | None,
     edges: list[tuple[str, str]],
     token: str,
-    announced: list[tuple[str, str]],
+    announced: list[tuple[str, str, float]],
 ) -> None:
     """Announce a blocked await, recording every row that reached the bus."""
     for handle, target_id in edges:
         daemon.store.bus_append(
-            "job.await.start",
+            BUS_KIND_JOB_AWAIT_START,
             from_id=caller_id,
             to_id=target_id,
             payload={"handle": handle, "token": token},
         )
-        announced.append((handle, target_id))
+        announced.append((handle, target_id, time.monotonic()))
 
 
 def _close_await(
     daemon,
     caller_id: str | None,
-    announced: list[tuple[str, str]],
+    announced: list[tuple[str, str, float]],
     token: str,
+    *,
+    state: str | None,
+    jobs: list[Job] | None,
 ) -> None:
     """Close every start row that was written, however the await ended.
 
     Best effort per row, because this runs in a `finally`.
     """
-    for handle, target_id in announced:
+    jobs_by_handle = {job.handle: job for job in jobs or []}
+    for handle, target_id, started_at in announced:
         try:
+            job_state = state
+            if job_state is None:
+                job = jobs_by_handle.get(handle)
+                job_state = "completed" if job and job.state != JobState.RUNNING else "timeout"
             daemon.store.bus_append(
-                "job.await.end",
+                BUS_KIND_JOB_AWAIT_END,
                 from_id=caller_id,
                 to_id=target_id,
-                payload={"handle": handle, "token": token},
+                payload={
+                    "handle": handle,
+                    "token": token,
+                    "state": job_state,
+                    "elapsed_seconds": max(0.0, time.monotonic() - started_at),
+                },
             )
         except Exception:
             logger.exception("could not close await %s on %s", token, handle)
