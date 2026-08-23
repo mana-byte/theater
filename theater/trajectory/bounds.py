@@ -1,8 +1,12 @@
-"""Public helpers for bounded, Rich-safe trajectory detail values."""
+"""Public helpers for bounded trajectory detail values."""
 
 from __future__ import annotations
 
-from theater.trajectory.models import ContentPreview, bound_detail_fields, escape_rich_text
+from theater.trajectory.content import (
+    ContentPreview,
+    bound_detail_fields,
+    escape_rich_text,
+)
 
 
 def bounded_preview(text: str, *, max_bytes: int | None = None) -> ContentPreview:

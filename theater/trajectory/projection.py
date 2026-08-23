@@ -6,15 +6,16 @@ from collections.abc import Iterable
 
 from theater.harness.contracts.events import Event, EventKind
 from theater.harness.contracts.trajectory import TrajectoryFact
-from theater.trajectory.models import (
-    ContentFormat,
-    DetailField,
-    Timing,
+from theater.trajectory.content import ContentFormat, DetailField
+from theater.trajectory.enums import (
     TimingProvenance,
     TrajectoryKind,
     TrajectoryLane,
-    TrajectoryRecord,
     TrajectoryStatus,
+)
+from theater.trajectory.records import (
+    Timing,
+    TrajectoryRecord,
     TrajectoryUsage,
 )
 
@@ -40,6 +41,7 @@ def event_to_fact(
     *,
     source: str = "baseline",
     event_ordinal: int = 0,
+    historical: bool = False,
 ) -> TrajectoryFact:
     """Project one normalized control event without assigning a participant."""
     kind, lane = _kind_and_lane(event.kind)
@@ -47,9 +49,7 @@ def event_to_fact(
         TrajectoryStatus.ERROR
         if event.kind is EventKind.ERROR
         else TrajectoryStatus.COMPLETED
-        if event.turn_end
-        else TrajectoryStatus.COMPLETED
-        if event.usage_only
+        if historical or event.kind is EventKind.USER or event.turn_end or event.usage_only
         else TrajectoryStatus.RUNNING
     )
     timing = (
@@ -117,10 +117,16 @@ def event_to_record(
     source_epoch: str,
     event_ordinal: int = 0,
     source: str = "baseline",
+    historical: bool = False,
 ) -> TrajectoryRecord:
     """Project one normalized Event into a canonical trajectory record."""
     return fact_to_record(
-        event_to_fact(event, source=source, event_ordinal=event_ordinal),
+        event_to_fact(
+            event,
+            source=source,
+            event_ordinal=event_ordinal,
+            historical=historical,
+        ),
         participant_id=participant_id,
         source_epoch=source_epoch,
     )
@@ -132,6 +138,7 @@ def project_events(
     participant_id: str,
     source_epoch: str,
     source: str = "baseline",
+    historical: bool = False,
 ) -> tuple[TrajectoryRecord, ...]:
     """Project events while assigning ordinals only within each raw record."""
     ordinals: dict[int, int] = {}
@@ -146,6 +153,7 @@ def project_events(
                 source_epoch=source_epoch,
                 event_ordinal=ordinal,
                 source=source,
+                historical=historical,
             )
         )
     return tuple(records)
@@ -184,7 +192,12 @@ def _kind_and_lane(kind: EventKind) -> tuple[TrajectoryKind, TrajectoryLane]:
 def _lane_for_kind(kind: TrajectoryKind) -> TrajectoryLane:
     if kind is TrajectoryKind.USER:
         return TrajectoryLane.INPUT
-    if kind in (TrajectoryKind.ASSISTANT, TrajectoryKind.SYSTEM, TrajectoryKind.CONTEXT):
+    if kind in (
+        TrajectoryKind.ASSISTANT,
+        TrajectoryKind.REASONING,
+        TrajectoryKind.SYSTEM,
+        TrajectoryKind.CONTEXT,
+    ):
         return TrajectoryLane.MODEL
     if kind in (TrajectoryKind.TOOL_CALL, TrajectoryKind.TOOL_RESULT):
         return TrajectoryLane.TOOLS

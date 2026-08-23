@@ -5,7 +5,9 @@ from __future__ import annotations
 from collections.abc import Iterable
 from json import dumps
 
-from theater.trajectory.models import GroupKind, TrajectoryGroup, TrajectoryRecord
+from theater.trajectory.enums import GroupKind, TimingProvenance
+from theater.trajectory.page import TrajectoryGroup
+from theater.trajectory.records import TrajectoryRecord
 
 
 def newer_record(current: TrajectoryRecord, candidate: TrajectoryRecord) -> TrajectoryRecord:
@@ -44,23 +46,31 @@ def merge_records(
 
 
 def deterministic_record_order(records: Iterable[TrajectoryRecord]) -> tuple[TrajectoryRecord, ...]:
-    """Order one stream by source coordinates, then make cross-stream ties stable."""
-    return tuple(
-        sorted(
-            deduplicate_records(records),
-            key=lambda record: (
-                record.source_epoch,
-                record.raw_index,
-                record.event_ordinal,
-                record.record_id,
-            ),
+    """Sort source coordinates within each stream without ordering streams lexically."""
+    streams: dict[str, list[TrajectoryRecord]] = {}
+    stream_order: list[str] = []
+    for record in deduplicate_records(records):
+        if record.source_epoch not in streams:
+            streams[record.source_epoch] = []
+            stream_order.append(record.source_epoch)
+        streams[record.source_epoch].append(record)
+    ordered: list[TrajectoryRecord] = []
+    for source_epoch in stream_order:
+        ordered.extend(
+            sorted(
+                streams[source_epoch],
+                key=lambda record: (record.raw_index, record.event_ordinal, record.record_id),
+            )
         )
-    )
+    return tuple(ordered)
 
 
 def group_records(records: Iterable[TrajectoryRecord]) -> tuple[TrajectoryGroup, ...]:
     """Build Turn → Step groups and an honest Between turns fallback group."""
     ordered = deterministic_record_order(records)
+    cross_stream = len({record.source_epoch for record in ordered}) > 1
+    if cross_stream and not _positionable_streams(ordered):
+        return (_between_group(ordered),) if ordered else ()
     turn_entries: dict[str, list[TrajectoryRecord]] = {}
     turn_order: list[str] = []
     turn_first: dict[str, int] = {}
@@ -108,7 +118,69 @@ def group_records(records: Iterable[TrajectoryRecord]) -> tuple[TrajectoryGroup,
                 ),
             )
         )
-    return tuple(group for _position, group in sorted(groups, key=lambda item: item[0]))
+    grouped = tuple(group for _position, group in sorted(groups, key=lambda item: item[0]))
+    if cross_stream and _reliable_boundary_times(grouped, ordered):
+        return tuple(
+            group
+            for _time, _position, group in sorted(
+                (
+                    (_group_time(group, ordered), position, group)
+                    for position, group in enumerate(grouped)
+                ),
+                key=lambda item: (item[0], item[1]),
+            )
+        )
+    return grouped
+
+
+def _between_group(records: Iterable[TrajectoryRecord]) -> TrajectoryGroup:
+    values = tuple(records)
+    return TrajectoryGroup(
+        group_id="between-turns",
+        kind=GroupKind.BETWEEN_TURNS,
+        label="Between turns",
+        record_ids=tuple(record.record_id for record in values),
+    )
+
+
+def _positionable_streams(records: tuple[TrajectoryRecord, ...]) -> bool:
+    call_ids = {record.call_id for record in records if record.call_id is not None}
+    if any(record.parent_call_id in call_ids for record in records):
+        return True
+    return all(
+        record.timing is not None
+        and record.timing.start is not None
+        and record.timing.provenance in (TimingProvenance.SOURCE, TimingProvenance.OBSERVED)
+        for record in records
+    )
+
+
+def _reliable_boundary_times(
+    groups: tuple[TrajectoryGroup, ...], records: tuple[TrajectoryRecord, ...]
+) -> bool:
+    if not groups:
+        return False
+    by_id = {record.record_id: record for record in records}
+    return all(_group_time(group, records) is not None for group in groups) and all(
+        record.timing is not None
+        and record.timing.start is not None
+        and record.timing.provenance in (TimingProvenance.SOURCE, TimingProvenance.OBSERVED)
+        for record in by_id.values()
+    )
+
+
+def _group_time(group: TrajectoryGroup, records: tuple[TrajectoryRecord, ...]) -> float | None:
+    by_id = {record.record_id: record for record in records}
+    record_ids = list(group.record_ids)
+    for child in group.children:
+        record_ids.extend(child.record_ids)
+    times: list[float] = []
+    for record_id in record_ids:
+        record = by_id.get(record_id)
+        if record is None or record.timing is None or record.timing.start is None:
+            continue
+        times.append(record.timing.start)
+    return min(times) if times else None
 
 
 def _step_groups(records: Iterable[TrajectoryRecord], turn_id: str) -> tuple[TrajectoryGroup, ...]:

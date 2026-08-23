@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-from theater.trajectory.models import (
-    TrajectoryDelta,
-    TrajectoryPage,
-    TrajectoryRecord,
-)
+from theater.trajectory.page import TrajectoryDelta, TrajectoryPage
+from theater.trajectory.records import TrajectoryRecord
 
 
 def to_wire(

@@ -22,6 +22,12 @@ TRAJECTORY_IDLE_TTL_SECONDS = 5 * 60.0
 TRAJECTORY_UI_RECORD_LIMIT = 2_000
 # Maximum encoded bytes retained in one régie participant window.
 TRAJECTORY_UI_MAX_BYTES = 8 << 20
+# Byte window read backwards for one transcript history page.
+TRAJECTORY_TRANSCRIPT_HISTORY_WINDOW_BYTES = 256 * 1024
+# Hard cap on one transcript history page reverse scan.
+TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES = 1 << 20
+# Bytes sampled at each end of a transcript cursor identity.
+TRAJECTORY_TRANSCRIPT_CURSOR_FINGERPRINT_BYTES = 64
 # Maximum mutable-update coalescing interval in milliseconds.
 TRAJECTORY_MUTABLE_UPDATE_COALESCE_MS = 50
 # Maximum server-side follow wait in seconds.
@@ -49,6 +55,9 @@ __all__ = [
     "TRAJECTORY_RESPONSE_MAX_BYTES",
     "TRAJECTORY_TOOLTIP_DELAY_MS",
     "TRAJECTORY_TOTAL_CACHE_MAX_BYTES",
+    "TRAJECTORY_TRANSCRIPT_CURSOR_FINGERPRINT_BYTES",
+    "TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES",
+    "TRAJECTORY_TRANSCRIPT_HISTORY_WINDOW_BYTES",
     "TRAJECTORY_UI_MAX_BYTES",
     "TRAJECTORY_UI_RECORD_LIMIT",
     "TRAJECTORY_WARM_STREAM_LIMIT",

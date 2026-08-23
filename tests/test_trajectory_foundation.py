@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from theater.harness.contracts.events import Event, EventKind
-from theater.harness.contracts.source import Batch, History, Source
+from theater.harness.contracts.source import Batch, History, Source, SourceContractError
 from theater.harness.contracts.trajectory import ParsedRecord, TrajectoryFact
 from theater.harness.transcript.observer import TranscriptObserver, open_participant_source
 from theater.harness.transcript.source import TranscriptSource
@@ -26,7 +26,10 @@ from theater.trajectory import (
     TrajectoryStatus,
     TrajectoryValidationError,
     bounded_preview,
+    deterministic_record_order,
+    event_to_fact,
     event_to_record,
+    fact_to_record,
     fallback_record_id,
     group_records,
     merge_records,
@@ -38,6 +41,7 @@ def make_record(
     *,
     revision: int = 0,
     raw_index: int = 0,
+    source_epoch: str = "epoch",
     turn_id: str | None = None,
     step_id: str | None = None,
     details: tuple[DetailField, ...] = (),
@@ -46,7 +50,7 @@ def make_record(
         record_id=record_id,
         revision=revision,
         participant_id="participant",
-        source_epoch="epoch",
+        source_epoch=source_epoch,
         lane=TrajectoryLane.MODEL,
         kind=TrajectoryKind.ASSISTANT,
         source="baseline",
@@ -89,9 +93,8 @@ def test_utf8_preview_keeps_safe_head_tail_and_exact_omission() -> None:
     unsafe = bounded_preview("\x1b[31m[bold]\x00")
     assert "\x1b" not in unsafe.text
     assert "\x00" not in unsafe.text
-    assert "\\[bold]" in unsafe.text
-    with pytest.raises(TrajectoryValidationError):
-        ContentPreview("[bold]")
+    assert unsafe.text == r"\x1b[31m[bold]\x00"
+    assert ContentPreview(r"[bold]\literal").text == r"[bold]\literal"
 
 
 def test_record_detail_fields_obey_field_and_aggregate_byte_caps() -> None:
@@ -127,6 +130,60 @@ def test_projection_identity_revision_and_grouping_are_deterministic() -> None:
     assert groups[0].kind is GroupKind.BETWEEN_TURNS
     assert groups[1].kind is GroupKind.TURN
     assert groups[1].children[0].kind is GroupKind.STEP
+
+
+def test_reasoning_wire_and_status_projection_are_explicit() -> None:
+    reasoning = TrajectoryRecord(
+        record_id="reasoning",
+        revision=0,
+        participant_id="participant",
+        source_epoch="source",
+        lane=TrajectoryLane.MODEL,
+        kind=TrajectoryKind.REASONING,
+        source="harness",
+        summary="visible reasoning summary",
+        status=TrajectoryStatus.COMPLETED,
+    )
+    assert TrajectoryRecord.from_wire(reasoning.to_wire()).kind is TrajectoryKind.REASONING
+    assert (
+        event_to_fact(Event(kind=EventKind.USER, text="prompt")).status
+        is TrajectoryStatus.COMPLETED
+    )
+    assert (
+        event_to_fact(Event(kind=EventKind.ASSISTANT, text="old"), historical=True).status
+        is TrajectoryStatus.COMPLETED
+    )
+    assert (
+        event_to_fact(Event(kind=EventKind.ASSISTANT, text="live")).status
+        is TrajectoryStatus.RUNNING
+    )
+
+
+def test_cross_stream_order_does_not_use_lexical_epoch_order() -> None:
+    records = (
+        make_record("z-2", source_epoch="z", raw_index=2),
+        make_record("a-1", source_epoch="a", raw_index=1),
+        make_record("z-1", source_epoch="z", raw_index=1),
+    )
+    ordered = deterministic_record_order(records)
+    assert [record.record_id for record in ordered] == ["z-1", "z-2", "a-1"]
+    groups = group_records(records)
+    assert len(groups) == 1
+    assert groups[0].kind is GroupKind.BETWEEN_TURNS
+
+
+def test_raw_text_preserves_literal_markup_and_is_bounded() -> None:
+    raw = "[bold]\\literal " + "x" * (20 * 1024)
+    fact = event_to_fact(
+        Event(kind=EventKind.ASSISTANT, text="clipped", raw_text=raw),
+        historical=True,
+    )
+    assert fact.details[0].name == "raw"
+    assert fact.details[0].preview.text.startswith("[bold]\\literal")
+    assert fact.details[0].preview.encoded_bytes <= 16 * 1024
+    record = fact_to_record(fact, participant_id="p", source_epoch="epoch")
+    assert record.details[0].preview.text == fact.details[0].preview.text
+    assert len(record.summary.encode("utf-8")) <= 16 * 1024
 
 
 class LegacyCountingObserver(TranscriptObserver):
@@ -166,12 +223,41 @@ class RichObserver(LegacyCountingObserver):
         )
 
 
+class RawObserver(LegacyCountingObserver):
+    def parse(self, line: str, index: int, *, clip_text: bool = True) -> list[Event]:
+        self.parse_calls += 1
+        return [
+            Event(
+                kind=EventKind.ASSISTANT,
+                text=line,
+                raw_text="[raw]\\literal " + "x" * (20 * 1024),
+                raw_index=index,
+            )
+        ]
+
+
+class InvalidRecordObserver(LegacyCountingObserver):
+    def parse_record(self, line: str, index: int, *, clip_text: bool = True):
+        self.parse_calls += 1
+        return [Event(kind=EventKind.ASSISTANT, text=line, raw_index=index)]
+
+
 async def test_default_parse_record_calls_legacy_parse_once() -> None:
     path = Path("/tmp/unused-transcript")
     observer = LegacyCountingObserver(path)
     parsed = observer.parse_record("line", 3)
     assert len(parsed.events) == 1
     assert parsed.trajectory == ()
+    assert observer.parse_calls == 1
+
+
+async def test_invalid_parse_record_result_raises_without_legacy_fallback(tmp_path) -> None:
+    path = tmp_path / "transcript.jsonl"
+    path.write_text("one\n", encoding="utf-8")
+    observer = InvalidRecordObserver(path)
+    source = TranscriptSource(observer, cwd=str(tmp_path))
+    with pytest.raises(SourceContractError):
+        await source.read()
     assert observer.parse_calls == 1
 
 
@@ -206,6 +292,84 @@ async def test_transcript_live_reads_emit_facts_and_history_pages_do_not_move_cu
     assert [event.text for event in live.events] == ["four"]
     assert [fact.native_id for fact in live.trajectory] == ["native-3"]
     assert observer.parse_calls == 4
+
+
+async def test_history_cursor_invalidates_after_rewrite_and_rotation(tmp_path) -> None:
+    path = tmp_path / "transcript.jsonl"
+    path.write_text("one\ntwo\nthree\n", encoding="utf-8")
+    observer = RichObserver(path)
+    source = TranscriptSource(observer, cwd=str(tmp_path))
+    attached = await source.read()
+    assert attached.attached is not None
+    source.commit_attachment()
+    page = await source.history_page(limit=1)
+    assert page.older_cursor is not None
+
+    path.write_text("rewritten\ntwo\nthree\n", encoding="utf-8")
+    rewritten = await source.history_page(before=page.older_cursor, limit=1)
+    assert rewritten.error_code == "history_cursor_invalid"
+
+    path.write_text("one\ntwo\nthree\n", encoding="utf-8")
+    page = await source.history_page(limit=1)
+    assert page.older_cursor is not None
+    replacement = tmp_path / "replacement.jsonl"
+    replacement.write_text("replacement\n", encoding="utf-8")
+    replacement.replace(path)
+    rotated = await source.history_page(before=page.older_cursor, limit=1)
+    assert rotated.error_code == "history_cursor_invalid"
+
+
+async def test_history_page_work_is_bounded_to_reverse_window(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "large.jsonl"
+    path.write_text("".join(f"record-{index}\n" for index in range(200_000)), encoding="utf-8")
+    observer = LegacyCountingObserver(path)
+    source = TranscriptSource(observer, cwd=str(tmp_path))
+    attached = await source.read()
+    assert attached.attached is not None
+    source.commit_attachment()
+
+    bytes_read = [0]
+    real_open = Path.open
+
+    class CountingFile:
+        def __init__(self, handle) -> None:
+            self.handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return self.handle.__exit__(*args)
+
+        def read(self, *args):
+            value = self.handle.read(*args)
+            bytes_read[0] += len(value)
+            return value
+
+        def __getattr__(self, name):
+            return getattr(self.handle, name)
+
+    def counted_open(file_path, *args, **kwargs):
+        return CountingFile(real_open(file_path, *args, **kwargs))
+
+    monkeypatch.setattr(Path, "open", counted_open)
+    page = await source.history_page(limit=1)
+    assert [event.text for event in page.events] == ["record-199999"]
+    assert bytes_read[0] < path.stat().st_size
+
+
+async def test_history_page_does_not_retain_unbounded_event_raw_text(tmp_path) -> None:
+    path = tmp_path / "raw.jsonl"
+    path.write_text("record\n", encoding="utf-8")
+    observer = RawObserver(path)
+    source = TranscriptSource(observer, cwd=str(tmp_path))
+    attached = await source.read()
+    assert attached.attached is not None
+    source.commit_attachment()
+    page = await source.history_page(limit=1)
+    assert page.events[0].raw_text is not None
+    assert page.events[0].raw_text.startswith("[raw]\\literal")
+    assert len(page.events[0].raw_text.encode("utf-8")) <= 16 * 1024
 
 
 class LegacySource(Source):

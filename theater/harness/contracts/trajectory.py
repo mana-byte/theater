@@ -6,15 +6,19 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from theater.harness.contracts.events import Event
-from theater.trajectory.models import (
+from theater.trajectory.content import (
+    ContentPreview,
     DetailField,
-    Timing,
+    bound_detail_fields,
+    sanitize_text,
+)
+from theater.trajectory.enums import (
     TrajectoryKind,
     TrajectoryLane,
     TrajectoryStatus,
-    TrajectoryUsage,
     TrajectoryValidationError,
 )
+from theater.trajectory.records import Timing, TrajectoryUsage
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +33,7 @@ class FactLink:
             raise TrajectoryValidationError("fact link target_id must be a non-empty string")
         if not isinstance(self.relation, str) or not self.relation:
             raise TrajectoryValidationError("fact link relation must be a non-empty string")
+        object.__setattr__(self, "relation", sanitize_text(self.relation))
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +62,7 @@ class TrajectoryFact:
         _validate_fact_text(self)
         _validate_fact_identity(self)
         _validate_fact_payload(self)
-        object.__setattr__(self, "details", tuple(self.details))
+        object.__setattr__(self, "details", bound_detail_fields(self.details))
         object.__setattr__(self, "links", tuple(self.links))
         _validate_fact_collections(self)
 
@@ -98,10 +103,8 @@ def _validate_fact_text(fact: TrajectoryFact) -> None:
         raise TrajectoryValidationError("fact.source must be a non-empty string")
     if not isinstance(fact.summary, str):
         raise TrajectoryValidationError("fact.summary must be a string")
-    try:
-        fact.summary.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        raise TrajectoryValidationError("fact.summary must contain valid UTF-8") from exc
+    object.__setattr__(fact, "source", sanitize_text(fact.source))
+    object.__setattr__(fact, "summary", ContentPreview.from_text(fact.summary).text)
     object.__setattr__(fact, "kind", _enum(TrajectoryKind, fact.kind, "fact.kind"))
     if fact.lane is not None:
         object.__setattr__(fact, "lane", _enum(TrajectoryLane, fact.lane, "fact.lane"))

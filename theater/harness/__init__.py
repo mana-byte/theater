@@ -56,6 +56,7 @@ from theater.harness.contracts.source import (
     History,
     HistoryPage,
     Source,
+    SourceContractError,
     StreamPoint,
     TrajectoryHistoryPage,
 )
@@ -146,6 +147,7 @@ __all__ = [
     "ScreenKind",
     "ScreenReading",
     "Source",
+    "SourceContractError",
     "StreamPoint",
     "TrajectoryFact",
     "TrajectoryHistoryPage",

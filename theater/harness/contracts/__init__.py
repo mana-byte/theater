@@ -36,6 +36,7 @@ from theater.harness.contracts.source import (
     History,
     HistoryPage,
     Source,
+    SourceContractError,
     TrajectoryHistoryPage,
 )
 from theater.harness.contracts.trajectory import FactLink, ParsedRecord, TrajectoryFact
@@ -59,6 +60,7 @@ __all__ = [
     "ScreenKind",
     "ScreenReading",
     "Source",
+    "SourceContractError",
     "TokenUsage",
     "TrajectoryFact",
     "TrajectoryHistoryPage",

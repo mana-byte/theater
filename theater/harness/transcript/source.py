@@ -14,10 +14,16 @@ import hashlib
 import json
 import logging
 import os
+from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
-from theater.constants.trajectory import TRAJECTORY_PAGE_RECORD_LIMIT
+from theater.constants.trajectory import (
+    TRAJECTORY_PAGE_RECORD_LIMIT,
+    TRAJECTORY_TRANSCRIPT_CURSOR_FINGERPRINT_BYTES,
+    TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES,
+    TRAJECTORY_TRANSCRIPT_HISTORY_WINDOW_BYTES,
+)
 from theater.harness.contracts.events import Event
 from theater.harness.contracts.source import (
     Attachment,
@@ -27,6 +33,7 @@ from theater.harness.contracts.source import (
     IdentityLossEvidence,
     ReceiptAdmission,
     Source,
+    SourceContractError,
     StreamPoint,
 )
 from theater.harness.contracts.trajectory import ParsedRecord, TrajectoryFact
@@ -36,6 +43,7 @@ from theater.provenance import (
     is_trusted_provenance,
     normalize_provenance,
 )
+from theater.trajectory.content import ContentPreview
 from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
     TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
@@ -46,6 +54,11 @@ if TYPE_CHECKING:
     from theater.harness.transcript.observer import TranscriptObserver
 
 logger = logging.getLogger("theater.harness.source")
+
+
+def _bounded_history_event(event: Event) -> Event:
+    raw_text = ContentPreview.from_text(event.raw_text).text if event.raw_text is not None else None
+    return replace(event, text=ContentPreview.from_text(event.text).text, raw_text=raw_text)
 
 
 class TranscriptSource(Source):
@@ -301,6 +314,14 @@ class TranscriptSource(Source):
         if path is None:
             return HistoryPage(pinned=pinned)
         if path_error := self._history_path_error(path, pinned=pinned):
+            if before is not None and path_error.error_code is None:
+                return HistoryPage(
+                    location=path_error.location,
+                    error_code="history_cursor_invalid",
+                    error="history cursor cannot be used because the transcript is unavailable",
+                    provenance=path_error.correlation,
+                    pinned=path_error.pinned,
+                )
             return HistoryPage(
                 location=path_error.location,
                 error_code=path_error.error_code,
@@ -309,12 +330,29 @@ class TranscriptSource(Source):
                 pinned=path_error.pinned,
             )
         try:
-            end = self._decode_page_cursor(before, path) if before is not None else None
-            events, facts, start, total = await asyncio.to_thread(
+            end, end_index, cursor_identity = (
+                self._decode_page_cursor(before, path) if before is not None else (None, None, None)
+            )
+            live_index = (
+                self.index
+                if before is None and self.path == path and self.offset == path.stat().st_size
+                else end_index
+            )
+            (
+                events,
+                facts,
+                start,
+                page_end,
+                start_index,
+                page_end_index,
+                identity,
+            ) = await asyncio.to_thread(
                 self._read_page,
                 path,
                 end=end,
+                end_index=live_index,
                 limit=limit,
+                expected_identity=cursor_identity,
             )
         except ValueError as exc:
             return HistoryPage(error_code="history_cursor_invalid", error=str(exc), pinned=pinned)
@@ -335,8 +373,10 @@ class TranscriptSource(Source):
             location=str(path),
             events=events,
             trajectory=facts,
-            cursor=self._encode_page_cursor(path, end if end is not None else total),
-            older_cursor=self._encode_page_cursor(path, start) if start > 0 else None,
+            cursor=self._encode_page_cursor(path, page_end, page_end_index, identity),
+            older_cursor=(
+                self._encode_page_cursor(path, start, start_index, identity) if start > 0 else None
+            ),
             has_older=start > 0,
             provenance=self.correlation_for(path, session_id),
             pinned=pinned,
@@ -429,7 +469,7 @@ class TranscriptSource(Source):
                 for index, raw in enumerate(fh):
                     line = raw.strip()
                     if line:
-                        events.extend(self._observer.parse(line, index, clip_text=False))
+                        events.extend(self._parse_record(line, index, clip_text=False).events)
         except OSError:
             if strict:
                 raise
@@ -438,50 +478,120 @@ class TranscriptSource(Source):
         return events
 
     def _read_page(
-        self, path: Path, *, end: int | None, limit: int
-    ) -> tuple[list[Event], list[TrajectoryFact], int, int]:
-        with path.open("rb") as fh:
-            total = sum(1 for _ in fh)
+        self,
+        path: Path,
+        *,
+        end: int | None,
+        end_index: int | None,
+        limit: int,
+        expected_identity: dict[str, object] | None,
+    ) -> tuple[
+        list[Event],
+        list[TrajectoryFact],
+        int,
+        int,
+        int | None,
+        int | None,
+        dict[str, object],
+    ]:
+        identity = self._page_file_identity(path)
+        if expected_identity is not None and identity != expected_identity:
+            raise ValueError("history cursor is invalid because the transcript changed")
+        total = cast(int, identity["size"])
         page_end = total if end is None else end
         if page_end < 0 or page_end > total:
             raise ValueError("history cursor is outside the transcript")
-        start = max(0, page_end - limit)
+        scan_start = max(
+            0,
+            page_end
+            - min(
+                TRAJECTORY_TRANSCRIPT_HISTORY_WINDOW_BYTES,
+                TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES,
+            ),
+        )
+        with path.open("rb") as fh:
+            fh.seek(scan_start)
+            data = fh.read(page_end - scan_start)
+        if scan_start:
+            first_newline = data.find(b"\n")
+            if first_newline < 0:
+                return [], [], page_end, page_end, end_index, end_index, identity
+            data = data[first_newline + 1 :]
+            scan_start += first_newline + 1
+        lines: list[tuple[int, bytes]] = []
+        offset = scan_start
+        for raw in data.splitlines(keepends=True):
+            if not raw.endswith(b"\n"):
+                break
+            lines.append((offset, raw[:-1]))
+            offset += len(raw)
+        selected = lines[-limit:]
+        selected_position = len(lines) - len(selected)
+        if end_index is None:
+            page_start_index = selected_position
+            selected_end_index: int | None = None
+        else:
+            page_start_index = end_index - len(lines) + selected_position
+            selected_end_index = end_index
         events: list[Event] = []
         facts: list[TrajectoryFact] = []
-        with path.open("rb") as fh:
-            for index, raw in enumerate(fh):
-                if index < start:
-                    continue
-                if index >= page_end:
-                    break
-                line = raw.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
-                parsed = self._parse_record(line, index, clip_text=False)
-                events.extend(event for event in parsed.events if not event.usage_only)
-                facts.extend(parsed.trajectory)
-        return events, facts, start, total
+        for position, (_offset, raw) in enumerate(selected):
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            parsed = self._parse_record(
+                line,
+                page_start_index + position,
+                clip_text=False,
+            )
+            events.extend(
+                _bounded_history_event(event) for event in parsed.events if not event.usage_only
+            )
+            facts.extend(parsed.trajectory)
+        start = selected[0][0] if selected else page_end
+        start_index = page_start_index if end_index is not None else None
+        return events, facts, start, page_end, start_index, selected_end_index, identity
 
     def _parse_record(self, line: str, index: int, *, clip_text: bool) -> ParsedRecord:
-        parser = getattr(self._observer, "parse_record", None)
-        if callable(parser):
-            parsed = parser(line, index, clip_text=clip_text)
-            if isinstance(parsed, ParsedRecord):
-                return parsed
-        return ParsedRecord(events=tuple(self._observer.parse(line, index, clip_text=clip_text)))
+        missing = object()
+        parser = getattr(self._observer, "parse_record", missing)
+        if parser is missing:
+            return ParsedRecord(
+                events=tuple(self._observer.parse(line, index, clip_text=clip_text))
+            )
+        if not callable(parser):
+            raise SourceContractError("TranscriptObserver.parse_record must be callable")
+        parsed = parser(line, index, clip_text=clip_text)
+        if not isinstance(parsed, ParsedRecord):
+            raise SourceContractError("TranscriptObserver.parse_record must return ParsedRecord")
+        return parsed
 
     @staticmethod
     def _page_path_key(path: Path) -> str:
         return hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()[:24]
 
     @classmethod
-    def _encode_page_cursor(cls, path: Path, end: int) -> str:
-        payload = {"v": 1, "path": cls._page_path_key(path), "end": end}
+    def _encode_page_cursor(
+        cls,
+        path: Path,
+        end: int,
+        end_index: int | None,
+        identity: dict[str, object],
+    ) -> str:
+        payload = {
+            "v": 2,
+            "path": cls._page_path_key(path),
+            "identity": identity,
+            "end": end,
+            "end_index": end_index,
+        }
         encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         return "trj1." + base64.urlsafe_b64encode(encoded).decode("ascii").rstrip("=")
 
     @classmethod
-    def _decode_page_cursor(cls, cursor: str | None, path: Path) -> int:
+    def _decode_page_cursor(
+        cls, cursor: str | None, path: Path
+    ) -> tuple[int, int | None, dict[str, object]]:
         if not isinstance(cursor, str) or not cursor.startswith("trj1."):
             raise ValueError("history cursor is not valid for a transcript source")
         try:
@@ -489,15 +599,48 @@ class TranscriptSource(Source):
             payload = json.loads(raw.decode("utf-8"))
         except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("history cursor is malformed") from exc
+        if not isinstance(payload, dict):
+            raise ValueError(  # noqa: TRY004
+                "history cursor does not belong to this transcript source"
+            )
+        end = payload.get("end")
+        end_index = payload.get("end_index")
         if (
-            not isinstance(payload, dict)
-            or set(payload) != {"v", "path", "end"}
-            or payload.get("v") != 1
+            set(payload) != {"v", "path", "identity", "end", "end_index"}
+            or payload.get("v") != 2
             or payload.get("path") != cls._page_path_key(path)
-            or type(payload.get("end")) is not int
+            or type(end) is not int
+            or end < 0
+            or (end_index is not None and type(end_index) is not int)
+            or (isinstance(end_index, int) and end_index < 0)
+            or not isinstance(payload.get("identity"), dict)
         ):
             raise ValueError("history cursor does not belong to this transcript source")
-        return payload["end"]
+        identity = cast(dict[str, object], payload["identity"])
+        if identity != cls._page_file_identity(path):
+            raise ValueError("history cursor is invalid because the transcript changed")
+        return end, cast(int | None, end_index), identity
+
+    @classmethod
+    def _page_file_identity(cls, path: Path) -> dict[str, object]:
+        with path.open("rb") as fh:
+            stat = os.fstat(fh.fileno())
+            sample_size = TRAJECTORY_TRANSCRIPT_CURSOR_FINGERPRINT_BYTES
+            head = fh.read(sample_size)
+            if stat.st_size > sample_size:
+                fh.seek(max(0, stat.st_size - sample_size))
+                tail = fh.read(sample_size)
+            else:
+                tail = head
+        return {
+            "dev": int(stat.st_dev),
+            "ino": int(stat.st_ino),
+            "size": int(stat.st_size),
+            "mtime_ns": int(stat.st_mtime_ns),
+            "ctime_ns": int(stat.st_ctime_ns),
+            "head": base64.urlsafe_b64encode(head).decode("ascii"),
+            "tail": base64.urlsafe_b64encode(tail).decode("ascii"),
+        }
 
     # ---- internals ------------------------------------------------------
 
