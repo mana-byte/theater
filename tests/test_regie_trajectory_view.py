@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from textual.app import App, ComposeResult
+from textual.widgets import Input
 
 from theater.regie.trajectory.enums import FocusRegion
 from theater.regie.trajectory.inspector import Inspector
 from theater.regie.trajectory.ledger import Ledger
+from theater.regie.trajectory.state import TrajectoryStateStore
 from theater.regie.trajectory.timeline import Timeline
 from theater.regie.trajectory.view import ReturnToTree, TrajectoryView
 from theater.trajectory import PanelState, PanelStateInfo, TrajectoryRecord
@@ -36,13 +38,24 @@ def make_record(record_id: str, summary: str, *, turn_id: str | None = "t1") -> 
 
 
 class Host(App):
-    def __init__(self, *, copied: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        copied: list[str] | None = None,
+        state_store: TrajectoryStateStore | None = None,
+    ) -> None:
         super().__init__()
         self.copied = copied if copied is not None else []
+        self.state_store = state_store
         self.returned = 0
 
     def compose(self) -> ComposeResult:
-        yield TrajectoryView("p1", copy_request=self.copied.append, id="trajectory")
+        yield TrajectoryView(
+            "p1",
+            copy_request=self.copied.append,
+            state_store=self.state_store,
+            id="trajectory",
+        )
 
     def on_return_to_tree(self, _message: ReturnToTree) -> None:
         self.returned += 1
@@ -104,3 +117,31 @@ async def test_copy_is_injected_and_literal_data_is_not_rich_escaped() -> None:
         assert copied
         assert "second" in copied[0]
         assert "[literal] \\ path" in copied[0]
+
+
+async def test_inspector_maximizes_by_key_and_header_double_click() -> None:
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await add_records(app)
+        await pilot.press("enter", "m")
+        assert view.state.inspector_maximized
+
+        await pilot.click("#trajectory-inspector", offset=(1, 0), times=2)
+        assert not view.state.inspector_maximized
+
+
+async def test_remount_restores_the_participant_search_state() -> None:
+    states = TrajectoryStateStore()
+    state = states.get("p1")
+    state.search_open = True
+    state.query = "saved query"
+    app = Host(state_store=states)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        view = app.query_one("#trajectory", TrajectoryView)
+        search = app.query_one("#trajectory-search", Input)
+        assert view.state is state
+        assert view.state.search_open
+        assert not search.has_class("-hidden")
+        assert search.value == "saved query"

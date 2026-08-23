@@ -32,6 +32,7 @@ tests, which is the regression that suite exists to catch.
 
 from __future__ import annotations
 
+from theater.tmux.buffers import set_buffer  # noqa: F401
 from theater.tmux.command import (  # noqa: F401
     _FORMAT_SEP,
     _PANE_FORMAT,

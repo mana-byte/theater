@@ -215,6 +215,11 @@ class TrajectoryCache:
     def remove(self, participant_id: str) -> CacheStream | None:
         return self._entries.pop(participant_id, None)
 
+    def clear(self) -> tuple[CacheStream, ...]:
+        entries = tuple(self._entries.values())
+        self._entries.clear()
+        return entries
+
     def evictable(self, entry: CacheStream) -> bool:
         """Whether a stream may be removed by a bound or TTL sweep."""
         return not entry.loading
@@ -224,13 +229,18 @@ class TrajectoryCache:
         protected = protected or set()
         evicted: list[CacheStream] = []
         while len(self._entries) > self.warm_streams or self.total_cached_bytes > self.total_bytes:
+            candidates = [
+                entry
+                for pid, entry in self._entries.items()
+                if pid not in protected and self.evictable(entry)
+            ]
             candidate = next(
                 (
                     entry
-                    for pid, entry in self._entries.items()
-                    if pid not in protected and self.evictable(entry)
+                    for entry in candidates
+                    if entry.viewer_refs == 0 and entry.follower_refs == 0
                 ),
-                None,
+                candidates[0] if candidates else None,
             )
             if candidate is None:
                 break

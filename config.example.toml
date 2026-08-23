@@ -103,6 +103,9 @@ dashboard_tip_hold_seconds = 6.0
 # Seconds between characters while typing a dashboard tip in or out.
 dashboard_tip_char_interval = 0.04
 
+# Initial height of the trajectory inspector as a fraction of its panel.
+trajectory_inspector_ratio = 0.35
+
 
 [rails]
 

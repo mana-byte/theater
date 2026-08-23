@@ -51,6 +51,10 @@ class InspectorResizeRequested(Message):
         self.delta = delta
 
 
+class InspectorMaximizeRequested(Message):
+    """A double-click requested maximize or restore."""
+
+
 class Inspector(Static):
     """Render bounded tab content and keep ordinary wheel input for content."""
 
@@ -175,6 +179,10 @@ class Inspector(Static):
             self.post_message(InspectorParticipantLinkClicked(participant_id))
 
     def on_click(self, event: events.Click) -> None:
+        if int(event.y) == 0 and event.chain >= 2:
+            event.stop()
+            self.post_message(InspectorMaximizeRequested())
+            return
         participant_id = self._link_line_ids.get(int(event.y) + int(self.scroll_y))
         if participant_id is None:
             return
@@ -227,6 +235,7 @@ class Inspector(Static):
 
 __all__ = [
     "Inspector",
+    "InspectorMaximizeRequested",
     "InspectorParticipantLinkClicked",
     "InspectorResizeRequested",
     "InspectorTabChanged",

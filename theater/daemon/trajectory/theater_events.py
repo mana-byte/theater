@@ -208,14 +208,15 @@ def _links(
 
 
 def _timing(timestamp: object, payload: Mapping[str, object]) -> Timing | None:
-    start = _finite_number(timestamp)
-    if start is None:
+    end = _finite_number(timestamp)
+    if end is None:
         return None
     elapsed = _finite_number(payload.get("elapsed_seconds"))
     duration_ms = elapsed * 1000 if elapsed is not None and elapsed >= 0 else None
+    start = end - elapsed if elapsed is not None and elapsed >= 0 else end
     return Timing(
         start=start,
-        end=start,
+        end=end,
         duration_ms=duration_ms,
         provenance=TimingProvenance.OBSERVED,
     )

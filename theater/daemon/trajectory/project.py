@@ -25,7 +25,7 @@ def project_batch(
 ) -> tuple[TrajectoryRecord, ...]:
     """Project a live batch, allowing rich facts to replace baseline events."""
     return project_events_and_facts(
-        batch.events,
+        batch.events if batch.trajectory_events is None else batch.trajectory_events,
         batch.trajectory,
         participant_id=participant_id,
         source_epoch=source_epoch,
@@ -42,7 +42,7 @@ def project_history_page(
 ) -> tuple[TrajectoryRecord, ...]:
     """Project one bounded history page without changing a live source cursor."""
     return project_events_and_facts(
-        page.events,
+        page.events if page.trajectory_events is None else page.trajectory_events,
         page.trajectory,
         participant_id=participant_id,
         source_epoch=source_epoch,

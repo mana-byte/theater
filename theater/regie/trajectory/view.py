@@ -28,6 +28,7 @@ from theater.regie.trajectory.filter_panel import (
 )
 from theater.regie.trajectory.inspector import (
     Inspector,
+    InspectorMaximizeRequested,
     InspectorParticipantLinkClicked,
     InspectorResizeRequested,
     InspectorTabChanged,
@@ -148,14 +149,18 @@ class TrajectoryView(Vertical):
         state_store: TrajectoryStateStore | None = None,
         copy_request: CopyRequest | None = None,
         participant_link: ParticipantLinkRequest | None = None,
+        focus_on_mount: bool = True,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
         self.participant_id = participant_id
         self.controller = controller
-        self.state_store = state_store or (
-            controller.state_store if controller else TrajectoryStateStore()
-        )
+        if state_store is not None:
+            self.state_store = state_store
+        elif controller is not None:
+            self.state_store = controller.state_store
+        else:
+            self.state_store = TrajectoryStateStore()
         self.state = (
             controller.state_for(participant_id)
             if controller is not None
@@ -163,6 +168,7 @@ class TrajectoryView(Vertical):
         )
         self._copy_request = copy_request
         self._participant_link = participant_link
+        self._focus_on_mount = focus_on_mount
         self._unsubscribe: Callable[[], None] | None = None
         self._search_result = SearchResult((), (), frozenset(), {}, FilterCounts())
         self._search_cache = SearchCache()
@@ -187,8 +193,12 @@ class TrajectoryView(Vertical):
                 name=f"trajectory-open-{self.participant_id}",
                 exclusive=True,
             )
+        self.call_after_refresh(self._finish_mount)
+
+    def _finish_mount(self) -> None:
         self._refresh()
-        self.focus_region(self.state.focus_region)
+        if self._focus_on_mount:
+            self.focus_region(self.state.focus_region)
 
     def on_unmount(self) -> None:
         if self._unsubscribe is not None:
@@ -255,6 +265,10 @@ class TrajectoryView(Vertical):
         ledger = self.query_one("#trajectory-ledger", Ledger)
         filter_panel = self.query_one("#trajectory-filters", FilterPanel)
         inspector = self.query_one("#trajectory-inspector", Inspector)
+        search = self.query_one("#trajectory-search", Input)
+        search.set_class(not self.state.search_open, "-hidden")
+        if search.value != self.state.query:
+            search.value = self.state.query
         timeline_offset: int | None = self.state.timeline_scroll
         if self.state.follow_tail:
             timeline_offset = max(0, len(self.state.record_list) - timeline._available_cells())
@@ -470,6 +484,11 @@ class TrajectoryView(Vertical):
             search.value = ""
             search.add_class("-hidden")
         self._refresh()
+        if self.controller is not None:
+            self.run_worker(
+                self.controller.resume_follow(self.participant_id),
+                name="trajectory-follow",
+            )
 
     def action_oldest(self) -> None:
         self.state.pause_follow()
@@ -505,6 +524,8 @@ class TrajectoryView(Vertical):
         self._refresh(recompute=False)
 
     def action_toggle_inspector_maximize(self) -> None:
+        if not self.state.inspector_open:
+            return
         self.state.inspector_maximized = not self.state.inspector_maximized
         self._refresh(recompute=False)
 
@@ -586,6 +607,7 @@ class TrajectoryView(Vertical):
             "slash": self.action_open_search,
             "f": self.action_toggle_filters,
             "d": self.action_toggle_mode,
+            "m": self.action_toggle_inspector_maximize,
             "r": self.action_reset,
             "R": self.action_retry,
             "shift+r": self.action_retry,
@@ -709,6 +731,9 @@ class TrajectoryView(Vertical):
 
     def on_inspector_resize_requested(self, message: InspectorResizeRequested) -> None:
         self.action_resize_inspector(message.delta)
+
+    def on_inspector_maximize_requested(self, _message: InspectorMaximizeRequested) -> None:
+        self.action_toggle_inspector_maximize()
 
     def on_inspector_tab_changed(self, message: InspectorTabChanged) -> None:
         self.state.inspector_tab = message.tab

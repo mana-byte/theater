@@ -358,17 +358,30 @@ class ParticipantTrajectoryState:
         self.filters_open = False
         self.follow_tail = True
         self.new_count = 0
-        self.retry_kind = None
-        self.retry_message = ""
 
 
 class TrajectoryStateStore:
     """Small LRU of participant UI state with no persistence hooks."""
 
-    def __init__(self, *, max_participants: int = TRAJECTORY_WARM_STREAM_LIMIT) -> None:
+    def __init__(
+        self,
+        *,
+        max_participants: int = TRAJECTORY_WARM_STREAM_LIMIT,
+        inspector_ratio: float = TRAJECTORY_INSPECTOR_RATIO_DEFAULT,
+    ) -> None:
         if max_participants < 1:
             raise ValueError("max_participants must be positive")
+        if (
+            not isinstance(inspector_ratio, (int, float))
+            or isinstance(inspector_ratio, bool)
+            or not isfinite(inspector_ratio)
+        ):
+            raise ValueError("inspector ratio must be finite")
         self.max_participants = max_participants
+        self.inspector_ratio = max(
+            TRAJECTORY_INSPECTOR_RATIO_MIN,
+            min(TRAJECTORY_INSPECTOR_RATIO_MAX, float(inspector_ratio)),
+        )
         self._states: OrderedDict[str, ParticipantTrajectoryState] = OrderedDict()
 
     def get(self, participant_id: str) -> ParticipantTrajectoryState:
@@ -380,7 +393,10 @@ class TrajectoryStateStore:
             state = self._states.pop(participant_id)
             self._states[participant_id] = state
             return state
-        state = ParticipantTrajectoryState(participant_id)
+        state = ParticipantTrajectoryState(
+            participant_id,
+            inspector_ratio=self.inspector_ratio,
+        )
         self._states[participant_id] = state
         while len(self._states) > self.max_participants:
             self._states.popitem(last=False)

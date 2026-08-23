@@ -36,8 +36,14 @@ TRAJECTORY_PARTICIPANT_CACHE_MAX_BYTES = 4 << 20
 TRAJECTORY_TOTAL_CACHE_MAX_BYTES = 32 << 20
 # Maximum warm participant streams retained by the daemon.
 TRAJECTORY_WARM_STREAM_LIMIT = 8
+# Maximum opaque older-page cursors retained per warm stream.
+TRAJECTORY_OLDER_CURSOR_LIMIT = 256
 # Idle lifetime of a warm participant stream in seconds.
 TRAJECTORY_IDLE_TTL_SECONDS = 5 * 60.0
+# Interval between idle trajectory cache sweeps.
+TRAJECTORY_CACHE_SWEEP_SECONDS = 30.0
+# Maximum bus rows projected before yielding back to the event loop.
+TRAJECTORY_BUS_DRAIN_BATCH = 256
 # Maximum records retained in one régie participant window.
 TRAJECTORY_UI_RECORD_LIMIT = 2_000
 # Maximum encoded bytes retained in one régie participant window.
@@ -62,6 +68,8 @@ TRAJECTORY_INSPECTOR_RATIO_MIN = 0.20
 TRAJECTORY_INSPECTOR_RATIO_MAX = 0.75
 
 __all__ = [
+    "TRAJECTORY_BUS_DRAIN_BATCH",
+    "TRAJECTORY_CACHE_SWEEP_SECONDS",
     "TRAJECTORY_CURSOR_MAX_BYTES",
     "TRAJECTORY_DETAIL_FIELD_MAX_BYTES",
     "TRAJECTORY_DETAIL_NAME_MAX_BYTES",
@@ -79,6 +87,7 @@ __all__ = [
     "TRAJECTORY_MAX_LINKS_PER_RECORD",
     "TRAJECTORY_MAX_PAGE_GROUPS",
     "TRAJECTORY_MUTABLE_UPDATE_COALESCE_MS",
+    "TRAJECTORY_OLDER_CURSOR_LIMIT",
     "TRAJECTORY_PAGE_RECORD_LIMIT",
     "TRAJECTORY_PARTICIPANT_CACHE_MAX_BYTES",
     "TRAJECTORY_RESPONSE_MAX_BYTES",

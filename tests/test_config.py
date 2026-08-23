@@ -32,6 +32,7 @@ def test_missing_file_is_not_an_error():
     assert loaded.rails.depth_cap == 3
     assert loaded.observer.poll_interval == 0.25
     assert loaded.regie.theme is None
+    assert loaded.regie.trajectory_inspector_ratio == 0.35
 
 
 def test_missing_file_reports_every_value_as_default():
@@ -74,6 +75,7 @@ def test_dashboard_settings_override_defaults():
         "dashboard_sentence_char_interval = 0.08\n"
         "dashboard_tip_hold_seconds = 3.5\n"
         "dashboard_tip_char_interval = 0.02\n"
+        "trajectory_inspector_ratio = 0.4\n"
     )
     loaded = cfg.load()
     assert loaded.regie.dashboard_sentences == ["make it clear", "keep it small"]
@@ -81,6 +83,7 @@ def test_dashboard_settings_override_defaults():
     assert loaded.regie.dashboard_sentence_char_interval == 0.08
     assert loaded.regie.dashboard_tip_hold_seconds == 3.5
     assert loaded.regie.dashboard_tip_char_interval == 0.02
+    assert loaded.regie.trajectory_inspector_ratio == 0.4
 
 
 def test_whole_number_is_accepted_for_an_interval():
@@ -200,6 +203,7 @@ def test_section_must_be_a_table():
         "[regie]\ndashboard_sentence_char_interval = 0.0\n",
         "[regie]\ndashboard_tip_hold_seconds = 0.0\n",
         "[regie]\ndashboard_tip_char_interval = 0.0\n",
+        "[regie]\ntrajectory_inspector_ratio = 0.19\n",
     ],
 )
 def test_out_of_range_is_fatal(body):
@@ -208,6 +212,13 @@ def test_out_of_range_is_fatal(body):
     with pytest.raises(cfg.ConfigError) as exc:
         cfg.load()
     assert "must be >=" in str(exc.value)
+
+
+def test_trajectory_inspector_ratio_has_a_maximum():
+    write("[regie]\ntrajectory_inspector_ratio = 0.76\n")
+    with pytest.raises(cfg.ConfigError) as exc:
+        cfg.load()
+    assert "must be <= 0.75" in str(exc.value)
 
 
 def test_infinite_interval_is_fatal():

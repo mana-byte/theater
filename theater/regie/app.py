@@ -2,9 +2,9 @@
 
 Layout:
     ┌──────────────────────┬──────────────────────────┐
-    │ tree (top)           │  welcome dashboard       │
-    │                      │  (sentence + tips)       │
-    │ bus (bottom)         │  replaced by tmux stage  │
+    │ tree (top)           │  dashboard / trajectory  │
+    │                      │  replaced by tmux stage  │
+    │ bus (bottom)         │                          │
     └──────────────────────┴──────────────────────────┘
 
 The tree and bus are Textual widgets. The right side is a welcome dashboard
@@ -15,9 +15,10 @@ pane layout so the tree stays visible. Unstaging restores the dashboard.
 
 Keybindings:
     j/k or up/down  navigate the tree and usage footer
-    h/l or left/right  navigate usage footer rows
+    h/l              stage trajectory/live pane, then focus on repeat
+    left/right       navigate usage footer rows
     Enter           stage the selected agent in the tree; toggle detailed usage in the footer
-    l               stage the selected agent (if needed) and focus it
+    Esc             return from trajectory to the tree
     <prefix> h      return focus to régie from the stage (claimed only if free)
     x               kill the selected agent's pane
     ctrl+p          command palette, including `Spawn <harness>`
@@ -107,6 +108,12 @@ from theater.regie.controllers.staging import (
     StageOutcome,
     StageResult,
 )
+from theater.regie.controllers.surface import (
+    RightSurface,
+    SurfaceController,
+    TrajectoryStageOutcome,
+    TrajectoryStageResult,
+)
 from theater.regie.controllers.usage import (
     ActivateOutcome,
     FetchAccept,
@@ -121,6 +128,13 @@ from theater.regie.palette import (
     SpawnCommand,
     SpawnHarnessCommands,
     ViewCommands,
+)
+from theater.regie.trajectory import (
+    ReturnToTree,
+    TrajectoryController,
+    TrajectoryParticipantSelected,
+    TrajectoryStateStore,
+    TrajectoryView,
 )
 from theater.regie.tree import (  # noqa: F401
     DOWN,
@@ -211,6 +225,18 @@ class RegieApp(App):
     #sidebar {
         layout: vertical;
     }
+    #right-surface {
+        width: 1fr;
+        height: 1fr;
+        min-width: 0;
+        min-height: 0;
+    }
+    #right-surface.-pane-staged {
+        display: none;
+    }
+    TrajectoryView.-hidden-surface {
+        display: none;
+    }
     #tree-stack {
         height: 1fr;
         layers: base overlay;
@@ -272,7 +298,7 @@ class RegieApp(App):
         Binding("k", "cursor_up", "up", show=False),
         Binding("down", "cursor_down", "down", show=False),
         Binding("up", "cursor_up", "up", show=False),
-        Binding("h", "cursor_left", "left", show=False),
+        Binding("h", "cursor_left_or_trajectory", "trajectory", show=False),
         Binding("left", "cursor_left", "left", show=False),
         Binding("right", "cursor_right", "right", show=False),
         Binding("enter", "stage", "stage"),
@@ -318,6 +344,12 @@ class RegieApp(App):
         self._nav = NavigationState()
         self._usage = UsagePanelState()
         self._staging = StageController(self.settings.regie, panes)
+        self._surface = SurfaceController(panes)
+        self._trajectory_states = TrajectoryStateStore(
+            inspector_ratio=self.settings.regie.trajectory_inspector_ratio
+        )
+        self._trajectory_controller: TrajectoryController | None = None
+        self._trajectory_view_widget: TrajectoryView | None = None
         self._session = SessionController(tmux, panes)
 
     @property
@@ -414,15 +446,16 @@ class RegieApp(App):
             # Applied here: a reactive default fires no watcher; false-vs-false would mount visible.
             bus.set_class(not self.bus_visible, "-hidden")
             yield bus
-        yield WelcomeDashboard(
-            self.harnesses,
-            sentences=self.settings.regie.dashboard_sentences,
-            sentence_hold_seconds=self.settings.regie.dashboard_sentence_hold_seconds,
-            sentence_char_interval=self.settings.regie.dashboard_sentence_char_interval,
-            tip_hold_seconds=self.settings.regie.dashboard_tip_hold_seconds,
-            tip_char_interval=self.settings.regie.dashboard_tip_char_interval,
-            id="welcome-dashboard",
-        )
+        with Vertical(id="right-surface"):
+            yield WelcomeDashboard(
+                self.harnesses,
+                sentences=self.settings.regie.dashboard_sentences,
+                sentence_hold_seconds=self.settings.regie.dashboard_sentence_hold_seconds,
+                sentence_char_interval=self.settings.regie.dashboard_sentence_char_interval,
+                tip_hold_seconds=self.settings.regie.dashboard_tip_hold_seconds,
+                tip_char_interval=self.settings.regie.dashboard_tip_char_interval,
+                id="welcome-dashboard",
+            )
 
     def get_system_commands(self, screen: Screen) -> Iterable[SystemCommand]:
         """Replace Textual's keys submenu with the unstaged dashboard tips."""
@@ -668,8 +701,10 @@ class RegieApp(App):
         self._stop_leaf_reveal()
         self._stop_leaf_retirement()
         self._leaf_retirement.clear()
-        # Best effort: catches paths that never reach action_quit's teardown.
         await self._teardown()
+        if self._trajectory_controller is not None:
+            await self._trajectory_controller.close()
+            self._trajectory_controller = None
         if self._client:
             await self._client.aclose()
 
@@ -1006,6 +1041,134 @@ class RegieApp(App):
         except Exception:
             return None
 
+    def _trajectory_view(self) -> TrajectoryView | None:
+        view = self._trajectory_view_widget
+        return view if view is not None and view.is_mounted else None
+
+    @property
+    def right_surface(self) -> RightSurface:
+        return self._surface.surface
+
+    @property
+    def trajectory_participant(self) -> str | None:
+        return self._surface.trajectory_participant
+
+    def _trajectory_highlight(self) -> str | None:
+        if self._surface.trajectory_visible(self.staged_pane):
+            return self._surface.trajectory_participant
+        return None
+
+    def _sync_right_surface(self) -> None:
+        trajectory_visible = self._surface.trajectory_visible(self.staged_pane)
+        dashboard = self._dashboard()
+        if dashboard is not None:
+            dashboard.set_staged(self.staged_pane is not None or trajectory_visible)
+        view = self._trajectory_view()
+        if view is not None:
+            view.set_class(not trajectory_visible, "-hidden-surface")
+        with contextlib.suppress(Exception):
+            self.query_one("#right-surface", Vertical).set_class(
+                self.staged_pane is not None,
+                "-pane-staged",
+            )
+
+    def _ensure_trajectory_controller(self) -> TrajectoryController:
+        if self._trajectory_controller is None:
+            self._trajectory_controller = TrajectoryController(
+                DaemonClient(),
+                DaemonClient(),
+                state_store=self._trajectory_states,
+            )
+        return self._trajectory_controller
+
+    async def _mount_trajectory(self, participant_id: str) -> TrajectoryView:
+        current = self._trajectory_view()
+        if current is not None and current.participant_id == participant_id:
+            return current
+        if current is not None:
+            await current.remove()
+        view = TrajectoryView(
+            participant_id,
+            controller=self._ensure_trajectory_controller(),
+            copy_request=self._copy_trajectory,
+            focus_on_mount=False,
+            id="trajectory-view",
+        )
+        self._trajectory_view_widget = view
+        await self.query_one("#right-surface", Vertical).mount(view)
+        self._sync_right_surface()
+        return view
+
+    def _selected_trajectory_target(self) -> tuple[str | None, bool]:
+        if not 0 <= self.cursor < len(self.tree_lines):
+            return None, False
+        _, node, key, _, _ = self.tree_lines[self.cursor]
+        participant_id = node.get("id") if node else None
+        return (participant_id if isinstance(participant_id, str) else None, key[0] == "p")
+
+    async def _show_trajectory(
+        self,
+        participant_id: str | None,
+        *,
+        managed: bool,
+        focus_after_stage: bool = False,
+    ) -> TrajectoryStageResult:
+        result = await self._surface.stage_trajectory(
+            participant_id=participant_id,
+            managed=managed,
+            staged_pane=self.staged_pane,
+            footer_active=self._nav.in_footer,
+        )
+        if result.outcome is TrajectoryStageOutcome.NO_NODE:
+            self.notify("nothing to inspect", severity="warning")
+            return result
+        if result.outcome is TrajectoryStageOutcome.UNMANAGED:
+            self.notify("adopt this pane before opening its trajectory", severity="warning")
+            return result
+        if result.outcome is TrajectoryStageOutcome.PARK_FAILED:
+            self.notify(f"could not park staged pane: {result.error}", severity="error")
+            return result
+        if result.outcome is TrajectoryStageOutcome.FOOTER_ACTIVE:
+            return result
+        if result.staged_pane != self.staged_pane:
+            self.staged_pane = result.staged_pane
+        assert result.participant_id is not None
+        view = await self._mount_trajectory(result.participant_id)
+        self._sync_right_surface()
+        self._render_tree()
+        if result.outcome is TrajectoryStageOutcome.FOCUS or focus_after_stage:
+            view.focus_region(view.state.focus_region)
+        else:
+            self.set_focus(None)
+        return result
+
+    async def _copy_trajectory(self, text: str) -> None:
+        try:
+            await tmux.set_buffer(text)
+        except Exception as exc:
+            self.notify(f"copy failed: {exc}", severity="error")
+
+    async def on_trajectory_participant_selected(
+        self,
+        message: TrajectoryParticipantSelected,
+    ) -> None:
+        for index, (_, node, key, _, _) in enumerate(self.tree_lines):
+            if key[0] == "p" and node.get("id") == message.participant_id:
+                self._leave_usage_metrics()
+                self.cursor = index
+                self._render_tree()
+                await self._show_trajectory(
+                    message.participant_id,
+                    managed=True,
+                    focus_after_stage=True,
+                )
+                return
+        self.notify("linked participant is no longer in the tree", severity="warning")
+
+    def on_return_to_tree(self, _message: ReturnToTree) -> None:
+        self.set_focus(None)
+        self._render_tree()
+
     def _render_tree(self) -> None:
         panel = self._panel()
         if panel is None:
@@ -1014,7 +1177,7 @@ class RegieApp(App):
         panel.lines = self.tree_lines
         self._sync_leaf_reveal(panel)
         cursor = self._visible_tree_cursor()
-        panel.apply_cursor(cursor, self.staged_pane)
+        panel.apply_cursor(cursor, self.staged_pane, self._trajectory_highlight())
         panel.scroll_to_cursor(cursor)
 
     def _sync_leaf_reveal(self, panel: TreePanel) -> None:
@@ -1110,18 +1273,20 @@ class RegieApp(App):
         if panel is None:
             return
         cursor = self._visible_tree_cursor()
-        panel.apply_cursor(cursor, self.staged_pane)
+        panel.apply_cursor(cursor, self.staged_pane, self._trajectory_highlight())
         panel.scroll_to_cursor(cursor)
 
     def watch_staged_pane(self, pane: str | None) -> None:
-        """Sync the tree marker and the unstaged dashboard."""
-        dashboard = self._dashboard()
-        if dashboard is not None:
-            dashboard.set_staged(pane is not None)
+        """Sync physical staging with the right surface and tree marker."""
+        self._sync_right_surface()
         panel = self._panel()
         if panel is None:
             return
-        panel.apply_cursor(self._visible_tree_cursor(), self.staged_pane)
+        panel.apply_cursor(
+            self._visible_tree_cursor(),
+            self.staged_pane,
+            self._trajectory_highlight(),
+        )
 
     def watch_bus_visible(self, visible: bool) -> None:
         """Show or hide the bus panel, giving the tree the space either way."""
@@ -1170,6 +1335,13 @@ class RegieApp(App):
         target = self._nav.left()
         if target is not None:
             self._select_usage_metric(target)
+
+    async def action_cursor_left_or_trajectory(self) -> None:
+        if self._nav.in_footer:
+            self.action_cursor_left()
+            return
+        participant_id, managed = self._selected_trajectory_target()
+        await self._show_trajectory(participant_id, managed=managed)
 
     def action_cursor_right(self) -> None:
         target = self._nav.right()
@@ -1351,12 +1523,7 @@ class RegieApp(App):
         await self._refresh_tree()
 
     async def action_focus_stage(self) -> None:
-        """Stage the selected agent if needed, then focus it. Bound to `l`.
-
-        Delegates staging and focus decisions to ``StageController`` and
-        performs only the app-side reactions (reactive assignment, pane
-        selection, error notification). The way back is `<prefix> h`.
-        """
+        """Stage on first `l`; focus an already staged pane on second `l`."""
         result = await self._staging.focus(
             tree_lines=self.tree_lines,
             cursor=self.cursor,

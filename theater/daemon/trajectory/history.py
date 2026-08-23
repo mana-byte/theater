@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from theater.daemon import workers
 from theater.harness import normalize
-from theater.harness.contracts.source import History, HistoryPage, Source
+from theater.harness.contracts.source import History, HistoryPage
 from theater.harness.transcript.observer import open_participant_source
 from theater.models import Participant, Status, Tier
 from theater.provenance import is_trusted_provenance, normalize_provenance
@@ -43,23 +43,11 @@ async def load_history(
         return _untrusted(transcript_identity_recovery_message(participant.id))
     after = participant.created_at if participant.tier is Tier.SPAWNED else None
     try:
-        source = open_participant_source(
-            observer,
-            participant_id=participant.id,
-            cwd=participant.cwd,
-            session_id=participant.session_id,
-            after=after,
-            session_provenance=normalize_provenance(participant.session_correlation),
-            known_location=participant.transcript_location,
-            transcript_domain=participant.transcript_domain,
-            pane_pid=participant.live_pid,
-        )
-    except Exception as exc:
-        return _unavailable(f"could not open the transcript source: {exc}")
-    try:
         page = await workers.to_thread(
-            _read_page_in_worker,
-            source,
+            _open_and_read_page,
+            observer,
+            participant,
+            after,
             before,
             limit,
             label="trajectory.history_page",
@@ -73,7 +61,25 @@ async def load_history(
     return _classify(daemon, participant, page)
 
 
-def _read_page_in_worker(source: Source, before: str | None, limit: int) -> HistoryPage:
+def _open_and_read_page(
+    observer,
+    participant: Participant,
+    after: float | None,
+    before: str | None,
+    limit: int,
+) -> HistoryPage:
+    source = open_participant_source(
+        observer,
+        participant_id=participant.id,
+        cwd=participant.cwd,
+        session_id=participant.session_id,
+        after=after,
+        session_provenance=normalize_provenance(participant.session_correlation),
+        known_location=participant.transcript_location,
+        transcript_domain=participant.transcript_domain,
+        pane_pid=participant.live_pid,
+    )
+
     async def read() -> HistoryPage:
         try:
             return await source.history_page(before=before, limit=limit)

@@ -30,6 +30,14 @@ def _reset_version_cache():
     client.reset_version_cache()
 
 
+async def test_set_buffer_passes_literal_text_after_double_dash(monkeypatch):
+    captured = _capture(monkeypatch)
+
+    await client.set_buffer("-literal\ntext")
+
+    assert captured == [["set-buffer", "--", "-literal\ntext"]]
+
+
 # ---- new_window --------------------------------------------------------
 
 

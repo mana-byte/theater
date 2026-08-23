@@ -7,15 +7,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from theater.constants.daemon import BUS_KIND_PARTICIPANT_KILL_REQUESTED
+from theater.constants.daemon import (
+    BUS_KIND_JOB_AWAIT_END,
+    BUS_KIND_PARTICIPANT_KILL_REQUESTED,
+)
 from theater.constants.trajectory import TRAJECTORY_RESPONSE_MAX_BYTES
 from theater.daemon.trajectory import history as history_module
 from theater.daemon.trajectory.cache import RecordRing, TrajectoryCache, encoded_record_bytes
-from theater.daemon.trajectory.project import project_batch
+from theater.daemon.trajectory.project import project_batch, project_history_page
 from theater.daemon.trajectory.service import TrajectoryService
 from theater.daemon.trajectory.theater_events import project_bus_row
 from theater.harness.contracts.events import Event, EventKind
-from theater.harness.contracts.source import Batch, HistoryPage, Source
+from theater.harness.contracts.source import Attachment, Batch, HistoryPage, Source
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.models import NotFound, Participant, Status, Tier
 from theater.trajectory import (
@@ -111,6 +114,17 @@ class _Source(Source):
         self.closed = True
 
 
+class _PagedSource(_Source):
+    def __init__(self, pages: dict[str | None, HistoryPage]) -> None:
+        super().__init__(pages[None])
+        self.pages = pages
+
+    async def history_page(self, *, before: str | None = None, limit: int = 200) -> HistoryPage:
+        self.calls.append(before)
+        self.thread_ids.append(threading.get_ident())
+        return self.pages[before]
+
+
 def _participant(
     participant_id: str,
     *,
@@ -202,6 +216,82 @@ async def test_snapshot_is_lazy_and_merges_race_captures(source_opener):
     await service.aclose()
 
 
+async def test_snapshot_paginates_older_history_without_gaps(source_opener):
+    participant = _participant("p")
+    source = _PagedSource(
+        {
+            None: HistoryPage(
+                location="/tmp/p",
+                events=(_event("four", 4), _event("five", 5)),
+                cursor="live",
+                older_cursor="before-four",
+                has_older=True,
+                provenance="operator",
+            ),
+            "before-four": HistoryPage(
+                location="/tmp/p",
+                events=(_event("two", 2), _event("three", 3)),
+                cursor="live",
+                older_cursor="before-two",
+                has_older=True,
+                provenance="operator",
+            ),
+            "before-two": HistoryPage(
+                location="/tmp/p",
+                events=(_event("zero", 0), _event("one", 1)),
+                cursor="live",
+                provenance="operator",
+            ),
+        }
+    )
+    source_opener[participant.id] = source
+    service = TrajectoryService(_Store(), _Registry([participant]), _Observer())
+
+    newest = await service.snapshot(participant.id, limit=2)
+    middle = await service.snapshot(participant.id, before=newest.older_cursor, limit=2)
+    oldest = await service.snapshot(participant.id, before=middle.older_cursor, limit=2)
+
+    assert [[record.summary for record in page.records] for page in (newest, middle, oldest)] == [
+        ["four", "five"],
+        ["two", "three"],
+        ["zero", "one"],
+    ]
+    assert newest.has_older is middle.has_older is True
+    assert oldest.has_older is False
+    assert source.calls == [None, "before-four", "before-two"]
+    await service.aclose()
+
+
+async def test_live_records_require_trusted_identity_and_recover_after_trusted_attach(
+    source_opener,
+):
+    participant = _participant("p")
+    participant.session_correlation = "heuristic"
+    source_opener[participant.id] = _Source(
+        _page(_event("untrusted history", 0), provenance="heuristic")
+    )
+    observer = _Observer()
+    service = TrajectoryService(_Store(), _Registry([participant]), observer)
+
+    initial = await service.snapshot(participant.id)
+    assert initial.panel_state.state is PanelState.UNTRUSTED
+    observer.capture(participant.id, Batch(events=(_event("ignored", 1),)))
+    still_untrusted = await service.snapshot(participant.id)
+    assert [record.summary for record in still_untrusted.records] == []
+
+    observer.capture(
+        participant.id,
+        Batch(
+            events=(_event("trusted live", 2),),
+            attached=Attachment("/tmp/p", correlation="operator"),
+        ),
+    )
+    recovered = await service.snapshot(participant.id)
+    assert recovered.panel_state.state is PanelState.READY
+    assert [record.summary for record in recovered.records] == ["trusted live"]
+    await service.aclose()
+
+
 def test_rich_facts_replace_matching_baseline_events():
     batch = Batch(
         events=(_event("baseline", 3, offset=44),),
@@ -220,6 +310,15 @@ def test_rich_facts_replace_matching_baseline_events():
     assert len(records) == 1
     assert records[0].summary == "rich"
     assert records[0].native_id == "epoch:native-3"
+
+
+def test_explicit_trajectory_event_selection_preserves_control_only() -> None:
+    event = _event("control", 3)
+    batch = Batch(events=(event,), trajectory_events=())
+    page = HistoryPage(events=(event,), trajectory_events=())
+
+    assert project_batch(batch, participant_id="p", source_epoch="epoch") == ()
+    assert project_history_page(page, participant_id="p", source_epoch="epoch") == ()
 
 
 async def test_follow_wakes_interactions_immediately_and_coalesces_mutable_updates(
@@ -336,6 +435,42 @@ def test_ring_detects_eviction_and_keeps_revision_precedence():
     assert ring.get("same").summary == "new"
     revision = ring.merge((_record("same", revision=2, summary="newest"),))[0]
     assert ring.changes_after(revision.sequence - 1, limit=10).changes == (revision,)
+
+
+def test_cache_prefers_closed_streams_before_active_viewers() -> None:
+    cache = TrajectoryCache(warm_streams=2)
+    viewed = cache.add("viewed", "stream-viewed")
+    viewed.viewer_refs = 1
+    cache.add("closed", "stream-closed")
+    cache.add("new", "stream-new")
+
+    evicted = cache.enforce(protected={"new"})
+
+    assert [entry.participant_id for entry in evicted] == ["closed"]
+    assert cache.get("viewed") is viewed
+
+
+async def test_snapshot_completion_and_close_refresh_idle_deadline(source_opener) -> None:
+    participant = _participant("p")
+    clock = [0.0]
+
+    class AdvancingSource(_Source):
+        async def history_page(self, *, before: str | None = None, limit: int = 200) -> HistoryPage:
+            clock[0] = 10.0
+            return await super().history_page(before=before, limit=limit)
+
+    source_opener[participant.id] = AdvancingSource(_page(location=None))
+    service = TrajectoryService(_Store(), _Registry([participant]), _Observer())
+    service.cache = TrajectoryCache(clock=lambda: clock[0])
+
+    page = await service.snapshot(participant.id)
+    stream = service.streams[participant.id].cache
+    assert stream.last_used == 10.0
+
+    clock[0] = 20.0
+    assert service.close_viewer(participant.id, page.stream_id)
+    assert stream.last_used == 20.0
+    await service.aclose()
 
 
 async def test_cache_eviction_and_restart_epoch_require_resync(source_opener):
@@ -470,6 +605,25 @@ def test_bus_projection_is_allowlisted_and_directional():
     assert project_bus_row({**row, "kind": "agent.transcript"}, "p") is None
 
 
+def test_await_end_timing_uses_elapsed_start() -> None:
+    record = project_bus_row(
+        {
+            "id": 8,
+            "ts": 10.0,
+            "from_id": "p",
+            "to_id": "q",
+            "kind": BUS_KIND_JOB_AWAIT_END,
+            "payload": {"state": "completed", "elapsed_seconds": 2.5},
+        },
+        "p",
+    )
+
+    assert record is not None and record.timing is not None
+    assert record.timing.start == 7.5
+    assert record.timing.end == 10.0
+    assert record.timing.duration_ms == 2500.0
+
+
 async def test_snapshot_response_byte_cap_wins(source_opener):
     participant = _participant("p")
     events = tuple(_event("x" * 12_000, index) for index in range(200))
@@ -483,6 +637,43 @@ async def test_snapshot_response_byte_cap_wins(source_opener):
     assert _wire_size(wire) <= TRAJECTORY_RESPONSE_MAX_BYTES
     assert page.truncated_by_bytes is True
     assert len(page.records) < 200
+    assert len(service._older_tokens) == 1
+    await service.aclose()
+
+
+async def test_follow_byte_cap_advances_without_skipping_updates(source_opener):
+    participant = _participant("p")
+    source_opener[participant.id] = _Source(_page(location=None, provenance="operator"))
+    store = _Store()
+    registry = _Registry([participant])
+    observer = _Observer()
+    service = TrajectoryService(store, registry, observer)
+    page = await service.snapshot("p")
+    assert page.cursor is not None and page.stream_id is not None
+    observer.capture(
+        participant.id,
+        Batch(events=tuple(_event("x" * 12_000, index) for index in range(100))),
+    )
+
+    first = await service.follow(
+        "p",
+        stream_id=page.stream_id,
+        after=page.cursor,
+        wait=0,
+        limit=200,
+    )
+
+    assert 0 < len(first.upserts) < 100
+    assert _wire_size(first.to_wire()) <= TRAJECTORY_RESPONSE_MAX_BYTES
+    assert first.cursor is not None
+    second = await service.follow(
+        "p",
+        stream_id=page.stream_id,
+        after=first.cursor,
+        wait=0,
+        limit=200,
+    )
+    assert len(first.upserts) + len(second.upserts) == 100
     await service.aclose()
 
 
@@ -503,7 +694,7 @@ async def test_listener_is_constant_time_without_viewer_and_is_removed_on_shutdo
         }
     )
     assert service.streams == {}
-    assert list(service._bus_queue) == []
+    assert list(service._runtime._bus_queue) == []
     await service.aclose()
-    assert service._on_bus_row not in store.listeners
+    assert store.listeners == []
     assert observer.capture is None

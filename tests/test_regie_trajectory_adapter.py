@@ -121,3 +121,10 @@ def test_runtime_state_counts_compact_utf8_wire_bytes() -> None:
 
     encoded = json.dumps(item.to_wire(), ensure_ascii=False, separators=(",", ":")).encode()
     assert state.loaded_bytes == len(encoded)
+
+
+def test_state_store_applies_configured_inspector_ratio_to_new_participants() -> None:
+    store = TrajectoryStateStore(inspector_ratio=0.42)
+
+    assert store.get("p1").inspector_ratio == 0.42
+    assert store.get("p2").inspector_ratio == 0.42

@@ -33,6 +33,20 @@ class DaemonClientCompatible(Protocol):
 StateListener = Callable[[ParticipantTrajectoryState], None]
 
 
+def _can_follow(state: ParticipantTrajectoryState) -> bool:
+    return (
+        state.panel.participant_state
+        not in {
+            TrajectoryParticipantState.DEAD,
+            TrajectoryParticipantState.EXTERNAL,
+            TrajectoryParticipantState.MISSING,
+        }
+        and state.panel.state not in {PanelState.UNAVAILABLE, PanelState.UNTRUSTED}
+        and state.stream_id is not None
+        and state.cursor is not None
+    )
+
+
 async def _maybe_await(value: object) -> object:
     if inspect.isawaitable(value):
         return await value
@@ -76,7 +90,7 @@ class TrajectoryController:
             raise ValueError(f"follow_wait must be in [0, {TRAJECTORY_FOLLOW_TIMEOUT_SECONDS}]")
         self.query_client = query_client
         self.follow_client = follow_client
-        self.state_store = state_store or TrajectoryStateStore()
+        self.state_store = state_store if state_store is not None else TrajectoryStateStore()
         self.page_limit = page_limit
         self.follow_wait = follow_wait
         self._generation = 0
@@ -100,11 +114,15 @@ class TrajectoryController:
         return self._follow_task
 
     def state_for(self, participant_id: str) -> ParticipantTrajectoryState:
-        before = set(self.state_store.participant_ids())
+        before = {
+            stored_id: state.stream_id
+            for stored_id in self.state_store.participant_ids()
+            if (state := self.state_store.peek(stored_id)) is not None
+        }
         state = self.state_store.get(participant_id)
         after = set(self.state_store.participant_ids())
-        for evicted in before - after:
-            self._schedule_close_hint(evicted)
+        for evicted in before.keys() - after:
+            self._schedule_close_hint(evicted, before[evicted])
         return state
 
     def subscribe(self, listener: StateListener) -> Callable[[], None]:
@@ -181,18 +199,7 @@ class TrajectoryController:
             return None
         state.apply_snapshot(page)
         self._publish(state)
-        participant_state = page.panel_state.participant_state
-        can_follow = participant_state not in {
-            TrajectoryParticipantState.DEAD,
-            TrajectoryParticipantState.EXTERNAL,
-            TrajectoryParticipantState.MISSING,
-        }
-        if (
-            start_follow
-            and can_follow
-            and page.panel_state.state not in {PanelState.UNAVAILABLE, PanelState.UNTRUSTED}
-            and page.stream_id is not None
-        ):
+        if start_follow and _can_follow(state):
             await self.start_follow(participant_id, expected_generation=generation)
         return page
 
@@ -247,6 +254,9 @@ class TrajectoryController:
             return False
         if expected_generation is not None and expected_generation != self._generation:
             return False
+        state = self.state_for(participant_id)
+        if not _can_follow(state):
+            return False
         await self._cancel_follow()
         generation = self._generation
         self._follow_task = asyncio.create_task(self._follow_loop(participant_id, generation))
@@ -256,7 +266,7 @@ class TrajectoryController:
         state = self.state_for(participant_id)
         try:
             while self._is_current(participant_id, generation):
-                if state.stream_id is None:
+                if state.stream_id is None or state.cursor is None:
                     return
                 response = await self._call(
                     self.follow_client,
@@ -305,8 +315,11 @@ class TrajectoryController:
         if participant_id is None or participant_id != self._active_participant:
             return False
         state = self.state_for(participant_id)
+        resync_required = state.retry_kind == "resync"
         state.resume_follow()
         self._publish(state)
+        if resync_required:
+            return await self.resync(participant_id) is not None
         if self._follow_task is None or self._follow_task.done():
             return await self.start_follow(participant_id)
         return True
@@ -337,20 +350,26 @@ class TrajectoryController:
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
-    async def _best_effort_close(self, participant_id: str) -> None:
+    async def _best_effort_close(self, participant_id: str, stream_id: str | None = None) -> None:
+        params = {"id": participant_id}
+        if stream_id is not None:
+            params["stream_id"] = stream_id
         try:
-            await self._call(self.query_client, "trajectory.close", id=participant_id)
+            await self._call(self.query_client, "trajectory.close", **params)
         except Exception:
             return
 
-    def _schedule_close_hint(self, participant_id: str) -> None:
+    def _schedule_close_hint(self, participant_id: str, stream_id: str | None = None) -> None:
         if self._closed:
             return
+        if stream_id is None:
+            state = self.state_store.peek(participant_id)
+            stream_id = state.stream_id if state is not None else None
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        task = loop.create_task(self._best_effort_close(participant_id))
+        task = loop.create_task(self._best_effort_close(participant_id, stream_id))
         self._close_hint_tasks.add(task)
         task.add_done_callback(self._close_hint_tasks.discard)
 
@@ -365,7 +384,11 @@ class TrajectoryController:
         if self._active_participant is not None:
             participants.add(self._active_participant)
         for participant_id in participants:
-            await self._best_effort_close(participant_id)
+            state = self.state_store.peek(participant_id)
+            await self._best_effort_close(
+                participant_id,
+                state.stream_id if state is not None else None,
+            )
         if self._close_hint_tasks:
             await asyncio.gather(*self._close_hint_tasks, return_exceptions=True)
             self._close_hint_tasks.clear()

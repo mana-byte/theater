@@ -5,6 +5,7 @@ import asyncio
 import pytest
 
 from theater.regie.trajectory.controller import TrajectoryController
+from theater.regie.trajectory.state import TrajectoryStateStore
 from theater.trajectory import PanelState
 
 
@@ -70,6 +71,17 @@ class FakeClient:
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+def test_controller_keeps_an_empty_injected_state_store() -> None:
+    states = TrajectoryStateStore(inspector_ratio=0.6)
+    query = FakeClient(lambda _method, _params: {})
+    follow = FakeClient(lambda _method, _params: {})
+
+    controller = TrajectoryController(query, follow, state_store=states)
+
+    assert controller.state_store is states
+    assert controller.state_for("p1").inspector_ratio == 0.6
 
 
 @pytest.mark.asyncio
@@ -241,4 +253,59 @@ async def test_controller_uses_best_effort_close_hints_on_switch_lru_and_final_c
 
     closed_ids = [params["id"] for method, params in query.calls if method == "trajectory.close"]
     assert "a" in closed_ids and "b" in closed_ids
+    assert {
+        params.get("stream_id") for method, params in query.calls if method == "trajectory.close"
+    } >= {"stream-a", "stream-b"}
     assert query.closed and follow.closed
+
+
+@pytest.mark.asyncio
+async def test_follow_does_not_start_without_stream_and_cursor() -> None:
+    response = page("p1", "record") | {"cursor": None}
+    query = FakeClient(lambda _method, _params: response)
+    follow = FakeClient(lambda _method, _params: pytest.fail("follow should not run"))
+    controller = TrajectoryController(query, follow)
+
+    await controller.open("p1")
+
+    assert controller.follow_task is None
+    assert not await controller.start_follow("p1")
+    await controller.close()
+
+
+@pytest.mark.asyncio
+async def test_follow_does_not_start_for_a_dead_participant() -> None:
+    response = page("p1", "record")
+    response["panel_state"] = {"state": "ready", "participant_state": "dead"}
+    query = FakeClient(lambda _method, _params: response)
+    follow = FakeClient(lambda _method, _params: pytest.fail("follow should not run"))
+    controller = TrajectoryController(query, follow)
+
+    await controller.open("p1")
+
+    assert controller.follow_task is None
+    assert not await controller.start_follow("p1")
+    await controller.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_resyncs_a_rejected_stream_before_following() -> None:
+    query = FakeClient(lambda _method, _params: page("p1", "record"))
+    release = asyncio.Event()
+
+    async def follow_handler(_method: str, _params: dict[str, object]) -> dict[str, object]:
+        await release.wait()
+        return {"stream_id": "stream-p1", "upserts": []}
+
+    follow = FakeClient(follow_handler)
+    controller = TrajectoryController(query, follow)
+    await controller.open("p1", start_follow=False)
+    state = controller.state_for("p1")
+    state.mark_resync("stream expired")
+    state.reset_ui()
+
+    assert state.retry_kind == "resync"
+    assert await controller.resume_follow("p1")
+    assert [method for method, _params in query.calls].count("trajectory.snapshot") == 2
+    assert controller.follow_task is not None
+    await controller.close()

@@ -32,6 +32,11 @@ from theater.constants.observability import (
     MIN_LOG_MAX_BYTES,
     OTLP_PROTOCOLS,
 )
+from theater.constants.trajectory import (
+    TRAJECTORY_INSPECTOR_RATIO_DEFAULT,
+    TRAJECTORY_INSPECTOR_RATIO_MAX,
+    TRAJECTORY_INSPECTOR_RATIO_MIN,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +128,11 @@ class RegieSection:
     dashboard_tip_hold_seconds: float = field(default=6.0, metadata={"min": MIN_INTERVAL})
     #: Seconds between characters while typing a dashboard tip in or out.
     dashboard_tip_char_interval: float = field(default=0.04, metadata={"min": MIN_INTERVAL})
+    #: Initial trajectory inspector height as a fraction of the panel.
+    trajectory_inspector_ratio: float = field(
+        default=TRAJECTORY_INSPECTOR_RATIO_DEFAULT,
+        metadata={"min": TRAJECTORY_INSPECTOR_RATIO_MIN, "max": TRAJECTORY_INSPECTOR_RATIO_MAX},
+    )
 
 
 @dataclass(frozen=True, slots=True)

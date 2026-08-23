@@ -283,7 +283,12 @@ class TreePanel(VerticalScroll):
         """
         widget.remove()
 
-    def apply_cursor(self, cursor: int, staged_pane: str | None) -> None:
+    def apply_cursor(
+        self,
+        cursor: int,
+        staged_pane: str | None,
+        staged_participant_id: str | None = None,
+    ) -> None:
         """Add CSS classes to the cursor and staged lines, remove from others.
 
         Active keys, rather than child positions, own highlighting.
@@ -294,7 +299,14 @@ class TreePanel(VerticalScroll):
                 continue
             widget.remove_class("tree-cursor")
             widget.remove_class("tree-staged")
-            if staged_pane and node.get("tmux_pane") == staged_pane:
+            pane_matches = staged_pane is not None and node.get("tmux_pane") == staged_pane
+            participant_matches = (
+                staged_pane is None
+                and staged_participant_id is not None
+                and key[0] == "p"
+                and node.get("id") == staged_participant_id
+            )
+            if pane_matches or participant_matches:
                 widget.add_class("tree-staged")
             if i == cursor:
                 widget.add_class("tree-cursor")

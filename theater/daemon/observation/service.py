@@ -191,7 +191,7 @@ class Observer:
             return
         try:
             callback(pid, batch)
-        except BaseException:
+        except Exception:
             logger.exception("trajectory capture failed for %s", pid)
 
     async def reset_for_operator_bind(self, pid: str) -> None:
