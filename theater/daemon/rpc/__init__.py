@@ -16,6 +16,7 @@ from theater.daemon.rpc import (  # noqa: F401
     scratchpad,
     sending,
     spawning,
+    trajectory,
     transcripts,
     usage,
 )

@@ -55,6 +55,7 @@ from theater.daemon.runtime.maintenance import REAP_INTERVAL
 from theater.daemon.runtime.socket import MAX_SOCKET_PATH
 from theater.daemon.spawning.service import Spawner
 from theater.daemon.store import Store
+from theater.daemon.trajectory import TrajectoryService
 from theater.harness import Harness
 from theater.tmux import client as tmux  # noqa: F401 — monkeypatched via server_mod
 
@@ -123,6 +124,8 @@ class Daemon:
                 rescue=observer_cfg.rescue_timeout,
                 jobs=self.jobs,
             )
+            self.trajectory = TrajectoryService(self.store, self.registry, self.observer)
+            self.trajectory_service = self.trajectory
             self._server: asyncio.Server | None = None
             self._reaper: asyncio.Task | None = None
             self._gc: asyncio.Task | None = None
