@@ -19,6 +19,7 @@ from theater.constants.worktree import (
     GIT_TIMEOUT_RC,
     WORKTREE_DIR,
 )
+from theater.observability.catalog import BY_KEY
 
 logger = logging.getLogger("theater.worktree")
 
@@ -31,13 +32,13 @@ def _git(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
     ``errors="backslashreplace"`` to match ``tmux/client.py``."""
     kwargs.setdefault("encoding", "utf-8")
     kwargs.setdefault("errors", "backslashreplace")
-    with timing.span(
-        f"git.{'-'.join(argv[1:3])}", slow_ms=timing.GIT_MS, cwd=kwargs.get("cwd")
-    ) as sp:
+    command = "-".join(argv[1:3])
+    with timing.span(BY_KEY["GIT_COMMAND"], command=command, cwd=kwargs.get("cwd")) as sp:
         try:
             proc = subprocess.run(argv, **kwargs)  # noqa: PLW1510  (callers pass check=)
         except subprocess.TimeoutExpired as exc:
             sp["rc"] = GIT_TIMEOUT_RC
+            sp.set_result("error", error_type="git_timeout")
             return subprocess.CompletedProcess(
                 args=argv,
                 returncode=GIT_TIMEOUT_RC,
@@ -46,10 +47,13 @@ def _git(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
             )
         except OSError as exc:
             sp["rc"] = GIT_MISSING_RC
+            sp.set_result("error", error_type="git_missing")
             return subprocess.CompletedProcess(
                 args=argv, returncode=GIT_MISSING_RC, stdout="", stderr=str(exc)
             )
         sp["rc"] = proc.returncode
+        if proc.returncode != 0:
+            sp.set_result("error", error_type="git_error")
         return proc
 
 

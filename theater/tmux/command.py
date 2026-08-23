@@ -29,6 +29,7 @@ from theater.constants.tmux import (
     TMUX_RUN_TIMEOUT_SECONDS,
 )
 from theater.models import TheaterError
+from theater.observability.catalog import BY_KEY
 
 _FORMAT_SEP = TMUX_FIELD_SEPARATOR
 _PANE_FORMAT = TMUX_PANE_FORMAT
@@ -102,7 +103,7 @@ def run_sync(*args: str, check: bool = True) -> str:
 
 async def run(*args: str, check: bool = True) -> str:
     _require()
-    with timing.span(f"tmux.{args[0]}", slow_ms=timing.TMUX_MS):
+    with timing.span(BY_KEY["TMUX_COMMAND"], command=args[0]) as sp:
         proc = await asyncio.create_subprocess_exec(
             "tmux",
             *args,
@@ -114,8 +115,9 @@ async def run(*args: str, check: bool = True) -> str:
         except TimeoutError:
             proc.kill()
             raise TmuxError(f"tmux {' '.join(args)} timed out") from None
-    if check and proc.returncode != 0:
-        # backslashreplace so invalid UTF-8 in stderr does not raise UnicodeDecodeError.
-        msg = err.decode("utf-8", "backslashreplace").strip()
-        raise TmuxError(f"tmux {' '.join(args)} failed: {msg}")
+        if proc.returncode != 0:
+            sp.set_result("error", error_type="tmux_error")
+            if check:
+                msg = err.decode("utf-8", "backslashreplace").strip()
+                raise TmuxError(f"tmux {' '.join(args)} failed: {msg}")
     return out.decode("utf-8", "backslashreplace").rstrip("\n")

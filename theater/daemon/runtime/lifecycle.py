@@ -16,6 +16,7 @@ from theater import paths, protocol, timing
 from theater.daemon.jobs import JobState
 from theater.daemon.lock import file_id
 from theater.models import Status
+from theater.observability.metrics import create_active_gauge_sampler
 from theater.tmux import client as tmux
 
 logger = logging.getLogger("theater.daemon")
@@ -69,6 +70,7 @@ async def start(daemon, *, check_path) -> None:
     daemon._sock_id = file_id(sock)
     await daemon._reconcile()
     daemon._init_send_seq()
+    await _start_gauge_sampler(daemon)
     daemon._reaper = asyncio.create_task(daemon._reap_loop())
     daemon._lag = asyncio.create_task(timing.lag_monitor(daemon._stopping))
     if daemon.config.retention.enabled:
@@ -142,6 +144,20 @@ def stop(daemon) -> None:
     daemon._stopping.set()
 
 
+async def _start_gauge_sampler(daemon) -> None:
+    sources = {
+        "theater.participants.live": daemon.registry.live_count,
+        "theater.participants.addressable": daemon.registry.addressable_count,
+        "theater.jobs.active": daemon.jobs.active_count,
+    }
+    interval = daemon.config.observability.gauge_interval_s
+    sampler = create_active_gauge_sampler(interval, sources)
+    if sampler is None:
+        return
+    await sampler.start()
+    daemon._gauge_sampler = sampler
+
+
 async def aclose(daemon, *, close_timeout: float, shutdown_workers) -> None:
     """Shut down in the one order that terminates."""
     daemon.stop()
@@ -166,6 +182,10 @@ async def aclose(daemon, *, close_timeout: float, shutdown_workers) -> None:
         await asyncio.gather(*daemon._conns, return_exceptions=True)
         daemon._conns.clear()
     await shutdown_workers()
+    sampler = getattr(daemon, "_gauge_sampler", None)
+    if sampler is not None:
+        await sampler.stop()
+        daemon._gauge_sampler = None
     if daemon._server:
         try:
             await asyncio.wait_for(daemon._server.wait_closed(), close_timeout)

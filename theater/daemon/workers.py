@@ -22,11 +22,13 @@ a subprocess.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
 from theater import timing
+from theater.observability.catalog import BY_KEY
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -52,11 +54,12 @@ async def to_thread(fn: Callable[..., Any], /, *args: Any, label: str, **kwargs:
     """Run ``fn(*args, **kwargs)`` off the event loop, on the dedicated pool.
 
     *fn* must not touch ``Store`` or ``Registry``. *label* feeds
-    ``timing.span(f"workers.{label}")``.
+    ``timing.span(BY_KEY["WORKER_TASK"], label=label)``.
     """
     loop = asyncio.get_running_loop()
-    with timing.span(f"workers.{label}", slow_ms=timing.WORKERS_MS):
-        return await loop.run_in_executor(_get_executor(), lambda: fn(*args, **kwargs))
+    with timing.span(BY_KEY["WORKER_TASK"], label=label):
+        ctx = contextvars.copy_context()
+        return await loop.run_in_executor(_get_executor(), lambda: ctx.run(fn, *args, **kwargs))
 
 
 async def shutdown() -> None:

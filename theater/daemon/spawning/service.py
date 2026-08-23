@@ -36,6 +36,7 @@ from theater.daemon.spawning.resume import (
 from theater.harness import get as get_harness
 from theater.harness.base import LaunchPlan, ResumeLaunchOverlay
 from theater.models import BadRequest, Participant, TheaterError
+from theater.observability.catalog import BY_KEY
 from theater.tmux import client as tmux
 
 logger = logging.getLogger("theater.spawner")
@@ -92,7 +93,9 @@ class Spawner:
             minted_token = self._validate_receipt_plan(plan, participant)
             if minted_token is not None:
                 plan = replace(plan, receipt_token=minted_token)
-            with timing.span("spawn.worktree", id=participant.id, kind=req.worktree or None):
+            with timing.span(
+                BY_KEY["SPAWN_WORKTREE"], id=participant.id, kind=req.worktree or None
+            ):
                 child_cwd = await self._prepare_worktree(req, participant)
             self._record_launch_identity(participant, plan)
 
@@ -125,7 +128,9 @@ class Spawner:
         """
         participant = reservation.participant
         try:
-            with timing.span("spawn.launch", id=participant.id, harness=participant.harness):
+            with timing.span(
+                BY_KEY["SPAWN_LAUNCH"], id=participant.id, harness=participant.harness
+            ):
                 pane = await tmux.new_window(
                     session=reservation.session,
                     name=reservation.name,
@@ -336,7 +341,9 @@ class Spawner:
         """Kill the tmux pane and confirm it is gone."""
         p = self.registry.get(participant_id)
         if p.tmux_pane:
-            with timing.span("kill.pane", id=p.id, pane=p.tmux_pane) as sp:
+            with timing.span(
+                BY_KEY["KILL_PANE"], id=p.id, pane=p.tmux_pane, harness=p.harness
+            ) as sp:
                 await tmux.kill_pane(p.tmux_pane)
                 for attempt in range(self.KILL_POLL_ATTEMPTS):
                     sp["attempts"] = attempt + 1
@@ -353,7 +360,7 @@ class Spawner:
 
     async def teardown(self, p: Participant) -> None:
         """Terminal teardown after the pane is confirmed gone."""
-        with timing.span("kill.teardown", id=p.id):
+        with timing.span(BY_KEY["KILL_TEARDOWN"], id=p.id, harness=p.harness):
             await self.retire(p, delete_branch=True)
             self.registry.mark_dead(p.id)
 
