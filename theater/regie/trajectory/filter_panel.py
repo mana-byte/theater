@@ -7,7 +7,7 @@ from textual import events
 from textual.message import Message
 from textual.widgets import Static
 
-from theater.regie.trajectory.constants import FILTER_MAX_ROWS
+from theater.regie.trajectory.constants import FILTER_MAX_ROWS, STYLE_FILTER_CURSOR
 from theater.regie.trajectory.models import (
     FilterDimension,
     Lane,
@@ -51,6 +51,8 @@ class FilterPanel(Static):
         super().__init__("", markup=False, **kwargs)
         self._options: list[tuple[FilterDimension, str]] = []
         self._cursor = 0
+        self._lines: list[str] = []
+        self._scroll_offset = 0
 
     @property
     def options(self) -> tuple[tuple[FilterDimension, str], ...]:
@@ -68,6 +70,37 @@ class FilterPanel(Static):
             marker = "✓" if value in selected else " "
             label = value.replace("_", " ")
             lines.append(f"{marker} {dimension.value:<6} {sanitize_text(label)} ({count})")
+
+    def _scroll_cursor_into_view(self) -> None:
+        if not self._options:
+            self._scroll_offset = 0
+            return
+        viewport = min(FILTER_MAX_ROWS, max(1, len(self._options)))
+        max_offset = max(0, len(self._options) - viewport)
+        offset = max(0, min(self._scroll_offset, max_offset))
+        if self._cursor < offset:
+            offset = self._cursor
+        elif self._cursor >= offset + viewport:
+            offset = self._cursor - viewport + 1
+        self._scroll_offset = max(0, min(offset, max_offset))
+
+    def _visible_lines(self) -> tuple[int, list[str]]:
+        start = self._scroll_offset
+        return start, self._lines[start : start + FILTER_MAX_ROWS]
+
+    def _render_options(self, lines: list[str]) -> None:
+        self._lines = lines
+        self._scroll_cursor_into_view()
+        start, visible_lines = self._visible_lines()
+        content = Text(no_wrap=True, overflow="crop")
+        for visible_index, (index, line) in enumerate(enumerate(visible_lines, start=start)):
+            if visible_index:
+                content.append("\n")
+            content.append(line, style=STYLE_FILTER_CURSOR if index == self._cursor else None)
+        self.update(
+            content if visible_lines else Text("No filter values in the loaded window."),
+            layout=True,
+        )
 
     def update_filters(
         self,
@@ -106,8 +139,7 @@ class FilterPanel(Static):
             lines,
         )
         self._cursor = min(self._cursor, max(0, len(self._options) - 1))
-        content = Text("\n".join(lines) or "No filter values in the loaded window.", no_wrap=True)
-        self.update(content, layout=False)
+        self._render_options(lines)
 
     def _activate_cursor(self) -> None:
         if not self._options:
@@ -119,9 +151,11 @@ class FilterPanel(Static):
         if event.key in {"up", "k"}:
             event.stop()
             self._cursor = max(0, self._cursor - 1)
+            self._render_options(self._lines)
         elif event.key in {"down", "j"}:
             event.stop()
             self._cursor = min(max(0, len(self._options) - 1), self._cursor + 1)
+            self._render_options(self._lines)
         elif event.key in {"enter", "space"}:
             event.stop()
             self._activate_cursor()
@@ -130,11 +164,12 @@ class FilterPanel(Static):
             self.post_message(FilterPanelClosed())
 
     def on_click(self, event: events.Click) -> None:
-        index = int(event.y) + int(self.scroll_y)
+        index = int(event.y) + self._scroll_offset
         if index < 0 or index >= len(self._options):
             return
         event.stop()
         self._cursor = index
+        self._render_options(self._lines)
         self._activate_cursor()
 
 

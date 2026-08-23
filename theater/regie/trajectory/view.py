@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 from collections.abc import Awaitable, Callable
 
@@ -170,7 +169,6 @@ class TrajectoryView(Vertical):
         self._search_key: tuple[object, ...] | None = None
         self._tooltip_text = ""
         self._load_worker: Worker[TrajectoryPage | None] | None = None
-        self._close_task: asyncio.Task[None] | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("Loading trajectory…", markup=False, id="trajectory-status")
@@ -198,8 +196,6 @@ class TrajectoryView(Vertical):
             self._unsubscribe = None
         if self._load_worker is not None and not self._load_worker.is_finished:
             self._load_worker.cancel()
-        if self.controller is not None and not self.controller._closed:
-            self._close_task = asyncio.create_task(self.controller.close())
 
     def _controller_state_changed(self, state: ParticipantTrajectoryState) -> None:
         if state.participant_id != self.participant_id:
@@ -664,11 +660,13 @@ class TrajectoryView(Vertical):
     def on_inspector_participant_link_clicked(
         self, message: InspectorParticipantLinkClicked
     ) -> None:
-        self.run_worker(
-            self._call_participant_link(message.participant_id),
-            name="trajectory-participant-link",
-        )
-        self.post_message(TrajectoryParticipantSelected(message.participant_id))
+        if self._participant_link is not None:
+            self.run_worker(
+                self._call_participant_link(message.participant_id),
+                name="trajectory-participant-link",
+            )
+        else:
+            self.post_message(TrajectoryParticipantSelected(message.participant_id))
 
     def on_inspector_resize_requested(self, message: InspectorResizeRequested) -> None:
         self.action_resize_inspector(message.delta)

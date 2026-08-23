@@ -157,6 +157,10 @@ class Timeline(Static):
         duration_mode: bool = False,
         scroll_offset: int | None = None,
     ) -> None:
+        old_span_ids = self._span_ids
+        old_scroll_offset = self._scroll_offset
+        anchor_index = min(old_scroll_offset, max(0, len(old_span_ids) - 1))
+        anchor_id = old_span_ids[anchor_index] if old_span_ids else None
         self._records = tuple(records)
         self._span_ids = tuple(record.record_id for record in self._records)
         self._matched_ids = (
@@ -170,14 +174,17 @@ class Timeline(Static):
             self._span_index = self._span_ids.index(selected_id)
         if hovered_id in self._span_ids:
             self._hovered_id = hovered_id
-        elif self._hovered_id not in self._span_ids:
+        else:
             self._hovered_id = None
         if self._span_ids:
             self._span_index = min(self._span_index, len(self._span_ids) - 1)
         else:
             self._span_index = 0
-        if scroll_offset is not None:
-            self.set_scroll_offset(scroll_offset, repaint=False)
+        requested_offset = old_scroll_offset if scroll_offset is None else int(scroll_offset)
+        if anchor_id in self._span_ids:
+            requested_offset += self._span_ids.index(anchor_id) - anchor_index
+        if scroll_offset is not None or requested_offset != self._scroll_offset:
+            self.set_scroll_offset(requested_offset, repaint=False)
         self.update(self._render_timeline(), layout=False)
 
     def _available_cells(self) -> int:
@@ -187,7 +194,9 @@ class Timeline(Static):
     def set_scroll_offset(self, offset: int, *, repaint: bool = True) -> int:
         if isinstance(offset, bool):
             raise TypeError("timeline scroll offset must be an integer")
-        self._scroll_offset = max(0, min(int(offset), max(0, len(self._records) - 1)))
+        self._scroll_offset = max(
+            0, min(int(offset), max(0, len(self._records) - self._available_cells()))
+        )
         if self.is_mounted:
             self.scroll_to(x=self._scroll_offset, animate=False)
         if repaint:
@@ -293,7 +302,8 @@ class Timeline(Static):
         self.set_scroll_offset(self._scroll_offset + 1)
 
     def watch_scroll_x(self, _old_value: float, new_value: float) -> None:
-        self._scroll_offset = max(0, int(new_value))
+        maximum = max(0, len(self._records) - self._available_cells())
+        self._scroll_offset = max(0, min(int(new_value), maximum))
         if self.is_mounted:
             self.post_message(TimelineScrolled(self._scroll_offset))
 

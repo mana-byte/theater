@@ -18,8 +18,10 @@ from theater.regie.trajectory.constants import (
 )
 from theater.regie.trajectory.models import (
     ContentFormat,
+    DetailField,
     InspectorTab,
     Lane,
+    ParticipantLink,
     RecordKind,
     RecordStatus,
     Timing,
@@ -118,54 +120,103 @@ def tabs_for_record(record: TrajectoryRecord | None) -> tuple[InspectorTab, ...]
     return (InspectorTab.SUMMARY, InspectorTab.TIMING)
 
 
-def _detail_lines(record: TrajectoryRecord) -> list[str]:
-    lines: list[str] = []
-    for field in record.details:
-        value = field.value.text
-        if field.value.format in {ContentFormat.IMAGE, ContentFormat.BINARY}:
-            value = f"{field.value.format.value} metadata ({field.value.original_bytes} bytes)"
-        elif field.value.format is ContentFormat.JSON:
-            try:
-                value = json.dumps(json.loads(value), ensure_ascii=False, indent=2, sort_keys=True)
-            except (TypeError, ValueError):
-                value = plain_text(value)
-        lines.append(f"{field.name}: {value}")
-    lines.extend(
-        f"participant {link.direction.value}: {link.participant_id} {link.label or ''}".rstrip()
-        for link in record.links
-    )
-    return lines
+_TAB_FIELD_ALIASES: dict[InspectorTab, frozenset[str]] = {
+    InspectorTab.OUTPUT: frozenset({"assistant_output", "content", "output", "response", "text"}),
+    InspectorTab.REASONING: frozenset({"reasoning", "reasoning_content", "reasoning_summary"}),
+    InspectorTab.INPUT: frozenset({"args", "arguments", "input", "parameters", "tool_input"}),
+    InspectorTab.RESULT: frozenset({"output", "response", "result", "tool_result"}),
+    InspectorTab.PREVIEW: frozenset({"content", "input", "preview", "prompt", "text"}),
+    InspectorTab.RAW: frozenset({"raw", "raw_text", "source_text", "transcript"}),
+    InspectorTab.PAYLOAD: frozenset({"data", "event", "message", "payload"}),
+    InspectorTab.USAGE: frozenset({"usage"}),
+    InspectorTab.CURRENT: frozenset({"context_current", "current", "current_context", "state"}),
+    InspectorTab.PREVIOUS: frozenset(
+        {"context_previous", "previous", "previous_context", "previous_state"}
+    ),
+    InspectorTab.DIFF: frozenset({"context_diff", "diff", "changes"}),
+}
 
 
-def inspector_text(record: TrajectoryRecord | None, tab: InspectorTab) -> str:
-    """Build the exact bounded text exposed by the active inspector tab."""
+def _field_key(name: str) -> str:
+    return name.casefold().replace("-", "_").replace(" ", "_")
+
+
+def _fields_for_tab(record: TrajectoryRecord, tab: InspectorTab) -> tuple[DetailField, ...]:
+    aliases = _TAB_FIELD_ALIASES.get(tab, frozenset())
+    return tuple(field for field in record.details if _field_key(field.name) in aliases)
+
+
+def _format_detail(field: DetailField) -> str:
+    value = field.value
+    if value.format in {ContentFormat.IMAGE, ContentFormat.BINARY}:
+        return f"{value.format.value} metadata ({value.original_bytes} bytes)"
+    if value.format is ContentFormat.JSON:
+        try:
+            return json.dumps(json.loads(value.text), ensure_ascii=False, indent=2, sort_keys=True)
+        except (TypeError, ValueError):
+            return plain_text(value.text)
+    return plain_text(value.text)
+
+
+def _participant_line(link: ParticipantLink) -> str:
+    return f"participant {link.direction.value}: {link.participant_id} {link.label or ''}".rstrip()
+
+
+def _inspector_lines(  # noqa: PLR0912
+    record: TrajectoryRecord | None, tab: InspectorTab
+) -> tuple[list[str], list[tuple[int, str]]]:
     if record is None:
-        return "No record selected."
+        return ["No record selected."], []
     lines = [
         f"{record.kind.value} · {record.source} · {status_label(record.status)}",
         record.summary,
     ]
-    details = _detail_lines(record)
-    if tab in {InspectorTab.SUMMARY, InspectorTab.PREVIEW, InspectorTab.CURRENT}:
-        lines.extend(details[:8])
-    elif tab in {InspectorTab.OUTPUT, InspectorTab.RESULT, InspectorTab.PAYLOAD, InspectorTab.RAW}:
-        lines.extend(details)
-    elif tab == InspectorTab.INPUT:
-        lines.extend(
-            line for line in details if "input" in line.casefold() or "argument" in line.casefold()
-        )
-    elif tab == InspectorTab.REASONING:
-        lines.extend(line for line in details if "reason" in line.casefold())
-    elif tab == InspectorTab.USAGE:
-        lines.append(
-            json.dumps(
-                record.usage.to_wire() if record.usage else "No usage recorded.",
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
+    link_lines: list[tuple[int, str]] = []
+
+    def append_fields(fields: tuple[DetailField, ...]) -> None:
+        lines.extend(f"{field.name}: {_format_detail(field)}" for field in fields)
+
+    if tab is InspectorTab.SUMMARY:
+        append_fields(record.details[:8])
+    elif tab in {
+        InspectorTab.OUTPUT,
+        InspectorTab.RESULT,
+        InspectorTab.PAYLOAD,
+        InspectorTab.RAW,
+    }:
+        fields = _fields_for_tab(record, tab)
+        append_fields(fields or record.details)
+    elif tab in {
+        InspectorTab.INPUT,
+        InspectorTab.REASONING,
+        InspectorTab.PREVIEW,
+        InspectorTab.CURRENT,
+        InspectorTab.PREVIOUS,
+        InspectorTab.DIFF,
+    }:
+        fields = _fields_for_tab(record, tab)
+        if fields:
+            append_fields(fields)
+        elif tab is InspectorTab.CURRENT:
+            lines.append("No current context supplied.")
+        elif tab is InspectorTab.PREVIOUS:
+            lines.append("No previous context supplied.")
+        elif tab is InspectorTab.DIFF:
+            lines.append("No context diff supplied.")
+    elif tab is InspectorTab.USAGE:
+        fields = _fields_for_tab(record, tab)
+        if fields:
+            append_fields(fields)
+        else:
+            lines.append(
+                json.dumps(
+                    record.usage.to_wire() if record.usage else "No usage recorded.",
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
             )
-        )
-    elif tab == InspectorTab.TIMING:
+    elif tab is InspectorTab.TIMING:
         lines.append(f"Duration: {format_duration(record.timing)}")
         if record.timing:
             lines.extend(
@@ -173,17 +224,41 @@ def inspector_text(record: TrajectoryRecord | None, tab: InspectorTab) -> str:
                 for value in (record.timing.started_at, record.timing.finished_at)
                 if value is not None
             )
-    elif tab == InspectorTab.SOURCE:
+    elif tab is InspectorTab.SOURCE:
         lines.append(f"Source: {record.source}")
         if record.source_epoch:
             lines.append(f"Epoch: {record.source_epoch}")
-    elif tab == InspectorTab.PREVIOUS:
-        lines.append("No previous context supplied.")
-    elif tab == InspectorTab.DIFF:
-        lines.append("No context diff supplied.")
+
+    if tab not in {InspectorTab.USAGE, InspectorTab.TIMING, InspectorTab.SOURCE}:
+        for link in record.links:
+            lines.append(_participant_line(link))
+            link_lines.append((len(lines) - 1, link.participant_id))
+    return lines, link_lines
+
+
+def inspector_text(record: TrajectoryRecord | None, tab: InspectorTab) -> str:
+    """Build the exact bounded text exposed by the active inspector tab."""
+    lines, _ = _inspector_lines(record, tab)
     text = "\n".join(plain_text(line) for line in lines)
     clipped, _, _ = clip_utf8(text, MAX_DETAIL_BYTES)
     return clipped
+
+
+def inspector_link_line_ids(record: TrajectoryRecord | None, tab: InspectorTab) -> dict[int, str]:
+    lines, link_lines = _inspector_lines(record, tab)
+    safe_lines = [plain_text(line) for line in lines]
+    text, _, _ = clip_utf8("\n".join(safe_lines), MAX_DETAIL_BYTES)
+    visible_lines = text.splitlines()
+    result: dict[int, str] = {}
+    for entry_index, participant_id in link_lines:
+        line_index = sum(line.count("\n") + 1 for line in safe_lines[:entry_index])
+        expected = safe_lines[entry_index].splitlines()
+        if not expected:
+            continue
+        end = line_index + len(expected)
+        if end <= len(visible_lines) and visible_lines[line_index:end] == expected:
+            result.update(dict.fromkeys(range(line_index, end), participant_id))
+    return result
 
 
 def inspector_content(record: TrajectoryRecord | None, tab: InspectorTab) -> Text:
@@ -221,6 +296,7 @@ __all__ = [
     "format_duration",
     "group_line",
     "inspector_content",
+    "inspector_link_line_ids",
     "inspector_text",
     "kind_glyph",
     "lane_glyph",

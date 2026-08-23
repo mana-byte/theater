@@ -19,7 +19,11 @@ from theater.regie.trajectory.constants import (
     MIN_INSPECTOR_RATIO,
 )
 from theater.regie.trajectory.models import InspectorTab, TrajectoryRecord
-from theater.regie.trajectory.render import inspector_content, tabs_for_record
+from theater.regie.trajectory.render import (
+    inspector_content,
+    inspector_link_line_ids,
+    tabs_for_record,
+)
 
 
 class InspectorTabChanged(Message):
@@ -107,15 +111,12 @@ class Inspector(Static):
         rendered = Text(heading, no_wrap=True, overflow="crop")
         rendered.append("\n")
         rendered.append_text(content)
-        self._link_line_ids = {}
-        if self._record is not None:
-            link_ids = {link.participant_id for link in self._record.links}
-            for line_index, line in enumerate(content.plain.splitlines(), start=1):
-                if line.startswith("participant "):
-                    for participant_id in link_ids:
-                        if participant_id in line:
-                            self._link_line_ids[line_index] = participant_id
-                            break
+        self._link_line_ids = {
+            line_index + 1: participant_id
+            for line_index, participant_id in inspector_link_line_ids(
+                self._record, self._tab
+            ).items()
+        }
         self.update(rendered, layout=False)
         self.scroll_to(y=0, animate=False)
 
@@ -150,7 +151,7 @@ class Inspector(Static):
         ):
             raise ValueError("inspector ratio must be finite")
         self._ratio = max(MIN_INSPECTOR_RATIO, min(MAX_INSPECTOR_RATIO, float(ratio)))
-        self.styles.height = f"{self._ratio * 100:.2f}%"
+        self._apply_height()
         return self._ratio
 
     def resize_by(self, delta: float) -> float:
@@ -159,9 +160,11 @@ class Inspector(Static):
     def toggle_maximize(self) -> bool:
         self._maximized = not self._maximized
         self.set_class(self._maximized, "-maximized")
-        if not self._maximized:
-            self.set_ratio(self._ratio)
+        self._apply_height()
         return self._maximized
+
+    def _apply_height(self) -> None:
+        self.styles.height = "1fr" if self._maximized else f"{self._ratio * 100:.2f}%"
 
     def emit_participant_link(self, participant_id: str) -> None:
         if participant_id:
@@ -195,7 +198,7 @@ class Inspector(Static):
         parent = self.parent
         height = parent.region.height if isinstance(parent, Widget) else self.region.height
         if height:
-            self.post_message(InspectorResizeRequested(event.delta_y / height))
+            self.post_message(InspectorResizeRequested(-event.delta_y / height))
 
     def on_mouse_up(self, event: events.MouseUp) -> None:
         if self._resizing:

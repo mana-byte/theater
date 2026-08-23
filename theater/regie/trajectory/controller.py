@@ -199,6 +199,7 @@ class TrajectoryController:
         state.retry_kind = None
         state.retry_message = ""
         self._publish(state)
+        result: TrajectoryPage | None = None
         try:
             response = await self._call(
                 self.query_client,
@@ -209,20 +210,20 @@ class TrajectoryController:
             )
             page = self._page(response, participant_id)
             _ensure_participant(page, participant_id, "page")
+            if self._is_current(participant_id, generation):
+                state.apply_older(page)
+                self._publish(state)
+                result = page
         except asyncio.CancelledError:
-            state.loading_older = False
             raise
         except Exception as exc:
             if self._is_current(participant_id, generation):
                 state.mark_retry("older", str(exc) or "Older trajectory page failed.")
                 self._publish(state)
             return None
-        if not self._is_current(participant_id, generation):
+        finally:
             state.loading_older = False
-            return None
-        state.apply_older(page)
-        self._publish(state)
-        return page
+        return result
 
     async def start_follow(
         self,

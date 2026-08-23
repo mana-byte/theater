@@ -131,7 +131,8 @@ class Ledger(Static):
         return 1
 
     def _clamp_scroll(self) -> None:
-        self._scroll_offset = max(0, min(self._scroll_offset, self._total_lines() - 1))
+        max_start = max(0, self._total_lines() - self._viewport_rows())
+        self._scroll_offset = max(0, min(self._scroll_offset, max_start))
 
     def _line_for_record(self, record_id: str | None) -> int | None:
         if record_id is None:
