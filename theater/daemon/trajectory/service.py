@@ -15,6 +15,7 @@ from theater.constants.trajectory import (
     TRAJECTORY_IDENTIFIER_MAX_BYTES,
     TRAJECTORY_OLDER_CURSOR_LIMIT,
     TRAJECTORY_PAGE_RECORD_LIMIT,
+    TRAJECTORY_RESPONSE_MAX_BYTES,
 )
 from theater.daemon.trajectory.cache import CacheStream, RecordChange, TrajectoryCache
 from theater.daemon.trajectory.merge import order_records
@@ -26,10 +27,17 @@ from theater.daemon.trajectory.responses import (
     missing_page,
     resync_delta,
     stale_page,
+    wire_bytes,
 )
 from theater.daemon.trajectory.runtime import TrajectoryRuntime, TrajectoryStream
 from theater.models import BadRequest, NotFound, Participant
-from theater.trajectory import TrajectoryDelta, TrajectoryPage, TrajectoryRecord
+from theater.trajectory import (
+    PanelState,
+    TrajectoryDelta,
+    TrajectoryPage,
+    TrajectoryParticipantState,
+    TrajectoryRecord,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +105,12 @@ class TrajectoryService:
         else:
             self.cache.touch(participant.id)
             stream.cache.viewer_refs = max(1, stream.cache.viewer_refs)
+            if before is None and stream.panel_state.state in {
+                PanelState.STALE,
+                PanelState.UNAVAILABLE,
+                PanelState.UNTRUSTED,
+            }:
+                await self._runtime.refresh(stream)
         self._runtime.refresh_participant(stream)
         if before is None:
             return self._build_page(
@@ -161,30 +175,27 @@ class TrajectoryService:
         _validate_bounded_string(after, "after", TRAJECTORY_CURSOR_MAX_BYTES)
         wait = _validate_wait(wait, "trajectory.follow")
         limit = _validate_limit(limit, "trajectory.follow")
-        participant = self._resolve(participant_token, missing=False)
-        assert participant is not None
-        stream = self.streams.get(participant.id)
         parsed = decode_follow_cursor(after)
         if parsed is None:
             raise BadRequest(
                 "trajectory.follow parameter 'after' must be a cursor from trajectory.snapshot"
             )
         cursor_epoch, cursor_stream, sequence = parsed
-        if cursor_epoch != self.daemon_epoch:
-            return resync_delta(stream_id, "the daemon restarted; request a fresh snapshot")
-        if stream is None or stream.cache.stream_id != stream_id or cursor_stream != stream_id:
-            return resync_delta(
-                stream_id,
-                "the trajectory stream is not warm; request a fresh snapshot",
-            )
-        self.cache.touch(participant.id)
+        target = self._follow_stream(participant_token, stream_id, cursor_epoch, cursor_stream)
+        if isinstance(target, TrajectoryDelta):
+            return target
+        stream = target
+        self._runtime.refresh_participant(stream, notify=True)
+        self.cache.touch(stream.participant.id)
         read = stream.ring.changes_after(sequence, limit=limit)
         if read.resync_required:
             return resync_delta(stream_id, read.reason or "request a fresh snapshot")
         if read.changes:
             return self._delta_for_changes(stream, read.changes, after_sequence=sequence)
+        if _terminal_participant_state(stream):
+            return self._empty_delta(stream, sequence=sequence)
         if wait <= 0:
-            return empty_delta(stream, daemon_epoch=self.daemon_epoch, sequence=sequence)
+            return self._empty_delta(stream, sequence=sequence)
         task = asyncio.current_task()
         follower_id = id(task) if task is not None else id(stream)
         event = asyncio.Event()
@@ -200,16 +211,17 @@ class TrajectoryService:
             stream.cache.follower_refs = max(0, stream.cache.follower_refs - 1)
             if task is not None:
                 self._follower_tasks.discard(task)
-        if self.streams.get(participant.id) is not stream:
+        if self.streams.get(stream.participant.id) is not stream:
             return resync_delta(
                 stream_id,
                 "the trajectory stream was evicted; request a fresh snapshot",
             )
+        self._runtime.refresh_participant(stream)
         read = stream.ring.changes_after(sequence, limit=limit)
         if read.resync_required:
             return resync_delta(stream_id, read.reason or "request a fresh snapshot")
         if not read.changes:
-            return empty_delta(stream, daemon_epoch=self.daemon_epoch, sequence=sequence)
+            return self._empty_delta(stream, sequence=sequence)
         return self._delta_for_changes(stream, read.changes, after_sequence=sequence)
 
     def close_viewer(self, participant_token: str, stream_id: str | None = None) -> bool:
@@ -295,6 +307,24 @@ class TrajectoryService:
                 "trajectory response envelope exceeds the 1 MiB limit; request a fresh snapshot"
             ) from exc
 
+    def _follow_stream(
+        self,
+        participant_token: str,
+        stream_id: str,
+        cursor_epoch: str,
+        cursor_stream: str,
+    ) -> TrajectoryStream | TrajectoryDelta:
+        if cursor_epoch != self.daemon_epoch:
+            return resync_delta(stream_id, "the daemon restarted; request a fresh snapshot")
+        participant = self._resolve(participant_token, missing=True)
+        stream = self.streams.get(participant.id if participant is not None else participant_token)
+        if stream is None or stream.cache.stream_id != stream_id or cursor_stream != stream_id:
+            return resync_delta(
+                stream_id,
+                "the trajectory stream is not warm; request a fresh snapshot",
+            )
+        return stream
+
     def _delta_for_changes(
         self,
         stream: TrajectoryStream,
@@ -302,17 +332,36 @@ class TrajectoryService:
         *,
         after_sequence: int,
     ) -> TrajectoryDelta:
-        delta = fit_delta(
-            stream,
-            changes,
-            daemon_epoch=self.daemon_epoch,
-            after_sequence=after_sequence,
-        )
-        if delta is not None:
-            return delta
+        candidate_changes = changes
+        while candidate_changes:
+            delta = fit_delta(
+                stream,
+                candidate_changes,
+                daemon_epoch=self.daemon_epoch,
+                after_sequence=after_sequence,
+            )
+            if delta is None:
+                break
+            stateful = TrajectoryDelta(
+                stream_id=delta.stream_id,
+                cursor=delta.cursor,
+                upserts=delta.upserts,
+                panel_state=stream.panel_state,
+            )
+            if wire_bytes(stateful.to_wire()) <= TRAJECTORY_RESPONSE_MAX_BYTES:
+                return stateful
+            candidate_changes = candidate_changes[: len(delta.upserts) - 1]
         return resync_delta(
             stream.cache.stream_id,
             "one trajectory update cannot fit the 1 MiB response limit; request a fresh snapshot",
+        )
+
+    def _empty_delta(self, stream: TrajectoryStream, *, sequence: int) -> TrajectoryDelta:
+        delta = empty_delta(stream, daemon_epoch=self.daemon_epoch, sequence=sequence)
+        return TrajectoryDelta(
+            stream_id=delta.stream_id,
+            cursor=delta.cursor,
+            panel_state=stream.panel_state,
         )
 
     def _older_state(self, token: str) -> _OlderState | None:
@@ -362,6 +411,14 @@ def _validate_participant_token(value: object, method_name: str) -> None:
     _validate_encoded_length(
         value, TRAJECTORY_IDENTIFIER_MAX_BYTES, f"{method_name} parameter 'id'"
     )
+
+
+def _terminal_participant_state(stream: TrajectoryStream) -> bool:
+    return stream.panel_state.participant_state in {
+        TrajectoryParticipantState.DEAD,
+        TrajectoryParticipantState.EXTERNAL,
+        TrajectoryParticipantState.MISSING,
+    }
 
 
 def _validate_bounded_string(value: object, key: str, maximum: int) -> None:

@@ -91,7 +91,7 @@ class TrajectoryRuntime:
         self._ttl_task: asyncio.Task | None = None
         self._closed = False
         self._eviction_listener: Callable[[CacheStream], None] | None = None
-        self.store.register_bus_listener(self._on_bus_row)
+        self._bus_listener_registered = False
         if observer is not None:
             setter = getattr(observer, "set_trajectory_capture", None)
             if callable(setter):
@@ -140,6 +140,7 @@ class TrajectoryRuntime:
             ),
         )
         self.streams[participant.id] = stream
+        self._register_bus_listener()
         cache_stream.loading = True
         self._ensure_ttl_task()
         for evicted in self.cache.enforce(protected={participant.id}):
@@ -184,6 +185,29 @@ class TrajectoryRuntime:
             self.cache.touch(stream.participant.id)
             for evicted in self.cache.enforce(protected={stream.participant.id}):
                 self._discard_stream(evicted.participant_id, evicted)
+
+    async def refresh(self, stream: TrajectoryStream) -> None:
+        async with stream.initialization_lock:
+            if not stream.initialized:
+                return
+            stream.cache.loading = True
+            task = asyncio.create_task(
+                load_history(
+                    self,
+                    stream.participant,
+                    before=None,
+                    limit=TRAJECTORY_PAGE_RECORD_LIMIT,
+                )
+            )
+            self._history_tasks.add(task)
+            try:
+                result = await task
+            finally:
+                self._history_tasks.discard(task)
+                stream.cache.loading = False
+            self._apply_history(stream, result, older=False)
+            self._set_initial_state(stream, result, notify=True)
+            self.cache.touch(stream.participant.id)
 
     async def load_older(
         self,
@@ -232,7 +256,13 @@ class TrajectoryRuntime:
                 stream.transcript_floor = result.page.older_cursor or result.page.cursor
             else:
                 self._add_history_failure(stream, result)
-                source_before = None
+                reason = result.message or result.page.error or "history source failed"
+                self._set_panel(
+                    stream,
+                    PanelState.STALE,
+                    f"older transcript history is unavailable: {reason}; retry this older page",
+                    notify=False,
+                )
         if bus_before is not None and needs_more:
             rows = self._bus_history(stream.participant.id, before_id=bus_before, stream=stream)
             records = tuple(
@@ -246,27 +276,49 @@ class TrajectoryRuntime:
             self._update_theater_floor(stream, records)
         return source_before, bus_before, tuple(loaded_records)
 
-    def refresh_participant(self, stream: TrajectoryStream) -> None:
+    def refresh_participant(self, stream: TrajectoryStream, *, notify: bool = False) -> bool:
         getter = getattr(self.registry, "get", None)
         if not callable(getter):
-            return
+            return False
         try:
             participant = getter(stream.participant.id)
         except NotFound:
-            return
+            return self._replace_panel(
+                stream,
+                PanelStateInfo(
+                    PanelState.UNAVAILABLE,
+                    (
+                        "participant is missing; refresh the participant tree and select an "
+                        "existing id"
+                    ),
+                    TrajectoryParticipantState.MISSING,
+                ),
+                notify=notify,
+            )
         if isinstance(participant, Participant):
             stream.participant = participant
-            stream.panel_state = PanelStateInfo(
-                stream.panel_state.state,
-                stream.panel_state.message,
-                participant_state(participant),
+            state = participant_state(participant)
+            message = stream.panel_state.message
+            if state is TrajectoryParticipantState.DEAD:
+                message = "participant is dead; live trajectory updates have stopped"
+            elif state is TrajectoryParticipantState.EXTERNAL:
+                message = "participant is external; live trajectory updates are unavailable"
+            return self._replace_panel(
+                stream,
+                PanelStateInfo(
+                    stream.panel_state.state,
+                    message,
+                    state,
+                ),
+                notify=notify,
             )
+        return False
 
     async def aclose(self) -> None:
         if self._closed:
             return
         self._closed = True
-        self.store.unregister_bus_listener(self._on_bus_row)
+        self._unregister_bus_listener()
         if self.observer is not None:
             setter = getattr(self.observer, "set_trajectory_capture", None)
             if callable(setter):
@@ -326,9 +378,11 @@ class TrajectoryRuntime:
         else:
             self._add_history_failure(stream, result)
 
-    def _set_initial_state(self, stream: TrajectoryStream, result: HistoryLoad) -> None:
-        self.refresh_participant(stream)
-        current_participant_state = participant_state(stream.participant)
+    def _set_initial_state(
+        self, stream: TrajectoryStream, result: HistoryLoad, *, notify: bool = False
+    ) -> None:
+        self.refresh_participant(stream, notify=notify)
+        current_participant_state = stream.panel_state.participant_state
         has_transcript = any(
             not record.record_id.startswith("bus:") for record in stream.ring.records()
         )
@@ -361,7 +415,11 @@ class TrajectoryRuntime:
         else:
             state = PanelState.UNAVAILABLE
             message = result.message or "trajectory history is unavailable"
-        stream.panel_state = PanelStateInfo(state, message, current_participant_state)
+        self._replace_panel(
+            stream,
+            PanelStateInfo(state, message, current_participant_state),
+            notify=notify,
+        )
 
     def _apply_live(
         self, stream: TrajectoryStream, captured: CapturedBatch, *, notify: bool
@@ -372,7 +430,10 @@ class TrajectoryRuntime:
             if not is_trusted_provenance(attachment.correlation):
                 stream.live_allowed = False
                 self._set_panel(
-                    stream, PanelState.UNTRUSTED, "live transcript identity is untrusted"
+                    stream,
+                    PanelState.UNTRUSTED,
+                    "live transcript identity is untrusted",
+                    notify=notify,
                 )
                 self._add_gap(stream, "transcript", "live transcript attachment is untrusted")
                 return
@@ -394,12 +455,14 @@ class TrajectoryRuntime:
                     stream,
                     PanelState.UNTRUSTED,
                     transcript_identity_recovery_message(stream.participant.id, reason),
+                    notify=notify,
                 )
-            elif any(not record.record_id.startswith("bus:") for record in stream.ring.records()):
-                self._set_panel(stream, PanelState.STALE, f"live transcript unavailable: {reason}")
             else:
                 self._set_panel(
-                    stream, PanelState.UNAVAILABLE, f"live transcript unavailable: {reason}"
+                    stream,
+                    PanelState.STALE,
+                    f"live trajectory read failed: {reason}; request a fresh snapshot to retry",
+                    notify=notify,
                 )
             return
         epoch = stream.source_epoch or source_epoch_for(stream.participant, None)
@@ -411,7 +474,12 @@ class TrajectoryRuntime:
             PanelState.STALE,
             PanelState.UNTRUSTED,
         }:
-            self._set_panel(stream, PanelState.READY, "live transcript records are available")
+            self._set_panel(
+                stream,
+                PanelState.READY,
+                "live transcript records are available",
+                notify=False,
+            )
 
     def _add_history_failure(self, stream: TrajectoryStream, result: HistoryLoad) -> None:
         reason = result.message or result.page.error or "history source failed"
@@ -444,9 +512,29 @@ class TrajectoryRuntime:
             stream.gaps.append(gap)
             del stream.gaps[:-TRAJECTORY_MAX_COVERAGE_GAPS]
 
-    @staticmethod
-    def _set_panel(stream: TrajectoryStream, state: PanelState, message: str) -> None:
-        stream.panel_state = PanelStateInfo(state, message, participant_state(stream.participant))
+    def _set_panel(
+        self,
+        stream: TrajectoryStream,
+        state: PanelState,
+        message: str,
+        *,
+        notify: bool,
+    ) -> bool:
+        return self._replace_panel(
+            stream,
+            PanelStateInfo(state, message, stream.panel_state.participant_state),
+            notify=notify,
+        )
+
+    def _replace_panel(
+        self, stream: TrajectoryStream, panel_state: PanelStateInfo, *, notify: bool
+    ) -> bool:
+        if stream.panel_state == panel_state:
+            return False
+        stream.panel_state = panel_state
+        if notify:
+            self.wake_followers(stream)
+        return True
 
     def _merge_records(
         self,
@@ -509,11 +597,15 @@ class TrajectoryRuntime:
         self._merge_records(stream, records, notify=notify)
         self._update_theater_floor(stream, records)
         if any(row.get("kind") == "participant.dead" for row in values):
-            self.refresh_participant(stream)
-            stream.panel_state = PanelStateInfo(
-                stream.panel_state.state,
-                stream.panel_state.message,
-                TrajectoryParticipantState.DEAD,
+            self.refresh_participant(stream, notify=notify)
+            self._replace_panel(
+                stream,
+                PanelStateInfo(
+                    stream.panel_state.state,
+                    "participant is dead; live trajectory updates have stopped",
+                    TrajectoryParticipantState.DEAD,
+                ),
+                notify=notify,
             )
 
     @staticmethod
@@ -539,6 +631,16 @@ class TrajectoryRuntime:
                 self._loop.call_soon(self._drain_bus_queue)
         except Exception:
             logger.exception("trajectory bus capture failed")
+
+    def _register_bus_listener(self) -> None:
+        if not self._bus_listener_registered:
+            self.store.register_bus_listener(self._on_bus_row)
+            self._bus_listener_registered = True
+
+    def _unregister_bus_listener(self) -> None:
+        if self._bus_listener_registered:
+            self.store.unregister_bus_listener(self._on_bus_row)
+            self._bus_listener_registered = False
 
     def _drain_bus_queue(self) -> None:
         self._bus_scheduled = False
@@ -590,6 +692,8 @@ class TrajectoryRuntime:
             if self._eviction_listener is not None:
                 self._eviction_listener(cache_stream)
         self.cache.remove(participant_id)
+        if not self.streams:
+            self._unregister_bus_listener()
 
 
 def count_records_before(records: tuple[TrajectoryRecord, ...], marker: str) -> int:

@@ -415,6 +415,7 @@ class TrajectoryDelta:
     stream_id: str
     cursor: str | None = None
     upserts: tuple[TrajectoryUpsert, ...] = ()
+    panel_state: PanelStateInfo | None = None
     resync_required: bool = False
     reason: str | None = None
 
@@ -447,6 +448,8 @@ class TrajectoryDelta:
             )
         if any(not isinstance(upsert, TrajectoryUpsert) for upsert in self.upserts):
             raise TrajectoryValidationError("delta.upserts must contain TrajectoryUpsert values")
+        if self.panel_state is not None and not isinstance(self.panel_state, PanelStateInfo):
+            raise TrajectoryValidationError("delta.panel_state must be PanelStateInfo or null")
         if type(self.resync_required) is not bool:
             raise TrajectoryValidationError("delta.resync_required must be a boolean")
         if self.reason is not None and not isinstance(self.reason, str):
@@ -459,6 +462,7 @@ class TrajectoryDelta:
             "stream_id": self.stream_id,
             "cursor": self.cursor,
             "upserts": [upsert.to_wire() for upsert in self.upserts],
+            "panel_state": self.panel_state.to_wire() if self.panel_state is not None else None,
             "resync_required": self.resync_required,
             "reason": self.reason,
         }
@@ -469,7 +473,7 @@ class TrajectoryDelta:
         keys(
             data,
             required={"stream_id"},
-            optional={"cursor", "upserts", "resync_required", "reason"},
+            optional={"cursor", "upserts", "panel_state", "resync_required", "reason"},
             label="trajectory delta",
         )
         return cls(
@@ -478,6 +482,11 @@ class TrajectoryDelta:
             upserts=tuple(
                 TrajectoryUpsert.from_wire(item)
                 for item in sequence(data.get("upserts", []), "delta.upserts")
+            ),
+            panel_state=(
+                PanelStateInfo.from_wire(data["panel_state"])
+                if data.get("panel_state") is not None
+                else None
             ),
             resync_required=boolean(data.get("resync_required", False), "delta.resync_required"),
             reason=string_or_none(data.get("reason"), "delta.reason"),
