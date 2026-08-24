@@ -41,13 +41,22 @@ def paginate_search_result(result: SearchResult, page: int, page_size: int) -> L
     group_ids = {
         group_id for record_id in record_ids for group_id in result.path_for_record(record_id)
     }
+    request_ids = {
+        request_id
+        for request_id, request in result.requests.items()
+        if any(record_id in record_ids for record_id in request.record_ids)
+    }
     entries = tuple(
         entry
         for entry in result.entries
         if (
             entry.record_id in record_ids
             if entry.record_id is not None
-            else entry.group_id in group_ids
+            else (
+                entry.request_id in request_ids
+                if entry.is_request_header
+                else entry.group_id in group_ids
+            )
         )
     )
     page_result = SearchResult(
@@ -63,6 +72,7 @@ def paginate_search_result(result: SearchResult, page: int, page_size: int) -> L
         group_paths={
             record.record_id: result.path_for_record(record.record_id) for record in records
         },
+        requests={request_id: result.requests[request_id] for request_id in request_ids},
     )
     return LedgerPage(
         index=index,

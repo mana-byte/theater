@@ -10,14 +10,13 @@ from textual.widgets import Label
 
 from theater.regie.trajectory.constants import (
     KIND_GLYPHS_BY_VALUE,
-    TRAJECTORY_OVERVIEW_COMPACT_NUMBER_THRESHOLD,
     TRAJECTORY_OVERVIEW_HEIGHT,
     TRAJECTORY_OVERVIEW_MILLISECONDS_PER_SECOND,
     TRAJECTORY_OVERVIEW_MINUTES_PER_HOUR,
     TRAJECTORY_OVERVIEW_SECONDS_PER_MINUTE,
     TRAJECTORY_OVERVIEW_TICK_SECONDS,
 )
-from theater.regie.trajectory.render import sanitize_text
+from theater.regie.trajectory.render import compact_cost, compact_number, sanitize_text
 from theater.trajectory import (
     PanelState,
     PanelStateInfo,
@@ -283,9 +282,9 @@ def _duration_text(duration_ms: float | None, start: float | None) -> str:
 
 def _meta_text(capabilities: TrajectoryCapabilities, overview: TrajectoryOverview) -> str:
     parts = [
-        f"{_compact_number(overview.record_count)} cached records",
-        f"{_compact_number(overview.model_operations)} model ops",
-        f"{_compact_number(overview.tool_operations)} tool calls",
+        f"{compact_number(overview.record_count)} cached records",
+        f"{compact_number(overview.model_operations)} model ops",
+        f"{compact_number(overview.tool_operations)} tool calls",
     ]
     token_parts = (
         ("in", overview.input_tokens),
@@ -293,9 +292,9 @@ def _meta_text(capabilities: TrajectoryCapabilities, overview: TrajectoryOvervie
         ("cache", overview.cache_read_tokens + overview.cache_write_tokens),
         ("reasoning", overview.reasoning_tokens),
     )
-    parts.extend(f"{name} {_compact_number(value)} tok" for name, value in token_parts if value)
+    parts.extend(f"{name} {compact_number(value)} tok" for name, value in token_parts if value)
     if overview.reported_cost_usd is not None:
-        parts.append(f"reported ${_compact_cost(overview.reported_cost_usd)}")
+        parts.append(f"reported ${compact_cost(overview.reported_cost_usd)}")
     if overview.totals_saturated:
         parts.append("totals capped")
     parts.append(_coverage_text(overview))
@@ -350,19 +349,6 @@ def _coverage_text(overview: TrajectoryOverview) -> str:
         if reason in overview.incomplete_reasons and reason in labels
     ]
     return f"partial: {', '.join(reasons)}" if reasons else "coverage unknown"
-
-
-def _compact_number(value: int) -> str:
-    if value < TRAJECTORY_OVERVIEW_COMPACT_NUMBER_THRESHOLD:
-        return str(value)
-    for divisor, suffix in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")):
-        if value >= divisor:
-            return f"{value / divisor:.1f}".rstrip("0").rstrip(".") + suffix
-    return str(value)
-
-
-def _compact_cost(value: float) -> str:
-    return f"{value:.4f}".rstrip("0").rstrip(".") or "0"
 
 
 def _one_line(value: str) -> str:
