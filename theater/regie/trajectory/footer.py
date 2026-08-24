@@ -224,7 +224,6 @@ class TrajectoryFooter(Horizontal):
         following.tooltip = "Next page (L)"
         selector = self.query_one("#trajectory-page", Select)
         selector.disabled = self._page_count <= 1
-        selector.tooltip = "Choose trajectory page"
         options = [
             (f"Page {page}/{self._page_count}", page - 1) for page in range(1, self._page_count + 1)
         ]
