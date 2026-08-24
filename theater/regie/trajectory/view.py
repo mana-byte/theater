@@ -44,6 +44,7 @@ from theater.regie.trajectory.ledger import (
     LedgerRetryClicked,
 )
 from theater.regie.trajectory.ordering import TrajectoryOrdering, build_ordering
+from theater.regie.trajectory.overview_strip import TrajectoryOverviewStrip
 from theater.regie.trajectory.pagination import paginate_search_result
 from theater.regie.trajectory.render import detail_text, sanitize_text
 from theater.regie.trajectory.search import FilterCounts, SearchCache, SearchResult, search_records
@@ -114,6 +115,7 @@ class TrajectoryView(Vertical):
     }}
     TrajectoryView > #trajectory-timeline,
     TrajectoryView > #trajectory-search,
+    TrajectoryView > #trajectory-overview,
     TrajectoryView > #trajectory-ledger,
     TrajectoryView > #trajectory-footer {{
         layer: trajectory-base;
@@ -206,6 +208,7 @@ class TrajectoryView(Vertical):
             placeholder="⌕ Search trajectory  /",
             id="trajectory-search",
         )
+        yield TrajectoryOverviewStrip(id="trajectory-overview")
         yield Timeline(id="trajectory-timeline")
         yield FilterPanel(id="trajectory-filters", classes="-hidden")
         yield Ledger(id="trajectory-ledger")
@@ -340,10 +343,18 @@ class TrajectoryView(Vertical):
         if not self.is_mounted:
             return
         timeline = self.query_one("#trajectory-timeline", Timeline)
+        overview_strip = self.query_one("#trajectory-overview", TrajectoryOverviewStrip)
         ledger = self.query_one("#trajectory-ledger", Ledger)
         search = self.query_one("#trajectory-search", Input)
         if search.value != self.state.query and self.app.focused is not search:
             search.value = self.state.query
+        overview_strip.update_state(
+            panel=self.state.panel,
+            capabilities=self.state.capabilities,
+            overview=self.state.overview,
+            loading=self.state.loading,
+            stale_message=self.state.stale_message,
+        )
         timeline_offset: int | None = self.state.timeline_scroll
         if (
             not self.state.follow_tail
