@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 from theater.trajectory.bounds import bounded_preview, clip_utf8
+from theater.trajectory.capabilities import (
+    TrajectoryCapabilities,
+    TrajectoryFeature,
+    TrajectorySupport,
+)
 from theater.trajectory.content import (
     ContentFormat,
     ContentPreview,
@@ -22,6 +27,12 @@ from theater.trajectory.enums import (
     TrajectoryStatus,
     TrajectoryValidationError,
 )
+from theater.trajectory.overview import (
+    TrajectoryCurrentOperation,
+    TrajectoryIncompleteReason,
+    TrajectoryOverview,
+    TrajectoryProblem,
+)
 from theater.trajectory.page import (
     CoverageGap,
     PanelStateInfo,
@@ -36,17 +47,6 @@ from theater.trajectory.records import (
     Timing,
     TrajectoryRecord,
     TrajectoryUsage,
-)
-from theater.trajectory.usefulness import (
-    TrajectoryCapabilities,
-    TrajectoryCapability,
-    TrajectoryCurrentOperation,
-    TrajectoryFeature,
-    TrajectoryIncompleteReason,
-    TrajectoryOverview,
-    TrajectoryProblem,
-    TrajectoryScope,
-    TrajectorySupport,
 )
 from theater.trajectory.wire import from_wire, to_wire
 
@@ -63,7 +63,6 @@ __all__ = [
     "Timing",
     "TimingProvenance",
     "TrajectoryCapabilities",
-    "TrajectoryCapability",
     "TrajectoryCoverage",
     "TrajectoryCurrentOperation",
     "TrajectoryDelta",
@@ -77,7 +76,6 @@ __all__ = [
     "TrajectoryParticipantState",
     "TrajectoryProblem",
     "TrajectoryRecord",
-    "TrajectoryScope",
     "TrajectoryStatus",
     "TrajectorySupport",
     "TrajectoryUpsert",

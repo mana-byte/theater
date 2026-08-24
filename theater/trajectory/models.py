@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from theater.trajectory.capabilities import (
+    TrajectoryCapabilities,
+    TrajectoryFeature,
+    TrajectorySupport,
+)
 from theater.trajectory.content import (
     ContentPreview,
     DetailField,
@@ -21,6 +26,12 @@ from theater.trajectory.enums import (
     TrajectoryStatus,
     TrajectoryValidationError,
 )
+from theater.trajectory.overview import (
+    TrajectoryCurrentOperation,
+    TrajectoryIncompleteReason,
+    TrajectoryOverview,
+    TrajectoryProblem,
+)
 from theater.trajectory.page import (
     CoverageGap,
     PanelStateInfo,
@@ -36,17 +47,6 @@ from theater.trajectory.records import (
     TrajectoryRecord,
     TrajectoryUsage,
 )
-from theater.trajectory.usefulness import (
-    TrajectoryCapabilities,
-    TrajectoryCapability,
-    TrajectoryCurrentOperation,
-    TrajectoryFeature,
-    TrajectoryIncompleteReason,
-    TrajectoryOverview,
-    TrajectoryProblem,
-    TrajectoryScope,
-    TrajectorySupport,
-)
 
 __all__ = [
     "ContentFormat",
@@ -61,7 +61,6 @@ __all__ = [
     "Timing",
     "TimingProvenance",
     "TrajectoryCapabilities",
-    "TrajectoryCapability",
     "TrajectoryCoverage",
     "TrajectoryCurrentOperation",
     "TrajectoryDelta",
@@ -75,7 +74,6 @@ __all__ = [
     "TrajectoryParticipantState",
     "TrajectoryProblem",
     "TrajectoryRecord",
-    "TrajectoryScope",
     "TrajectoryStatus",
     "TrajectorySupport",
     "TrajectoryUpsert",

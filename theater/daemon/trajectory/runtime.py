@@ -482,8 +482,7 @@ class TrajectoryRuntime:
         epoch = stream.source_epoch or source_epoch_for(stream.participant, None)
         records = project_batch(batch, participant_id=stream.participant.id, source_epoch=epoch)
         changes = self._merge_records(stream, records, notify=notify)
-        changed_live_updates = bool(changes) and not stream.live_updates_observed
-        if changed_live_updates:
+        if changes:
             stream.live_updates_observed = True
         if records and stream.panel_state.state in {
             PanelState.WAITING,

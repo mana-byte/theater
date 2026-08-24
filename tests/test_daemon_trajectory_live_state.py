@@ -140,8 +140,8 @@ async def test_follow_reports_waiting_to_ready_and_state_only_stale_delta(source
     initial = await service.snapshot(current.id)
     assert initial.panel_state.state is PanelState.WAITING
     assert initial.cursor is not None and initial.stream_id is not None
-    assert initial.capabilities.features
-    assert initial.overview.scope.value == "daemon_cache"
+    assert initial.capabilities == TrajectoryCapabilities()
+    assert initial.overview.scope_complete
 
     assert observer.capture is not None
     observer.capture(current.id, Batch(events=(event("live", 1),)))
@@ -156,10 +156,7 @@ async def test_follow_reports_waiting_to_ready_and_state_only_stale_delta(source
     assert ready.panel_state.state is PanelState.READY
     assert [upsert.record.summary for upsert in ready.upserts] == ["live"]
     assert ready.capabilities is not None
-    assert any(
-        item.feature.value == "live_updates" and item.observed
-        for item in ready.capabilities.features
-    )
+    assert TrajectoryFeature.LIVE_UPDATES in ready.capabilities.observed
     assert ready.overview is not None and ready.overview.record_count == 1
 
     assert ready.cursor is not None
@@ -197,10 +194,7 @@ async def test_empty_live_batch_does_not_observe_live_trajectory_updates(source_
     )
 
     assert delta.capabilities is not None
-    assert not any(
-        item.feature.value == "live_updates" and item.observed
-        for item in delta.capabilities.features
-    )
+    assert TrajectoryFeature.LIVE_UPDATES not in delta.capabilities.observed
     await service.aclose()
 
 
@@ -212,7 +206,7 @@ async def test_capability_declaration_accepts_mapping_harness_registries(source_
         {
             "fake": SimpleNamespace(
                 observer=SimpleNamespace(
-                    trajectory_capabilities=TrajectoryCapabilities.declared(
+                    trajectory_capabilities=TrajectoryCapabilities(
                         supported=frozenset({TrajectoryFeature.MODELS})
                     )
                 )
@@ -224,12 +218,7 @@ async def test_capability_declaration_accepts_mapping_harness_registries(source_
     snapshot = await service.snapshot(current.id)
 
     assert (
-        next(
-            item
-            for item in snapshot.capabilities.features
-            if item.feature is TrajectoryFeature.MODELS
-        ).declared
-        is TrajectorySupport.SUPPORTED
+        snapshot.capabilities.support_for(TrajectoryFeature.MODELS) is TrajectorySupport.SUPPORTED
     )
     await service.aclose()
 

@@ -6,6 +6,11 @@ import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from theater.constants.trajectory import (
+    TRAJECTORY_OVERVIEW_MAX_COST_USD,
+    TRAJECTORY_OVERVIEW_MAX_COUNT,
+    TRAJECTORY_OVERVIEW_MAX_TOKENS,
+)
 from theater.trajectory import (
     TrajectoryCapabilities,
     TrajectoryCurrentOperation,
@@ -17,12 +22,9 @@ from theater.trajectory import (
     TrajectoryProblem,
     TrajectoryRecord,
     TrajectoryStatus,
-    TrajectoryUsage,
     deterministic_record_order,
 )
 
-_MAX_TOTAL = (1 << 63) - 1
-_MAX_COST = 1e15
 _ACTIVE = frozenset({TrajectoryStatus.PENDING, TrajectoryStatus.RUNNING, TrajectoryStatus.PARTIAL})
 _TERMINAL = frozenset(
     {
@@ -124,7 +126,11 @@ def _capabilities(
                 observed.add(TrajectoryFeature.REQUESTS)
     if live_updates_observed:
         observed.add(TrajectoryFeature.LIVE_UPDATES)
-    return declared.with_observed(frozenset(observed))
+    return TrajectoryCapabilities(
+        supported=declared.supported,
+        unsupported=declared.unsupported,
+        observed=frozenset(observed),
+    )
 
 
 def _overview(
@@ -134,7 +140,8 @@ def _overview(
     has_coverage_gaps: bool,
     cache_evicted: bool,
 ) -> TrajectoryOverview:
-    usages = _usage_records(ordered)
+    usage_records = _usage_records(ordered)
+    usages = tuple(record.usage for record in usage_records if record.usage is not None)
     input_tokens, input_saturated = _sum_int(usage.input_tokens for usage in usages)
     output_tokens, output_saturated = _sum_int(usage.output_tokens for usage in usages)
     cache_read_tokens, cache_read_saturated = _sum_int(usage.cache_read_tokens for usage in usages)
@@ -152,21 +159,29 @@ def _overview(
         )
         if present
     )
-    explicit_requests = {usage.request_id for usage in usages if usage.request_id is not None}
+    explicit_requests = {
+        (record.source_epoch, record.usage.request_id)
+        for record in usage_records
+        if record.usage is not None and record.usage.request_id is not None
+    }
     implicit_model_records = sum(
         record.lane is TrajectoryLane.MODEL
         and record.usage is not None
         and record.usage.request_id is None
         for record in ordered
     )
+    record_count, record_count_saturated = _bounded_count(len(ordered))
+    model_operations, model_operations_saturated = _bounded_count(
+        len(explicit_requests) + implicit_model_records
+    )
+    tool_operations, tool_operations_saturated = _bounded_count(
+        sum(record.kind is TrajectoryKind.TOOL_CALL for record in ordered)
+    )
     return TrajectoryOverview(
-        scope_complete=not reasons,
         incomplete_reasons=reasons,
-        has_older=has_older,
-        has_coverage_gaps=has_coverage_gaps,
-        record_count=len(ordered),
-        model_operations=len(explicit_requests) + implicit_model_records,
-        tool_operations=sum(record.kind is TrajectoryKind.TOOL_CALL for record in ordered),
+        record_count=record_count,
+        model_operations=model_operations,
+        tool_operations=tool_operations,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cache_read_tokens=cache_read_tokens,
@@ -181,6 +196,9 @@ def _overview(
                 cache_write_saturated,
                 reasoning_saturated,
                 cost_saturated,
+                record_count_saturated,
+                model_operations_saturated,
+                tool_operations_saturated,
             )
         ),
         current=_current(ordered),
@@ -188,32 +206,42 @@ def _overview(
     )
 
 
-def _usage_records(ordered: tuple[TrajectoryRecord, ...]) -> tuple[TrajectoryUsage, ...]:
-    requested: dict[str, TrajectoryUsage] = {}
-    independent: list[TrajectoryUsage] = []
+def _usage_records(ordered: tuple[TrajectoryRecord, ...]) -> tuple[TrajectoryRecord, ...]:
+    requested: dict[tuple[str, str], TrajectoryRecord] = {}
+    independent: list[TrajectoryRecord] = []
     for record in ordered:
         if record.usage is None:
             continue
         if record.usage.request_id is None:
-            independent.append(record.usage)
+            independent.append(record)
         else:
-            requested[record.usage.request_id] = record.usage
+            requested[(record.source_epoch, record.usage.request_id)] = record
     return (*independent, *requested.values())
 
 
 def _current(ordered: tuple[TrajectoryRecord, ...]) -> TrajectoryCurrentOperation | None:
-    closed_calls: set[tuple[str, str]] = set()
+    closed_calls: set[tuple[str, str, str]] = set()
     for record in reversed(ordered):
-        if record.kind is TrajectoryKind.TOOL_RESULT and record.status in _TERMINAL:
+        family = _call_family(record.kind)
+        if (
+            family is not None
+            and record.kind
+            in {
+                TrajectoryKind.TOOL_RESULT,
+                TrajectoryKind.AWAIT_END,
+            }
+            and record.status in _TERMINAL
+        ):
             if record.call_id is not None:
-                closed_calls.add((record.source_epoch, record.call_id))
+                closed_calls.add((family, record.source_epoch, record.call_id))
             continue
         if record.status not in _ACTIVE:
             continue
         if (
-            record.kind is TrajectoryKind.TOOL_CALL
+            family is not None
+            and record.kind in {TrajectoryKind.TOOL_CALL, TrajectoryKind.AWAIT_START}
             and record.call_id is not None
-            and (record.source_epoch, record.call_id) in closed_calls
+            and (family, record.source_epoch, record.call_id) in closed_calls
         ):
             continue
         timing = record.timing
@@ -237,11 +265,27 @@ def _latest_problem(ordered: tuple[TrajectoryRecord, ...]) -> TrajectoryProblem 
     return None
 
 
+def _call_family(kind: TrajectoryKind) -> str | None:
+    if kind in {TrajectoryKind.TOOL_CALL, TrajectoryKind.TOOL_RESULT}:
+        return "tool"
+    if kind in {TrajectoryKind.AWAIT_START, TrajectoryKind.AWAIT_END}:
+        return "await"
+    return None
+
+
+def _bounded_count(value: int) -> tuple[int, bool]:
+    return (
+        (TRAJECTORY_OVERVIEW_MAX_COUNT, True)
+        if value > TRAJECTORY_OVERVIEW_MAX_COUNT
+        else (value, False)
+    )
+
+
 def _sum_int(values: Iterable[int]) -> tuple[int, bool]:
     total = 0
     for value in values:
-        if total > _MAX_TOTAL - value:
-            return _MAX_TOTAL, True
+        if total > TRAJECTORY_OVERVIEW_MAX_TOKENS - value:
+            return TRAJECTORY_OVERVIEW_MAX_TOKENS, True
         total += value
     return total, False
 
@@ -253,8 +297,8 @@ def _sum_cost(values: Iterable[float | None]) -> tuple[float | None, bool]:
         if value is None:
             continue
         seen = True
-        if not math.isfinite(value) or total > _MAX_COST - value:
-            return _MAX_COST, True
+        if not math.isfinite(value) or total > TRAJECTORY_OVERVIEW_MAX_COST_USD - value:
+            return TRAJECTORY_OVERVIEW_MAX_COST_USD, True
         total += value
     return (total if seen else None), False
 

@@ -8,6 +8,7 @@ from theater.constants.trajectory import (
     TRAJECTORY_RESPONSE_MAX_BYTES,
     TRAJECTORY_RESPONSE_SIZING_REQUEST_ID,
 )
+from theater.daemon.trajectory import responses as responses_module
 from theater.daemon.trajectory.cache import CacheStream, RecordChange, RecordRing
 from theater.daemon.trajectory.responses import (
     empty_delta,
@@ -71,7 +72,7 @@ def _frame(value: dict[str, object]) -> bytes:
 def test_page_boundary_measures_the_complete_ndjson_frame() -> None:
     records = (
         *(_record(index, "x" * 16_384) for index in range(62)),
-        _record(62, "x" * 7_588),
+        _record(62, "x" * 8_186),
     )
 
     page = _page(_stream(), records)
@@ -83,7 +84,7 @@ def test_page_boundary_measures_the_complete_ndjson_frame() -> None:
 def test_page_trims_the_record_that_crosses_the_complete_frame_cap() -> None:
     records = (
         *(_record(index, "x" * 16_384) for index in range(62)),
-        _record(62, "x" * 7_588),
+        _record(62, "x" * 8_186),
         _record(63, "x"),
     )
 
@@ -102,6 +103,23 @@ def test_follow_delta_complete_frame_stays_within_the_cap() -> None:
     assert delta is not None
     assert len(delta.upserts) < len(changes)
     assert len(_frame(delta.to_wire())) <= TRAJECTORY_RESPONSE_MAX_BYTES
+
+
+def test_fit_helpers_project_response_values_once_per_attempt(monkeypatch) -> None:
+    original = responses_module.response_values_for
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(responses_module, "response_values_for", counted)
+    _page(_stream(), tuple(_record(index, "x" * 16_384) for index in range(100)))
+    changes = tuple(RecordChange(index + 1, _record(index, "x" * 16_384)) for index in range(100))
+    fit_delta(_stream(), changes, daemon_epoch="e" * 32, after_sequence=0)
+
+    assert calls == 2
 
 
 def test_empty_and_state_only_deltas_stay_within_the_cap() -> None:

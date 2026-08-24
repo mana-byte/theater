@@ -9,6 +9,7 @@ import pytest
 
 from theater.constants.daemon import (
     BUS_KIND_JOB_AWAIT_END,
+    BUS_KIND_JOB_AWAIT_START,
     BUS_KIND_PARTICIPANT_KILL_REQUESTED,
 )
 from theater.constants.trajectory import TRAJECTORY_RESPONSE_MAX_BYTES
@@ -622,6 +623,46 @@ def test_await_end_timing_uses_elapsed_start() -> None:
     assert record.timing.start == 7.5
     assert record.timing.end == 10.0
     assert record.timing.duration_ms == 2500.0
+
+
+def test_await_projection_uses_only_nonempty_handles_as_call_ids() -> None:
+    start = project_bus_row(
+        {
+            "id": 9,
+            "ts": 10.0,
+            "from_id": "p",
+            "to_id": "q",
+            "kind": BUS_KIND_JOB_AWAIT_START,
+            "payload": {"handle": "job-1"},
+        },
+        "p",
+    )
+    end = project_bus_row(
+        {
+            "id": 10,
+            "ts": 11.0,
+            "from_id": "p",
+            "to_id": "q",
+            "kind": BUS_KIND_JOB_AWAIT_END,
+            "payload": {"handle": "job-1", "state": "completed"},
+        },
+        "p",
+    )
+    other = project_bus_row(
+        {
+            "id": 11,
+            "ts": 12.0,
+            "from_id": "p",
+            "to_id": "q",
+            "kind": BUS_KIND_PARTICIPANT_KILL_REQUESTED,
+            "payload": {"handle": "job-1"},
+        },
+        "p",
+    )
+
+    assert start is not None and start.call_id == "job-1"
+    assert end is not None and end.call_id == "job-1"
+    assert other is not None and other.call_id is None
 
 
 async def test_snapshot_response_byte_cap_wins(source_opener):

@@ -56,7 +56,7 @@ def fit_page(
     make_older: Callable[[str | None, int | None, str | None], str],
 ) -> TrajectoryPage:
     """Return the largest suffix whose complete encoded page fits the wire cap."""
-    values = _response_values(stream)
+    values = response_values_for_stream(stream)
 
     def build(
         count: int,
@@ -114,9 +114,10 @@ def fit_delta(
     daemon_epoch: str,
     after_sequence: int,
     response_values: TrajectoryResponseValues | None = None,
+    panel_state: PanelStateInfo | None = None,
 ) -> TrajectoryDelta | None:
     """Return the largest prefix that fits, or None when one update cannot fit."""
-    values = response_values or _response_values(stream)
+    values = response_values if response_values is not None else response_values_for_stream(stream)
 
     def build(count: int) -> TrajectoryDelta:
         selected = changes[:count]
@@ -125,6 +126,7 @@ def fit_delta(
             stream_id=stream.cache.stream_id,
             cursor=follow_cursor(daemon_epoch, stream, sequence),
             upserts=tuple(TrajectoryUpsert(change.record) for change in selected),
+            panel_state=panel_state,
             capabilities=values.capabilities,
             overview=values.overview,
         )
@@ -143,8 +145,15 @@ def fit_delta(
     return best
 
 
-def empty_delta(stream: TrajectoryStream, *, daemon_epoch: str, sequence: int) -> TrajectoryDelta:
-    values = _response_values(stream)
+def empty_delta(
+    stream: TrajectoryStream,
+    *,
+    daemon_epoch: str,
+    sequence: int,
+    panel_state: PanelStateInfo | None = None,
+    response_values: TrajectoryResponseValues | None = None,
+) -> TrajectoryDelta:
+    values = response_values if response_values is not None else response_values_for_stream(stream)
     return TrajectoryDelta(
         stream_id=stream.cache.stream_id,
         cursor=follow_cursor(
@@ -152,6 +161,7 @@ def empty_delta(stream: TrajectoryStream, *, daemon_epoch: str, sequence: int) -
             stream,
             max(sequence, stream.ring.current_sequence),
         ),
+        panel_state=panel_state,
         capabilities=values.capabilities,
         overview=values.overview,
     )
@@ -162,7 +172,7 @@ def resync_delta(stream_id: str, reason: str) -> TrajectoryDelta:
 
 
 def stale_page(stream: TrajectoryStream, *, daemon_epoch: str, message: str) -> TrajectoryPage:
-    values = _response_values(stream)
+    values = response_values_for_stream(stream)
 
     def build(coverage: TrajectoryCoverage) -> TrajectoryPage:
         return TrajectoryPage(
@@ -243,7 +253,7 @@ def _coverage(
     )
 
 
-def _response_values(stream: TrajectoryStream) -> TrajectoryResponseValues:
+def response_values_for_stream(stream: TrajectoryStream) -> TrajectoryResponseValues:
     return response_values_for(
         stream.declared_capabilities,
         stream.ring.records(),
@@ -262,6 +272,7 @@ __all__ = [
     "fit_page",
     "follow_cursor",
     "missing_page",
+    "response_values_for_stream",
     "resync_delta",
     "stale_page",
     "wire_bytes",

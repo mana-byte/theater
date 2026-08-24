@@ -135,6 +135,7 @@ from theater.provenance import (
     is_trusted_provenance,
     normalize_provenance,
 )
+from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFeature
 from theater.trajectory.content import ContentFormat, DetailField
 from theater.trajectory.enums import (
     TimingProvenance,
@@ -143,7 +144,6 @@ from theater.trajectory.enums import (
     TrajectoryStatus,
 )
 from theater.trajectory.records import Timing, TrajectoryUsage
-from theater.trajectory.usefulness import TrajectoryCapabilities, TrajectoryFeature
 from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
     TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
@@ -705,7 +705,7 @@ class OpenCodeObserver(HarnessObserver):
     lineage hook on `Source`.
     """
 
-    trajectory_capabilities = TrajectoryCapabilities.declared(
+    trajectory_capabilities = TrajectoryCapabilities(
         supported=frozenset(
             {
                 TrajectoryFeature.REQUESTS,

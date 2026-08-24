@@ -15,11 +15,9 @@ from theater.constants.trajectory import (
     TRAJECTORY_IDENTIFIER_MAX_BYTES,
     TRAJECTORY_OLDER_CURSOR_LIMIT,
     TRAJECTORY_PAGE_RECORD_LIMIT,
-    TRAJECTORY_RESPONSE_MAX_BYTES,
 )
 from theater.daemon.trajectory.cache import CacheStream, RecordChange, TrajectoryCache
 from theater.daemon.trajectory.merge import order_records
-from theater.daemon.trajectory.overview import TrajectoryResponseValues
 from theater.daemon.trajectory.responses import (
     TrajectoryResponseTooLarge,
     decode_follow_cursor,
@@ -27,9 +25,9 @@ from theater.daemon.trajectory.responses import (
     fit_delta,
     fit_page,
     missing_page,
+    response_values_for_stream,
     resync_delta,
     stale_page,
-    wire_bytes,
 )
 from theater.daemon.trajectory.runtime import TrajectoryRuntime, TrajectoryStream
 from theater.models import BadRequest, NotFound, Participant
@@ -334,44 +332,27 @@ class TrajectoryService:
         *,
         after_sequence: int,
     ) -> TrajectoryDelta:
-        candidate_changes = changes
-        response_values: TrajectoryResponseValues | None = None
-        while candidate_changes:
-            delta = fit_delta(
-                stream,
-                candidate_changes,
-                daemon_epoch=self.daemon_epoch,
-                after_sequence=after_sequence,
-                response_values=response_values,
-            )
-            if delta is None:
-                break
-            if delta.capabilities is not None and delta.overview is not None:
-                response_values = TrajectoryResponseValues(delta.capabilities, delta.overview)
-            stateful = TrajectoryDelta(
-                stream_id=delta.stream_id,
-                cursor=delta.cursor,
-                upserts=delta.upserts,
-                panel_state=stream.panel_state,
-                capabilities=delta.capabilities,
-                overview=delta.overview,
-            )
-            if wire_bytes(stateful.to_wire()) <= TRAJECTORY_RESPONSE_MAX_BYTES:
-                return stateful
-            candidate_changes = candidate_changes[: len(delta.upserts) - 1]
+        delta = fit_delta(
+            stream,
+            changes,
+            daemon_epoch=self.daemon_epoch,
+            after_sequence=after_sequence,
+            response_values=response_values_for_stream(stream),
+            panel_state=stream.panel_state,
+        )
+        if delta is not None:
+            return delta
         return resync_delta(
             stream.cache.stream_id,
             "one trajectory update cannot fit the 1 MiB response limit; request a fresh snapshot",
         )
 
     def _empty_delta(self, stream: TrajectoryStream, *, sequence: int) -> TrajectoryDelta:
-        delta = empty_delta(stream, daemon_epoch=self.daemon_epoch, sequence=sequence)
-        return TrajectoryDelta(
-            stream_id=delta.stream_id,
-            cursor=delta.cursor,
+        return empty_delta(
+            stream,
+            daemon_epoch=self.daemon_epoch,
+            sequence=sequence,
             panel_state=stream.panel_state,
-            capabilities=delta.capabilities,
-            overview=delta.overview,
         )
 
     def _older_state(self, token: str) -> _OlderState | None:

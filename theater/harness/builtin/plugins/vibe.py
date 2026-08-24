@@ -82,9 +82,9 @@ from theater.harness.observation import (
 from theater.harness.source import Batch, Source, TranscriptCandidate, TranscriptSource
 from theater.models import BadRequest
 from theater.provenance import TranscriptProvenance
+from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFeature
 from theater.trajectory.content import ContentFormat, DetailField
 from theater.trajectory.enums import TrajectoryKind, TrajectoryLane, TrajectoryStatus
-from theater.trajectory.usefulness import TrajectoryCapabilities, TrajectoryFeature
 
 if TYPE_CHECKING:
     from theater.models import Participant
@@ -831,7 +831,7 @@ class VibeObserver(TranscriptObserver):
     per-turn Vibe rotations are exact by construction.
     """
 
-    trajectory_capabilities = TrajectoryCapabilities.declared(
+    trajectory_capabilities = TrajectoryCapabilities(
         supported=frozenset(
             {
                 TrajectoryFeature.TOOLS,

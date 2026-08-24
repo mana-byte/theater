@@ -147,6 +147,7 @@ from theater.harness.observation import (
 from theater.harness.source import Source, TranscriptCandidate, TranscriptSource
 from theater.models import BadRequest
 from theater.provenance import TranscriptProvenance, normalize_provenance
+from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFeature
 from theater.trajectory.content import ContentFormat, DetailField
 from theater.trajectory.enums import (
     TimingProvenance,
@@ -155,7 +156,6 @@ from theater.trajectory.enums import (
     TrajectoryStatus,
 )
 from theater.trajectory.records import Timing, TrajectoryUsage
-from theater.trajectory.usefulness import TrajectoryCapabilities, TrajectoryFeature
 
 if TYPE_CHECKING:
     from theater.models import Participant
@@ -637,7 +637,7 @@ class CodexObserver(TranscriptObserver):
 
     #: The process holds its rollout open, so ownership can be shown rather than inferred.
     proves_ownership = True
-    trajectory_capabilities = TrajectoryCapabilities.declared(
+    trajectory_capabilities = TrajectoryCapabilities(
         supported=frozenset(
             {
                 TrajectoryFeature.REQUESTS,

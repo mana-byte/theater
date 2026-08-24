@@ -15,6 +15,7 @@ from theater.constants.daemon import (
     BUS_KIND_PARTICIPANT_KILL_REQUESTED,
     BUS_KIND_PARTICIPANT_SESSION_BOUNDARY,
 )
+from theater.constants.trajectory import TRAJECTORY_IDENTIFIER_MAX_BYTES
 from theater.trajectory import (
     ContentFormat,
     DetailField,
@@ -26,7 +27,9 @@ from theater.trajectory import (
     TrajectoryLane,
     TrajectoryRecord,
     TrajectoryStatus,
+    TrajectoryValidationError,
 )
+from theater.trajectory.content import bounded_text
 
 BUS_KIND_PARTICIPANT_CREATED = "participant.created"
 BUS_KIND_PARTICIPANT_DEAD = "participant.dead"
@@ -99,6 +102,7 @@ def project_bus_row(row: Mapping[str, object], participant_id: str) -> Trajector
         links=links,
         timing=timing,
         details=details,
+        call_id=_await_call_id(kind, payload_map),
     )
 
 
@@ -180,6 +184,23 @@ def _summary(bus_kind: str, payload: Mapping[str, object], record_kind: Trajecto
     if bus_kind in {BUS_KIND_PARTICIPANT_SESSION_BOUNDARY, "participant.resumed"}:
         return "Session resumed" if record_kind is TrajectoryKind.RESUME else "Session boundary"
     return dynamic.get(bus_kind, fixed.get(bus_kind, bus_kind))
+
+
+def _await_call_id(bus_kind: str, payload: Mapping[str, object]) -> str | None:
+    if bus_kind not in {BUS_KIND_JOB_AWAIT_START, BUS_KIND_JOB_AWAIT_END}:
+        return None
+    handle = payload.get("handle")
+    if not isinstance(handle, str) or not handle:
+        return None
+    try:
+        return bounded_text(
+            handle,
+            max_bytes=TRAJECTORY_IDENTIFIER_MAX_BYTES,
+            label="await handle",
+            nonempty=True,
+        )
+    except TrajectoryValidationError:
+        return None
 
 
 def _details(payload: Mapping[str, object], summary: str) -> tuple[DetailField, ...]:

@@ -15,6 +15,7 @@ from theater.constants.trajectory import (
     TRAJECTORY_PAGE_RECORD_LIMIT,
     TRAJECTORY_SOURCE_MAX_BYTES,
 )
+from theater.trajectory.capabilities import TrajectoryCapabilities
 from theater.trajectory.content import ContentPreview, bounded_text
 from theater.trajectory.enums import (
     GroupKind,
@@ -22,8 +23,8 @@ from theater.trajectory.enums import (
     TrajectoryParticipantState,
     TrajectoryValidationError,
 )
+from theater.trajectory.overview import TrajectoryOverview
 from theater.trajectory.records import TrajectoryRecord
-from theater.trajectory.usefulness import TrajectoryCapabilities, TrajectoryOverview
 from theater.trajectory.validation import (
     boolean,
     enum_value,
