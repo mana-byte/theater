@@ -88,8 +88,8 @@ class TrajectoryToolOperation:
 
     def _validate_identity(self) -> None:
         keyed = self.call_id is not None
-        calls = bool(self.call_record_ids)
-        results = bool(self.result_record_ids)
+        calls = self.call_count > 0
+        results = self.result_count > 0
         expected = (
             TrajectoryToolIdentity.MATCHED
             if keyed and calls and results
@@ -206,8 +206,20 @@ def tool_operations_for_records(
     """Project exact tool-call and tool-result associations."""
     groups: list[list[TrajectoryRecord]] = []
     positions: dict[tuple[str, str, str], int] = {}
+    child_ids: dict[tuple[str, str, str], list[str]] = {}
+    child_seen: dict[tuple[str, str, str], set[str]] = {}
     ordered = deterministic_record_order(records)
     for record in ordered:
+        if (
+            record.kind is TrajectoryKind.TOOL_CALL
+            and record.call_id is not None
+            and record.parent_call_id is not None
+        ):
+            parent_key = (record.participant_id, record.source_epoch, record.parent_call_id)
+            seen = child_seen.setdefault(parent_key, set())
+            if record.call_id not in seen:
+                seen.add(record.call_id)
+                child_ids.setdefault(parent_key, []).append(record.call_id)
         if record.kind not in {TrajectoryKind.TOOL_CALL, TrajectoryKind.TOOL_RESULT}:
             continue
         if record.call_id is None:
@@ -220,11 +232,12 @@ def tool_operations_for_records(
             groups.append([record])
         else:
             groups[position].append(record)
-    return tuple(_operation_for_group(group, ordered) for group in groups)
+    child_links = {key: tuple(value) for key, value in child_ids.items()}
+    return tuple(_operation_for_group(group, child_links) for group in groups)
 
 
 def _operation_for_group(
-    records: list[TrajectoryRecord], ordered: tuple[TrajectoryRecord, ...]
+    records: list[TrajectoryRecord], child_links: dict[tuple[str, str, str], tuple[str, ...]]
 ) -> TrajectoryToolOperation:
     calls = [record for record in records if record.kind is TrajectoryKind.TOOL_CALL]
     results = [record for record in records if record.kind is TrajectoryKind.TOOL_RESULT]
@@ -252,7 +265,7 @@ def _operation_for_group(
         request_id=_consistent(records, "request_id"),
         parent_call_id=_parent_call_id(calls, results, call_id),
         child_call_ids=_child_call_ids(
-            ordered, primary.participant_id, primary.source_epoch, call_id
+            child_links, primary.participant_id, primary.source_epoch, call_id
         ),
         call_details=primary_call.details if primary_call is not None else (),
         result_details=primary_result.details if primary_result is not None else (),
@@ -326,28 +339,15 @@ def _parent_call_id(
 
 
 def _child_call_ids(
-    records: tuple[TrajectoryRecord, ...],
+    child_links: dict[tuple[str, str, str], tuple[str, ...]],
     participant_id: str,
     source_epoch: str,
     call_id: str | None,
 ) -> tuple[str, ...]:
     if call_id is None:
         return ()
-    children: list[str] = []
-    seen: set[str] = set()
-    for record in records:
-        if (
-            record.kind is TrajectoryKind.TOOL_CALL
-            and record.participant_id == participant_id
-            and record.source_epoch == source_epoch
-            and record.parent_call_id == call_id
-            and record.call_id is not None
-            and record.call_id != call_id
-            and record.call_id not in seen
-        ):
-            seen.add(record.call_id)
-            children.append(record.call_id)
-    return tuple(children[-TRAJECTORY_TOOL_RECORD_LIMIT:])
+    children = child_links.get((participant_id, source_epoch, call_id), ())
+    return tuple(child for child in children if child != call_id)[-TRAJECTORY_TOOL_RECORD_LIMIT:]
 
 
 def _timing(
@@ -367,12 +367,16 @@ def _timing(
         else None
     )
     start = start_timing.start if start_timing is not None else None
-    ends: list[Timing] = []
+    end_records: list[TrajectoryRecord] = []
     if primary_result is not None and primary_result.status in _TERMINAL:
-        for record in results:
-            timing = record.timing
-            if timing is not None and timing.end is not None:
-                ends.append(timing)
+        end_records = results
+    elif primary_result is None and primary_call is not None and primary_call.status in _TERMINAL:
+        end_records = calls
+    ends: list[Timing] = []
+    for record in end_records:
+        timing = record.timing
+        if timing is not None and timing.end is not None:
+            ends.append(timing)
     end_timing = (
         max(ends, key=lambda timing: timing.end if timing.end is not None else 0) if ends else None
     )
@@ -500,10 +504,18 @@ def _validate_counts(operation: TrajectoryToolOperation) -> None:
         raise TrajectoryValidationError("tool record counts must cover retained record ids")
     if type(operation.records_truncated) is not bool:
         raise TrajectoryValidationError("tool.records_truncated must be a boolean")
-    if operation.records_truncated != (
-        operation.call_count > len(operation.call_record_ids)
-        or operation.result_count > len(operation.result_record_ids)
+    for count, record_ids in (
+        (operation.call_count, operation.call_record_ids),
+        (operation.result_count, operation.result_record_ids),
     ):
+        if count == 0 and record_ids:
+            raise TrajectoryValidationError("zero tool record counts must not retain record ids")
+        if count > 0 and not record_ids:
+            raise TrajectoryValidationError("positive tool record counts must retain record ids")
+    truncated = operation.call_count > len(
+        operation.call_record_ids
+    ) or operation.result_count > len(operation.result_record_ids)
+    if operation.records_truncated != truncated:
         raise TrajectoryValidationError("tool.records_truncated must match retained record ids")
 
 

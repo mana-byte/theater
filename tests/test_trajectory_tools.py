@@ -9,6 +9,7 @@ import pytest
 from theater.constants.trajectory import (
     TRAJECTORY_IDENTIFIER_MAX_BYTES,
     TRAJECTORY_SOURCE_MAX_BYTES,
+    TRAJECTORY_TOOL_RECORD_LIMIT,
 )
 from theater.harness.builtin.plugins.claude import ClaudeCodeObserver
 from theater.harness.builtin.plugins.codex import CodexObserver
@@ -198,6 +199,59 @@ def test_request_parent_and_exact_child_links_are_conservative() -> None:
     assert child_operation.parent_call_id == "parent"
 
 
+def test_child_links_are_precomputed_exactly_per_parent_stream() -> None:
+    parent = _call("parent", 1, "parent")
+    first = _call("first", 2, "first", parent_call_id="parent")
+    repeated = _call("repeated", 3, "first", parent_call_id="parent")
+    second = _call("second", 4, "second", parent_call_id="parent")
+    self_link = _call("self", 5, "parent", parent_call_id="parent")
+    other_participant = _call("other-p", 6, "other-p", participant_id="other")
+    other_participant_child = _call(
+        "other-p-child", 7, "other-p-child", participant_id="other", parent_call_id="other-p"
+    )
+    other_epoch = _call("other-e", 8, "other-e", source_epoch="other")
+    other_epoch_child = _call(
+        "other-e-child", 9, "other-e-child", source_epoch="other", parent_call_id="other-e"
+    )
+
+    operations = tool_operations_for_records(
+        (
+            parent,
+            first,
+            repeated,
+            second,
+            self_link,
+            other_participant,
+            other_participant_child,
+            other_epoch,
+            other_epoch_child,
+        )
+    )
+    children = {
+        (
+            operation.participant_id,
+            operation.source_epoch,
+            operation.call_id,
+        ): operation.child_call_ids
+        for operation in operations
+    }
+
+    assert children[("participant", "epoch", "parent")] == ("first", "second")
+    assert children[("other", "epoch", "other-p")] == ("other-p-child",)
+    assert children[("participant", "other", "other-e")] == ("other-e-child",)
+
+
+def test_projector_retains_newest_record_ids_when_tool_operation_is_truncated() -> None:
+    count = TRAJECTORY_TOOL_RECORD_LIMIT + 1
+    records = tuple(_call(f"call-{index}", index, "shared") for index in range(count))
+
+    operation = tool_operations_for_records(records)[0]
+
+    assert operation.call_count == count
+    assert operation.call_record_ids == tuple(f"call-{index}" for index in range(1, count))
+    assert operation.records_truncated
+
+
 def test_timing_derivation_fallback_contradictions_and_call_only() -> None:
     derived = tool_operations_for_records(
         (
@@ -220,12 +274,26 @@ def test_timing_derivation_fallback_contradictions_and_call_only() -> None:
     call_only = tool_operations_for_records(
         (_call("f", 1, "call-only", timing=Timing(start=1, end=9)),)
     )[0]
+    running_call_only = tool_operations_for_records(
+        (
+            _call(
+                "g",
+                1,
+                "running-call-only",
+                status=TrajectoryStatus.RUNNING,
+                timing=Timing(start=1, end=9),
+            ),
+        )
+    )[0]
 
     assert derived.timing == Timing(
         start=1, end=4, duration_ms=3000, provenance=TimingProvenance.DERIVED
     )
     assert fallback.timing == Timing(start=4, duration_ms=7, provenance=TimingProvenance.OBSERVED)
-    assert call_only.timing == Timing(start=1, provenance=TimingProvenance.UNAVAILABLE)
+    assert call_only.timing == Timing(
+        start=1, end=9, duration_ms=8000, provenance=TimingProvenance.DERIVED
+    )
+    assert running_call_only.timing == Timing(start=1, provenance=TimingProvenance.UNAVAILABLE)
 
 
 def test_operation_ids_and_previews_are_bounded_and_details_preserve_omission() -> None:
@@ -251,13 +319,19 @@ def test_operation_ids_and_previews_are_bounded_and_details_preserve_omission() 
 
 
 def test_tool_wire_is_strict_and_supports_generic_helpers() -> None:
-    operation = tool_operations_for_records((_call("call", 1, "id"),))[0]
+    operation = tool_operations_for_records((_call("call", 1, "id"), _result("result", 2, "id")))[0]
     invalid = operation.to_wire()
     invalid["extra"] = True
     missing = operation.to_wire()
     missing.pop("source")
     wrong = operation.to_wire()
     wrong["call_count"] = True
+    missing_retained = operation.to_wire()
+    missing_retained["identity"] = TrajectoryToolIdentity.RESULT_ONLY.value
+    missing_retained["call_record_ids"] = []
+    missing_retained["records_truncated"] = True
+    zero_count = operation.to_wire()
+    zero_count["call_count"] = 0
 
     assert TrajectoryToolOperation.from_wire(operation.to_wire()) == operation
     assert from_wire(TrajectoryToolOperation, to_wire(operation)) == operation
@@ -267,6 +341,27 @@ def test_tool_wire_is_strict_and_supports_generic_helpers() -> None:
         TrajectoryToolOperation.from_wire(missing)
     with pytest.raises(TrajectoryValidationError):
         TrajectoryToolOperation.from_wire(wrong)
+    with pytest.raises(TrajectoryValidationError):
+        TrajectoryToolOperation.from_wire(missing_retained)
+    with pytest.raises(TrajectoryValidationError):
+        TrajectoryToolOperation.from_wire(zero_count)
+
+    truncated = TrajectoryToolOperation(
+        operation_id="tool",
+        participant_id="participant",
+        source_epoch="epoch",
+        source="source",
+        identity=TrajectoryToolIdentity.CALL_ONLY,
+        call_id="call",
+        call_record_ids=("newest",),
+        result_record_ids=(),
+        tool_name=None,
+        status=TrajectoryStatus.RUNNING,
+        call_count=2,
+        result_count=0,
+        records_truncated=True,
+    )
+    assert TrajectoryToolOperation.from_wire(truncated.to_wire()) == truncated
 
 
 def test_input_is_not_mutated_and_supported_fixtures_pair_exact_ids() -> None:
