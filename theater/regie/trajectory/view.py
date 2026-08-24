@@ -308,7 +308,7 @@ class TrajectoryView(Vertical):
         }
 
     def _sync_page(self) -> None:
-        selected_anchor = self._search_result.row_id_for_record(self.state.selected_id)
+        selected_anchor = self._logical_row_id(self.state.selected_id)
         selected_index = self._all_visible_indices.get(selected_anchor or "")
         if selected_index is not None:
             requested_page = selected_index // self.state_store.page_size
@@ -332,7 +332,7 @@ class TrajectoryView(Vertical):
             for record_id in self._visible_ids
             if record_id in self._ordered_indices
         )
-        selected_anchor = self._search_result.row_id_for_record(self.state.selected_id)
+        selected_anchor = self._logical_row_id(self.state.selected_id)
         if self.state.follow_tail and selected_anchor not in self._visible_id_set:
             self.state.select(self._visible_ids[-1] if self._visible_ids else None)
         elif selected_anchor not in self._visible_id_set:
@@ -434,8 +434,14 @@ class TrajectoryView(Vertical):
         footer.update_state(
             status=status,
             message=footer_message,
-            record_count=len(self.state.records),
-            visible_count=len(self._search_result.records),
+            record_count=(
+                len(self.state.tool_index.ordered)
+                + sum(
+                    record_id not in self.state.tool_index.by_record_id
+                    for record_id in self.state.records
+                )
+            ),
+            visible_count=len(self._search_result.row_ids),
             page_number=self._ledger_page.number,
             page_count=self._ledger_page.count,
             first_item=self._ledger_page.first_item,
@@ -500,26 +506,33 @@ class TrajectoryView(Vertical):
     def _scroll_to_record(self, record_id: str | None) -> None:
         if record_id is None or not self.is_mounted:
             return
-        if record_id not in self._visible_id_set:
+        row_id = self._logical_row_id(record_id)
+        if row_id not in self._visible_id_set:
             return
         ledger = self.query_one("#trajectory-ledger", Ledger)
         ledger.scroll_to_record(record_id)
         timeline = self.query_one("#trajectory-timeline", Timeline)
         self.state.timeline_scroll = timeline.scroll_span_into_view(record_id)
 
+    def _logical_row_id(self, record_id: str | None) -> str | None:
+        row_id = self._search_result.row_id_for_record(record_id)
+        if row_id is not None:
+            return row_id
+        return record_id if record_id in self._all_visible_indices else None
+
     def _selected_visible_ids(self) -> tuple[str, ...]:
         return self._visible_ids
 
     def _update_follow_for_selection(self, record_id: str | None) -> None:
         tail_id = self._all_visible_ids[-1] if self._all_visible_ids else None
-        if record_id is not None and record_id == tail_id:
+        if self._logical_row_id(record_id) == tail_id:
             self.state.follow_tail = True
             self.state.new_count = 0
         else:
             self.state.pause_follow()
 
     def _reveal_selection_page(self, record_id: str | None) -> bool:
-        index = self._all_visible_indices.get(record_id or "")
+        index = self._all_visible_indices.get(self._logical_row_id(record_id) or "")
         if index is None:
             return False
         page = index // self.state_store.page_size

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from rich.style import Style
 from rich.text import Text
 
+from theater.regie.trajectory.constants import TRAJECTORY_DETAIL_RECORD_MAX_BYTES
 from theater.regie.trajectory.enums import InspectorTab
 from theater.regie.trajectory.render import (
     detail_link_line_ids,
@@ -14,7 +15,7 @@ from theater.regie.trajectory.render import (
     sanitize_text,
     tabs_for_record,
 )
-from theater.trajectory import ContentFormat, DetailField, TrajectoryRecord
+from theater.trajectory import ContentFormat, DetailField, TrajectoryRecord, bounded_preview
 from theater.trajectory.tools import TrajectoryToolOperation
 
 DETAIL_PARTICIPANT_META = "trajectory_detail_participant"
@@ -153,6 +154,8 @@ def _tool_field_lines(fields: tuple[DetailField, ...], aliases: set[str]) -> lis
                 value = field.preview.text
         else:
             value = field.preview.text
+        if field.preview.omitted_bytes:
+            lines.append(f"{field.name}: … {field.preview.omitted_bytes} bytes omitted")
         values = sanitize_text(value).splitlines() or [""]
         lines.append(f"{field.name}: {values[0]}")
         lines.extend(values[1:])
@@ -176,26 +179,31 @@ def tool_detail_text(tool: TrajectoryToolOperation, tab: InspectorTab) -> str:
             ("results", str(tool.result_count)),
             ("records", "links clipped" if tool.records_truncated else None),
         ]
-        return "\n".join(f"{name}: {sanitize_text(value)}" for name, value in fields if value)
-    if active is InspectorTab.INPUT:
+        text = "\n".join(f"{name}: {sanitize_text(value)}" for name, value in fields if value)
+    elif active is InspectorTab.INPUT:
         lines = _tool_field_lines(
             tool.call_details, {"args", "arguments", "input", "parameters", "tool_input"}
         )
-        return "\n".join(lines or ["No input supplied."])
-    if active is InspectorTab.RESULT:
+        text = "\n".join(lines or ["No input supplied."])
+    elif active is InspectorTab.RESULT:
         lines = _tool_field_lines(
             tool.result_details, {"output", "response", "result", "tool_result", "error"}
         )
-        return "\n".join(lines or ["No result supplied."])
-    timing = tool.timing
-    if timing is None:
-        return "No timing supplied."
-    return (
-        "\n".join(
-            f"{name}: {value}" for name, value in timing.to_wire().items() if value is not None
-        )
-        or "No timing supplied."
-    )
+        text = "\n".join(lines or ["No result supplied."])
+    else:
+        timing = tool.timing
+        if timing is None:
+            text = "No timing supplied."
+        else:
+            text = (
+                "\n".join(
+                    f"{name}: {value}"
+                    for name, value in timing.to_wire().items()
+                    if value is not None
+                )
+                or "No timing supplied."
+            )
+    return bounded_preview(text, max_bytes=TRAJECTORY_DETAIL_RECORD_MAX_BYTES).text
 
 
 def build_tool_inline_details(
@@ -219,7 +227,7 @@ def build_tool_inline_details(
         )
     copy_text = tool_detail_text(tool, active)
     lines = copy_text.splitlines() or [""]
-    limit = max(1, int(max_height))
+    limit = max(len(_TOOL_TABS), int(max_height), 1)
     visible = lines[:limit]
     if len(lines) > limit:
         visible[-1] = "… preview clipped"

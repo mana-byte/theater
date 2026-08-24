@@ -259,7 +259,7 @@ class Ledger(DataTable[Text | str]):
         self._has_older = has_older
         self._loading_older = loading_older
         self._retry_message = retry_message
-        self._expanded_id = expanded_id
+        self._expanded_id = self._row_id_for_record(expanded_id)
         self._detail_tab = detail_tab
         self._detail_ratio = self._validated_detail_ratio(detail_ratio)
         self._position_offset = max(0, int(position_offset))
@@ -400,6 +400,10 @@ class Ledger(DataTable[Text | str]):
         if record_id is None:
             return None
         return self._entry_indices.get(record_id)
+
+    def _row_id_for_record(self, record_id: str | None) -> str | None:
+        index = self._entry_index_for_record(record_id)
+        return self._entries[index].record_id if index is not None else None
 
     def _row_index_for_record(self, record_id: str | None) -> int | None:
         index = self._entry_index_for_record(record_id)
@@ -571,8 +575,14 @@ class Ledger(DataTable[Text | str]):
                 self._records[entry.record_id or ""], index, depth=entry.depth
             )
         text = tool_row_text(tool, compact=self._compact_columns)
-        hovered = entry.record_id == self._hovered_id
-        marker = "▾" if entry.record_id == self.expanded_id else "●" if hovered else "▸"
+        hovered = entry.record_id == self._row_id_for_record(self._hovered_id)
+        marker = (
+            "▾"
+            if entry.record_id == self._row_id_for_record(self._expanded_id)
+            else "●"
+            if hovered
+            else "▸"
+        )
         return {
             self.COLUMN_POSITION: Text(
                 f"{marker}{index + 1:>3}", style="bold" if hovered else "dim"
@@ -679,8 +689,9 @@ class Ledger(DataTable[Text | str]):
         }
 
     def _build_detail(self) -> InlineDetails | None:
+        expanded_row_id = self._row_id_for_record(self._expanded_id)
         for entry in self._entries:
-            if entry.record_id == self._expanded_id and entry.is_tool_operation:
+            if entry.record_id == expanded_row_id and entry.is_tool_operation:
                 tool = self._tools.get(entry.tool_operation_id or "")
                 if tool is not None:
                     detail = build_tool_inline_details(
@@ -747,6 +758,13 @@ class Ledger(DataTable[Text | str]):
             include(self._detail_values(self._detail))
         if self._retry_message:
             include(self._retry_values())
+        if any(entry.is_tool_operation for entry in self._entries):
+            widths[self.COLUMN_STATUS] = max(
+                self._text_width(self.COLUMN_LABELS[self.COLUMN_STATUS]), 16
+            )
+            widths[self.COLUMN_DURATION] = max(
+                self._text_width(self.COLUMN_LABELS[self.COLUMN_DURATION]), 8
+            )
         return widths
 
     @staticmethod
@@ -1021,6 +1039,15 @@ class Ledger(DataTable[Text | str]):
         old_selected_line = self._row_index_for_record(self._selected_id)
         old_selected = self._selected_id
         previous_detail_revision = self._revisions.get(self.expanded_id or "")
+        previous_detail_tool = next(
+            (
+                self._tools[entry.tool_operation_id]
+                for entry in self._entries
+                if entry.record_id == self._row_id_for_record(self.expanded_id)
+                and entry.tool_operation_id in self._tools
+            ),
+            None,
+        )
         self._records = {record.record_id: record for record in records}
         self._requests = dict(search_result.requests)
         self._tools = dict(search_result.tools)
@@ -1067,10 +1094,16 @@ class Ledger(DataTable[Text | str]):
             self._refresh_changed_records()
             self._refresh_changed_requests()
             self._refresh_changed_tools()
-            if self.expanded_id is not None and any(
-                entry.record_id == self.expanded_id and entry.is_tool_operation
-                for entry in self._entries
-            ):
+            current_detail_tool = next(
+                (
+                    self._tools[entry.tool_operation_id]
+                    for entry in self._entries
+                    if entry.record_id == self._row_id_for_record(self.expanded_id)
+                    and entry.tool_operation_id in self._tools
+                ),
+                None,
+            )
+            if current_detail_tool != previous_detail_tool:
                 self._update_detail_row()
             if detail_changed:
                 self._update_detail_row()
@@ -1089,7 +1122,7 @@ class Ledger(DataTable[Text | str]):
             self._detail_ratio = self._validated_detail_ratio(detail_ratio)
             if self.region.height:
                 self._detail_height_limit = self._detail_limit_for_height(self.region.height)
-        expanded_id = expanded_id if expanded_id in self._entry_indices else None
+        expanded_id = self._row_id_for_record(expanded_id)
         same_record = expanded_id == self.expanded_id
         self._expanded_id = expanded_id
         self._detail_tab = tab

@@ -400,6 +400,12 @@ def search_records(  # noqa: PLR0912, PLR0915
     requests: dict[str, TrajectoryRequest] = {}
     request_id_by_row_id: dict[str, str] = {}
     if request_index is not None:
+        fallback_requests: dict[tuple[str, str, str], set[str]] = {}
+        for request in request_index.ordered:
+            if request.source_request_id is not None:
+                fallback_requests.setdefault(
+                    (request.source_request_id, request.participant_id, request.source_epoch), set()
+                ).add(request.request_id)
         for row_id in visible_rows:
             members = (row_id,)
             row_operation = tool_by_anchor.get(row_id)
@@ -410,6 +416,17 @@ def search_records(  # noqa: PLR0912, PLR0915
                 for member in members
                 if member in request_index.by_record_id
             }
+            if row_operation is not None and row_operation.request_id is not None:
+                request_ids.update(
+                    fallback_requests.get(
+                        (
+                            row_operation.request_id,
+                            row_operation.participant_id,
+                            row_operation.source_epoch,
+                        ),
+                        set(),
+                    )
+                )
             if len(request_ids) == 1:
                 request_id_by_row_id[row_id] = next(iter(request_ids))
         entries, requests = compose_request_headers(

@@ -27,7 +27,7 @@ class LedgerPage:
 
     @property
     def record_ids(self) -> tuple[str, ...]:
-        return self.result.record_ids
+        return self.result.row_ids
 
 
 def paginate_search_result(result: SearchResult, page: int, page_size: int) -> LedgerPage:
@@ -94,9 +94,7 @@ def paginate_search_result(result: SearchResult, page: int, page_size: int) -> L
             if record.record_id in result.scores
         },
         counts=result.counts,
-        group_paths={
-            record.record_id: result.path_for_record(record.record_id) for record in records
-        },
+        group_paths={row_id: result.path_for_record(row_id) for row_id in page_row_ids},
         requests=requests,
         tools={
             entry.tool_operation_id: result.tools[entry.tool_operation_id]

@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from theater.regie.trajectory.constants import TOOL_ROW_SUMMARY_MAX_CHARS
 from theater.regie.trajectory.render import format_duration, sanitize_text, status_label
 from theater.trajectory import TrajectoryRecord
 from theater.trajectory.grouping import deterministic_record_order
@@ -108,13 +109,11 @@ def tool_row_text(operation: TrajectoryToolOperation, *, compact: bool = False) 
         summary = "unmatched result"
     else:
         summary = _preview(operation) or "result unavailable"
-    summary = summary[:160]
     if operation.call_count > 1 or operation.result_count > 1:
         summary += f" · {operation.call_count + operation.result_count} records"
     if operation.records_truncated:
         summary += " · links clipped"
-    if compact:
-        summary = f"[{name}] {summary}"
+    summary = f"[{name}] {summary}"[:TOOL_ROW_SUMMARY_MAX_CHARS]
     return ToolRowText(
         event="⚙ TOOL",
         source=source,
