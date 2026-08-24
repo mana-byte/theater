@@ -247,6 +247,7 @@ class TrajectoryRecord:
     event_ordinal: int = 0
     turn_id: str | None = None
     step_id: str | None = None
+    request_id: str | None = None
     call_id: str | None = None
     parent_call_id: str | None = None
     links: tuple[ParticipantLink, ...] = ()
@@ -295,7 +296,7 @@ class TrajectoryRecord:
             self, "status", enum_value(TrajectoryStatus, self.status, "record.status")
         )
         object.__setattr__(self, "summary", ContentPreview.from_text(self.summary).text)
-        for name in ("native_id", "turn_id", "step_id", "call_id", "parent_call_id"):
+        for name in ("native_id", "turn_id", "step_id", "request_id", "call_id", "parent_call_id"):
             value = getattr(self, name)
             if value is not None:
                 object.__setattr__(
@@ -322,7 +323,7 @@ class TrajectoryRecord:
         object.__setattr__(self, "details", bound_detail_fields(self.details))
 
     def to_wire(self) -> dict[str, object]:
-        return {
+        value = {
             "record_id": self.record_id,
             "revision": self.revision,
             "participant_id": self.participant_id,
@@ -345,6 +346,9 @@ class TrajectoryRecord:
             "usage": self.usage.to_wire() if self.usage else None,
             "details": [detail.to_wire() for detail in self.details],
         }
+        if self.request_id is not None:
+            value["request_id"] = self.request_id
+        return value
 
     @classmethod
     def from_wire(cls, value: object) -> Self:
@@ -367,6 +371,7 @@ class TrajectoryRecord:
             "event_ordinal",
             "turn_id",
             "step_id",
+            "request_id",
             "call_id",
             "parent_call_id",
             "links",
@@ -395,6 +400,7 @@ class TrajectoryRecord:
             event_ordinal=integer(data.get("event_ordinal", 0), "record.event_ordinal"),
             turn_id=string_or_none(data.get("turn_id"), "record.turn_id"),
             step_id=string_or_none(data.get("step_id"), "record.step_id"),
+            request_id=string_or_none(data.get("request_id"), "record.request_id"),
             call_id=string_or_none(data.get("call_id"), "record.call_id"),
             parent_call_id=string_or_none(data.get("parent_call_id"), "record.parent_call_id"),
             links=tuple(

@@ -471,6 +471,12 @@ def _trajectory_usage(info: dict) -> TrajectoryUsage | None:
     )
 
 
+def _assistant_request_id(usage: TrajectoryUsage | None, message_id: str) -> str | None:
+    if usage is not None and usage.request_id is not None:
+        return usage.request_id
+    return _trajectory_identifier(f"opencode:{message_id}", "request") if message_id else None
+
+
 def _opencode_source_key(db: Path) -> str:
     return hashlib.sha256(str(db.expanduser().resolve()).encode("utf-8")).hexdigest()[:32]
 
@@ -1561,6 +1567,7 @@ class OpenCodeSource(Source):
         event_ordinal: int,
         turn_id: str | None = None,
         step_id: str | None = None,
+        request_id: str | None = None,
         call_id: str | None = None,
         parent_call_id: str | None = None,
         timing: Timing | None = None,
@@ -1582,6 +1589,7 @@ class OpenCodeSource(Source):
             event_ordinal=max(0, event_ordinal),
             turn_id=_trajectory_identifier(turn_id, "turn"),
             step_id=_trajectory_identifier(step_id, "step"),
+            request_id=_trajectory_identifier(request_id, "request"),
             call_id=_trajectory_identifier(call_id, "call"),
             parent_call_id=_trajectory_identifier(parent_call_id, "parent-call"),
             timing=timing,
@@ -1603,6 +1611,7 @@ class OpenCodeSource(Source):
         finish = info.get("finish")
         timing = _message_timing(info)
         usage = _trajectory_usage(info)
+        request_id = _assistant_request_id(usage, mid) if role == "assistant" else None
         ordinal = 0
         for part_id, created, updated, raw in parts:
             part = _loads(raw)
@@ -1616,6 +1625,7 @@ class OpenCodeSource(Source):
                 ordinal_base=ordinal,
                 timing=timing,
                 usage=usage,
+                request_id=request_id,
             )
             facts.extend(part_facts)
             ordinal += max(1, len(part_facts))
@@ -1650,6 +1660,7 @@ class OpenCodeSource(Source):
                     turn_id=mid or None,
                     timing=timing,
                     usage=usage,
+                    request_id=request_id,
                 )
             )
         return facts
@@ -1664,6 +1675,7 @@ class OpenCodeSource(Source):
         ordinal_base: int,
         timing: Timing | None,
         usage: TrajectoryUsage | None,
+        request_id: str | None,
     ) -> list[TrajectoryFact]:
         mid = _trajectory_string(info.get("id"))
         role = info.get("role")
@@ -1702,6 +1714,7 @@ class OpenCodeSource(Source):
                     turn_id=mid or None,
                     timing=fact_timing,
                     usage=fact_usage,
+                    request_id=request_id if role == "assistant" else None,
                 )
             ]
         if ptype in ("reasoning", "thinking"):
@@ -1724,6 +1737,7 @@ class OpenCodeSource(Source):
                     event_ordinal=ordinal_base,
                     turn_id=mid or None,
                     timing=part_timing,
+                    request_id=request_id if role == "assistant" else None,
                 )
             ]
         if ptype in ("context", "system"):
@@ -1773,6 +1787,7 @@ class OpenCodeSource(Source):
                 call_id=call_id,
                 parent_call_id=parent_id,
                 timing=_part_timing(part),
+                request_id=request_id if role == "assistant" else None,
                 details=details,
             )
         ]
@@ -1797,6 +1812,7 @@ class OpenCodeSource(Source):
                     call_id=call_id,
                     parent_call_id=parent_id,
                     timing=_part_timing(part),
+                    request_id=request_id if role == "assistant" else None,
                     details=(result_detail,) if result_detail is not None else (),
                 )
             )
@@ -2136,6 +2152,7 @@ class OpenCodeSource(Source):
         event_ordinal: int,
         turn_id: str | None = None,
         step_id: str | None = None,
+        request_id: str | None = None,
         call_id: str | None = None,
         parent_call_id: str | None = None,
         timing: Timing | None = None,
@@ -2157,6 +2174,7 @@ class OpenCodeSource(Source):
             event_ordinal=max(0, event_ordinal),
             turn_id=_trajectory_identifier(turn_id, "turn"),
             step_id=_trajectory_identifier(step_id, "step"),
+            request_id=_trajectory_identifier(request_id, "request"),
             call_id=_trajectory_identifier(call_id, "call"),
             parent_call_id=_trajectory_identifier(parent_call_id, "parent-call"),
             timing=timing,
@@ -2241,6 +2259,7 @@ class OpenCodeSource(Source):
         mid = part.get("messageID")
         message_id = mid if isinstance(mid, str) else ""
         role = self._role(conn, message_id) if message_id else None
+        request_id = _assistant_request_id(None, message_id) if role == "assistant" else None
         ptype = part.get("type")
         timing = _part_timing(part)
         part_id = part.get("id")
@@ -2276,6 +2295,7 @@ class OpenCodeSource(Source):
                 event_ordinal=0,
                 turn_id=message_id or None,
                 step_id=step_id if isinstance(step_id, str) else None,
+                request_id=request_id,
                 timing=timing,
                 revision_hint=revision_hint,
             )
@@ -2297,6 +2317,7 @@ class OpenCodeSource(Source):
                 event_ordinal=0,
                 turn_id=message_id or None,
                 step_id=step_id if isinstance(step_id, str) else None,
+                request_id=request_id,
                 timing=timing,
                 revision_hint=revision_hint,
             )
@@ -2345,6 +2366,7 @@ class OpenCodeSource(Source):
             event_ordinal=0,
             turn_id=message_id or None,
             step_id=step_id if isinstance(step_id, str) else None,
+            request_id=request_id,
             call_id=call_id,
             parent_call_id=parent_id,
             timing=timing,
@@ -2372,6 +2394,7 @@ class OpenCodeSource(Source):
                 event_ordinal=1,
                 turn_id=message_id or None,
                 step_id=step_id if isinstance(step_id, str) else None,
+                request_id=request_id,
                 call_id=call_id,
                 parent_call_id=parent_id,
                 timing=timing,
@@ -2393,6 +2416,7 @@ class OpenCodeSource(Source):
         finish = info.get("finish")
         timing = _message_timing(info)
         usage = _trajectory_usage(info)
+        request_id = _assistant_request_id(usage, mid) if role == "assistant" else None
         time_data = _table(info.get("time"))
         revision_hint = self._live_revision(
             conn,
@@ -2420,6 +2444,7 @@ class OpenCodeSource(Source):
                         turn_id=mid or None,
                         timing=timing,
                         usage=usage,
+                        request_id=request_id,
                         revision_hint=revision_hint,
                     )
                     if fact is not None:
@@ -2437,6 +2462,7 @@ class OpenCodeSource(Source):
                     turn_id=mid or None,
                     timing=timing,
                     usage=usage,
+                    request_id=request_id,
                     revision_hint=revision_hint,
                 )
                 return [fact] if fact is not None else []
