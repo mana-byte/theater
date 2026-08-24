@@ -351,7 +351,7 @@ def search_records(
         visit(group, 0)
     requests: dict[str, TrajectoryRequest] = {}
     if request_index is not None:
-        entries, requests = _compose_request_headers(
+        entries, requests = compose_request_headers(
             entries,
             matched_ids,
             paths,
@@ -369,7 +369,7 @@ def search_records(
     )
 
 
-def _compose_request_headers(
+def compose_request_headers(
     entries: Sequence[LedgerEntry],
     matched_ids: frozenset[str],
     paths: Mapping[str, tuple[str, ...]],
@@ -446,7 +446,7 @@ def _request_groups(
     return request_for_group
 
 
-def _base_request_entries(
+def base_request_entries(
     entries: Sequence[LedgerEntry],
     matched_ids: frozenset[str],
     paths: Mapping[str, tuple[str, ...]],
@@ -476,6 +476,8 @@ __all__ = [
     "SearchCache",
     "SearchResult",
     "TrajectoryFilters",
+    "base_request_entries",
+    "compose_request_headers",
     "fuzzy_subsequence_score",
     "matches_query",
     "record_search_text",

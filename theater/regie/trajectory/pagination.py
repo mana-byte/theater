@@ -6,8 +6,8 @@ from dataclasses import dataclass
 
 from theater.regie.trajectory.search import (
     SearchResult,
-    _base_request_entries,
-    _compose_request_headers,
+    base_request_entries,
+    compose_request_headers,
 )
 
 
@@ -61,7 +61,7 @@ def paginate_search_result(result: SearchResult, page: int, page_size: int) -> L
         for request in ordered_requests
         for record_id in request.record_ids
     }
-    base_entries = _base_request_entries(
+    base_entries = base_request_entries(
         result.entries,
         result.matched_ids,
         result.group_paths,
@@ -76,7 +76,7 @@ def paginate_search_result(result: SearchResult, page: int, page_size: int) -> L
             else entry.group_id in group_ids
         )
     )
-    entries, requests = _compose_request_headers(
+    entries, requests = compose_request_headers(
         page_entries,
         record_ids,
         result.group_paths,
