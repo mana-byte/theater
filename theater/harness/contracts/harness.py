@@ -32,7 +32,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from theater.constants.harness import HARNESS_APPROVAL_POLICIES
 from theater.harness.contracts.launch import LaunchPlan, ResumeLaunchOverlay
@@ -44,6 +44,8 @@ if TYPE_CHECKING:
 
 #: No default anywhere — the whole safety story for a child nobody is watching.
 APPROVALS = HARNESS_APPROVAL_POLICIES
+
+ResumeStrategy = Literal["continue", "fork"]
 
 
 class Harness(ABC):
@@ -61,6 +63,8 @@ class Harness(ABC):
     observer: HarnessObserver
     #: Class attribute, not signature introspection — opencode's -s drops --prompt.
     resume_takes_prompt: bool = True
+    #: Native resume behaviour. Forking keeps context while minting a new transcript identity.
+    resume_strategy: ResumeStrategy = "continue"
 
     # ---- launching ------------------------------------------------------
 

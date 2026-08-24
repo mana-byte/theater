@@ -287,6 +287,7 @@ class CodexHarness(Harness):
     icon = "\u25c9"
     #: A spelling that does not normalize is observed as nothing at all, so these are not cosmetic.
     aliases = ("codex-cli", "codex_cli", "openai-codex", "Codex")
+    resume_strategy = "fork"
 
     def __init__(self, root: Path | None = None):
         #: The observer's business alone; nothing about launching depends on it.
@@ -309,12 +310,12 @@ class CodexHarness(Harness):
             raise BadRequest(f"approval must be one of {', '.join(APPROVALS)}, got {approval!r}")
         command = json.dumps(theater_binary())
         args = json.dumps(["mcp", "--id", participant_id])
-        # `codex resume <SESSION_ID>` is a subcommand, not a flag; shares `-c` and approval.
+        # `codex fork <SESSION_ID>` preserves context under a fresh native session identity.
         argv = [
             "codex",
         ]
         if resume is not None:
-            argv.append("resume")
+            argv.append("fork")
             argv.append(resume)
         argv += [
             "-c",
@@ -334,7 +335,7 @@ class CodexHarness(Harness):
             argv += ["-a", "untrusted", "-s", "read-only"]
         if prompt:
             argv.append(prompt)
-        return LaunchPlan(argv=argv, session_id=resume)
+        return LaunchPlan(argv=argv)
 
     def resume_launch_overlay(
         self,

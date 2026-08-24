@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 
-from shipped import VibeObserver
+from shipped import VibeHarness, VibeObserver
 
 from theater.harness import EventPath, plan_launch
 from theater.harness.base import EventKind
@@ -150,6 +150,7 @@ def test_vibe_resume_uses_resume_flag(tmp_path):
     )
     assert "--resume" in plan.argv
     assert plan.argv[plan.argv.index("--resume") + 1] == "session-xyz"
+    assert VibeHarness.resume_strategy == "continue"
     assert plan.argv[-1] == "do something"
 
 

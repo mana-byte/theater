@@ -351,8 +351,7 @@ def test_history_also_carries_paths(rec, workdir):
 # ---- resume -------------------------------------------------------------
 
 
-def test_resume_argv_uses_dash_s_and_session_id(tmp_path):
-    """`-s <session_id>` continues an existing session."""
+def test_resume_forks_the_session_and_waits_for_its_receipt(tmp_path):
     plan = OpenCodeHarness().plan_launch(
         participant_id="abc123",
         prompt="do something",
@@ -364,12 +363,11 @@ def test_resume_argv_uses_dash_s_and_session_id(tmp_path):
         "opencode",
         "-s",
         "ses_ffb42302cffeaasiFBDGgLmkRf",
+        "--fork",
     ]
     receipt = tmp_path / "x.opencode-session"
-    assert json.loads(plan.files[receipt]) == {
-        "participant_id": "abc123",
-        "session_id": "ses_ffb42302cffeaasiFBDGgLmkRf",
-    }
+    assert receipt not in plan.files
+    assert plan.session_id is None
 
 
 def test_resume_with_model_and_auto(tmp_path):
@@ -389,6 +387,7 @@ def test_resume_with_model_and_auto(tmp_path):
         "--auto",
         "-s",
         "ses_abc",
+        "--fork",
     ]
 
 
