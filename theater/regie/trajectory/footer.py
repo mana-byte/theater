@@ -218,10 +218,8 @@ class TrajectoryFooter(Horizontal):
     def _update_pagination(self) -> None:
         previous = self.query_one("#trajectory-page-previous", Button)
         previous.disabled = self._page_number <= 1
-        previous.tooltip = "Previous page (H)"
         following = self.query_one("#trajectory-page-next", Button)
         following.disabled = self._page_number >= self._page_count
-        following.tooltip = "Next page (L)"
         selector = self.query_one("#trajectory-page", Select)
         selector.disabled = self._page_count <= 1
         options = [
