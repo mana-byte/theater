@@ -3,6 +3,7 @@
 from theater.regie.trajectory.controller import DaemonClientCompatible, TrajectoryController
 from theater.regie.trajectory.enums import FilterDimension, FocusRegion, InspectorTab, OrderMode
 from theater.regie.trajectory.models import decode_delta, decode_page
+from theater.regie.trajectory.pagination import LedgerPage, paginate_search_result
 from theater.regie.trajectory.search import (
     FilterCounts,
     SearchResult,
@@ -50,6 +51,7 @@ __all__ = [
     "FilterDimension",
     "FocusRegion",
     "InspectorTab",
+    "LedgerPage",
     "LinkDirection",
     "OrderMode",
     "PanelState",
@@ -81,5 +83,6 @@ __all__ = [
     "decode_delta",
     "decode_page",
     "fuzzy_subsequence_score",
+    "paginate_search_result",
     "search_records",
 ]

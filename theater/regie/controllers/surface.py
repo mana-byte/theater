@@ -10,6 +10,8 @@ from typing import Protocol
 class PaneParking(Protocol):
     async def break_pane(self, pane_id: str, *, target_window: str | None = ...) -> None: ...
 
+    async def pane_exists(self, pane_id: str) -> bool: ...
+
 
 class RightSurface(Enum):
     DASHBOARD = "dashboard"
@@ -76,12 +78,17 @@ class SurfaceController:
             try:
                 await self._panes.break_pane(staged_pane)
             except Exception as exc:
-                return TrajectoryStageResult(
-                    TrajectoryStageOutcome.PARK_FAILED,
-                    staged_pane,
-                    participant_id,
-                    str(exc),
-                )
+                try:
+                    pane_still_exists = await self._panes.pane_exists(staged_pane)
+                except Exception:
+                    pane_still_exists = True
+                if pane_still_exists:
+                    return TrajectoryStageResult(
+                        TrajectoryStageOutcome.PARK_FAILED,
+                        staged_pane,
+                        participant_id,
+                        str(exc),
+                    )
         self.surface = RightSurface.TRAJECTORY
         self.trajectory_participant = participant_id
         return TrajectoryStageResult(

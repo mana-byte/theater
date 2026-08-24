@@ -108,6 +108,11 @@ REGIE_STARTUP_REVEAL_MAX_LEAVES = 100
 #: Suppresses the tree highlight while the footer owns the keyboard cursor.
 REGIE_HIDDEN_TREE_CURSOR = -1
 
+#: Hidden Textual binding targeted by the tmux return command.
+REGIE_RETURN_SIGNAL_TEXTUAL = "ctrl+g"
+#: tmux spelling for the same control key.
+REGIE_RETURN_SIGNAL_TMUX = "C-g"
+
 #: Textual system-command title replaced by the dashboard tips.
 REGIE_PALETTE_KEYS_COMMAND_TITLE = "Keys"
 
@@ -196,7 +201,7 @@ REGIE_DASHBOARD_TIPS: tuple[tuple[str | tuple[str, str], ...], ...] = (
     (
         ("Tips: when the key is free, Theater binds ", _D),
         ("<prefix> h", _T),
-        (" to return from the stage", _D),
+        (" to return from the stage or trajectory", _D),
     ),
     (
         ("Tips: ", _D),

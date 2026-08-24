@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import json
 
+from rich.cells import cell_len, set_cell_size
 from rich.text import Text
 
 from theater.regie.trajectory.constants import (
     KIND_GLYPHS_BY_VALUE,
     LANE_GLYPHS_BY_VALUE,
-    MAX_TOOLTIP_BYTES,
     STYLE_DURATION,
     STYLE_MATCHED,
     TOOLTIP_DELAY,
     TRAJECTORY_DETAIL_RECORD_MAX_BYTES,
+    TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS,
 )
 from theater.regie.trajectory.enums import InspectorTab
 from theater.trajectory import (
@@ -115,11 +116,6 @@ def record_line(
     return line
 
 
-def group_line(label: str, *, collapsed: bool, depth: int = 0) -> Text:
-    glyph = "▸" if collapsed else "▾"
-    return Text(f"{'  ' * depth}{glyph} {_compact(label, 120)}", no_wrap=True, overflow="crop")
-
-
 def tabs_for_record(record: TrajectoryRecord | None) -> tuple[InspectorTab, ...]:
     if record is None:
         return (InspectorTab.SUMMARY,)
@@ -201,7 +197,7 @@ def _participant_line(link: ParticipantLink) -> str:
     return f"participant {direction}: {link.participant_id} ({link.relation})"
 
 
-def _inspector_lines(  # noqa: PLR0912
+def _detail_lines(  # noqa: PLR0912
     record: TrajectoryRecord | None, tab: InspectorTab
 ) -> tuple[list[str], dict[int, str]]:
     if record is None:
@@ -274,14 +270,14 @@ def _bounded_lines(lines: list[str]) -> str:
     ).text
 
 
-def inspector_text(record: TrajectoryRecord | None, tab: InspectorTab) -> str:
-    """Build the exact bounded text exposed by the active inspector tab."""
-    lines, _ = _inspector_lines(record, tab)
+def detail_text(record: TrajectoryRecord | None, tab: InspectorTab) -> str:
+    """Build the exact bounded text exposed by the active detail tab."""
+    lines, _ = _detail_lines(record, tab)
     return _bounded_lines(lines)
 
 
-def inspector_link_line_ids(record: TrajectoryRecord | None, tab: InspectorTab) -> dict[int, str]:
-    lines, links = _inspector_lines(record, tab)
+def detail_link_line_ids(record: TrajectoryRecord | None, tab: InspectorTab) -> dict[int, str]:
+    lines, links = _detail_lines(record, tab)
     bounded = _bounded_lines(lines).splitlines()
     return {
         line_index: participant_id
@@ -290,20 +286,12 @@ def inspector_link_line_ids(record: TrajectoryRecord | None, tab: InspectorTab) 
     }
 
 
-def inspector_content(record: TrajectoryRecord | None, tab: InspectorTab) -> Text:
-    """Return displayed inspector content without Rich markup interpretation."""
-    return Text(inspector_text(record, tab), no_wrap=False)
-
-
 def tooltip_text(record: TrajectoryRecord) -> str:
     """Return a small bounded hover detail."""
-    return bounded_preview(
-        (
-            f"{record.kind.value} · {record.source}\n"
-            f"{record.summary}\n{format_duration(record.timing)}"
-        ),
-        max_bytes=MAX_TOOLTIP_BYTES,
-    ).text
+    summary = " ".join(plain_text(record.summary).splitlines())
+    if cell_len(summary) > TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS:
+        summary = set_cell_size(summary, TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS - 1).rstrip() + "…"
+    return f"{record.kind.value} · {record.source}\n{summary}\n{format_duration(record.timing)}"
 
 
 def count_label(value: str, count: int) -> str:
@@ -321,12 +309,10 @@ __all__ = [
     "LANE_GLYPHS",
     "TOOLTIP_DELAY",
     "count_label",
+    "detail_link_line_ids",
+    "detail_text",
     "details_size",
     "format_duration",
-    "group_line",
-    "inspector_content",
-    "inspector_link_line_ids",
-    "inspector_text",
     "kind_glyph",
     "lane_glyph",
     "plain_text",

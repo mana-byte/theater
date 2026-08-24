@@ -18,6 +18,8 @@ class PaneOperations(Protocol):
 
     async def break_pane(self, pane_id: str, *, target_window: str | None = ...) -> None: ...
 
+    async def pane_exists(self, pane_id: str) -> bool: ...
+
     async def join_pane(
         self, pane_id: str, *, target_window: str, horizontal: bool = ...
     ) -> None: ...
@@ -94,35 +96,33 @@ class StageController:
 
         old_was_parked = False
         if staged_pane and staged_pane != pane:
-            try:
-                await self._ops.break_pane(staged_pane)
-                old_was_parked = True
-            except Exception as exc:
+            error = await self._park_error(staged_pane)
+            if error is not None:
                 return StageResult(
                     outcome=StageOutcome.UNSTAGE_FAILED,
                     staged_pane=staged_pane,
                     pane=pane,
                     node_id=node_id,
-                    error=str(exc),
+                    error=str(error),
                 )
+            old_was_parked = True
 
         if staged_pane == pane:
-            try:
-                await self._ops.break_pane(pane)
-                return StageResult(
-                    outcome=StageOutcome.UNSTAGED,
-                    staged_pane=None,
-                    pane=pane,
-                    node_id=node_id,
-                )
-            except Exception as exc:
+            error = await self._park_error(pane)
+            if error is not None:
                 return StageResult(
                     outcome=StageOutcome.UNSTAGE_FAILED,
                     staged_pane=staged_pane,
                     pane=pane,
                     node_id=node_id,
-                    error=str(exc),
+                    error=str(error),
                 )
+            return StageResult(
+                outcome=StageOutcome.UNSTAGED,
+                staged_pane=None,
+                pane=pane,
+                node_id=node_id,
+            )
 
         try:
             await self._ops.join_pane(pane, target_window=my_window)
@@ -145,6 +145,17 @@ class StageController:
             pane=pane,
             node_id=node_id,
         )
+
+    async def _park_error(self, pane: str) -> Exception | None:
+        try:
+            await self._ops.break_pane(pane)
+        except Exception as exc:
+            try:
+                return exc if await self._ops.pane_exists(pane) else None
+            except Exception:
+                return exc
+        else:
+            return None
 
     async def focus(
         self,

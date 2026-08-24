@@ -20,6 +20,7 @@ from theater.constants.trajectory import (
 from theater.daemon.trajectory.cache import CacheStream, RecordChange, TrajectoryCache
 from theater.daemon.trajectory.merge import order_records
 from theater.daemon.trajectory.responses import (
+    TrajectoryResponseTooLarge,
     decode_follow_cursor,
     empty_delta,
     fit_delta,
@@ -302,7 +303,7 @@ class TrajectoryService:
                 bus_before=bus_before,
                 make_older=make_older,
             )
-        except ValueError as exc:
+        except TrajectoryResponseTooLarge as exc:
             raise BadRequest(
                 "trajectory response envelope exceeds the 1 MiB limit; request a fresh snapshot"
             ) from exc

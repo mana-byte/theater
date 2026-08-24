@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence, Set
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TypeVar
 
@@ -145,7 +145,6 @@ class LedgerEntry:
     group_id: str
     group_label: str
     record_id: str | None = None
-    collapsed: bool = False
     depth: int = 0
     group_kind: GroupKind | None = None
 
@@ -263,11 +262,10 @@ def search_records(
     status_filters: Iterable[TrajectoryStatus] = (),
     source_filters: Iterable[str] = (),
     groups: Sequence[TrajectoryGroup] = (),
-    collapsed_groups: Set[str] = frozenset(),
     cache: SearchCache | None = None,
     ordering: TrajectoryOrdering | None = None,
 ) -> SearchResult:
-    """Filter source order and retain every visible structural group header."""
+    """Filter source order and retain visible step headers."""
     ordered = ordering or build_ordering(records, groups)
     complete = ordered.groups
     bounded_records = ordered.records
@@ -304,18 +302,17 @@ def search_records(
     def visit(group: TrajectoryGroup, depth: int) -> None:
         if id(group) not in matching_groups:
             return
-        collapsed = group.group_id in collapsed_groups
-        entries.append(
-            LedgerEntry(
-                group_id=group.group_id,
-                group_label=group.label,
-                collapsed=collapsed,
-                depth=depth,
-                group_kind=group.kind,
+        show_header = group.kind is GroupKind.STEP
+        if show_header:
+            entries.append(
+                LedgerEntry(
+                    group_id=group.group_id,
+                    group_label=group.label,
+                    depth=depth,
+                    group_kind=group.kind,
+                )
             )
-        )
-        if collapsed:
-            return
+        content_depth = depth + int(show_header)
         for unit in ordered.group_units(group):
             if isinstance(unit, str) and unit in matched_ids:
                 entries.append(
@@ -323,12 +320,12 @@ def search_records(
                         group_id=group.group_id,
                         group_label=group.label,
                         record_id=unit,
-                        depth=depth + 1,
+                        depth=content_depth,
                         group_kind=group.kind,
                     )
                 )
             elif isinstance(unit, TrajectoryGroup) and id(unit) in matching_groups:
-                visit(unit, depth + 1)
+                visit(unit, content_depth)
 
     for group in complete:
         visit(group, 0)

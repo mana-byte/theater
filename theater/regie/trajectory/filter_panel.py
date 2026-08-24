@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
@@ -12,7 +14,7 @@ from textual.widgets import Button, Label, SelectionList
 from theater.regie.trajectory.constants import (
     FILTER_HEADER_HEIGHT,
     FILTER_MAX_ROWS,
-    TOOLBAR_HEIGHT,
+    SEARCH_HEIGHT,
 )
 from theater.regie.trajectory.enums import FilterDimension
 from theater.regie.trajectory.render import sanitize_text
@@ -42,6 +44,11 @@ class FilterClearRequested(Message):
 class FilterPanel(Vertical):
     """Show typed filter options through Textual's native selection list."""
 
+    COMPONENT_CLASSES: ClassVar[set[str]] = {
+        "trajectory-filter--active",
+        "trajectory-filter--dimension",
+    }
+
     DEFAULT_CSS = f"""
     FilterPanel {{
         width: 1fr;
@@ -49,9 +56,9 @@ class FilterPanel(Vertical):
         max-height: {FILTER_MAX_ROWS};
         dock: top;
         layer: trajectory-overlay;
-        offset-y: {TOOLBAR_HEIGHT};
-        background: $panel;
-        border: solid $accent 45%;
+        offset-y: {SEARCH_HEIGHT};
+        background: $background;
+        border: solid $accent 20%;
         padding: 0 1;
     }}
     FilterPanel > #trajectory-filter-header {{
@@ -81,19 +88,19 @@ class FilterPanel(Vertical):
         border: none !important;
         margin: 0 0 0 1;
         color: $text-muted;
-        background: $surface;
+        background: $foreground 3%;
     }}
     FilterPanel Button:hover,
     FilterPanel Button:focus {{
         color: $text;
-        background: $accent 20%;
+        background: $accent 10%;
     }}
     FilterPanel SelectionList {{
         width: 1fr;
         height: 1fr;
         border: none;
         padding: 0;
-        background: $surface;
+        background: $background;
     }}
     FilterPanel SelectionList > .option-list--option {{
         padding: 1 1;
@@ -105,6 +112,14 @@ class FilterPanel(Vertical):
     }}
     FilterPanel SelectionList > .option-list--option-hover {{
         background: $accent 10%;
+    }}
+    FilterPanel > .trajectory-filter--dimension {{
+        color: $text-muted;
+        text-style: bold;
+    }}
+    FilterPanel > .trajectory-filter--active {{
+        color: $accent;
+        text-style: dim;
     }}
     """
 
@@ -127,14 +142,25 @@ class FilterPanel(Vertical):
     def options(self) -> tuple[FilterValue, ...]:
         return tuple(self._options)
 
-    @staticmethod
-    def _prompt(dimension: FilterDimension, value: str, count: int, selected: bool) -> Text:
+    def _prompt(self, dimension: FilterDimension, value: str, count: int, selected: bool) -> Text:
         prompt = Text(no_wrap=True, overflow="ellipsis")
-        prompt.append(f"{dimension.value.upper():<7}", style="bold cyan")
+        prompt.append(
+            f"{dimension.value.upper():<7}",
+            style=self.get_component_rich_style(
+                "trajectory-filter--dimension",
+                partial=True,
+            ),
+        )
         prompt.append(f" {sanitize_text(value.replace('_', ' '))}")
         prompt.append(f"  {count:>4}", style="dim")
         if selected:
-            prompt.append("  active", style="green")
+            prompt.append(
+                "  active",
+                style=self.get_component_rich_style(
+                    "trajectory-filter--active",
+                    partial=True,
+                ),
+            )
         return prompt
 
     def _append_dimension(

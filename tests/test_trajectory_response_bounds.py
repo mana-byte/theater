@@ -150,3 +150,13 @@ def test_multibyte_response_content_is_sized_as_encoded_bytes() -> None:
 
     assert wire_bytes(multibyte_page.to_wire()) == len(_frame(multibyte_page.to_wire()))
     assert wire_bytes(multibyte_page.to_wire()) > wire_bytes(ascii_page.to_wire())
+
+
+def test_page_accepts_a_transcript_cursor_larger_than_an_identifier() -> None:
+    stream = _stream()
+    stream.transcript_floor = "source-cursor-" + "x" * 600
+
+    page = _page(stream, (_record(0, "record"),))
+
+    assert page.coverage.transcript_floor == stream.transcript_floor
+    assert len(_frame(page.to_wire())) <= TRAJECTORY_RESPONSE_MAX_BYTES

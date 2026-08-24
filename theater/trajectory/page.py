@@ -190,7 +190,11 @@ class TrajectoryCoverage:
     gaps: tuple[CoverageGap, ...] = ()
 
     def __post_init__(self) -> None:
-        for name in ("transcript_floor", "theater_floor"):
+        limits = {
+            "transcript_floor": TRAJECTORY_CURSOR_MAX_BYTES,
+            "theater_floor": TRAJECTORY_IDENTIFIER_MAX_BYTES,
+        }
+        for name, max_bytes in limits.items():
             value = string_or_none(getattr(self, name), f"coverage.{name}")
             if value is not None:
                 object.__setattr__(
@@ -198,7 +202,7 @@ class TrajectoryCoverage:
                     name,
                     bounded_text(
                         value,
-                        max_bytes=TRAJECTORY_IDENTIFIER_MAX_BYTES,
+                        max_bytes=max_bytes,
                         label=f"coverage.{name}",
                         nonempty=True,
                     ),

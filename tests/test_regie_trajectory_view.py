@@ -1,23 +1,23 @@
 from __future__ import annotations
 
 from textual.app import App, ComposeResult
-from textual.widgets import Button, DataTable, Input, RichLog, SelectionList, TabbedContent
+from textual.coordinate import Coordinate
+from textual.widgets import Button, DataTable, Input, SelectionList
 
 from theater.regie.trajectory.constants import (
     LEDGER_HEADER_HEIGHT,
     LEDGER_ROW_HEIGHT,
     SEARCH_HEIGHT,
-    TOOLBAR_HEIGHT,
+    TRAJECTORY_FOOTER_HEIGHT,
     TRAJECTORY_HORIZONTAL_PADDING,
 )
-from theater.regie.trajectory.enums import FocusRegion
+from theater.regie.trajectory.enums import FocusRegion, InspectorTab
 from theater.regie.trajectory.filter_panel import FilterPanel
-from theater.regie.trajectory.inspector import Inspector
+from theater.regie.trajectory.footer import TrajectoryFooter
 from theater.regie.trajectory.ledger import Ledger
 from theater.regie.trajectory.state import TrajectoryStateStore
 from theater.regie.trajectory.timeline import Timeline
-from theater.regie.trajectory.toolbar import TrajectoryToolbar
-from theater.regie.trajectory.view import ReturnToTree, TrajectoryView
+from theater.regie.trajectory.view import ReturnToTree, TrajectoryRetryRequested, TrajectoryView
 from theater.trajectory import PanelState, PanelStateInfo, TrajectoryRecord
 
 
@@ -85,24 +85,28 @@ async def test_surface_uses_fixed_timeline_and_virtualized_ledger() -> None:
 
         assert isinstance(view.query_one("#trajectory-timeline"), Timeline)
         assert isinstance(view.query_one("#trajectory-ledger"), Ledger)
-        assert isinstance(view.query_one("#trajectory-inspector"), Inspector)
-        assert isinstance(view.query_one("#trajectory-toolbar"), TrajectoryToolbar)
+        assert isinstance(view.query_one("#trajectory-footer"), TrajectoryFooter)
         assert isinstance(view.query_one("#trajectory-filters"), FilterPanel)
         assert isinstance(view.query_one("#trajectory-filter-options"), SelectionList)
-        assert isinstance(view.query_one("#trajectory-inspector-tabs"), TabbedContent)
-        assert isinstance(view.query_one("#trajectory-inspector-content-summary"), RichLog)
         assert isinstance(view.query_one("#trajectory-ledger"), DataTable)
-        assert len(view.query_one(TrajectoryToolbar).query(Button)) == 4
-        assert view.query_one(TrajectoryToolbar).region.height == TOOLBAR_HEIGHT
-        assert view.query_one("#trajectory-search", Input).region.height == SEARCH_HEIGHT
+        buttons = list(view.query_one(TrajectoryFooter).query(Button))
+        assert len(buttons) == 4
+        assert all(button.display for button in buttons)
+        assert view.query_one(TrajectoryFooter).region.height == TRAJECTORY_FOOTER_HEIGHT
+        search = view.query_one("#trajectory-search", Input)
+        timeline = view.query_one(Timeline)
+        assert search.region.height == SEARCH_HEIGHT
+        assert search.region.y < timeline.region.y
+        assert search.region.width == timeline.region.width == view.region.width
         assert view.query_one(Ledger).header_height == LEDGER_HEADER_HEIGHT
         assert all(row.height == LEDGER_ROW_HEIGHT for row in view.query_one(Ledger).rows.values())
         assert all(
-            button.region.height == TOOLBAR_HEIGHT
-            for button in view.query_one(TrajectoryToolbar).query(Button)
+            button.region.height == 1
+            for button in view.query_one(TrajectoryFooter).query(Button)
+            if button.display
         )
         assert len(view.query(Ledger)) == 1
-        assert len(view.query(Inspector)) == 1
+        assert len(view.query("#trajectory-inspector")) == 0
         assert view.styles.padding.left == TRAJECTORY_HORIZONTAL_PADDING
         assert view.styles.padding.right == TRAJECTORY_HORIZONTAL_PADDING
 
@@ -116,10 +120,11 @@ async def test_keys_route_regions_selection_search_reset_and_escape() -> None:
         await pilot.press("k")
         assert view.state.selected_id == "r1"
         await pilot.press("enter")
-        assert view.state.focus_region is FocusRegion.INSPECTOR
-        old_tab = view.state.inspector_tab
+        assert view.state.focus_region is FocusRegion.LEDGER
+        assert view.state.expanded_id == "r1"
+        old_tab = view.state.detail_tab
         await pilot.press("l")
-        assert view.state.inspector_tab != old_tab
+        assert view.state.detail_tab != old_tab
         await pilot.press("/")
         await pilot.press(*"second")
         assert view.state.query == "second"
@@ -167,7 +172,39 @@ async def test_native_controls_handle_mouse_search_filters_and_row_activation() 
             offset=(2, ledger.header_height + row * LEDGER_ROW_HEIGHT + 1),
         )
         assert view.state.selected_id == "r1"
-        assert view.state.inspector_open
+        assert view.state.expanded_id == "r1"
+
+
+async def test_transcript_failure_shows_retry_inside_the_error_row() -> None:
+    class RetryHost(Host):
+        def __init__(self) -> None:
+            super().__init__()
+            self.retries = 0
+
+        def on_trajectory_retry_requested(self, _message: TrajectoryRetryRequested) -> None:
+            self.retries += 1
+
+    app = RetryHost()
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await add_records(app)
+        view.state.mark_stale("transcript identity was lost")
+        view._refresh()
+        await pilot.pause()
+        ledger = app.query_one(Ledger)
+        retry = ledger.get_cell(Ledger.RETRY_KEY, Ledger.COLUMN_STATUS)
+
+        assert "Retry" in retry.plain
+        assert not app.query("#trajectory-retry-action")
+        row = ledger.get_row_index(Ledger.RETRY_KEY)
+        column = ledger.get_column_index(Ledger.COLUMN_STATUS)
+        region = ledger._get_cell_region(Coordinate(row, column))
+        await pilot.click(
+            ledger,
+            offset=(region.x + 2, region.y - int(ledger.scroll_y) + 1),
+        )
+        await pilot.pause()
+
+        assert app.retries == 1
 
 
 async def test_copy_is_injected_and_literal_data_is_not_rich_escaped() -> None:
@@ -185,18 +222,28 @@ async def test_copy_is_injected_and_literal_data_is_not_rich_escaped() -> None:
         assert "[literal] \\ path" in copied[0]
 
 
-async def test_inspector_maximizes_by_key_and_header_double_click() -> None:
+async def test_details_expand_beneath_the_record_and_toggle_closed() -> None:
     app = Host()
     async with app.run_test(size=(100, 30)) as pilot:
         view = await add_records(app)
-        await pilot.press("enter", "m")
-        assert view.state.inspector_maximized
-        assert view.has_class("-inspector-maximized")
-        assert not view.query_one("#trajectory-ledger", Ledger).display
+        ledger = view.query_one("#trajectory-ledger", Ledger)
+        await pilot.press("enter")
+        record_row = ledger.get_row_index("record:r2")
+        assert ledger.get_row_index("detail:r2") == record_row + 1
+        assert ledger.ordered_rows[record_row].height == LEDGER_ROW_HEIGHT
+        assert ledger.ordered_rows[record_row + 1].height >= 3
 
-        await pilot.click("#trajectory-inspector-handle", times=2)
-        assert not view.state.inspector_maximized
-        assert view.query_one("#trajectory-ledger", Ledger).display
+        event_column = ledger.get_column_index(Ledger.COLUMN_EVENT)
+        detail_region = ledger._get_cell_region(Coordinate(record_row + 1, event_column))
+        await pilot.click(
+            ledger,
+            offset=(detail_region.x + 2, detail_region.y - int(ledger.scroll_y) + 1),
+        )
+        assert view.state.detail_tab is InspectorTab.OUTPUT
+
+        await pilot.press("enter")
+        assert view.state.expanded_id is None
+        assert "detail:r2" not in {row.key.value for row in ledger.ordered_rows}
 
 
 async def test_remount_restores_the_participant_search_state() -> None:

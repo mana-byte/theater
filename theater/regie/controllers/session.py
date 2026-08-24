@@ -17,6 +17,8 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Protocol
 
+from theater.constants.regie import REGIE_RETURN_SIGNAL_TMUX
+
 logger = logging.getLogger("theater.regie")
 
 # Note tag on the <prefix> h return key, so teardown can tell ours from theirs.
@@ -188,10 +190,22 @@ class SessionController:
             logger.debug("could not restore status line: %s", exc)
 
     async def _bind_return_key(self) -> None:
-        """Claim <prefix> h for select-pane -L, unless the user already has it."""
+        """Claim <prefix> h for returning to the régie tree, unless already bound."""
+        if self.my_pane is None:
+            return
+        on_regie = f"#{{==:#{{pane_id}},{self.my_pane}}}"
         try:
             self._return_key_set = await self._ops.bind_key_if_free(
-                "prefix", "h", ["select-pane", "-L"], note=_RETURN_KEY_NOTE
+                "prefix",
+                "h",
+                [
+                    "if-shell",
+                    "-F",
+                    on_regie,
+                    f"send-keys -t {self.my_pane} {REGIE_RETURN_SIGNAL_TMUX}",
+                    "select-pane -L",
+                ],
+                note=_RETURN_KEY_NOTE,
             )
         except Exception as exc:
             logger.debug("could not bind <prefix> h return key: %s", exc)

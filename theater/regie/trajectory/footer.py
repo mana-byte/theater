@@ -1,4 +1,4 @@
-"""Trajectory title, state, and mouse-accessible actions."""
+"""Trajectory status, pagination, and mouse-accessible actions."""
 
 from __future__ import annotations
 
@@ -9,98 +9,90 @@ from textual.message import Message
 from textual.widgets import Button, Label
 
 from theater.regie.trajectory.constants import (
-    TOOLBAR_COMPACT_WIDTH,
-    TOOLBAR_HEIGHT,
-    TOOLBAR_NARROW_WIDTH,
+    TRAJECTORY_FOOTER_COMPACT_WIDTH,
+    TRAJECTORY_FOOTER_HEIGHT,
+    TRAJECTORY_FOOTER_NARROW_WIDTH,
 )
 from theater.regie.trajectory.enums import OrderMode
 
 
-class ToolbarActionRequested(Message):
-    """A trajectory toolbar action was clicked."""
+class FooterActionRequested(Message):
+    """A trajectory footer action was clicked."""
 
     def __init__(self, action: str) -> None:
         super().__init__()
         self.action = action
 
 
-class TrajectoryToolbar(Horizontal):
-    """Compact native controls for trajectory state and actions."""
+class TrajectoryFooter(Horizontal):
+    """Two-line footer for trajectory navigation and actions."""
 
     DEFAULT_CSS = f"""
-    TrajectoryToolbar {{
+    TrajectoryFooter {{
         width: 1fr;
-        height: {TOOLBAR_HEIGHT};
-        min-height: {TOOLBAR_HEIGHT};
+        height: {TRAJECTORY_FOOTER_HEIGHT};
+        min-height: {TRAJECTORY_FOOTER_HEIGHT};
         align-vertical: middle;
-        background: $panel;
-        border-bottom: solid $foreground 12%;
+        background: $foreground 3%;
+        border-top: solid $foreground 12%;
         padding: 0 1;
     }}
-    TrajectoryToolbar #trajectory-title {{
-        width: auto;
-        min-width: 12;
-        height: 3;
+    TrajectoryFooter Label {{
+        height: 1;
         content-align: left middle;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+    }}
+    TrajectoryFooter #trajectory-page {{
+        width: auto;
+        min-width: 24;
         color: $text;
         text-style: bold;
     }}
-    TrajectoryToolbar #trajectory-state {{
+    TrajectoryFooter #trajectory-state {{
         width: auto;
         min-width: 10;
-        height: 3;
-        content-align: left middle;
-        padding: 0 1;
-        color: $text-success;
+        padding-left: 1;
+        color: $text-muted;
         text-style: bold;
     }}
-    TrajectoryToolbar #trajectory-state.-waiting {{
-        color: $text-warning;
-    }}
-    TrajectoryToolbar #trajectory-state.-problem {{
-        color: $text-error;
-    }}
-    TrajectoryToolbar #trajectory-status {{
+    TrajectoryFooter #trajectory-state.-waiting {{ color: $warning; text-opacity: 70%; }}
+    TrajectoryFooter #trajectory-state.-problem {{ color: $error; text-opacity: 70%; }}
+    TrajectoryFooter #trajectory-status {{
         width: 1fr;
-        min-width: 8;
-        height: 3;
-        content-align: left middle;
+        min-width: 2;
+        padding-left: 1;
         color: $text-muted;
-        text-overflow: ellipsis;
-        text-wrap: nowrap;
     }}
-    TrajectoryToolbar Button {{
-        min-width: 8;
+    TrajectoryFooter Button {{
         width: auto;
-        height: 3;
+        min-width: 8;
+        height: 1;
+        min-height: 1;
         content-align: center middle;
         border: none !important;
+        padding: 0 1;
         margin-left: 1;
         color: $text-muted;
-        background: $surface;
+        background: $background;
     }}
-    TrajectoryToolbar Button:hover,
-    TrajectoryToolbar Button:focus {{
+    TrajectoryFooter Button:hover,
+    TrajectoryFooter Button:focus {{
+        color: $text;
+        background: $accent 10%;
+    }}
+    TrajectoryFooter Button.-selected {{
         color: $text;
         background: $accent 20%;
     }}
-    TrajectoryToolbar Button.-selected {{
-        color: $text;
-        background: $accent 25%;
+    TrajectoryFooter.-compact Button {{
+        min-width: 3;
+        padding: 0 1;
+        margin-left: 0;
     }}
-    TrajectoryToolbar.-compact #trajectory-title {{
-        display: none;
-    }}
-    TrajectoryToolbar.-compact Button {{
-        min-width: 6;
-    }}
-    TrajectoryToolbar.-narrow #trajectory-status,
-    TrajectoryToolbar.-narrow #trajectory-search-action {{
-        display: none;
-    }}
-    TrajectoryToolbar.-narrow #trajectory-state {{
-        width: 1fr;
-    }}
+    TrajectoryFooter.-compact #trajectory-state {{ display: none; }}
+    TrajectoryFooter.-narrow #trajectory-status {{ display: none; }}
+    TrajectoryFooter.-narrow #trajectory-page {{ width: 1fr; min-width: 12; }}
     """
 
     def __init__(self, **kwargs) -> None:
@@ -113,7 +105,7 @@ class TrajectoryToolbar(Horizontal):
         self._state_key: tuple[object, ...] | None = None
 
     def compose(self) -> ComposeResult:
-        yield Label("TRAJECTORY", id="trajectory-title")
+        yield Label("H ‹  Page 1/1  › L · 0 items", id="trajectory-page")
         yield Label("● WAITING", id="trajectory-state", classes="-waiting")
         yield Label("Loading…", id="trajectory-status")
         yield Button("⌕ Search", id="trajectory-search-action", compact=True, flat=True)
@@ -122,9 +114,11 @@ class TrajectoryToolbar(Horizontal):
         yield Button("↓ Live", id="trajectory-follow-action", compact=True, flat=True)
 
     def _update_actions(self) -> None:
+        search = self.query_one("#trajectory-search-action", Button)
+        search.label = "⌕" if self._compact else "⌕ Search"
         filters = self.query_one("#trajectory-filter-action", Button)
         filters.label = (
-            f"≡ {self._active_filters}"
+            f"≡{self._active_filters}"
             if self._compact and self._active_filters
             else "≡"
             if self._compact
@@ -154,11 +148,17 @@ class TrajectoryToolbar(Horizontal):
         mode.set_class(self._mode is OrderMode.DURATION, "-selected")
         follow = self.query_one("#trajectory-follow-action", Button)
         follow.label = (
-            "↓ Live"
+            "↓"
+            if self._compact and self._follow_tail
+            else f"↓{self._new_count}"
+            if self._compact and self._new_count
+            else "Ⅱ"
+            if self._compact
+            else "↓ Live"
             if self._follow_tail
             else f"↓ +{self._new_count}"
             if self._new_count
-            else "↓ Paused"
+            else "Ⅱ Paused"
         )
         follow.tooltip = "Following live events" if self._follow_tail else "Resume live tail"
         follow.set_class(self._follow_tail, "-selected")
@@ -170,6 +170,10 @@ class TrajectoryToolbar(Horizontal):
         message: str,
         record_count: int,
         visible_count: int,
+        page_number: int,
+        page_count: int,
+        first_item: int,
+        last_item: int,
         active_filters: int,
         query: str,
         mode: OrderMode,
@@ -181,6 +185,10 @@ class TrajectoryToolbar(Horizontal):
             message,
             record_count,
             visible_count,
+            page_number,
+            page_count,
+            first_item,
+            last_item,
             active_filters,
             query,
             mode,
@@ -192,22 +200,23 @@ class TrajectoryToolbar(Horizontal):
         self._state_key = state_key
         state = self.query_one("#trajectory-state", Label)
         state.update(f"● {status.upper()}")
-        state.set_class(status in {"waiting"}, "-waiting")
+        state.set_class(status == "waiting", "-waiting")
         state.set_class(status in {"untrusted", "unavailable", "stale"}, "-problem")
-        count = (
-            f"{visible_count}/{record_count}"
-            if visible_count != record_count
-            else str(record_count)
+        item_range = (
+            "0 items" if not visible_count else f"{first_item}–{last_item}/{visible_count} items"
         )
-        details = [f"{count} events"]
+        self.query_one("#trajectory-page", Label).update(
+            f"H ‹  Page {page_number}/{page_count}  › L · {item_range}"
+        )
+        details = [f"{record_count} loaded"]
         if message:
             details.append(message)
         if query:
             details.append(f"search: {query}")
+        status_text = " · ".join(details)
         status_label = self.query_one("#trajectory-status", Label)
-        status_label.update(" · ".join(details))
-        status_label.tooltip = " · ".join(details)
-
+        status_label.update(status_text)
+        status_label.tooltip = status_text
         search = self.query_one("#trajectory-search-action", Button)
         search.set_class(bool(query), "-selected")
         search.tooltip = "Focus trajectory search"
@@ -218,8 +227,8 @@ class TrajectoryToolbar(Horizontal):
         self._update_actions()
 
     def on_resize(self, event: events.Resize) -> None:
-        compact = event.size.width < TOOLBAR_COMPACT_WIDTH
-        narrow = event.size.width < TOOLBAR_NARROW_WIDTH
+        compact = event.size.width < TRAJECTORY_FOOTER_COMPACT_WIDTH
+        narrow = event.size.width < TRAJECTORY_FOOTER_NARROW_WIDTH
         changed = compact != self._compact
         self._compact = compact
         self.set_class(compact, "-compact")
@@ -238,7 +247,7 @@ class TrajectoryToolbar(Horizontal):
         if action is None:
             return
         message.stop()
-        self.post_message(ToolbarActionRequested(action))
+        self.post_message(FooterActionRequested(action))
 
 
-__all__ = ["ToolbarActionRequested", "TrajectoryToolbar"]
+__all__ = ["FooterActionRequested", "TrajectoryFooter"]

@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 
 import pytest
 from rich.cells import cell_len
 from rich.console import Console
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.widgets import Button, Input, SelectionList, TabbedContent
+from textual.coordinate import Coordinate
+from textual.widgets import Input, SelectionList
 
 from theater.regie.trajectory.constants import (
     FILTER_MAX_ROWS,
@@ -17,15 +17,17 @@ from theater.regie.trajectory.constants import (
     LEDGER_ROW_HEIGHT,
     TIMELINE_LABEL_WIDTH,
     TIMELINE_LANE_HEIGHT,
+    TIMELINE_SPAN_MIN_WIDTH,
+    TIMELINE_TURN_BOUNDARY_GLYPH,
+    TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS,
+)
+from theater.regie.trajectory.details import (
+    DETAIL_PARTICIPANT_META,
+    DETAIL_TAB_META,
+    build_inline_details,
 )
 from theater.regie.trajectory.enums import FilterDimension, InspectorTab, OrderMode
 from theater.regie.trajectory.filter_panel import FilterPanel
-from theater.regie.trajectory.inspector import (
-    Inspector,
-    InspectorHandle,
-    InspectorParticipantLinkClicked,
-    InspectorResizeRequested,
-)
 from theater.regie.trajectory.ledger import (
     Ledger,
     LedgerOlderClicked,
@@ -36,27 +38,27 @@ from theater.regie.trajectory.ledger import (
 from theater.regie.trajectory.models import decode_delta, decode_page
 from theater.regie.trajectory.ordering import build_ordering
 from theater.regie.trajectory.render import (
-    inspector_content,
-    inspector_text,
+    detail_text,
     record_line,
     sanitize_text,
     tabs_for_record,
+    tooltip_text,
 )
 from theater.regie.trajectory.search import FilterCounts, search_records
 from theater.regie.trajectory.timeline import Timeline, TimelineSpanClicked
 from theater.regie.trajectory.timeline_layout import build_timeline_layout
 from theater.regie.trajectory.view import TrajectoryParticipantSelected, TrajectoryView
 from theater.trajectory import (
-    ContentFormat,
-    DetailField,
     GroupKind,
     PanelState,
     PanelStateInfo,
     Timing,
     TimingProvenance,
+    TrajectoryDelta,
     TrajectoryGroup,
     TrajectoryLane,
     TrajectoryRecord,
+    TrajectoryUpsert,
 )
 
 
@@ -127,6 +129,7 @@ async def test_ledger_window_is_bounded_and_scroll_hit_testing_uses_offset() -> 
     records = [record(f"r{index}", index=index, turn_id=f"t{index}") for index in range(100)]
     app = Host()
     async with app.run_test(size=(100, 30)) as pilot:
+        app.query_one(TrajectoryView).state_store.page_size = 100
         await populate(app, records)
         ledger = app.query_one(Ledger)
         ledger._viewport_height = 5
@@ -136,7 +139,7 @@ async def test_ledger_window_is_bounded_and_scroll_hit_testing_uses_offset() -> 
         assert ledger.rendered_record_count <= 5 + 2 * LEDGER_OVERSCAN_ROWS
         ledger.set_scroll_offset(10)
         await pilot.pause()
-        assert ledger.entries[11].record_id == "r5"
+        assert ledger.entries[11].record_id == "r11"
         assert int(ledger.scroll_y) == 10 * LEDGER_ROW_HEIGHT
         assert ledger.rendered_record_count <= 5 + 2 * LEDGER_OVERSCAN_ROWS
 
@@ -180,7 +183,7 @@ async def test_ledger_sizes_non_summary_columns_to_displayed_content() -> None:
         )
 
 
-async def test_jk_navigation_skips_records_inside_collapsed_turns() -> None:
+async def test_turn_groups_stay_expanded_when_horizontal_keys_are_pressed() -> None:
     records = [
         record("before", index=0, turn_id="before"),
         record("hidden-1", index=1, turn_id="collapsed"),
@@ -190,17 +193,13 @@ async def test_jk_navigation_skips_records_inside_collapsed_turns() -> None:
     app = Host()
     async with app.run_test(size=(100, 30)):
         view = await populate(app, records)
-        collapsed = view.search_result.path_for_record("hidden-1")[-1]
-        view.state.collapsed_groups.add(collapsed)
-        view._refresh()
-
-        assert view._selected_visible_ids() == ("before", "after")
+        assert view._selected_visible_ids() == ("before", "hidden-1", "hidden-2", "after")
         view.state.select("hidden-1")
-        view.action_select_next()
-        assert view.state.selected_id == "after"
-        view.state.select("hidden-2")
-        view.action_select_previous()
-        assert view.state.selected_id == "before"
+        view._handle_contextual_horizontal(-1)
+        view._handle_contextual_horizontal(1)
+
+        assert view._selected_visible_ids() == ("before", "hidden-1", "hidden-2", "after")
+        assert view.state.selected_id == "hidden-1"
 
 
 async def test_timeline_scroll_hit_testing_and_positioned_spans() -> None:
@@ -211,13 +210,16 @@ async def test_timeline_scroll_hit_testing_and_positioned_spans() -> None:
         timeline = view.query_one(Timeline)
         timeline._viewport_width = TIMELINE_LABEL_WIDTH + 4
         timeline.update_records(records, selected_id=None)
-        timeline.set_scroll_offset(5)
+        sixth = timeline.projection.span_for("r6")
+        assert sixth is not None
+        timeline.set_scroll_offset(sixth.x)
 
         model_middle = 1 + list(TrajectoryLane).index(TrajectoryLane.MODEL) * TIMELINE_LANE_HEIGHT
         assert timeline._record_at(TIMELINE_LABEL_WIDTH + 1, model_middle).record_id == "r6"
-        assert timeline.scroll_span_into_view("r9") == 6
+        assert timeline.scroll_span_into_view("r9") == timeline.tail_offset
         assert len(timeline.projection.spans) == len(records)
-        assert {span.width for span in timeline.projection.spans} == {1}
+        assert {span.width for span in timeline.projection.spans} == {TIMELINE_SPAN_MIN_WIDTH}
+        assert timeline.tail_offset > 0
         normal_background = timeline._span_style(records[-1]).bgcolor
         timeline._hovered_id = "r9"
         assert timeline._span_style(records[-1]).bgcolor != normal_background
@@ -239,7 +241,11 @@ async def test_timeline_projects_four_lanes_and_duration_widths() -> None:
             span = timeline.projection.span_for(record_item.record_id)
             assert span is not None
             middle = 1 + lane_index * TIMELINE_LANE_HEIGHT
-            assert timeline._record_at(TIMELINE_LABEL_WIDTH + span.x, middle) == record_item
+            assert (
+                timeline._record_at(TIMELINE_LABEL_WIDTH + span.visual_start, middle) == record_item
+            )
+            assert timeline._record_at(TIMELINE_LABEL_WIDTH + span.x, middle) is None
+            assert timeline._record_at(TIMELINE_LABEL_WIDTH + span.visual_start, middle - 1) is None
 
         assert timeline.projection.width == timeline._available_cells()
         assert timeline.projection.spans[0].x == 0
@@ -251,6 +257,14 @@ async def test_timeline_projects_four_lanes_and_duration_widths() -> None:
         )
         assert model_strip.text == " " * timeline.projection.width
         assert any(segment.style and segment.style.bgcolor for segment in model_strip._segments)
+
+        model_top = timeline._lane_strip(
+            TrajectoryLane.MODEL,
+            0,
+            timeline.projection.width,
+            row=0,
+        )
+        assert all(segment.style == timeline._component("track") for segment in model_top._segments)
 
     duration_records = (
         record(
@@ -267,6 +281,38 @@ async def test_timeline_projects_four_lanes_and_duration_widths() -> None:
     duration = build_timeline_layout(duration_records, OrderMode.DURATION)
     assert duration.has_timing
     assert duration.span_for("long").width > duration.span_for("short").width
+    assert all(span.width >= TIMELINE_SPAN_MIN_WIDTH for span in duration.spans)
+
+
+async def test_timeline_uses_two_rows_per_lane_and_marks_new_turns() -> None:
+    records = [
+        record("first", index=0, turn_id="turn-1"),
+        record("same-turn", index=1, turn_id="turn-1"),
+        record("next-turn", index=2, turn_id="turn-2"),
+    ]
+    app = Host()
+    async with app.run_test(size=(100, 30)):
+        view = await populate(app, records)
+        timeline = view.query_one(Timeline)
+        next_span = timeline.projection.span_for("next-turn")
+        assert next_span is not None
+        strip = timeline._lane_strip(TrajectoryLane.MODEL, 0, timeline.projection.width)
+
+        assert TIMELINE_LANE_HEIGHT == 2
+        assert timeline.virtual_size.height == len(TrajectoryLane) * TIMELINE_LANE_HEIGHT
+        assert strip.text[next_span.x] == TIMELINE_TURN_BOUNDARY_GLYPH
+
+
+async def test_timeline_lane_labels_are_right_aligned() -> None:
+    app = Host()
+    async with app.run_test(size=(100, 30)):
+        view = await populate(app, [record("model", index=0)])
+        timeline = view.query_one(Timeline)
+        model_middle = 1 + list(TrajectoryLane).index(TrajectoryLane.MODEL) * TIMELINE_LANE_HEIGHT
+
+        line = timeline.render_line(model_middle)
+
+        assert line.text[:TIMELINE_LABEL_WIDTH] == "MODEL".rjust(TIMELINE_LABEL_WIDTH)
 
 
 def test_timeline_layout_reflows_existing_events_to_available_width() -> None:
@@ -403,8 +449,11 @@ async def test_duration_mode_marks_only_independently_reported_intervals() -> No
         assert isinstance(source, Text)
         assert missing.plain.strip() == "—"
         assert derived.plain.strip() == source.plain.strip() == "10ms"
-        assert "cyan" not in str(derived.get_style_at_offset(Console(), 1))
-        assert "cyan" in str(source.get_style_at_offset(Console(), 1))
+        derived_style = derived.get_style_at_offset(Console(), 1)
+        source_style = source.get_style_at_offset(Console(), 1)
+        assert not derived_style.bold
+        assert source_style.bold
+        assert source_style.dim
         assert view.state.selected_id == "derived"
         assert view.query_one(Timeline).span_ids == ("missing", "derived", "source")
 
@@ -448,6 +497,18 @@ def test_duration_mode_changes_render_without_reordering_and_preserves_literals(
     assert sanitize_text("[literal] \\ data") == "[literal] \\ data"
 
 
+def test_timeline_tooltip_flattens_and_bounds_large_summaries() -> None:
+    item = TrajectoryRecord.from_wire(
+        wire_record("r1", summary="first line\n" + "界" * 300 + "\nlast line")
+    )
+
+    lines = tooltip_text(item).splitlines()
+
+    assert len(lines) == 3
+    assert cell_len(lines[1]) <= TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS
+    assert lines[1].endswith("…")
+
+
 async def test_clicks_and_movement_pause_tail_but_hover_does_not() -> None:
     app = Host()
     async with app.run_test(size=(100, 30)):
@@ -459,9 +520,39 @@ async def test_clicks_and_movement_pause_tail_but_hover_does_not() -> None:
         assert view.state.follow_tail
         view.on_ledger_record_clicked(type("Click", (), {"record_id": "r1"})())
         assert not view.state.follow_tail
+        view.on_ledger_record_clicked(type("Click", (), {"record_id": "r2"})())
+        assert view.state.follow_tail
         view.state.resume_follow()
         view.action_timeline_previous()
         assert not view.state.follow_tail
+
+
+async def test_reaching_visible_bottom_resumes_tail_and_follows_new_records() -> None:
+    records = [record(f"r{index}", index=index, turn_id=None) for index in range(12)]
+    app = Host()
+    async with app.run_test(size=(100, 24)):
+        view = await populate(app, records)
+        ledger = view.query_one(Ledger)
+        ledger._viewport_height = 3
+        view.state.select("r10")
+        view.state.pause_follow()
+        view._sync_selection()
+
+        view.action_select_next()
+
+        assert view.state.selected_id == "r11"
+        assert view.state.follow_tail
+        assert view.state.new_count == 0
+
+        newest = record("r12", index=12, turn_id=None)
+        view.state.apply_follow(
+            TrajectoryDelta(stream_id="stream", upserts=(TrajectoryUpsert(newest),))
+        )
+        view._refresh()
+
+        assert view.state.selected_id == "r12"
+        assert ledger._selected_id == "r12"
+        assert ledger._scroll_offset > 0
 
 
 async def test_selection_and_hover_use_incremental_widget_updates(monkeypatch) -> None:
@@ -491,7 +582,45 @@ async def test_selection_and_hover_use_incremental_widget_updates(monkeypatch) -
         assert timeline.hovered_id == "r1"
         assert timeline.selected_id == "r1"
         assert ledger._hovered_id == "r1"
-        assert view.query_one(Inspector).record == view.state.records["r1"]
+        assert ledger.expanded_id == "r1"
+        assert ledger.get_row_index("detail:r1") == ledger.get_row_index("record:r1") + 1
+        summary = ledger.get_cell("record:r1", Ledger.COLUMN_SUMMARY)
+        assert isinstance(summary, Text)
+        assert "underline" not in str(summary.get_style_at_offset(Console(), 1))
+
+
+async def test_ledger_pages_with_shift_h_and_shift_l() -> None:
+    records = [record(f"r{index}", index=index, turn_id=None) for index in range(5)]
+    app = Host()
+    async with app.run_test(size=(100, 24)) as pilot:
+        view = app.query_one(TrajectoryView)
+        view.state_store.page_size = 2
+        view.state.panel = PanelStateInfo(PanelState.READY, participant_state="live")
+        view.state.upsert(records)
+        view._refresh()
+        ledger = view.query_one(Ledger)
+
+        assert view.state.ledger_page == 2
+        assert tuple(entry.record_id for entry in ledger.entries if entry.record_id) == ("r4",)
+        assert "Page 3/3" in str(view.query_one("#trajectory-page").content)
+        assert "5 items" in str(view.query_one("#trajectory-page").content)
+
+        await pilot.press("shift+h")
+        assert view.state.ledger_page == 1
+        assert tuple(entry.record_id for entry in ledger.entries if entry.record_id) == (
+            "r2",
+            "r3",
+        )
+        position = ledger.get_cell("record:r2", Ledger.COLUMN_POSITION)
+        assert isinstance(position, Text)
+        assert position.plain.strip().endswith("3")
+        assert not view.state.follow_tail
+        assert "Page 2/3" in str(view.query_one("#trajectory-page").content)
+
+        await pilot.press("shift+l")
+        assert view.state.ledger_page == 2
+        assert view.state.selected_id == "r4"
+        assert view.state.follow_tail
 
 
 def test_context_tabs_render_matching_formats_and_copy_exactly() -> None:
@@ -521,17 +650,15 @@ def test_context_tabs_render_matching_formats_and_copy_exactly() -> None:
         InspectorTab.PREVIOUS,
         InspectorTab.DIFF,
     )
-    current = inspector_text(item, InspectorTab.CURRENT)
-    previous = inspector_text(item, InspectorTab.PREVIOUS)
-    diff = inspector_text(item, InspectorTab.DIFF)
+    current = detail_text(item, InspectorTab.CURRENT)
+    previous = detail_text(item, InspectorTab.PREVIOUS)
+    diff = detail_text(item, InspectorTab.DIFF)
     assert '"a": [' in current and "No current" not in current
     assert "[old] \\ path" in previous and "No previous" not in previous
     assert "--- old" in diff and "No diff" not in diff
-    assert inspector_content(item, InspectorTab.CURRENT).plain == current
 
 
-@pytest.mark.asyncio
-async def test_inspector_uses_only_contextual_native_tabs() -> None:
+def test_inline_details_use_only_contextual_tabs() -> None:
     item = record(
         "system",
         kind="system",
@@ -543,73 +670,70 @@ async def test_inspector_uses_only_contextual_native_tabs() -> None:
             }
         ],
     )
-    app = InspectorHost(item)
-    async with app.run_test(size=(80, 20)) as pilot:
-        inspector = app.query_one(Inspector)
-        tabbed = app.query_one(TabbedContent)
-        visible = {tab for tab in InspectorTab if tabbed.get_tab(inspector._pane_id(tab)).display}
-        assert visible == {
-            InspectorTab.CURRENT,
-            InspectorTab.PREVIOUS,
-            InspectorTab.DIFF,
-        }
-        await pilot.click(tabbed.get_tab(inspector._pane_id(InspectorTab.PREVIOUS)))
-        assert inspector.tab is InspectorTab.PREVIOUS
-
-
-class InspectorHost(App):
-    def __init__(self, item: TrajectoryRecord) -> None:
-        super().__init__()
-        self.item = item
-        self.links: list[str] = []
-        self.resize: list[float] = []
-
-    def compose(self) -> ComposeResult:
-        yield Inspector(self.item)
-
-    def on_inspector_participant_link_clicked(
-        self, message: InspectorParticipantLinkClicked
-    ) -> None:
-        self.links.append(message.participant_id)
-
-    def on_inspector_resize_requested(self, message: InspectorResizeRequested) -> None:
-        self.resize.append(message.delta)
-
-
-@pytest.mark.asyncio
-async def test_inspector_maximize_survives_refresh_ratio_and_wheel_scroll() -> None:
-    detail = DetailField.from_text("output", "line\n" * 1000, format=ContentFormat.TEXT)
-    item = TrajectoryRecord(
-        record_id="r1",
-        revision=1,
-        participant_id="p1",
-        source_epoch="epoch",
-        lane="model",
-        kind="assistant",
-        source="claude",
-        summary="summary",
-        status="completed",
-        details=(detail,),
+    details = build_inline_details(item, InspectorTab.CURRENT, max_height=20)
+    assert details.tabs == (
+        InspectorTab.CURRENT,
+        InspectorTab.PREVIOUS,
+        InspectorTab.DIFF,
     )
-    app = InspectorHost(item)
-    async with app.run_test(size=(80, 20)) as pilot:
-        inspector = app.query_one(Inspector)
-        inspector.set_ratio(0.60)
-        inspector.toggle_maximize()
-        inspector.set_ratio(0.25)
-        inspector.set_record(item, tab=InspectorTab.SUMMARY)
-        inspector.resize_by(0.10)
-        assert inspector.maximized
-        assert str(inspector.styles.height) == "1fr"
-        inspector.on_mouse_scroll_down(SimpleNamespace(shift=False, stop=lambda: None))
-        await pilot.pause()
-        assert inspector.maximized
-        handle = app.query_one(InspectorHandle)
-        handle.on_mouse_down(SimpleNamespace(button=1, stop=lambda: None))
-        handle.on_mouse_move(SimpleNamespace(delta_y=2, stop=lambda: None))
-        handle.on_mouse_up(SimpleNamespace(stop=lambda: None))
-        await pilot.pause()
-        assert app.resize and app.resize[-1] < 0
+    assert details.tab is InspectorTab.CURRENT
+    assert {
+        span.style.meta[DETAIL_TAB_META]
+        for span in details.menu.spans
+        if span.style and DETAIL_TAB_META in span.style.meta
+    } == {tab.value for tab in details.tabs}
+
+
+async def test_inline_detail_tab_updates_without_rebuilding_the_ledger(monkeypatch) -> None:
+    item = record(
+        "r1",
+        details=[
+            {
+                "name": "output",
+                "format": "text",
+                "value": {"text": "line\n" * 1000, "omitted_bytes": 0},
+            }
+        ],
+    )
+    app = Host()
+    async with app.run_test(size=(80, 24)):
+        view = await populate(app, [item])
+        view._toggle_details("r1")
+        ledger = view.query_one(Ledger)
+        rebuilds = 0
+        original = ledger._rebuild
+
+        def count_rebuild(*, preserve_scroll: bool = True) -> None:
+            nonlocal rebuilds
+            rebuilds += 1
+            original(preserve_scroll=preserve_scroll)
+
+        monkeypatch.setattr(ledger, "_rebuild", count_rebuild)
+        ledger.set_details("r1", InspectorTab.OUTPUT)
+
+        assert rebuilds == 0
+        assert ledger.detail_tab is InspectorTab.OUTPUT
+        assert "output: line" in ledger.copy_text
+
+        payload = item.to_wire()
+        payload["revision"] = 2
+        payload["details"] = [
+            {
+                "name": "output",
+                "format": "text",
+                "value": {"text": "updated", "omitted_bytes": 0},
+            }
+        ]
+        updated = TrajectoryRecord.from_wire(payload)
+        ledger.update_rows(
+            [updated],
+            search_records([updated]),
+            selected_id="r1",
+            expanded_id="r1",
+            detail_tab=InspectorTab.OUTPUT,
+        )
+        assert rebuilds == 0
+        assert "output: updated" in ledger.copy_text
 
 
 @pytest.mark.asyncio
@@ -653,12 +777,13 @@ async def test_links_are_exact_and_callback_excludes_fallback() -> None:
             {"participant_id": "p-long", "relation": "child", "direction": "outgoing"},
         ],
     )
-    app = InspectorHost(item)
-    async with app.run_test(size=(80, 20)) as pilot:
-        assert len(app.query_one(Inspector).query(TabbedContent)) == 1
-        link = app.query_one("#trajectory-participant-link-0", Button)
-        await pilot.click(link)
-        assert app.links == ["p"]
+    details = build_inline_details(item, InspectorTab.SUMMARY, max_height=20)
+    linked = {
+        meta[DETAIL_PARTICIPANT_META]
+        for span in details.content.spans
+        if (meta := getattr(span.style, "meta", {})) and DETAIL_PARTICIPANT_META in meta
+    }
+    assert linked == {"p", "p-long"}
 
     called: list[str] = []
 
@@ -672,15 +797,24 @@ async def test_links_are_exact_and_callback_excludes_fallback() -> None:
             called.append("fallback")
 
     link_app = LinkViewHost()
-    async with link_app.run_test(size=(80, 20)) as pilot:
+    async with link_app.run_test(size=(80, 40)) as pilot:
         view = link_app.query_one(TrajectoryView)
-        view.on_inspector_participant_link_clicked(InspectorParticipantLinkClicked("p"))
-        await pilot.pause()
+        view.state.upsert([item])
+        view._refresh()
+        view._toggle_details("system")
+        ledger = view.query_one(Ledger)
+        row = ledger.get_row_index("detail:system")
+        column = ledger.get_column_index(Ledger.COLUMN_SUMMARY)
+        region = ledger._get_cell_region(Coordinate(row, column))
+        await pilot.click(
+            ledger,
+            offset=(region.x + 2, region.y - int(ledger.scroll_y) + 3),
+        )
     assert called == ["p"]
 
 
 @pytest.mark.asyncio
-async def test_retry_row_is_clickable() -> None:
+async def test_retry_action_inside_error_row_is_clickable_and_keyboard_accessible() -> None:
     class RetryHost(App):
         def __init__(self) -> None:
             super().__init__()
@@ -696,8 +830,21 @@ async def test_retry_row_is_clickable() -> None:
     async with app.run_test(size=(80, 20)) as pilot:
         ledger = app.query_one(Ledger)
         ledger.update_rows([], search_records([]), retry_message="try again")
-        await pilot.click(ledger, offset=(2, ledger.header_height + 1))
+        retry = ledger.get_cell(Ledger.RETRY_KEY, Ledger.COLUMN_STATUS)
+        assert isinstance(retry, Text)
+        assert retry.plain.strip() == "↻ Retry"
+        row = ledger.get_row_index(Ledger.RETRY_KEY)
+        column = ledger.get_column_index(Ledger.COLUMN_STATUS)
+        region = ledger._get_cell_region(Coordinate(row, column))
+        await pilot.click(
+            ledger,
+            offset=(region.x + 2, region.y - int(ledger.scroll_y) + 1),
+        )
         assert app.retries == 1
+        ledger.focus()
+        ledger.move_cursor(row=row, column=column, animate=False)
+        await pilot.press("enter")
+        assert app.retries == 2
 
 
 @pytest.mark.asyncio

@@ -123,8 +123,9 @@ def test_runtime_state_counts_compact_utf8_wire_bytes() -> None:
     assert state.loaded_bytes == len(encoded)
 
 
-def test_state_store_applies_configured_inspector_ratio_to_new_participants() -> None:
-    store = TrajectoryStateStore(inspector_ratio=0.42)
+def test_state_store_applies_configured_detail_ratio_to_new_participants() -> None:
+    store = TrajectoryStateStore(detail_ratio=0.42, page_size=17)
 
-    assert store.get("p1").inspector_ratio == 0.42
-    assert store.get("p2").inspector_ratio == 0.42
+    assert store.get("p1").detail_ratio == 0.42
+    assert store.get("p2").detail_ratio == 0.42
+    assert store.page_size == 17

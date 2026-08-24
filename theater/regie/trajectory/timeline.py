@@ -19,7 +19,8 @@ from theater.regie.trajectory.constants import (
     TIMELINE_HEIGHT,
     TIMELINE_LABEL_WIDTH,
     TIMELINE_LANE_HEIGHT,
-    TIMELINE_ORDER_CELL_WIDTH,
+    TIMELINE_SPAN_MIN_WIDTH,
+    TIMELINE_TURN_BOUNDARY_GLYPH,
 )
 from theater.regie.trajectory.enums import OrderMode
 from theater.regie.trajectory.render import tooltip_text
@@ -66,11 +67,13 @@ class Timeline(ScrollView):
         "trajectory-timeline--label",
         "trajectory-timeline--model",
         "trajectory-timeline--muted",
+        "trajectory-timeline--rail",
         "trajectory-timeline--running",
         "trajectory-timeline--selected",
         "trajectory-timeline--theater",
         "trajectory-timeline--tools",
         "trajectory-timeline--track",
+        "trajectory-timeline--turn",
     }
 
     DEFAULT_CSS = f"""
@@ -81,24 +84,26 @@ class Timeline(ScrollView):
         overflow-x: auto;
         overflow-y: hidden;
         scrollbar-size: 1 1;
-        background: $surface;
-        border-bottom: solid $panel;
+        background: $background;
+        border-bottom: solid $foreground 12%;
     }}
     Timeline:focus {{
-        border-bottom: solid $accent;
+        border-bottom: solid $accent 30%;
     }}
     Timeline > .trajectory-timeline--label {{ color: $text-muted; text-style: bold; }}
-    Timeline > .trajectory-timeline--track {{ background: $surface; }}
-    Timeline > .trajectory-timeline--input {{ background: $primary; }}
-    Timeline > .trajectory-timeline--model {{ background: $accent; }}
-    Timeline > .trajectory-timeline--tools {{ background: $warning; }}
-    Timeline > .trajectory-timeline--theater {{ background: $secondary; }}
-    Timeline > .trajectory-timeline--error {{ background: $error; }}
-    Timeline > .trajectory-timeline--running {{ background: $warning; }}
+    Timeline > .trajectory-timeline--track {{ background: $background; }}
+    Timeline > .trajectory-timeline--rail {{ background: $foreground 3%; }}
+    Timeline > .trajectory-timeline--turn {{ color: $text-muted; text-style: bold; }}
+    Timeline > .trajectory-timeline--input {{ background: $primary 28%; }}
+    Timeline > .trajectory-timeline--model {{ background: $accent 28%; }}
+    Timeline > .trajectory-timeline--tools {{ background: $warning 26%; }}
+    Timeline > .trajectory-timeline--theater {{ background: $secondary 26%; }}
+    Timeline > .trajectory-timeline--error {{ background: $error 38%; }}
+    Timeline > .trajectory-timeline--running {{ background: $warning 32%; }}
     Timeline > .trajectory-timeline--muted {{ opacity: 32%; }}
-    Timeline > .trajectory-timeline--hovered {{ background: $foreground 55%; }}
+    Timeline > .trajectory-timeline--hovered {{ background: $accent 30%; }}
     Timeline > .trajectory-timeline--selected {{
-        background: $foreground 35%;
+        background: $accent 40%;
     }}
     """
 
@@ -131,6 +136,7 @@ class Timeline(ScrollView):
         )
         self._lane_starts: dict[TrajectoryLane, tuple[int, ...]] = dict.fromkeys(self._LANES, ())
         self._lane_max_ends: dict[TrajectoryLane, tuple[int, ...]] = dict.fromkeys(self._LANES, ())
+        self._turn_boundaries: tuple[int, ...] = ()
         self._scroll_offset = max(0, int(scroll_offset))
         self._viewport_width = 0
         self.virtual_size = Size(TIMELINE_LABEL_WIDTH + 1, TIMELINE_CONTENT_HEIGHT)
@@ -188,10 +194,10 @@ class Timeline(ScrollView):
             style += self._component("running")
         if record.record_id not in self._matched_ids:
             style += self._component("muted")
-        if record.record_id == self._selected_id:
-            style += self._component("selected")
         if record.record_id == self._hovered_id:
             style += self._component("hovered")
+        if record.record_id == self._selected_id:
+            style += self._component("selected")
         return style
 
     def _lane_row(self, y: int) -> tuple[TrajectoryLane, int] | None:
@@ -211,7 +217,7 @@ class Timeline(ScrollView):
         return "", self._component("label")
 
     @staticmethod
-    def _solid_strip(styles: list[Style], width: int) -> Strip:
+    def _styled_strip(characters: list[str], styles: list[Style], width: int) -> Strip:
         if not styles:
             return Strip.blank(width)
         segments: list[Segment] = []
@@ -220,26 +226,46 @@ class Timeline(ScrollView):
         for index, style in enumerate(styles[1:], start=1):
             if style == active:
                 continue
-            segments.append(Segment(" " * (index - start), active))
+            segments.append(Segment("".join(characters[start:index]), active))
             start = index
             active = style
-        segments.append(Segment(" " * (width - start), active))
+        segments.append(Segment("".join(characters[start:width]), active))
         return Strip(segments, width)
 
-    def _lane_strip(self, lane: TrajectoryLane, start: int, width: int) -> Strip:
-        styles = [self._component("track")] * width
+    def _lane_strip(
+        self,
+        lane: TrajectoryLane,
+        start: int,
+        width: int,
+        row: int = TIMELINE_LANE_HEIGHT // 2,
+    ) -> Strip:
+        characters = [" "] * width
+        paints_spans = row == TIMELINE_LANE_HEIGHT // 2
+        base_style = self._component("rail" if paints_spans else "track")
+        styles = [base_style] * width
         spans = self._lane_spans[lane]
         first = bisect_right(self._lane_max_ends[lane], start)
         last = bisect_left(self._lane_starts[lane], start + width)
-        visible_spans = spans[first:last]
-        for span in sorted(visible_spans, key=lambda item: item.width, reverse=True):
-            record = self._records_by_id.get(span.record_id)
-            if record is None:
-                continue
-            style = self._span_style(record)
-            for x in range(max(0, span.x - start), min(width, span.end - start)):
-                styles[x] = style
-        return self._solid_strip(styles, width)
+        if paints_spans:
+            visible_spans = spans[first:last]
+            for span in sorted(visible_spans, key=lambda item: item.width, reverse=True):
+                record = self._records_by_id.get(span.record_id)
+                if record is None:
+                    continue
+                style = self._span_style(record)
+                for x in range(
+                    max(0, span.visual_start - start),
+                    min(width, span.visual_end - start),
+                ):
+                    styles[x] = style
+        first_boundary = bisect_left(self._turn_boundaries, start)
+        last_boundary = bisect_left(self._turn_boundaries, start + width)
+        boundary_style = self._component("turn")
+        for boundary in self._turn_boundaries[first_boundary:last_boundary]:
+            offset = boundary - start
+            characters[offset] = TIMELINE_TURN_BOUNDARY_GLYPH
+            styles[offset] += boundary_style
+        return self._styled_strip(characters, styles, width)
 
     def render_line(self, y: int) -> Strip:
         scroll_x, scroll_y = self.scroll_offset
@@ -251,18 +277,31 @@ class Timeline(ScrollView):
             return Strip.blank(width, self.rich_style)
         label, label_style = self._label(y)
         label_strip = Strip(
-            [Segment(label[:label_width].ljust(label_width), label_style)], label_width
+            [Segment(label[:label_width].rjust(label_width), label_style)], label_width
         )
         chart_start = int(scroll_x)
         if (lane_row := self._lane_row(y)) is not None:
-            lane, _row = lane_row
-            chart = self._lane_strip(lane, chart_start, chart_width)
+            lane, row = lane_row
+            chart = self._lane_strip(lane, chart_start, chart_width, row)
         else:
             chart = Strip.blank(chart_width, self._component("track"))
         return Strip.join((label_strip, chart))
 
     def _index_spans(self) -> None:
         self._span_by_id = {span.record_id: span for span in self._layout.spans}
+        seen_turns: set[tuple[str, str]] = set()
+        boundaries: set[int] = set()
+        for record in self._records:
+            if record.turn_id is None:
+                continue
+            turn = (record.source_epoch, record.turn_id)
+            if turn in seen_turns:
+                continue
+            seen_turns.add(turn)
+            span = self._span_by_id.get(record.record_id)
+            if span is not None and span.x > 0:
+                boundaries.add(span.x)
+        self._turn_boundaries = tuple(sorted(boundaries))
         for lane in self._LANES:
             spans = tuple(
                 sorted(
@@ -364,7 +403,9 @@ class Timeline(ScrollView):
         chart_x = x - TIMELINE_LABEL_WIDTH + self._scroll_offset
         if chart_x < 0:
             return None
-        lane, _row = lane_row
+        lane, row = lane_row
+        if row != TIMELINE_LANE_HEIGHT // 2:
+            return None
         spans = self._lane_spans[lane]
         index = bisect_right(self._lane_starts[lane], chart_x) - 1
         matches: list[TimelineSpan] = []
@@ -372,7 +413,7 @@ class Timeline(ScrollView):
             if self._lane_max_ends[lane][index] <= chart_x:
                 break
             span = spans[index]
-            if chart_x < span.end:
+            if span.visual_start <= chart_x < span.visual_end:
                 matches.append(span)
             index -= 1
         if not matches:
@@ -466,11 +507,11 @@ class Timeline(ScrollView):
 
     def on_mouse_scroll_left(self, event: events.MouseScrollLeft) -> None:
         event.stop()
-        self.set_scroll_offset(self._scroll_offset - TIMELINE_ORDER_CELL_WIDTH)
+        self.set_scroll_offset(self._scroll_offset - TIMELINE_SPAN_MIN_WIDTH)
 
     def on_mouse_scroll_right(self, event: events.MouseScrollRight) -> None:
         event.stop()
-        self.set_scroll_offset(self._scroll_offset + TIMELINE_ORDER_CELL_WIDTH)
+        self.set_scroll_offset(self._scroll_offset + TIMELINE_SPAN_MIN_WIDTH)
 
     def watch_scroll_x(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_x(old_value, new_value)

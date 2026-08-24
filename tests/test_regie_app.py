@@ -36,7 +36,6 @@ from theater.protocol import RemoteError
 from theater.regie import app as app_mod
 from theater.regie.app import RegieApp
 from theater.regie.dashboard.widgets import AnimatedDashboardText, WelcomeDashboard
-from theater.regie.trajectory.inspector import Inspector
 from theater.regie.tree import SEND_STYLE, send_path
 
 PARENT = {
@@ -265,6 +264,9 @@ def tmux(monkeypatch):
     async def break_pane(pane, *, target_window=None):
         calls.append(("break", pane))
 
+    async def pane_exists(_pane):
+        return True
+
     async def resize_pane(pane, *, width=None):
         calls.append(("resize", pane, width))
 
@@ -290,6 +292,7 @@ def tmux(monkeypatch):
     monkeypatch.setattr(app_mod.tmux, "unbind_key_if_owned", unbind_key_if_owned)
     monkeypatch.setattr(app_mod.panes, "join_pane", join_pane)
     monkeypatch.setattr(app_mod.panes, "break_pane", break_pane)
+    monkeypatch.setattr(app_mod.panes, "pane_exists", pane_exists)
     monkeypatch.setattr(app_mod.panes, "resize_pane", resize_pane)
     monkeypatch.setattr(app_mod.panes, "select_pane", select_pane)
     monkeypatch.setattr(app_mod.tmux, "set_buffer", set_buffer)
@@ -1680,6 +1683,23 @@ async def test_enter_on_the_staged_agent_unstages_it(daemon, tmux):
     assert ("break", "%10") in tmux
 
 
+async def test_unstage_clears_a_staged_pane_that_has_disappeared(daemon, tmux, monkeypatch):
+    async def refuse(_pane, *, target_window=None):
+        raise RuntimeError("can't find pane")
+
+    async def missing(_pane):
+        return False
+
+    app, notes = make_app()
+    async with app.run_test() as pilot:
+        await pilot.press("enter")
+        monkeypatch.setattr(app_mod.panes, "break_pane", refuse)
+        monkeypatch.setattr(app_mod.panes, "pane_exists", missing)
+        await pilot.press("enter")
+        assert app.staged_pane is None
+    assert not notes
+
+
 async def test_staging_a_second_agent_breaks_the_first_one_out(daemon, tmux):
     """Two panes must never share the stage; the old one goes back first."""
     app, _ = make_app()
@@ -1726,28 +1746,57 @@ async def test_the_staged_line_is_marked_in_the_tree(daemon, tmux):
 
 async def test_first_h_stages_trajectory_and_second_h_focuses_it(daemon, tmux):
     app, _ = make_app()
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(160, 40)) as pilot:
         await pilot.press("h")
         view = app.query_one("#trajectory-view", app_mod.TrajectoryView)
         ledger = view.query_one("#trajectory-ledger")
+        right_surface = app.query_one("#right-surface")
+        search = view.query_one("#trajectory-search")
         assert app.right_surface is app_mod.RightSurface.TRAJECTORY
         assert app.trajectory_participant == PARENT["id"]
         assert app.staged_pane is None
         assert not ledger.has_focus
         assert len(daemon["clients"]) == 3
+        assert search.region.x == right_surface.content_region.x
+        assert search.region.right == right_surface.content_region.right
 
         await pilot.press("h")
         assert ledger.has_focus
 
 
-async def test_trajectory_uses_the_configured_inspector_ratio(daemon, tmux):
-    app, _ = make_app(trajectory_inspector_ratio=0.6)
+async def test_tmux_return_signal_moves_trajectory_focus_back_to_the_tree(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test() as pilot:
+        await pilot.press("h", "h")
+        assert app.focused is not None
+
+        await pilot.press("ctrl+g")
+
+        assert app.focused is None
+        assert app.right_surface is app_mod.RightSurface.TRAJECTORY
+    assert (
+        "bind",
+        "prefix",
+        "h",
+        (
+            "if-shell",
+            "-F",
+            "#{==:#{pane_id},%1}",
+            "send-keys -t %1 C-g",
+            "select-pane -L",
+        ),
+    ) in tmux
+
+
+async def test_trajectory_uses_the_configured_inline_detail_ratio(daemon, tmux):
+    app, _ = make_app(trajectory_inspector_ratio=0.6, trajectory_page_size=17)
     async with app.run_test() as pilot:
         await pilot.press("h")
         view = app.query_one("#trajectory-view", app_mod.TrajectoryView)
-        inspector = view.query_one("#trajectory-inspector", Inspector)
-        assert view.state.inspector_ratio == 0.6
-        assert inspector.ratio == 0.6
+        ledger = view.query_one("#trajectory-ledger")
+        assert view.state.detail_ratio == 0.6
+        assert view.state_store.page_size == 17
+        assert ledger.detail_ratio == 0.6
 
 
 async def test_h_parks_a_live_pane_before_showing_trajectory(daemon, tmux):
@@ -1774,6 +1823,25 @@ async def test_h_keeps_live_stage_when_parking_fails(daemon, tmux, monkeypatch):
         assert app.right_surface is app_mod.RightSurface.DASHBOARD
         assert len(daemon["clients"]) == 1
     assert any("cannot park" in message for message, _ in notes)
+
+
+async def test_h_recovers_when_the_staged_pane_has_disappeared(daemon, tmux, monkeypatch):
+    async def refuse(_pane, *, target_window=None):
+        raise RuntimeError("can't find pane")
+
+    async def missing(_pane):
+        return False
+
+    app, notes = make_app()
+    async with app.run_test() as pilot:
+        await pilot.press("enter")
+        monkeypatch.setattr(app_mod.panes, "break_pane", refuse)
+        monkeypatch.setattr(app_mod.panes, "pane_exists", missing)
+        await pilot.press("h")
+        assert app.staged_pane is None
+        assert app.right_surface is app_mod.RightSurface.TRAJECTORY
+        assert app.trajectory_participant == PARENT["id"]
+    assert not notes
 
 
 async def test_l_hides_but_does_not_unpin_trajectory(daemon, tmux):
@@ -2084,6 +2152,24 @@ async def test_live_switch_aborts_when_the_old_pane_cannot_be_parked(daemon, tmu
     assert any("unstage failed" in message for message, _ in notes)
 
 
+async def test_live_switch_recovers_when_the_old_pane_has_disappeared(daemon, tmux, monkeypatch):
+    async def refuse(_pane, *, target_window=None):
+        raise RuntimeError("can't find pane")
+
+    async def missing(_pane):
+        return False
+
+    app, notes = make_app()
+    async with app.run_test() as pilot:
+        await pilot.press("l")
+        monkeypatch.setattr(app_mod.panes, "break_pane", refuse)
+        monkeypatch.setattr(app_mod.panes, "pane_exists", missing)
+        await pilot.press("j", "l")
+        assert app.staged_pane == "%11"
+    assert ("join", "%11", "@7") in tmux
+    assert not notes
+
+
 # ---- kill ----------------------------------------------------------------
 
 
@@ -2097,6 +2183,15 @@ async def test_kill_asks_the_daemon_and_refreshes(daemon, tmux):
         assert len(client.asked("participants.tree")) == 2
     # The row leaving the tree is the feedback; a successful kill says nothing.
     assert notes == []
+
+
+async def test_killing_the_staged_participant_clears_the_stale_pane(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test() as pilot:
+        await pilot.press("enter")
+        assert app.staged_pane == "%10"
+        await pilot.press("x")
+        assert app.staged_pane is None
 
 
 async def test_a_refused_kill_is_reported(daemon, tmux):
@@ -2126,16 +2221,39 @@ async def test_an_unmanaged_pane_cannot_be_killed(daemon, tmux):
 async def test_the_palette_spawns_into_the_regie_session(daemon, tmux):
     daemon["answers"]["spawn"] = {"id": "cccccccccccc", "tmux_pane": "%30"}
     app, notes = make_app()
-    async with app.run_test():
+    async with app.run_test() as pilot:
+        await pilot.press("h", "h")
+        assert app.focused is not None
         app.spawn_harness("claude")
         await app.workers.wait_for_complete()
         [params] = daemon["client"].asked("spawn")
+        assert app.focused is None
     # A bare CLI: no prompt, no parent, and in the window the user is looking at.
     assert params["harness"] == "claude"
     assert params["prompt"] == ""
     assert params["tmux_session"] == "work"
     # The new agent appearing in the tree is the feedback, so nothing is said.
     assert notes == []
+
+
+async def test_palette_resume_returns_focus_to_the_tree(daemon, tmux):
+    daemon["answers"]["spawn"] = {"id": "cccccccccccc", "tmux_pane": "%30"}
+    app, _ = make_app()
+    row = {
+        "resume_state": "resumable",
+        "harness": "claude",
+        "cwd": "/tmp",
+        "session_id": "session-1",
+    }
+    async with app.run_test() as pilot:
+        await pilot.press("h", "h")
+        assert app.focused is not None
+        app.resume_dead_session(row)
+        await app.workers.wait_for_complete()
+        assert app.focused is None
+
+    [params] = daemon["client"].asked("spawn")
+    assert params["resume"] == "session-1"
 
 
 async def test_a_failed_spawn_is_reported(daemon, tmux):

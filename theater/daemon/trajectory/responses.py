@@ -27,6 +27,10 @@ from theater.trajectory import (
 _OLDER_CURSOR_PLACEHOLDER = "o1-" + "0" * 32
 
 
+class TrajectoryResponseTooLarge(ValueError):
+    pass
+
+
 def follow_cursor(daemon_epoch: str, stream: TrajectoryStream, sequence: int) -> str:
     return f"c1-{daemon_epoch}-{stream.cache.stream_id}-{sequence}"
 
@@ -87,7 +91,7 @@ def fit_page(
         else:
             high = count - 1
     if best < 0:
-        raise ValueError("trajectory response envelope exceeds the wire limit")
+        raise TrajectoryResponseTooLarge("trajectory response envelope exceeds the wire limit")
     byte_truncated = best < len(records)
     older = has_older or byte_truncated
     coverage = _fit_coverage(
@@ -203,7 +207,7 @@ def _bounded_coverage(
         retained = candidate
     coverage = _coverage(stream, retained)
     if fits(coverage) > TRAJECTORY_RESPONSE_MAX_BYTES:
-        raise ValueError("trajectory coverage exceeds the wire limit")
+        raise TrajectoryResponseTooLarge("trajectory coverage exceeds the wire limit")
     return coverage
 
 
@@ -225,6 +229,7 @@ def _coverage(
 
 
 __all__ = [
+    "TrajectoryResponseTooLarge",
     "decode_follow_cursor",
     "empty_delta",
     "fit_delta",

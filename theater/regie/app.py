@@ -16,10 +16,11 @@ pane layout so the tree stays visible. Unstaging restores the dashboard.
 Keybindings:
     j/k or up/down  navigate the tree and usage footer
     h/l              stage trajectory/live pane, then focus on repeat
+    H/L              previous/next trajectory ledger page
     left/right       navigate usage footer rows
     Enter           stage the selected agent in the tree; toggle detailed usage in the footer
     Esc             return from trajectory to the tree
-    <prefix> h      return focus to régie from the stage (claimed only if free)
+    <prefix> h      return to the tree from the stage or trajectory (claimed only if free)
     x               kill the selected agent's pane
     ctrl+p          command palette, including `Spawn <harness>`
     q               quit (unstages first; detaches, kills nothing)
@@ -69,6 +70,7 @@ from theater.constants.regie import (
     REGIE_MAX_AWAIT_ANIMS,
     REGIE_MAX_TRACE_ANIMS,
     REGIE_PALETTE_KEYS_COMMAND_TITLE,
+    REGIE_RETURN_SIGNAL_TEXTUAL,
     REGIE_STARTUP_REVEAL_INTERVAL_SECONDS,
     REGIE_TRACE_ANIM_INTERVAL,
     REGIE_USAGE_METRIC_DOWN,
@@ -308,6 +310,12 @@ class RegieApp(App):
         Binding("l", "cursor_right_or_focus", "focus", show=False),
         Binding("x", "kill", "kill"),
         Binding("q", "quit", "quit"),
+        Binding(
+            REGIE_RETURN_SIGNAL_TEXTUAL,
+            "return_to_tree",
+            show=False,
+            priority=True,
+        ),
     ]
 
     #: ctrl+p opens the palette; ours adds one `Spawn <harness>` entry per registered harness.
@@ -349,7 +357,8 @@ class RegieApp(App):
         self._staging = StageController(self.settings.regie, panes)
         self._surface = SurfaceController(panes)
         self._trajectory_states = TrajectoryStateStore(
-            inspector_ratio=self.settings.regie.trajectory_inspector_ratio
+            detail_ratio=self.settings.regie.trajectory_inspector_ratio,
+            page_size=self.settings.regie.trajectory_page_size,
         )
         self._trajectory_controller: TrajectoryController | None = None
         self._trajectory_view_widget: TrajectoryView | None = None
@@ -1169,7 +1178,14 @@ class RegieApp(App):
         self.notify("linked participant is no longer in the tree", severity="warning")
 
     def on_return_to_tree(self, _message: ReturnToTree) -> None:
-        self.set_focus(None)
+        self._focus_tree()
+
+    def action_return_to_tree(self) -> None:
+        self._focus_tree()
+
+    def _focus_tree(self) -> None:
+        if self.is_running:
+            self.set_focus(None)
         self._render_tree()
 
     def _render_tree(self) -> None:
@@ -1414,6 +1430,7 @@ class RegieApp(App):
             self.notify("nothing to kill", severity="warning")
             return
         pid = node.get("id")
+        pane = node.get("tmux_pane")
         if not pid:
             self.notify("cannot kill an unmanaged pane", severity="warning")
             return
@@ -1423,6 +1440,9 @@ class RegieApp(App):
             await self._client.call("participant.kill", id=pid)
         except Exception as exc:
             self.notify(f"kill failed: {exc}", severity="error")
+        else:
+            if pane == self.staged_pane:
+                self.staged_pane = None
         await self._refresh_tree()
 
     def action_spawn(self) -> None:
@@ -1445,6 +1465,7 @@ class RegieApp(App):
         self.run_worker(self._spawn_harness(harness), exclusive=False)
 
     async def _spawn_harness(self, harness: str) -> None:
+        self._focus_tree()
         if not self._client:
             return
         try:
@@ -1460,9 +1481,11 @@ class RegieApp(App):
             )
         except Exception as exc:
             self.notify(f"spawn failed: {exc}", severity="error")
+            self._focus_tree()
             return
         # The new agent appears in the tree on the next refresh.
         await self._refresh_tree()
+        self._focus_tree()
 
     async def load_dead_sessions(self) -> list[dict]:
         if self._client is None:
@@ -1507,6 +1530,7 @@ class RegieApp(App):
         self.run_worker(self._resume_dead_session(row), exclusive=False)
 
     async def _resume_dead_session(self, row: dict) -> None:
+        self._focus_tree()
         if self._client is None:
             return
         try:
@@ -1522,8 +1546,10 @@ class RegieApp(App):
             )
         except Exception as exc:
             self.notify(f"resume failed: {exc}", severity="error")
+            self._focus_tree()
             return
         await self._refresh_tree()
+        self._focus_tree()
 
     async def action_focus_stage(self) -> None:
         """Stage on first `l`; focus an already staged pane on second `l`."""

@@ -76,14 +76,14 @@ class FakeClient:
 
 
 def test_controller_keeps_an_empty_injected_state_store() -> None:
-    states = TrajectoryStateStore(inspector_ratio=0.6)
+    states = TrajectoryStateStore(detail_ratio=0.6)
     query = FakeClient(lambda _method, _params: {})
     follow = FakeClient(lambda _method, _params: {})
 
     controller = TrajectoryController(query, follow, state_store=states)
 
     assert controller.state_store is states
-    assert controller.state_for("p1").inspector_ratio == 0.6
+    assert controller.state_for("p1").detail_ratio == 0.6
 
 
 @pytest.mark.asyncio
@@ -375,11 +375,13 @@ def test_reset_keeps_only_a_pending_resync_retry() -> None:
     state.loading_older = True
     state.reload_required = True
     state.query = "query"
+    state.expanded_id = "record"
     state.reset_ui()
 
     assert state.retry_kind is None
     assert state.retry_message == ""
     assert state.query == ""
+    assert state.expanded_id is None
     assert state.loading_older
     assert state.reload_required
 

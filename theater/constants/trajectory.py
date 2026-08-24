@@ -50,6 +50,10 @@ TRAJECTORY_BUS_DRAIN_BATCH = 256
 TRAJECTORY_UI_RECORD_LIMIT = 2_000
 # Maximum encoded bytes retained in one régie participant window.
 TRAJECTORY_UI_MAX_BYTES = 8 << 20
+# Default number of records shown on one trajectory ledger page.
+TRAJECTORY_LEDGER_PAGE_SIZE_DEFAULT = 30
+# Maximum configurable trajectory ledger page size.
+TRAJECTORY_LEDGER_PAGE_SIZE_MAX = TRAJECTORY_UI_RECORD_LIMIT
 # Byte window read backwards for one transcript history page.
 TRAJECTORY_TRANSCRIPT_HISTORY_WINDOW_BYTES = 256 * 1024
 # Hard cap on one transcript history page reverse scan.
@@ -62,11 +66,13 @@ TRAJECTORY_MUTABLE_UPDATE_COALESCE_MS = 50
 TRAJECTORY_FOLLOW_TIMEOUT_SECONDS = 20.0
 # Pointer tooltip delay in milliseconds.
 TRAJECTORY_TOOLTIP_DELAY_MS = 50
-# Default trajectory inspector height ratio.
+# Maximum terminal cells shown from a record summary in a timeline tooltip.
+TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS = 240
+# Default inline trajectory detail height ratio.
 TRAJECTORY_INSPECTOR_RATIO_DEFAULT = 0.35
-# Minimum trajectory inspector height ratio.
+# Minimum inline trajectory detail height ratio.
 TRAJECTORY_INSPECTOR_RATIO_MIN = 0.20
-# Maximum trajectory inspector height ratio.
+# Maximum inline trajectory detail height ratio.
 TRAJECTORY_INSPECTOR_RATIO_MAX = 0.75
 
 __all__ = [
@@ -82,6 +88,8 @@ __all__ = [
     "TRAJECTORY_INSPECTOR_RATIO_DEFAULT",
     "TRAJECTORY_INSPECTOR_RATIO_MAX",
     "TRAJECTORY_INSPECTOR_RATIO_MIN",
+    "TRAJECTORY_LEDGER_PAGE_SIZE_DEFAULT",
+    "TRAJECTORY_LEDGER_PAGE_SIZE_MAX",
     "TRAJECTORY_MAX_COVERAGE_GAPS",
     "TRAJECTORY_MAX_DETAILS_PER_RECORD",
     "TRAJECTORY_MAX_GROUP_CHILDREN",
@@ -96,6 +104,7 @@ __all__ = [
     "TRAJECTORY_RESPONSE_SIZING_REQUEST_ID",
     "TRAJECTORY_SOURCE_MAX_BYTES",
     "TRAJECTORY_TOOLTIP_DELAY_MS",
+    "TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS",
     "TRAJECTORY_TOTAL_CACHE_MAX_BYTES",
     "TRAJECTORY_TRANSCRIPT_CURSOR_FINGERPRINT_BYTES",
     "TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES",

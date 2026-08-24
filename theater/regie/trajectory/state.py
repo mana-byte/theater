@@ -14,6 +14,8 @@ from theater.regie.trajectory.constants import (
     TRAJECTORY_INSPECTOR_RATIO_DEFAULT,
     TRAJECTORY_INSPECTOR_RATIO_MAX,
     TRAJECTORY_INSPECTOR_RATIO_MIN,
+    TRAJECTORY_LEDGER_PAGE_SIZE_DEFAULT,
+    TRAJECTORY_LEDGER_PAGE_SIZE_MAX,
     TRAJECTORY_UI_MAX_BYTES,
     TRAJECTORY_UI_RECORD_LIMIT,
     TRAJECTORY_WARM_STREAM_LIMIT,
@@ -63,18 +65,17 @@ class ParticipantTrajectoryState:
     new_count: int = 0
     selected_id: str | None = None
     hovered_id: str | None = None
-    collapsed_groups: set[str] = field(default_factory=set)
     query: str = ""
     lane_filters: set[TrajectoryLane] = field(default_factory=set)
     kind_filters: set[TrajectoryKind] = field(default_factory=set)
     status_filters: set[TrajectoryStatus] = field(default_factory=set)
     source_filters: set[str] = field(default_factory=set)
     order_mode: OrderMode = OrderMode.ORDER
+    ledger_page: int = 0
     timeline_scroll: int = 0
-    inspector_tab: InspectorTab = InspectorTab.SUMMARY
-    inspector_ratio: float = TRAJECTORY_INSPECTOR_RATIO_DEFAULT
-    inspector_maximized: bool = False
-    inspector_open: bool = False
+    expanded_id: str | None = None
+    detail_tab: InspectorTab = InspectorTab.SUMMARY
+    detail_ratio: float = TRAJECTORY_INSPECTOR_RATIO_DEFAULT
     focus_region: FocusRegion = FocusRegion.LEDGER
     stale: bool = False
     stale_message: str = ""
@@ -93,7 +94,10 @@ class ParticipantTrajectoryState:
             raise ValueError("participant_id must be a non-empty string")
         if len(self.participant_id.encode("utf-8")) > TRAJECTORY_IDENTIFIER_MAX_BYTES:
             raise ValueError("participant_id is too large")
-        self.set_ratio(self.inspector_ratio)
+        self.set_detail_ratio(self.detail_ratio)
+        if not isinstance(self.ledger_page, int) or isinstance(self.ledger_page, bool):
+            raise TypeError("ledger page must be an integer")
+        self.ledger_page = max(0, self.ledger_page)
         if not isinstance(self.timeline_scroll, int) or isinstance(self.timeline_scroll, bool):
             raise TypeError("timeline scroll must be an integer")
         self.timeline_scroll = max(0, self.timeline_scroll)
@@ -148,6 +152,8 @@ class ParticipantTrajectoryState:
                 self.selected_id = None
             if record_id == self.hovered_id:
                 self.hovered_id = None
+            if record_id == self.expanded_id:
+                self.expanded_id = None
 
     def _apply_records(
         self, records: Sequence[TrajectoryRecord], *, older: bool = False
@@ -239,6 +245,8 @@ class ParticipantTrajectoryState:
             self.selected_id = next(reversed(self.records))
         else:
             self.selected_id = None
+        if self.expanded_id not in self.records:
+            self.expanded_id = None
 
     def apply_older(self, page: TrajectoryPage) -> None:
         if page.stream_id is not None and self.stream_id not in {None, page.stream_id}:
@@ -341,18 +349,21 @@ class ParticipantTrajectoryState:
         )
         target = max(0, min(len(ids) - 1, current + delta))
         self.selected_id = ids[target]
-        if delta < 0:
+        if target == len(ids) - 1:
+            self.follow_tail = True
+            self.new_count = 0
+        else:
             self.pause_follow()
         return self.selected_id
 
-    def set_ratio(self, ratio: float) -> float:
+    def set_detail_ratio(self, ratio: float) -> float:
         if not isinstance(ratio, (int, float)) or isinstance(ratio, bool) or not isfinite(ratio):
-            raise ValueError("inspector ratio must be finite")
-        self.inspector_ratio = max(
+            raise ValueError("detail ratio must be finite")
+        self.detail_ratio = max(
             TRAJECTORY_INSPECTOR_RATIO_MIN,
             min(TRAJECTORY_INSPECTOR_RATIO_MAX, float(ratio)),
         )
-        return self.inspector_ratio
+        return self.detail_ratio
 
     def reset_ui(self) -> None:
         """Reset only this participant's in-memory presentation state."""
@@ -363,14 +374,13 @@ class ParticipantTrajectoryState:
         self.kind_filters.clear()
         self.status_filters.clear()
         self.source_filters.clear()
-        self.collapsed_groups.clear()
         self.selected_id = None
         self.hovered_id = None
         self.order_mode = OrderMode.ORDER
+        self.ledger_page = 0
         self.timeline_scroll = 0
-        self.inspector_tab = InspectorTab.SUMMARY
-        self.inspector_maximized = False
-        self.inspector_open = False
+        self.expanded_id = None
+        self.detail_tab = InspectorTab.SUMMARY
         self.focus_region = FocusRegion.LEDGER
         self.search_open = False
         self.filters_open = False
@@ -387,21 +397,29 @@ class TrajectoryStateStore:
         self,
         *,
         max_participants: int = TRAJECTORY_WARM_STREAM_LIMIT,
-        inspector_ratio: float = TRAJECTORY_INSPECTOR_RATIO_DEFAULT,
+        detail_ratio: float = TRAJECTORY_INSPECTOR_RATIO_DEFAULT,
+        page_size: int = TRAJECTORY_LEDGER_PAGE_SIZE_DEFAULT,
     ) -> None:
         if max_participants < 1:
             raise ValueError("max_participants must be positive")
         if (
-            not isinstance(inspector_ratio, (int, float))
-            or isinstance(inspector_ratio, bool)
-            or not isfinite(inspector_ratio)
+            not isinstance(detail_ratio, (int, float))
+            or isinstance(detail_ratio, bool)
+            or not isfinite(detail_ratio)
         ):
-            raise ValueError("inspector ratio must be finite")
+            raise ValueError("detail ratio must be finite")
+        if (
+            not isinstance(page_size, int)
+            or isinstance(page_size, bool)
+            or not 1 <= page_size <= TRAJECTORY_LEDGER_PAGE_SIZE_MAX
+        ):
+            raise ValueError("page size is outside the supported range")
         self.max_participants = max_participants
-        self.inspector_ratio = max(
+        self.detail_ratio = max(
             TRAJECTORY_INSPECTOR_RATIO_MIN,
-            min(TRAJECTORY_INSPECTOR_RATIO_MAX, float(inspector_ratio)),
+            min(TRAJECTORY_INSPECTOR_RATIO_MAX, float(detail_ratio)),
         )
+        self.page_size = page_size
         self._states: OrderedDict[str, ParticipantTrajectoryState] = OrderedDict()
 
     def get(self, participant_id: str) -> ParticipantTrajectoryState:
@@ -415,7 +433,7 @@ class TrajectoryStateStore:
             return state
         state = ParticipantTrajectoryState(
             participant_id,
-            inspector_ratio=self.inspector_ratio,
+            detail_ratio=self.detail_ratio,
         )
         self._states[participant_id] = state
         while len(self._states) > self.max_participants:

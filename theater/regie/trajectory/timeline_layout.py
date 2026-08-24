@@ -6,10 +6,10 @@ from dataclasses import dataclass
 from math import ceil
 
 from theater.regie.trajectory.constants import (
-    TIMELINE_DURATION_CELLS_PER_RECORD,
     TIMELINE_DURATION_MIN_WIDTH,
     TIMELINE_DURATION_UNTIMED_GAP,
-    TIMELINE_ORDER_CELL_WIDTH,
+    TIMELINE_SPAN_GUTTER,
+    TIMELINE_SPAN_MIN_WIDTH,
 )
 from theater.regie.trajectory.enums import OrderMode
 from theater.regie.trajectory.render import supports_duration_interval
@@ -28,6 +28,14 @@ class TimelineSpan:
     def end(self) -> int:
         return self.x + self.width
 
+    @property
+    def visual_start(self) -> int:
+        return self.x + min(TIMELINE_SPAN_GUTTER, max(0, (self.width - 1) // 2))
+
+    @property
+    def visual_end(self) -> int:
+        return self.end - min(TIMELINE_SPAN_GUTTER, max(0, self.width // 2))
+
 
 @dataclass(frozen=True, slots=True)
 class TimelineLayout:
@@ -42,7 +50,11 @@ class TimelineLayout:
         return next((span for span in self.spans if span.record_id == record_id), None)
 
     def record_at(self, x: int, lane: TrajectoryLane) -> str | None:
-        matches = [span for span in self.spans if span.lane is lane and span.x <= x < span.end]
+        matches = [
+            span
+            for span in self.spans
+            if span.lane is lane and span.visual_start <= x < span.visual_end
+        ]
         if not matches:
             return None
         return min(matches, key=lambda span: (span.width, -span.x)).record_id
@@ -50,7 +62,7 @@ class TimelineLayout:
 
 def _sequence_layout(records: tuple[TrajectoryRecord, ...], minimum_width: int) -> TimelineLayout:
     count = len(records)
-    width = max(1, minimum_width, count * TIMELINE_ORDER_CELL_WIDTH)
+    width = max(1, minimum_width, count * TIMELINE_SPAN_MIN_WIDTH)
     spans = (
         tuple(
             TimelineSpan(
@@ -116,11 +128,11 @@ def _duration_layout(records: tuple[TrajectoryRecord, ...], minimum_width: int) 
     domain_end = max(end for _, end in projected.values())
     domain = max(domain_end - domain_start, 0.001)
     untimed = [record for record in records if record.record_id not in projected]
-    untimed_width = len(untimed) * TIMELINE_ORDER_CELL_WIDTH
+    untimed_width = len(untimed) * TIMELINE_SPAN_MIN_WIDTH
     untimed_space = untimed_width + (TIMELINE_DURATION_UNTIMED_GAP if untimed else 0)
     timed_width = max(
         TIMELINE_DURATION_MIN_WIDTH,
-        len(raw) * TIMELINE_DURATION_CELLS_PER_RECORD,
+        len(raw) * TIMELINE_SPAN_MIN_WIDTH,
         minimum_width - untimed_space,
     )
 
@@ -131,7 +143,7 @@ def _duration_layout(records: tuple[TrajectoryRecord, ...], minimum_width: int) 
             continue
         start, end = interval
         x = round((start - domain_start) / domain * (timed_width - 1))
-        width = max(1, ceil((end - start) / domain * timed_width))
+        width = max(TIMELINE_SPAN_MIN_WIDTH, ceil((end - start) / domain * timed_width))
         spans.append(TimelineSpan(record.record_id, record.lane, x, width, True))
 
     untimed_start = timed_width + (TIMELINE_DURATION_UNTIMED_GAP if untimed else 0)
@@ -139,15 +151,19 @@ def _duration_layout(records: tuple[TrajectoryRecord, ...], minimum_width: int) 
         TimelineSpan(
             record.record_id,
             record.lane,
-            untimed_start + index * TIMELINE_ORDER_CELL_WIDTH,
-            TIMELINE_ORDER_CELL_WIDTH,
+            untimed_start + index * TIMELINE_SPAN_MIN_WIDTH,
+            TIMELINE_SPAN_MIN_WIDTH,
             False,
         )
         for index, record in enumerate(untimed)
     )
     spans_by_id = {span.record_id: span for span in spans}
     ordered_spans = tuple(spans_by_id[record.record_id] for record in records)
-    width = max(timed_width, untimed_start + len(untimed) * TIMELINE_ORDER_CELL_WIDTH, 1)
+    width = max(
+        timed_width,
+        untimed_start + len(untimed) * TIMELINE_SPAN_MIN_WIDTH,
+        max((span.end for span in spans), default=1),
+    )
     return TimelineLayout(
         spans=ordered_spans,
         width=width,

@@ -13,7 +13,6 @@ class OrderMode(StrEnum):
 class FocusRegion(StrEnum):
     TIMELINE = "timeline"
     LEDGER = "ledger"
-    INSPECTOR = "inspector"
 
 
 class FilterDimension(StrEnum):
