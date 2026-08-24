@@ -1292,6 +1292,7 @@ class CodexObserver(TranscriptObserver):
         record_id = _trajectory_id(record.get("id") or record.get("uuid"))
         turn_id = _codex_trajectory_turn_id(payload)
         step_id = _trajectory_id(payload.get("step_id") or payload.get("stepId"))
+        source_request_id = _trajectory_id(payload.get("request_id") or payload.get("requestId"))
         facts: list[TrajectoryFact] = []
 
         def add(
@@ -1303,6 +1304,8 @@ class CodexObserver(TranscriptObserver):
             status: TrajectoryStatus = TrajectoryStatus.UNKNOWN,
             turn: str | None = turn_id,
             step: str | None = step_id,
+            request: str | None = None,
+            request_from_turn: bool = True,
             call_id: str | None = None,
             parent_call_id: str | None = None,
             fact_timing: Timing | None = timing,
@@ -1323,6 +1326,11 @@ class CodexObserver(TranscriptObserver):
                     event_ordinal=len(facts),
                     turn_id=turn,
                     step_id=step,
+                    request_id=_trajectory_id(
+                        request if request is not None else source_request_id or turn
+                    )
+                    if request_from_turn
+                    else None,
                     call_id=_trajectory_id(call_id),
                     parent_call_id=_trajectory_id(parent_call_id),
                     timing=fact_timing,
@@ -1341,6 +1349,7 @@ class CodexObserver(TranscriptObserver):
                 "session metadata",
                 native_id=session_id or record_id,
                 status=_trajectory_status(payload.get("status"), TrajectoryStatus.COMPLETED),
+                request_from_turn=False,
                 details=(_trajectory_detail("session", payload, format=ContentFormat.JSON),),
             )
             return facts

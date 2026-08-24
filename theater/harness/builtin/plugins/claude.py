@@ -1175,6 +1175,7 @@ class ClaudeCodeObserver(TranscriptObserver):
             status: TrajectoryStatus = TrajectoryStatus.UNKNOWN,
             turn: str | None = turn_id,
             step: str | None = step_id,
+            request: str | None = None,
             call_id: str | None = None,
             parent_call_id: str | None = None,
             fact_timing: Timing | None = timing,
@@ -1195,6 +1196,7 @@ class ClaudeCodeObserver(TranscriptObserver):
                     event_ordinal=len(facts),
                     turn_id=turn,
                     step_id=step,
+                    request_id=_trajectory_id(request),
                     call_id=_trajectory_id(call_id),
                     parent_call_id=_trajectory_id(parent_call_id),
                     timing=fact_timing,
@@ -1219,6 +1221,11 @@ class ClaudeCodeObserver(TranscriptObserver):
                 message.get("status") or record.get("status"), TrajectoryStatus.COMPLETED
             )
             usage = _claude_trajectory_usage(message, record)
+            request = (
+                (usage.request_id if usage is not None else None)
+                or message_id
+                or _trajectory_id(record.get("requestId"))
+            )
             content = message.get("content")
             blocks = content if isinstance(content, list) else []
             if isinstance(content, str):
@@ -1240,6 +1247,7 @@ class ClaudeCodeObserver(TranscriptObserver):
                         native_id=native_id,
                         status=message_status,
                         turn=message_turn,
+                        request=request,
                     )
                 elif block_type == "thinking":
                     raw = _safe_trajectory_text(block.get("thinking"))
@@ -1252,6 +1260,7 @@ class ClaudeCodeObserver(TranscriptObserver):
                         native_id=native_id,
                         status=_trajectory_status(block.get("status"), message_status),
                         turn=message_turn,
+                        request=request,
                         details=(_trajectory_detail("thinking", raw, format=ContentFormat.TEXT),),
                     )
                 elif block_type in ("tool_use", "server_tool_use"):
@@ -1270,6 +1279,7 @@ class ClaudeCodeObserver(TranscriptObserver):
                         native_id=native_id,
                         status=_trajectory_status(block.get("status"), TrajectoryStatus.PENDING),
                         turn=message_turn,
+                        request=request,
                         call_id=call_id,
                         parent_call_id=parent_call_id,
                         details=block_details,
@@ -1315,6 +1325,7 @@ class ClaudeCodeObserver(TranscriptObserver):
                     native_id=message_id or record_id,
                     status=message_status,
                     turn=message_turn,
+                    request=request,
                 )
             if usage is not None and facts:
                 facts[-1] = replace(facts[-1], usage=usage)

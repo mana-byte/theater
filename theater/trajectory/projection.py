@@ -118,6 +118,7 @@ def fact_to_record(
         event_ordinal=fact.event_ordinal,
         turn_id=fact.turn_id,
         step_id=fact.step_id,
+        request_id=fact.request_id,
         call_id=fact.call_id,
         parent_call_id=fact.parent_call_id,
         links=tuple(links),

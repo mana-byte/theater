@@ -56,6 +56,8 @@ TRAJECTORY_CACHE_SWEEP_SECONDS = 30.0
 TRAJECTORY_BUS_DRAIN_BATCH = 256
 # Maximum records retained in one régie participant window.
 TRAJECTORY_UI_RECORD_LIMIT = 2_000
+# Maximum record links retained by one request projection.
+TRAJECTORY_REQUEST_RECORD_LIMIT = TRAJECTORY_UI_RECORD_LIMIT
 # Maximum encoded bytes retained in one régie participant window.
 TRAJECTORY_UI_MAX_BYTES = 8 << 20
 # Default number of records shown on one trajectory ledger page.
@@ -112,6 +114,7 @@ __all__ = [
     "TRAJECTORY_OVERVIEW_SUMMARY_MAX_BYTES",
     "TRAJECTORY_PAGE_RECORD_LIMIT",
     "TRAJECTORY_PARTICIPANT_CACHE_MAX_BYTES",
+    "TRAJECTORY_REQUEST_RECORD_LIMIT",
     "TRAJECTORY_RESPONSE_MAX_BYTES",
     "TRAJECTORY_RESPONSE_SIZING_REQUEST_ID",
     "TRAJECTORY_SOURCE_MAX_BYTES",

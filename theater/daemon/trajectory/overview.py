@@ -17,12 +17,12 @@ from theater.trajectory import (
     TrajectoryFeature,
     TrajectoryIncompleteReason,
     TrajectoryKind,
-    TrajectoryLane,
     TrajectoryOverview,
     TrajectoryProblem,
     TrajectoryRecord,
     TrajectoryStatus,
     deterministic_record_order,
+    requests_for_records,
 )
 
 _ACTIVE = frozenset({TrajectoryStatus.PENDING, TrajectoryStatus.RUNNING, TrajectoryStatus.PARTIAL})
@@ -118,6 +118,8 @@ def _capabilities(
             for value in (record.timing.start, record.timing.end, record.timing.duration_ms)
         ):
             observed.add(TrajectoryFeature.TIMING)
+        if record.request_id is not None:
+            observed.add(TrajectoryFeature.REQUESTS)
         if record.usage is not None:
             observed.add(TrajectoryFeature.USAGE)
             if record.usage.model is not None:
@@ -159,20 +161,9 @@ def _overview(
         )
         if present
     )
-    explicit_requests = {
-        (record.source_epoch, record.usage.request_id)
-        for record in usage_records
-        if record.usage is not None and record.usage.request_id is not None
-    }
-    implicit_model_records = sum(
-        record.lane is TrajectoryLane.MODEL
-        and record.usage is not None
-        and record.usage.request_id is None
-        for record in ordered
-    )
     record_count, record_count_saturated = _bounded_count(len(ordered))
     model_operations, model_operations_saturated = _bounded_count(
-        len(explicit_requests) + implicit_model_records
+        len(requests_for_records(ordered))
     )
     tool_operations, tool_operations_saturated = _bounded_count(
         sum(record.kind is TrajectoryKind.TOOL_CALL for record in ordered)

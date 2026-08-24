@@ -47,6 +47,11 @@ from theater.trajectory.records import (
     TrajectoryRecord,
     TrajectoryUsage,
 )
+from theater.trajectory.requests import (
+    TrajectoryRequest,
+    TrajectoryRequestIdentity,
+    requests_for_records,
+)
 
 __all__ = [
     "ContentFormat",
@@ -74,6 +79,8 @@ __all__ = [
     "TrajectoryParticipantState",
     "TrajectoryProblem",
     "TrajectoryRecord",
+    "TrajectoryRequest",
+    "TrajectoryRequestIdentity",
     "TrajectoryStatus",
     "TrajectorySupport",
     "TrajectoryUpsert",
@@ -81,5 +88,6 @@ __all__ = [
     "TrajectoryValidationError",
     "bound_detail_fields",
     "escape_rich_text",
+    "requests_for_records",
     "sanitize_text",
 ]

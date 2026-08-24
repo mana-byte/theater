@@ -118,7 +118,9 @@ def test_opencode_facts_upsert_running_tool_to_terminal(rec, workdir) -> None:
     assert first_call.status is TrajectoryStatus.RUNNING
     assert second_call.status is TrajectoryStatus.COMPLETED
     assert second_call.revision > first_call.revision
+    assert first_call.request_id == second_call.request_id == "opencode:message-1"
     assert result.call_id == second_call.call_id == "call-1"
+    assert result.request_id == "opencode:message-1"
 
     rec._part({**running, "state": {"status": "completed", "output": "done"}})
     duplicate = asyncio.run(source.read())
@@ -145,6 +147,7 @@ def test_opencode_live_and_history_revisions_share_coordinates(rec, workdir) -> 
 
     assert live_call.raw_index == stored_call.raw_index
     assert live_call.revision == stored_call.revision
+    assert live_call.request_id == stored_call.request_id == "opencode:message-1"
 
     rec._part({**running, "state": {"status": "completed", "output": "done"}})
     completed = asyncio.run(source.read())

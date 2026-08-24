@@ -71,6 +71,7 @@ class TrajectoryFact:
     event_ordinal: int = 0
     turn_id: str | None = None
     step_id: str | None = None
+    request_id: str | None = None
     call_id: str | None = None
     parent_call_id: str | None = None
     timing: Timing | None = None
@@ -173,7 +174,7 @@ def _validate_fact_identity(fact: TrajectoryFact) -> None:
         value = getattr(fact, name)
         if type(value) is not int or value < 0:
             raise TrajectoryValidationError(f"fact.{name} must be a non-negative integer")
-    for name in ("turn_id", "step_id", "call_id", "parent_call_id"):
+    for name in ("turn_id", "step_id", "request_id", "call_id", "parent_call_id"):
         value = getattr(fact, name)
         if value is not None:
             object.__setattr__(
