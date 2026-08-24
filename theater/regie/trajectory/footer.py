@@ -53,14 +53,14 @@ class TrajectoryFooter(Horizontal):
     }}
     TrajectoryFooter #trajectory-page-previous,
     TrajectoryFooter #trajectory-page-next {{
-        width: 3;
-        min-width: 3;
-        padding: 0;
+        width: 5;
+        min-width: 5;
+        padding: 0 1;
         margin-left: 0;
     }}
     TrajectoryFooter #trajectory-page {{
-        width: 13;
-        min-width: 10;
+        width: 16;
+        min-width: 13;
         height: 1;
         min-height: 1;
         background: $background;
@@ -68,7 +68,7 @@ class TrajectoryFooter(Horizontal):
     TrajectoryFooter #trajectory-page SelectCurrent {{
         height: 1;
         min-height: 1;
-        padding: 0;
+        padding: 0 1;
         background: $background;
     }}
     TrajectoryFooter #trajectory-page SelectCurrent Static#label {{
@@ -81,8 +81,11 @@ class TrajectoryFooter(Horizontal):
         color: $text-muted;
     }}
     TrajectoryFooter #trajectory-page SelectOverlay {{
-        width: 16;
+        width: 18;
         max-height: 12;
+    }}
+    TrajectoryFooter #trajectory-page SelectOverlay > .option-list--option {{
+        padding: 0 2;
     }}
     TrajectoryFooter #trajectory-page-range {{
         width: auto;
