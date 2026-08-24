@@ -348,6 +348,8 @@ class TrajectoryService:
                 cursor=delta.cursor,
                 upserts=delta.upserts,
                 panel_state=stream.panel_state,
+                capabilities=delta.capabilities,
+                overview=delta.overview,
             )
             if wire_bytes(stateful.to_wire()) <= TRAJECTORY_RESPONSE_MAX_BYTES:
                 return stateful
@@ -363,6 +365,8 @@ class TrajectoryService:
             stream_id=delta.stream_id,
             cursor=delta.cursor,
             panel_state=stream.panel_state,
+            capabilities=delta.capabilities,
+            overview=delta.overview,
         )
 
     def _older_state(self, token: str) -> _OlderState | None:

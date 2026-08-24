@@ -84,6 +84,7 @@ from theater.models import BadRequest
 from theater.provenance import TranscriptProvenance
 from theater.trajectory.content import ContentFormat, DetailField
 from theater.trajectory.enums import TrajectoryKind, TrajectoryLane, TrajectoryStatus
+from theater.trajectory.usefulness import TrajectoryCapabilities, TrajectoryFeature
 
 if TYPE_CHECKING:
     from theater.models import Participant
@@ -829,6 +830,26 @@ class VibeObserver(TranscriptObserver):
     both the session provenance and the domain marker. Within an isolated root,
     per-turn Vibe rotations are exact by construction.
     """
+
+    trajectory_capabilities = TrajectoryCapabilities.declared(
+        supported=frozenset(
+            {
+                TrajectoryFeature.TOOLS,
+                TrajectoryFeature.REASONING,
+                TrajectoryFeature.LIVE_UPDATES,
+            }
+        ),
+        unsupported=frozenset(
+            {
+                TrajectoryFeature.REQUESTS,
+                TrajectoryFeature.MODELS,
+                TrajectoryFeature.USAGE,
+                TrajectoryFeature.TIMING,
+                TrajectoryFeature.CONTEXT,
+                TrajectoryFeature.RETRIES,
+            }
+        ),
+    )
 
     def __init__(
         self,

@@ -143,6 +143,7 @@ from theater.trajectory.enums import (
     TrajectoryStatus,
 )
 from theater.trajectory.records import Timing, TrajectoryUsage
+from theater.trajectory.usefulness import TrajectoryCapabilities, TrajectoryFeature
 from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
     TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
@@ -703,6 +704,22 @@ class OpenCodeObserver(HarnessObserver):
     keyed by transcript path and there is no path. Surfacing them needs a
     lineage hook on `Source`.
     """
+
+    trajectory_capabilities = TrajectoryCapabilities.declared(
+        supported=frozenset(
+            {
+                TrajectoryFeature.REQUESTS,
+                TrajectoryFeature.MODELS,
+                TrajectoryFeature.TOOLS,
+                TrajectoryFeature.USAGE,
+                TrajectoryFeature.TIMING,
+                TrajectoryFeature.REASONING,
+                TrajectoryFeature.CONTEXT,
+                TrajectoryFeature.LIVE_UPDATES,
+            }
+        ),
+        unsupported=frozenset({TrajectoryFeature.RETRIES}),
+    )
 
     def __init__(self, db: Path | None = None, correlation_dir: Path | None = None):
         #: Injectable so tests never touch the real database.

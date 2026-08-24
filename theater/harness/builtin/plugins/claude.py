@@ -87,6 +87,7 @@ from theater.trajectory.enums import (
     TrajectoryStatus,
 )
 from theater.trajectory.records import Timing, TrajectoryUsage
+from theater.trajectory.usefulness import TrajectoryCapabilities, TrajectoryFeature
 
 if TYPE_CHECKING:
     from theater.models import Participant
@@ -603,6 +604,22 @@ class ClaudeCodeObserver(TranscriptObserver):
     survivable today because the reducer answers a job per boundary; giving
     events a native turn id is what makes it harmless.
     """
+
+    trajectory_capabilities = TrajectoryCapabilities.declared(
+        supported=frozenset(
+            {
+                TrajectoryFeature.REQUESTS,
+                TrajectoryFeature.MODELS,
+                TrajectoryFeature.TOOLS,
+                TrajectoryFeature.USAGE,
+                TrajectoryFeature.TIMING,
+                TrajectoryFeature.REASONING,
+                TrajectoryFeature.CONTEXT,
+                TrajectoryFeature.LIVE_UPDATES,
+            }
+        ),
+        unsupported=frozenset({TrajectoryFeature.RETRIES}),
+    )
 
     def __init__(self, root: Path | None = None):
         #: Injectable so tests never touch the real ~/.claude.

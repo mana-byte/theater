@@ -23,6 +23,7 @@ from theater.daemon.trajectory.history import HistoryLoad, load_history, source_
 from theater.daemon.trajectory.merge import is_interaction, is_mutable, order_records
 from theater.daemon.trajectory.project import project_batch, project_history_page
 from theater.daemon.trajectory.theater_events import ALLOWLISTED_BUS_KINDS, project_bus_row
+from theater.harness import normalize
 from theater.harness.contracts.source import Batch
 from theater.models import NotFound, Participant, Status, Tier
 from theater.provenance import is_trusted_provenance
@@ -30,6 +31,7 @@ from theater.trajectory import (
     CoverageGap,
     PanelState,
     PanelStateInfo,
+    TrajectoryCapabilities,
     TrajectoryKind,
     TrajectoryLane,
     TrajectoryParticipantState,
@@ -61,6 +63,8 @@ class TrajectoryStream:
     source_before: str | None = None
     bus_before: int | None = None
     gaps: list[CoverageGap] = field(default_factory=list)
+    declared_capabilities: TrajectoryCapabilities = field(default_factory=TrajectoryCapabilities)
+    live_updates_observed: bool = False
     pending_live: list[CapturedBatch] = field(default_factory=list)
     followers: dict[int, asyncio.Event] = field(default_factory=dict)
     capture_serial: int = 0
@@ -138,6 +142,7 @@ class TrajectoryRuntime:
                 "loading trajectory history",
                 participant_state(participant),
             ),
+            declared_capabilities=self._declared_capabilities(participant),
         )
         self.streams[participant.id] = stream
         self._register_bus_listener()
@@ -205,8 +210,10 @@ class TrajectoryRuntime:
             finally:
                 self._history_tasks.discard(task)
                 stream.cache.loading = False
-            self._apply_history(stream, result, older=False)
-            self._set_initial_state(stream, result, notify=True)
+            gaps_changed = self._apply_history(stream, result, older=False)
+            panel_changed = self._set_initial_state(stream, result, notify=True)
+            if gaps_changed and not panel_changed:
+                self.wake_followers(stream)
             self.cache.touch(stream.participant.id)
 
     async def load_older(
@@ -351,7 +358,7 @@ class TrajectoryRuntime:
             for expired in self.cache.expire():
                 self._discard_stream(expired.participant_id, expired)
 
-    def _apply_history(self, stream: TrajectoryStream, result: HistoryLoad, *, older: bool) -> None:
+    def _apply_history(self, stream: TrajectoryStream, result: HistoryLoad, *, older: bool) -> bool:
         page = result.page
         if result.trusted:
             stream.trusted = True
@@ -376,11 +383,12 @@ class TrajectoryRuntime:
             if page.cursor is not None:
                 stream.transcript_floor = page.older_cursor or page.cursor
         else:
-            self._add_history_failure(stream, result)
+            return self._add_history_failure(stream, result)
+        return False
 
     def _set_initial_state(
         self, stream: TrajectoryStream, result: HistoryLoad, *, notify: bool = False
-    ) -> None:
+    ) -> bool:
         self.refresh_participant(stream, notify=notify)
         current_participant_state = stream.panel_state.participant_state
         has_transcript = any(
@@ -415,7 +423,7 @@ class TrajectoryRuntime:
         else:
             state = PanelState.UNAVAILABLE
             message = result.message or "trajectory history is unavailable"
-        self._replace_panel(
+        return self._replace_panel(
             stream,
             PanelStateInfo(state, message, current_participant_state),
             notify=notify,
@@ -429,13 +437,17 @@ class TrajectoryRuntime:
         if attachment is not None:
             if not is_trusted_provenance(attachment.correlation):
                 stream.live_allowed = False
-                self._set_panel(
+                gap_added = self._add_gap(
+                    stream, "transcript", "live transcript attachment is untrusted"
+                )
+                panel_changed = self._set_panel(
                     stream,
                     PanelState.UNTRUSTED,
                     "live transcript identity is untrusted",
                     notify=notify,
                 )
-                self._add_gap(stream, "transcript", "live transcript attachment is untrusted")
+                if gap_added and notify and not panel_changed:
+                    self.wake_followers(stream)
                 return
             stream.live_allowed = True
             epoch = source_epoch_for(stream.participant, attachment.location)
@@ -449,25 +461,32 @@ class TrajectoryRuntime:
             return
         if batch.error_code is not None:
             reason = batch.error or batch.error_code
-            self._add_gap(stream, "transcript", reason)
+            gap_added = self._add_gap(stream, "transcript", reason)
             if batch.error_code == TRANSCRIPT_IDENTITY_LOST_CODE:
-                self._set_panel(
+                panel_changed = self._set_panel(
                     stream,
                     PanelState.UNTRUSTED,
                     transcript_identity_recovery_message(stream.participant.id, reason),
                     notify=notify,
                 )
             else:
-                self._set_panel(
+                panel_changed = self._set_panel(
                     stream,
                     PanelState.STALE,
                     f"live trajectory read failed: {reason}; request a fresh snapshot to retry",
                     notify=notify,
                 )
+            if gap_added and notify and not panel_changed:
+                self.wake_followers(stream)
             return
         epoch = stream.source_epoch or source_epoch_for(stream.participant, None)
         records = project_batch(batch, participant_id=stream.participant.id, source_epoch=epoch)
-        self._merge_records(stream, records, notify=notify)
+        changed_live_updates = not stream.live_updates_observed
+        if not stream.live_updates_observed:
+            stream.live_updates_observed = True
+        changes = self._merge_records(stream, records, notify=notify)
+        if changed_live_updates and not changes and notify:
+            self.wake_followers(stream)
         if records and stream.panel_state.state in {
             PanelState.WAITING,
             PanelState.UNAVAILABLE,
@@ -481,9 +500,9 @@ class TrajectoryRuntime:
                 notify=False,
             )
 
-    def _add_history_failure(self, stream: TrajectoryStream, result: HistoryLoad) -> None:
+    def _add_history_failure(self, stream: TrajectoryStream, result: HistoryLoad) -> bool:
         reason = result.message or result.page.error or "history source failed"
-        self._add_gap(stream, "transcript", reason)
+        return self._add_gap(stream, "transcript", reason)
 
     def _add_boundary(self, stream: TrajectoryStream, old: str, new: str) -> None:
         record = TrajectoryRecord(
@@ -506,11 +525,13 @@ class TrajectoryRuntime:
         reason: str,
         start: str | None = None,
         end: str | None = None,
-    ) -> None:
+    ) -> bool:
         gap = CoverageGap(source, reason, start=start, end=end)
         if gap not in stream.gaps:
             stream.gaps.append(gap)
             del stream.gaps[:-TRAJECTORY_MAX_COVERAGE_GAPS]
+            return True
+        return False
 
     def _set_panel(
         self,
@@ -631,6 +652,16 @@ class TrajectoryRuntime:
                 self._loop.call_soon(self._drain_bus_queue)
         except Exception:
             logger.exception("trajectory bus capture failed")
+
+    def _declared_capabilities(self, participant: Participant) -> TrajectoryCapabilities:
+        harnesses = getattr(self.observer, "harnesses", {})
+        harness = (
+            harnesses.get(normalize(participant.harness)) if isinstance(harnesses, dict) else None
+        )
+        declared = getattr(getattr(harness, "observer", None), "trajectory_capabilities", None)
+        return (
+            declared if isinstance(declared, TrajectoryCapabilities) else TrajectoryCapabilities()
+        )
 
     def _register_bus_listener(self) -> None:
         if not self._bus_listener_registered:

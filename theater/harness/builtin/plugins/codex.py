@@ -155,6 +155,7 @@ from theater.trajectory.enums import (
     TrajectoryStatus,
 )
 from theater.trajectory.records import Timing, TrajectoryUsage
+from theater.trajectory.usefulness import TrajectoryCapabilities, TrajectoryFeature
 
 if TYPE_CHECKING:
     from theater.models import Participant
@@ -636,6 +637,21 @@ class CodexObserver(TranscriptObserver):
 
     #: The process holds its rollout open, so ownership can be shown rather than inferred.
     proves_ownership = True
+    trajectory_capabilities = TrajectoryCapabilities.declared(
+        supported=frozenset(
+            {
+                TrajectoryFeature.REQUESTS,
+                TrajectoryFeature.MODELS,
+                TrajectoryFeature.TOOLS,
+                TrajectoryFeature.USAGE,
+                TrajectoryFeature.TIMING,
+                TrajectoryFeature.REASONING,
+                TrajectoryFeature.CONTEXT,
+                TrajectoryFeature.LIVE_UPDATES,
+            }
+        ),
+        unsupported=frozenset({TrajectoryFeature.RETRIES}),
+    )
 
     def __init__(
         self,

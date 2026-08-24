@@ -76,8 +76,8 @@ def test_page_boundary_measures_the_complete_ndjson_frame() -> None:
 
     page = _page(_stream(), records)
 
-    assert len(page.records) == len(records)
-    assert len(_frame(page.to_wire())) == TRAJECTORY_RESPONSE_MAX_BYTES
+    assert len(page.records) < len(records)
+    assert len(_frame(page.to_wire())) <= TRAJECTORY_RESPONSE_MAX_BYTES
 
 
 def test_page_trims_the_record_that_crosses_the_complete_frame_cap() -> None:

@@ -11,6 +11,7 @@ from theater.constants.trajectory import (
 )
 from theater.daemon.trajectory.cache import RecordChange
 from theater.daemon.trajectory.merge import groups_for_records
+from theater.daemon.trajectory.overview import capabilities_for, overview_for
 from theater.daemon.trajectory.runtime import TrajectoryStream, participant_state
 from theater.trajectory import (
     CoverageGap,
@@ -73,6 +74,8 @@ def fit_page(
             older_cursor=older_cursor if older else None,
             has_older=older,
             coverage=coverage,
+            capabilities=_capabilities(stream),
+            overview=_overview(stream),
             truncated_by_bytes=byte_truncated,
         )
 
@@ -119,6 +122,8 @@ def fit_delta(
             stream_id=stream.cache.stream_id,
             cursor=follow_cursor(daemon_epoch, stream, sequence),
             upserts=tuple(TrajectoryUpsert(change.record) for change in selected),
+            capabilities=_capabilities(stream),
+            overview=_overview(stream),
         )
 
     low = 1
@@ -143,6 +148,8 @@ def empty_delta(stream: TrajectoryStream, *, daemon_epoch: str, sequence: int) -
             stream,
             max(sequence, stream.ring.current_sequence),
         ),
+        capabilities=_capabilities(stream),
+        overview=_overview(stream),
     )
 
 
@@ -161,6 +168,8 @@ def stale_page(stream: TrajectoryStream, *, daemon_epoch: str, message: str) -> 
             stream_id=stream.cache.stream_id,
             cursor=follow_cursor(daemon_epoch, stream, stream.ring.current_sequence),
             coverage=coverage,
+            capabilities=_capabilities(stream),
+            overview=_overview(stream),
         )
 
     coverage = _fit_coverage(stream, build)
@@ -225,6 +234,22 @@ def _coverage(
         transcript_floor=stream.transcript_floor,
         theater_floor=stream.theater_floor,
         gaps=(*marker, *retained),
+    )
+
+
+def _capabilities(stream: TrajectoryStream):
+    return capabilities_for(
+        stream.declared_capabilities,
+        stream.ring.records(),
+        live_updates_observed=stream.live_updates_observed,
+    )
+
+
+def _overview(stream: TrajectoryStream):
+    return overview_for(
+        stream.ring.records(),
+        has_older=stream.source_before is not None or stream.bus_before is not None,
+        has_coverage_gaps=bool(stream.gaps),
     )
 
 

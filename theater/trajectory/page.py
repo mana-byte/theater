@@ -23,6 +23,7 @@ from theater.trajectory.enums import (
     TrajectoryValidationError,
 )
 from theater.trajectory.records import TrajectoryRecord
+from theater.trajectory.usefulness import TrajectoryCapabilities, TrajectoryOverview
 from theater.trajectory.validation import (
     boolean,
     enum_value,
@@ -299,6 +300,8 @@ class TrajectoryPage:
     older_cursor: str | None = None
     has_older: bool = False
     coverage: TrajectoryCoverage = field(default_factory=TrajectoryCoverage)
+    capabilities: TrajectoryCapabilities = field(default_factory=TrajectoryCapabilities)
+    overview: TrajectoryOverview = field(default_factory=TrajectoryOverview)
     truncated_by_bytes: bool = False
 
     def __post_init__(self) -> None:
@@ -337,6 +340,10 @@ class TrajectoryPage:
             raise TrajectoryValidationError("page.groups must contain TrajectoryGroup values")
         if not isinstance(self.coverage, TrajectoryCoverage):
             raise TrajectoryValidationError("page.coverage must be TrajectoryCoverage")
+        if not isinstance(self.capabilities, TrajectoryCapabilities):
+            raise TrajectoryValidationError("page.capabilities must be TrajectoryCapabilities")
+        if not isinstance(self.overview, TrajectoryOverview):
+            raise TrajectoryValidationError("page.overview must be TrajectoryOverview")
         if type(self.has_older) is not bool or type(self.truncated_by_bytes) is not bool:
             raise TrajectoryValidationError("page boolean fields must be booleans")
 
@@ -354,6 +361,8 @@ class TrajectoryPage:
             "older_cursor": self.older_cursor,
             "has_older": self.has_older,
             "coverage": self.coverage.to_wire(),
+            "capabilities": self.capabilities.to_wire(),
+            "overview": self.overview.to_wire(),
             "truncated_by_bytes": self.truncated_by_bytes,
         }
 
@@ -371,6 +380,8 @@ class TrajectoryPage:
                 "older_cursor",
                 "has_older",
                 "coverage",
+                "capabilities",
+                "overview",
                 "truncated_by_bytes",
             },
             label="trajectory page",
@@ -390,6 +401,8 @@ class TrajectoryPage:
             older_cursor=string_or_none(data.get("older_cursor"), "page.older_cursor"),
             has_older=boolean(data.get("has_older", False), "page.has_older"),
             coverage=TrajectoryCoverage.from_wire(data.get("coverage", {})),
+            capabilities=TrajectoryCapabilities.from_wire(data.get("capabilities", {})),
+            overview=TrajectoryOverview.from_wire(data.get("overview", {})),
             truncated_by_bytes=boolean(
                 data.get("truncated_by_bytes", False), "page.truncated_by_bytes"
             ),
@@ -420,6 +433,8 @@ class TrajectoryDelta:
     cursor: str | None = None
     upserts: tuple[TrajectoryUpsert, ...] = ()
     panel_state: PanelStateInfo | None = None
+    capabilities: TrajectoryCapabilities | None = None
+    overview: TrajectoryOverview | None = None
     resync_required: bool = False
     reason: str | None = None
 
@@ -454,6 +469,14 @@ class TrajectoryDelta:
             raise TrajectoryValidationError("delta.upserts must contain TrajectoryUpsert values")
         if self.panel_state is not None and not isinstance(self.panel_state, PanelStateInfo):
             raise TrajectoryValidationError("delta.panel_state must be PanelStateInfo or null")
+        if self.capabilities is not None and not isinstance(
+            self.capabilities, TrajectoryCapabilities
+        ):
+            raise TrajectoryValidationError(
+                "delta.capabilities must be TrajectoryCapabilities or null"
+            )
+        if self.overview is not None and not isinstance(self.overview, TrajectoryOverview):
+            raise TrajectoryValidationError("delta.overview must be TrajectoryOverview or null")
         if type(self.resync_required) is not bool:
             raise TrajectoryValidationError("delta.resync_required must be a boolean")
         if self.reason is not None and not isinstance(self.reason, str):
@@ -467,6 +490,8 @@ class TrajectoryDelta:
             "cursor": self.cursor,
             "upserts": [upsert.to_wire() for upsert in self.upserts],
             "panel_state": self.panel_state.to_wire() if self.panel_state is not None else None,
+            "capabilities": self.capabilities.to_wire() if self.capabilities is not None else None,
+            "overview": self.overview.to_wire() if self.overview is not None else None,
             "resync_required": self.resync_required,
             "reason": self.reason,
         }
@@ -477,7 +502,15 @@ class TrajectoryDelta:
         keys(
             data,
             required={"stream_id"},
-            optional={"cursor", "upserts", "panel_state", "resync_required", "reason"},
+            optional={
+                "cursor",
+                "upserts",
+                "panel_state",
+                "capabilities",
+                "overview",
+                "resync_required",
+                "reason",
+            },
             label="trajectory delta",
         )
         return cls(
@@ -490,6 +523,16 @@ class TrajectoryDelta:
             panel_state=(
                 PanelStateInfo.from_wire(data["panel_state"])
                 if data.get("panel_state") is not None
+                else None
+            ),
+            capabilities=(
+                TrajectoryCapabilities.from_wire(data["capabilities"])
+                if data.get("capabilities") is not None
+                else None
+            ),
+            overview=(
+                TrajectoryOverview.from_wire(data["overview"])
+                if data.get("overview") is not None
                 else None
             ),
             resync_required=boolean(data.get("resync_required", False), "delta.resync_required"),

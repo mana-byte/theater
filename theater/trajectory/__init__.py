@@ -37,6 +37,16 @@ from theater.trajectory.records import (
     TrajectoryRecord,
     TrajectoryUsage,
 )
+from theater.trajectory.usefulness import (
+    TrajectoryCapabilities,
+    TrajectoryCapability,
+    TrajectoryCurrentOperation,
+    TrajectoryFeature,
+    TrajectoryLatestError,
+    TrajectoryOverview,
+    TrajectoryScope,
+    TrajectorySupport,
+)
 from theater.trajectory.wire import from_wire, to_wire
 
 __all__ = [
@@ -51,15 +61,23 @@ __all__ = [
     "ParticipantLink",
     "Timing",
     "TimingProvenance",
+    "TrajectoryCapabilities",
+    "TrajectoryCapability",
     "TrajectoryCoverage",
+    "TrajectoryCurrentOperation",
     "TrajectoryDelta",
+    "TrajectoryFeature",
     "TrajectoryGroup",
     "TrajectoryKind",
     "TrajectoryLane",
+    "TrajectoryLatestError",
+    "TrajectoryOverview",
     "TrajectoryPage",
     "TrajectoryParticipantState",
     "TrajectoryRecord",
+    "TrajectoryScope",
     "TrajectoryStatus",
+    "TrajectorySupport",
     "TrajectoryUpsert",
     "TrajectoryUsage",
     "TrajectoryValidationError",

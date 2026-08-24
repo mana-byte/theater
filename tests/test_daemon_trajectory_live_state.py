@@ -137,6 +137,8 @@ async def test_follow_reports_waiting_to_ready_and_state_only_stale_delta(source
     initial = await service.snapshot(current.id)
     assert initial.panel_state.state is PanelState.WAITING
     assert initial.cursor is not None and initial.stream_id is not None
+    assert initial.capabilities.features
+    assert initial.overview.scope.value == "loaded"
 
     assert observer.capture is not None
     observer.capture(current.id, Batch(events=(event("live", 1),)))
@@ -150,6 +152,12 @@ async def test_follow_reports_waiting_to_ready_and_state_only_stale_delta(source
     assert ready.panel_state is not None
     assert ready.panel_state.state is PanelState.READY
     assert [upsert.record.summary for upsert in ready.upserts] == ["live"]
+    assert ready.capabilities is not None
+    assert any(
+        item.feature.value == "live_updates" and item.observed
+        for item in ready.capabilities.features
+    )
+    assert ready.overview is not None and ready.overview.record_count == 1
 
     assert ready.cursor is not None
     observer.capture(current.id, Batch(error_code="source_failed", error="reader closed"))
