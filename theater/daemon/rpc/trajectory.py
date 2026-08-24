@@ -66,6 +66,14 @@ async def _trajectory_close(daemon, params: dict) -> dict:
     return {"released": released}
 
 
+@method("trajectory.locate")
+async def _trajectory_locate(daemon, params: dict) -> dict:
+    method_name = "trajectory.locate"
+    participant_id = _required_identifier(params, "id", method_name)
+    record_id = _required_identifier(params, "record_id", method_name)
+    return daemon.trajectory.locate(participant_id, record_id).to_wire()
+
+
 def _required_string(params: dict, key: str, method_name: str) -> str:
     value = params.get(key)
     if not isinstance(value, str) or not value:
@@ -85,6 +93,13 @@ def _required_bounded_string(params: dict, key: str, method_name: str, max_bytes
         raise BadRequest(f"{method_name} parameter {key!r} must contain valid UTF-8") from exc
     if encoded_length > max_bytes:
         raise BadRequest(f"{method_name} parameter {key!r} exceeds {max_bytes} encoded bytes")
+    return value
+
+
+def _required_identifier(params: dict, key: str, method_name: str) -> str:
+    value = _required_bounded_string(params, key, method_name, TRAJECTORY_IDENTIFIER_MAX_BYTES)
+    if any(ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in value):
+        raise BadRequest(f"{method_name} parameter {key!r} must not contain control characters")
     return value
 
 

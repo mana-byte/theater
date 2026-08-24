@@ -63,6 +63,15 @@ def test_bus_is_ordered_and_seekable(store):
     assert [e["kind"] for e in store.bus_tail(after_id=first)] == ["b"]
 
 
+def test_exact_bus_record_requires_participant_and_allowlisted_kind(store):
+    row_id = store.bus_append("agent.send", from_id="p", to_id="child")
+    disallowed_id = store.bus_append("participant.status", to_id="p")
+
+    assert store.bus_record_for_participant("p", row_id, kinds={"agent.send"})["id"] == row_id
+    assert store.bus_record_for_participant("other", row_id, kinds={"agent.send"}) is None
+    assert store.bus_record_for_participant("p", disallowed_id, kinds={"agent.send"}) is None
+
+
 def test_reopening_does_not_wipe_state(store, theater_home):
     from theater import paths
     from theater.daemon.store import Store

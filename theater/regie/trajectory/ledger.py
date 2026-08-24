@@ -34,7 +34,15 @@ from theater.regie.trajectory.constants import (
     TRAJECTORY_INSPECTOR_RATIO_MIN,
 )
 from theater.regie.trajectory.details import (
+    DETAIL_PARTICIPANT_CORRELATION_KEY_META,
+    DETAIL_PARTICIPANT_CORRELATION_TYPE_META,
+    DETAIL_PARTICIPANT_DIRECTION_META,
+    DETAIL_PARTICIPANT_EXACT_META,
     DETAIL_PARTICIPANT_META,
+    DETAIL_PARTICIPANT_RELATION_META,
+    DETAIL_PARTICIPANT_TARGET_META,
+    DETAIL_PARTICIPANT_UNRESOLVED_META,
+    DETAIL_RECORD_TARGET_META,
     DETAIL_TAB_META,
     InlineDetails,
     build_inline_details,
@@ -52,6 +60,8 @@ from theater.regie.trajectory.request_rows import request_row_text
 from theater.regie.trajectory.search import LedgerEntry, SearchResult
 from theater.regie.trajectory.tool_rows import tool_row_text
 from theater.trajectory import (
+    LinkDirection,
+    ParticipantLink,
     TrajectoryLane,
     TrajectoryRecord,
     TrajectoryRequest,
@@ -97,9 +107,31 @@ class LedgerDetailTabChanged(Message):
 class LedgerParticipantLinkClicked(Message):
     """An inline participant link was activated."""
 
-    def __init__(self, participant_id: str) -> None:
+    def __init__(
+        self,
+        participant_id: str,
+        target_record_id: str | None = None,
+        *,
+        exact: bool | None = None,
+        unresolved: bool = False,
+        link: ParticipantLink | None = None,
+    ) -> None:
         super().__init__()
         self.participant_id = participant_id
+        self.target_record_id = target_record_id
+        self.exact = target_record_id is not None if exact is None else exact
+        self.unresolved = unresolved
+        self.is_exact = self.exact
+        self.is_unresolved = self.unresolved
+        self.link = link
+
+
+class LedgerRecordLinkClicked(Message):
+    """An inline association asks to reveal another record."""
+
+    def __init__(self, record_id: str) -> None:
+        super().__init__()
+        self.record_id = record_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,7 +247,6 @@ class Ledger(DataTable[Text | str]):
     }
     Ledger > .trajectory-ledger--request {
         color: $accent;
-        background: $accent 4%;
         text-style: dim;
     }
     """
@@ -249,6 +280,7 @@ class Ledger(DataTable[Text | str]):
         )
         self._records: dict[str, TrajectoryRecord] = {}
         self._requests: dict[str, TrajectoryRequest] = {}
+        self._request_id_by_row_id: dict[str, str] = {}
         self._tools: dict[str, TrajectoryToolOperation] = {}
         self._entries: tuple[LedgerEntry, ...] = ()
         self._entry_indices: dict[str, int] = {}
@@ -413,6 +445,11 @@ class Ledger(DataTable[Text | str]):
             return None
         operation_id = self._entries[index].tool_operation_id
         return self._tools.get(operation_id or "")
+
+    def _request_for_record(self, record_id: str | None) -> TrajectoryRequest | None:
+        row_id = self._row_id_for_record(record_id)
+        request_id = self._request_id_by_row_id.get(row_id or "")
+        return self._requests.get(request_id or "")
 
     def _detail_key(self, record_id: str) -> str:
         operation = self._tool_for_record(record_id)
@@ -727,6 +764,7 @@ class Ledger(DataTable[Text | str]):
             self._detail_tab,
             max_height=self._detail_height_limit,
             accent_style=self._component("accent"),
+            request=self._request_for_record(self._expanded_id),
         )
         self._detail_tab = detail.tab
         return detail
@@ -1035,6 +1073,25 @@ class Ledger(DataTable[Text | str]):
                 self.update_cell(self._row_key(entry), column, self._middle_cell(cells[column]))
             self._rendered_tools[entry.tool_operation_id] = tool
 
+    def _set_content(
+        self,
+        records: Sequence[TrajectoryRecord],
+        search_result: SearchResult,
+    ) -> None:
+        self._records = {record.record_id: record for record in records}
+        self._requests = dict(search_result.requests)
+        self._request_id_by_row_id = dict(search_result.request_id_by_row_id)
+        self._tools = dict(search_result.tools)
+        self._entries = search_result.entries
+        self._entry_indices = {
+            entry.record_id: index
+            for index, entry in enumerate(self._entries)
+            if entry.record_id is not None
+        }
+        for record_id, row_id in search_result.row_id_by_record_id.items():
+            if row_id in self._entry_indices:
+                self._entry_indices[record_id] = self._entry_indices[row_id]
+
     def update_rows(
         self,
         records: Sequence[TrajectoryRecord],
@@ -1058,18 +1115,8 @@ class Ledger(DataTable[Text | str]):
         previous_detail_limit = self._detail_height_limit
         previous_detail_record = self._records.get(previous_expanded_id or "")
         previous_detail_tool = self._tool_for_record(previous_expanded_id)
-        self._records = {record.record_id: record for record in records}
-        self._requests = dict(search_result.requests)
-        self._tools = dict(search_result.tools)
-        self._entries = search_result.entries
-        self._entry_indices = {
-            entry.record_id: index
-            for index, entry in enumerate(self._entries)
-            if entry.record_id is not None
-        }
-        for record_id, row_id in search_result.row_id_by_record_id.items():
-            if row_id in self._entry_indices:
-                self._entry_indices[record_id] = self._entry_indices[row_id]
+        previous_detail_request = self._request_for_record(previous_expanded_id)
+        self._set_content(records, search_result)
         self._selected_id = selected_id
         self._hovered_id = hovered_id
         self._order_mode = order_mode
@@ -1086,12 +1133,14 @@ class Ledger(DataTable[Text | str]):
         self._record_indices = self._record_index_map()
         current_detail_record = self._records.get(self.expanded_id or "")
         current_detail_tool = self._tool_for_record(self.expanded_id)
+        current_detail_request = self._request_for_record(self.expanded_id)
         detail_changed = (
             self._expanded_id != previous_expanded_id
             or self._detail_tab != previous_detail_tab
             or self._detail_height_limit != previous_detail_limit
             or current_detail_record != previous_detail_record
             or current_detail_tool != previous_detail_tool
+            or current_detail_request != previous_detail_request
         )
         if detail_changed:
             self._detail = self._build_detail()
@@ -1350,10 +1399,27 @@ class Ledger(DataTable[Text | str]):
             event.stop()
             self.post_message(LedgerRetryClicked())
             return
+        if link := _participant_link_from_meta(meta):
+            event.stop()
+            self.post_message(
+                LedgerParticipantLinkClicked(
+                    link.participant_id,
+                    link.target_record_id,
+                    exact=meta.get(DETAIL_PARTICIPANT_EXACT_META) == "1",
+                    unresolved=meta.get(DETAIL_PARTICIPANT_UNRESOLVED_META) == "1",
+                    link=link,
+                )
+            )
+            return
         if participant_id := meta.get(DETAIL_PARTICIPANT_META):
             if isinstance(participant_id, str):
                 event.stop()
                 self.post_message(LedgerParticipantLinkClicked(participant_id))
+            return
+        if record_id := meta.get(DETAIL_RECORD_TARGET_META):
+            if isinstance(record_id, str):
+                event.stop()
+                self.post_message(LedgerRecordLinkClicked(record_id))
             return
         if tab_value := meta.get(DETAIL_TAB_META):
             try:
@@ -1374,6 +1440,38 @@ class Ledger(DataTable[Text | str]):
         self.move_cursor(row=row, column=0, animate=False)
 
 
+def _participant_link_from_meta(meta: dict[str, object]) -> ParticipantLink | None:
+    participant_id = meta.get(DETAIL_PARTICIPANT_META)
+    relation = meta.get(DETAIL_PARTICIPANT_RELATION_META)
+    direction = meta.get(DETAIL_PARTICIPANT_DIRECTION_META)
+    if (
+        not isinstance(participant_id, str)
+        or not isinstance(relation, str)
+        or not isinstance(direction, str)
+    ):
+        return None
+    target_record_id = meta.get(DETAIL_PARTICIPANT_TARGET_META)
+    correlation_type = meta.get(DETAIL_PARTICIPANT_CORRELATION_TYPE_META)
+    correlation_key = meta.get(DETAIL_PARTICIPANT_CORRELATION_KEY_META)
+    if target_record_id is not None and not isinstance(target_record_id, str):
+        return None
+    if correlation_type is not None and not isinstance(correlation_type, str):
+        return None
+    if correlation_key is not None and not isinstance(correlation_key, str):
+        return None
+    try:
+        return ParticipantLink(
+            participant_id,
+            relation,
+            LinkDirection(direction),
+            target_record_id=target_record_id,
+            correlation_type=correlation_type,
+            correlation_key=correlation_key,
+        )
+    except ValueError:
+        return None
+
+
 __all__ = [
     "Ledger",
     "LedgerDetailTabChanged",
@@ -1381,5 +1479,6 @@ __all__ = [
     "LedgerParticipantLinkClicked",
     "LedgerRecordClicked",
     "LedgerRecordHovered",
+    "LedgerRecordLinkClicked",
     "LedgerRetryClicked",
 ]

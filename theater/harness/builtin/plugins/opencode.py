@@ -138,18 +138,23 @@ from theater.provenance import (
 from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFeature
 from theater.trajectory.content import ContentFormat, DetailField
 from theater.trajectory.enums import (
+    CostProvenance,
     TimingProvenance,
+    TrajectoryFailureCategory,
     TrajectoryKind,
     TrajectoryLane,
     TrajectoryStatus,
 )
-from theater.trajectory.records import Timing, TrajectoryUsage
+from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryUsage
 from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
     TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
 )
 
 logger = logging.getLogger("theater.harness.opencode")
+
+OPENCODE_PROVIDER_ID_KEY = "providerID"
+OPENCODE_MODEL_ID_KEY = "modelID"
 
 #: Reported by `opencode debug paths`. The `-stable` suffix is the release channel.
 DB_NAME = "opencode-stable.db"
@@ -297,8 +302,8 @@ def _opencode_usage(info: dict) -> TokenUsage | None:
     cost = info.get("cost")
     # OpenCode uses zero when it has no per-turn price; zero falls through to model pricing.
     cost = float(cost) if isinstance(cost, (int, float)) and cost > 0 else None
-    provider = info.get("providerID")
-    model_id = info.get("modelID")
+    provider = info.get(OPENCODE_PROVIDER_ID_KEY)
+    model_id = info.get(OPENCODE_MODEL_ID_KEY)
     if isinstance(provider, str) and isinstance(model_id, str) and provider and model_id:
         model = f"{provider}/{model_id}"
     elif isinstance(model_id, str) and model_id:
@@ -309,20 +314,26 @@ def _opencode_usage(info: dict) -> TokenUsage | None:
     usage_key = f"opencode:{native_id}" if isinstance(native_id, str) and native_id else None
     return TokenUsage(
         model=model,
+        provider=provider if isinstance(provider, str) and provider else None,
         input_tokens=int(tokens.get("input") or 0),
         output_tokens=int(tokens.get("output") or 0),
         cache_creation_input_tokens=int(cache.get("write") or 0),
         cache_read_input_tokens=int(cache.get("read") or 0),
         reasoning_output_tokens=int(tokens.get("reasoning") or 0),
         cost_usd=cost,
+        cost_provenance=(CostProvenance.REPORTED if cost is not None else CostProvenance.UNKNOWN),
         idempotency_key=usage_key,
     )
 
 
 def _opencode_model(info: dict) -> str | None:
     model_data = _table(info.get("model"))
-    provider = info.get("providerID") or model_data.get("providerID")
-    model_id = info.get("modelID") or model_data.get("modelID") or model_data.get("id")
+    provider = info.get(OPENCODE_PROVIDER_ID_KEY) or model_data.get(OPENCODE_PROVIDER_ID_KEY)
+    model_id = (
+        info.get(OPENCODE_MODEL_ID_KEY)
+        or model_data.get(OPENCODE_MODEL_ID_KEY)
+        or model_data.get("id")
+    )
     if isinstance(provider, str) and isinstance(model_id, str) and provider and model_id:
         return f"{provider}/{model_id}"
     if isinstance(model_id, str) and model_id:
@@ -444,12 +455,17 @@ def _part_timing(part: dict, fallback=None) -> Timing | None:
 
 def _trajectory_usage(info: dict) -> TrajectoryUsage | None:
     model = _trajectory_identifier(_opencode_model(info), "model")
+    model_data = _table(info.get("model"))
+    provider = _trajectory_identifier(
+        info.get(OPENCODE_PROVIDER_ID_KEY) or model_data.get(OPENCODE_PROVIDER_ID_KEY),
+        "provider",
+    )
     try:
         usage = _opencode_usage(info)
     except (AttributeError, TypeError, ValueError, OverflowError):
-        return TrajectoryUsage(model=model) if model is not None else None
+        return TrajectoryUsage(model=model, provider=provider) if model or provider else None
     if usage is None:
-        return TrajectoryUsage(model=model) if model is not None else None
+        return TrajectoryUsage(model=model, provider=provider) if model or provider else None
     values = {
         name: max(0, value) if isinstance(value, int) else 0
         for name, value in (
@@ -465,8 +481,10 @@ def _trajectory_usage(info: dict) -> TrajectoryUsage | None:
         cost = None
     return TrajectoryUsage(
         model=model or _trajectory_identifier(usage.model, "model"),
+        provider=provider or _trajectory_identifier(usage.provider, "provider"),
         request_id=_trajectory_identifier(usage.idempotency_key, "request"),
         cost_usd=cost,
+        cost_provenance=(CostProvenance.REPORTED if cost is not None else CostProvenance.UNKNOWN),
         **values,
     )
 
@@ -1572,6 +1590,7 @@ class OpenCodeSource(Source):
         parent_call_id: str | None = None,
         timing: Timing | None = None,
         usage: TrajectoryUsage | None = None,
+        failure: TrajectoryFailure | None = None,
         details: Sequence[DetailField] = (),
     ) -> TrajectoryFact:
         native = _trajectory_identifier(native_id, "native")
@@ -1594,6 +1613,7 @@ class OpenCodeSource(Source):
             parent_call_id=_trajectory_identifier(parent_call_id, "parent-call"),
             timing=timing,
             usage=usage,
+            failure=failure,
             details=tuple(details),
         )
 
@@ -1811,6 +1831,11 @@ class OpenCodeSource(Source):
                     turn_id=mid or None,
                     call_id=call_id,
                     parent_call_id=parent_id,
+                    failure=(
+                        TrajectoryFailure(TrajectoryFailureCategory.TOOL, detail=result)
+                        if state_status == "error"
+                        else None
+                    ),
                     timing=_part_timing(part),
                     request_id=request_id if role == "assistant" else None,
                     details=(result_detail,) if result_detail is not None else (),
@@ -2157,6 +2182,7 @@ class OpenCodeSource(Source):
         parent_call_id: str | None = None,
         timing: Timing | None = None,
         usage: TrajectoryUsage | None = None,
+        failure: TrajectoryFailure | None = None,
         details: Sequence[DetailField] = (),
         revision_hint: int | None = None,
     ) -> TrajectoryFact | None:
@@ -2179,6 +2205,7 @@ class OpenCodeSource(Source):
             parent_call_id=_trajectory_identifier(parent_call_id, "parent-call"),
             timing=timing,
             usage=usage,
+            failure=failure,
             details=tuple(details),
         )
         key = native or f"fallback:{candidate.raw_index}:{candidate.event_ordinal}:{kind.value}"
@@ -2397,6 +2424,11 @@ class OpenCodeSource(Source):
                 request_id=request_id,
                 call_id=call_id,
                 parent_call_id=parent_id,
+                failure=(
+                    TrajectoryFailure(TrajectoryFailureCategory.TOOL, detail=result)
+                    if state_status == "error"
+                    else None
+                ),
                 timing=timing,
                 details=result_details,
                 revision_hint=revision_hint,

@@ -134,7 +134,9 @@ from theater.regie.palette import (
 )
 from theater.regie.trajectory import (
     ReturnToTree,
+    TrajectoryBackRequested,
     TrajectoryController,
+    TrajectoryNavigationHistory,
     TrajectoryParticipantSelected,
     TrajectoryStateStore,
     TrajectoryView,
@@ -185,6 +187,7 @@ from theater.regie.widgets.usage_footer import (  # noqa: F401
 )
 from theater.tmux import client as tmux
 from theater.tmux import panes
+from theater.trajectory import TrajectoryLocationResolution
 
 logger = logging.getLogger("theater.regie")
 
@@ -289,10 +292,12 @@ class RegieApp(App):
         Binding("down", "cursor_down", "down", show=False),
         Binding("up", "cursor_up", "up", show=False),
         Binding("h", "cursor_left_or_trajectory", "trajectory", show=False),
+        Binding("H,shift+h", "stage_and_focus_trajectory", "open trajectory", show=False),
         Binding("left", "cursor_left", "left", show=False),
         Binding("right", "cursor_right", "right", show=False),
         Binding("enter", "stage", "stage"),
         Binding("l", "cursor_right_or_focus", "focus", show=False),
+        Binding("L,shift+l", "stage_and_focus_tmux", "open agent", show=False),
         Binding("o", "spawn", "spawn"),
         Binding("x", "kill", "kill"),
         Binding("q", "quit", "quit"),
@@ -348,6 +353,7 @@ class RegieApp(App):
         )
         self._trajectory_controller: TrajectoryController | None = None
         self._trajectory_view_widget: TrajectoryView | None = None
+        self._trajectory_navigation = TrajectoryNavigationHistory()
         self._session = SessionController(tmux, panes)
 
     @property
@@ -1150,18 +1156,71 @@ class RegieApp(App):
         self,
         message: TrajectoryParticipantSelected,
     ) -> None:
+        origin = self._trajectory_origin()
+        if (
+            await self._navigate_trajectory_link(message.participant_id, message.target_record_id)
+            and origin is not None
+        ):
+            self._trajectory_navigation.push(origin[0], origin[1])
+
+    async def on_trajectory_back_requested(self, _message: TrajectoryBackRequested) -> None:
+        target = self._trajectory_navigation.back()
+        if target is None:
+            return
+        if not await self._navigate_trajectory_link(target.participant_id, target.record_id):
+            self._trajectory_navigation.push(target.participant_id, target.record_id)
+
+    def _trajectory_origin(self) -> tuple[str, str] | None:
+        view = self._trajectory_view()
+        if view is None:
+            return None
+        record_id = view.state.row_anchor(view.state.selected_id)
+        return (view.participant_id, record_id) if record_id is not None else None
+
+    async def _navigate_trajectory_link(
+        self,
+        participant_id: str,
+        target_record_id: str | None,
+    ) -> bool:
         for index, (_, node, key, _, _) in enumerate(self.tree_lines):
-            if key[0] == "p" and node.get("id") == message.participant_id:
+            if key[0] == "p" and node.get("id") == participant_id:
                 self._leave_usage_metrics()
                 self.cursor = index
                 self._render_tree()
-                await self._show_trajectory(
-                    message.participant_id,
+                result = await self._show_trajectory(
+                    participant_id,
                     managed=True,
                     focus_after_stage=True,
                 )
-                return
+                if result.outcome not in {
+                    TrajectoryStageOutcome.STAGED,
+                    TrajectoryStageOutcome.FOCUS,
+                }:
+                    return False
+                if target_record_id is not None:
+                    await self._reveal_trajectory_target(participant_id, target_record_id)
+                return True
         self.notify("linked participant is no longer in the tree", severity="warning")
+        return False
+
+    async def _reveal_trajectory_target(self, participant_id: str, record_id: str) -> None:
+        view = self._trajectory_view()
+        if view is None or view.participant_id != participant_id:
+            return
+        await view.wait_until_loaded()
+        if view.select_and_reveal_record(record_id):
+            return
+        try:
+            location = await self._ensure_trajectory_controller().locate(participant_id, record_id)
+        except Exception as exc:
+            self.notify(f"linked event lookup failed: {exc}", severity="warning")
+            return
+        if location.resolution is not TrajectoryLocationResolution.EXACT or location.record is None:
+            self.notify(location.message or "linked event is unavailable", severity="warning")
+            return
+        view.state.upsert((location.record,))
+        if not view.select_and_reveal_record(record_id):
+            self.notify("linked event could not be shown", severity="warning")
 
     def on_return_to_tree(self, _message: ReturnToTree) -> None:
         self._focus_tree()
@@ -1346,7 +1405,16 @@ class RegieApp(App):
             self.action_cursor_left()
             return
         participant_id, managed = self._selected_trajectory_target()
+        self._trajectory_navigation.clear()
         await self._show_trajectory(participant_id, managed=managed)
+
+    async def action_stage_and_focus_trajectory(self) -> None:
+        """Stage the selected trajectory and focus it immediately."""
+        if self._nav.in_footer:
+            return
+        participant_id, managed = self._selected_trajectory_target()
+        self._trajectory_navigation.clear()
+        await self._show_trajectory(participant_id, managed=managed, focus_after_stage=True)
 
     def action_cursor_right(self) -> None:
         target = self._nav.right()
@@ -1546,8 +1614,9 @@ class RegieApp(App):
         await self._refresh_tree()
         self._focus_tree()
 
-    async def action_focus_stage(self) -> None:
-        """Stage on first `l`; focus an already staged pane on second `l`."""
+    async def _focus_stage(self, *, focus_after_stage: bool) -> None:
+        if self._nav.in_footer:
+            return
         result = await self._staging.focus(
             tree_lines=self.tree_lines,
             cursor=self.cursor,
@@ -1558,11 +1627,19 @@ class RegieApp(App):
             selected_participant_fn=selected_participant,
         )
         self._apply_stage_result(result.stage_result)
-        if result.should_select and result.pane:
+        if result.pane and (result.should_select or focus_after_stage):
             try:
                 await panes.select_pane(result.pane)
             except Exception as exc:
                 self.notify(f"focus failed: {exc}", severity="error")
+
+    async def action_focus_stage(self) -> None:
+        """Stage on first `l`; focus an already staged pane on second `l`."""
+        await self._focus_stage(focus_after_stage=False)
+
+    async def action_stage_and_focus_tmux(self) -> None:
+        """Stage the selected tmux pane and focus it immediately."""
+        await self._focus_stage(focus_after_stage=True)
 
     # ---- tree rendering with cursor ------------------------------------
 

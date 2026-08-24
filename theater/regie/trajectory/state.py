@@ -20,7 +20,12 @@ from theater.regie.trajectory.constants import (
     TRAJECTORY_UI_RECORD_LIMIT,
     TRAJECTORY_WARM_STREAM_LIMIT,
 )
-from theater.regie.trajectory.enums import FocusRegion, InspectorTab, OrderMode
+from theater.regie.trajectory.diagnostic_views import (
+    DiagnosticIndex,
+    build_diagnostic_index,
+    empty_diagnostic_index,
+)
+from theater.regie.trajectory.enums import DiagnosticView, FocusRegion, InspectorTab, OrderMode
 from theater.regie.trajectory.ordering import canonical_group_records
 from theater.regie.trajectory.request_rows import (
     RequestIndex,
@@ -72,6 +77,7 @@ class ParticipantTrajectoryState:
     records: OrderedDict[str, TrajectoryRecord] = field(default_factory=OrderedDict)
     request_index: RequestIndex = field(default_factory=empty_request_index)
     tool_index: ToolIndex = field(default_factory=empty_tool_index)
+    diagnostic_index: DiagnosticIndex = field(default_factory=empty_diagnostic_index)
     loaded_bytes: int = 0
     follow_tail: bool = True
     new_count: int = 0
@@ -82,6 +88,7 @@ class ParticipantTrajectoryState:
     kind_filters: set[TrajectoryKind] = field(default_factory=set)
     status_filters: set[TrajectoryStatus] = field(default_factory=set)
     source_filters: set[str] = field(default_factory=set)
+    diagnostic_view: DiagnosticView = DiagnosticView.ALL
     order_mode: OrderMode = OrderMode.ORDER
     ledger_page: int = 0
     timeline_scroll: int = 0
@@ -150,6 +157,9 @@ class ParticipantTrajectoryState:
         self.groups = group_records(self.record_list)
         self.request_index = build_request_index(self.records.values())
         self.tool_index = build_tool_index(self.records.values())
+        self.diagnostic_index = build_diagnostic_index(
+            self.records.values(), self.request_index, self.tool_index
+        )
 
     def row_anchor(self, record_id: str | None) -> str | None:
         """Resolve a tool member to its canonical ledger row anchor."""
@@ -236,6 +246,7 @@ class ParticipantTrajectoryState:
         prior_groups = self.groups
         prior_request_index = self.request_index
         prior_tool_index = self.tool_index
+        prior_diagnostic_index = self.diagnostic_index
         preserve_trace = (
             page.panel_state.state
             in {PanelState.STALE, PanelState.UNAVAILABLE, PanelState.UNTRUSTED}
@@ -264,6 +275,7 @@ class ParticipantTrajectoryState:
             self.groups = prior_groups
             self.request_index = prior_request_index
             self.tool_index = prior_tool_index
+            self.diagnostic_index = prior_diagnostic_index
         else:
             self._apply_records(page.records)
             self.groups = page.groups or self.groups
@@ -411,6 +423,7 @@ class ParticipantTrajectoryState:
         self.kind_filters.clear()
         self.status_filters.clear()
         self.source_filters.clear()
+        self.diagnostic_view = DiagnosticView.ALL
         self.selected_id = None
         self.hovered_id = None
         self.order_mode = OrderMode.ORDER

@@ -30,6 +30,7 @@ from theater.daemon.trajectory.responses import (
     stale_page,
 )
 from theater.daemon.trajectory.runtime import TrajectoryRuntime, TrajectoryStream
+from theater.daemon.trajectory.theater_events import ALLOWLISTED_BUS_KINDS, project_bus_row
 from theater.models import BadRequest, NotFound, Participant
 from theater.trajectory import (
     PanelState,
@@ -38,6 +39,7 @@ from theater.trajectory import (
     TrajectoryParticipantState,
     TrajectoryRecord,
 )
+from theater.trajectory.location import TrajectoryLocation, TrajectoryLocationResolution
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +80,54 @@ class TrajectoryService:
 
     def capture_batch(self, participant_id: str, batch) -> None:
         self._runtime.capture_batch(participant_id, batch)
+
+    def locate(self, participant_token: str, record_id: str) -> TrajectoryLocation:
+        _validate_identifier(participant_token, "trajectory.locate", "id")
+        _validate_identifier(record_id, "trajectory.locate", "record_id")
+        participant = self._resolve(participant_token, missing=True)
+        if participant is None:
+            return TrajectoryLocation(
+                participant_token,
+                record_id,
+                TrajectoryLocationResolution.NOT_FOUND,
+                message="participant is not known to Theater",
+            )
+        stream = self.streams.get(participant.id)
+        cached = stream.ring.get(record_id) if stream is not None else None
+        if cached is not None and cached.participant_id == participant.id:
+            return TrajectoryLocation(
+                participant.id,
+                record_id,
+                TrajectoryLocationResolution.EXACT,
+                record=cached,
+            )
+        row_id = _bus_record_id(record_id)
+        if row_id is None:
+            return TrajectoryLocation(
+                participant.id,
+                record_id,
+                TrajectoryLocationResolution.UNAVAILABLE,
+                message="record is not warm; request trajectory.snapshot before navigating to it",
+            )
+        row = self.store.bus_record_for_participant(
+            participant.id,
+            row_id,
+            kinds=ALLOWLISTED_BUS_KINDS,
+        )
+        record = project_bus_row(row, participant.id) if row is not None else None
+        if record is None or record.record_id != record_id:
+            return TrajectoryLocation(
+                participant.id,
+                record_id,
+                TrajectoryLocationResolution.NOT_FOUND,
+                message="record is not available for this participant",
+            )
+        return TrajectoryLocation(
+            participant.id,
+            record_id,
+            TrajectoryLocationResolution.EXACT,
+            record=record,
+        )
 
     async def snapshot(
         self,
@@ -402,6 +452,26 @@ def _validate_participant_token(value: object, method_name: str) -> None:
     _validate_encoded_length(
         value, TRAJECTORY_IDENTIFIER_MAX_BYTES, f"{method_name} parameter 'id'"
     )
+
+
+def _validate_identifier(value: object, method_name: str, key: str) -> None:
+    if not isinstance(value, str) or not value:
+        raise BadRequest(f"{method_name} requires non-empty string parameter {key!r}")
+    _validate_encoded_length(
+        value, TRAJECTORY_IDENTIFIER_MAX_BYTES, f"{method_name} parameter {key!r}"
+    )
+    if any(ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in value):
+        raise BadRequest(f"{method_name} parameter {key!r} must not contain control characters")
+
+
+def _bus_record_id(record_id: str) -> int | None:
+    prefix = "bus:"
+    if not record_id.startswith(prefix):
+        return None
+    value = record_id.removeprefix(prefix)
+    if not value or not value.isascii() or not value.isdecimal() or value != str(int(value)):
+        return None
+    return int(value)
 
 
 def _terminal_participant_state(stream: TrajectoryStream) -> bool:

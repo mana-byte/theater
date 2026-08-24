@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from theater.constants.trajectory import (
     TRAJECTORY_OVERVIEW_MAX_COST_USD,
     TRAJECTORY_OVERVIEW_MAX_COUNT,
+    TRAJECTORY_OVERVIEW_MAX_DURATION_MS,
     TRAJECTORY_OVERVIEW_MAX_TOKENS,
 )
 from theater.trajectory import (
@@ -17,13 +18,20 @@ from theater.trajectory import (
     TrajectoryFeature,
     TrajectoryIncompleteReason,
     TrajectoryKind,
-    TrajectoryOverview,
     TrajectoryProblem,
     TrajectoryRecord,
     TrajectoryStatus,
     deterministic_record_order,
     requests_for_records,
 )
+from theater.trajectory.enums import CostProvenance
+from theater.trajectory.overview import (
+    TrajectoryErrorDiagnostics,
+    TrajectoryOverview,
+    TrajectorySlowOperation,
+)
+from theater.trajectory.requests import TrajectoryRequest
+from theater.trajectory.tools import TrajectoryToolOperation, tool_operations_for_records
 
 _ACTIVE = frozenset({TrajectoryStatus.PENDING, TrajectoryStatus.RUNNING, TrajectoryStatus.PARTIAL})
 _TERMINAL = frozenset(
@@ -115,9 +123,16 @@ def _capabilities(
             observed.add(TrajectoryFeature.CONTEXT)
         if record.timing is not None and any(
             value is not None
-            for value in (record.timing.start, record.timing.end, record.timing.duration_ms)
+            for value in (
+                record.timing.start,
+                record.timing.first_token,
+                record.timing.end,
+                record.timing.duration_ms,
+            )
         ):
             observed.add(TrajectoryFeature.TIMING)
+        if record.retry_of_record_id is not None:
+            observed.add(TrajectoryFeature.RETRIES)
         if record.request_id is not None:
             observed.add(TrajectoryFeature.REQUESTS)
         if record.usage is not None:
@@ -142,6 +157,8 @@ def _overview(
     has_coverage_gaps: bool,
     cache_evicted: bool,
 ) -> TrajectoryOverview:
+    requests = requests_for_records(ordered)
+    tool_operations = tool_operations_for_records(ordered)
     usage_records = _usage_records(ordered)
     usages = tuple(record.usage for record in usage_records if record.usage is not None)
     input_tokens, input_saturated = _sum_int(usage.input_tokens for usage in usages)
@@ -151,7 +168,15 @@ def _overview(
         usage.cache_write_tokens for usage in usages
     )
     reasoning_tokens, reasoning_saturated = _sum_int(usage.reasoning_tokens for usage in usages)
-    reported_cost_usd, cost_saturated = _sum_cost(usage.cost_usd for usage in usages)
+    reported_cost_usd, reported_cost_saturated = _sum_cost(
+        usage.cost_usd for usage in usages if usage.cost_provenance is CostProvenance.REPORTED
+    )
+    estimated_cost_usd, estimated_cost_saturated = _sum_cost(
+        usage.cost_usd for usage in usages if usage.cost_provenance is CostProvenance.ESTIMATED
+    )
+    unknown_cost_usd, unknown_cost_saturated = _sum_cost(
+        usage.cost_usd for usage in usages if usage.cost_provenance is CostProvenance.UNKNOWN
+    )
     reasons = tuple(
         reason
         for reason, present in (
@@ -162,23 +187,27 @@ def _overview(
         if present
     )
     record_count, record_count_saturated = _bounded_count(len(ordered))
-    model_operations, model_operations_saturated = _bounded_count(
-        len(requests_for_records(ordered))
-    )
-    tool_operations, tool_operations_saturated = _bounded_count(
-        sum(record.kind is TrajectoryKind.TOOL_CALL for record in ordered)
+    model_operations, model_operations_saturated = _bounded_count(len(requests))
+    tool_operation_count, tool_operations_saturated = _bounded_count(len(tool_operations))
+    active_duration_ms, duration_saturated = _active_duration(requests, tool_operations)
+    error_count, errors_saturated = _bounded_count(_error_count(ordered, tool_operations))
+    retry_count, retries_saturated = _bounded_count(
+        sum(record.retry_of_record_id is not None for record in ordered)
     )
     return TrajectoryOverview(
         incomplete_reasons=reasons,
         record_count=record_count,
         model_operations=model_operations,
-        tool_operations=tool_operations,
+        tool_operations=tool_operation_count,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cache_read_tokens=cache_read_tokens,
         cache_write_tokens=cache_write_tokens,
         reasoning_tokens=reasoning_tokens,
         reported_cost_usd=reported_cost_usd,
+        estimated_cost_usd=estimated_cost_usd,
+        unknown_cost_usd=unknown_cost_usd,
+        active_duration_ms=active_duration_ms,
         totals_saturated=any(
             (
                 input_saturated,
@@ -186,14 +215,29 @@ def _overview(
                 cache_read_saturated,
                 cache_write_saturated,
                 reasoning_saturated,
-                cost_saturated,
+                reported_cost_saturated,
+                estimated_cost_saturated,
+                unknown_cost_saturated,
                 record_count_saturated,
                 model_operations_saturated,
                 tool_operations_saturated,
+                duration_saturated,
+                errors_saturated,
+                retries_saturated,
             )
         ),
         current=_current(ordered),
         latest_problem=_latest_problem(ordered),
+        slowest_model_operation=_slowest_request(requests),
+        slowest_tool_operation=_slowest_tool(tool_operations),
+        diagnostics=(
+            TrajectoryErrorDiagnostics(
+                error_count=error_count,
+                retry_count=retry_count if retry_count else None,
+            )
+            if error_count or retry_count
+            else None
+        ),
     )
 
 
@@ -254,6 +298,91 @@ def _latest_problem(ordered: tuple[TrajectoryRecord, ...]) -> TrajectoryProblem 
         if record.kind in _PROBLEM_KINDS or record.status in _PROBLEM_STATUSES:
             return TrajectoryProblem(record.record_id, record.summary)
     return None
+
+
+def _error_count(
+    ordered: tuple[TrajectoryRecord, ...], tools: tuple[TrajectoryToolOperation, ...]
+) -> int:
+    non_tool_errors = sum(
+        record.kind not in {TrajectoryKind.TOOL_CALL, TrajectoryKind.TOOL_RESULT}
+        and (record.kind in _PROBLEM_KINDS or record.status in _PROBLEM_STATUSES)
+        for record in ordered
+    )
+    return non_tool_errors + sum(operation.status in _PROBLEM_STATUSES for operation in tools)
+
+
+def _active_duration(
+    requests: tuple[TrajectoryRequest, ...], tools: tuple[TrajectoryToolOperation, ...]
+) -> tuple[float | None, bool]:
+    if not requests and not tools:
+        return None, False
+    intervals: list[tuple[float, float]] = []
+    for timing in (
+        *(request.timing for request in requests),
+        *(operation.timing for operation in tools),
+    ):
+        if timing is None or timing.start is None or timing.end is None:
+            return None, False
+        intervals.append((timing.start, timing.end))
+    intervals.sort()
+    total = 0.0
+    start, end = intervals[0]
+    for next_start, next_end in intervals[1:]:
+        if next_start <= end:
+            end = max(end, next_end)
+            continue
+        total, saturated = _add_interval(total, start, end)
+        if saturated:
+            return total, True
+        start, end = next_start, next_end
+    return _add_interval(total, start, end)
+
+
+def _add_interval(total: float, start: float, end: float) -> tuple[float, bool]:
+    duration_ms = (end - start) * 1000
+    if total > TRAJECTORY_OVERVIEW_MAX_DURATION_MS - duration_ms:
+        return float(TRAJECTORY_OVERVIEW_MAX_DURATION_MS), True
+    return total + duration_ms, False
+
+
+def _slowest_request(requests: tuple[TrajectoryRequest, ...]) -> TrajectorySlowOperation | None:
+    slowest: TrajectorySlowOperation | None = None
+    for request in requests:
+        timing = request.timing
+        if timing is None or timing.duration_ms is None:
+            continue
+        label = request.model or request.source_request_id or request.request_id
+        candidate = TrajectorySlowOperation(
+            record_id=request.record_ids[-1],
+            operation_id=request.request_id,
+            label=label,
+            model=request.model,
+            duration_ms=timing.duration_ms,
+            status=request.status,
+        )
+        if slowest is None or candidate.duration_ms > slowest.duration_ms:
+            slowest = candidate
+    return slowest
+
+
+def _slowest_tool(tools: tuple[TrajectoryToolOperation, ...]) -> TrajectorySlowOperation | None:
+    slowest: TrajectorySlowOperation | None = None
+    for operation in tools:
+        timing = operation.timing
+        if timing is None or timing.duration_ms is None:
+            continue
+        record_ids = operation.result_record_ids or operation.call_record_ids
+        candidate = TrajectorySlowOperation(
+            record_id=record_ids[-1],
+            operation_id=operation.operation_id,
+            label=operation.tool_name or operation.operation_id,
+            tool_name=operation.tool_name,
+            duration_ms=timing.duration_ms,
+            status=operation.status,
+        )
+        if slowest is None or candidate.duration_ms > slowest.duration_ms:
+            slowest = candidate
+    return slowest
 
 
 def _call_family(kind: TrajectoryKind) -> str | None:

@@ -8,7 +8,12 @@ import pytest
 from theater.regie.trajectory import controller as controller_module
 from theater.regie.trajectory.controller import TrajectoryController
 from theater.regie.trajectory.state import TrajectoryStateStore
-from theater.trajectory import PanelState, PanelStateInfo, TrajectoryParticipantState
+from theater.trajectory import (
+    PanelState,
+    PanelStateInfo,
+    TrajectoryLocationResolution,
+    TrajectoryParticipantState,
+)
 
 
 def wire_record(
@@ -84,6 +89,26 @@ def test_controller_keeps_an_empty_injected_state_store() -> None:
 
     assert controller.state_store is states
     assert controller.state_for("p1").detail_ratio == 0.6
+
+
+@pytest.mark.asyncio
+async def test_controller_decodes_exact_record_location() -> None:
+    response = {
+        "participant_id": "p1",
+        "requested_record_id": "bus:7",
+        "resolution": "exact",
+        "record": wire_record("bus:7", participant_id="p1"),
+        "message": "",
+    }
+    query = FakeClient(lambda _method, _params: response)
+    follow = FakeClient(lambda _method, _params: {})
+    controller = TrajectoryController(query, follow)
+
+    location = await controller.locate("p1", "bus:7")
+
+    assert location.resolution is TrajectoryLocationResolution.EXACT
+    assert location.record is not None and location.record.record_id == "bus:7"
+    assert query.calls == [("trajectory.locate", {"id": "p1", "record_id": "bus:7"})]
 
 
 @pytest.mark.asyncio

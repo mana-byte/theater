@@ -11,6 +11,7 @@ from theater.constants.trajectory import (
     TRAJECTORY_IDENTIFIER_MAX_BYTES,
     TRAJECTORY_OVERVIEW_MAX_COST_USD,
     TRAJECTORY_OVERVIEW_MAX_COUNT,
+    TRAJECTORY_OVERVIEW_MAX_DURATION_MS,
     TRAJECTORY_OVERVIEW_MAX_TOKENS,
     TRAJECTORY_OVERVIEW_SUMMARY_MAX_BYTES,
 )
@@ -170,6 +171,128 @@ class TrajectoryProblem:
 
 
 @dataclass(frozen=True, slots=True)
+class TrajectorySlowOperation:
+    record_id: str
+    operation_id: str
+    label: str
+    duration_ms: float
+    status: TrajectoryStatus
+    model: str | None = None
+    tool_name: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("record_id", "operation_id", "label"):
+            object.__setattr__(
+                self,
+                name,
+                bounded_text(
+                    getattr(self, name),
+                    max_bytes=TRAJECTORY_IDENTIFIER_MAX_BYTES,
+                    label=f"overview.slowest.{name}",
+                    nonempty=True,
+                ),
+            )
+        object.__setattr__(
+            self, "status", enum_value(TrajectoryStatus, self.status, "overview.slowest.status")
+        )
+        for name in ("model", "tool_name"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(
+                    self,
+                    name,
+                    bounded_text(
+                        value,
+                        max_bytes=TRAJECTORY_IDENTIFIER_MAX_BYTES,
+                        label=f"overview.slowest.{name}",
+                        nonempty=True,
+                    ),
+                )
+        if (
+            type(self.duration_ms) not in (int, float)
+            or not math.isfinite(self.duration_ms)
+            or self.duration_ms < 0
+        ):
+            raise TrajectoryValidationError("overview.slowest.duration_ms must be non-negative")
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "record_id": self.record_id,
+            "operation_id": self.operation_id,
+            "label": self.label,
+            "duration_ms": self.duration_ms,
+            "status": self.status.value,
+            "model": self.model,
+            "tool_name": self.tool_name,
+        }
+
+    @classmethod
+    def from_wire(cls, value: object) -> Self:
+        data = mapping(value, "trajectory slow operation")
+        keys(
+            data,
+            required={"record_id", "operation_id", "label", "duration_ms", "status"},
+            optional={"model", "tool_name"},
+            label="trajectory slow operation",
+        )
+        duration_ms = number_or_none(data["duration_ms"], "overview.slowest.duration_ms")
+        if duration_ms is None:
+            raise TrajectoryValidationError("overview.slowest.duration_ms must be a number")
+        return cls(
+            record_id=string(data["record_id"], "overview.slowest.record_id"),
+            operation_id=string(data["operation_id"], "overview.slowest.operation_id"),
+            label=string(data["label"], "overview.slowest.label"),
+            duration_ms=duration_ms,
+            status=enum_value(TrajectoryStatus, data["status"], "overview.slowest.status"),
+            model=string_or_none(data.get("model"), "overview.slowest.model"),
+            tool_name=string_or_none(data.get("tool_name"), "overview.slowest.tool_name"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TrajectoryErrorDiagnostics:
+    error_count: int = 0
+    retry_count: int | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.error_count) is not int
+            or not 0 <= self.error_count <= TRAJECTORY_OVERVIEW_MAX_COUNT
+        ):
+            raise TrajectoryValidationError(
+                "overview.diagnostics.error_count must be a bounded integer"
+            )
+        if self.retry_count is not None and (
+            type(self.retry_count) is not int
+            or not 0 <= self.retry_count <= TRAJECTORY_OVERVIEW_MAX_COUNT
+        ):
+            raise TrajectoryValidationError(
+                "overview.diagnostics.retry_count must be a bounded integer or null"
+            )
+
+    def to_wire(self) -> dict[str, object]:
+        return {"error_count": self.error_count, "retry_count": self.retry_count}
+
+    @classmethod
+    def from_wire(cls, value: object) -> Self:
+        data = mapping(value, "trajectory error diagnostics")
+        keys(
+            data,
+            required=set(),
+            optional={"error_count", "retry_count"},
+            label="trajectory error diagnostics",
+        )
+        return cls(
+            error_count=integer(data.get("error_count", 0), "overview.diagnostics.error_count"),
+            retry_count=(
+                integer(data["retry_count"], "overview.diagnostics.retry_count")
+                if data.get("retry_count") is not None
+                else None
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class TrajectoryOverview:
     incomplete_reasons: tuple[TrajectoryIncompleteReason, ...] = (
         TrajectoryIncompleteReason.UNKNOWN,
@@ -183,11 +306,17 @@ class TrajectoryOverview:
     cache_write_tokens: int = 0
     reasoning_tokens: int = 0
     reported_cost_usd: float | None = None
+    estimated_cost_usd: float | None = None
+    unknown_cost_usd: float | None = None
+    active_duration_ms: float | None = None
     totals_saturated: bool = False
     current: TrajectoryCurrentOperation | None = None
     latest_problem: TrajectoryProblem | None = None
+    slowest_model_operation: TrajectorySlowOperation | None = None
+    slowest_tool_operation: TrajectorySlowOperation | None = None
+    diagnostics: TrajectoryErrorDiagnostics | None = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> None:  # noqa: PLR0912
         object.__setattr__(
             self,
             "incomplete_reasons",
@@ -218,13 +347,23 @@ class TrajectoryOverview:
                 raise TrajectoryValidationError(
                     f"overview.{name} must be a bounded non-negative integer"
                 )
-        if self.reported_cost_usd is not None and (
-            type(self.reported_cost_usd) not in (int, float)
-            or not math.isfinite(self.reported_cost_usd)
-            or not 0 <= self.reported_cost_usd <= TRAJECTORY_OVERVIEW_MAX_COST_USD
+        for name in ("reported_cost_usd", "estimated_cost_usd", "unknown_cost_usd"):
+            value = getattr(self, name)
+            if value is not None and (
+                type(value) not in (int, float)
+                or not math.isfinite(value)
+                or not 0 <= value <= TRAJECTORY_OVERVIEW_MAX_COST_USD
+            ):
+                raise TrajectoryValidationError(
+                    f"overview.{name} must be a bounded non-negative number or null"
+                )
+        if self.active_duration_ms is not None and (
+            type(self.active_duration_ms) not in (int, float)
+            or not math.isfinite(self.active_duration_ms)
+            or not 0 <= self.active_duration_ms <= TRAJECTORY_OVERVIEW_MAX_DURATION_MS
         ):
             raise TrajectoryValidationError(
-                "overview.reported_cost_usd must be a bounded non-negative number or null"
+                "overview.active_duration_ms must be a bounded non-negative number or null"
             )
         if type(self.totals_saturated) is not bool:
             raise TrajectoryValidationError("overview.totals_saturated must be a boolean")
@@ -237,6 +376,18 @@ class TrajectoryOverview:
         ):
             raise TrajectoryValidationError(
                 "overview.latest_problem must be TrajectoryProblem or null"
+            )
+        for name in ("slowest_model_operation", "slowest_tool_operation"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, TrajectorySlowOperation):
+                raise TrajectoryValidationError(
+                    f"overview.{name} must be TrajectorySlowOperation or null"
+                )
+        if self.diagnostics is not None and not isinstance(
+            self.diagnostics, TrajectoryErrorDiagnostics
+        ):
+            raise TrajectoryValidationError(
+                "overview.diagnostics must be TrajectoryErrorDiagnostics or null"
             )
 
     @property
@@ -256,7 +407,7 @@ class TrajectoryOverview:
         return TrajectoryIncompleteReason.CACHE_EVICTED in self.incomplete_reasons
 
     def to_wire(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "incomplete_reasons": [value.value for value in self.incomplete_reasons],
             "record_count": self.record_count,
             "model_operations": self.model_operations,
@@ -273,6 +424,19 @@ class TrajectoryOverview:
             if self.latest_problem is not None
             else None,
         }
+        if self.active_duration_ms is not None:
+            value["active_duration_ms"] = self.active_duration_ms
+        if self.estimated_cost_usd is not None:
+            value["estimated_cost_usd"] = self.estimated_cost_usd
+        if self.unknown_cost_usd is not None:
+            value["unknown_cost_usd"] = self.unknown_cost_usd
+        if self.slowest_model_operation is not None:
+            value["slowest_model_operation"] = self.slowest_model_operation.to_wire()
+        if self.slowest_tool_operation is not None:
+            value["slowest_tool_operation"] = self.slowest_tool_operation.to_wire()
+        if self.diagnostics is not None:
+            value["diagnostics"] = self.diagnostics.to_wire()
+        return value
 
     @classmethod
     def from_wire(cls, value: object) -> Self:
@@ -291,9 +455,15 @@ class TrajectoryOverview:
                 "cache_write_tokens",
                 "reasoning_tokens",
                 "reported_cost_usd",
+                "estimated_cost_usd",
+                "unknown_cost_usd",
+                "active_duration_ms",
                 "totals_saturated",
                 "current",
                 "latest_problem",
+                "slowest_model_operation",
+                "slowest_tool_operation",
+                "diagnostics",
             },
             label="trajectory overview",
         )
@@ -323,6 +493,15 @@ class TrajectoryOverview:
             reported_cost_usd=number_or_none(
                 data.get("reported_cost_usd"), "overview.reported_cost_usd"
             ),
+            estimated_cost_usd=number_or_none(
+                data.get("estimated_cost_usd"), "overview.estimated_cost_usd"
+            ),
+            unknown_cost_usd=number_or_none(
+                data.get("unknown_cost_usd"), "overview.unknown_cost_usd"
+            ),
+            active_duration_ms=number_or_none(
+                data.get("active_duration_ms"), "overview.active_duration_ms"
+            ),
             totals_saturated=boolean(
                 data.get("totals_saturated", False), "overview.totals_saturated"
             ),
@@ -336,12 +515,29 @@ class TrajectoryOverview:
                 if data.get("latest_problem") is not None
                 else None
             ),
+            slowest_model_operation=(
+                TrajectorySlowOperation.from_wire(data["slowest_model_operation"])
+                if data.get("slowest_model_operation") is not None
+                else None
+            ),
+            slowest_tool_operation=(
+                TrajectorySlowOperation.from_wire(data["slowest_tool_operation"])
+                if data.get("slowest_tool_operation") is not None
+                else None
+            ),
+            diagnostics=(
+                TrajectoryErrorDiagnostics.from_wire(data["diagnostics"])
+                if data.get("diagnostics") is not None
+                else None
+            ),
         )
 
 
 __all__ = [
     "TrajectoryCurrentOperation",
+    "TrajectoryErrorDiagnostics",
     "TrajectoryIncompleteReason",
     "TrajectoryOverview",
     "TrajectoryProblem",
+    "TrajectorySlowOperation",
 ]

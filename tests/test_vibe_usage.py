@@ -6,6 +6,7 @@ from pathlib import Path
 
 from theater.harness.builtin.plugins.vibe import _VibeSource
 from theater.harness.source import Batch, Source, TranscriptSource
+from theater.trajectory.enums import CostProvenance
 
 
 class FakeTranscriptSource(Source):
@@ -99,9 +100,11 @@ def test_new_launch_counts_initial_usage_and_prices_like_vibe(tmp_path):
 
     assert usage is not None
     assert usage.model == "openai/gpt-5"
+    assert usage.provider == "openai"
     assert usage.input_tokens == 6
     assert usage.cache_read_input_tokens == 4
     assert usage.cost_usd == 35 / 1_000_000
+    assert usage.cost_provenance is CostProvenance.ESTIMATED
 
 
 def test_cached_tokens_are_clamped_to_prompt_tokens(tmp_path):

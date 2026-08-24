@@ -9,10 +9,17 @@ import pytest
 
 import theater.harness.builtin.plugins.claude as claude_plugin
 import theater.harness.builtin.plugins.codex as codex_plugin
+import theater.harness.builtin.plugins.opencode as opencode_plugin
 from theater.harness.builtin.plugins.claude import ClaudeCodeObserver
 from theater.harness.builtin.plugins.codex import CodexObserver
 from theater.harness.contracts.trajectory import ParsedRecord
-from theater.trajectory.enums import TimingProvenance, TrajectoryKind, TrajectoryStatus
+from theater.trajectory.enums import (
+    CostProvenance,
+    TimingProvenance,
+    TrajectoryFailureCategory,
+    TrajectoryKind,
+    TrajectoryStatus,
+)
 from theater.trajectory.records import Timing
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -164,6 +171,7 @@ def test_codex_facts_include_rollout_items_calls_parent_ids_reasoning_usage_and_
     assert reasoning.summary == "explicit summary"
     assert usage.usage is not None
     assert usage.usage.model == "codex-test"
+    assert usage.usage.provider == "openai"
     assert usage.usage.input_tokens == 75
     assert usage.usage.cache_read_tokens == 20
     assert usage.usage.cache_write_tokens == 5
@@ -171,6 +179,111 @@ def test_codex_facts_include_rollout_items_calls_parent_ids_reasoning_usage_and_
     assert complete.summary == "turn completed"
     assert complete.timing is not None
     assert complete.timing.duration_ms == 9000
+
+
+def test_codex_task_complete_preserves_explicit_first_token_time() -> None:
+    line = json.dumps(
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "turn_id": "turn",
+                "started_at": 100.0,
+                "completed_at": 102.0,
+                "time_to_first_token_ms": 250.0,
+            },
+        }
+    )
+    fact = CodexObserver().parse_record(line, 0).trajectory[0]
+
+    assert fact.timing == Timing(
+        start=100.0,
+        end=102.0,
+        first_token=100.25,
+        provenance=TimingProvenance.SOURCE,
+    )
+
+    without_first_token = json.dumps(
+        {
+            "type": "event_msg",
+            "payload": {"type": "task_complete", "started_at": 100.0, "completed_at": 102.0},
+        }
+    )
+    missing = CodexObserver().parse_record(without_first_token, 0).trajectory[0]
+    assert missing.timing is not None and missing.timing.first_token is None
+
+
+def test_cost_provenance_tracks_reported_adapter_values() -> None:
+    claude = claude_plugin._token_usage({"usage": {"input_tokens": 1}}, {"costUSD": 0.1})
+    codex = codex_plugin._codex_usage({}, {"usage": {"input_tokens": 1, "cost_usd": 0.2}})
+    opencode = opencode_plugin._opencode_usage({"tokens": {"input": 1}, "cost": 0.3})
+
+    assert claude is not None and claude.cost_provenance is CostProvenance.REPORTED
+    assert codex is not None and codex.cost_provenance is CostProvenance.REPORTED
+    assert opencode is not None and opencode.cost_provenance is CostProvenance.REPORTED
+
+
+def test_provider_projection_stays_inside_each_adapter() -> None:
+    claude = claude_plugin._claude_trajectory_usage(
+        {"provider": "anthropic", "usage": {"input_tokens": 1}},
+        {},
+    )
+    opencode = opencode_plugin._trajectory_usage(
+        {
+            "providerID": "openai-foundry",
+            "modelID": "zai-glm-5-2",
+            "tokens": {"input": 1},
+        }
+    )
+
+    assert claude is not None and claude.provider == "anthropic"
+    assert opencode is not None and opencode.provider == "openai-foundry"
+
+
+def test_explicit_tool_and_provider_errors_keep_typed_failures() -> None:
+    tool_line = json.dumps(
+        {
+            "type": "assistant",
+            "message": {
+                "id": "message",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tool",
+                        "is_error": True,
+                        "content": "bad",
+                    }
+                ],
+            },
+        }
+    )
+    provider_line = json.dumps({"type": "system", "level": "error", "error": "API failed"})
+    observer = ClaudeCodeObserver()
+    tool = observer.parse_record(tool_line, 0).trajectory[0]
+    provider = observer.parse_record(provider_line, 1).trajectory[0]
+
+    assert tool.failure is not None and tool.failure.category is TrajectoryFailureCategory.TOOL
+    assert provider.failure is not None
+    assert provider.failure.category is TrajectoryFailureCategory.PROVIDER
+
+    status_only = json.dumps(
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tool",
+                        "status": "error",
+                        "content": "no explicit error",
+                    }
+                ]
+            },
+        }
+    )
+    unclassified = observer.parse_record(status_only, 2).trajectory[0]
+    assert unclassified.status is TrajectoryStatus.ERROR
+    assert unclassified.failure is None
 
 
 def test_codex_never_projects_encrypted_only_reasoning_and_keeps_unmatched_results():

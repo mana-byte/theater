@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 from bisect import bisect_left, bisect_right
 from collections.abc import Awaitable, Callable
@@ -12,7 +13,7 @@ from textual.containers import Vertical
 from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Input, Select
-from textual.worker import Worker
+from textual.worker import Worker, WorkerCancelled, WorkerFailed
 
 from theater.regie.trajectory.constants import (
     MAX_QUERY_BYTES,
@@ -27,7 +28,8 @@ from theater.regie.trajectory.details import (
     move_detail_tab,
     move_tool_detail_tab,
 )
-from theater.regie.trajectory.enums import FilterDimension, FocusRegion, OrderMode
+from theater.regie.trajectory.diagnostic_views import ordering_for_projection
+from theater.regie.trajectory.enums import DiagnosticView, FilterDimension, FocusRegion, OrderMode
 from theater.regie.trajectory.filter_panel import (
     FilterClearRequested,
     FilterPanel,
@@ -46,6 +48,7 @@ from theater.regie.trajectory.ledger import (
     LedgerParticipantLinkClicked,
     LedgerRecordClicked,
     LedgerRecordHovered,
+    LedgerRecordLinkClicked,
     LedgerRetryClicked,
 )
 from theater.regie.trajectory.ordering import TrajectoryOrdering, build_ordering
@@ -61,13 +64,16 @@ from theater.regie.trajectory.timeline import (
     TimelineSpanHovered,
 )
 from theater.trajectory import (
+    ParticipantLink,
     TrajectoryGroup,
     TrajectoryKind,
     TrajectoryLane,
     TrajectoryPage,
     TrajectoryRecord,
+    TrajectoryRequest,
     TrajectoryStatus,
 )
+from theater.trajectory.location import TrajectoryLocationResolution
 
 
 class ReturnToTree(Message):
@@ -85,9 +91,27 @@ class TrajectoryCopyRequested(Message):
 class TrajectoryParticipantSelected(Message):
     """A participant link asks the owning app to stage that tree leaf."""
 
-    def __init__(self, participant_id: str) -> None:
+    def __init__(
+        self,
+        participant_id: str,
+        target_record_id: str | None = None,
+        *,
+        exact: bool | None = None,
+        unresolved: bool = False,
+        link: ParticipantLink | None = None,
+    ) -> None:
         super().__init__()
         self.participant_id = participant_id
+        self.target_record_id = target_record_id
+        self.exact = target_record_id is not None if exact is None else exact
+        self.unresolved = unresolved
+        self.is_exact = self.exact
+        self.is_unresolved = self.unresolved
+        self.link = link
+
+
+class TrajectoryBackRequested(Message):
+    """The current trajectory asks the owning app to navigate back."""
 
 
 class TrajectoryRetryRequested(Message):
@@ -263,6 +287,7 @@ class TrajectoryView(Vertical):
             frozenset(self.state.kind_filters),
             frozenset(self.state.status_filters),
             frozenset(self.state.source_filters),
+            self.state.diagnostic_view,
             groups,
             requests,
         )
@@ -289,6 +314,8 @@ class TrajectoryView(Vertical):
         if key == self._search_key:
             return
         self._search_key = key
+        projection = self.state.diagnostic_index.projection_for(self.state.diagnostic_view)
+        diagnostic_ordering = ordering_for_projection(records, projection)
         self._search_result = search_records(
             records,
             query=self.state.query,
@@ -298,9 +325,10 @@ class TrajectoryView(Vertical):
             source_filters=self.state.source_filters,
             groups=self.state.groups,
             cache=self._search_cache,
-            ordering=ordering,
+            ordering=diagnostic_ordering or ordering,
             request_index=self.state.request_index,
             tool_index=self.state.tool_index,
+            candidate_ids=projection.record_ids,
         )
         self._all_visible_ids = self._search_result.row_ids
         self._all_visible_indices = {
@@ -454,6 +482,7 @@ class TrajectoryView(Vertical):
             ),
             query=self.state.query,
             mode=self.state.order_mode,
+            view=self.state.diagnostic_view,
             follow_tail=self.state.follow_tail,
             new_count=self.state.new_count,
         )
@@ -519,6 +548,54 @@ class TrajectoryView(Vertical):
         if row_id is not None:
             return row_id
         return record_id if record_id in self._all_visible_indices else None
+
+    def _request_for_record(self, record_id: str | None) -> TrajectoryRequest | None:
+        if record_id is None:
+            return None
+        request_id = self.state.request_index.by_record_id.get(record_id)
+        return self.state.request_index.by_id.get(request_id or "")
+
+    def select_and_reveal_record(self, record_id: str) -> bool:
+        """Select and open a loaded record without requesting more trajectory data."""
+        if record_id not in self.state.records:
+            return False
+        anchor = self.state.row_anchor(record_id)
+        if anchor is None:
+            return False
+        if self._logical_row_id(record_id) not in self._all_visible_indices:
+            self.state.diagnostic_view = DiagnosticView.ALL
+            self.state.query = ""
+            if self.is_mounted:
+                self.query_one("#trajectory-search", Input).value = ""
+            self.state.lane_filters.clear()
+            self.state.kind_filters.clear()
+            self.state.status_filters.clear()
+            self.state.source_filters.clear()
+        self.state.select(anchor)
+        self.state.expanded_id = anchor
+        operation_id = self.state.tool_index.by_record_id.get(anchor)
+        if operation_id is not None:
+            self.state.detail_tab = active_tool_detail_tab(
+                self.state.tool_index.by_id[operation_id], self.state.detail_tab
+            )
+        else:
+            self.state.detail_tab = active_detail_tab(
+                self.state.records[anchor], self.state.detail_tab
+            )
+        self._refresh()
+        self._update_follow_for_selection(anchor)
+        self._sync_selection()
+        if self.is_mounted:
+            self.query_one("#trajectory-ledger", Ledger).focus()
+        return True
+
+    async def wait_until_loaded(self) -> None:
+        """Wait for the initial bounded snapshot before an exact reveal."""
+        worker = self._load_worker
+        if worker is None or worker.is_finished:
+            return
+        with contextlib.suppress(WorkerCancelled, WorkerFailed):
+            await worker.wait()
 
     def _selected_visible_ids(self) -> tuple[str, ...]:
         return self._visible_ids
@@ -649,6 +726,12 @@ class TrajectoryView(Vertical):
         )
         self._refresh(recompute=False)
 
+    def action_cycle_diagnostic_view(self) -> None:
+        views = tuple(DiagnosticView)
+        current = views.index(self.state.diagnostic_view)
+        self.state.diagnostic_view = views[(current + 1) % len(views)]
+        self._refresh()
+
     def action_open_search(self) -> None:
         self.state.search_open = True
         self.state.filters_open = False
@@ -776,13 +859,20 @@ class TrajectoryView(Vertical):
             text = ledger.copy_text
         elif self.state.selected_record is not None:
             record = self.state.selected_record
-            text = detail_text(record, active_detail_tab(record, self.state.detail_tab))
+            text = detail_text(
+                record,
+                active_detail_tab(record, self.state.detail_tab),
+                self._request_for_record(record.record_id),
+            )
         else:
             text = ""
         self.run_worker(self._copy(text), name="trajectory-copy")
 
     def action_retry(self) -> None:
         self.run_worker(self._retry(), name="trajectory-retry")
+
+    def action_back(self) -> None:
+        self.post_message(TrajectoryBackRequested())
 
     def action_return_to_tree(self) -> None:
         self.post_message(ReturnToTree())
@@ -854,6 +944,8 @@ class TrajectoryView(Vertical):
             "slash": self.action_open_search,
             "f": self.action_toggle_filters,
             "d": self.action_toggle_mode,
+            "v": self.action_cycle_diagnostic_view,
+            "b": self.action_back,
             "r": self.action_reset,
             "R": self.action_retry,
             "shift+r": self.action_retry,
@@ -1001,6 +1093,7 @@ class TrajectoryView(Vertical):
             "search": self.action_open_search,
             "filters": self.action_toggle_filters,
             "mode": self.action_toggle_mode,
+            "view": self.action_cycle_diagnostic_view,
             "follow": self.action_tail,
         }
         action = actions.get(message.action)
@@ -1011,13 +1104,47 @@ class TrajectoryView(Vertical):
         self.action_select_page(message.page_index)
 
     def on_ledger_participant_link_clicked(self, message: LedgerParticipantLinkClicked) -> None:
-        if self._participant_link is not None:
+        if message.target_record_id is None and self._participant_link is not None:
             self.run_worker(
                 self._call_participant_link(message.participant_id),
                 name="trajectory-participant-link",
             )
         else:
-            self.post_message(TrajectoryParticipantSelected(message.participant_id))
+            self.post_message(
+                TrajectoryParticipantSelected(
+                    message.participant_id,
+                    message.target_record_id,
+                    exact=message.exact,
+                    unresolved=message.unresolved,
+                    link=message.link,
+                )
+            )
+
+    def on_ledger_record_link_clicked(self, message: LedgerRecordLinkClicked) -> None:
+        self.run_worker(
+            self._reveal_record_link(message.record_id),
+            name="trajectory-record-link",
+            group="trajectory-record-link",
+            exclusive=True,
+        )
+
+    async def _reveal_record_link(self, record_id: str) -> None:
+        if self.select_and_reveal_record(record_id):
+            return
+        if self.controller is None:
+            self.notify("linked event is outside the loaded window", severity="warning")
+            return
+        try:
+            location = await self.controller.locate(self.participant_id, record_id)
+        except Exception as exc:
+            self.notify(f"linked event lookup failed: {exc}", severity="warning")
+            return
+        if location.resolution is not TrajectoryLocationResolution.EXACT or location.record is None:
+            self.notify(location.message or "linked event is unavailable", severity="warning")
+            return
+        self.state.upsert((location.record,))
+        if not self.select_and_reveal_record(record_id):
+            self.notify("linked event could not be shown", severity="warning")
 
     def on_ledger_detail_tab_changed(self, message: LedgerDetailTabChanged) -> None:
         self.state.detail_tab = message.tab
@@ -1029,6 +1156,7 @@ class TrajectoryView(Vertical):
 
 __all__ = [
     "ReturnToTree",
+    "TrajectoryBackRequested",
     "TrajectoryCopyRequested",
     "TrajectoryParticipantSelected",
     "TrajectoryRetryRequested",

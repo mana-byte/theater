@@ -22,6 +22,7 @@ from theater.trajectory import (
     TrajectoryPage,
     TrajectoryProblem,
 )
+from theater.trajectory.overview import TrajectoryErrorDiagnostics, TrajectorySlowOperation
 
 
 def panel(
@@ -262,6 +263,53 @@ async def test_complete_and_unknown_coverage_wording() -> None:
                 loading=False,
             )
             assert wording in text(strip.query_one("#trajectory-overview-meta", Label))
+
+
+async def test_meta_renders_cost_provenance_duration_errors_retries_and_slowest_operations() -> (
+    None
+):
+    app = App()
+    async with app.run_test():
+        strip = TrajectoryOverviewStrip()
+        await app.mount(strip)
+        overview = TrajectoryOverview(
+            incomplete_reasons=(),
+            reported_cost_usd=0.1,
+            estimated_cost_usd=0.2,
+            unknown_cost_usd=0.3,
+            active_duration_ms=2_000,
+            diagnostics=TrajectoryErrorDiagnostics(error_count=2, retry_count=1),
+            slowest_model_operation=TrajectorySlowOperation(
+                "model-record",
+                "request",
+                "model-x",
+                1_500,
+                "completed",
+            ),
+            slowest_tool_operation=TrajectorySlowOperation(
+                "tool-record",
+                "tool",
+                "pytest",
+                750,
+                "completed",
+            ),
+        )
+        strip.update_state(
+            panel=panel(),
+            capabilities=TrajectoryCapabilities(),
+            overview=overview,
+            loading=False,
+        )
+
+        meta = strip.query_one("#trajectory-overview-meta", Label)
+        value = text(meta)
+        assert "reported $0.1" in value
+        assert "estimated $0.2" in value
+        assert "unclassified $0.3" in value
+        assert "active 2.0s" in value
+        assert "2 errors" in value and "1 retries" in value
+        assert "Slowest model: model-x · 1.5s" in str(meta.tooltip)
+        assert "Slowest tool: pytest · 750ms" in str(meta.tooltip)
 
 
 async def test_tick_updates_only_elapsed_primary_and_identical_state_is_quiet(monkeypatch) -> None:

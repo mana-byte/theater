@@ -70,6 +70,23 @@ class TimingProvenance(StrEnum):
     UNAVAILABLE = "unavailable"
 
 
+class CostProvenance(StrEnum):
+    UNKNOWN = "unknown"
+    REPORTED = "reported"
+    ESTIMATED = "estimated"
+
+
+class TrajectoryFailureCategory(StrEnum):
+    PROVIDER = "provider"
+    TOOL = "tool"
+    USER = "user"
+    THEATER = "theater"
+    TRANSPORT = "transport"
+    TIMEOUT = "timeout"
+    INCOMPLETE_TRANSCRIPT = "incomplete_transcript"
+    UNKNOWN = "unknown"
+
+
 class LinkDirection(StrEnum):
     INCOMING = "incoming"
     OUTGOING = "outgoing"
@@ -100,10 +117,12 @@ class TrajectoryParticipantState(StrEnum):
 
 __all__ = [
     "ContentFormat",
+    "CostProvenance",
     "GroupKind",
     "LinkDirection",
     "PanelState",
     "TimingProvenance",
+    "TrajectoryFailureCategory",
     "TrajectoryKind",
     "TrajectoryLane",
     "TrajectoryParticipantState",

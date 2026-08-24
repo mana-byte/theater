@@ -295,6 +295,17 @@ def _meta_text(capabilities: TrajectoryCapabilities, overview: TrajectoryOvervie
     parts.extend(f"{name} {compact_number(value)} tok" for name, value in token_parts if value)
     if overview.reported_cost_usd is not None:
         parts.append(f"reported ${compact_cost(overview.reported_cost_usd)}")
+    if overview.estimated_cost_usd is not None:
+        parts.append(f"estimated ${compact_cost(overview.estimated_cost_usd)}")
+    if overview.unknown_cost_usd is not None:
+        parts.append(f"unclassified ${compact_cost(overview.unknown_cost_usd)}")
+    if overview.active_duration_ms is not None:
+        parts.append(f"active {_duration_text(overview.active_duration_ms, None)}")
+    if overview.diagnostics is not None:
+        if overview.diagnostics.error_count:
+            parts.append(f"{compact_number(overview.diagnostics.error_count)} errors")
+        if overview.diagnostics.retry_count:
+            parts.append(f"{compact_number(overview.diagnostics.retry_count)} retries")
     if overview.totals_saturated:
         parts.append("totals capped")
     parts.append(_coverage_text(overview))
@@ -325,6 +336,24 @@ def _meta_tooltip(capabilities: TrajectoryCapabilities, overview: TrajectoryOver
         ),
     )
     lines = [f"Coverage: {coverage}"]
+    if overview.active_duration_ms is not None:
+        lines.append(f"Active duration: {_duration_text(overview.active_duration_ms, None)}")
+    if overview.slowest_model_operation is not None:
+        slowest = overview.slowest_model_operation
+        lines.append(
+            f"Slowest model: {_one_line(slowest.label)} · "
+            f"{_duration_text(slowest.duration_ms, None)}"
+        )
+    if overview.slowest_tool_operation is not None:
+        slowest = overview.slowest_tool_operation
+        lines.append(
+            f"Slowest tool: {_one_line(slowest.label)} · "
+            f"{_duration_text(slowest.duration_ms, None)}"
+        )
+    if overview.diagnostics is not None:
+        lines.append(f"Errors: {overview.diagnostics.error_count}")
+        if overview.diagnostics.retry_count is not None:
+            lines.append(f"Retries: {overview.diagnostics.retry_count}")
     lines.extend(f"{label}: {_feature_names(values)}" for label, values in groups)
     return "\n".join(lines)
 

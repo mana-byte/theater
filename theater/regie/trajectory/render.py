@@ -18,6 +18,15 @@ from theater.regie.trajectory.constants import (
     TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS,
 )
 from theater.regie.trajectory.enums import InspectorTab
+from theater.regie.trajectory.inspector import (
+    InspectorLine,
+    failure_lines,
+    request_association_lines,
+    request_summary_lines,
+    request_timing_lines,
+    request_usage_lines,
+    retry_lines,
+)
 from theater.trajectory import (
     ContentFormat,
     DetailField,
@@ -27,6 +36,7 @@ from theater.trajectory import (
     TrajectoryKind,
     TrajectoryLane,
     TrajectoryRecord,
+    TrajectoryRequest,
     TrajectoryStatus,
     bounded_preview,
 )
@@ -151,6 +161,7 @@ def tabs_for_record(record: TrajectoryRecord | None) -> tuple[InspectorTab, ...]
             InspectorTab.REASONING,
             InspectorTab.USAGE,
             InspectorTab.TIMING,
+            InspectorTab.ASSOCIATIONS,
         )
     if (
         record.kind
@@ -210,29 +221,37 @@ def _format_detail(field: DetailField) -> str:
 
 def _participant_line(link: ParticipantLink) -> str:
     direction = link.direction.value
-    return f"participant {direction}: {link.participant_id} ({link.relation})"
+    target = (
+        f" · exact target {link.target_record_id}"
+        if link.target_record_id is not None
+        else " · participant only"
+    )
+    return f"participant {direction}: {link.participant_id} ({link.relation}){target}"
 
 
-def _detail_lines(  # noqa: PLR0912
-    record: TrajectoryRecord | None, tab: InspectorTab
-) -> tuple[list[str], dict[int, str]]:
-    if record is None:
-        return ["No record selected."], {}
-    lines = [
-        f"{record.kind.value} · {record.source} · {status_label(record.status)}",
-    ]
-    lines.extend(record.summary.split("\n"))
-    link_lines: dict[int, str] = {}
+def _field_lines(fields: tuple[DetailField, ...]) -> tuple[InspectorLine, ...]:
+    lines: list[InspectorLine] = []
+    for field in fields:
+        values = _format_detail(field).split("\n")
+        lines.append(InspectorLine(f"{field.name}: {values[0]}"))
+        lines.extend(InspectorLine(value) for value in values[1:])
+    return tuple(lines)
 
-    def append_fields(fields: tuple[DetailField, ...]) -> None:
-        for field in fields:
-            values = _format_detail(field).split("\n")
-            lines.append(f"{field.name}: {values[0]}")
-            lines.extend(values[1:])
 
+def _record_tab_lines(  # noqa: PLR0912
+    record: TrajectoryRecord,
+    tab: InspectorTab,
+    request: TrajectoryRequest | None,
+) -> tuple[InspectorLine, ...]:
     if tab is InspectorTab.SUMMARY:
-        append_fields(record.details[:8])
-    elif tab in {
+        lines = [*_field_lines(record.details[:8])]
+        if request is not None:
+            lines.extend(request_summary_lines(request))
+        else:
+            lines.extend(failure_lines(record.failure))
+            lines.extend(retry_lines(record.retry_of_record_id, record.retry_attempt))
+        return tuple(lines)
+    if tab in {
         InspectorTab.OUTPUT,
         InspectorTab.RESULT,
         InspectorTab.PAYLOAD,
@@ -242,41 +261,71 @@ def _detail_lines(  # noqa: PLR0912
         InspectorTab.PREVIEW,
     }:
         fields = _fields_for_tab(record, tab)
-        if fields:
-            append_fields(fields)
-        elif tab not in {InspectorTab.SUMMARY}:
-            lines.append(f"No {tab.value} supplied.")
-    elif tab in {InspectorTab.CURRENT, InspectorTab.PREVIOUS, InspectorTab.DIFF}:
+        return _field_lines(fields) if fields else (InspectorLine(f"No {tab.value} supplied."),)
+    if tab in {InspectorTab.CURRENT, InspectorTab.PREVIOUS, InspectorTab.DIFF}:
         fields = _fields_for_tab(record, tab)
-        if fields:
-            append_fields(fields)
-        else:
-            lines.append(f"No {tab.value} context supplied.")
-    elif tab is InspectorTab.USAGE:
+        return (
+            _field_lines(fields)
+            if fields
+            else (InspectorLine(f"No {tab.value} context supplied."),)
+        )
+    if tab is InspectorTab.USAGE:
+        if request is not None:
+            return request_usage_lines(request)
         if record.usage is not None:
-            lines.append(
-                json.dumps(record.usage.to_wire(), ensure_ascii=False, indent=2, sort_keys=True)
+            return (
+                InspectorLine(
+                    json.dumps(record.usage.to_wire(), ensure_ascii=False, indent=2, sort_keys=True)
+                ),
             )
-        else:
-            lines.append("No usage recorded.")
-    elif tab is InspectorTab.TIMING:
-        lines.append(f"Duration: {format_duration(record.timing)}")
+        return (InspectorLine("No usage recorded."),)
+    if tab is InspectorTab.TIMING:
+        if request is not None:
+            return request_timing_lines(request)
+        lines = [InspectorLine(f"Duration: {format_duration(record.timing)}")]
         if record.timing is not None:
             lines.extend(
-                (
+                InspectorLine(value)
+                for value in (
                     f"Start: {record.timing.start}",
                     f"End: {record.timing.end}",
                     f"Provenance: {record.timing.provenance.value}",
                 )
             )
-    elif tab is InspectorTab.SOURCE:
-        lines.extend((f"Source: {record.source}", f"Epoch: {record.source_epoch}"))
+        return tuple(lines)
+    if tab is InspectorTab.ASSOCIATIONS:
+        return request_association_lines(request)
+    if tab is InspectorTab.SOURCE:
+        return (
+            InspectorLine(f"Source: {record.source}"),
+            InspectorLine(f"Epoch: {record.source_epoch}"),
+        )
+    return ()
 
+
+def _detail_lines(
+    record: TrajectoryRecord | None,
+    tab: InspectorTab,
+    request: TrajectoryRequest | None = None,
+) -> tuple[list[str], dict[int, ParticipantLink], dict[int, str]]:
+    if record is None:
+        return ["No record selected."], {}, {}
+    lines = [
+        f"{record.kind.value} · {record.source} · {status_label(record.status)}",
+        *record.summary.split("\n"),
+    ]
+    record_link_lines: dict[int, str] = {}
+    for value in _record_tab_lines(record, tab, request):
+        lines.append(value.text)
+        if value.target_record_id is not None:
+            record_link_lines[len(lines) - 1] = value.target_record_id
+
+    link_lines: dict[int, ParticipantLink] = {}
     if tab not in {InspectorTab.USAGE, InspectorTab.TIMING, InspectorTab.SOURCE}:
         for link in record.links:
             lines.append(_participant_line(link))
-            link_lines[len(lines) - 1] = link.participant_id
-    return lines, link_lines
+            link_lines[len(lines) - 1] = link
+    return lines, link_lines, record_link_lines
 
 
 def _bounded_lines(lines: list[str]) -> str:
@@ -286,18 +335,47 @@ def _bounded_lines(lines: list[str]) -> str:
     ).text
 
 
-def detail_text(record: TrajectoryRecord | None, tab: InspectorTab) -> str:
+def detail_text(
+    record: TrajectoryRecord | None,
+    tab: InspectorTab,
+    request: TrajectoryRequest | None = None,
+) -> str:
     """Build the exact bounded text exposed by the active detail tab."""
-    lines, _ = _detail_lines(record, tab)
+    lines, _, _ = _detail_lines(record, tab, request)
     return _bounded_lines(lines)
 
 
 def detail_link_line_ids(record: TrajectoryRecord | None, tab: InspectorTab) -> dict[int, str]:
-    lines, links = _detail_lines(record, tab)
+    return {
+        line_index: link.participant_id
+        for line_index, link in detail_links_by_line(record, tab).items()
+    }
+
+
+def detail_links_by_line(
+    record: TrajectoryRecord | None,
+    tab: InspectorTab,
+    request: TrajectoryRequest | None = None,
+) -> dict[int, ParticipantLink]:
+    lines, links, _ = _detail_lines(record, tab, request)
     bounded = _bounded_lines(lines).splitlines()
     return {
-        line_index: participant_id
-        for line_index, participant_id in links.items()
+        line_index: link
+        for line_index, link in links.items()
+        if line_index < len(bounded) and bounded[line_index] == plain_text(lines[line_index])
+    }
+
+
+def detail_record_links_by_line(
+    record: TrajectoryRecord | None,
+    tab: InspectorTab,
+    request: TrajectoryRequest | None = None,
+) -> dict[int, str]:
+    lines, _, links = _detail_lines(record, tab, request)
+    bounded = _bounded_lines(lines).splitlines()
+    return {
+        line_index: record_id
+        for line_index, record_id in links.items()
         if line_index < len(bounded) and bounded[line_index] == plain_text(lines[line_index])
     }
 
@@ -328,6 +406,8 @@ __all__ = [
     "compact_number",
     "count_label",
     "detail_link_line_ids",
+    "detail_links_by_line",
+    "detail_record_links_by_line",
     "detail_text",
     "details_size",
     "format_duration",

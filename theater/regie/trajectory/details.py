@@ -9,16 +9,32 @@ from rich.text import Text
 
 from theater.regie.trajectory.constants import TRAJECTORY_DETAIL_RECORD_MAX_BYTES
 from theater.regie.trajectory.enums import InspectorTab
+from theater.regie.trajectory.inspector import InspectorLine, tool_summary_lines
 from theater.regie.trajectory.render import (
-    detail_link_line_ids,
+    detail_links_by_line,
+    detail_record_links_by_line,
     detail_text,
     sanitize_text,
     tabs_for_record,
 )
-from theater.trajectory import ContentFormat, DetailField, TrajectoryRecord, bounded_preview
+from theater.trajectory import (
+    ContentFormat,
+    DetailField,
+    TrajectoryRecord,
+    TrajectoryRequest,
+    bounded_preview,
+)
 from theater.trajectory.tools import TrajectoryToolOperation
 
 DETAIL_PARTICIPANT_META = "trajectory_detail_participant"
+DETAIL_PARTICIPANT_RELATION_META = "trajectory_detail_participant_relation"
+DETAIL_PARTICIPANT_DIRECTION_META = "trajectory_detail_participant_direction"
+DETAIL_PARTICIPANT_TARGET_META = "trajectory_detail_participant_target"
+DETAIL_PARTICIPANT_CORRELATION_TYPE_META = "trajectory_detail_participant_correlation_type"
+DETAIL_PARTICIPANT_CORRELATION_KEY_META = "trajectory_detail_participant_correlation_key"
+DETAIL_PARTICIPANT_EXACT_META = "trajectory_detail_participant_exact"
+DETAIL_PARTICIPANT_UNRESOLVED_META = "trajectory_detail_participant_unresolved"
+DETAIL_RECORD_TARGET_META = "trajectory_detail_record_target"
 DETAIL_TAB_META = "trajectory_detail_tab"
 
 
@@ -69,9 +85,11 @@ def _content(
     tab: InspectorTab,
     max_height: int,
     accent_style: Style,
+    request: TrajectoryRequest | None,
 ) -> tuple[Text, str]:
-    copy_text = detail_text(record, tab)
-    links = detail_link_line_ids(record, tab)
+    copy_text = detail_text(record, tab, request)
+    links = detail_links_by_line(record, tab, request)
+    record_links = detail_record_links_by_line(record, tab, request)
     lines = copy_text.splitlines() or [""]
     clipped = len(lines) > max_height
     visible = lines[:max_height]
@@ -83,11 +101,15 @@ def _content(
             content.append("\n")
         if clipped and index == len(visible) - 1:
             content.append(line, style="dim italic")
-        elif participant_id := links.get(index):
+        elif link := links.get(index):
             content.append(
                 line,
-                accent_style
-                + Style(underline=True, meta={DETAIL_PARTICIPANT_META: participant_id}),
+                accent_style + Style(underline=True, meta=_participant_link_meta(link)),
+            )
+        elif record_id := record_links.get(index):
+            content.append(
+                line,
+                accent_style + Style(underline=True, meta={DETAIL_RECORD_TARGET_META: record_id}),
             )
         elif index == 0:
             content.append(line, style="bold")
@@ -102,18 +124,36 @@ def _content(
     return content, copy_text
 
 
+def _participant_link_meta(link) -> dict[str, str]:
+    meta = {
+        DETAIL_PARTICIPANT_META: link.participant_id,
+        DETAIL_PARTICIPANT_RELATION_META: link.relation,
+        DETAIL_PARTICIPANT_DIRECTION_META: link.direction.value,
+        DETAIL_PARTICIPANT_EXACT_META: "1" if link.target_record_id is not None else "0",
+        DETAIL_PARTICIPANT_UNRESOLVED_META: "0",
+    }
+    if link.target_record_id is not None:
+        meta[DETAIL_PARTICIPANT_TARGET_META] = link.target_record_id
+    if link.correlation_type is not None:
+        meta[DETAIL_PARTICIPANT_CORRELATION_TYPE_META] = link.correlation_type
+        assert link.correlation_key is not None
+        meta[DETAIL_PARTICIPANT_CORRELATION_KEY_META] = link.correlation_key
+    return meta
+
+
 def build_inline_details(
     record: TrajectoryRecord,
     tab: InspectorTab,
     *,
     max_height: int,
     accent_style: Style | None = None,
+    request: TrajectoryRequest | None = None,
 ) -> InlineDetails:
     tabs = tabs_for_record(record)
     active = active_detail_tab(record, tab)
     accent = accent_style or Style(dim=True)
     height_limit = max(len(tabs), int(max_height), 1)
-    content, copy_text = _content(record, active, height_limit, accent)
+    content, copy_text = _content(record, active, height_limit, accent, request)
     height = min(height_limit, max(len(tabs), len(content.plain.splitlines()) or 1))
     return InlineDetails(
         tab=active,
@@ -163,48 +203,57 @@ def _tool_field_lines(fields: tuple[DetailField, ...], aliases: set[str]) -> lis
     return lines
 
 
-def tool_detail_text(tool: TrajectoryToolOperation, tab: InspectorTab) -> str:
-    """Return copyable tool detail without fabricating a trajectory record."""
+def _tool_detail_lines(
+    tool: TrajectoryToolOperation,
+    tab: InspectorTab,
+) -> tuple[InspectorLine, ...]:
     active = active_tool_detail_tab(tool, tab)
     if active is InspectorTab.SUMMARY:
-        fields = [
-            ("tool", tool.tool_name),
-            ("source", tool.source),
-            ("status", tool.status.value),
-            ("identity", tool.identity.value),
-            ("call ID", tool.call_id),
-            ("request", tool.request_id),
-            ("parent", tool.parent_call_id),
-            ("children", ", ".join(tool.child_call_ids) or None),
-            ("calls", str(tool.call_count)),
-            ("results", str(tool.result_count)),
-            ("records", "links clipped" if tool.records_truncated else None),
-        ]
-        text = "\n".join(f"{name}: {sanitize_text(value)}" for name, value in fields if value)
-    elif active is InspectorTab.INPUT:
-        lines = _tool_field_lines(
+        return tool_summary_lines(tool)
+    if active is InspectorTab.INPUT:
+        field_lines = _tool_field_lines(
             tool.call_details, {"args", "arguments", "input", "parameters", "tool_input"}
         )
-        text = "\n".join(lines or ["No input supplied."])
-    elif active is InspectorTab.RESULT:
-        lines = _tool_field_lines(
+        return tuple(InspectorLine(line) for line in (field_lines or ["No input supplied."]))
+    if active is InspectorTab.RESULT:
+        field_lines = _tool_field_lines(
             tool.result_details, {"output", "response", "result", "tool_result", "error"}
         )
-        text = "\n".join(lines or ["No result supplied."])
-    else:
-        timing = tool.timing
-        if timing is None:
-            text = "No timing supplied."
-        else:
-            text = (
-                "\n".join(
-                    f"{name}: {value}"
-                    for name, value in timing.to_wire().items()
-                    if value is not None
-                )
-                or "No timing supplied."
-            )
-    return bounded_preview(text, max_bytes=TRAJECTORY_DETAIL_RECORD_MAX_BYTES).text
+        return tuple(InspectorLine(line) for line in (field_lines or ["No result supplied."]))
+    timing = tool.timing
+    if timing is None:
+        return (InspectorLine("No timing supplied."),)
+    timing_lines = tuple(
+        InspectorLine(f"{name}: {value}")
+        for name, value in timing.to_wire().items()
+        if value is not None
+    )
+    return timing_lines or (InspectorLine("No timing supplied."),)
+
+
+def _bounded_tool_details(
+    tool: TrajectoryToolOperation,
+    tab: InspectorTab,
+) -> tuple[str, dict[int, str]]:
+    lines = _tool_detail_lines(tool, tab)
+    text = bounded_preview(
+        "\n".join(sanitize_text(line.text) for line in lines),
+        max_bytes=TRAJECTORY_DETAIL_RECORD_MAX_BYTES,
+    ).text
+    visible = text.splitlines()
+    links = {
+        index: line.target_record_id
+        for index, line in enumerate(lines)
+        if line.target_record_id is not None
+        and index < len(visible)
+        and visible[index] == sanitize_text(line.text)
+    }
+    return text, links
+
+
+def tool_detail_text(tool: TrajectoryToolOperation, tab: InspectorTab) -> str:
+    """Return copyable tool detail without fabricating a trajectory record."""
+    return _bounded_tool_details(tool, tab)[0]
 
 
 def build_tool_inline_details(
@@ -226,13 +275,23 @@ def build_tool_inline_details(
             accent
             + Style(bold=selected, dim=not selected, meta={DETAIL_TAB_META: candidate.value}),
         )
-    copy_text = tool_detail_text(tool, active)
+    copy_text, record_links = _bounded_tool_details(tool, active)
     lines = copy_text.splitlines() or [""]
     limit = max(len(_TOOL_TABS), int(max_height), 1)
     visible = lines[:limit]
     if len(lines) > limit:
         visible[-1] = "… preview clipped"
-    content = Text("\n".join(visible), no_wrap=True, overflow="ellipsis")
+    content = Text(no_wrap=True, overflow="ellipsis")
+    for index, line in enumerate(visible):
+        if index:
+            content.append("\n")
+        if record_id := record_links.get(index):
+            content.append(
+                line,
+                accent + Style(underline=True, meta={DETAIL_RECORD_TARGET_META: record_id}),
+            )
+        else:
+            content.append(line)
     return InlineDetails(
         tab=active,
         tabs=_TOOL_TABS,
@@ -244,7 +303,15 @@ def build_tool_inline_details(
 
 
 __all__ = [
+    "DETAIL_PARTICIPANT_CORRELATION_KEY_META",
+    "DETAIL_PARTICIPANT_CORRELATION_TYPE_META",
+    "DETAIL_PARTICIPANT_DIRECTION_META",
+    "DETAIL_PARTICIPANT_EXACT_META",
     "DETAIL_PARTICIPANT_META",
+    "DETAIL_PARTICIPANT_RELATION_META",
+    "DETAIL_PARTICIPANT_TARGET_META",
+    "DETAIL_PARTICIPANT_UNRESOLVED_META",
+    "DETAIL_RECORD_TARGET_META",
     "DETAIL_TAB_META",
     "InlineDetails",
     "active_detail_tab",

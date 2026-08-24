@@ -70,11 +70,19 @@ def _one_line(value: str) -> str:
 def request_row_text(request: TrajectoryRequest, *, compact: bool = False) -> RequestRowText:
     """Build one non-interactive request header without Rich or Textual values."""
     model = _one_line(request.model) if request.model else "model unknown"
+    provider = _one_line(request.provider) if request.provider else ""
+    source = model
+    if provider and not model.startswith(f"{provider}/"):
+        source = f"{provider}/{model}"
     if request.usage is None:
         summary = "usage unavailable"
     else:
         usage = request.usage
-        cost = "—" if usage.cost_usd is None else f"${compact_cost(usage.cost_usd)}"
+        cost = (
+            "—"
+            if usage.cost_usd is None
+            else f"${compact_cost(usage.cost_usd)} {usage.cost_provenance.value}"
+        )
         summary = " · ".join(
             (
                 f"in {compact_number(usage.input_tokens)}",
@@ -86,11 +94,16 @@ def request_row_text(request: TrajectoryRequest, *, compact: bool = False) -> Re
         )
     if request.records_truncated:
         summary += " · links clipped"
+    if request.failure is not None:
+        summary += f" · failure {request.failure.category.value.replace('_', ' ')}"
+    if request.retry_of_record_id is not None:
+        attempt = f" {request.retry_attempt}" if request.retry_attempt is not None else ""
+        summary += f" · retry{attempt}"
     if compact:
-        summary = f"[{model}] {summary}"
+        summary = f"[{source}] {summary}"
     return RequestRowText(
         event="◆ REQUEST",
-        source=model,
+        source=source,
         summary=summary,
         status=status_label(request.status),
         duration=format_duration(request.timing),

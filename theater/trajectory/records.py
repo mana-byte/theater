@@ -18,8 +18,10 @@ from theater.trajectory.content import (
     bounded_text,
 )
 from theater.trajectory.enums import (
+    CostProvenance,
     LinkDirection,
     TimingProvenance,
+    TrajectoryFailureCategory,
     TrajectoryKind,
     TrajectoryLane,
     TrajectoryStatus,
@@ -43,11 +45,13 @@ class Timing:
     end: float | None = None
     duration_ms: float | None = None
     provenance: TimingProvenance = TimingProvenance.UNAVAILABLE
+    first_token: float | None = None
 
     def __post_init__(self) -> None:
         for name, value in (
             ("start", self.start),
             ("end", self.end),
+            ("first_token", self.first_token),
             ("duration_ms", self.duration_ms),
         ):
             if value is not None and (type(value) not in (int, float) or not math.isfinite(value)):
@@ -56,17 +60,40 @@ class Timing:
             raise TrajectoryValidationError("timing.duration_ms must be non-negative")
         if self.start is not None and self.end is not None and self.end < self.start:
             raise TrajectoryValidationError("timing.end must not precede timing.start")
+        if (
+            self.first_token is not None
+            and self.start is not None
+            and self.first_token < self.start
+        ):
+            raise TrajectoryValidationError("timing.first_token must not precede timing.start")
+        if self.first_token is not None and self.end is not None and self.first_token > self.end:
+            raise TrajectoryValidationError("timing.first_token must not follow timing.end")
         object.__setattr__(
             self, "provenance", enum_value(TimingProvenance, self.provenance, "timing.provenance")
         )
 
     def to_wire(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "start": self.start,
             "end": self.end,
             "duration_ms": self.duration_ms,
             "provenance": self.provenance.value,
         }
+        if self.first_token is not None:
+            value["first_token"] = self.first_token
+        return value
+
+    @property
+    def ttft_ms(self) -> float | None:
+        if self.start is None or self.first_token is None:
+            return None
+        return max(0.0, (self.first_token - self.start) * 1000)
+
+    @property
+    def generation_duration_ms(self) -> float | None:
+        if self.first_token is None or self.end is None:
+            return None
+        return max(0.0, (self.end - self.first_token) * 1000)
 
     @classmethod
     def from_wire(cls, value: object) -> Self:
@@ -74,12 +101,13 @@ class Timing:
         keys(
             data,
             required=set(),
-            optional={"start", "end", "duration_ms", "provenance"},
+            optional={"start", "end", "first_token", "duration_ms", "provenance"},
             label="timing",
         )
         return cls(
             start=number_or_none(data.get("start"), "timing.start"),
             end=number_or_none(data.get("end"), "timing.end"),
+            first_token=number_or_none(data.get("first_token"), "timing.first_token"),
             duration_ms=number_or_none(data.get("duration_ms"), "timing.duration_ms"),
             provenance=enum_value(
                 TimingProvenance,
@@ -92,6 +120,7 @@ class Timing:
 @dataclass(frozen=True, slots=True)
 class TrajectoryUsage:
     model: str | None = None
+    provider: str | None = None
     request_id: str | None = None
     input_tokens: int = 0
     output_tokens: int = 0
@@ -99,9 +128,10 @@ class TrajectoryUsage:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     cost_usd: float | None = None
+    cost_provenance: CostProvenance = CostProvenance.UNKNOWN
 
     def __post_init__(self) -> None:
-        for name in ("model", "request_id"):
+        for name in ("model", "provider", "request_id"):
             value = getattr(self, name)
             if value is not None:
                 object.__setattr__(
@@ -132,10 +162,18 @@ class TrajectoryUsage:
             raise TrajectoryValidationError(
                 "usage.cost_usd must be a non-negative finite number or null"
             )
+        object.__setattr__(
+            self,
+            "cost_provenance",
+            enum_value(CostProvenance, self.cost_provenance, "usage.cost_provenance"),
+        )
+        if self.cost_usd is None and self.cost_provenance is not CostProvenance.UNKNOWN:
+            raise TrajectoryValidationError("usage.cost provenance requires a cost")
 
     def to_wire(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "model": self.model,
+            "provider": self.provider,
             "request_id": self.request_id,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
@@ -144,6 +182,9 @@ class TrajectoryUsage:
             "cache_write_tokens": self.cache_write_tokens,
             "cost_usd": self.cost_usd,
         }
+        if self.cost_provenance is not CostProvenance.UNKNOWN:
+            value["cost_provenance"] = self.cost_provenance.value
+        return value
 
     @classmethod
     def from_wire(cls, value: object) -> Self:
@@ -158,11 +199,12 @@ class TrajectoryUsage:
         keys(
             data,
             required=required,
-            optional={"model", "request_id", "cost_usd"},
+            optional={"model", "provider", "request_id", "cost_usd", "cost_provenance"},
             label="usage",
         )
         return cls(
             model=string_or_none(data.get("model"), "usage.model"),
+            provider=string_or_none(data.get("provider"), "usage.provider"),
             request_id=string_or_none(data.get("request_id"), "usage.request_id"),
             input_tokens=integer(data["input_tokens"], "usage.input_tokens"),
             output_tokens=integer(data["output_tokens"], "usage.output_tokens"),
@@ -170,6 +212,54 @@ class TrajectoryUsage:
             cache_read_tokens=integer(data["cache_read_tokens"], "usage.cache_read_tokens"),
             cache_write_tokens=integer(data["cache_write_tokens"], "usage.cache_write_tokens"),
             cost_usd=number_or_none(data.get("cost_usd"), "usage.cost_usd"),
+            cost_provenance=enum_value(
+                CostProvenance,
+                data.get("cost_provenance", CostProvenance.UNKNOWN.value),
+                "usage.cost_provenance",
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TrajectoryFailure:
+    category: TrajectoryFailureCategory = TrajectoryFailureCategory.UNKNOWN
+    code: str | None = None
+    detail: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "category",
+            enum_value(TrajectoryFailureCategory, self.category, "failure.category"),
+        )
+        if self.code is not None:
+            object.__setattr__(
+                self,
+                "code",
+                bounded_text(
+                    self.code,
+                    max_bytes=TRAJECTORY_IDENTIFIER_MAX_BYTES,
+                    label="failure.code",
+                    nonempty=True,
+                ),
+            )
+        object.__setattr__(
+            self,
+            "detail",
+            ContentPreview.from_text(self.detail, max_bytes=TRAJECTORY_SOURCE_MAX_BYTES).text,
+        )
+
+    def to_wire(self) -> dict[str, object]:
+        return {"category": self.category.value, "code": self.code, "detail": self.detail}
+
+    @classmethod
+    def from_wire(cls, value: object) -> Self:
+        data = mapping(value, "trajectory failure")
+        keys(data, required={"category"}, optional={"code", "detail"}, label="trajectory failure")
+        return cls(
+            category=enum_value(TrajectoryFailureCategory, data["category"], "failure.category"),
+            code=string_or_none(data.get("code"), "failure.code"),
+            detail=string(data.get("detail", ""), "failure.detail"),
         )
 
 
@@ -178,6 +268,9 @@ class ParticipantLink:
     participant_id: str
     relation: str
     direction: LinkDirection = LinkDirection.RELATED
+    target_record_id: str | None = None
+    correlation_type: str | None = None
+    correlation_key: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -203,13 +296,58 @@ class ParticipantLink:
         object.__setattr__(
             self, "direction", enum_value(LinkDirection, self.direction, "link.direction")
         )
+        if self.target_record_id is not None:
+            object.__setattr__(
+                self,
+                "target_record_id",
+                bounded_text(
+                    self.target_record_id,
+                    max_bytes=TRAJECTORY_IDENTIFIER_MAX_BYTES,
+                    label="participant link target record id",
+                    nonempty=True,
+                ),
+            )
+        if (self.correlation_type is None) != (self.correlation_key is None):
+            raise TrajectoryValidationError(
+                "participant link correlation type and key must be provided together"
+            )
+        if self.correlation_type is not None:
+            assert self.correlation_key is not None
+            correlation_type = bounded_text(
+                self.correlation_type,
+                max_bytes=TRAJECTORY_IDENTIFIER_MAX_BYTES,
+                label="participant link correlation type",
+                nonempty=True,
+            )
+            if correlation_type not in {"bus_row", "job_handle", "session_id", "spawn_id"}:
+                raise TrajectoryValidationError(
+                    "participant link correlation type must be bus_row, job_handle, session_id, or "
+                    "spawn_id"
+                )
+            object.__setattr__(self, "correlation_type", correlation_type)
+            object.__setattr__(
+                self,
+                "correlation_key",
+                bounded_text(
+                    self.correlation_key,
+                    max_bytes=TRAJECTORY_IDENTIFIER_MAX_BYTES,
+                    label="participant link correlation key",
+                    nonempty=True,
+                ),
+            )
 
     def to_wire(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "participant_id": self.participant_id,
             "relation": self.relation,
             "direction": self.direction.value,
         }
+        if self.target_record_id is not None:
+            value["target_record_id"] = self.target_record_id
+        if self.correlation_type is not None:
+            value["correlation_type"] = self.correlation_type
+            value["correlation_key"] = self.correlation_key
+        return value
 
     @classmethod
     def from_wire(cls, value: object) -> Self:
@@ -217,7 +355,7 @@ class ParticipantLink:
         keys(
             data,
             required={"participant_id", "relation"},
-            optional={"direction"},
+            optional={"direction", "target_record_id", "correlation_type", "correlation_key"},
             label="participant link",
         )
         return cls(
@@ -228,6 +366,9 @@ class ParticipantLink:
                 data.get("direction", LinkDirection.RELATED.value),
                 "link.direction",
             ),
+            target_record_id=string_or_none(data.get("target_record_id"), "link.target_record_id"),
+            correlation_type=string_or_none(data.get("correlation_type"), "link.correlation_type"),
+            correlation_key=string_or_none(data.get("correlation_key"), "link.correlation_key"),
         )
 
 
@@ -253,10 +394,13 @@ class TrajectoryRecord:
     links: tuple[ParticipantLink, ...] = ()
     timing: Timing | None = None
     usage: TrajectoryUsage | None = None
+    failure: TrajectoryFailure | None = None
+    retry_of_record_id: str | None = None
+    retry_attempt: int | None = None
     details: tuple[DetailField, ...] = ()
     source_offset: int | None = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> None:  # noqa: PLR0912
         for name in ("record_id", "participant_id", "source_epoch"):
             object.__setattr__(
                 self,
@@ -296,7 +440,15 @@ class TrajectoryRecord:
             self, "status", enum_value(TrajectoryStatus, self.status, "record.status")
         )
         object.__setattr__(self, "summary", ContentPreview.from_text(self.summary).text)
-        for name in ("native_id", "turn_id", "step_id", "request_id", "call_id", "parent_call_id"):
+        for name in (
+            "native_id",
+            "turn_id",
+            "step_id",
+            "request_id",
+            "call_id",
+            "parent_call_id",
+            "retry_of_record_id",
+        ):
             value = getattr(self, name)
             if value is not None:
                 object.__setattr__(
@@ -320,6 +472,14 @@ class TrajectoryRecord:
             raise TrajectoryValidationError("record.timing must be Timing or null")
         if self.usage is not None and not isinstance(self.usage, TrajectoryUsage):
             raise TrajectoryValidationError("record.usage must be TrajectoryUsage or null")
+        if self.failure is not None and not isinstance(self.failure, TrajectoryFailure):
+            raise TrajectoryValidationError("record.failure must be TrajectoryFailure or null")
+        if self.retry_attempt is not None and self.retry_of_record_id is None:
+            raise TrajectoryValidationError("record retry attempt requires a retry link")
+        if self.retry_attempt is not None and (
+            type(self.retry_attempt) is not int or self.retry_attempt <= 0
+        ):
+            raise TrajectoryValidationError("record.retry_attempt must be a positive integer")
         object.__setattr__(self, "details", bound_detail_fields(self.details))
 
     def to_wire(self) -> dict[str, object]:
@@ -348,6 +508,11 @@ class TrajectoryRecord:
         }
         if self.request_id is not None:
             value["request_id"] = self.request_id
+        if self.failure is not None:
+            value["failure"] = self.failure.to_wire()
+        if self.retry_of_record_id is not None:
+            value["retry_of_record_id"] = self.retry_of_record_id
+            value["retry_attempt"] = self.retry_attempt
         return value
 
     @classmethod
@@ -377,6 +542,9 @@ class TrajectoryRecord:
             "links",
             "timing",
             "usage",
+            "failure",
+            "retry_of_record_id",
+            "retry_attempt",
             "details",
         }
         keys(data, required=required, optional=optional, label="trajectory record")
@@ -411,6 +579,17 @@ class TrajectoryRecord:
             usage=TrajectoryUsage.from_wire(data["usage"])
             if data.get("usage") is not None
             else None,
+            failure=TrajectoryFailure.from_wire(data["failure"])
+            if data.get("failure") is not None
+            else None,
+            retry_of_record_id=string_or_none(
+                data.get("retry_of_record_id"), "record.retry_of_record_id"
+            ),
+            retry_attempt=(
+                integer(data["retry_attempt"], "record.retry_attempt")
+                if data.get("retry_attempt") is not None
+                else None
+            ),
             details=tuple(
                 DetailField.from_wire(item)
                 for item in sequence(data.get("details", []), "record.details")
@@ -418,4 +597,4 @@ class TrajectoryRecord:
         )
 
 
-__all__ = ["ParticipantLink", "Timing", "TrajectoryRecord", "TrajectoryUsage"]
+__all__ = ["ParticipantLink", "Timing", "TrajectoryFailure", "TrajectoryRecord", "TrajectoryUsage"]

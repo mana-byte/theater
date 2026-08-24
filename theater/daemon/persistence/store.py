@@ -525,6 +525,15 @@ class Store:
             kinds=kinds,
         )
 
+    def bus_record_for_participant(
+        self,
+        participant_id: str,
+        row_id: int,
+        *,
+        kinds: Collection[str],
+    ) -> dict | None:
+        return self._bus.record_for_participant(participant_id, row_id, kinds=kinds)
+
     def bus_tail(self, limit: int = 100, *, after_id: int = 0) -> list[dict]:
         return self._bus.tail(limit, after_id=after_id)
 

@@ -64,7 +64,23 @@ def record_search_text(record: TrajectoryRecord) -> str:
         record.request_id or "",
     ]
     if record.usage is not None:
-        values.extend((record.usage.request_id or "", record.usage.model or ""))
+        values.extend(
+            (
+                record.usage.request_id or "",
+                record.usage.provider or "",
+                record.usage.model or "",
+                record.usage.cost_provenance.value,
+            )
+        )
+    if record.failure is not None:
+        values.extend(
+            (
+                record.failure.category.value,
+                record.failure.code or "",
+                record.failure.detail,
+            )
+        )
+    values.extend((record.retry_of_record_id or "", str(record.retry_attempt or "")))
     values.extend(field.name for field in record.details)
     values.extend(field.preview.text for field in record.details)
     values.extend(link.participant_id for link in record.links)
@@ -313,6 +329,7 @@ def search_records(  # noqa: PLR0912, PLR0915
     ordering: TrajectoryOrdering | None = None,
     request_index: RequestIndex | None = None,
     tool_index: ToolIndex | None = None,
+    candidate_ids: frozenset[str] | None = None,
 ) -> SearchResult:
     """Filter source order and retain visible step headers."""
     ordered = ordering or build_ordering(records, groups)
@@ -325,9 +342,14 @@ def search_records(  # noqa: PLR0912, PLR0915
         sources=source_filters,
     )
     normalized_query = query.casefold().strip()
+    candidates = (
+        tuple(record for record in bounded_records if record.record_id in candidate_ids)
+        if candidate_ids is not None
+        else bounded_records
+    )
     matched: list[TrajectoryRecord] = []
     scores: dict[str, int] = {}
-    for record in bounded_records:
+    for record in candidates:
         passes = (
             cache.passes(record, active) if cache is not None else _passes_filters(record, active)
         )
@@ -443,7 +465,7 @@ def search_records(  # noqa: PLR0912, PLR0915
         entries=tuple(entries),
         matched_ids=matched_ids,
         scores=scores,
-        counts=_filter_counts(bounded_records, active),
+        counts=_filter_counts(candidates, active),
         group_paths=paths,
         requests=requests,
         tools={operation.operation_id: operation for operation in tool_by_anchor.values()},

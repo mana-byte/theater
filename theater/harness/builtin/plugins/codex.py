@@ -150,17 +150,24 @@ from theater.provenance import TranscriptProvenance, normalize_provenance
 from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFeature
 from theater.trajectory.content import ContentFormat, DetailField
 from theater.trajectory.enums import (
+    CostProvenance,
     TimingProvenance,
+    TrajectoryFailureCategory,
     TrajectoryKind,
     TrajectoryLane,
     TrajectoryStatus,
 )
-from theater.trajectory.records import Timing, TrajectoryUsage
+from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryUsage
 
 if TYPE_CHECKING:
     from theater.models import Participant
 
 logger = logging.getLogger("theater.harness.codex")
+
+CODEX_SESSION_META_RECORD_TYPE = "session_meta"
+CODEX_THREAD_SETTINGS_EVENT_TYPE = "thread_settings_applied"
+CODEX_MODEL_PROVIDER_ID_KEY = "model_provider_id"
+CODEX_MODEL_PROVIDER_KEY = "model_provider"
 
 #: The composer prompt. A single glyph (U+203A), not the ASCII ">" that Claude Code uses.
 PROMPT = "\u203a"
@@ -395,13 +402,33 @@ def _codex_timing(record: dict, payload: dict, timestamp: float | None) -> Timin
         ),
         None,
     )
+    first_token_ms = next(
+        (
+            _codex_duration(value.get(key))
+            for value in values
+            for key in ("time_to_first_token_ms", "timeToFirstTokenMs")
+            if _codex_duration(value.get(key)) is not None
+        ),
+        None,
+    )
     if start is None and end is None and duration is None and timestamp is not None:
         start = timestamp
     if start is None and end is None and duration is None:
         return None
     if start is not None and end is not None and end < start:
         end = None
-    return Timing(start=start, end=end, duration_ms=duration, provenance=TimingProvenance.SOURCE)
+    first_token = (
+        start + first_token_ms / 1000 if start is not None and first_token_ms is not None else None
+    )
+    if first_token is not None and end is not None and first_token > end:
+        first_token = None
+    return Timing(
+        start=start,
+        end=end,
+        first_token=first_token,
+        duration_ms=duration,
+        provenance=TimingProvenance.SOURCE,
+    )
 
 
 def _trajectory_status(value: object, default: TrajectoryStatus) -> TrajectoryStatus:
@@ -475,7 +502,11 @@ def _codex_trajectory_turn_id(payload: dict) -> str | None:
     return None
 
 
-def _codex_usage(record: dict, payload: dict) -> TrajectoryUsage | None:
+def _codex_usage(
+    record: dict,
+    payload: dict,
+    provider: str | None = None,
+) -> TrajectoryUsage | None:
     info = payload.get("info") if payload.get("type") == "token_count" else None
     raw = info.get("last_token_usage") if isinstance(info, dict) else None
     if not isinstance(raw, dict) and isinstance(info, dict):
@@ -505,9 +536,15 @@ def _codex_usage(record: dict, payload: dict) -> TrajectoryUsage | None:
     request_id = _trajectory_id(
         payload.get("request_id") or payload.get("requestId") or payload.get("turn_id")
     )
-    cost = _trajectory_float(raw.get("cost_usd") or raw.get("costUSD"))
+    cost = _trajectory_float(raw.get("cost_usd") if "cost_usd" in raw else raw.get("costUSD"))
     return TrajectoryUsage(
         model=_trajectory_id(model_value),
+        provider=_trajectory_id(
+            raw.get("provider")
+            or raw.get(CODEX_MODEL_PROVIDER_KEY)
+            or payload.get(CODEX_MODEL_PROVIDER_ID_KEY)
+            or provider
+        ),
         request_id=request_id,
         input_tokens=max(0, input_total - cache_read - cache_write),
         output_tokens=max(0, output_total - reasoning),
@@ -515,6 +552,9 @@ def _codex_usage(record: dict, payload: dict) -> TrajectoryUsage | None:
         cache_read_tokens=cache_read,
         cache_write_tokens=cache_write,
         cost_usd=cost if cost is None or cost >= 0 else None,
+        cost_provenance=(
+            CostProvenance.REPORTED if cost is not None and cost >= 0 else CostProvenance.UNKNOWN
+        ),
     )
 
 
@@ -665,6 +705,7 @@ class CodexObserver(TranscriptObserver):
         #: The participant's launch process. Set only on the `open_source_for` clone.
         self.pane_pid = pane_pid
         self._last_model: str | None = None
+        self._last_provider: str | None = None
         #: Whether the id this clone opened with is itself proof — token or receipt, not file-read.
         provenance = normalize_provenance(session_provenance)
         self._session_exact = session_exact or provenance is TranscriptProvenance.EXACT
@@ -1033,7 +1074,7 @@ class CodexObserver(TranscriptObserver):
             record = json.loads(line)
         except ValueError:
             return None
-        if not isinstance(record, dict) or record.get("type") != "session_meta":
+        if not isinstance(record, dict) or record.get("type") != CODEX_SESSION_META_RECORD_TYPE:
             return None
         payload = record.get("payload")
         found = payload.get("cwd") if isinstance(payload, dict) else None
@@ -1087,6 +1128,12 @@ class CodexObserver(TranscriptObserver):
 
         ts = _epoch(record.get("timestamp"))
         kind = record.get("type")
+        if kind == CODEX_SESSION_META_RECORD_TYPE:
+            provider = payload.get(CODEX_MODEL_PROVIDER_KEY) or payload.get(
+                CODEX_MODEL_PROVIDER_ID_KEY
+            )
+            if isinstance(provider, str) and provider:
+                self._last_provider = provider
         if kind == "event_msg":
             return self._event(payload, ts, index, clip_text=clip_text)
         if kind == "response_item":
@@ -1184,12 +1231,17 @@ class CodexObserver(TranscriptObserver):
             ]
         if ptype == "token_count":
             return self._token_count(payload, ts, index)
-        if ptype == "thread_settings_applied":
+        if ptype == CODEX_THREAD_SETTINGS_EVENT_TYPE:
             settings = payload.get("thread_settings")
             if isinstance(settings, dict):
                 m = settings.get("model")
                 if isinstance(m, str) and m:
                     self._last_model = m
+                provider = settings.get(CODEX_MODEL_PROVIDER_ID_KEY) or settings.get(
+                    CODEX_MODEL_PROVIDER_KEY
+                )
+                if isinstance(provider, str) and provider:
+                    self._last_provider = provider
         return []
 
     def _mcp_result(self, result) -> str:
@@ -1227,13 +1279,22 @@ class CodexObserver(TranscriptObserver):
         model = info.get("model") or info.get("model_name") or self._last_model
         model = model or None if isinstance(model, str) else None
         input_tokens, cache_read, cache_write, output_tokens, reasoning = latest
+        cost = _trajectory_float(
+            last.get("cost_usd") if "cost_usd" in last else last.get("costUSD")
+        )
+        cost = cost if cost is None or cost >= 0 else None
         usage = TokenUsage(
             model=model,
+            provider=self._last_provider,
             input_tokens=max(0, input_tokens - cache_read - cache_write),
             output_tokens=max(0, output_tokens - reasoning),
             cache_creation_input_tokens=cache_write,
             cache_read_input_tokens=cache_read,
             reasoning_output_tokens=reasoning,
+            cost_usd=cost,
+            cost_provenance=(
+                CostProvenance.REPORTED if cost is not None else CostProvenance.UNKNOWN
+            ),
             idempotency_key="codex:" + ":".join(str(value) for value in totals + latest),
         )
         if (
@@ -1310,6 +1371,7 @@ class CodexObserver(TranscriptObserver):
             parent_call_id: str | None = None,
             fact_timing: Timing | None = timing,
             usage: TrajectoryUsage | None = None,
+            failure: TrajectoryFailure | None = None,
             details: tuple[DetailField, ...] = (),
         ) -> None:
             clean_id = _trajectory_id(native_id)
@@ -1335,13 +1397,14 @@ class CodexObserver(TranscriptObserver):
                     parent_call_id=_trajectory_id(parent_call_id),
                     timing=fact_timing,
                     usage=usage,
+                    failure=failure,
                     details=details,
                 )
             )
 
         record_kind = record.get("type")
         ptype = payload.get("type")
-        if record_kind == "session_meta":
+        if record_kind == CODEX_SESSION_META_RECORD_TYPE:
             session_id = _trajectory_id(payload.get("session_id") or payload.get("id"))
             add(
                 TrajectoryKind.SYSTEM,
@@ -1354,7 +1417,7 @@ class CodexObserver(TranscriptObserver):
             )
             return facts
 
-        if record_kind in ("turn_context", "thread_settings_applied", "world_state"):
+        if record_kind in ("turn_context", CODEX_THREAD_SETTINGS_EVENT_TYPE, "world_state"):
             context = payload.get("thread_context") or payload.get("thread_settings")
             context = context if context is not None else payload.get("state")
             if context is None:
@@ -1469,6 +1532,11 @@ class CodexObserver(TranscriptObserver):
                             payload.get("parent_call_id") or payload.get("parent_id")
                         )
                         or call_id,
+                        failure=(
+                            TrajectoryFailure(TrajectoryFailureCategory.TOOL, detail=raw)
+                            if result_error
+                            else None
+                        ),
                         details=(
                             (_trajectory_detail("result", result, format=ContentFormat.JSON),)
                             if result is not None
@@ -1477,7 +1545,7 @@ class CodexObserver(TranscriptObserver):
                     )
                 return facts
             if event_type == "token_count":
-                usage = _codex_usage(record, payload)
+                usage = _codex_usage(record, payload, self._last_provider)
                 if usage is not None:
                     add(
                         TrajectoryKind.ASSISTANT,
@@ -1492,7 +1560,7 @@ class CodexObserver(TranscriptObserver):
                 "task_started",
                 "context_compacted",
                 "turn_context",
-                "thread_settings_applied",
+                CODEX_THREAD_SETTINGS_EVENT_TYPE,
             ):
                 status = (
                     TrajectoryStatus.RUNNING
@@ -1553,7 +1621,7 @@ class CodexObserver(TranscriptObserver):
                         native_id=_codex_block_id(item_id, block, block_index),
                         status=message_status,
                         turn=item_turn,
-                        usage=_codex_usage(record, payload),
+                        usage=_codex_usage(record, payload, self._last_provider),
                     )
                 if not facts:
                     add(
@@ -1563,7 +1631,7 @@ class CodexObserver(TranscriptObserver):
                         native_id=item_id,
                         status=message_status,
                         turn=item_turn,
-                        usage=_codex_usage(record, payload),
+                        usage=_codex_usage(record, payload, self._last_provider),
                     )
                 return facts
             if item_type == "reasoning":
@@ -1639,7 +1707,7 @@ class CodexObserver(TranscriptObserver):
                     turn=item_turn,
                     call_id=call_id,
                     parent_call_id=parent_call_id,
-                    usage=_codex_usage(record, payload),
+                    usage=_codex_usage(record, payload, self._last_provider),
                     details=(
                         (_trajectory_detail("input", input_value, format=ContentFormat.JSON),)
                         if input_value is not None

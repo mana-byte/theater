@@ -30,6 +30,8 @@ from theater.trajectory import (
     TrajectoryValidationError,
 )
 from theater.trajectory.content import bounded_text
+from theater.trajectory.enums import TrajectoryFailureCategory
+from theater.trajectory.records import TrajectoryFailure
 
 BUS_KIND_PARTICIPANT_CREATED = "participant.created"
 BUS_KIND_PARTICIPANT_DEAD = "participant.dead"
@@ -75,6 +77,8 @@ def project_bus_row(row: Mapping[str, object], participant_id: str) -> Trajector
     payload = row.get("payload")
     payload_map = payload if isinstance(payload, Mapping) else {}
     if kind == BUS_KIND_JOB_FINISHED and str(payload_map.get("state", "")) not in {
+        "done",
+        "completed",
         "crashed",
         "killed",
         "error",
@@ -85,7 +89,13 @@ def project_bus_row(row: Mapping[str, object], participant_id: str) -> Trajector
     status = _record_status(kind, payload_map)
     summary = _summary(kind, payload_map, record_kind)
     details = _details(payload_map, summary)
-    links = _links(participant_id, from_id, to_id)
+    links = _links(
+        participant_id,
+        from_id,
+        to_id,
+        row_id=row_id,
+        correlation=_job_handle(kind, payload_map),
+    )
     timing = _timing(row.get("ts"), payload_map)
     return TrajectoryRecord(
         record_id=f"bus:{row_id}",
@@ -103,6 +113,7 @@ def project_bus_row(row: Mapping[str, object], participant_id: str) -> Trajector
         timing=timing,
         details=details,
         call_id=_await_call_id(kind, payload_map),
+        failure=_failure(kind, payload_map, summary, status),
     )
 
 
@@ -116,7 +127,7 @@ def _record_kind(
     if bus_kind == BUS_KIND_AGENT_SEND:
         return TrajectoryKind.SEND if participant_id == from_id else TrajectoryKind.RECEIVE
     if bus_kind == BUS_KIND_AGENT_RECEIVE:
-        return TrajectoryKind.RECEIVE
+        return TrajectoryKind.SEND if participant_id == from_id else TrajectoryKind.RECEIVE
     if bus_kind == BUS_KIND_PARTICIPANT_CREATED:
         return TrajectoryKind.SPAWN
     if bus_kind in {BUS_KIND_PARTICIPANT_SESSION_BOUNDARY, "participant.resumed"}:
@@ -131,6 +142,11 @@ def _record_kind(
         return TrajectoryKind.AWAIT_END
     if bus_kind == BUS_KIND_PARTICIPANT_KILL_REQUESTED:
         return TrajectoryKind.KILL
+    if bus_kind == BUS_KIND_JOB_FINISHED and str(payload.get("state", "")) in {
+        "done",
+        "completed",
+    }:
+        return TrajectoryKind.SEND if participant_id == from_id else TrajectoryKind.RECEIVE
     if bus_kind in {BUS_KIND_JOB_FINISHED, "job.failure"}:
         return TrajectoryKind.JOB_FAILURE
     if bus_kind == BUS_KIND_AGENT_OBSERVATION_ERROR:
@@ -152,6 +168,11 @@ def _record_status(bus_kind: str, payload: Mapping[str, object]) -> TrajectorySt
         }.get(str(payload.get("state")), TrajectoryStatus.UNKNOWN)
     if bus_kind in {BUS_KIND_AGENT_OBSERVATION_ERROR, BUS_KIND_PARTICIPANT_DEAD}:
         return TrajectoryStatus.ERROR
+    if bus_kind == BUS_KIND_JOB_FINISHED and str(payload.get("state", "")) in {
+        "done",
+        "completed",
+    }:
+        return TrajectoryStatus.COMPLETED
     if bus_kind in {BUS_KIND_JOB_FINISHED, "job.failure"}:
         return TrajectoryStatus.ERROR
     return TrajectoryStatus.COMPLETED
@@ -164,6 +185,11 @@ def _summary(bus_kind: str, payload: Mapping[str, object], record_kind: Trajecto
         return f"Await {handle or 'job'} started"
     if bus_kind == BUS_KIND_JOB_AWAIT_END:
         return f"Await {handle or 'job'} {state or 'ended'}"
+    if bus_kind == BUS_KIND_JOB_FINISHED and str(payload.get("state", "")) in {
+        "done",
+        "completed",
+    }:
+        return f"Job {handle or 'job'} replied"
     if bus_kind in {BUS_KIND_JOB_FINISHED, "job.failure"}:
         return f"Job {handle or 'job'} failed"
     dynamic = {
@@ -203,6 +229,63 @@ def _await_call_id(bus_kind: str, payload: Mapping[str, object]) -> str | None:
         return None
 
 
+def _job_handle(bus_kind: str, payload: Mapping[str, object]) -> str | None:
+    if bus_kind not in {
+        BUS_KIND_AGENT_SEND,
+        BUS_KIND_AGENT_RECEIVE,
+        BUS_KIND_JOB_AWAIT_START,
+        BUS_KIND_JOB_AWAIT_END,
+        BUS_KIND_JOB_FINISHED,
+        "job.failure",
+    }:
+        return None
+    handle = payload.get("handle")
+    if not isinstance(handle, str) or not handle:
+        return None
+    try:
+        return bounded_text(
+            handle,
+            max_bytes=TRAJECTORY_IDENTIFIER_MAX_BYTES,
+            label="job handle",
+            nonempty=True,
+        )
+    except TrajectoryValidationError:
+        return None
+
+
+def _failure(
+    bus_kind: str,
+    payload: Mapping[str, object],
+    summary: str,
+    status: TrajectoryStatus,
+) -> TrajectoryFailure | None:
+    if bus_kind == BUS_KIND_AGENT_OBSERVATION_ERROR:
+        return TrajectoryFailure(
+            TrajectoryFailureCategory.INCOMPLETE_TRANSCRIPT,
+            code=_string_or_none(payload.get("code")),
+            detail=_text(payload.get("message")) or summary,
+        )
+    if bus_kind == BUS_KIND_JOB_AWAIT_END and status is TrajectoryStatus.TIMEOUT:
+        return TrajectoryFailure(TrajectoryFailureCategory.TIMEOUT, code="timeout", detail=summary)
+    if bus_kind in {BUS_KIND_JOB_FINISHED, "job.failure"} and status is TrajectoryStatus.ERROR:
+        return TrajectoryFailure(
+            TrajectoryFailureCategory.THEATER,
+            code=(
+                _string_or_none(payload.get("error_code"))
+                or _string_or_none(payload.get("code"))
+                or _string_or_none(payload.get("state"))
+            ),
+            detail=_text(payload.get("reason")) or _text(payload.get("message")) or summary,
+        )
+    if bus_kind == BUS_KIND_PARTICIPANT_DEAD:
+        return TrajectoryFailure(
+            TrajectoryFailureCategory.THEATER,
+            code=_string_or_none(payload.get("reason")),
+            detail=summary,
+        )
+    return None
+
+
 def _details(payload: Mapping[str, object], summary: str) -> tuple[DetailField, ...]:
     fields: list[DetailField] = []
     for name in ("handle", "state", "reason", "error_code", "code", "elapsed_seconds"):
@@ -218,13 +301,40 @@ def _details(payload: Mapping[str, object], summary: str) -> tuple[DetailField, 
 
 
 def _links(
-    participant_id: str, from_id: str | None, to_id: str | None
+    participant_id: str,
+    from_id: str | None,
+    to_id: str | None,
+    *,
+    row_id: int,
+    correlation: str | None,
 ) -> tuple[ParticipantLink, ...]:
     links: list[ParticipantLink] = []
+    target_record_id = f"bus:{row_id}"
+    correlation_fields = (
+        {"correlation_type": "job_handle", "correlation_key": correlation}
+        if correlation is not None
+        else {}
+    )
     if from_id is not None and from_id != participant_id and to_id == participant_id:
-        links.append(ParticipantLink(from_id, "sender", LinkDirection.INCOMING))
+        links.append(
+            ParticipantLink(
+                from_id,
+                "sender",
+                LinkDirection.INCOMING,
+                target_record_id=target_record_id,
+                **correlation_fields,
+            )
+        )
     if to_id is not None and to_id != participant_id and from_id == participant_id:
-        links.append(ParticipantLink(to_id, "recipient", LinkDirection.OUTGOING))
+        links.append(
+            ParticipantLink(
+                to_id,
+                "recipient",
+                LinkDirection.OUTGOING,
+                target_record_id=target_record_id,
+                **correlation_fields,
+            )
+        )
     return tuple(links)
 
 

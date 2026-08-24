@@ -12,12 +12,13 @@ from theater.regie.trajectory.constants import (
     TRAJECTORY_FOLLOW_TIMEOUT_SECONDS,
     TRAJECTORY_PAGE_RECORD_LIMIT,
 )
-from theater.regie.trajectory.models import decode_delta, decode_page
+from theater.regie.trajectory.models import decode_delta, decode_location, decode_page
 from theater.regie.trajectory.state import ParticipantTrajectoryState, TrajectoryStateStore
 from theater.trajectory import (
     PanelState,
     PanelStateInfo,
     TrajectoryDelta,
+    TrajectoryLocation,
     TrajectoryPage,
     TrajectoryParticipantState,
     TrajectoryValidationError,
@@ -204,6 +205,21 @@ class TrajectoryController:
         if start_follow and _can_follow(state):
             await self.start_follow(participant_id, expected_generation=generation)
         return page
+
+    async def locate(self, participant_id: str, record_id: str) -> TrajectoryLocation:
+        """Resolve one exact record through the daemon's bounded lookup."""
+        response = await self._call(
+            self.query_client,
+            "trajectory.locate",
+            id=participant_id,
+            record_id=record_id,
+        )
+        location = decode_location(response)
+        if location.participant_id != participant_id:
+            raise TrajectoryValidationError("trajectory location participant does not match target")
+        if location.requested_record_id != record_id:
+            raise TrajectoryValidationError("trajectory location record does not match target")
+        return location
 
     async def load_older(self, participant_id: str | None = None) -> TrajectoryPage | None:
         """Request exactly one older page; this method never chain-loads."""

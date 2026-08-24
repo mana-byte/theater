@@ -12,7 +12,11 @@ from theater.regie.trajectory.constants import (
     TOOL_ROW_SUMMARY_MAX_CHARS,
     TRAJECTORY_DETAIL_RECORD_MAX_BYTES,
 )
-from theater.regie.trajectory.details import build_tool_inline_details, tool_detail_text
+from theater.regie.trajectory.details import (
+    DETAIL_RECORD_TARGET_META,
+    build_tool_inline_details,
+    tool_detail_text,
+)
 from theater.regie.trajectory.enums import InspectorTab
 from theater.regie.trajectory.footer import TrajectoryFooter
 from theater.regie.trajectory.ledger import Ledger
@@ -35,6 +39,8 @@ from theater.trajectory import (
     bounded_preview,
     group_records,
 )
+from theater.trajectory.enums import TrajectoryFailureCategory
+from theater.trajectory.records import TrajectoryFailure
 
 
 def _tool(
@@ -52,6 +58,9 @@ def _tool(
     revision: int = 1,
     turn_id: str | None = None,
     step_id: str | None = None,
+    failure: TrajectoryFailure | None = None,
+    retry_of_record_id: str | None = None,
+    retry_attempt: int | None = None,
 ) -> TrajectoryRecord:
     return TrajectoryRecord(
         record_id=record_id,
@@ -69,6 +78,9 @@ def _tool(
         turn_id=turn_id,
         step_id=step_id,
         details=details,
+        failure=failure,
+        retry_of_record_id=retry_of_record_id,
+        retry_attempt=retry_attempt,
     )
 
 
@@ -109,6 +121,32 @@ def test_unmatched_text_and_details_are_explicit() -> None:
 
     assert "awaiting result" in tool_row_text(operation).summary
     assert tool_detail_text(operation, tab=InspectorTab.RESULT) == "No result supplied."
+
+
+def test_tool_summary_exposes_typed_failure_and_retry_target() -> None:
+    result = _tool(
+        "result",
+        2,
+        TrajectoryKind.TOOL_RESULT,
+        "one",
+        status=TrajectoryStatus.ERROR,
+        failure=TrajectoryFailure(
+            TrajectoryFailureCategory.TOOL,
+            code="exit_1",
+            detail="command failed",
+        ),
+        retry_of_record_id="prior",
+        retry_attempt=2,
+    )
+    operation = build_tool_index((result,)).ordered[0]
+    detail = build_tool_inline_details(operation, InspectorTab.SUMMARY, max_height=20)
+
+    assert "Failure: tool" in detail.copy_text
+    assert "Code: exit_1" in detail.copy_text
+    assert "Retry of: prior · attempt 2" in detail.copy_text
+    assert any(
+        span.style.meta.get(DETAIL_RECORD_TARGET_META) == "prior" for span in detail.content.spans
+    )
 
 
 def _ordinary(record_id: str, index: int) -> TrajectoryRecord:

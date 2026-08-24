@@ -17,7 +17,7 @@ from theater.constants.trajectory import (
     TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES,
     TRAJECTORY_TRANSCRIPT_HISTORY_WINDOW_BYTES,
 )
-from theater.harness.contracts.events import Event, EventKind
+from theater.harness.contracts.events import Event, EventKind, TokenUsage
 from theater.harness.contracts.source import (
     Batch,
     History,
@@ -55,6 +55,8 @@ from theater.trajectory import (
     group_records,
     merge_records,
 )
+from theater.trajectory.enums import CostProvenance, TrajectoryFailureCategory
+from theater.trajectory.records import TrajectoryFailure, TrajectoryUsage
 
 
 def make_record(
@@ -69,6 +71,8 @@ def make_record(
     timing: Timing | None = None,
     call_id: str | None = None,
     parent_call_id: str | None = None,
+    retry_of_record_id: str | None = None,
+    retry_attempt: int | None = None,
 ) -> TrajectoryRecord:
     return TrajectoryRecord(
         record_id=record_id,
@@ -86,6 +90,8 @@ def make_record(
         timing=timing,
         call_id=call_id,
         parent_call_id=parent_call_id,
+        retry_of_record_id=retry_of_record_id,
+        retry_attempt=retry_attempt,
         details=details,
     )
 
@@ -105,6 +111,85 @@ def test_canonical_record_is_immutable_and_strictly_round_trips() -> None:
     invalid_detail["details"] = [{"name": "output", "value": {"arbitrary": True}}]
     with pytest.raises(TrajectoryValidationError):
         TrajectoryRecord.from_wire(invalid_detail)
+
+
+def test_additive_timing_usage_failure_and_retry_facts_keep_old_wire_compatible() -> None:
+    old_timing = Timing.from_wire({"start": 1.0, "end": 2.0, "provenance": "source"})
+    old_usage = TrajectoryUsage.from_wire(
+        {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+        }
+    )
+    record = make_record("retry", timing=Timing(1.0, 2.0, first_token=1.5))
+
+    assert old_timing.first_token is None
+    assert old_usage.cost_provenance is CostProvenance.UNKNOWN
+    assert record.timing is not None and record.timing.first_token == 1.5
+    assert Timing(1.0, 2.0, 1_000.0, TimingProvenance.SOURCE).first_token is None
+    assert "first_token" not in old_timing.to_wire()
+    assert "cost_provenance" not in old_usage.to_wire()
+    assert "failure" not in record.to_wire()
+    assert "retry_of_record_id" not in record.to_wire()
+
+    with pytest.raises(TrajectoryValidationError):
+        Timing(start=2.0, first_token=1.0)
+    with pytest.raises(TrajectoryValidationError):
+        Timing(first_token=3.0, end=2.0)
+    with pytest.raises(TrajectoryValidationError):
+        Timing(first_token=float("nan"))
+    with pytest.raises(TrajectoryValidationError):
+        TrajectoryUsage(cost_provenance=CostProvenance.REPORTED)
+    with pytest.raises(TrajectoryValidationError):
+        TrajectoryFact(kind=TrajectoryKind.ERROR, retry_attempt=1)
+    with pytest.raises(TrajectoryValidationError):
+        TrajectoryFact(kind=TrajectoryKind.ERROR, retry_of_native_id="first", retry_attempt=0)
+
+    linked = TrajectoryFact(kind=TrajectoryKind.ERROR, retry_of_native_id="first")
+    assert linked.retry_of_native_id == "first" and linked.retry_attempt is None
+    assert make_record("retry-record", retry_of_record_id="first").retry_attempt is None
+
+    fact = TrajectoryFact(
+        kind=TrajectoryKind.ERROR,
+        failure=TrajectoryFailure(TrajectoryFailureCategory.PROVIDER, code="rate_limit"),
+        retry_of_native_id="first",
+        retry_attempt=2,
+    )
+    projected = fact_to_record(fact, participant_id="p", source_epoch="epoch")
+    assert projected.failure == fact.failure
+    assert projected.retry_of_record_id == "epoch:first"
+    assert projected.retry_attempt == 2
+    assert TrajectoryRecord.from_wire(projected.to_wire()) == projected
+
+
+def test_timing_diagnostics_and_usage_provider_are_explicit() -> None:
+    timing = Timing(start=10.0, first_token=10.25, end=11.25)
+    usage = TrajectoryUsage(
+        model="model",
+        provider="provider",
+        output_tokens=100,
+        cost_usd=0.2,
+        cost_provenance=CostProvenance.REPORTED,
+    )
+
+    assert timing.ttft_ms == 250
+    assert timing.generation_duration_ms == 1000
+    assert TrajectoryUsage.from_wire(usage.to_wire()) == usage
+
+
+def test_baseline_usage_preserves_cost_provenance() -> None:
+    fact = event_to_fact(
+        Event(
+            kind=EventKind.ASSISTANT,
+            usage=TokenUsage(cost_usd=0.1, cost_provenance=CostProvenance.REPORTED),
+        )
+    )
+
+    assert fact.usage is not None
+    assert fact.usage.cost_provenance is CostProvenance.REPORTED
 
 
 def test_utf8_preview_keeps_safe_head_tail_and_exact_omission() -> None:

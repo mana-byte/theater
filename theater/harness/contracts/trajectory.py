@@ -23,7 +23,7 @@ from theater.trajectory.enums import (
     TrajectoryStatus,
     TrajectoryValidationError,
 )
-from theater.trajectory.records import Timing, TrajectoryUsage
+from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryUsage
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +76,9 @@ class TrajectoryFact:
     parent_call_id: str | None = None
     timing: Timing | None = None
     usage: TrajectoryUsage | None = None
+    failure: TrajectoryFailure | None = None
+    retry_of_native_id: str | None = None
+    retry_attempt: int | None = None
     details: tuple[DetailField, ...] = ()
     links: tuple[FactLink, ...] = ()
     source_offset: int | None = None
@@ -174,7 +177,14 @@ def _validate_fact_identity(fact: TrajectoryFact) -> None:
         value = getattr(fact, name)
         if type(value) is not int or value < 0:
             raise TrajectoryValidationError(f"fact.{name} must be a non-negative integer")
-    for name in ("turn_id", "step_id", "request_id", "call_id", "parent_call_id"):
+    for name in (
+        "turn_id",
+        "step_id",
+        "request_id",
+        "call_id",
+        "parent_call_id",
+        "retry_of_native_id",
+    ):
         value = getattr(fact, name)
         if value is not None:
             object.__setattr__(
@@ -194,6 +204,14 @@ def _validate_fact_payload(fact: TrajectoryFact) -> None:
         raise TrajectoryValidationError("fact.timing must be Timing or null")
     if fact.usage is not None and not isinstance(fact.usage, TrajectoryUsage):
         raise TrajectoryValidationError("fact.usage must be TrajectoryUsage or null")
+    if fact.failure is not None and not isinstance(fact.failure, TrajectoryFailure):
+        raise TrajectoryValidationError("fact.failure must be TrajectoryFailure or null")
+    if fact.retry_attempt is not None and fact.retry_of_native_id is None:
+        raise TrajectoryValidationError("fact retry attempt requires a retry link")
+    if fact.retry_attempt is not None and (
+        type(fact.retry_attempt) is not int or fact.retry_attempt <= 0
+    ):
+        raise TrajectoryValidationError("fact.retry_attempt must be a positive integer")
 
 
 def _validate_fact_collections(fact: TrajectoryFact) -> None:

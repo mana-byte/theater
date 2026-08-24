@@ -84,12 +84,21 @@ from theater.models import BadRequest
 from theater.provenance import TranscriptProvenance
 from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFeature
 from theater.trajectory.content import ContentFormat, DetailField
-from theater.trajectory.enums import TrajectoryKind, TrajectoryLane, TrajectoryStatus
+from theater.trajectory.enums import (
+    CostProvenance,
+    TrajectoryFailureCategory,
+    TrajectoryKind,
+    TrajectoryLane,
+    TrajectoryStatus,
+)
+from theater.trajectory.records import TrajectoryFailure
 
 if TYPE_CHECKING:
     from theater.models import Participant
 
 logger = logging.getLogger("theater.harness.vibe")
+
+VIBE_ACTIVE_MODEL_CONFIG_KEY = "active_model"
 
 #: Vibe's idle prompt is `❯` (U+276F). Anything after is someone typing — presence, not idleness.
 IDLE_PROMPTS = ("❯", "❯ ", "> ❯")
@@ -339,6 +348,7 @@ def _vibe_fact(
     turn_id: str | None = None,
     call_id: str | None = None,
     parent_call_id: str | None = None,
+    failure: TrajectoryFailure | None = None,
     details: tuple[DetailField, ...] = (),
 ) -> TrajectoryFact:
     lane = (
@@ -360,6 +370,7 @@ def _vibe_fact(
         turn_id=_vibe_identifier(turn_id),
         call_id=_vibe_identifier(call_id),
         parent_call_id=_vibe_identifier(parent_call_id),
+        failure=failure,
         details=details,
     )
 
@@ -740,10 +751,14 @@ class _VibeSource(Source):
         key = f"vibe:{old_prompt}:{old_completion}:{old_cached}->{prompt}:{completion}:{cached}"
         usage = TokenUsage(
             model=model,
+            provider=self._resolve_provider(meta),
             input_tokens=input_tokens,
             output_tokens=d_completion,
             cache_read_input_tokens=cache_read,
             cost_usd=cost_usd,
+            cost_provenance=(
+                CostProvenance.ESTIMATED if cost_usd is not None else CostProvenance.UNKNOWN
+            ),
             idempotency_key=key,
         )
         return [Event(kind=EventKind.ASSISTANT, usage=usage)]
@@ -774,7 +789,7 @@ class _VibeSource(Source):
         config = meta.get("config")
         if not isinstance(config, dict):
             return None
-        active = config.get("active_model")
+        active = config.get(VIBE_ACTIVE_MODEL_CONFIG_KEY)
         if isinstance(active, str) and active:
             matched = self._model_entry(config.get("models"), active)
             if matched is not None:
@@ -790,6 +805,21 @@ class _VibeSource(Source):
             name = routed.get("name")
             if isinstance(name, str) and name:
                 return name
+        return None
+
+    def _resolve_provider(self, meta: dict) -> str | None:
+        config = meta.get("config")
+        if not isinstance(config, dict):
+            return None
+        active = config.get(VIBE_ACTIVE_MODEL_CONFIG_KEY)
+        if isinstance(active, str) and active:
+            matched = self._model_entry(config.get("models"), active)
+            provider = matched.get("provider") if matched is not None else None
+            return provider if isinstance(provider, str) and provider else None
+        routed = config.get("routed_model_config")
+        if isinstance(routed, dict):
+            provider = routed.get("provider")
+            return provider if isinstance(provider, str) and provider else None
         return None
 
     @staticmethod
@@ -1403,6 +1433,14 @@ class VibeObserver(TranscriptObserver):
                 status=status,
                 turn_id=turn_id,
                 call_id=call_id,
+                failure=(
+                    TrajectoryFailure(
+                        TrajectoryFailureCategory.TOOL,
+                        detail=_vibe_text(record.get("error")),
+                    )
+                    if record.get("error") is not None
+                    else None
+                ),
                 details=tuple(details),
             )
         )

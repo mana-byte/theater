@@ -124,6 +124,13 @@ def fact_to_record(
         links=tuple(links),
         timing=fact.timing,
         usage=fact.usage,
+        failure=fact.failure,
+        retry_of_record_id=(
+            _namespaced_native_id(fact.retry_of_native_id, source_epoch)
+            if fact.retry_of_native_id is not None
+            else None
+        ),
+        retry_attempt=fact.retry_attempt,
         details=fact.details,
     )
 
@@ -224,6 +231,7 @@ def _usage(event: Event) -> TrajectoryUsage | None:
         return None
     return TrajectoryUsage(
         model=event.usage.model,
+        provider=event.usage.provider,
         request_id=event.usage.idempotency_key,
         input_tokens=event.usage.input_tokens,
         output_tokens=event.usage.output_tokens,
@@ -231,6 +239,7 @@ def _usage(event: Event) -> TrajectoryUsage | None:
         cache_read_tokens=event.usage.cache_read_input_tokens,
         cache_write_tokens=event.usage.cache_creation_input_tokens,
         cost_usd=event.usage.cost_usd,
+        cost_provenance=event.usage.cost_provenance,
     )
 
 

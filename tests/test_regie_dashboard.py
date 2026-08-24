@@ -73,6 +73,7 @@ def test_tip_corpus_covers_regie_capabilities():
         "past the last agent",
         "Enter",
         "outside usage stats",
+        "H/L",
         "<prefix> h",
         "single-click",
         "double-click",

@@ -91,7 +91,7 @@ async def test_surface_uses_fixed_timeline_and_virtualized_ledger() -> None:
         assert isinstance(view.query_one("#trajectory-ledger"), DataTable)
         assert isinstance(view.query_one("#trajectory-page"), Select)
         buttons = list(view.query_one(TrajectoryFooter).query(Button))
-        assert len(buttons) == 6
+        assert len(buttons) == 7
         assert all(button.display for button in buttons)
         assert view.query_one(TrajectoryFooter).region.height == TRAJECTORY_FOOTER_HEIGHT
         search = view.query_one("#trajectory-search", Input)
@@ -134,6 +134,31 @@ async def test_keys_route_regions_selection_search_reset_and_escape() -> None:
         view.focus_region(FocusRegion.LEDGER)
         await pilot.press("escape")
         assert app.returned == 1
+
+
+async def test_diagnostic_view_action_updates_in_place() -> None:
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = app.query_one("#trajectory", TrajectoryView)
+        view.state.panel = PanelStateInfo(PanelState.READY, participant_state="live")
+        view.state.upsert([make_record("r1", "running")])
+        view.state.upsert(
+            [
+                TrajectoryRecord.from_wire(
+                    {**view.state.records["r1"].to_wire(), "status": "running", "revision": 2}
+                )
+            ]
+        )
+        view._refresh()
+        ledger = view.query_one(Ledger)
+
+        await pilot.click("#trajectory-view-action")
+
+        assert view.state.diagnostic_view.value == "running"
+        assert view.query_one(Ledger) is ledger
+        assert "Running" in str(view.query_one("#trajectory-view-action", Button).label)
+        await pilot.press("v")
+        assert view.state.diagnostic_view.value == "errors"
 
 
 async def test_native_controls_handle_mouse_search_filters_and_row_activation() -> None:

@@ -23,6 +23,7 @@ from theater.trajectory import (
     TrajectoryGroup,
     TrajectoryKind,
     TrajectoryLane,
+    TrajectoryLocation,
     TrajectoryOverview,
     TrajectoryPage,
     TrajectoryRecord,
@@ -51,6 +52,15 @@ def decode_delta(value: object) -> TrajectoryDelta:
         return value
     _reject_oversized(value, "trajectory delta")
     return TrajectoryDelta.from_wire(value)
+
+
+def decode_location(value: object) -> TrajectoryLocation:
+    """Decode one bounded exact-record lookup response."""
+    if isinstance(value, TrajectoryLocation):
+        _reject_oversized(value.to_wire(), "trajectory location")
+        return value
+    _reject_oversized(value, "trajectory location")
+    return TrajectoryLocation.from_wire(value)
 
 
 def _reject_oversized(value: object, label: str) -> None:
@@ -85,6 +95,7 @@ __all__ = [
     "TrajectoryGroup",
     "TrajectoryKind",
     "TrajectoryLane",
+    "TrajectoryLocation",
     "TrajectoryOverview",
     "TrajectoryPage",
     "TrajectoryRecord",
@@ -95,5 +106,6 @@ __all__ = [
     "bounded_preview",
     "clip_utf8",
     "decode_delta",
+    "decode_location",
     "decode_page",
 ]

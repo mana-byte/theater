@@ -100,6 +100,24 @@ class BusRepository:
         ).fetchall()
         return [self._decode(row) for row in reversed(rows)]
 
+    def record_for_participant(
+        self,
+        participant_id: str,
+        row_id: int,
+        *,
+        kinds: Collection[str],
+    ) -> dict | None:
+        if not participant_id or type(row_id) is not int or row_id < 0 or not kinds:
+            return None
+        row = self._db.conn.execute(
+            select(bus)
+            .where(bus.c.id == row_id)
+            .where(or_(bus.c.from_id == participant_id, bus.c.to_id == participant_id))
+            .where(bus.c.kind.in_(tuple(kinds)))
+            .limit(1)
+        ).fetchone()
+        return self._decode(row) if row is not None else None
+
     def refusal_counts(self, *, since: float | None = None) -> dict[str, int]:
         """Sends refused before a job existed, counted by reason."""
         query = select(bus.c.payload).where(bus.c.kind == BUS_KIND_SEND_REFUSED)

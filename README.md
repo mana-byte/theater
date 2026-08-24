@@ -148,11 +148,12 @@ Run `theater` to open the normal TUI, or run `theater regie` inside an
 existing `tmux` session. The latter does not create a session and refuses to
 run outside `tmux`.
 
-The tree accepts `j`/`k` and the arrow keys. `Enter` stages a selected tree
-leaf; when keyboard navigation is on a usage tile, `Enter` toggles detailed
+The tree accepts `j`/`k` and the arrow keys. Lowercase `h`/`l` stage a
+trajectory/tmux pane, then focus it on the second press; uppercase `H`/`L`
+stage and focus it immediately. `Enter` stages or unstages a selected tmux
+pane. When keyboard navigation is on a usage tile, `Enter` toggles detailed
 usage. Clicking any usage tile does the same. The five tiles cover input,
-output, cache, cost, and average/active day. `Ctrl+P` opens the command
-palette.
+output, cache, cost, and average/active day. `Ctrl+P` opens the command palette.
 
 Detailed usage shows today, this week, and this month by harness and model,
 with global totals. It is fetched lazily and reused while the usage overlay is

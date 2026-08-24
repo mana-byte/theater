@@ -28,6 +28,8 @@ from theater.trajectory import (
     fact_to_record,
     tool_operations_for_records,
 )
+from theater.trajectory.enums import TrajectoryFailureCategory
+from theater.trajectory.records import TrajectoryFailure
 from theater.trajectory.wire import from_wire, to_wire
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -49,6 +51,9 @@ def _record(
     parent_call_id: str | None = None,
     timing: Timing | None = None,
     details: tuple[DetailField, ...] = (),
+    failure: TrajectoryFailure | None = None,
+    retry_of_record_id: str | None = None,
+    retry_attempt: int | None = None,
 ) -> TrajectoryRecord:
     return TrajectoryRecord(
         record_id=record_id,
@@ -66,6 +71,9 @@ def _record(
         parent_call_id=parent_call_id,
         timing=timing,
         details=details,
+        failure=failure,
+        retry_of_record_id=retry_of_record_id,
+        retry_attempt=retry_attempt,
     )
 
 
@@ -116,6 +124,33 @@ def test_exact_pair_uses_last_records_for_display_data() -> None:
     assert operation.timing == Timing(
         start=1, end=2, duration_ms=1000, provenance=TimingProvenance.DERIVED
     )
+
+
+def test_tool_projection_preserves_explicit_failure_and_retry_link() -> None:
+    failure = TrajectoryFailure(
+        TrajectoryFailureCategory.TOOL,
+        code="exit_1",
+        detail="command failed",
+    )
+    operation = tool_operations_for_records(
+        (
+            _call("call", 1, "id", status=TrajectoryStatus.RUNNING),
+            _result(
+                "result",
+                2,
+                "id",
+                status=TrajectoryStatus.ERROR,
+                failure=failure,
+                retry_of_record_id="prior",
+                retry_attempt=2,
+            ),
+        )
+    )[0]
+
+    assert operation.failure == failure
+    assert operation.retry_of_record_id == "prior"
+    assert operation.retry_attempt == 2
+    assert TrajectoryToolOperation.from_wire(operation.to_wire()) == operation
 
 
 def test_pairing_is_exactly_scoped_and_never_heuristic() -> None:

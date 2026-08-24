@@ -40,6 +40,8 @@ TRAJECTORY_OVERVIEW_MAX_COUNT = (1 << 31) - 1
 TRAJECTORY_OVERVIEW_MAX_TOKENS = (1 << 63) - 1
 # Maximum reported USD cost retained in one trajectory overview aggregate.
 TRAJECTORY_OVERVIEW_MAX_COST_USD = 1e15
+# Maximum active milliseconds retained in one trajectory overview aggregate.
+TRAJECTORY_OVERVIEW_MAX_DURATION_MS = 100 * 365 * 24 * 60 * 60 * 1000
 # Maximum cached encoded bytes for one participant stream.
 TRAJECTORY_PARTICIPANT_CACHE_MAX_BYTES = 4 << 20
 # Maximum cached encoded bytes across all participant streams.
@@ -112,6 +114,7 @@ __all__ = [
     "TRAJECTORY_OLDER_CURSOR_LIMIT",
     "TRAJECTORY_OVERVIEW_MAX_COST_USD",
     "TRAJECTORY_OVERVIEW_MAX_COUNT",
+    "TRAJECTORY_OVERVIEW_MAX_DURATION_MS",
     "TRAJECTORY_OVERVIEW_MAX_TOKENS",
     "TRAJECTORY_OVERVIEW_SUMMARY_MAX_BYTES",
     "TRAJECTORY_PAGE_RECORD_LIMIT",

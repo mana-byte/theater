@@ -82,12 +82,14 @@ from theater.provenance import TranscriptProvenance
 from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFeature
 from theater.trajectory.content import ContentFormat, DetailField
 from theater.trajectory.enums import (
+    CostProvenance,
     TimingProvenance,
+    TrajectoryFailureCategory,
     TrajectoryKind,
     TrajectoryLane,
     TrajectoryStatus,
 )
-from theater.trajectory.records import Timing, TrajectoryUsage
+from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryUsage
 
 if TYPE_CHECKING:
     from theater.models import Participant
@@ -215,15 +217,18 @@ def _token_usage(message: dict, record: dict) -> TokenUsage | None:
         model = None
     cost = record.get("costUSD")
     cost = float(cost) if isinstance(cost, (int, float)) and cost > 0 else None
+    provider = message.get("provider") or record.get("provider")
     native_id = message.get("id") or record.get("requestId")
     usage_key = f"claude:{native_id}" if isinstance(native_id, str) and native_id else None
     return TokenUsage(
         model=model,
+        provider=provider if isinstance(provider, str) and provider else None,
         input_tokens=int(raw.get("input_tokens") or 0),
         output_tokens=int(raw.get("output_tokens") or 0),
         cache_creation_input_tokens=int(raw.get("cache_creation_input_tokens") or 0),
         cache_read_input_tokens=int(raw.get("cache_read_input_tokens") or 0),
         cost_usd=cost,
+        cost_provenance=(CostProvenance.REPORTED if cost is not None else CostProvenance.UNKNOWN),
         idempotency_key=usage_key,
     )
 
@@ -356,12 +361,14 @@ def _claude_trajectory_usage(message: dict, record: dict) -> TrajectoryUsage | N
     if not isinstance(raw, dict):
         return None
     model = _trajectory_id(message.get("model"))
+    provider = _trajectory_id(message.get("provider") or record.get("provider"))
     request_id = _trajectory_id(
         record.get("requestId") or message.get("request_id") or message.get("id")
     )
     cost = _trajectory_float(record.get("costUSD"))
     return TrajectoryUsage(
         model=model,
+        provider=provider,
         request_id=request_id,
         input_tokens=_trajectory_int(raw.get("input_tokens")),
         output_tokens=_trajectory_int(raw.get("output_tokens")),
@@ -369,6 +376,9 @@ def _claude_trajectory_usage(message: dict, record: dict) -> TrajectoryUsage | N
         cache_read_tokens=_trajectory_int(raw.get("cache_read_input_tokens")),
         cache_write_tokens=_trajectory_int(raw.get("cache_creation_input_tokens")),
         cost_usd=cost if cost is None or cost >= 0 else None,
+        cost_provenance=(
+            CostProvenance.REPORTED if cost is not None and cost >= 0 else CostProvenance.UNKNOWN
+        ),
     )
 
 
@@ -1180,6 +1190,7 @@ class ClaudeCodeObserver(TranscriptObserver):
             parent_call_id: str | None = None,
             fact_timing: Timing | None = timing,
             usage: TrajectoryUsage | None = None,
+            failure: TrajectoryFailure | None = None,
             details: tuple[DetailField, ...] = (),
         ) -> None:
             clean_id = _trajectory_id(native_id)
@@ -1201,6 +1212,7 @@ class ClaudeCodeObserver(TranscriptObserver):
                     parent_call_id=_trajectory_id(parent_call_id),
                     timing=fact_timing,
                     usage=usage,
+                    failure=failure,
                     details=details,
                 )
             )
@@ -1316,6 +1328,11 @@ class ClaudeCodeObserver(TranscriptObserver):
                         turn=message_turn,
                         call_id=call_id,
                         parent_call_id=parent_call_id or call_id,
+                        failure=(
+                            TrajectoryFailure(TrajectoryFailureCategory.TOOL, detail=raw)
+                            if block.get("is_error") is True
+                            else None
+                        ),
                         details=result_details,
                     )
             if not facts and (usage is not None or stop is not None):
@@ -1389,6 +1406,11 @@ class ClaudeCodeObserver(TranscriptObserver):
                         status=result_status,
                         call_id=call_id,
                         parent_call_id=parent_call_id or call_id,
+                        failure=(
+                            TrajectoryFailure(TrajectoryFailureCategory.TOOL, detail=raw)
+                            if block.get("is_error") is True
+                            else None
+                        ),
                         details=details,
                     )
             if not facts and (isinstance(content, str) or record_id is not None):
@@ -1450,6 +1472,11 @@ class ClaudeCodeObserver(TranscriptObserver):
                     TrajectoryStatus.ERROR
                     if is_error
                     else _trajectory_status(record.get("status"), TrajectoryStatus.COMPLETED)
+                ),
+                failure=(
+                    TrajectoryFailure(TrajectoryFailureCategory.PROVIDER, detail=summary)
+                    if is_error
+                    else None
                 ),
                 details=tuple(system_details),
             )

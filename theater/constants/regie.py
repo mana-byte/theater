@@ -195,8 +195,8 @@ REGIE_DASHBOARD_TIPS: tuple[tuple[str | tuple[str, str], ...], ...] = (
     (("Tips: press ", _D), ("Enter", _T), (" to stage or unstage an agent", _D)),
     (
         ("Tips: outside usage stats, ", _D),
-        ("l", _T),
-        (" stages and focuses the selected agent", _D),
+        ("H/L", _T),
+        (" stage and focus trajectory or agent directly", _D),
     ),
     (
         ("Tips: when the key is free, Theater binds ", _D),

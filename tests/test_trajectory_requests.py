@@ -35,6 +35,8 @@ from theater.trajectory import (
     fact_to_record,
     requests_for_records,
 )
+from theater.trajectory.enums import CostProvenance, TrajectoryFailureCategory
+from theater.trajectory.records import TrajectoryFailure
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -55,6 +57,9 @@ def _record(
     turn_id: str | None = None,
     step_id: str | None = None,
     timing: Timing | None = None,
+    failure: TrajectoryFailure | None = None,
+    retry_of_record_id: str | None = None,
+    retry_attempt: int | None = None,
 ) -> TrajectoryRecord:
     return TrajectoryRecord(
         record_id=record_id,
@@ -72,6 +77,9 @@ def _record(
         turn_id=turn_id,
         step_id=step_id,
         timing=timing,
+        failure=failure,
+        retry_of_record_id=retry_of_record_id,
+        retry_attempt=retry_attempt,
     )
 
 
@@ -197,6 +205,120 @@ def test_request_projection_uses_latest_usage_and_consistent_turn_step_values() 
     assert request.model == "new"
     assert request.turn_id == "turn"
     assert request.step_id is None
+
+
+def test_request_exposes_provenance_timing_failure_retry_and_record_associations() -> None:
+    usage = TrajectoryUsage(
+        model="model-x",
+        provider="provider-x",
+        output_tokens=200,
+        cost_usd=0.5,
+        cost_provenance=CostProvenance.REPORTED,
+    )
+    records = (
+        _record(
+            "context",
+            1,
+            request_id="request",
+            kind=TrajectoryKind.CONTEXT,
+            timing=Timing(start=10.0, provenance=TimingProvenance.SOURCE),
+        ),
+        _record(
+            "model",
+            2,
+            request_id="request",
+            status=TrajectoryStatus.ERROR,
+            usage=usage,
+            timing=Timing(
+                start=10.0,
+                first_token=10.25,
+                end=11.25,
+                provenance=TimingProvenance.SOURCE,
+            ),
+            failure=TrajectoryFailure(
+                TrajectoryFailureCategory.TRANSPORT,
+                code="disconnected",
+                detail="connection closed",
+            ),
+            retry_of_record_id="prior-request-record",
+            retry_attempt=2,
+        ),
+        _record(
+            "tool",
+            3,
+            request_id="request",
+            lane=TrajectoryLane.TOOLS,
+            kind=TrajectoryKind.TOOL_RESULT,
+        ),
+        _record(
+            "coordination",
+            4,
+            request_id="request",
+            lane=TrajectoryLane.THEATER,
+            kind=TrajectoryKind.SEND,
+            status=TrajectoryStatus.ERROR,
+        ),
+    )
+
+    request = requests_for_records(records)[0]
+
+    assert (request.provider, request.model) == ("provider-x", "model-x")
+    assert request.ttft_ms == 250
+    assert request.generation_duration_ms == 1000
+    assert request.output_tokens_per_second == 200
+    assert request.failure == records[1].failure
+    assert (request.retry_of_record_id, request.retry_attempt) == ("prior-request-record", 2)
+    assert request.context_record_ids == ("context",)
+    assert request.model_record_ids == ("model",)
+    assert request.tool_record_ids == ("tool",)
+    assert request.coordination_record_ids == ("coordination",)
+    assert TrajectoryRequest.from_wire(request.to_wire()) == request
+
+
+def test_request_diagnostics_use_model_timing_not_context_or_tool_bounds() -> None:
+    records = (
+        _record(
+            "context",
+            1,
+            request_id="request",
+            kind=TrajectoryKind.CONTEXT,
+            timing=Timing(start=8.0, end=9.0, provenance=TimingProvenance.SOURCE),
+        ),
+        _record(
+            "model",
+            2,
+            request_id="request",
+            usage=TrajectoryUsage(output_tokens=100),
+            timing=Timing(
+                start=10.0,
+                first_token=10.2,
+                end=11.2,
+                provenance=TimingProvenance.SOURCE,
+            ),
+        ),
+        _record(
+            "tool",
+            3,
+            request_id="request",
+            lane=TrajectoryLane.TOOLS,
+            kind=TrajectoryKind.TOOL_RESULT,
+            status=TrajectoryStatus.ERROR,
+            timing=Timing(start=11.3, end=20.0, provenance=TimingProvenance.SOURCE),
+            failure=TrajectoryFailure(TrajectoryFailureCategory.TOOL, detail="failed"),
+        ),
+    )
+
+    request = requests_for_records(records)[0]
+
+    assert request.status is TrajectoryStatus.COMPLETED
+    assert request.timing is not None
+    assert request.timing.start == 10.0
+    assert request.timing.first_token == 10.2
+    assert request.timing.end == 11.2
+    assert request.timing.duration_ms == pytest.approx(1200.0)
+    assert request.timing.provenance is TimingProvenance.DERIVED
+    assert request.failure is None
+    assert request.output_tokens_per_second == pytest.approx(100.0)
 
 
 def test_request_projection_is_deterministic_across_duplicate_revisions() -> None:

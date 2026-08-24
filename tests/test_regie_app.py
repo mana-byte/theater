@@ -38,6 +38,13 @@ from theater.regie import app as app_mod
 from theater.regie.app import RegieApp
 from theater.regie.dashboard.widgets import AnimatedDashboardText, WelcomeDashboard
 from theater.regie.tree import SEND_STYLE, send_path
+from theater.trajectory import (
+    ParticipantLink,
+    TrajectoryKind,
+    TrajectoryLane,
+    TrajectoryRecord,
+    TrajectoryStatus,
+)
 
 PARENT = {
     "id": "aaaaaaaaaaaa",
@@ -109,6 +116,26 @@ AWAIT_END_ROW = {
 }
 
 _ECHO_PERIOD = object()
+
+
+def trajectory_record(
+    participant_id: str,
+    record_id: str,
+    *,
+    links: tuple[ParticipantLink, ...] = (),
+) -> TrajectoryRecord:
+    return TrajectoryRecord(
+        record_id=record_id,
+        revision=0,
+        participant_id=participant_id,
+        source_epoch="theater-bus",
+        lane=TrajectoryLane.THEATER,
+        kind=TrajectoryKind.SEND,
+        source="theater",
+        summary=record_id,
+        status=TrajectoryStatus.COMPLETED,
+        links=links,
+    )
 
 
 class FakeClient:
@@ -1781,6 +1808,25 @@ async def test_first_h_stages_trajectory_and_second_h_focuses_it(daemon, tmux):
         assert ledger.has_focus
 
 
+async def test_capital_h_stages_and_focuses_trajectory_immediately(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test() as pilot:
+        await pilot.press("shift+h")
+        view = app.query_one("#trajectory-view", app_mod.TrajectoryView)
+        assert app.right_surface is app_mod.RightSurface.TRAJECTORY
+        assert app.trajectory_participant == PARENT["id"]
+        assert view.query_one("#trajectory-ledger").has_focus
+
+
+async def test_capital_page_keys_stay_inside_focused_trajectory(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test() as pilot:
+        await pilot.press("h", "h", "shift+l")
+        assert app.right_surface is app_mod.RightSurface.TRAJECTORY
+        assert app.staged_pane is None
+    assert not any(call[0] in {"join", "select"} for call in tmux)
+
+
 async def test_tmux_return_signal_moves_trajectory_focus_back_to_the_tree(daemon, tmux):
     app, _ = make_app()
     async with app.run_test() as pilot:
@@ -1951,6 +1997,66 @@ async def test_trajectory_participant_link_selects_and_stages_target(daemon, tmu
         assert (
             app.query_one("#trajectory-view", app_mod.TrajectoryView).participant_id == CHILD["id"]
         )
+
+
+async def test_exact_trajectory_link_locates_record_and_back_restores_origin(daemon, tmux):
+    target_id = "bus:2"
+    link = ParticipantLink(CHILD["id"], "recipient", target_record_id=target_id)
+    source = trajectory_record(PARENT["id"], "bus:1", links=(link,))
+    target = trajectory_record(CHILD["id"], target_id)
+
+    def snapshot(params):
+        records = [source.to_wire()] if params["id"] == PARENT["id"] else []
+        return {
+            "panel_state": {"state": "ready", "participant_state": "dead"},
+            "stream_id": f"stream-{params['id']}",
+            "cursor": "cursor-1",
+            "older_cursor": None,
+            "has_older": False,
+            "records": records,
+            "groups": [],
+        }
+
+    daemon["answers"]["trajectory.snapshot"] = snapshot
+    daemon["answers"]["trajectory.locate"] = {
+        "participant_id": CHILD["id"],
+        "requested_record_id": target_id,
+        "resolution": "exact",
+        "record": target.to_wire(),
+        "message": "",
+    }
+    app, _ = make_app()
+    async with app.run_test() as pilot:
+        await pilot.press("h", "h")
+        source_view = app.query_one("#trajectory-view", app_mod.TrajectoryView)
+        await source_view.wait_until_loaded()
+        source_view.post_message(
+            app_mod.TrajectoryParticipantSelected(
+                CHILD["id"],
+                target_id,
+                exact=True,
+                link=link,
+            )
+        )
+        await pilot.pause()
+
+        target_view = app.query_one("#trajectory-view", app_mod.TrajectoryView)
+        assert target_view.participant_id == CHILD["id"]
+        assert target_view.state.selected_id == target_id
+        assert target_view.state.expanded_id == target_id
+        assert any(
+            params == {"id": CHILD["id"], "record_id": target_id}
+            for client in daemon["clients"]
+            for method, params in client.calls
+            if method == "trajectory.locate"
+        )
+
+        await pilot.press("b")
+        await pilot.pause()
+
+        restored = app.query_one("#trajectory-view", app_mod.TrajectoryView)
+        assert restored.participant_id == PARENT["id"]
+        assert restored.state.selected_id == source.record_id
 
 
 async def test_trajectory_copy_uses_tmux_buffer(daemon, tmux):
@@ -2152,6 +2258,15 @@ async def test_first_l_stages_and_second_l_focuses(daemon, tmux):
         assert app.staged_pane == "%10"
         assert ("select", "%10") not in tmux
         await pilot.press("l")
+    assert ("join", "%10", "@7") in tmux
+    assert ("select", "%10") in tmux
+
+
+async def test_capital_l_stages_and_focuses_tmux_immediately(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test() as pilot:
+        await pilot.press("shift+l")
+        assert app.staged_pane == "%10"
     assert ("join", "%10", "@7") in tmux
     assert ("select", "%10") in tmux
 

@@ -13,6 +13,7 @@ from typing import Literal
 
 from theater.constants.harness import HARNESS_EVENT_TEXT_MAX_CHARS
 from theater.models import Status
+from theater.trajectory.enums import CostProvenance
 
 
 def clip(text: str | None) -> str:
@@ -79,12 +80,14 @@ class TokenUsage:
     """Normalized, non-overlapping token counts for one model response."""
 
     model: str | None = None
+    provider: str | None = None
     input_tokens: int = 0
     output_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
     reasoning_output_tokens: int = 0
     cost_usd: float | None = None
+    cost_provenance: CostProvenance = CostProvenance.UNKNOWN
     idempotency_key: str | None = None
 
 

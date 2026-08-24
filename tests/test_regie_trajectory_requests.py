@@ -8,7 +8,19 @@ from textual.app import App, ComposeResult
 from textual.coordinate import Coordinate
 
 import theater.regie.trajectory.state as state_module
-from theater.regie.trajectory.ledger import Ledger, LedgerRecordClicked, LedgerRecordHovered
+from theater.regie.trajectory.details import build_inline_details
+from theater.regie.trajectory.enums import InspectorTab
+from theater.regie.trajectory.inspector import (
+    request_association_lines,
+    request_timing_lines,
+    request_usage_lines,
+)
+from theater.regie.trajectory.ledger import (
+    Ledger,
+    LedgerRecordClicked,
+    LedgerRecordHovered,
+    LedgerRecordLinkClicked,
+)
 from theater.regie.trajectory.pagination import paginate_search_result
 from theater.regie.trajectory.request_rows import build_request_index, request_row_text
 from theater.regie.trajectory.search import search_records
@@ -29,6 +41,8 @@ from theater.trajectory import (
     TrajectoryUsage,
     group_records,
 )
+from theater.trajectory.enums import CostProvenance, TrajectoryFailureCategory
+from theater.trajectory.records import TrajectoryFailure
 
 
 def record(
@@ -226,6 +240,7 @@ def test_request_text_marks_missing_values_and_uses_reported_usage() -> None:
             cache_write_tokens=6,
             reasoning_tokens=7,
             cost_usd=0.1234,
+            cost_provenance=CostProvenance.REPORTED,
         ),
         timing=Timing(duration_ms=2_000, provenance=TimingProvenance.SOURCE),
     )
@@ -234,12 +249,86 @@ def test_request_text_marks_missing_values_and_uses_reported_usage() -> None:
 
     assert text.event == "◆ REQUEST"
     assert text.source == "model-x"
-    assert text.summary == "[model-x] in 1.2K · out 34 · cache 11 · reasoning 7 · cost $0.1234"
+    assert text.summary == (
+        "[model-x] in 1.2K · out 34 · cache 11 · reasoning 7 · cost $0.1234 reported"
+    )
     assert (text.status, text.duration) == ("completed", "2.0s")
 
     missing_request = build_request_index((record("missing", 2, request_id="missing"),)).ordered[0]
     missing = request_row_text(missing_request)
     assert (missing.source, missing.summary) == ("model unknown", "usage unavailable")
+
+
+def test_request_inspector_exposes_diagnostics_and_exact_associations() -> None:
+    context = replace(
+        record("context", 1, request_id="request"),
+        kind=TrajectoryKind.CONTEXT,
+    )
+    model = replace(
+        record(
+            "model",
+            2,
+            request_id="request",
+            usage=TrajectoryUsage(
+                model="model-x",
+                provider="provider-x",
+                output_tokens=100,
+                cost_usd=0.25,
+                cost_provenance=CostProvenance.REPORTED,
+            ),
+            timing=Timing(
+                start=10.0,
+                first_token=10.2,
+                end=11.2,
+                provenance=TimingProvenance.SOURCE,
+            ),
+        ),
+        status=TrajectoryStatus.ERROR,
+        failure=TrajectoryFailure(
+            TrajectoryFailureCategory.PROVIDER,
+            code="rate_limit",
+            detail="retry later",
+        ),
+        retry_of_record_id="prior",
+        retry_attempt=2,
+    )
+    tool = replace(
+        record("tool", 3, request_id="request"),
+        lane=TrajectoryLane.TOOLS,
+        kind=TrajectoryKind.TOOL_CALL,
+    )
+    coordination = replace(
+        record("coordination", 4, request_id="request"),
+        lane=TrajectoryLane.THEATER,
+        kind=TrajectoryKind.SEND,
+    )
+    request = build_request_index((context, model, tool, coordination)).ordered[0]
+
+    usage = "\n".join(line.text for line in request_usage_lines(request))
+    timing = "\n".join(line.text for line in request_timing_lines(request))
+    associations = request_association_lines(request)
+    details = build_inline_details(
+        model,
+        InspectorTab.ASSOCIATIONS,
+        request=request,
+        max_height=20,
+    )
+
+    assert "Provider: provider-x" in usage
+    assert request_row_text(request).source == "provider-x/model-x"
+    assert "Cost: $0.25 · reported" in usage
+    assert "Time to first token: 200ms" in timing
+    assert "Generation duration: 1s" in timing
+    assert "Output throughput: 100.00 tok/s" in timing
+    assert {line.target_record_id for line in associations if line.target_record_id} == {
+        "context",
+        "model",
+        "tool",
+        "coordination",
+        "prior",
+    }
+    assert "Retry of: prior · attempt 2" in details.copy_text
+    assert InspectorTab.ASSOCIATIONS in details.tabs
 
 
 class LedgerHost(App):
@@ -282,6 +371,7 @@ async def test_ledger_request_headers_are_noninteractive_and_patch_in_place(
         assert "model-x" in ledger.get_cell(key, Ledger.COLUMN_SOURCE).plain
         assert "cost $0.1" in ledger.get_cell(key, Ledger.COLUMN_SUMMARY).plain
         request_style = ledger._component("request")
+        assert request_style.bgcolor is None
         cells = {
             column: ledger.get_cell(key, column)
             for column in (
@@ -363,3 +453,26 @@ async def test_view_places_request_before_step_and_keeps_record_navigation() -> 
         assert view._selected_visible_ids() == ("second",)
         await pilot.press("k")
         assert view.state.selected_id == "second"
+
+
+@pytest.mark.asyncio
+async def test_loaded_request_association_link_reveals_exact_record() -> None:
+    class ViewHost(App):
+        def compose(self) -> ComposeResult:
+            yield TrajectoryView("p1")
+
+    app = ViewHost()
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = app.query_one(TrajectoryView)
+        view.state.upsert(
+            (
+                record("first", 1, request_id="shared"),
+                record("second", 2, request_id="shared"),
+            )
+        )
+        view._refresh()
+        view.on_ledger_record_link_clicked(LedgerRecordLinkClicked("first"))
+        await pilot.pause()
+
+        assert view.state.selected_id == "first"
+        assert view.state.expanded_id == "first"

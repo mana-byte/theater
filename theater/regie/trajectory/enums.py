@@ -10,6 +10,15 @@ class OrderMode(StrEnum):
     DURATION = "duration"
 
 
+class DiagnosticView(StrEnum):
+    ALL = "all"
+    RUNNING = "running"
+    ERRORS = "errors"
+    SLOW = "slow"
+    TOOLS = "tools"
+    COORDINATION = "coordination"
+
+
 class FocusRegion(StrEnum):
     TIMELINE = "timeline"
     LEDGER = "ledger"
@@ -37,6 +46,7 @@ class InspectorTab(StrEnum):
     CURRENT = "current"
     PREVIOUS = "previous"
     DIFF = "diff"
+    ASSOCIATIONS = "associations"
 
 
-__all__ = ["FilterDimension", "FocusRegion", "InspectorTab", "OrderMode"]
+__all__ = ["DiagnosticView", "FilterDimension", "FocusRegion", "InspectorTab", "OrderMode"]

@@ -26,7 +26,7 @@ from theater.trajectory.enums import (
     TrajectoryValidationError,
 )
 from theater.trajectory.grouping import deterministic_record_order
-from theater.trajectory.records import Timing, TrajectoryRecord
+from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryRecord
 from theater.trajectory.validation import (
     boolean,
     enum_value,
@@ -79,6 +79,9 @@ class TrajectoryToolOperation:
     call_count: int = 0
     result_count: int = 0
     records_truncated: bool = False
+    failure: TrajectoryFailure | None = None
+    retry_of_record_id: str | None = None
+    retry_attempt: int | None = None
 
     def __post_init__(self) -> None:
         _bound_attributes(self)
@@ -115,7 +118,7 @@ class TrajectoryToolOperation:
             raise TrajectoryValidationError("unkeyed result operations contain exactly one result")
 
     def to_wire(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "operation_id": self.operation_id,
             "participant_id": self.participant_id,
             "source_epoch": self.source_epoch,
@@ -136,6 +139,12 @@ class TrajectoryToolOperation:
             "result_count": self.result_count,
             "records_truncated": self.records_truncated,
         }
+        if self.failure is not None:
+            value["failure"] = self.failure.to_wire()
+        if self.retry_of_record_id is not None:
+            value["retry_of_record_id"] = self.retry_of_record_id
+            value["retry_attempt"] = self.retry_attempt
+        return value
 
     @classmethod
     def from_wire(cls, value: object) -> Self:
@@ -161,7 +170,12 @@ class TrajectoryToolOperation:
             "result_count",
             "records_truncated",
         }
-        keys(data, required=required, optional=set(), label="trajectory tool operation")
+        keys(
+            data,
+            required=required,
+            optional={"failure", "retry_of_record_id", "retry_attempt"},
+            label="trajectory tool operation",
+        )
         return cls(
             operation_id=string(data["operation_id"], "tool.operation_id"),
             participant_id=string(data["participant_id"], "tool.participant_id"),
@@ -197,6 +211,19 @@ class TrajectoryToolOperation:
             call_count=integer(data["call_count"], "tool.call_count"),
             result_count=integer(data["result_count"], "tool.result_count"),
             records_truncated=boolean(data["records_truncated"], "tool.records_truncated"),
+            failure=(
+                TrajectoryFailure.from_wire(data["failure"])
+                if data.get("failure") is not None
+                else None
+            ),
+            retry_of_record_id=string_or_none(
+                data.get("retry_of_record_id"), "tool.retry_of_record_id"
+            ),
+            retry_attempt=(
+                integer(data["retry_attempt"], "tool.retry_attempt")
+                if data.get("retry_attempt") is not None
+                else None
+            ),
         )
 
 
@@ -274,6 +301,23 @@ def _operation_for_group(
         records_truncated=(
             len(call_ids) > TRAJECTORY_TOOL_RECORD_LIMIT
             or len(result_ids) > TRAJECTORY_TOOL_RECORD_LIMIT
+        ),
+        failure=next((record.failure for record in reversed(records) if record.failure), None),
+        retry_of_record_id=next(
+            (
+                record.retry_of_record_id
+                for record in reversed(records)
+                if record.retry_of_record_id is not None
+            ),
+            None,
+        ),
+        retry_attempt=next(
+            (
+                record.retry_attempt
+                for record in reversed(records)
+                if record.retry_of_record_id is not None
+            ),
+            None,
         ),
     )
 
@@ -430,7 +474,7 @@ def _bound_attributes(operation: TrajectoryToolOperation) -> None:
             nonempty=True,
         ),
     )
-    for name in ("call_id", "request_id", "parent_call_id"):
+    for name in ("call_id", "request_id", "parent_call_id", "retry_of_record_id"):
         value = getattr(operation, name)
         if value is not None:
             object.__setattr__(
@@ -466,6 +510,14 @@ def _bound_attributes(operation: TrajectoryToolOperation) -> None:
     )
     if operation.timing is not None and not isinstance(operation.timing, Timing):
         raise TrajectoryValidationError("tool.timing must be Timing or null")
+    if operation.failure is not None and not isinstance(operation.failure, TrajectoryFailure):
+        raise TrajectoryValidationError("tool.failure must be TrajectoryFailure or null")
+    if operation.retry_attempt is not None and operation.retry_of_record_id is None:
+        raise TrajectoryValidationError("tool retry attempt requires a retry link")
+    if operation.retry_attempt is not None and (
+        type(operation.retry_attempt) is not int or operation.retry_attempt <= 0
+    ):
+        raise TrajectoryValidationError("tool.retry_attempt must be a positive integer")
     object.__setattr__(operation, "call_details", bound_detail_fields(operation.call_details))
     object.__setattr__(operation, "result_details", bound_detail_fields(operation.result_details))
 

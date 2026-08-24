@@ -1,8 +1,18 @@
 """Standalone Régie trajectory components and their narrow adapter surface."""
 
 from theater.regie.trajectory.controller import DaemonClientCompatible, TrajectoryController
-from theater.regie.trajectory.enums import FilterDimension, FocusRegion, InspectorTab, OrderMode
-from theater.regie.trajectory.models import decode_delta, decode_page
+from theater.regie.trajectory.enums import (
+    DiagnosticView,
+    FilterDimension,
+    FocusRegion,
+    InspectorTab,
+    OrderMode,
+)
+from theater.regie.trajectory.models import decode_delta, decode_location, decode_page
+from theater.regie.trajectory.navigation import (
+    TrajectoryNavigationHistory,
+    TrajectoryNavigationTarget,
+)
 from theater.regie.trajectory.overview_strip import TrajectoryOverviewStrip
 from theater.regie.trajectory.pagination import LedgerPage, paginate_search_result
 from theater.regie.trajectory.search import (
@@ -15,6 +25,7 @@ from theater.regie.trajectory.search import (
 from theater.regie.trajectory.state import ParticipantTrajectoryState, TrajectoryStateStore
 from theater.regie.trajectory.view import (
     ReturnToTree,
+    TrajectoryBackRequested,
     TrajectoryCopyRequested,
     TrajectoryParticipantSelected,
     TrajectoryRetryRequested,
@@ -51,6 +62,7 @@ __all__ = [
     "ContentPreview",
     "DaemonClientCompatible",
     "DetailField",
+    "DiagnosticView",
     "FilterCounts",
     "FilterDimension",
     "FocusRegion",
@@ -66,6 +78,7 @@ __all__ = [
     "SearchResult",
     "Timing",
     "TimingProvenance",
+    "TrajectoryBackRequested",
     "TrajectoryCapabilities",
     "TrajectoryController",
     "TrajectoryCopyRequested",
@@ -76,6 +89,8 @@ __all__ = [
     "TrajectoryGroup",
     "TrajectoryKind",
     "TrajectoryLane",
+    "TrajectoryNavigationHistory",
+    "TrajectoryNavigationTarget",
     "TrajectoryOverview",
     "TrajectoryOverviewStrip",
     "TrajectoryPage",
@@ -89,6 +104,7 @@ __all__ = [
     "TrajectoryValidationError",
     "TrajectoryView",
     "decode_delta",
+    "decode_location",
     "decode_page",
     "fuzzy_subsequence_score",
     "paginate_search_result",

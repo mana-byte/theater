@@ -17,21 +17,26 @@ from theater.trajectory.content import (
     sanitize_text,
 )
 from theater.trajectory.enums import (
+    CostProvenance,
     GroupKind,
     LinkDirection,
     PanelState,
     TimingProvenance,
+    TrajectoryFailureCategory,
     TrajectoryKind,
     TrajectoryLane,
     TrajectoryParticipantState,
     TrajectoryStatus,
     TrajectoryValidationError,
 )
+from theater.trajectory.location import TrajectoryLocation, TrajectoryLocationResolution
 from theater.trajectory.overview import (
     TrajectoryCurrentOperation,
+    TrajectoryErrorDiagnostics,
     TrajectoryIncompleteReason,
     TrajectoryOverview,
     TrajectoryProblem,
+    TrajectorySlowOperation,
 )
 from theater.trajectory.page import (
     CoverageGap,
@@ -45,6 +50,7 @@ from theater.trajectory.page import (
 from theater.trajectory.records import (
     ParticipantLink,
     Timing,
+    TrajectoryFailure,
     TrajectoryRecord,
     TrajectoryUsage,
 )
@@ -63,6 +69,7 @@ from theater.trajectory.wire import from_wire, to_wire
 __all__ = [
     "ContentFormat",
     "ContentPreview",
+    "CostProvenance",
     "CoverageGap",
     "DetailField",
     "GroupKind",
@@ -76,11 +83,16 @@ __all__ = [
     "TrajectoryCoverage",
     "TrajectoryCurrentOperation",
     "TrajectoryDelta",
+    "TrajectoryErrorDiagnostics",
+    "TrajectoryFailure",
+    "TrajectoryFailureCategory",
     "TrajectoryFeature",
     "TrajectoryGroup",
     "TrajectoryIncompleteReason",
     "TrajectoryKind",
     "TrajectoryLane",
+    "TrajectoryLocation",
+    "TrajectoryLocationResolution",
     "TrajectoryOverview",
     "TrajectoryPage",
     "TrajectoryParticipantState",
@@ -88,6 +100,7 @@ __all__ = [
     "TrajectoryRecord",
     "TrajectoryRequest",
     "TrajectoryRequestIdentity",
+    "TrajectorySlowOperation",
     "TrajectoryStatus",
     "TrajectorySupport",
     "TrajectoryToolIdentity",

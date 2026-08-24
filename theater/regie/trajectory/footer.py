@@ -13,7 +13,7 @@ from theater.regie.trajectory.constants import (
     TRAJECTORY_FOOTER_HEIGHT,
     TRAJECTORY_FOOTER_NARROW_WIDTH,
 )
-from theater.regie.trajectory.enums import OrderMode
+from theater.regie.trajectory.enums import DiagnosticView, OrderMode
 
 
 class FooterActionRequested(Message):
@@ -144,6 +144,7 @@ class TrajectoryFooter(Horizontal):
         self._compact = False
         self._active_filters = 0
         self._mode = OrderMode.ORDER
+        self._view = DiagnosticView.ALL
         self._follow_tail = True
         self._new_count = 0
         self._page_number = 1
@@ -166,6 +167,7 @@ class TrajectoryFooter(Horizontal):
         yield Button("⌕ Search", id="trajectory-search-action", compact=True, flat=True)
         yield Button("≡ Filters", id="trajectory-filter-action", compact=True, flat=True)
         yield Button("◷ Duration", id="trajectory-mode-action", compact=True, flat=True)
+        yield Button("◫ All", id="trajectory-view-action", compact=True, flat=True)
         yield Button("↓ Live", id="trajectory-follow-action", compact=True, flat=True)
 
     def _update_actions(self) -> None:
@@ -201,6 +203,10 @@ class TrajectoryFooter(Horizontal):
             else "Switch to recorded duration"
         )
         mode.set_class(self._mode is OrderMode.DURATION, "-selected")
+        view = self.query_one("#trajectory-view-action", Button)
+        view.label = "◫" if self._compact else f"◫ {self._view.value.title()}"
+        view.tooltip = f"Diagnostic view: {self._view.value.title()} · press V"
+        view.set_class(self._view is not DiagnosticView.ALL, "-selected")
         follow = self.query_one("#trajectory-follow-action", Button)
         follow.label = (
             "↓"
@@ -245,6 +251,7 @@ class TrajectoryFooter(Horizontal):
         active_filters: int,
         query: str,
         mode: OrderMode,
+        view: DiagnosticView,
         follow_tail: bool,
         new_count: int,
     ) -> None:
@@ -260,6 +267,7 @@ class TrajectoryFooter(Horizontal):
             active_filters,
             query,
             mode,
+            view,
             follow_tail,
             new_count,
         )
@@ -298,6 +306,7 @@ class TrajectoryFooter(Horizontal):
         search.tooltip = "Focus trajectory search"
         self._active_filters = active_filters
         self._mode = mode
+        self._view = view
         self._follow_tail = follow_tail
         self._new_count = new_count
         self._update_actions()
@@ -319,6 +328,7 @@ class TrajectoryFooter(Horizontal):
             "trajectory-search-action": "search",
             "trajectory-filter-action": "filters",
             "trajectory-mode-action": "mode",
+            "trajectory-view-action": "view",
             "trajectory-follow-action": "follow",
         }
         action = actions.get(message.button.id or "")
