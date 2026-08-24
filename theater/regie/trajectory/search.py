@@ -10,6 +10,7 @@ from typing import TypeVar
 from theater.regie.trajectory.constants import MAX_SEARCH_CACHE_ENTRIES
 from theater.regie.trajectory.ordering import TrajectoryOrdering, build_ordering
 from theater.regie.trajectory.request_rows import RequestIndex
+from theater.regie.trajectory.tool_rows import ToolIndex
 from theater.trajectory import (
     GroupKind,
     TrajectoryGroup,
@@ -19,6 +20,7 @@ from theater.trajectory import (
     TrajectoryRequest,
     TrajectoryStatus,
 )
+from theater.trajectory.tools import TrajectoryToolOperation
 
 CacheKey = TypeVar("CacheKey")
 CacheValue = TypeVar("CacheValue")
@@ -153,10 +155,16 @@ class LedgerEntry:
     depth: int = 0
     group_kind: GroupKind | None = None
     request_id: str | None = None
+    tool_operation_id: str | None = None
 
     def __post_init__(self) -> None:
-        if self.record_id is not None and self.request_id is not None:
-            raise ValueError("ledger entry cannot be both a record and request header")
+        if self.request_id is not None:
+            if self.record_id is not None or self.tool_operation_id is not None:
+                raise ValueError("request header cannot carry a row")
+        elif self.tool_operation_id is not None and self.record_id is None:
+            raise ValueError("tool row requires its canonical record anchor")
+        elif self.record_id is None and self.group_kind is None:
+            raise ValueError("group header requires a group kind")
 
     @property
     def is_request_header(self) -> bool:
@@ -164,7 +172,11 @@ class LedgerEntry:
 
     @property
     def is_group_header(self) -> bool:
-        return self.record_id is None and self.request_id is None
+        return self.record_id is None and self.request_id is None and self.tool_operation_id is None
+
+    @property
+    def is_tool_operation(self) -> bool:
+        return self.record_id is not None and self.tool_operation_id is not None
 
     @property
     def is_header(self) -> bool:
@@ -182,10 +194,24 @@ class SearchResult:
     counts: FilterCounts
     group_paths: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     requests: Mapping[str, TrajectoryRequest] = field(default_factory=dict)
+    tools: Mapping[str, TrajectoryToolOperation] = field(default_factory=dict)
+    row_id_by_record_id: Mapping[str, str] = field(default_factory=dict)
+    request_id_by_row_id: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def record_ids(self) -> tuple[str, ...]:
         return tuple(record.record_id for record in self.records)
+
+    @property
+    def row_ids(self) -> tuple[str, ...]:
+        return tuple(
+            entry.record_id
+            for entry in self.entries
+            if not entry.is_header and entry.record_id is not None
+        )
+
+    def row_id_for_record(self, record_id: str | None) -> str | None:
+        return self.row_id_by_record_id.get(record_id or "")
 
     def path_for_record(self, record_id: str | None) -> tuple[str, ...]:
         return self.group_paths.get(record_id or "", ())
@@ -271,7 +297,7 @@ def _group_paths(
     return paths
 
 
-def search_records(
+def search_records(  # noqa: PLR0912, PLR0915
     records: Sequence[TrajectoryRecord],
     *,
     query: str = "",
@@ -284,6 +310,7 @@ def search_records(
     cache: SearchCache | None = None,
     ordering: TrajectoryOrdering | None = None,
     request_index: RequestIndex | None = None,
+    tool_index: ToolIndex | None = None,
 ) -> SearchResult:
     """Filter source order and retain visible step headers."""
     ordered = ordering or build_ordering(records, groups)
@@ -316,7 +343,26 @@ def search_records(
 
     matched_ids = frozenset(record.record_id for record in matched)
     paths = _group_paths(complete)
-    matching_groups = _matching_groups(complete, matched_ids)
+    row_id_by_record_id: dict[str, str] = {}
+    visible_rows: set[str] = set(matched_ids)
+    tool_by_anchor: dict[str, TrajectoryToolOperation] = {}
+    if tool_index is not None:
+        for operation in tool_index.ordered:
+            members = tool_index.members_by_id[operation.operation_id]
+            if any(member in matched_ids for member in members):
+                anchor = tool_index.anchor_by_id[operation.operation_id]
+                visible_rows.add(anchor)
+                tool_by_anchor[anchor] = operation
+                for member in members:
+                    row_id_by_record_id[member] = anchor
+        visible_rows.difference_update(
+            record_id
+            for record_id, operation_id in tool_index.by_record_id.items()
+            if tool_index.anchor_by_id[operation_id] != record_id
+        )
+    for record_id in visible_rows:
+        row_id_by_record_id.setdefault(record_id, record_id)
+    matching_groups = _matching_groups(complete, frozenset(visible_rows))
     entries: list[LedgerEntry] = []
 
     def visit(group: TrajectoryGroup, depth: int) -> None:
@@ -334,7 +380,8 @@ def search_records(
             )
         content_depth = depth + int(show_header)
         for unit in ordered.group_units(group):
-            if isinstance(unit, str) and unit in matched_ids:
+            if isinstance(unit, str) and unit in visible_rows:
+                operation = tool_by_anchor.get(unit)
                 entries.append(
                     LedgerEntry(
                         group_id=group.group_id,
@@ -342,6 +389,7 @@ def search_records(
                         record_id=unit,
                         depth=content_depth,
                         group_kind=group.kind,
+                        tool_operation_id=getattr(operation, "operation_id", None),
                     )
                 )
             elif isinstance(unit, TrajectoryGroup) and id(unit) in matching_groups:
@@ -350,13 +398,43 @@ def search_records(
     for group in complete:
         visit(group, 0)
     requests: dict[str, TrajectoryRequest] = {}
+    request_id_by_row_id: dict[str, str] = {}
     if request_index is not None:
+        fallback_requests: dict[tuple[str, str, str], set[str]] = {}
+        for request in request_index.ordered:
+            if request.source_request_id is not None:
+                fallback_requests.setdefault(
+                    (request.source_request_id, request.participant_id, request.source_epoch), set()
+                ).add(request.request_id)
+        for row_id in visible_rows:
+            members = (row_id,)
+            row_operation = tool_by_anchor.get(row_id)
+            if row_operation is not None and tool_index is not None:
+                members = tool_index.members_by_id[row_operation.operation_id]
+            request_ids = {
+                request_index.by_record_id[member]
+                for member in members
+                if member in request_index.by_record_id
+            }
+            if row_operation is not None and row_operation.request_id is not None:
+                request_ids.update(
+                    fallback_requests.get(
+                        (
+                            row_operation.request_id,
+                            row_operation.participant_id,
+                            row_operation.source_epoch,
+                        ),
+                        set(),
+                    )
+                )
+            if len(request_ids) == 1:
+                request_id_by_row_id[row_id] = next(iter(request_ids))
         entries, requests = compose_request_headers(
             entries,
-            matched_ids,
+            frozenset(visible_rows),
             paths,
             request_index.ordered,
-            request_index.by_record_id,
+            request_id_by_row_id,
         )
     return SearchResult(
         records=tuple(matched),
@@ -366,6 +444,9 @@ def search_records(
         counts=_filter_counts(bounded_records, active),
         group_paths=paths,
         requests=requests,
+        tools={operation.operation_id: operation for operation in tool_by_anchor.values()},
+        row_id_by_record_id=row_id_by_record_id,
+        request_id_by_row_id=request_id_by_row_id,
     )
 
 
@@ -390,7 +471,7 @@ def compose_request_headers(
         request_id = request.request_id
         visible_members = [
             record_id
-            for record_id in request.record_ids
+            for record_id in positions
             if record_id in matched_ids and by_record_id.get(record_id) == request_id
         ]
         if not visible_members:

@@ -27,6 +27,7 @@ from theater.regie.trajectory.request_rows import (
     build_request_index,
     empty_request_index,
 )
+from theater.regie.trajectory.tool_rows import ToolIndex, build_tool_index, empty_tool_index
 from theater.trajectory import (
     PanelState,
     PanelStateInfo,
@@ -70,6 +71,7 @@ class ParticipantTrajectoryState:
     groups: tuple[TrajectoryGroup, ...] = ()
     records: OrderedDict[str, TrajectoryRecord] = field(default_factory=OrderedDict)
     request_index: RequestIndex = field(default_factory=empty_request_index)
+    tool_index: ToolIndex = field(default_factory=empty_tool_index)
     loaded_bytes: int = 0
     follow_tail: bool = True
     new_count: int = 0
@@ -147,6 +149,16 @@ class ParticipantTrajectoryState:
     def _rebuild_groups(self) -> None:
         self.groups = group_records(self.record_list)
         self.request_index = build_request_index(self.records.values())
+        self.tool_index = build_tool_index(self.records.values())
+
+    def row_anchor(self, record_id: str | None) -> str | None:
+        """Resolve a tool member to its canonical ledger row anchor."""
+        if record_id is None:
+            return None
+        operation_id = self.tool_index.by_record_id.get(record_id)
+        if operation_id is not None:
+            return self.tool_index.anchor_by_id.get(operation_id)
+        return record_id if record_id in self.records else None
 
     def _trim(self, *, evict_newest: bool) -> None:
         while (
@@ -223,6 +235,7 @@ class ParticipantTrajectoryState:
         prior_bytes = self.loaded_bytes
         prior_groups = self.groups
         prior_request_index = self.request_index
+        prior_tool_index = self.tool_index
         preserve_trace = (
             page.panel_state.state
             in {PanelState.STALE, PanelState.UNAVAILABLE, PanelState.UNTRUSTED}
@@ -250,6 +263,7 @@ class ParticipantTrajectoryState:
             self.loaded_bytes = prior_bytes
             self.groups = prior_groups
             self.request_index = prior_request_index
+            self.tool_index = prior_tool_index
         else:
             self._apply_records(page.records)
             self.groups = page.groups or self.groups
@@ -260,7 +274,7 @@ class ParticipantTrajectoryState:
             self.selected_id = next(reversed(self.records))
         else:
             self.selected_id = None
-        if self.expanded_id not in self.records:
+        if self.row_anchor(self.expanded_id) is None:
             self.expanded_id = None
 
     def apply_older(self, page: TrajectoryPage) -> None:
