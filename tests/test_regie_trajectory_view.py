@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from textual.app import App, ComposeResult
 from textual.coordinate import Coordinate
-from textual.widgets import Button, DataTable, Input, SelectionList
+from textual.widgets import Button, DataTable, Input, Select, SelectionList
 
 from theater.regie.trajectory.constants import (
     LEDGER_HEADER_HEIGHT,
@@ -89,8 +89,9 @@ async def test_surface_uses_fixed_timeline_and_virtualized_ledger() -> None:
         assert isinstance(view.query_one("#trajectory-filters"), FilterPanel)
         assert isinstance(view.query_one("#trajectory-filter-options"), SelectionList)
         assert isinstance(view.query_one("#trajectory-ledger"), DataTable)
+        assert isinstance(view.query_one("#trajectory-page"), Select)
         buttons = list(view.query_one(TrajectoryFooter).query(Button))
-        assert len(buttons) == 4
+        assert len(buttons) == 6
         assert all(button.display for button in buttons)
         assert view.query_one(TrajectoryFooter).region.height == TRAJECTORY_FOOTER_HEIGHT
         search = view.query_one("#trajectory-search", Input)

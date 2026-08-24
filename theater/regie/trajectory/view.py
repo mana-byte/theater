@@ -11,7 +11,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import Input
+from textual.widgets import Input, Select
 from textual.worker import Worker
 
 from theater.regie.trajectory.constants import (
@@ -29,7 +29,11 @@ from theater.regie.trajectory.filter_panel import (
     FilterPanelClosed,
     FilterValueClicked,
 )
-from theater.regie.trajectory.footer import FooterActionRequested, TrajectoryFooter
+from theater.regie.trajectory.footer import (
+    FooterActionRequested,
+    FooterPageRequested,
+    TrajectoryFooter,
+)
 from theater.regie.trajectory.ledger import (
     Ledger,
     LedgerDetailTabChanged,
@@ -571,13 +575,21 @@ class TrajectoryView(Vertical):
         target = max(0, min(self._ledger_page.count - 1, self.state.ledger_page + delta))
         if target == self.state.ledger_page:
             return
+        self._show_page(target, select_last=delta < 0)
+
+    def _show_page(self, target: int, *, select_last: bool = False) -> None:
         page = paginate_search_result(
             self._search_result,
             target,
             self.state_store.page_size,
         )
         self.state.ledger_page = page.index
-        record_id = page.record_ids[-1] if delta < 0 else page.record_ids[0]
+        if not page.record_ids:
+            record_id = None
+        elif select_last:
+            record_id = page.record_ids[-1]
+        else:
+            record_id = page.record_ids[0]
         self.state.select(record_id)
         self._update_follow_for_selection(record_id)
         self._refresh(recompute=False)
@@ -587,6 +599,11 @@ class TrajectoryView(Vertical):
 
     def action_next_page(self) -> None:
         self._change_page(1)
+
+    def action_select_page(self, page_index: int) -> None:
+        target = max(0, min(self._ledger_page.count - 1, page_index))
+        if target != self.state.ledger_page:
+            self._show_page(target)
 
     def action_toggle_mode(self) -> None:
         self.state.order_mode = (
@@ -748,6 +765,9 @@ class TrajectoryView(Vertical):
             self.is_mounted and self.query_one("#trajectory-filters", FilterPanel).has_focus_within
         )
 
+    def _page_select_owns_focus(self) -> bool:
+        return self.is_mounted and self.query_one("#trajectory-page", Select).has_focus_within
+
     def on_key(self, event: events.Key) -> None:
         if self.state.search_open:
             if event.key == "escape":
@@ -761,6 +781,8 @@ class TrajectoryView(Vertical):
             if event.key == "escape":
                 event.stop()
                 self.on_filter_panel_closed(FilterPanelClosed())
+            return
+        if self._page_select_owns_focus():
             return
         actions: dict[str, Callable[[], None]] = {
             "j": self.action_select_next,
@@ -924,6 +946,8 @@ class TrajectoryView(Vertical):
 
     def on_footer_action_requested(self, message: FooterActionRequested) -> None:
         actions = {
+            "previous_page": self.action_previous_page,
+            "next_page": self.action_next_page,
             "search": self.action_open_search,
             "filters": self.action_toggle_filters,
             "mode": self.action_toggle_mode,
@@ -932,6 +956,9 @@ class TrajectoryView(Vertical):
         action = actions.get(message.action)
         if action is not None:
             action()
+
+    def on_footer_page_requested(self, message: FooterPageRequested) -> None:
+        self.action_select_page(message.page_index)
 
     def on_ledger_participant_link_clicked(self, message: LedgerParticipantLinkClicked) -> None:
         if self._participant_link is not None:

@@ -6,7 +6,7 @@ from textual import events
 from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.message import Message
-from textual.widgets import Button, Label
+from textual.widgets import Button, Label, Select
 
 from theater.regie.trajectory.constants import (
     TRAJECTORY_FOOTER_COMPACT_WIDTH,
@@ -22,6 +22,14 @@ class FooterActionRequested(Message):
     def __init__(self, action: str) -> None:
         super().__init__()
         self.action = action
+
+
+class FooterPageRequested(Message):
+    """A trajectory page was chosen from the footer."""
+
+    def __init__(self, page_index: int) -> None:
+        super().__init__()
+        self.page_index = page_index
 
 
 class TrajectoryFooter(Horizontal):
@@ -43,11 +51,44 @@ class TrajectoryFooter(Horizontal):
         text-wrap: nowrap;
         text-overflow: ellipsis;
     }}
+    TrajectoryFooter #trajectory-page-previous,
+    TrajectoryFooter #trajectory-page-next {{
+        width: 3;
+        min-width: 3;
+        padding: 0;
+        margin-left: 0;
+    }}
     TrajectoryFooter #trajectory-page {{
-        width: auto;
-        min-width: 24;
-        color: $text;
+        width: 13;
+        min-width: 10;
+        height: 1;
+        min-height: 1;
+        background: $background;
+    }}
+    TrajectoryFooter #trajectory-page SelectCurrent {{
+        height: 1;
+        min-height: 1;
+        padding: 0;
+        background: $background;
+    }}
+    TrajectoryFooter #trajectory-page SelectCurrent Static#label {{
+        height: 1;
+        content-align: center middle;
         text-style: bold;
+    }}
+    TrajectoryFooter #trajectory-page SelectCurrent .arrow {{
+        padding: 0;
+        color: $text-muted;
+    }}
+    TrajectoryFooter #trajectory-page SelectOverlay {{
+        width: 16;
+        max-height: 12;
+    }}
+    TrajectoryFooter #trajectory-page-range {{
+        width: auto;
+        min-width: 14;
+        padding-left: 1;
+        color: $text-muted;
     }}
     TrajectoryFooter #trajectory-state {{
         width: auto;
@@ -92,7 +133,7 @@ class TrajectoryFooter(Horizontal):
     }}
     TrajectoryFooter.-compact #trajectory-state {{ display: none; }}
     TrajectoryFooter.-narrow #trajectory-status {{ display: none; }}
-    TrajectoryFooter.-narrow #trajectory-page {{ width: 1fr; min-width: 12; }}
+    TrajectoryFooter.-narrow #trajectory-page-range {{ display: none; }}
     """
 
     def __init__(self, **kwargs) -> None:
@@ -102,10 +143,21 @@ class TrajectoryFooter(Horizontal):
         self._mode = OrderMode.ORDER
         self._follow_tail = True
         self._new_count = 0
+        self._page_number = 1
+        self._page_count = 1
         self._state_key: tuple[object, ...] | None = None
 
     def compose(self) -> ComposeResult:
-        yield Label("H ‹  Page 1/1  › L · 0 items", id="trajectory-page")
+        yield Button("‹", id="trajectory-page-previous", compact=True, flat=True)
+        yield Select(
+            [("Page 1/1", 0)],
+            value=0,
+            allow_blank=False,
+            id="trajectory-page",
+            compact=True,
+        )
+        yield Button("›", id="trajectory-page-next", compact=True, flat=True)
+        yield Label("0 items", id="trajectory-page-range")
         yield Label("● WAITING", id="trajectory-state", classes="-waiting")
         yield Label("Loading…", id="trajectory-status")
         yield Button("⌕ Search", id="trajectory-search-action", compact=True, flat=True)
@@ -163,6 +215,22 @@ class TrajectoryFooter(Horizontal):
         follow.tooltip = "Following live events" if self._follow_tail else "Resume live tail"
         follow.set_class(self._follow_tail, "-selected")
 
+    def _update_pagination(self) -> None:
+        previous = self.query_one("#trajectory-page-previous", Button)
+        previous.disabled = self._page_number <= 1
+        previous.tooltip = "Previous page (H)"
+        following = self.query_one("#trajectory-page-next", Button)
+        following.disabled = self._page_number >= self._page_count
+        following.tooltip = "Next page (L)"
+        selector = self.query_one("#trajectory-page", Select)
+        selector.disabled = self._page_count <= 1
+        selector.tooltip = "Choose trajectory page"
+        options = [
+            (f"Page {page}/{self._page_count}", page - 1) for page in range(1, self._page_count + 1)
+        ]
+        selector.set_options(options)
+        selector.value = self._page_number - 1
+
     def update_state(
         self,
         *,
@@ -202,12 +270,20 @@ class TrajectoryFooter(Horizontal):
         state.update(f"● {status.upper()}")
         state.set_class(status == "waiting", "-waiting")
         state.set_class(status in {"untrusted", "unavailable", "stale"}, "-problem")
+        page_count_changed = page_count != self._page_count
+        self._page_number = page_number
+        self._page_count = page_count
+        selector = self.query_one("#trajectory-page", Select)
+        if page_count_changed:
+            self._update_pagination()
+        else:
+            selector.value = page_number - 1
+            self.query_one("#trajectory-page-previous", Button).disabled = page_number <= 1
+            self.query_one("#trajectory-page-next", Button).disabled = page_number >= page_count
         item_range = (
             "0 items" if not visible_count else f"{first_item}–{last_item}/{visible_count} items"
         )
-        self.query_one("#trajectory-page", Label).update(
-            f"H ‹  Page {page_number}/{page_count}  › L · {item_range}"
-        )
+        self.query_one("#trajectory-page-range", Label).update(item_range)
         details = [f"{record_count} loaded"]
         if message:
             details.append(message)
@@ -238,6 +314,8 @@ class TrajectoryFooter(Horizontal):
 
     def on_button_pressed(self, message: Button.Pressed) -> None:
         actions = {
+            "trajectory-page-previous": "previous_page",
+            "trajectory-page-next": "next_page",
             "trajectory-search-action": "search",
             "trajectory-filter-action": "filters",
             "trajectory-mode-action": "mode",
@@ -249,5 +327,18 @@ class TrajectoryFooter(Horizontal):
         message.stop()
         self.post_message(FooterActionRequested(action))
 
+    def on_select_changed(self, message: Select.Changed) -> None:
+        page_index = message.value
+        if (
+            message.select.id != "trajectory-page"
+            or not isinstance(page_index, int)
+            or isinstance(page_index, bool)
+        ):
+            return
+        message.stop()
+        if page_index != message.select.value or page_index == self._page_number - 1:
+            return
+        self.post_message(FooterPageRequested(page_index))
 
-__all__ = ["FooterActionRequested", "TrajectoryFooter"]
+
+__all__ = ["FooterActionRequested", "FooterPageRequested", "TrajectoryFooter"]

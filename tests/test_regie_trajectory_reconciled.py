@@ -8,7 +8,7 @@ from rich.console import Console
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.coordinate import Coordinate
-from textual.widgets import Input, SelectionList
+from textual.widgets import Button, Input, Select, SelectionList
 
 from theater.regie.trajectory.constants import (
     FILTER_MAX_ROWS,
@@ -602,8 +602,8 @@ async def test_ledger_pages_with_shift_h_and_shift_l() -> None:
 
         assert view.state.ledger_page == 2
         assert tuple(entry.record_id for entry in ledger.entries if entry.record_id) == ("r4",)
-        assert "Page 3/3" in str(view.query_one("#trajectory-page").content)
-        assert "5 items" in str(view.query_one("#trajectory-page").content)
+        assert view.query_one("#trajectory-page", Select).value == 2
+        assert "5 items" in str(view.query_one("#trajectory-page-range").content)
 
         await pilot.press("shift+h")
         assert view.state.ledger_page == 1
@@ -615,12 +615,44 @@ async def test_ledger_pages_with_shift_h_and_shift_l() -> None:
         assert isinstance(position, Text)
         assert position.plain.strip().endswith("3")
         assert not view.state.follow_tail
-        assert "Page 2/3" in str(view.query_one("#trajectory-page").content)
+        assert view.query_one("#trajectory-page", Select).value == 1
 
         await pilot.press("shift+l")
         assert view.state.ledger_page == 2
         assert view.state.selected_id == "r4"
         assert view.state.follow_tail
+
+
+async def test_footer_page_buttons_and_selector_change_pages() -> None:
+    records = [record(f"r{index}", index=index, turn_id=None) for index in range(5)]
+    app = Host()
+    async with app.run_test(size=(100, 24)) as pilot:
+        view = app.query_one(TrajectoryView)
+        view.state_store.page_size = 2
+        view.state.panel = PanelStateInfo(PanelState.READY, participant_state="live")
+        view.state.upsert(records)
+        view._refresh()
+        previous = view.query_one("#trajectory-page-previous", Button)
+        following = view.query_one("#trajectory-page-next", Button)
+        selector = view.query_one("#trajectory-page", Select)
+
+        assert selector.value == 2
+        assert following.disabled
+        await pilot.click(previous)
+        assert view.state.ledger_page == 1
+        assert not previous.disabled
+        assert not following.disabled
+        await pilot.click(following)
+        assert view.state.ledger_page == 2
+
+        await pilot.click(selector)
+        assert selector.expanded
+        await pilot.press("home", "enter")
+        await pilot.pause()
+
+        assert view.state.ledger_page == 0
+        assert selector.value == 0
+        assert previous.disabled
 
 
 def test_context_tabs_render_matching_formats_and_copy_exactly() -> None:
