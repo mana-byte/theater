@@ -109,6 +109,7 @@ class TrajectoryView(Vertical):
         min-height: 0;
         layers: trajectory-base trajectory-overlay;
         background: $background;
+        border-left: solid $foreground 20%;
         padding: 0 {TRAJECTORY_HORIZONTAL_PADDING};
     }}
     TrajectoryView > #trajectory-timeline,

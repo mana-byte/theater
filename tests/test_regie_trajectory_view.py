@@ -98,7 +98,7 @@ async def test_surface_uses_fixed_timeline_and_virtualized_ledger() -> None:
         timeline = view.query_one(Timeline)
         assert search.region.height == SEARCH_HEIGHT
         assert search.region.y < timeline.region.y
-        assert search.region.width == timeline.region.width == view.region.width
+        assert search.region.width == timeline.region.width == view.content_region.width
         assert view.query_one(Ledger).header_height == LEDGER_HEADER_HEIGHT
         assert all(row.height == LEDGER_ROW_HEIGHT for row in view.query_one(Ledger).rows.values())
         assert all(
