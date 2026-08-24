@@ -154,11 +154,7 @@ def test_malformed_apply_patch_input_yields_no_paths():
 # ---- resume argv -------------------------------------------------------
 
 
-def test_resume_inserts_subcommand_and_session_id(tmp_path):
-    """``codex resume <SESSION_ID>`` is a subcommand (cli/src/main.rs:181-182,
-    315-339), not a flag. The session id is a positional after the subcommand,
-    and the MCP config overrides and approval flags follow just as they do for
-    a fresh launch."""
+def test_resume_forks_the_session(tmp_path):
     plan = plan_launch(
         "codex",
         participant_id="abc123",
@@ -168,8 +164,9 @@ def test_resume_inserts_subcommand_and_session_id(tmp_path):
         resume="019ff5c6-717c-7a70-9ec4-66dd1f4d173e",
     )
     assert plan.argv[0] == "codex"
-    assert plan.argv[1] == "resume"
+    assert plan.argv[1] == "fork"
     assert plan.argv[2] == "019ff5c6-717c-7a70-9ec4-66dd1f4d173e"
+    assert plan.session_id is None
     # The MCP config overrides and approval flags are still present.
     assert any(a.startswith("mcp_servers.theater.command=") for a in plan.argv)
     assert "-a" in plan.argv and "untrusted" in plan.argv
@@ -186,7 +183,7 @@ def test_resume_without_prompt_omits_positional(tmp_path):
         approval="manual",
         resume="some-session",
     )
-    assert plan.argv[1] == "resume"
+    assert plan.argv[1] == "fork"
     assert plan.argv[2] == "some-session"
     # No trailing positional prompt.
     assert not plan.argv[-1].startswith("mcp_servers")

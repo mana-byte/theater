@@ -208,7 +208,7 @@ def test_cwd_with_trailing_slash_relativises_correctly():
 # ---- resume support -------------------------------------------------------
 
 
-def test_plan_launch_with_resume_adds_the_flag(tmp_path):
+def test_plan_launch_with_resume_forks_to_a_fresh_session(tmp_path):
     plan = ClaudeCodeHarness().plan_launch(
         participant_id="p-abc",
         prompt="continue",
@@ -217,6 +217,9 @@ def test_plan_launch_with_resume_adds_the_flag(tmp_path):
         resume="session-uuid-123",
     )
     assert "--resume=session-uuid-123" in plan.argv
+    assert "--fork-session" in plan.argv
+    assert f"--session-id={plan.session_id}" in plan.argv
+    assert plan.session_id != "session-uuid-123"
     assert plan.argv[-1] == "continue"
 
 
@@ -228,3 +231,4 @@ def test_plan_launch_without_resume_adds_no_resume_flag(tmp_path):
         approval="manual",
     )
     assert not any(arg.startswith("--resume") for arg in plan.argv)
+    assert "--fork-session" not in plan.argv

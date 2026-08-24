@@ -447,6 +447,7 @@ class ClaudeCodeHarness(Harness):
     icon = "✻"
     #: Registration aliases; a non-normalizing spelling is observed as nothing.
     aliases = ("claude_code", "claude-code", "Claude", "ClaudeCode")
+    resume_strategy = "fork"
 
     def __init__(self, root: Path | None = None):
         #: `root` locates the transcript; nothing about launching depends on it.
@@ -480,17 +481,15 @@ class ClaudeCodeHarness(Harness):
         # `=` form: `--mcp-config` is variadic in 2.x — space form greedily consumes the prompt.
         argv = ["claude", f"--mcp-config={config_path}", f"--settings={settings_path}"]
         # Choosing the UUID before the pane exists removes the same-cwd creation race entirely.
-        native_session_id = resume or str(uuid.uuid4())
-        if resume is None:
-            argv.append(f"--session-id={native_session_id}")
+        native_session_id = str(uuid.uuid4())
+        argv.append(f"--session-id={native_session_id}")
         if model:
             # `=` form, same as --mcp-config: space-separated value sits next to the prompt.
             argv.append(f"--model={model}")
         if reasoning_effort:
             argv.append(f"--effort={reasoning_effort}")
         if resume:
-            # `--resume <id>` resumes a session; interactive reattaches and still accepts a prompt.
-            argv.append(f"--resume={resume}")
+            argv += [f"--resume={resume}", "--fork-session"]
         if approval == "yolo":
             argv.append("--dangerously-skip-permissions")
         elif approval == "edits":

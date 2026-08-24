@@ -112,9 +112,10 @@ async def spawn_session(
     `[reasoning]` allowlist and nothing else.
 
     `resume` takes a session id from `recall` — or a Theater participant id —
-    and attaches the new job to that existing harness session instead of
-    starting cold. If the value matches a retained participant, the daemon
-    resolves it to that participant's harness session id internally.
+    and continues that context. Harnesses with native fork support create a
+    fresh session identity; older resume-only harnesses reuse the existing one.
+    If the value matches a retained participant, the daemon resolves it to
+    that participant's harness session id internally.
     Refused up front
     for a harness whose `plan_launch` has no `resume` parameter. Some
     harnesses accept resume but cannot carry a prompt through it — see

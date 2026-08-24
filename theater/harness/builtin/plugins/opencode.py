@@ -574,6 +574,7 @@ class OpenCodeHarness(Harness):
     icon = "\u25c7"
     #: A spelling that does not normalize is observed as nothing at all, so these are not cosmetic.
     aliases = ("open-code", "open_code", "OpenCode", "opencode-ai")
+    resume_strategy = "fork"
     #: `-s` routes to session view, `--prompt` only on home screen — a prompt with `-s` is dropped.
     resume_takes_prompt: bool = False
 
@@ -616,24 +617,17 @@ class OpenCodeHarness(Harness):
         if approval == "yolo":
             argv.append("--auto")
         if resume is not None:
-            # `--prompt` omitted: `-s` to session view, `--prompt` on home only — both drop task.
-            argv += ["-s", resume]
+            argv += ["-s", resume, "--fork"]
         elif prompt:
             argv += ["--prompt", prompt]
         files = {
             config_path: json.dumps(config, indent=2),
             plugin_path: _correlation_plugin(participant_id, receipt_path),
         }
-        # Resuming creates no session, so no creation event; the id is already an exact receipt.
-        if resume is not None:
-            files[receipt_path] = (
-                json.dumps({"participant_id": participant_id, "session_id": resume}) + "\n"
-            )
         return LaunchPlan(
             argv=argv,
             env={"OPENCODE_CONFIG": str(config_path)},
             files=files,
-            session_id=resume,
         )
 
     def resume_launch_overlay(
