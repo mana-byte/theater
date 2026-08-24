@@ -53,6 +53,11 @@ from theater.trajectory.requests import (
     TrajectoryRequestIdentity,
     requests_for_records,
 )
+from theater.trajectory.tools import (
+    TrajectoryToolIdentity,
+    TrajectoryToolOperation,
+    tool_operations_for_records,
+)
 from theater.trajectory.wire import from_wire, to_wire
 
 __all__ = [
@@ -85,6 +90,8 @@ __all__ = [
     "TrajectoryRequestIdentity",
     "TrajectoryStatus",
     "TrajectorySupport",
+    "TrajectoryToolIdentity",
+    "TrajectoryToolOperation",
     "TrajectoryUpsert",
     "TrajectoryUsage",
     "TrajectoryValidationError",
@@ -108,6 +115,7 @@ __all__ = [
     "requests_for_records",
     "sanitize_text",
     "to_wire",
+    "tool_operations_for_records",
 ]
 
 

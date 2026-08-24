@@ -52,6 +52,11 @@ from theater.trajectory.requests import (
     TrajectoryRequestIdentity,
     requests_for_records,
 )
+from theater.trajectory.tools import (
+    TrajectoryToolIdentity,
+    TrajectoryToolOperation,
+    tool_operations_for_records,
+)
 
 __all__ = [
     "ContentFormat",
@@ -83,6 +88,8 @@ __all__ = [
     "TrajectoryRequestIdentity",
     "TrajectoryStatus",
     "TrajectorySupport",
+    "TrajectoryToolIdentity",
+    "TrajectoryToolOperation",
     "TrajectoryUpsert",
     "TrajectoryUsage",
     "TrajectoryValidationError",
@@ -90,4 +97,5 @@ __all__ = [
     "escape_rich_text",
     "requests_for_records",
     "sanitize_text",
+    "tool_operations_for_records",
 ]
