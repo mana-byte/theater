@@ -36,6 +36,7 @@ from theater.regie.trajectory.details import (
     DETAIL_TAB_META,
     InlineDetails,
     build_inline_details,
+    build_tool_inline_details,
 )
 from theater.regie.trajectory.enums import InspectorTab, OrderMode
 from theater.regie.trajectory.render import (
@@ -47,7 +48,14 @@ from theater.regie.trajectory.render import (
 )
 from theater.regie.trajectory.request_rows import request_row_text
 from theater.regie.trajectory.search import LedgerEntry, SearchResult
-from theater.trajectory import TrajectoryLane, TrajectoryRecord, TrajectoryRequest, TrajectoryStatus
+from theater.regie.trajectory.tool_rows import tool_row_text
+from theater.trajectory import (
+    TrajectoryLane,
+    TrajectoryRecord,
+    TrajectoryRequest,
+    TrajectoryStatus,
+    TrajectoryToolOperation,
+)
 
 RETRY_ACTION_META = "trajectory_retry"
 
@@ -113,6 +121,7 @@ class Ledger(DataTable[Text | str]):
     GROUP_PREFIX = "group:"
     REQUEST_PREFIX = "request:"
     RECORD_PREFIX = "record:"
+    TOOL_PREFIX = "tool:"
     DETAIL_PREFIX = "detail:"
     COLUMN_LABELS: ClassVar[dict[str, str]] = {
         COLUMN_POSITION: "#",
@@ -238,6 +247,7 @@ class Ledger(DataTable[Text | str]):
         )
         self._records: dict[str, TrajectoryRecord] = {}
         self._requests: dict[str, TrajectoryRequest] = {}
+        self._tools: dict[str, TrajectoryToolOperation] = {}
         self._entries: tuple[LedgerEntry, ...] = ()
         self._entry_indices: dict[str, int] = {}
         self._line_ids: tuple[str | None, ...] = ()
@@ -264,6 +274,7 @@ class Ledger(DataTable[Text | str]):
         self._structure: tuple[object, ...] = ()
         self._revisions: dict[str, int] = {}
         self._rendered_requests: dict[str, TrajectoryRequest] = {}
+        self._rendered_tools: dict[str, TrajectoryToolOperation] = {}
         self._summary_width = 32
         self._column_widths = {
             key: self._text_width(label) for key, label in self.COLUMN_LABELS.items()
@@ -377,6 +388,8 @@ class Ledger(DataTable[Text | str]):
             return f"{self.REQUEST_PREFIX}{entry.request_id}"
         if entry.is_group_header:
             return f"{self.GROUP_PREFIX}{entry.group_id}"
+        if entry.is_tool_operation:
+            return f"{self.TOOL_PREFIX}{entry.tool_operation_id}"
         return f"{self.RECORD_PREFIX}{entry.record_id}"
 
     def _entry_for_key(self, key: object) -> LedgerEntry | _DetailRow | str | None:
@@ -551,6 +564,31 @@ class Ledger(DataTable[Text | str]):
             self.COLUMN_DURATION: duration,
         }
 
+    def _tool_cells(self, entry: LedgerEntry, index: int) -> dict[str, Text]:
+        tool = self._tools.get(entry.tool_operation_id or "")
+        if tool is None:
+            return self._record_cells(
+                self._records[entry.record_id or ""], index, depth=entry.depth
+            )
+        text = tool_row_text(tool, compact=self._compact_columns)
+        hovered = entry.record_id == self._hovered_id
+        marker = "▾" if entry.record_id == self.expanded_id else "●" if hovered else "▸"
+        return {
+            self.COLUMN_POSITION: Text(
+                f"{marker}{index + 1:>3}", style="bold" if hovered else "dim"
+            ),
+            self.COLUMN_EVENT: Text(text.event, style=self._component("tools") + Style(bold=True)),
+            self.COLUMN_SOURCE: Text(text.source, style="dim"),
+            self.COLUMN_SUMMARY: Text(
+                f"{'  ' * entry.depth}{text.summary}", style="bold" if hovered else ""
+            ),
+            self.COLUMN_STATUS: Text(f"● {text.status}", style="dim"),
+            self.COLUMN_DURATION: Text(text.duration, justify="right"),
+        }
+
+    def _tool_values(self, entry: LedgerEntry, index: int) -> dict[str, str]:
+        return {key: value.plain for key, value in self._tool_cells(entry, index).items()}
+
     def _group_values(self, entry: LedgerEntry) -> dict[str, str]:
         kind = entry.group_kind.value.replace("_", " ").upper() if entry.group_kind else "GROUP"
         label = sanitize_text(entry.group_label)
@@ -641,6 +679,18 @@ class Ledger(DataTable[Text | str]):
         }
 
     def _build_detail(self) -> InlineDetails | None:
+        for entry in self._entries:
+            if entry.record_id == self._expanded_id and entry.is_tool_operation:
+                tool = self._tools.get(entry.tool_operation_id or "")
+                if tool is not None:
+                    detail = build_tool_inline_details(
+                        tool,
+                        self._detail_tab,
+                        max_height=self._detail_height_limit,
+                        accent_style=self._component("accent"),
+                    )
+                    self._detail_tab = detail.tab
+                    return detail
         record = self._records.get(self._expanded_id or "")
         if record is None or self._detail_entry_index is None:
             return None
@@ -682,7 +732,9 @@ class Ledger(DataTable[Text | str]):
                 include(self._group_values(entry))
                 continue
             record = self._records.get(entry.record_id or "")
-            if record is not None:
+            if entry.is_tool_operation:
+                include(self._tool_values(entry, self._record_indices[line_index] or 0))
+            elif record is not None:
                 include(
                     self._record_values(
                         record,
@@ -757,6 +809,7 @@ class Ledger(DataTable[Text | str]):
                     entry.group_id,
                     entry.record_id,
                     entry.request_id,
+                    entry.tool_operation_id,
                     entry.depth,
                     entry.group_kind,
                 )
@@ -813,7 +866,12 @@ class Ledger(DataTable[Text | str]):
             if record is None:
                 continue
             record_index = self._record_indices[line_index] or 0
-            self._add_cells(self._record_cells(record, record_index, depth=entry.depth), key=key)
+            cells = (
+                self._tool_cells(entry, record_index)
+                if entry.is_tool_operation
+                else self._record_cells(record, record_index, depth=entry.depth)
+            )
+            self._add_cells(cells, key=key)
             if entry.record_id == self.expanded_id and self._detail is not None:
                 self._add_detail_row(record.record_id, self._detail)
         if self._retry_message:
@@ -856,6 +914,7 @@ class Ledger(DataTable[Text | str]):
                 for entry in self._entries
                 if entry.is_request_header and entry.request_id in self._requests
             }
+            self._rendered_tools = dict(self._tools)
             self._update_row_starts()
             self._structure = self._structure_key()
         finally:
@@ -905,7 +964,7 @@ class Ledger(DataTable[Text | str]):
 
     def _refresh_changed_records(self) -> None:
         for line_index, entry in enumerate(self._entries):
-            if entry.is_header or entry.record_id is None:
+            if entry.is_header or entry.is_tool_operation or entry.record_id is None:
                 continue
             record = self._records.get(entry.record_id)
             if record is None or self._revisions.get(entry.record_id) == record.revision:
@@ -931,6 +990,18 @@ class Ledger(DataTable[Text | str]):
                 self.update_cell(key, column, self._middle_cell(cells[column]))
             self._rendered_requests[entry.request_id] = request
 
+    def _refresh_changed_tools(self) -> None:
+        for line_index, entry in enumerate(self._entries):
+            if not entry.is_tool_operation or entry.tool_operation_id is None:
+                continue
+            tool = self._tools.get(entry.tool_operation_id)
+            if tool is None or self._rendered_tools.get(entry.tool_operation_id) == tool:
+                continue
+            cells = self._tool_cells(entry, self._record_indices[line_index] or 0)
+            for column in self._column_keys:
+                self.update_cell(self._row_key(entry), column, self._middle_cell(cells[column]))
+            self._rendered_tools[entry.tool_operation_id] = tool
+
     def update_rows(
         self,
         records: Sequence[TrajectoryRecord],
@@ -952,12 +1023,16 @@ class Ledger(DataTable[Text | str]):
         previous_detail_revision = self._revisions.get(self.expanded_id or "")
         self._records = {record.record_id: record for record in records}
         self._requests = dict(search_result.requests)
+        self._tools = dict(search_result.tools)
         self._entries = search_result.entries
         self._entry_indices = {
             entry.record_id: index
             for index, entry in enumerate(self._entries)
             if entry.record_id is not None
         }
+        for record_id, row_id in search_result.row_id_by_record_id.items():
+            if row_id in self._entry_indices:
+                self._entry_indices[record_id] = self._entry_indices[row_id]
         self._selected_id = selected_id
         self._hovered_id = hovered_id
         self._order_mode = order_mode
@@ -991,6 +1066,12 @@ class Ledger(DataTable[Text | str]):
             )
             self._refresh_changed_records()
             self._refresh_changed_requests()
+            self._refresh_changed_tools()
+            if self.expanded_id is not None and any(
+                entry.record_id == self.expanded_id and entry.is_tool_operation
+                for entry in self._entries
+            ):
+                self._update_detail_row()
             if detail_changed:
                 self._update_detail_row()
             self._sync_selection()
@@ -1125,10 +1206,14 @@ class Ledger(DataTable[Text | str]):
             if line_index is None or candidate not in self._records:
                 continue
             entry = self._entries[line_index]
-            cells = self._record_cells(
-                self._records[candidate],
-                self._record_indices[line_index] or 0,
-                depth=entry.depth,
+            cells = (
+                self._tool_cells(entry, self._record_indices[line_index] or 0)
+                if entry.is_tool_operation
+                else self._record_cells(
+                    self._records[candidate],
+                    self._record_indices[line_index] or 0,
+                    depth=entry.depth,
+                )
             )
             self.update_cell(
                 self._row_key(entry),
@@ -1142,6 +1227,9 @@ class Ledger(DataTable[Text | str]):
             )
 
     def set_selected(self, record_id: str | None) -> None:
+        index = self._entry_index_for_record(record_id)
+        if index is not None:
+            record_id = self._entries[index].record_id
         if record_id == self._selected_id:
             return
         self._selected_id = record_id

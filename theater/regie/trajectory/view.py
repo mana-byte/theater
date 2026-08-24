@@ -21,7 +21,12 @@ from theater.regie.trajectory.constants import (
     TRAJECTORY_HORIZONTAL_PADDING,
 )
 from theater.regie.trajectory.controller import TrajectoryController
-from theater.regie.trajectory.details import active_detail_tab, move_detail_tab
+from theater.regie.trajectory.details import (
+    active_detail_tab,
+    active_tool_detail_tab,
+    move_detail_tab,
+    move_tool_detail_tab,
+)
 from theater.regie.trajectory.enums import FilterDimension, FocusRegion, OrderMode
 from theater.regie.trajectory.filter_panel import (
     FilterClearRequested,
@@ -295,14 +300,16 @@ class TrajectoryView(Vertical):
             cache=self._search_cache,
             ordering=ordering,
             request_index=self.state.request_index,
+            tool_index=self.state.tool_index,
         )
-        self._all_visible_ids = self._search_result.record_ids
+        self._all_visible_ids = self._search_result.row_ids
         self._all_visible_indices = {
             record_id: index for index, record_id in enumerate(self._all_visible_ids)
         }
 
     def _sync_page(self) -> None:
-        selected_index = self._all_visible_indices.get(self.state.selected_id or "")
+        selected_anchor = self._search_result.row_id_for_record(self.state.selected_id)
+        selected_index = self._all_visible_indices.get(selected_anchor or "")
         if selected_index is not None:
             requested_page = selected_index // self.state_store.page_size
         elif self.state.follow_tail and self._all_visible_ids:
@@ -315,7 +322,7 @@ class TrajectoryView(Vertical):
             self.state_store.page_size,
         )
         self.state.ledger_page = self._ledger_page.index
-        self._visible_ids = self._ledger_page.record_ids
+        self._visible_ids = self._ledger_page.result.row_ids
         self._visible_id_set = frozenset(self._visible_ids)
         self._visible_indices = {
             record_id: index for index, record_id in enumerate(self._visible_ids)
@@ -325,9 +332,10 @@ class TrajectoryView(Vertical):
             for record_id in self._visible_ids
             if record_id in self._ordered_indices
         )
-        if self.state.follow_tail and self.state.selected_id not in self._visible_id_set:
+        selected_anchor = self._search_result.row_id_for_record(self.state.selected_id)
+        if self.state.follow_tail and selected_anchor not in self._visible_id_set:
             self.state.select(self._visible_ids[-1] if self._visible_ids else None)
-        elif self.state.selected_id not in self._visible_id_set:
+        elif selected_anchor not in self._visible_id_set:
             self.state.select(self._visible_ids[0] if self._visible_ids else None)
 
     @staticmethod
@@ -687,16 +695,22 @@ class TrajectoryView(Vertical):
             )
 
     def _toggle_details(self, record_id: str | None) -> None:
-        if record_id is None or record_id not in self.state.records:
+        record_id = self.state.row_anchor(record_id)
+        if record_id is None:
             return
         opening = self.state.expanded_id != record_id
         self.state.select(record_id)
         self.state.expanded_id = record_id if opening else None
         if opening:
-            self.state.detail_tab = active_detail_tab(
-                self.state.records[record_id],
-                self.state.detail_tab,
-            )
+            operation_id = self.state.tool_index.by_record_id.get(record_id)
+            if operation_id is not None:
+                self.state.detail_tab = active_tool_detail_tab(
+                    self.state.tool_index.by_id[operation_id], self.state.detail_tab
+                )
+            else:
+                self.state.detail_tab = active_detail_tab(
+                    self.state.records[record_id], self.state.detail_tab
+                )
         self.state.focus_region = FocusRegion.LEDGER
         self._sync_selection(scroll=False)
         if not self.is_mounted:
@@ -769,8 +783,14 @@ class TrajectoryView(Vertical):
         else:
             ledger = self.query_one("#trajectory-ledger", Ledger)
             record_id = ledger.expanded_id
+            operation_id = self.state.tool_index.by_record_id.get(record_id or "")
             record = self.state.records.get(record_id or "")
-            if record is not None:
+            if operation_id is not None:
+                self.state.detail_tab = move_tool_detail_tab(
+                    self.state.tool_index.by_id[operation_id], self.state.detail_tab, delta
+                )
+                ledger.set_details(record_id, self.state.detail_tab)
+            elif record is not None:
                 self.state.detail_tab = move_detail_tab(record, self.state.detail_tab, delta)
                 ledger.set_details(record_id, self.state.detail_tab)
 
