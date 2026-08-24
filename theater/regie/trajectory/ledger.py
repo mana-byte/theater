@@ -22,11 +22,13 @@ from theater.regie.trajectory.constants import (
     LEDGER_COMPACT_WIDTH,
     LEDGER_DEFAULT_VIEWPORT_ROWS,
     LEDGER_DETAIL_MIN_HEIGHT,
+    LEDGER_DURATION_COLUMN_WIDTH,
     LEDGER_HEADER_HEIGHT,
     LEDGER_MIN_SUMMARY_WIDTH,
     LEDGER_OVERSCAN_ROWS,
     LEDGER_ROW_HEIGHT,
     LEDGER_SCROLLBAR_WIDTH,
+    LEDGER_STATUS_COLUMN_WIDTH,
     TRAJECTORY_INSPECTOR_RATIO_DEFAULT,
     TRAJECTORY_INSPECTOR_RATIO_MAX,
     TRAJECTORY_INSPECTOR_RATIO_MIN,
@@ -583,6 +585,9 @@ class Ledger(DataTable[Text | str]):
             if hovered
             else "▸"
         )
+        status = Text(no_wrap=True)
+        status.append("●", style=self._status_style(tool.status))
+        status.append(f" {text.status}", style="dim")
         return {
             self.COLUMN_POSITION: Text(
                 f"{marker}{index + 1:>3}", style="bold" if hovered else "dim"
@@ -592,7 +597,7 @@ class Ledger(DataTable[Text | str]):
             self.COLUMN_SUMMARY: Text(
                 f"{'  ' * entry.depth}{text.summary}", style="bold" if hovered else ""
             ),
-            self.COLUMN_STATUS: Text(f"● {text.status}", style="dim"),
+            self.COLUMN_STATUS: status,
             self.COLUMN_DURATION: Text(text.duration, justify="right"),
         }
 
@@ -753,18 +758,13 @@ class Ledger(DataTable[Text | str]):
                         depth=entry.depth,
                     )
                 )
-        self._detail = self._build_detail()
         if self._detail is not None:
             include(self._detail_values(self._detail))
         if self._retry_message:
             include(self._retry_values())
         if any(entry.is_tool_operation for entry in self._entries):
-            widths[self.COLUMN_STATUS] = max(
-                self._text_width(self.COLUMN_LABELS[self.COLUMN_STATUS]), 16
-            )
-            widths[self.COLUMN_DURATION] = max(
-                self._text_width(self.COLUMN_LABELS[self.COLUMN_DURATION]), 8
-            )
+            widths[self.COLUMN_STATUS] = LEDGER_STATUS_COLUMN_WIDTH
+            widths[self.COLUMN_DURATION] = LEDGER_DURATION_COLUMN_WIDTH
         return widths
 
     @staticmethod
@@ -1020,7 +1020,7 @@ class Ledger(DataTable[Text | str]):
                 self.update_cell(self._row_key(entry), column, self._middle_cell(cells[column]))
             self._rendered_tools[entry.tool_operation_id] = tool
 
-    def update_rows(
+    def update_rows(  # noqa: PLR0915
         self,
         records: Sequence[TrajectoryRecord],
         search_result: SearchResult,
@@ -1038,6 +1038,9 @@ class Ledger(DataTable[Text | str]):
     ) -> None:
         old_selected_line = self._row_index_for_record(self._selected_id)
         old_selected = self._selected_id
+        previous_expanded_id = self.expanded_id
+        previous_detail_tab = self._detail_tab
+        previous_detail_limit = self._detail_height_limit
         previous_detail_revision = self._revisions.get(self.expanded_id or "")
         previous_detail_tool = next(
             (
@@ -1066,7 +1069,7 @@ class Ledger(DataTable[Text | str]):
         self._has_older = has_older
         self._loading_older = loading_older
         self._retry_message = retry_message
-        self._expanded_id = expanded_id
+        self._expanded_id = self._row_id_for_record(expanded_id)
         self._detail_tab = detail_tab
         self._detail_ratio = self._validated_detail_ratio(detail_ratio)
         self._position_offset = max(0, int(position_offset))
@@ -1074,6 +1077,12 @@ class Ledger(DataTable[Text | str]):
             self._detail_height_limit = self._detail_limit_for_height(self.region.height)
         self._line_ids = tuple(entry.record_id for entry in self._entries)
         self._record_indices = self._record_index_map()
+        if (
+            self._expanded_id != previous_expanded_id
+            or self._detail_tab != previous_detail_tab
+            or self._detail_height_limit != previous_detail_limit
+        ):
+            self._detail = self._build_detail()
         self._column_widths = self._measure_column_widths()
         self._summary_width = self._columns_width()
         new_selected_line = self._row_index_for_record(selected_id)
@@ -1131,6 +1140,7 @@ class Ledger(DataTable[Text | str]):
         elif same_record and expanded_id is None:
             return
         else:
+            self._detail = self._build_detail()
             self._column_widths = self._measure_column_widths()
             self._summary_width = self._columns_width()
             self._rebuild()
@@ -1203,6 +1213,7 @@ class Ledger(DataTable[Text | str]):
         return self._scroll_offset
 
     def scroll_to_record(self, record_id: str | None, *, include_detail: bool = False) -> int:
+        record_id = self._row_id_for_record(record_id)
         line = self._row_index_for_record(record_id)
         if line is None:
             return self._scroll_offset

@@ -154,11 +154,11 @@ def _tool_field_lines(fields: tuple[DetailField, ...], aliases: set[str]) -> lis
                 value = field.preview.text
         else:
             value = field.preview.text
-        if field.preview.omitted_bytes:
-            lines.append(f"{field.name}: … {field.preview.omitted_bytes} bytes omitted")
         values = sanitize_text(value).splitlines() or [""]
         lines.append(f"{field.name}: {values[0]}")
         lines.extend(values[1:])
+        if field.preview.omitted_bytes:
+            lines.append(f"… {field.preview.omitted_bytes} source bytes omitted …")
     return lines
 
 
