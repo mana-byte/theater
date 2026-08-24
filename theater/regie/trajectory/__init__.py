@@ -3,6 +3,7 @@
 from theater.regie.trajectory.controller import DaemonClientCompatible, TrajectoryController
 from theater.regie.trajectory.enums import FilterDimension, FocusRegion, InspectorTab, OrderMode
 from theater.regie.trajectory.models import decode_delta, decode_page
+from theater.regie.trajectory.overview_strip import TrajectoryOverviewStrip
 from theater.regie.trajectory.pagination import LedgerPage, paginate_search_result
 from theater.regie.trajectory.search import (
     FilterCounts,
@@ -29,11 +30,14 @@ from theater.trajectory import (
     ParticipantLink,
     Timing,
     TimingProvenance,
+    TrajectoryCapabilities,
     TrajectoryCoverage,
+    TrajectoryCurrentOperation,
     TrajectoryDelta,
     TrajectoryGroup,
     TrajectoryKind,
     TrajectoryLane,
+    TrajectoryOverview,
     TrajectoryPage,
     TrajectoryRecord,
     TrajectoryStatus,
@@ -62,14 +66,18 @@ __all__ = [
     "SearchResult",
     "Timing",
     "TimingProvenance",
+    "TrajectoryCapabilities",
     "TrajectoryController",
     "TrajectoryCopyRequested",
     "TrajectoryCoverage",
+    "TrajectoryCurrentOperation",
     "TrajectoryDelta",
     "TrajectoryFilters",
     "TrajectoryGroup",
     "TrajectoryKind",
     "TrajectoryLane",
+    "TrajectoryOverview",
+    "TrajectoryOverviewStrip",
     "TrajectoryPage",
     "TrajectoryParticipantSelected",
     "TrajectoryRecord",

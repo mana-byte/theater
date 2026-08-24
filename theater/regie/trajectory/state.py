@@ -25,11 +25,13 @@ from theater.regie.trajectory.ordering import canonical_group_records
 from theater.trajectory import (
     PanelState,
     PanelStateInfo,
+    TrajectoryCapabilities,
     TrajectoryCoverage,
     TrajectoryDelta,
     TrajectoryGroup,
     TrajectoryKind,
     TrajectoryLane,
+    TrajectoryOverview,
     TrajectoryPage,
     TrajectoryRecord,
     TrajectoryStatus,
@@ -58,6 +60,8 @@ class ParticipantTrajectoryState:
     older_cursor: str | None = None
     has_older: bool = False
     coverage: TrajectoryCoverage = field(default_factory=TrajectoryCoverage)
+    capabilities: TrajectoryCapabilities = field(default_factory=TrajectoryCapabilities)
+    overview: TrajectoryOverview = field(default_factory=TrajectoryOverview)
     groups: tuple[TrajectoryGroup, ...] = ()
     records: OrderedDict[str, TrajectoryRecord] = field(default_factory=OrderedDict)
     loaded_bytes: int = 0
@@ -224,6 +228,8 @@ class ParticipantTrajectoryState:
         self.older_cursor = page.older_cursor
         self.has_older = page.has_older
         self.coverage = page.coverage
+        self.capabilities = page.capabilities
+        self.overview = page.overview
         self.reload_required = False
         self.truncated_by_bytes = page.truncated_by_bytes
         self.loading_older = False
@@ -257,6 +263,8 @@ class ParticipantTrajectoryState:
         self.older_cursor = page.older_cursor
         self.has_older = page.has_older
         self.coverage = page.coverage
+        self.capabilities = page.capabilities
+        self.overview = page.overview
         self.truncated_by_bytes = page.truncated_by_bytes
         self._set_panel(page.panel_state)
         self.retry_kind = None
@@ -277,6 +285,12 @@ class ParticipantTrajectoryState:
         self.stream_id = delta.stream_id
         if delta.cursor is not None:
             self.cursor = delta.cursor
+        capabilities = getattr(delta, "capabilities", None)
+        if capabilities is not None:
+            self.capabilities = capabilities
+        overview = getattr(delta, "overview", None)
+        if overview is not None:
+            self.overview = overview
         panel = getattr(delta, "panel_state", None)
         if panel is not None:
             if not isinstance(panel, PanelStateInfo):
