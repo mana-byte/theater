@@ -115,6 +115,18 @@ def test_retirement_controller_drops_candidate_without_a_mounted_width():
     assert controller.observe({}).retire == set()
 
 
+def test_retirement_controller_skips_user_requested_removal():
+    root = ("p", "root")
+    child = ("p", "child")
+    controller = LeafRetirementController()
+
+    controller.observe({root: False, child: True})
+    controller.remove_without_animation(child)
+
+    assert controller.observe({root: False}).retire == set()
+    assert not controller.active
+
+
 def test_controller_skips_unusually_large_trees():
     required = {("p", str(index)): 10 for index in range(REGIE_STARTUP_REVEAL_MAX_LEAVES + 1)}
     frame = LeafRevealController().observe(required, now=0.0)

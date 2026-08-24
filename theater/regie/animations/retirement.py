@@ -39,6 +39,13 @@ class LeafRetirementController:
     def active(self) -> bool:
         return bool(self._pending)
 
+    def remove_without_animation(self, key: Key) -> None:
+        """Keep a user-requested removal out of the retirement animation."""
+        if key in self._active:
+            self._active[key] = False
+        self._retiring.pop(key, None)
+        self._pending.pop(key, None)
+
     def observe(self, current: Mapping[Key, bool]) -> LeafRetirementChange:
         """Compare active keys and preserve each leaf's original parent provenance."""
         current_keys = set(current)

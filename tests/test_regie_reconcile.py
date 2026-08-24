@@ -247,6 +247,36 @@ async def test_agent_spawned_leaf_retires_before_unmount(daemon, tmux, monkeypat
         assert app._leaf_retirement_timer is None
 
 
+async def test_user_killed_child_unmounts_without_retirement(daemon, tmux, monkeypatch):
+    monkeypatch.setattr(app_mod, "STARTUP_REVEAL_INTERVAL", 60.0)
+    child = {**CHILD, "parent_id": PARENT["id"]}
+    daemon["answers"]["participants.tree"] = [{**PARENT, "children": [child]}]
+    app = make_app(startup_reveal=True)
+
+    async with app.run_test() as pilot:
+        panel = _panel(app)
+        key = ("p", child["id"])
+        leaf = panel._key_widgets[key]
+        _finish_leaf_reveal(app)
+        app.cursor = 1
+        client = daemon["client"]
+        original_call = client.call
+
+        async def remove_child(method: str, **params):
+            result = await original_call(method, **params)
+            if method == "participant.kill":
+                daemon["answers"]["participants.tree"] = [dict(PARENT, children=[])]
+            return result
+
+        client.call = remove_child
+        await app.action_kill()
+        await pilot.pause()
+
+        assert leaf not in panel.children
+        assert not app._leaf_retirement.active
+        assert app._leaf_retirement_timer is None
+
+
 async def test_retiring_middle_leaf_keeps_its_prior_slot(daemon, tmux, monkeypatch):
     monkeypatch.setattr(app_mod, "STARTUP_REVEAL_INTERVAL", 60.0)
     child = {**CHILD, "parent_id": PARENT["id"]}

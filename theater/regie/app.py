@@ -1248,6 +1248,8 @@ class RegieApp(App):
             await self._client.call("participant.kill", id=pid)
         except Exception as exc:
             self.notify(f"kill failed: {exc}", severity="error")
+        else:
+            self._leaf_retirement.remove_without_animation(("p", pid))
         await self._refresh_tree()
 
     def action_spawn(self) -> None:
