@@ -407,6 +407,18 @@ class Ledger(DataTable[Text | str]):
         index = self._entry_index_for_record(record_id)
         return self._entries[index].record_id if index is not None else None
 
+    def _tool_for_record(self, record_id: str | None) -> TrajectoryToolOperation | None:
+        index = self._entry_index_for_record(record_id)
+        if index is None:
+            return None
+        operation_id = self._entries[index].tool_operation_id
+        return self._tools.get(operation_id or "")
+
+    def _detail_key(self, record_id: str) -> str:
+        operation = self._tool_for_record(record_id)
+        identity = f"{self.TOOL_PREFIX}{operation.operation_id}" if operation else record_id
+        return f"{self.DETAIL_PREFIX}{identity}"
+
     def _row_index_for_record(self, record_id: str | None) -> int | None:
         index = self._entry_index_for_record(record_id)
         if index is None:
@@ -787,7 +799,7 @@ class Ledger(DataTable[Text | str]):
         )
 
     def _add_detail_row(self, record_id: str, detail: InlineDetails) -> None:
-        key = f"{self.DETAIL_PREFIX}{record_id}"
+        key = self._detail_key(record_id)
         cells: dict[str, Text | str] = {
             self.COLUMN_POSITION: Text("╰", style=self._component("accent")),
             self.COLUMN_EVENT: detail.menu,
@@ -949,13 +961,12 @@ class Ledger(DataTable[Text | str]):
         self._row_starts = tuple(starts)
         self._rows_height = offset
 
-    def _update_detail_row(self) -> None:
-        detail = self._build_detail()
-        self._detail = detail
+    def _render_detail_row(self) -> None:
+        detail = self._detail
         record_id = self.expanded_id
         if detail is None or record_id is None:
             return
-        key = f"{self.DETAIL_PREFIX}{record_id}"
+        key = self._detail_key(record_id)
         try:
             row_index = self.get_row_index(key)
         except RowDoesNotExist:
@@ -979,6 +990,10 @@ class Ledger(DataTable[Text | str]):
             self.refresh(layout=True)
         self._update_row_starts()
         self._structure = self._structure_key()
+
+    def _update_detail_row(self) -> None:
+        self._detail = self._build_detail()
+        self._render_detail_row()
 
     def _refresh_changed_records(self) -> None:
         for line_index, entry in enumerate(self._entries):
@@ -1020,7 +1035,7 @@ class Ledger(DataTable[Text | str]):
                 self.update_cell(self._row_key(entry), column, self._middle_cell(cells[column]))
             self._rendered_tools[entry.tool_operation_id] = tool
 
-    def update_rows(  # noqa: PLR0915
+    def update_rows(
         self,
         records: Sequence[TrajectoryRecord],
         search_result: SearchResult,
@@ -1041,16 +1056,8 @@ class Ledger(DataTable[Text | str]):
         previous_expanded_id = self.expanded_id
         previous_detail_tab = self._detail_tab
         previous_detail_limit = self._detail_height_limit
-        previous_detail_revision = self._revisions.get(self.expanded_id or "")
-        previous_detail_tool = next(
-            (
-                self._tools[entry.tool_operation_id]
-                for entry in self._entries
-                if entry.record_id == self._row_id_for_record(self.expanded_id)
-                and entry.tool_operation_id in self._tools
-            ),
-            None,
-        )
+        previous_detail_record = self._records.get(previous_expanded_id or "")
+        previous_detail_tool = self._tool_for_record(previous_expanded_id)
         self._records = {record.record_id: record for record in records}
         self._requests = dict(search_result.requests)
         self._tools = dict(search_result.tools)
@@ -1077,11 +1084,16 @@ class Ledger(DataTable[Text | str]):
             self._detail_height_limit = self._detail_limit_for_height(self.region.height)
         self._line_ids = tuple(entry.record_id for entry in self._entries)
         self._record_indices = self._record_index_map()
-        if (
+        current_detail_record = self._records.get(self.expanded_id or "")
+        current_detail_tool = self._tool_for_record(self.expanded_id)
+        detail_changed = (
             self._expanded_id != previous_expanded_id
             or self._detail_tab != previous_detail_tab
             or self._detail_height_limit != previous_detail_limit
-        ):
+            or current_detail_record != previous_detail_record
+            or current_detail_tool != previous_detail_tool
+        )
+        if detail_changed:
             self._detail = self._build_detail()
         self._column_widths = self._measure_column_widths()
         self._summary_width = self._columns_width()
@@ -1096,26 +1108,11 @@ class Ledger(DataTable[Text | str]):
         if structure != self._structure or not len(self.columns):
             self._rebuild()
         else:
-            detail_changed = (
-                self.expanded_id is not None
-                and previous_detail_revision != self._records[self.expanded_id].revision
-            )
             self._refresh_changed_records()
             self._refresh_changed_requests()
             self._refresh_changed_tools()
-            current_detail_tool = next(
-                (
-                    self._tools[entry.tool_operation_id]
-                    for entry in self._entries
-                    if entry.record_id == self._row_id_for_record(self.expanded_id)
-                    and entry.tool_operation_id in self._tools
-                ),
-                None,
-            )
-            if current_detail_tool != previous_detail_tool:
-                self._update_detail_row()
-            if detail_changed:
-                self._update_detail_row()
+            if detail_changed and self.expanded_id is not None:
+                self._render_detail_row()
             self._sync_selection()
             self.set_scroll_offset(self._scroll_offset)
         self._update_render_window()
@@ -1292,6 +1289,8 @@ class Ledger(DataTable[Text | str]):
         if columns_changed:
             self._compact_columns = compact_columns
         if columns_changed or detail_height_changed:
+            if detail_height_changed:
+                self._detail = self._build_detail()
             self._column_widths = self._measure_column_widths()
         summary_width = self._columns_width(event.size.width)
         if summary_width != self._summary_width or columns_changed or detail_height_changed:

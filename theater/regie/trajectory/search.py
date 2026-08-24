@@ -205,9 +205,11 @@ class SearchResult:
     @property
     def row_ids(self) -> tuple[str, ...]:
         return tuple(
-            entry.record_id
-            for entry in self.entries
-            if not entry.is_header and entry.record_id is not None
+            dict.fromkeys(
+                entry.record_id
+                for entry in self.entries
+                if not entry.is_header and entry.record_id is not None
+            )
         )
 
     def row_id_for_record(self, record_id: str | None) -> str | None:

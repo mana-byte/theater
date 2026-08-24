@@ -157,7 +157,8 @@ def _tool_field_lines(fields: tuple[DetailField, ...], aliases: set[str]) -> lis
         values = sanitize_text(value).splitlines() or [""]
         lines.append(f"{field.name}: {values[0]}")
         lines.extend(values[1:])
-        if field.preview.omitted_bytes:
+        omission = f"… {field.preview.omitted_bytes} bytes omitted …"
+        if field.preview.omitted_bytes and omission not in value:
             lines.append(f"… {field.preview.omitted_bytes} source bytes omitted …")
     return lines
 

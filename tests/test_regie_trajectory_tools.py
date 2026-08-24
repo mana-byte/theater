@@ -2,15 +2,26 @@
 
 from __future__ import annotations
 
+from types import MappingProxyType
+
+import pytest
+from rich.console import Console
+from textual.app import App, ComposeResult
+
 from theater.regie.trajectory.constants import (
     TOOL_ROW_SUMMARY_MAX_CHARS,
     TRAJECTORY_DETAIL_RECORD_MAX_BYTES,
 )
 from theater.regie.trajectory.details import build_tool_inline_details, tool_detail_text
 from theater.regie.trajectory.enums import InspectorTab
+from theater.regie.trajectory.footer import TrajectoryFooter
+from theater.regie.trajectory.ledger import Ledger
 from theater.regie.trajectory.pagination import paginate_search_result
+from theater.regie.trajectory.request_rows import RequestIndex
 from theater.regie.trajectory.search import search_records
+from theater.regie.trajectory.state import TrajectoryStateStore
 from theater.regie.trajectory.tool_rows import build_tool_index, tool_row_text
+from theater.regie.trajectory.view import TrajectoryView
 from theater.trajectory import (
     ContentFormat,
     ContentPreview,
@@ -18,7 +29,11 @@ from theater.trajectory import (
     TrajectoryKind,
     TrajectoryLane,
     TrajectoryRecord,
+    TrajectoryRequest,
+    TrajectoryRequestIdentity,
     TrajectoryStatus,
+    bounded_preview,
+    group_records,
 )
 
 
@@ -30,19 +45,29 @@ def _tool(
     *,
     summary: str = "tool",
     details: tuple[DetailField, ...] = (),
+    participant_id: str = "participant",
+    source_epoch: str = "epoch",
+    request_id: str | None = None,
+    status: TrajectoryStatus = TrajectoryStatus.COMPLETED,
+    revision: int = 1,
+    turn_id: str | None = None,
+    step_id: str | None = None,
 ) -> TrajectoryRecord:
     return TrajectoryRecord(
         record_id=record_id,
-        revision=1,
-        participant_id="participant",
-        source_epoch="epoch",
+        revision=revision,
+        participant_id=participant_id,
+        source_epoch=source_epoch,
         lane=TrajectoryLane.TOOLS,
         kind=kind,
         source="codex",
         summary=summary,
-        status=TrajectoryStatus.COMPLETED,
+        status=status,
         raw_index=index,
         call_id=call_id,
+        request_id=request_id,
+        turn_id=turn_id,
+        step_id=step_id,
         details=details,
     )
 
@@ -179,3 +204,297 @@ def test_tool_details_bound_copy_and_show_omission() -> None:
         InspectorTab.RESULT,
         InspectorTab.TIMING,
     )
+
+    bounded = bounded_preview("y" * 5000, max_bytes=128)
+    bounded_result = _tool(
+        "bounded-result",
+        3,
+        TrajectoryKind.TOOL_RESULT,
+        "bounded",
+        details=(DetailField("result", bounded, ContentFormat.TEXT),),
+    )
+    bounded_text = tool_detail_text(
+        build_tool_index((bounded_result,)).ordered[0], InspectorTab.RESULT
+    )
+    marker = f"… {bounded.omitted_bytes} bytes omitted …"
+    assert bounded_text.count(marker) == 1
+
+
+def _request(
+    request_id: str,
+    source_request_id: str,
+    *,
+    participant_id: str = "participant",
+    source_epoch: str = "epoch",
+) -> TrajectoryRequest:
+    return TrajectoryRequest(
+        request_id=request_id,
+        participant_id=participant_id,
+        source_epoch=source_epoch,
+        source="codex",
+        record_ids=(f"member-{request_id}",),
+        identity=TrajectoryRequestIdentity.SOURCE,
+        source_request_id=source_request_id,
+    )
+
+
+def _request_index(
+    *requests: TrajectoryRequest,
+    direct: dict[str, str] | None = None,
+) -> RequestIndex:
+    return RequestIndex(
+        ordered=requests,
+        by_id=MappingProxyType({request.request_id: request for request in requests}),
+        by_record_id=MappingProxyType(direct or {}),
+    )
+
+
+def test_tool_request_fallback_requires_one_exact_unconflicted_match() -> None:
+    call = _tool(
+        "call",
+        1,
+        TrajectoryKind.TOOL_CALL,
+        "tool-call",
+        request_id="source-request",
+    )
+    tool_index = build_tool_index((call,))
+    exact = _request("exact", "source-request")
+
+    result = search_records((call,), request_index=_request_index(exact), tool_index=tool_index)
+    assert result.request_id_by_row_id == {"call": "exact"}
+    assert sum(entry.is_request_header for entry in result.entries) == 1
+
+    for mismatch in (
+        _request("participant-mismatch", "source-request", participant_id="other"),
+        _request("epoch-mismatch", "source-request", source_epoch="other"),
+    ):
+        result = search_records(
+            (call,), request_index=_request_index(mismatch), tool_index=tool_index
+        )
+        assert result.request_id_by_row_id == {}
+        assert not any(entry.is_request_header for entry in result.entries)
+
+    duplicate = _request("duplicate", "source-request")
+    ambiguous = search_records(
+        (call,), request_index=_request_index(exact, duplicate), tool_index=tool_index
+    )
+    assert ambiguous.request_id_by_row_id == {}
+
+    direct = _request("direct", "different-source-request")
+    conflicted = search_records(
+        (call,),
+        request_index=_request_index(exact, direct, direct={"call": "direct"}),
+        tool_index=tool_index,
+    )
+    assert conflicted.request_id_by_row_id == {}
+    assert not any(entry.is_request_header for entry in conflicted.entries)
+
+
+def test_result_match_keeps_the_logical_anchor_group_path() -> None:
+    call = _tool(
+        "call",
+        1,
+        TrajectoryKind.TOOL_CALL,
+        "one",
+        summary="invoke",
+        turn_id="call-turn",
+        step_id="call-step",
+    )
+    result_record = _tool(
+        "result",
+        2,
+        TrajectoryKind.TOOL_RESULT,
+        "one",
+        summary="needle result",
+        turn_id="result-turn",
+        step_id="result-step",
+    )
+    records = (call, result_record)
+    result = search_records(
+        records,
+        query="needle",
+        groups=group_records(records),
+        tool_index=build_tool_index(records),
+    )
+
+    assert result.row_ids == ("call",)
+    assert result.path_for_record("call")
+    assert result.path_for_record("call") != result.path_for_record("result")
+    page = paginate_search_result(result, 0, 1)
+    assert page.result.group_paths == {"call": result.path_for_record("call")}
+
+
+class _LedgerHost(App):
+    def compose(self) -> ComposeResult:
+        yield Ledger()
+
+
+@pytest.mark.asyncio
+async def test_result_member_hover_and_expansion_target_combined_row() -> None:
+    call = _tool(
+        "call",
+        1,
+        TrajectoryKind.TOOL_CALL,
+        "one",
+        details=(
+            DetailField.from_text("tool", "runner"),
+            DetailField.from_text("args", '{"path":"src"}'),
+        ),
+        status=TrajectoryStatus.RUNNING,
+    )
+    result_record = _tool(
+        "result",
+        2,
+        TrajectoryKind.TOOL_RESULT,
+        "one",
+        details=(DetailField.from_text("result", "finished"),),
+    )
+    records = (call, result_record)
+    search = search_records(records, tool_index=build_tool_index(records))
+    operation = next(iter(search.tools.values()))
+
+    app = _LedgerHost()
+    async with app.run_test(size=(110, 24)) as pilot:
+        ledger = app.query_one(Ledger)
+        ledger.update_rows(records, search, selected_id="result")
+        await pilot.pause()
+        row_key = f"{Ledger.TOOL_PREFIX}{operation.operation_id}"
+
+        ledger.set_hovered("result")
+        position = ledger.get_cell(row_key, Ledger.COLUMN_POSITION)
+        summary = ledger.get_cell(row_key, Ledger.COLUMN_SUMMARY)
+        status = ledger.get_cell(row_key, Ledger.COLUMN_STATUS)
+        assert "●" in position.plain
+        assert summary.get_style_at_offset(Console(), 1).bold
+        assert (
+            status.get_style_at_offset(Console(), 1).color
+            == ledger._status_style(operation.status).color
+        )
+
+        ledger.set_details("result", InspectorTab.RESULT)
+        await pilot.pause()
+        assert ledger.expanded_id == "call"
+        assert "finished" in ledger.copy_text
+        detail_key = f"{Ledger.DETAIL_PREFIX}{Ledger.TOOL_PREFIX}{operation.operation_id}"
+        assert ledger.get_row_index(detail_key) > ledger.get_row_index(row_key)
+        ledger.scroll_to_record("result", include_detail=True)
+
+
+@pytest.mark.asyncio
+async def test_call_only_to_matched_patches_without_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    call = _tool(
+        "call",
+        1,
+        TrajectoryKind.TOOL_CALL,
+        "one",
+        details=(DetailField.from_text("tool", "runner"),),
+        status=TrajectoryStatus.RUNNING,
+    )
+    initial = search_records((call,), tool_index=build_tool_index((call,)))
+    operation_id = next(iter(initial.tools))
+    app = _LedgerHost()
+
+    async with app.run_test(size=(110, 24)) as pilot:
+        ledger = app.query_one(Ledger)
+        ledger.update_rows(
+            (call,), initial, selected_id="call", expanded_id="call", detail_tab=InspectorTab.RESULT
+        )
+        await pilot.pause()
+        row_key = f"{Ledger.TOOL_PREFIX}{operation_id}"
+        detail_key = f"{Ledger.DETAIL_PREFIX}{Ledger.TOOL_PREFIX}{operation_id}"
+        assert "No result supplied" in ledger.copy_text
+        assert ledger.get_row_index(detail_key) > ledger.get_row_index(row_key)
+
+        rebuilds = 0
+        detail_renders = 0
+        original_rebuild = ledger._rebuild
+        original_render = ledger._render_detail_row
+
+        def count_rebuild(*, preserve_scroll: bool = True) -> None:
+            nonlocal rebuilds
+            rebuilds += 1
+            original_rebuild(preserve_scroll=preserve_scroll)
+
+        def count_detail_render() -> None:
+            nonlocal detail_renders
+            detail_renders += 1
+            original_render()
+
+        monkeypatch.setattr(ledger, "_rebuild", count_rebuild)
+        monkeypatch.setattr(ledger, "_render_detail_row", count_detail_render)
+        result_record = _tool(
+            "result",
+            2,
+            TrajectoryKind.TOOL_RESULT,
+            "one",
+            details=(DetailField.from_text("result", "finished"),),
+        )
+        records = (call, result_record)
+        matched = search_records(records, tool_index=build_tool_index(records))
+        ledger.update_rows(
+            records,
+            matched,
+            selected_id="result",
+            expanded_id="result",
+            detail_tab=InspectorTab.RESULT,
+        )
+
+        assert next(iter(matched.tools)) == operation_id
+        assert matched.row_ids == ("call",)
+        assert ledger.get_row_index(row_key) >= 0
+        assert ledger.get_row_index(detail_key) > ledger.get_row_index(row_key)
+        assert rebuilds == 0
+        assert detail_renders == 1
+        assert "finished" in ledger.copy_text
+
+        ledger.update_rows(
+            records,
+            matched,
+            selected_id="result",
+            expanded_id="result",
+            detail_tab=InspectorTab.RESULT,
+        )
+        assert rebuilds == 0
+        assert detail_renders == 1
+
+
+class _ViewHost(App):
+    def __init__(self, state_store: TrajectoryStateStore) -> None:
+        super().__init__()
+        self.state_store = state_store
+
+    def compose(self) -> ComposeResult:
+        yield TrajectoryView("participant", state_store=self.state_store)
+
+
+@pytest.mark.asyncio
+async def test_result_selection_reveals_anchor_page_and_footer_counts_logical_rows() -> None:
+    first = _ordinary("first", 1)
+    call = _tool("call", 2, TrajectoryKind.TOOL_CALL, "one", summary="invoke")
+    result_record = _tool("result", 3, TrajectoryKind.TOOL_RESULT, "one", summary="needle result")
+    app = _ViewHost(TrajectoryStateStore(page_size=1))
+
+    async with app.run_test(size=(110, 30)) as pilot:
+        view = app.query_one(TrajectoryView)
+        view.state.upsert((first, call, result_record))
+        view.state.follow_tail = False
+        view.state.select("first")
+        view._refresh()
+        await pilot.pause()
+
+        footer = view.query_one(TrajectoryFooter)
+        assert "2 loaded" in str(footer.query_one("#trajectory-status").content)
+        assert "1–1/2 items" in str(footer.query_one("#trajectory-page-range").content)
+        assert view._reveal_selection_page("result")
+        assert view.state.ledger_page == 1
+        view._update_follow_for_selection("result")
+        assert view.state.follow_tail
+
+        view.state.query = "needle"
+        view._refresh()
+        await pilot.pause()
+        assert view.search_result.row_ids == ("call",)
+        assert "2 loaded" in str(footer.query_one("#trajectory-status").content)
+        assert "1–1/1 items" in str(footer.query_one("#trajectory-page-range").content)
