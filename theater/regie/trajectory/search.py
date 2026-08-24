@@ -351,7 +351,13 @@ def search_records(
         visit(group, 0)
     requests: dict[str, TrajectoryRequest] = {}
     if request_index is not None:
-        entries, requests = _with_request_headers(entries, matched_ids, paths, request_index)
+        entries, requests = _compose_request_headers(
+            entries,
+            matched_ids,
+            paths,
+            request_index.ordered,
+            request_index.by_record_id,
+        )
     return SearchResult(
         records=tuple(matched),
         entries=tuple(entries),
@@ -363,34 +369,29 @@ def search_records(
     )
 
 
-def _with_request_headers(
-    entries: list[LedgerEntry],
+def _compose_request_headers(
+    entries: Sequence[LedgerEntry],
     matched_ids: frozenset[str],
     paths: Mapping[str, tuple[str, ...]],
-    request_index: RequestIndex,
+    ordered_requests: Sequence[TrajectoryRequest],
+    by_record_id: Mapping[str, str],
 ) -> tuple[list[LedgerEntry], dict[str, TrajectoryRequest]]:
     """Insert cached request headers while keeping step headers structurally truthful."""
-    request_for_record = request_index.by_record_id
-    members_by_group: dict[str, set[str]] = {}
-    for record_id in matched_ids:
-        for group_id in paths.get(record_id, ()):
-            members_by_group.setdefault(group_id, set()).add(record_id)
-    request_for_group: dict[str, str] = {}
-    for group_id, record_ids in members_by_group.items():
-        request_ids = {request_for_record.get(record_id) for record_id in record_ids}
-        if len(request_ids) == 1 and (request_id := request_ids.pop()) is not None:
-            request_for_group[group_id] = request_id
+    base_entries = tuple(entry for entry in entries if not entry.is_request_header)
+    request_for_group = _request_groups(matched_ids, paths, by_record_id)
     positions = {
-        entry.record_id: index for index, entry in enumerate(entries) if entry.record_id is not None
+        entry.record_id: index
+        for index, entry in enumerate(base_entries)
+        if entry.record_id is not None
     }
     insertions: list[tuple[int, int, str]] = []
     requests: dict[str, TrajectoryRequest] = {}
-    for order, request in enumerate(request_index.ordered):
+    for order, request in enumerate(ordered_requests):
         request_id = request.request_id
         visible_members = [
             record_id
             for record_id in request.record_ids
-            if record_id in matched_ids and request_for_record.get(record_id) == request_id
+            if record_id in matched_ids and by_record_id.get(record_id) == request_id
         ]
         if not visible_members:
             continue
@@ -400,8 +401,8 @@ def _with_request_headers(
         insertion = position
         while (
             insertion > 0
-            and entries[insertion - 1].is_group_header
-            and request_for_group.get(entries[insertion - 1].group_id) == request_id
+            and base_entries[insertion - 1].is_group_header
+            and request_for_group.get(base_entries[insertion - 1].group_id) == request_id
         ):
             insertion -= 1
         insertions.append((insertion, order, request_id))
@@ -410,7 +411,7 @@ def _with_request_headers(
     insert_at: dict[int, list[str]] = {}
     for insertion, _order, request_id in sorted(insertions):
         insert_at.setdefault(insertion, []).append(request_id)
-    for index, entry in enumerate(entries):
+    for index, entry in enumerate(base_entries):
         for request_id in insert_at.get(index, ()):
             adjusted.append(
                 LedgerEntry(
@@ -421,10 +422,47 @@ def _with_request_headers(
                 )
             )
         indented = (entry.is_group_header and entry.group_id in request_for_group) or (
-            entry.record_id is not None and entry.record_id in request_for_record
+            entry.record_id is not None and entry.record_id in by_record_id
         )
         adjusted.append(replace(entry, depth=entry.depth + 1) if indented else entry)
     return adjusted, requests
+
+
+def _request_groups(
+    matched_ids: frozenset[str],
+    paths: Mapping[str, tuple[str, ...]],
+    by_record_id: Mapping[str, str],
+) -> dict[str, str]:
+    """Return step groups whose visible members all share one request."""
+    members_by_group: dict[str, set[str]] = {}
+    for record_id in matched_ids:
+        for group_id in paths.get(record_id, ()):
+            members_by_group.setdefault(group_id, set()).add(record_id)
+    request_for_group: dict[str, str] = {}
+    for group_id, record_ids in members_by_group.items():
+        request_ids = {by_record_id.get(record_id) for record_id in record_ids}
+        if len(request_ids) == 1 and (request_id := request_ids.pop()) is not None:
+            request_for_group[group_id] = request_id
+    return request_for_group
+
+
+def _base_request_entries(
+    entries: Sequence[LedgerEntry],
+    matched_ids: frozenset[str],
+    paths: Mapping[str, tuple[str, ...]],
+    by_record_id: Mapping[str, str],
+) -> tuple[LedgerEntry, ...]:
+    """Remove request headers and restore their original structural depths."""
+    request_for_group = _request_groups(matched_ids, paths, by_record_id)
+    base: list[LedgerEntry] = []
+    for entry in entries:
+        if entry.is_request_header:
+            continue
+        indented = (entry.is_group_header and entry.group_id in request_for_group) or (
+            entry.record_id is not None and entry.record_id in by_record_id
+        )
+        base.append(replace(entry, depth=max(0, entry.depth - 1)) if indented else entry)
+    return tuple(base)
 
 
 def matches_query(record: TrajectoryRecord, query: str) -> bool:

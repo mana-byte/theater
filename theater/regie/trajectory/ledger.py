@@ -599,19 +599,21 @@ class Ledger(DataTable[Text | str]):
         values = self._request_values(entry)
         request = self._requests.get(entry.request_id or "")
         status = request.status if request is not None else TrajectoryStatus.UNKNOWN
-        event = Text(values[self.COLUMN_EVENT], style=self._component("request") + Style(bold=True))
+        request_style = self._component("request")
+        dim_request_style = request_style + Style(dim=True)
+        event = Text(values[self.COLUMN_EVENT], style=request_style + Style(bold=True))
         state = Text(no_wrap=True)
-        state.append("●", style=self._status_style(status))
-        state.append(f" {status_label(status)}", style="dim")
+        state.append("●", style=request_style + self._status_style(status))
+        state.append(f" {status_label(status)}", style=dim_request_style)
         return {
-            self.COLUMN_POSITION: Text(
-                values[self.COLUMN_POSITION], style=self._component("request")
-            ),
+            self.COLUMN_POSITION: Text(values[self.COLUMN_POSITION], style=request_style),
             self.COLUMN_EVENT: event,
-            self.COLUMN_SOURCE: Text(values[self.COLUMN_SOURCE], style="dim"),
-            self.COLUMN_SUMMARY: Text(values[self.COLUMN_SUMMARY], style="dim"),
+            self.COLUMN_SOURCE: Text(values[self.COLUMN_SOURCE], style=dim_request_style),
+            self.COLUMN_SUMMARY: Text(values[self.COLUMN_SUMMARY], style=dim_request_style),
             self.COLUMN_STATUS: state,
-            self.COLUMN_DURATION: Text(values[self.COLUMN_DURATION], justify="right"),
+            self.COLUMN_DURATION: Text(
+                values[self.COLUMN_DURATION], justify="right", style=dim_request_style
+            ),
         }
 
     def _older_values(self) -> dict[str, str]:

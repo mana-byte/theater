@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
+from rich.console import Console
 from textual.app import App, ComposeResult
 from textual.coordinate import Coordinate
 
@@ -143,8 +144,15 @@ def test_request_headers_follow_matched_records_without_distorting_steps() -> No
 
 
 def test_request_headers_repeat_per_record_page_without_affecting_ranges() -> None:
-    records = tuple(record(f"r{index}", index, request_id="shared") for index in range(3))
-    result = search_records(records, request_index=build_request_index(records))
+    records = tuple(
+        record(f"r{index}", index, request_id="shared", turn_id="turn", step_id="step")
+        for index in range(3)
+    )
+    result = search_records(
+        records,
+        groups=group_records(records),
+        request_index=build_request_index(records),
+    )
 
     first = paginate_search_result(result, 0, 1)
     last = paginate_search_result(result, 2, 1)
@@ -154,6 +162,54 @@ def test_request_headers_repeat_per_record_page_without_affecting_ranges() -> No
     assert sum(entry.is_request_header for entry in first.result.entries) == 1
     assert sum(entry.is_request_header for entry in last.result.entries) == 1
     assert set(first.result.requests) == set(last.result.requests) == set(result.requests)
+    assert [
+        (entry.is_request_header, entry.is_group_header, entry.record_id)
+        for entry in last.result.entries
+    ] == [
+        (True, False, None),
+        (False, True, None),
+        (False, False, "r2"),
+    ]
+
+
+def test_pagination_recomposes_interleaved_request_headers_per_page() -> None:
+    records = (
+        record("a1", 1, request_id="A"),
+        record("b1", 2, request_id="B"),
+        record("a2", 3, request_id="A"),
+        record("b2", 4, request_id="B"),
+    )
+    index = build_request_index(records)
+    result = search_records(records, request_index=index)
+    page = paginate_search_result(result, 1, 2)
+
+    request_a = index.by_record_id["a1"]
+    request_b = index.by_record_id["b1"]
+    assert [(entry.request_id, entry.record_id) for entry in page.result.entries] == [
+        (request_a, None),
+        (None, "a2"),
+        (request_b, None),
+        (None, "b2"),
+    ]
+
+
+def test_pagination_keeps_an_unassociated_record_before_a_later_request_member() -> None:
+    records = (
+        record("a1", 1, request_id="A"),
+        record("filler", 2),
+        record("unassociated", 3),
+        record("a2", 4, request_id="A"),
+    )
+    index = build_request_index(records)
+    result = search_records(records, request_index=index)
+    page = paginate_search_result(result, 1, 2)
+
+    request_a = index.by_record_id["a1"]
+    assert [(entry.request_id, entry.record_id) for entry in page.result.entries] == [
+        (None, "unassociated"),
+        (request_a, None),
+        (None, "a2"),
+    ]
 
 
 def test_request_text_marks_missing_values_and_uses_reported_usage() -> None:
@@ -225,6 +281,26 @@ async def test_ledger_request_headers_are_noninteractive_and_patch_in_place(
         assert ledger.line_ids == (None, "record")
         assert "model-x" in ledger.get_cell(key, Ledger.COLUMN_SOURCE).plain
         assert "cost $0.1" in ledger.get_cell(key, Ledger.COLUMN_SUMMARY).plain
+        request_style = ledger._component("request")
+        cells = {
+            column: ledger.get_cell(key, column)
+            for column in (
+                Ledger.COLUMN_POSITION,
+                Ledger.COLUMN_EVENT,
+                Ledger.COLUMN_SOURCE,
+                Ledger.COLUMN_SUMMARY,
+                Ledger.COLUMN_STATUS,
+                Ledger.COLUMN_DURATION,
+            )
+        }
+        styles = {column: cell.get_style_at_offset(Console(), 1) for column, cell in cells.items()}
+        assert all(style.bgcolor == request_style.bgcolor for style in styles.values())
+        assert styles[Ledger.COLUMN_EVENT].bold
+        assert styles[Ledger.COLUMN_SOURCE].dim
+        assert styles[Ledger.COLUMN_SUMMARY].dim
+        assert styles[Ledger.COLUMN_DURATION].dim
+        assert styles[Ledger.COLUMN_STATUS].color == ledger._status_style(initial.status).color
+        assert cells[Ledger.COLUMN_STATUS].get_style_at_offset(Console(), 3).dim
 
         await pilot.click(ledger, offset=(2, ledger.header_height + row * 2 + 1))
         ledger.focus()
