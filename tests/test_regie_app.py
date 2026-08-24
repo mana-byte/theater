@@ -1757,8 +1757,10 @@ async def test_first_h_stages_trajectory_and_second_h_focuses_it(daemon, tmux):
         assert app.staged_pane is None
         assert not ledger.has_focus
         assert len(daemon["clients"]) == 3
-        assert search.region.x == right_surface.content_region.x
-        assert search.region.right == right_surface.content_region.right
+        assert view.region.x == right_surface.content_region.x
+        assert view.region.right == right_surface.content_region.right
+        assert search.region.x == view.content_region.x
+        assert search.region.right == view.content_region.right
 
         await pilot.press("h")
         assert ledger.has_focus
