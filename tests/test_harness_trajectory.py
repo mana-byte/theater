@@ -13,6 +13,7 @@ import theater.harness.builtin.plugins.opencode as opencode_plugin
 from theater.harness.builtin.plugins.claude import ClaudeCodeObserver
 from theater.harness.builtin.plugins.codex import CodexObserver
 from theater.harness.contracts.trajectory import ParsedRecord
+from theater.provenance import TranscriptProvenance
 from theater.trajectory.enums import (
     CostProvenance,
     TimingProvenance,
@@ -20,7 +21,9 @@ from theater.trajectory.enums import (
     TrajectoryKind,
     TrajectoryStatus,
 )
+from theater.trajectory.projection import fact_to_record
 from theater.trajectory.records import Timing
+from theater.trajectory.requests import requests_for_records
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -179,6 +182,84 @@ def test_codex_facts_include_rollout_items_calls_parent_ids_reasoning_usage_and_
     assert complete.summary == "turn completed"
     assert complete.timing is not None
     assert complete.timing.duration_ms == 9000
+
+
+async def test_codex_history_associates_context_model_and_usage_with_the_active_turn(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "rollout.jsonl"
+    records = [
+        {
+            "type": "session_meta",
+            "payload": {"cwd": str(tmp_path), "model_provider": "azure"},
+        },
+        {
+            "type": "event_msg",
+            "payload": {"type": "task_started", "turn_id": "turn-1"},
+        },
+        {
+            "type": "turn_context",
+            "payload": {"turn_id": "turn-1", "model": "gpt-5.6-sol"},
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "answer-1",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "done"}],
+                "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"},
+            },
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {
+                        "input_tokens": 100,
+                        "cached_input_tokens": 20,
+                        "output_tokens": 30,
+                        "reasoning_output_tokens": 4,
+                    },
+                    "total_token_usage": {"input_tokens": 100, "output_tokens": 30},
+                },
+            },
+        },
+        {
+            "type": "event_msg",
+            "payload": {"type": "task_complete", "turn_id": "turn-1"},
+        },
+    ]
+    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    observer = CodexObserver(root=tmp_path)
+    source = observer.open_source(
+        cwd=str(tmp_path),
+        known_location=str(path),
+        session_provenance=TranscriptProvenance.OPERATOR,
+    )
+
+    page = await source.history_page(limit=20)
+    usage_fact = next(fact for fact in page.trajectory if fact.usage is not None)
+    canonical = tuple(
+        fact_to_record(fact, participant_id="participant", source_epoch="epoch")
+        for fact in page.trajectory
+    )
+    request = next(
+        request
+        for request in requests_for_records(canonical)
+        if request.source_request_id == "turn-1"
+    )
+
+    assert usage_fact.turn_id == "turn-1"
+    assert usage_fact.request_id == "turn-1"
+    assert usage_fact.usage is not None
+    assert usage_fact.usage.model == "gpt-5.6-sol"
+    assert usage_fact.usage.provider == "azure"
+    assert request.model == "gpt-5.6-sol"
+    assert request.provider == "azure"
+    assert request.usage is not None
+    assert request.usage.input_tokens == 80
 
 
 def test_codex_task_complete_preserves_explicit_first_token_time() -> None:

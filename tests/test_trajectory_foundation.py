@@ -547,6 +547,18 @@ class RichObserver(LegacyCountingObserver):
         )
 
 
+class OrderedObserver(LegacyCountingObserver):
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self.seen: list[str] = []
+
+    def parse_record(self, line: str, index: int, *, clip_text: bool = True) -> ParsedRecord:
+        self.seen.append(line)
+        return ParsedRecord(
+            events=(Event(kind=EventKind.ASSISTANT, text=line, raw_index=index),),
+        )
+
+
 class MultiRecordObserver(LegacyCountingObserver):
     def __init__(self, path: Path, output_count: int = 2) -> None:
         super().__init__(path)
@@ -615,6 +627,18 @@ async def test_invalid_parse_record_result_raises_without_legacy_fallback(tmp_pa
     with pytest.raises(SourceContractError):
         await source.read()
     assert observer.parse_calls == 1
+
+
+async def test_history_page_parses_selected_records_in_transcript_order(tmp_path) -> None:
+    path = tmp_path / "ordered.jsonl"
+    path.write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
+    observer = OrderedObserver(path)
+    source = TranscriptSource(observer, cwd=str(tmp_path))
+
+    page = await source.history_page(limit=3)
+
+    assert observer.seen == ["two", "three", "four"]
+    assert [event.text for event in page.events] == ["two", "three", "four"]
 
 
 async def test_transcript_live_reads_emit_facts_and_history_pages_do_not_move_cursor(

@@ -533,6 +533,9 @@ class TranscriptSource(Source):
             if end is None and live_offset != total:
                 page_end_index = None
             lines = self._read_page_lines(fh, page_end)
+            selected_position = max(0, len(lines) - limit)
+            history_start = lines[selected_position][0] if lines else page_end
+            self._prepare_history_parse(fh, history_start)
             if page_end_index is None:
                 line_index_base = 0
                 selected_end_index: int | None = None
@@ -559,6 +562,9 @@ class TranscriptSource(Source):
                 identity,
                 older_identity,
             )
+
+    def _prepare_history_parse(self, fh: BinaryIO, start: int) -> None:
+        """Let a stateful adapter seed bounded context before forward parsing."""
 
     @classmethod
     def _read_page_lines(cls, fh: BinaryIO, page_end: int) -> list[tuple[int, bytes]]:
@@ -592,25 +598,48 @@ class TranscriptSource(Source):
         limit: int,
     ) -> tuple[list[Event], list[TrajectoryFact], list[Event], int, int | None]:
         selected_position = max(0, len(lines) - limit)
+        parsed_lines: list[
+            tuple[
+                int,
+                int,
+                tuple[Event, ...],
+                tuple[TrajectoryFact, ...],
+                tuple[Event, ...],
+            ]
+        ] = []
+        for position in range(selected_position, len(lines)):
+            record_offset, raw = lines[position]
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line:
+                parsed_lines.append((position, record_offset, (), (), ()))
+                continue
+            parsed = self._parse_record(line, line_index_base + position, clip_text=False)
+            decorated = self._decorate_parsed(parsed, record_offset)
+            parsed_lines.append(
+                (
+                    position,
+                    record_offset,
+                    tuple(
+                        _bounded_history_event(event)
+                        for event in decorated.events
+                        if not event.usage_only
+                    ),
+                    tuple(decorated.trajectory),
+                    tuple(_bounded_history_event(event) for event in decorated.baseline_events),
+                )
+            )
+
         events: list[Event] = []
         facts: list[TrajectoryFact] = []
         trajectory_events: list[Event] = []
         selected: list[tuple[int, int]] = []
-        for position in range(len(lines) - 1, selected_position - 1, -1):
-            record_offset, raw = lines[position]
-            line = raw.decode("utf-8", errors="replace").strip()
-            if not line:
-                selected.append((position, record_offset))
-                continue
-            parsed = self._parse_record(line, line_index_base + position, clip_text=False)
-            decorated = self._decorate_parsed(parsed, record_offset)
-            candidate_events = tuple(
-                _bounded_history_event(event) for event in decorated.events if not event.usage_only
-            )
-            candidate_facts = tuple(decorated.trajectory)
-            candidate_trajectory_events = tuple(
-                _bounded_history_event(event) for event in decorated.baseline_events
-            )
+        for (
+            position,
+            record_offset,
+            candidate_events,
+            candidate_facts,
+            candidate_trajectory_events,
+        ) in reversed(parsed_lines):
             if len(candidate_events) > limit or len(candidate_facts) > limit:
                 if not selected:
                     raise _HistoryPageError(
