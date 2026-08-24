@@ -11,7 +11,7 @@ from theater.constants.trajectory import (
 )
 from theater.daemon.trajectory.cache import RecordChange
 from theater.daemon.trajectory.merge import groups_for_records
-from theater.daemon.trajectory.overview import capabilities_for, overview_for
+from theater.daemon.trajectory.overview import TrajectoryResponseValues, response_values_for
 from theater.daemon.trajectory.runtime import TrajectoryStream, participant_state
 from theater.trajectory import (
     CoverageGap,
@@ -56,6 +56,7 @@ def fit_page(
     make_older: Callable[[str | None, int | None, str | None], str],
 ) -> TrajectoryPage:
     """Return the largest suffix whose complete encoded page fits the wire cap."""
+    values = _response_values(stream)
 
     def build(
         count: int,
@@ -74,8 +75,8 @@ def fit_page(
             older_cursor=older_cursor if older else None,
             has_older=older,
             coverage=coverage,
-            capabilities=_capabilities(stream),
-            overview=_overview(stream),
+            capabilities=values.capabilities,
+            overview=values.overview,
             truncated_by_bytes=byte_truncated,
         )
 
@@ -112,8 +113,10 @@ def fit_delta(
     *,
     daemon_epoch: str,
     after_sequence: int,
+    response_values: TrajectoryResponseValues | None = None,
 ) -> TrajectoryDelta | None:
     """Return the largest prefix that fits, or None when one update cannot fit."""
+    values = response_values or _response_values(stream)
 
     def build(count: int) -> TrajectoryDelta:
         selected = changes[:count]
@@ -122,8 +125,8 @@ def fit_delta(
             stream_id=stream.cache.stream_id,
             cursor=follow_cursor(daemon_epoch, stream, sequence),
             upserts=tuple(TrajectoryUpsert(change.record) for change in selected),
-            capabilities=_capabilities(stream),
-            overview=_overview(stream),
+            capabilities=values.capabilities,
+            overview=values.overview,
         )
 
     low = 1
@@ -141,6 +144,7 @@ def fit_delta(
 
 
 def empty_delta(stream: TrajectoryStream, *, daemon_epoch: str, sequence: int) -> TrajectoryDelta:
+    values = _response_values(stream)
     return TrajectoryDelta(
         stream_id=stream.cache.stream_id,
         cursor=follow_cursor(
@@ -148,8 +152,8 @@ def empty_delta(stream: TrajectoryStream, *, daemon_epoch: str, sequence: int) -
             stream,
             max(sequence, stream.ring.current_sequence),
         ),
-        capabilities=_capabilities(stream),
-        overview=_overview(stream),
+        capabilities=values.capabilities,
+        overview=values.overview,
     )
 
 
@@ -158,6 +162,8 @@ def resync_delta(stream_id: str, reason: str) -> TrajectoryDelta:
 
 
 def stale_page(stream: TrajectoryStream, *, daemon_epoch: str, message: str) -> TrajectoryPage:
+    values = _response_values(stream)
+
     def build(coverage: TrajectoryCoverage) -> TrajectoryPage:
         return TrajectoryPage(
             panel_state=PanelStateInfo(
@@ -168,8 +174,8 @@ def stale_page(stream: TrajectoryStream, *, daemon_epoch: str, message: str) -> 
             stream_id=stream.cache.stream_id,
             cursor=follow_cursor(daemon_epoch, stream, stream.ring.current_sequence),
             coverage=coverage,
-            capabilities=_capabilities(stream),
-            overview=_overview(stream),
+            capabilities=values.capabilities,
+            overview=values.overview,
         )
 
     coverage = _fit_coverage(stream, build)
@@ -237,19 +243,14 @@ def _coverage(
     )
 
 
-def _capabilities(stream: TrajectoryStream):
-    return capabilities_for(
+def _response_values(stream: TrajectoryStream) -> TrajectoryResponseValues:
+    return response_values_for(
         stream.declared_capabilities,
         stream.ring.records(),
         live_updates_observed=stream.live_updates_observed,
-    )
-
-
-def _overview(stream: TrajectoryStream):
-    return overview_for(
-        stream.ring.records(),
         has_older=stream.source_before is not None or stream.bus_before is not None,
         has_coverage_gaps=bool(stream.gaps),
+        cache_evicted=stream.ring.floor_sequence > 0,
     )
 
 

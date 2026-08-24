@@ -7,7 +7,7 @@ import contextlib
 import logging
 import uuid
 from collections import deque
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 
 from theater.constants.daemon import BUS_PARTICIPANT_PAGE_MAX_LIMIT
@@ -481,12 +481,10 @@ class TrajectoryRuntime:
             return
         epoch = stream.source_epoch or source_epoch_for(stream.participant, None)
         records = project_batch(batch, participant_id=stream.participant.id, source_epoch=epoch)
-        changed_live_updates = not stream.live_updates_observed
-        if not stream.live_updates_observed:
-            stream.live_updates_observed = True
         changes = self._merge_records(stream, records, notify=notify)
-        if changed_live_updates and not changes and notify:
-            self.wake_followers(stream)
+        changed_live_updates = bool(changes) and not stream.live_updates_observed
+        if changed_live_updates:
+            stream.live_updates_observed = True
         if records and stream.panel_state.state in {
             PanelState.WAITING,
             PanelState.UNAVAILABLE,
@@ -656,7 +654,9 @@ class TrajectoryRuntime:
     def _declared_capabilities(self, participant: Participant) -> TrajectoryCapabilities:
         harnesses = getattr(self.observer, "harnesses", {})
         harness = (
-            harnesses.get(normalize(participant.harness)) if isinstance(harnesses, dict) else None
+            harnesses.get(normalize(participant.harness))
+            if isinstance(harnesses, Mapping)
+            else None
         )
         declared = getattr(getattr(harness, "observer", None), "trajectory_capabilities", None)
         return (

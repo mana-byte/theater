@@ -19,6 +19,7 @@ from theater.constants.trajectory import (
 )
 from theater.daemon.trajectory.cache import CacheStream, RecordChange, TrajectoryCache
 from theater.daemon.trajectory.merge import order_records
+from theater.daemon.trajectory.overview import TrajectoryResponseValues
 from theater.daemon.trajectory.responses import (
     TrajectoryResponseTooLarge,
     decode_follow_cursor,
@@ -334,15 +335,19 @@ class TrajectoryService:
         after_sequence: int,
     ) -> TrajectoryDelta:
         candidate_changes = changes
+        response_values: TrajectoryResponseValues | None = None
         while candidate_changes:
             delta = fit_delta(
                 stream,
                 candidate_changes,
                 daemon_epoch=self.daemon_epoch,
                 after_sequence=after_sequence,
+                response_values=response_values,
             )
             if delta is None:
                 break
+            if delta.capabilities is not None and delta.overview is not None:
+                response_values = TrajectoryResponseValues(delta.capabilities, delta.overview)
             stateful = TrajectoryDelta(
                 stream_id=delta.stream_id,
                 cursor=delta.cursor,

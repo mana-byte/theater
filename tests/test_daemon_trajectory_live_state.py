@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
@@ -13,8 +13,11 @@ from theater.models import NotFound, Participant, Status, Tier
 from theater.trajectory import (
     PanelState,
     PanelStateInfo,
+    TrajectoryCapabilities,
     TrajectoryDelta,
+    TrajectoryFeature,
     TrajectoryParticipantState,
+    TrajectorySupport,
     TrajectoryValidationError,
 )
 
@@ -138,7 +141,7 @@ async def test_follow_reports_waiting_to_ready_and_state_only_stale_delta(source
     assert initial.panel_state.state is PanelState.WAITING
     assert initial.cursor is not None and initial.stream_id is not None
     assert initial.capabilities.features
-    assert initial.overview.scope.value == "loaded"
+    assert initial.overview.scope.value == "daemon_cache"
 
     assert observer.capture is not None
     observer.capture(current.id, Batch(events=(event("live", 1),)))
@@ -172,6 +175,62 @@ async def test_follow_reports_waiting_to_ready_and_state_only_stale_delta(source
     assert stale.panel_state is not None
     assert stale.panel_state.state is PanelState.STALE
     assert "fresh snapshot" in stale.panel_state.message
+    await service.aclose()
+
+
+async def test_empty_live_batch_does_not_observe_live_trajectory_updates(source_opener) -> None:
+    current = participant()
+    source_opener[current.id] = SourcePage({None: page(location=None)})
+    observer = Observer()
+    service = TrajectoryService(Store(), Registry(current), observer)
+
+    initial = await service.snapshot(current.id)
+    assert initial.cursor is not None and initial.stream_id is not None
+    assert observer.capture is not None
+    observer.capture(current.id, Batch(progressed=True))
+    delta = await service.follow(
+        current.id,
+        stream_id=initial.stream_id,
+        after=initial.cursor,
+        wait=0,
+        limit=20,
+    )
+
+    assert delta.capabilities is not None
+    assert not any(
+        item.feature.value == "live_updates" and item.observed
+        for item in delta.capabilities.features
+    )
+    await service.aclose()
+
+
+async def test_capability_declaration_accepts_mapping_harness_registries(source_opener) -> None:
+    current = participant()
+    source_opener[current.id] = SourcePage({None: page(location=None)})
+    observer = Observer()
+    observer.harnesses = MappingProxyType(
+        {
+            "fake": SimpleNamespace(
+                observer=SimpleNamespace(
+                    trajectory_capabilities=TrajectoryCapabilities.declared(
+                        supported=frozenset({TrajectoryFeature.MODELS})
+                    )
+                )
+            )
+        }
+    )
+    service = TrajectoryService(Store(), Registry(current), observer)
+
+    snapshot = await service.snapshot(current.id)
+
+    assert (
+        next(
+            item
+            for item in snapshot.capabilities.features
+            if item.feature is TrajectoryFeature.MODELS
+        ).declared
+        is TrajectorySupport.SUPPORTED
+    )
     await service.aclose()
 
 

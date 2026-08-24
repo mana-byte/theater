@@ -71,19 +71,19 @@ def _frame(value: dict[str, object]) -> bytes:
 def test_page_boundary_measures_the_complete_ndjson_frame() -> None:
     records = (
         *(_record(index, "x" * 16_384) for index in range(62)),
-        _record(62, "x" * 8_532),
+        _record(62, "x" * 7_588),
     )
 
     page = _page(_stream(), records)
 
-    assert len(page.records) < len(records)
-    assert len(_frame(page.to_wire())) <= TRAJECTORY_RESPONSE_MAX_BYTES
+    assert len(page.records) == len(records)
+    assert len(_frame(page.to_wire())) == TRAJECTORY_RESPONSE_MAX_BYTES
 
 
 def test_page_trims_the_record_that_crosses_the_complete_frame_cap() -> None:
     records = (
         *(_record(index, "x" * 16_384) for index in range(62)),
-        _record(62, "x" * 8_532),
+        _record(62, "x" * 7_588),
         _record(63, "x"),
     )
 
@@ -111,6 +111,18 @@ def test_empty_and_state_only_deltas_stay_within_the_cap() -> None:
 
     assert len(_frame(empty.to_wire())) <= TRAJECTORY_RESPONSE_MAX_BYTES
     assert len(_frame(resync.to_wire())) <= TRAJECTORY_RESPONSE_MAX_BYTES
+
+
+def test_overview_marks_evicted_daemon_cache_scope_incomplete() -> None:
+    stream = _stream()
+    stream.ring.max_bytes = 1
+    stream.ring.merge((_record(0, "record"),))
+
+    delta = empty_delta(stream, daemon_epoch="e" * 32, sequence=0)
+
+    assert delta.overview is not None
+    assert not delta.overview.scope_complete
+    assert [reason.value for reason in delta.overview.incomplete_reasons] == ["cache_evicted"]
 
 
 def test_empty_page_bounds_large_coverage_gaps_deterministically() -> None:

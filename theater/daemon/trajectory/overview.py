@@ -2,24 +2,104 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 from theater.trajectory import (
     TrajectoryCapabilities,
     TrajectoryCurrentOperation,
     TrajectoryFeature,
+    TrajectoryIncompleteReason,
     TrajectoryKind,
-    TrajectoryLatestError,
+    TrajectoryLane,
     TrajectoryOverview,
+    TrajectoryProblem,
     TrajectoryRecord,
     TrajectoryStatus,
+    TrajectoryUsage,
     deterministic_record_order,
 )
+
+_MAX_TOTAL = (1 << 63) - 1
+_MAX_COST = 1e15
+_ACTIVE = frozenset({TrajectoryStatus.PENDING, TrajectoryStatus.RUNNING, TrajectoryStatus.PARTIAL})
+_TERMINAL = frozenset(
+    {
+        TrajectoryStatus.COMPLETED,
+        TrajectoryStatus.ERROR,
+        TrajectoryStatus.INTERRUPTED,
+        TrajectoryStatus.TIMEOUT,
+        TrajectoryStatus.CANCELLED,
+    }
+)
+_PROBLEM_KINDS = frozenset(
+    {TrajectoryKind.ERROR, TrajectoryKind.JOB_FAILURE, TrajectoryKind.OBSERVATION_ERROR}
+)
+_PROBLEM_STATUSES = frozenset(
+    {
+        TrajectoryStatus.ERROR,
+        TrajectoryStatus.INTERRUPTED,
+        TrajectoryStatus.TIMEOUT,
+        TrajectoryStatus.CANCELLED,
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class TrajectoryResponseValues:
+    capabilities: TrajectoryCapabilities
+    overview: TrajectoryOverview
 
 
 def capabilities_for(
     declared: TrajectoryCapabilities,
     records: Iterable[TrajectoryRecord],
+    *,
+    live_updates_observed: bool,
+) -> TrajectoryCapabilities:
+    return _capabilities(declared, tuple(records), live_updates_observed=live_updates_observed)
+
+
+def overview_for(
+    records: Iterable[TrajectoryRecord],
+    *,
+    has_older: bool,
+    has_coverage_gaps: bool,
+    cache_evicted: bool = False,
+) -> TrajectoryOverview:
+    return _overview(
+        deterministic_record_order(records),
+        has_older=has_older,
+        has_coverage_gaps=has_coverage_gaps,
+        cache_evicted=cache_evicted,
+    )
+
+
+def response_values_for(
+    declared: TrajectoryCapabilities,
+    records: Iterable[TrajectoryRecord],
+    *,
+    live_updates_observed: bool,
+    has_older: bool,
+    has_coverage_gaps: bool,
+    cache_evicted: bool,
+) -> TrajectoryResponseValues:
+    ordered = deterministic_record_order(records)
+    return TrajectoryResponseValues(
+        _capabilities(declared, ordered, live_updates_observed=live_updates_observed),
+        _overview(
+            ordered,
+            has_older=has_older,
+            has_coverage_gaps=has_coverage_gaps,
+            cache_evicted=cache_evicted,
+        ),
+    )
+
+
+def _capabilities(
+    declared: TrajectoryCapabilities,
+    records: tuple[TrajectoryRecord, ...],
     *,
     live_updates_observed: bool,
 ) -> TrajectoryCapabilities:
@@ -47,62 +127,136 @@ def capabilities_for(
     return declared.with_observed(frozenset(observed))
 
 
-def overview_for(
-    records: Iterable[TrajectoryRecord],
+def _overview(
+    ordered: tuple[TrajectoryRecord, ...],
     *,
     has_older: bool,
     has_coverage_gaps: bool,
+    cache_evicted: bool,
 ) -> TrajectoryOverview:
-    ordered = deterministic_record_order(records)
-    current = next(
-        (
-            _current(record)
-            for record in reversed(ordered)
-            if record.status
-            in {TrajectoryStatus.PENDING, TrajectoryStatus.RUNNING, TrajectoryStatus.PARTIAL}
-        ),
-        None,
+    usages = _usage_records(ordered)
+    input_tokens, input_saturated = _sum_int(usage.input_tokens for usage in usages)
+    output_tokens, output_saturated = _sum_int(usage.output_tokens for usage in usages)
+    cache_read_tokens, cache_read_saturated = _sum_int(usage.cache_read_tokens for usage in usages)
+    cache_write_tokens, cache_write_saturated = _sum_int(
+        usage.cache_write_tokens for usage in usages
     )
-    latest_error = next(
-        (
-            TrajectoryLatestError(record.record_id, record.summary)
-            for record in reversed(ordered)
-            if record.kind is TrajectoryKind.ERROR or record.status is TrajectoryStatus.ERROR
-        ),
-        None,
+    reasoning_tokens, reasoning_saturated = _sum_int(usage.reasoning_tokens for usage in usages)
+    reported_cost_usd, cost_saturated = _sum_cost(usage.cost_usd for usage in usages)
+    reasons = tuple(
+        reason
+        for reason, present in (
+            (TrajectoryIncompleteReason.OLDER_HISTORY, has_older),
+            (TrajectoryIncompleteReason.COVERAGE_GAPS, has_coverage_gaps),
+            (TrajectoryIncompleteReason.CACHE_EVICTED, cache_evicted),
+        )
+        if present
     )
-    usages = tuple(record.usage for record in ordered if record.usage is not None)
-    costs = tuple(usage.cost_usd for usage in usages if usage.cost_usd is not None)
+    explicit_requests = {usage.request_id for usage in usages if usage.request_id is not None}
+    implicit_model_records = sum(
+        record.lane is TrajectoryLane.MODEL
+        and record.usage is not None
+        and record.usage.request_id is None
+        for record in ordered
+    )
     return TrajectoryOverview(
-        scope_complete=not has_older and not has_coverage_gaps,
+        scope_complete=not reasons,
+        incomplete_reasons=reasons,
         has_older=has_older,
         has_coverage_gaps=has_coverage_gaps,
         record_count=len(ordered),
-        model_operations=sum(record.lane.value == "model" for record in ordered),
+        model_operations=len(explicit_requests) + implicit_model_records,
         tool_operations=sum(record.kind is TrajectoryKind.TOOL_CALL for record in ordered),
-        input_tokens=sum(usage.input_tokens for usage in usages),
-        output_tokens=sum(usage.output_tokens for usage in usages),
-        cache_read_tokens=sum(usage.cache_read_tokens for usage in usages),
-        cache_write_tokens=sum(usage.cache_write_tokens for usage in usages),
-        reasoning_tokens=sum(usage.reasoning_tokens for usage in usages),
-        reported_cost_usd=sum(costs) if costs else None,
-        current=current,
-        latest_error=latest_error,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+        reasoning_tokens=reasoning_tokens,
+        reported_cost_usd=reported_cost_usd,
+        totals_saturated=any(
+            (
+                input_saturated,
+                output_saturated,
+                cache_read_saturated,
+                cache_write_saturated,
+                reasoning_saturated,
+                cost_saturated,
+            )
+        ),
+        current=_current(ordered),
+        latest_problem=_latest_problem(ordered),
     )
 
 
-def _current(record: TrajectoryRecord) -> TrajectoryCurrentOperation:
-    timing = record.timing
-    return TrajectoryCurrentOperation(
-        record_id=record.record_id,
-        kind=record.kind,
-        lane=record.lane,
-        status=record.status,
-        summary=record.summary,
-        model=record.usage.model if record.usage is not None else None,
-        start=timing.start if timing is not None else None,
-        duration_ms=timing.duration_ms if timing is not None else None,
-    )
+def _usage_records(ordered: tuple[TrajectoryRecord, ...]) -> tuple[TrajectoryUsage, ...]:
+    requested: dict[str, TrajectoryUsage] = {}
+    independent: list[TrajectoryUsage] = []
+    for record in ordered:
+        if record.usage is None:
+            continue
+        if record.usage.request_id is None:
+            independent.append(record.usage)
+        else:
+            requested[record.usage.request_id] = record.usage
+    return (*independent, *requested.values())
 
 
-__all__ = ["capabilities_for", "overview_for"]
+def _current(ordered: tuple[TrajectoryRecord, ...]) -> TrajectoryCurrentOperation | None:
+    closed_calls: set[tuple[str, str]] = set()
+    for record in reversed(ordered):
+        if record.kind is TrajectoryKind.TOOL_RESULT and record.status in _TERMINAL:
+            if record.call_id is not None:
+                closed_calls.add((record.source_epoch, record.call_id))
+            continue
+        if record.status not in _ACTIVE:
+            continue
+        if (
+            record.kind is TrajectoryKind.TOOL_CALL
+            and record.call_id is not None
+            and (record.source_epoch, record.call_id) in closed_calls
+        ):
+            continue
+        timing = record.timing
+        return TrajectoryCurrentOperation(
+            record_id=record.record_id,
+            kind=record.kind,
+            lane=record.lane,
+            status=record.status,
+            summary=record.summary,
+            model=record.usage.model if record.usage is not None else None,
+            start=timing.start if timing is not None else None,
+            duration_ms=timing.duration_ms if timing is not None else None,
+        )
+    return None
+
+
+def _latest_problem(ordered: tuple[TrajectoryRecord, ...]) -> TrajectoryProblem | None:
+    for record in reversed(ordered):
+        if record.kind in _PROBLEM_KINDS or record.status in _PROBLEM_STATUSES:
+            return TrajectoryProblem(record.record_id, record.summary)
+    return None
+
+
+def _sum_int(values: Iterable[int]) -> tuple[int, bool]:
+    total = 0
+    for value in values:
+        if total > _MAX_TOTAL - value:
+            return _MAX_TOTAL, True
+        total += value
+    return total, False
+
+
+def _sum_cost(values: Iterable[float | None]) -> tuple[float | None, bool]:
+    total = 0.0
+    seen = False
+    for value in values:
+        if value is None:
+            continue
+        seen = True
+        if not math.isfinite(value) or total > _MAX_COST - value:
+            return _MAX_COST, True
+        total += value
+    return (total if seen else None), False
+
+
+__all__ = ["TrajectoryResponseValues", "capabilities_for", "overview_for", "response_values_for"]

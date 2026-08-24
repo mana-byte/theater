@@ -53,7 +53,13 @@ class TrajectorySupport(StrEnum):
 
 
 class TrajectoryScope(StrEnum):
-    LOADED = "loaded"
+    DAEMON_CACHE = "daemon_cache"
+
+
+class TrajectoryIncompleteReason(StrEnum):
+    OLDER_HISTORY = "older_history"
+    COVERAGE_GAPS = "coverage_gaps"
+    CACHE_EVICTED = "cache_evicted"
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,7 +270,7 @@ class TrajectoryCurrentOperation:
 
 
 @dataclass(frozen=True, slots=True)
-class TrajectoryLatestError:
+class TrajectoryProblem:
     record_id: str
     summary: str = ""
 
@@ -275,7 +281,7 @@ class TrajectoryLatestError:
             bounded_text(
                 self.record_id,
                 max_bytes=TRAJECTORY_IDENTIFIER_MAX_BYTES,
-                label="overview.error.record_id",
+                label="overview.problem.record_id",
                 nonempty=True,
             ),
         )
@@ -292,18 +298,19 @@ class TrajectoryLatestError:
 
     @classmethod
     def from_wire(cls, value: object) -> Self:
-        data = mapping(value, "trajectory latest error")
-        keys(data, required={"record_id"}, optional={"summary"}, label="trajectory latest error")
+        data = mapping(value, "trajectory problem")
+        keys(data, required={"record_id"}, optional={"summary"}, label="trajectory problem")
         return cls(
-            record_id=string(data["record_id"], "overview.error.record_id"),
-            summary=string(data.get("summary", ""), "overview.error.summary"),
+            record_id=string(data["record_id"], "overview.problem.record_id"),
+            summary=string(data.get("summary", ""), "overview.problem.summary"),
         )
 
 
 @dataclass(frozen=True, slots=True)
 class TrajectoryOverview:
-    scope: TrajectoryScope = TrajectoryScope.LOADED
-    scope_complete: bool = False
+    scope: TrajectoryScope = TrajectoryScope.DAEMON_CACHE
+    scope_complete: bool = True
+    incomplete_reasons: tuple[TrajectoryIncompleteReason, ...] = ()
     has_older: bool = False
     has_coverage_gaps: bool = False
     record_count: int = 0
@@ -315,14 +322,29 @@ class TrajectoryOverview:
     cache_write_tokens: int = 0
     reasoning_tokens: int = 0
     reported_cost_usd: float | None = None
+    totals_saturated: bool = False
     current: TrajectoryCurrentOperation | None = None
-    latest_error: TrajectoryLatestError | None = None
+    latest_problem: TrajectoryProblem | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "scope", enum_value(TrajectoryScope, self.scope, "overview.scope"))
-        for name in ("scope_complete", "has_older", "has_coverage_gaps"):
+        for name in ("scope_complete", "has_older", "has_coverage_gaps", "totals_saturated"):
             if type(getattr(self, name)) is not bool:
                 raise TrajectoryValidationError(f"overview.{name} must be a boolean")
+        object.__setattr__(
+            self,
+            "incomplete_reasons",
+            tuple(
+                enum_value(TrajectoryIncompleteReason, value, "overview.incomplete_reasons[]")
+                for value in self.incomplete_reasons
+            ),
+        )
+        if len(self.incomplete_reasons) > len(TrajectoryIncompleteReason):
+            raise TrajectoryValidationError("overview.incomplete_reasons has too many values")
+        if len(set(self.incomplete_reasons)) != len(self.incomplete_reasons):
+            raise TrajectoryValidationError("overview.incomplete_reasons must not repeat a value")
+        if self.scope_complete != (not self.incomplete_reasons):
+            raise TrajectoryValidationError("overview.scope_complete must match incomplete_reasons")
         for name in ("record_count", "model_operations", "tool_operations"):
             value = getattr(self, name)
             if type(value) is not int or not 0 <= value <= _MAX_COUNT:
@@ -353,17 +375,18 @@ class TrajectoryOverview:
             raise TrajectoryValidationError(
                 "overview.current must be TrajectoryCurrentOperation or null"
             )
-        if self.latest_error is not None and not isinstance(
-            self.latest_error, TrajectoryLatestError
+        if self.latest_problem is not None and not isinstance(
+            self.latest_problem, TrajectoryProblem
         ):
             raise TrajectoryValidationError(
-                "overview.latest_error must be TrajectoryLatestError or null"
+                "overview.latest_problem must be TrajectoryProblem or null"
             )
 
     def to_wire(self) -> dict[str, object]:
         return {
             "scope": self.scope.value,
             "scope_complete": self.scope_complete,
+            "incomplete_reasons": [value.value for value in self.incomplete_reasons],
             "has_older": self.has_older,
             "has_coverage_gaps": self.has_coverage_gaps,
             "record_count": self.record_count,
@@ -375,8 +398,11 @@ class TrajectoryOverview:
             "cache_write_tokens": self.cache_write_tokens,
             "reasoning_tokens": self.reasoning_tokens,
             "reported_cost_usd": self.reported_cost_usd,
+            "totals_saturated": self.totals_saturated,
             "current": self.current.to_wire() if self.current is not None else None,
-            "latest_error": self.latest_error.to_wire() if self.latest_error is not None else None,
+            "latest_problem": self.latest_problem.to_wire()
+            if self.latest_problem is not None
+            else None,
         }
 
     @classmethod
@@ -385,6 +411,7 @@ class TrajectoryOverview:
         optional = {
             "scope",
             "scope_complete",
+            "incomplete_reasons",
             "has_older",
             "has_coverage_gaps",
             "record_count",
@@ -396,15 +423,25 @@ class TrajectoryOverview:
             "cache_write_tokens",
             "reasoning_tokens",
             "reported_cost_usd",
+            "totals_saturated",
             "current",
+            "latest_problem",
             "latest_error",
         }
         keys(data, required=set(), optional=optional, label="trajectory overview")
         return cls(
             scope=enum_value(
-                TrajectoryScope, data.get("scope", TrajectoryScope.LOADED.value), "overview.scope"
+                TrajectoryScope,
+                data.get("scope", TrajectoryScope.DAEMON_CACHE.value),
+                "overview.scope",
             ),
-            scope_complete=boolean(data.get("scope_complete", False), "overview.scope_complete"),
+            scope_complete=boolean(data.get("scope_complete", True), "overview.scope_complete"),
+            incomplete_reasons=tuple(
+                enum_value(TrajectoryIncompleteReason, item, "overview.incomplete_reasons[]")
+                for item in sequence(
+                    data.get("incomplete_reasons", []), "overview.incomplete_reasons"
+                )
+            ),
             has_older=boolean(data.get("has_older", False), "overview.has_older"),
             has_coverage_gaps=boolean(
                 data.get("has_coverage_gaps", False), "overview.has_coverage_gaps"
@@ -424,13 +461,18 @@ class TrajectoryOverview:
             reported_cost_usd=number_or_none(
                 data.get("reported_cost_usd"), "overview.reported_cost_usd"
             ),
+            totals_saturated=boolean(
+                data.get("totals_saturated", False), "overview.totals_saturated"
+            ),
             current=(
                 TrajectoryCurrentOperation.from_wire(data["current"])
                 if data.get("current") is not None
                 else None
             ),
-            latest_error=(
-                TrajectoryLatestError.from_wire(data["latest_error"])
+            latest_problem=(
+                TrajectoryProblem.from_wire(data["latest_problem"])
+                if data.get("latest_problem") is not None
+                else TrajectoryProblem.from_wire(data["latest_error"])
                 if data.get("latest_error") is not None
                 else None
             ),
@@ -442,8 +484,9 @@ __all__ = [
     "TrajectoryCapability",
     "TrajectoryCurrentOperation",
     "TrajectoryFeature",
-    "TrajectoryLatestError",
+    "TrajectoryIncompleteReason",
     "TrajectoryOverview",
+    "TrajectoryProblem",
     "TrajectoryScope",
     "TrajectorySupport",
 ]
