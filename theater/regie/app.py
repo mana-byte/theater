@@ -308,6 +308,7 @@ class RegieApp(App):
         Binding("right", "cursor_right", "right", show=False),
         Binding("enter", "stage", "stage"),
         Binding("l", "cursor_right_or_focus", "focus", show=False),
+        Binding("o", "spawn", "spawn"),
         Binding("x", "kill", "kill"),
         Binding("q", "quit", "quit"),
         Binding(
