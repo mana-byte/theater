@@ -15,6 +15,7 @@ from theater.regie.trajectory.constants import (
     LEDGER_CELL_PADDING,
     LEDGER_OVERSCAN_ROWS,
     LEDGER_ROW_HEIGHT,
+    TIMELINE_LABEL_RIGHT_PADDING,
     TIMELINE_LABEL_WIDTH,
     TIMELINE_LANE_HEIGHT,
     TIMELINE_SPAN_MIN_WIDTH,
@@ -312,7 +313,9 @@ async def test_timeline_lane_labels_are_right_aligned() -> None:
 
         line = timeline.render_line(model_middle)
 
-        assert line.text[:TIMELINE_LABEL_WIDTH] == "MODEL".rjust(TIMELINE_LABEL_WIDTH)
+        assert line.text[:TIMELINE_LABEL_WIDTH] == "MODEL".rjust(
+            TIMELINE_LABEL_WIDTH - TIMELINE_LABEL_RIGHT_PADDING
+        ).ljust(TIMELINE_LABEL_WIDTH)
 
 
 def test_timeline_layout_reflows_existing_events_to_available_width() -> None:

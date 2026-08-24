@@ -17,6 +17,7 @@ from textual.strip import Strip
 from theater.regie.trajectory.constants import (
     TIMELINE_CONTENT_HEIGHT,
     TIMELINE_HEIGHT,
+    TIMELINE_LABEL_RIGHT_PADDING,
     TIMELINE_LABEL_WIDTH,
     TIMELINE_LANE_HEIGHT,
     TIMELINE_SPAN_MIN_WIDTH,
@@ -276,9 +277,10 @@ class Timeline(ScrollView):
         if y >= TIMELINE_CONTENT_HEIGHT:
             return Strip.blank(width, self.rich_style)
         label, label_style = self._label(y)
-        label_strip = Strip(
-            [Segment(label[:label_width].rjust(label_width), label_style)], label_width
-        )
+        label_padding = min(TIMELINE_LABEL_RIGHT_PADDING, label_width)
+        label_text_width = label_width - label_padding
+        label_text = label[:label_text_width].rjust(label_text_width).ljust(label_width)
+        label_strip = Strip([Segment(label_text, label_style)], label_width)
         chart_start = int(scroll_x)
         if (lane_row := self._lane_row(y)) is not None:
             lane, row = lane_row
