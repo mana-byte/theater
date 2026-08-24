@@ -1443,6 +1443,7 @@ class RegieApp(App):
         else:
             if pane == self.staged_pane:
                 self.staged_pane = None
+            self._leaf_retirement.remove_without_animation(("p", pid))
         await self._refresh_tree()
 
     def action_spawn(self) -> None:
