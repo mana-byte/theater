@@ -34,6 +34,12 @@ class TrajectoryOverviewStrip(Vertical):
     """A non-interactive current-scope trajectory summary."""
 
     can_focus = False
+    _state_key: tuple[object, ...] | None
+    _primary_text: str
+    _panel: PanelStateInfo | None
+    _overview: TrajectoryOverview | None
+    _loading: bool
+    _stale_message: str
 
     DEFAULT_CSS = f"""
     TrajectoryOverviewStrip {{
@@ -74,29 +80,6 @@ class TrajectoryOverviewStrip(Vertical):
     }}
     """
 
-    def __init__(
-        self,
-        *,
-        name: str | None = None,
-        id: str | None = None,
-        classes: str | None = None,
-        disabled: bool = False,
-        markup: bool = True,
-    ) -> None:
-        super().__init__(
-            name=name,
-            id=id,
-            classes=classes,
-            disabled=disabled,
-            markup=markup,
-        )
-        self._state_key: tuple[object, ...] | None = None
-        self._primary_text = ""
-        self._panel: PanelStateInfo | None = None
-        self._overview: TrajectoryOverview | None = None
-        self._loading = False
-        self._stale_message = ""
-
     def compose(self) -> ComposeResult:
         yield Label("Loading trajectory…", id="trajectory-overview-current", markup=False)
         yield Label(
@@ -106,6 +89,12 @@ class TrajectoryOverviewStrip(Vertical):
         )
 
     def on_mount(self) -> None:
+        self._state_key = None
+        self._primary_text = ""
+        self._panel: PanelStateInfo | None = None
+        self._overview: TrajectoryOverview | None = None
+        self._loading = False
+        self._stale_message = ""
         self.set_interval(TRAJECTORY_OVERVIEW_TICK_SECONDS, self._tick)
 
     def update_state(
@@ -177,7 +166,11 @@ class TrajectoryOverviewStrip(Vertical):
             self._panel.state is PanelState.WAITING
             or self._panel.participant_state is TrajectoryParticipantState.EXTERNAL
         )
-        active = not problem and not warning and self._overview.current is not None
+        active = (
+            self._panel.state is PanelState.READY
+            and self._panel.participant_state is TrajectoryParticipantState.LIVE
+            and self._overview.current is not None
+        )
         label.set_class(problem, "-problem")
         label.set_class(warning, "-warning")
         label.set_class(active, "-active")

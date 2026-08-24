@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Input, Label
 
@@ -30,14 +31,17 @@ def panel(
 
 
 def current(
-    *, start: float | None = None, duration_ms: float | None = 8_400
+    *,
+    start: float | None = None,
+    duration_ms: float | None = 8_400,
+    summary: str = "pytest tests/test_rpc.py",
 ) -> TrajectoryCurrentOperation:
     return TrajectoryCurrentOperation(
         record_id="r1",
         kind="tool_call",
         lane="tools",
         status="running",
-        summary="pytest tests/test_rpc.py",
+        summary=summary,
         model="gpt-5.6",
         start=start,
         duration_ms=duration_ms,
@@ -128,6 +132,47 @@ async def test_live_current_renders_glyph_status_model_duration_and_summary() ->
         primary = text(strip.query_one("#trajectory-overview-current", Label))
         assert primary == "⚙ Running tool call · gpt-5.6 · 8.4s · pytest tests/test_rpc.py"
         await pilot.pause()
+
+
+async def test_current_summary_markup_is_literal() -> None:
+    app = App()
+    async with app.run_test():
+        strip = TrajectoryOverviewStrip()
+        await app.mount(strip)
+        strip.update_state(
+            panel=panel(),
+            capabilities=TrajectoryCapabilities(),
+            overview=TrajectoryOverview(current=current(summary="[red]oops[/]")),
+            loading=False,
+        )
+        assert "[red]oops[/]" in text(strip.query_one("#trajectory-overview-current", Label))
+
+
+@pytest.mark.parametrize("participant_state", ("unknown", "missing"))
+async def test_unknown_and_missing_current_never_receive_active_styling(
+    participant_state: str,
+) -> None:
+    app = App()
+    async with app.run_test():
+        strip = TrajectoryOverviewStrip()
+        await app.mount(strip)
+        overview = TrajectoryOverview(current=current())
+        strip.update_state(
+            panel=panel(participant_state=participant_state),
+            capabilities=TrajectoryCapabilities(),
+            overview=overview,
+            loading=False,
+        )
+        label = strip.query_one("#trajectory-overview-current", Label)
+        assert not label.has_class("-active")
+        assert "Running" not in text(label)
+        strip.update_state(
+            panel=panel(),
+            capabilities=TrajectoryCapabilities(),
+            overview=overview,
+            loading=False,
+        )
+        assert label.has_class("-active")
 
 
 async def test_dead_external_and_bad_panels_never_present_current_as_running() -> None:
