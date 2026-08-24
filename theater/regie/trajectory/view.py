@@ -248,6 +248,9 @@ class TrajectoryView(Vertical):
     def _make_search_key(self, records: tuple[TrajectoryRecord, ...]) -> tuple[object, ...]:
         record_key = tuple((record.record_id, record.revision) for record in records)
         groups = tuple(self._group_signature(group) for group in self.state.groups)
+        requests = tuple(
+            (request.request_id, request.record_ids) for request in self.state.request_index.ordered
+        )
         return (
             record_key,
             self.state.query,
@@ -256,6 +259,7 @@ class TrajectoryView(Vertical):
             frozenset(self.state.status_filters),
             frozenset(self.state.source_filters),
             groups,
+            requests,
         )
 
     @staticmethod
@@ -290,6 +294,7 @@ class TrajectoryView(Vertical):
             groups=self.state.groups,
             cache=self._search_cache,
             ordering=ordering,
+            request_index=self.state.request_index,
         )
         self._all_visible_ids = self._search_result.record_ids
         self._all_visible_indices = {

@@ -22,6 +22,11 @@ from theater.regie.trajectory.constants import (
 )
 from theater.regie.trajectory.enums import FocusRegion, InspectorTab, OrderMode
 from theater.regie.trajectory.ordering import canonical_group_records
+from theater.regie.trajectory.request_rows import (
+    RequestIndex,
+    build_request_index,
+    empty_request_index,
+)
 from theater.trajectory import (
     PanelState,
     PanelStateInfo,
@@ -64,6 +69,7 @@ class ParticipantTrajectoryState:
     overview: TrajectoryOverview = field(default_factory=TrajectoryOverview)
     groups: tuple[TrajectoryGroup, ...] = ()
     records: OrderedDict[str, TrajectoryRecord] = field(default_factory=OrderedDict)
+    request_index: RequestIndex = field(default_factory=empty_request_index)
     loaded_bytes: int = 0
     follow_tail: bool = True
     new_count: int = 0
@@ -140,6 +146,7 @@ class ParticipantTrajectoryState:
 
     def _rebuild_groups(self) -> None:
         self.groups = group_records(self.record_list)
+        self.request_index = build_request_index(self.records.values())
 
     def _trim(self, *, evict_newest: bool) -> None:
         while (
@@ -215,6 +222,7 @@ class ParticipantTrajectoryState:
         prior_records = OrderedDict(self.records)
         prior_bytes = self.loaded_bytes
         prior_groups = self.groups
+        prior_request_index = self.request_index
         preserve_trace = (
             page.panel_state.state
             in {PanelState.STALE, PanelState.UNAVAILABLE, PanelState.UNTRUSTED}
@@ -241,6 +249,7 @@ class ParticipantTrajectoryState:
             self.records = prior_records
             self.loaded_bytes = prior_bytes
             self.groups = prior_groups
+            self.request_index = prior_request_index
         else:
             self._apply_records(page.records)
             self.groups = page.groups or self.groups

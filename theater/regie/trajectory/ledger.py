@@ -45,8 +45,9 @@ from theater.regie.trajectory.render import (
     status_label,
     supports_duration_interval,
 )
+from theater.regie.trajectory.request_rows import request_row_text
 from theater.regie.trajectory.search import LedgerEntry, SearchResult
-from theater.trajectory import TrajectoryLane, TrajectoryRecord, TrajectoryStatus
+from theater.trajectory import TrajectoryLane, TrajectoryRecord, TrajectoryRequest, TrajectoryStatus
 
 RETRY_ACTION_META = "trajectory_retry"
 
@@ -110,6 +111,7 @@ class Ledger(DataTable[Text | str]):
     OLDER_KEY = "__older__"
     RETRY_KEY = "__retry__"
     GROUP_PREFIX = "group:"
+    REQUEST_PREFIX = "request:"
     RECORD_PREFIX = "record:"
     DETAIL_PREFIX = "detail:"
     COLUMN_LABELS: ClassVar[dict[str, str]] = {
@@ -128,6 +130,7 @@ class Ledger(DataTable[Text | str]):
         "trajectory-ledger--model",
         "trajectory-ledger--muted",
         "trajectory-ledger--retry",
+        "trajectory-ledger--request",
         "trajectory-ledger--theater",
         "trajectory-ledger--tools",
         "trajectory-ledger--warning",
@@ -199,6 +202,11 @@ class Ledger(DataTable[Text | str]):
         background: $accent 20%;
         text-style: bold;
     }
+    Ledger > .trajectory-ledger--request {
+        color: $accent;
+        background: $accent 4%;
+        text-style: dim;
+    }
     """
 
     def __init__(
@@ -229,6 +237,7 @@ class Ledger(DataTable[Text | str]):
             **kwargs,
         )
         self._records: dict[str, TrajectoryRecord] = {}
+        self._requests: dict[str, TrajectoryRequest] = {}
         self._entries: tuple[LedgerEntry, ...] = ()
         self._entry_indices: dict[str, int] = {}
         self._line_ids: tuple[str | None, ...] = ()
@@ -254,6 +263,7 @@ class Ledger(DataTable[Text | str]):
         self._rows_height = 0
         self._structure: tuple[object, ...] = ()
         self._revisions: dict[str, int] = {}
+        self._rendered_requests: dict[str, TrajectoryRequest] = {}
         self._summary_width = 32
         self._column_widths = {
             key: self._text_width(label) for key, label in self.COLUMN_LABELS.items()
@@ -363,7 +373,9 @@ class Ledger(DataTable[Text | str]):
         )
 
     def _row_key(self, entry: LedgerEntry) -> str:
-        if entry.is_header:
+        if entry.is_request_header:
+            return f"{self.REQUEST_PREFIX}{entry.request_id}"
+        if entry.is_group_header:
             return f"{self.GROUP_PREFIX}{entry.group_id}"
         return f"{self.RECORD_PREFIX}{entry.record_id}"
 
@@ -562,6 +574,48 @@ class Ledger(DataTable[Text | str]):
             self.COLUMN_DURATION: "",
         }
 
+    def _request_values(self, entry: LedgerEntry) -> dict[str, str]:
+        request = self._requests.get(entry.request_id or "")
+        if request is None:
+            return {
+                self.COLUMN_POSITION: "╭",
+                self.COLUMN_EVENT: "◆ REQUEST",
+                self.COLUMN_SOURCE: "model unknown",
+                self.COLUMN_SUMMARY: "usage unavailable",
+                self.COLUMN_STATUS: "● unknown",
+                self.COLUMN_DURATION: "—",
+            }
+        text = request_row_text(request, compact=self._compact_columns)
+        return {
+            self.COLUMN_POSITION: "╭",
+            self.COLUMN_EVENT: text.event,
+            self.COLUMN_SOURCE: text.source,
+            self.COLUMN_SUMMARY: f"{'  ' * entry.depth}{text.summary}",
+            self.COLUMN_STATUS: f"● {text.status}",
+            self.COLUMN_DURATION: text.duration,
+        }
+
+    def _request_cells(self, entry: LedgerEntry) -> dict[str, Text | str]:
+        values = self._request_values(entry)
+        request = self._requests.get(entry.request_id or "")
+        status = request.status if request is not None else TrajectoryStatus.UNKNOWN
+        request_style = self._component("request")
+        dim_request_style = request_style + Style(dim=True)
+        event = Text(values[self.COLUMN_EVENT], style=request_style + Style(bold=True))
+        state = Text(no_wrap=True)
+        state.append("●", style=request_style + self._status_style(status))
+        state.append(f" {status_label(status)}", style=dim_request_style)
+        return {
+            self.COLUMN_POSITION: Text(values[self.COLUMN_POSITION], style=request_style),
+            self.COLUMN_EVENT: event,
+            self.COLUMN_SOURCE: Text(values[self.COLUMN_SOURCE], style=dim_request_style),
+            self.COLUMN_SUMMARY: Text(values[self.COLUMN_SUMMARY], style=dim_request_style),
+            self.COLUMN_STATUS: state,
+            self.COLUMN_DURATION: Text(
+                values[self.COLUMN_DURATION], justify="right", style=dim_request_style
+            ),
+        }
+
     def _older_values(self) -> dict[str, str]:
         loading = self._loading_older
         return {
@@ -621,7 +675,10 @@ class Ledger(DataTable[Text | str]):
         if not self._entries and not self._retry_message and not self._has_older:
             include(self._empty_values())
         for line_index, entry in enumerate(self._entries):
-            if entry.is_header:
+            if entry.is_request_header:
+                include(self._request_values(entry))
+                continue
+            if entry.is_group_header:
                 include(self._group_values(entry))
                 continue
             record = self._records.get(entry.record_id or "")
@@ -699,6 +756,7 @@ class Ledger(DataTable[Text | str]):
                 (
                     entry.group_id,
                     entry.record_id,
+                    entry.request_id,
                     entry.depth,
                     entry.group_kind,
                 )
@@ -745,7 +803,10 @@ class Ledger(DataTable[Text | str]):
         for line_index, entry in enumerate(self._entries):
             key = self._row_key(entry)
             self._row_entries[key] = entry
-            if entry.is_header:
+            if entry.is_request_header:
+                self._add_cells(self._request_cells(entry), key=key)
+                continue
+            if entry.is_group_header:
                 self._add_cells(self._group_cells(entry), key=key)
                 continue
             record = self._records.get(entry.record_id or "")
@@ -789,6 +850,11 @@ class Ledger(DataTable[Text | str]):
             self._populate_rows()
             self._revisions = {
                 record_id: record.revision for record_id, record in self._records.items()
+            }
+            self._rendered_requests = {
+                entry.request_id: self._requests[entry.request_id]
+                for entry in self._entries
+                if entry.is_request_header and entry.request_id in self._requests
             }
             self._update_row_starts()
             self._structure = self._structure_key()
@@ -852,6 +918,19 @@ class Ledger(DataTable[Text | str]):
                 self.update_cell(key, column, self._middle_cell(cells[column]))
             self._revisions[entry.record_id] = record.revision
 
+    def _refresh_changed_requests(self) -> None:
+        for entry in self._entries:
+            if not entry.is_request_header or entry.request_id is None:
+                continue
+            request = self._requests.get(entry.request_id)
+            if request is None or self._rendered_requests.get(entry.request_id) == request:
+                continue
+            key = self._row_key(entry)
+            cells = self._request_cells(entry)
+            for column in self._column_keys:
+                self.update_cell(key, column, self._middle_cell(cells[column]))
+            self._rendered_requests[entry.request_id] = request
+
     def update_rows(
         self,
         records: Sequence[TrajectoryRecord],
@@ -872,6 +951,7 @@ class Ledger(DataTable[Text | str]):
         old_selected = self._selected_id
         previous_detail_revision = self._revisions.get(self.expanded_id or "")
         self._records = {record.record_id: record for record in records}
+        self._requests = dict(search_result.requests)
         self._entries = search_result.entries
         self._entry_indices = {
             entry.record_id: index
@@ -910,6 +990,7 @@ class Ledger(DataTable[Text | str]):
                 and previous_detail_revision != self._records[self.expanded_id].revision
             )
             self._refresh_changed_records()
+            self._refresh_changed_requests()
             if detail_changed:
                 self._update_detail_row()
             self._sync_selection()

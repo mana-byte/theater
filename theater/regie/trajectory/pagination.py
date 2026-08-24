@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from theater.regie.trajectory.search import SearchResult
+from theater.regie.trajectory.search import (
+    SearchResult,
+    _base_request_entries,
+    _compose_request_headers,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,18 +45,47 @@ def paginate_search_result(result: SearchResult, page: int, page_size: int) -> L
     group_ids = {
         group_id for record_id in record_ids for group_id in result.path_for_record(record_id)
     }
-    entries = tuple(
+    all_requests = tuple(result.requests.values())
+    all_by_record_id = {
+        record_id: request.request_id
+        for request in all_requests
+        for record_id in request.record_ids
+    }
+    ordered_requests = tuple(
+        request
+        for request in all_requests
+        if any(record_id in record_ids for record_id in request.record_ids)
+    )
+    by_record_id = {
+        record_id: request.request_id
+        for request in ordered_requests
+        for record_id in request.record_ids
+    }
+    base_entries = _base_request_entries(
+        result.entries,
+        result.matched_ids,
+        result.group_paths,
+        all_by_record_id,
+    )
+    page_entries = tuple(
         entry
-        for entry in result.entries
+        for entry in base_entries
         if (
             entry.record_id in record_ids
             if entry.record_id is not None
             else entry.group_id in group_ids
         )
     )
+    entries, requests = _compose_request_headers(
+        page_entries,
+        record_ids,
+        result.group_paths,
+        ordered_requests,
+        by_record_id,
+    )
     page_result = SearchResult(
         records=records,
-        entries=entries,
+        entries=tuple(entries),
         matched_ids=record_ids,
         scores={
             record.record_id: result.scores[record.record_id]
@@ -63,6 +96,7 @@ def paginate_search_result(result: SearchResult, page: int, page_size: int) -> L
         group_paths={
             record.record_id: result.path_for_record(record.record_id) for record in records
         },
+        requests=requests,
     )
     return LedgerPage(
         index=index,

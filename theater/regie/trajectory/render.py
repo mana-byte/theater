@@ -14,6 +14,7 @@ from theater.regie.trajectory.constants import (
     STYLE_MATCHED,
     TOOLTIP_DELAY,
     TRAJECTORY_DETAIL_RECORD_MAX_BYTES,
+    TRAJECTORY_OVERVIEW_COMPACT_NUMBER_THRESHOLD,
     TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS,
 )
 from theater.regie.trajectory.enums import InspectorTab
@@ -74,6 +75,21 @@ def format_duration(timing: Timing | None) -> str:
         return f"{seconds:.1f}s"
     minutes, remainder = divmod(seconds, 60)
     return f"{int(minutes)}m {remainder:.0f}s"
+
+
+def compact_number(value: int) -> str:
+    """Render a non-negative count using the overview's compact notation."""
+    if value < TRAJECTORY_OVERVIEW_COMPACT_NUMBER_THRESHOLD:
+        return str(value)
+    for divisor, suffix in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")):
+        if value >= divisor:
+            return f"{value / divisor:.1f}".rstrip("0").rstrip(".") + suffix
+    return str(value)
+
+
+def compact_cost(value: float) -> str:
+    """Render a reported dollar value using the overview's compact precision."""
+    return f"{value:.4f}".rstrip("0").rstrip(".") or "0"
 
 
 def supports_duration_interval(record: TrajectoryRecord) -> bool:
@@ -308,6 +324,8 @@ __all__ = [
     "KIND_GLYPHS",
     "LANE_GLYPHS",
     "TOOLTIP_DELAY",
+    "compact_cost",
+    "compact_number",
     "count_label",
     "detail_link_line_ids",
     "detail_text",
