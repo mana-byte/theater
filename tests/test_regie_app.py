@@ -22,6 +22,7 @@ from rich.cells import cell_len
 from rich.console import Console
 from rich.table import Table
 from textual.color import Color
+from textual.command import CommandPalette
 from textual.selection import SELECT_ALL
 from textual.theme import BUILTIN_THEMES
 
@@ -1940,6 +1941,15 @@ async def test_an_unmanaged_pane_cannot_be_killed(daemon, tmux):
 
 
 # ---- palette spawn -------------------------------------------------------
+
+
+async def test_o_opens_the_spawn_palette(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test() as pilot:
+        await pilot.press("o")
+        await pilot.pause()
+
+        assert isinstance(app.screen, CommandPalette)
 
 
 async def test_the_palette_spawns_into_the_regie_session(daemon, tmux):
