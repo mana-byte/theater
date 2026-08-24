@@ -11,7 +11,7 @@ from theater.constants.trajectory import (
     TRAJECTORY_IDENTIFIER_MAX_BYTES,
     TRAJECTORY_REQUEST_RECORD_LIMIT,
 )
-from theater.daemon.trajectory.overview import overview_for
+from theater.daemon.trajectory.overview import capabilities_for, overview_for
 from theater.harness.builtin.plugins.claude import ClaudeCodeObserver
 from theater.harness.builtin.plugins.codex import CodexObserver
 from theater.harness.builtin.plugins.opencode import OpenCodeSource
@@ -21,6 +21,7 @@ from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.trajectory import (
     Timing,
     TimingProvenance,
+    TrajectoryCapabilities,
     TrajectoryFeature,
     TrajectoryKind,
     TrajectoryLane,
@@ -109,8 +110,12 @@ def test_baseline_event_usage_is_a_conservative_request_association() -> None:
         )
     )
 
-    assert fact.request_id == "usage-request"
+    assert fact.request_id is None
     assert fact.usage is not None and fact.usage.request_id == "usage-request"
+    record = fact_to_record(fact, participant_id="participant", source_epoch="epoch")
+    request = requests_for_records((record,))[0]
+    assert request.identity is TrajectoryRequestIdentity.USAGE
+    assert request.source_request_id == "usage-request"
 
 
 def test_shared_request_groups_are_scoped_by_participant_and_epoch() -> None:
@@ -148,6 +153,22 @@ def test_explicit_identity_beats_usage_and_requestless_model_usage_stands_alone(
     ]
     assert requests[0].source_request_id == "shared"
     assert requests[1].source_request_id is None
+
+
+def test_shared_request_id_survives_provenance_upgrade_and_avoids_record_fallback() -> None:
+    usage = _record("usage", 1, usage=TrajectoryUsage(request_id="shared"))
+    explicit = _record("explicit", 2, request_id="shared")
+    record_local = _record("shared", 3, usage=TrajectoryUsage(model="local"))
+
+    usage_request = requests_for_records((usage,))[0]
+    upgraded_request = requests_for_records((usage, explicit))[0]
+    local_request = requests_for_records((usage, record_local))[1]
+
+    assert usage_request.identity is TrajectoryRequestIdentity.USAGE
+    assert upgraded_request.identity is TrajectoryRequestIdentity.SOURCE
+    assert upgraded_request.request_id == usage_request.request_id
+    assert local_request.identity is TrajectoryRequestIdentity.RECORD
+    assert local_request.request_id != usage_request.request_id
 
 
 def test_request_projection_uses_latest_usage_and_consistent_turn_step_values() -> None:
@@ -251,6 +272,27 @@ def test_request_timing_uses_active_and_terminal_rules() -> None:
         duration_ms=5000,
         provenance=TimingProvenance.DERIVED,
     )
+
+
+def test_request_timing_falls_back_when_cross_record_clocks_contradict() -> None:
+    request = requests_for_records(
+        (
+            _record(
+                "start",
+                1,
+                request_id="request",
+                timing=Timing(start=10, provenance=TimingProvenance.SOURCE),
+            ),
+            _record(
+                "end",
+                2,
+                request_id="request",
+                timing=Timing(end=5, provenance=TimingProvenance.SOURCE),
+            ),
+        )
+    )[0]
+
+    assert request.timing == Timing(end=5, provenance=TimingProvenance.SOURCE)
 
 
 def test_request_record_links_keep_newest_ids_and_aggregate_full_group() -> None:
@@ -370,3 +412,13 @@ def test_overview_counts_the_same_canonical_requests() -> None:
     )
 
     assert overview.model_operations == 3
+
+
+def test_explicit_request_id_observes_request_capability_without_usage() -> None:
+    capabilities = capabilities_for(
+        TrajectoryCapabilities(),
+        (_record("explicit", 1, request_id="request"),),
+        live_updates_observed=False,
+    )
+
+    assert TrajectoryFeature.REQUESTS in capabilities.observed

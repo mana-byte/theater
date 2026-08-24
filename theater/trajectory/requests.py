@@ -285,7 +285,7 @@ def _request_for_group(
         request_id=_request_id(
             latest.participant_id,
             latest.source_epoch,
-            identity,
+            "shared" if source_request_id is not None else "record",
             key,
         ),
         participant_id=latest.participant_id,
@@ -321,7 +321,7 @@ def _timing(records: list[TrajectoryRecord], status: TrajectoryStatus) -> Timing
     if status in _TERMINAL:
         ends = [timing.end for timing in values if timing.end is not None]
         end = max(ends) if ends else None
-        if start is not None and end is not None:
+        if start is not None and end is not None and end >= start:
             return Timing(
                 start=start,
                 end=end,
@@ -334,17 +334,17 @@ def _timing(records: list[TrajectoryRecord], status: TrajectoryStatus) -> Timing
         )
         if with_duration is not None:
             return with_duration
-        return Timing(start=start, end=end, provenance=latest.provenance)
+        return latest
     return latest
 
 
 def _request_id(
     participant_id: str,
     source_epoch: str,
-    identity: TrajectoryRequestIdentity,
+    association: str,
     key: str,
 ) -> str:
-    value = f"request:{participant_id}:{source_epoch}:{identity.value}:{key}"
+    value = f"request:{participant_id}:{source_epoch}:{association}:{key}"
     if len(value.encode("utf-8")) <= TRAJECTORY_IDENTIFIER_MAX_BYTES:
         return value
     return f"request:{sha256(value.encode('utf-8')).hexdigest()}"

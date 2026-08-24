@@ -82,7 +82,6 @@ def event_to_fact(
         source_offset=event.source_offset,
         event_ordinal=event_ordinal,
         turn_id=event.turn_id,
-        request_id=usage.request_id if usage is not None else None,
         timing=timing,
         usage=usage,
         details=tuple(details),

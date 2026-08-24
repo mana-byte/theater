@@ -118,6 +118,8 @@ def _capabilities(
             for value in (record.timing.start, record.timing.end, record.timing.duration_ms)
         ):
             observed.add(TrajectoryFeature.TIMING)
+        if record.request_id is not None:
+            observed.add(TrajectoryFeature.REQUESTS)
         if record.usage is not None:
             observed.add(TrajectoryFeature.USAGE)
             if record.usage.model is not None:
