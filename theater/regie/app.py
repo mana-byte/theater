@@ -258,30 +258,15 @@ class RegieApp(App):
     #bus-panel.-hidden {
         display: none;
     }
-    /* The zebra stripe and its row states. These live in App.CSS, which
-       outranks AgentLeaf.DEFAULT_CSS whatever the specificity, so every
-       state an alt row can be in has to be restated here or the widget's
-       own cursor rule never applies to every other row. The stripe is a
-       3% ink wash: $foreground darkens light themes and lightens dark
-       ones, and 3% keeps it below the hover tint on all 21 themes. */
+    /* Alternate rows retain the same hover and cursor states. */
     AgentLeaf.tree-alt {
         background: $foreground 3%;
     }
     AgentLeaf.tree-alt:hover {
         background: $accent 10%;
     }
-    AgentLeaf.tree-alt.tree-staged {
-        background: $primary 20%;
-    }
-    AgentLeaf.tree-alt.tree-staged:hover {
-        background: $primary 20%;
-    }
     AgentLeaf.tree-alt.tree-cursor {
         background: $accent 20%;
-        text-style: bold;
-    }
-    AgentLeaf.tree-alt.tree-cursor.tree-staged {
-        background: $accent 30%;
         text-style: bold;
     }
     .log {
@@ -1399,6 +1384,16 @@ class RegieApp(App):
         elif result.outcome is StageOutcome.JOIN_FAILED:
             self.notify(f"stage failed: {result.error}", severity="error")
 
+    def _apply_stage_result(self, result: StageResult | None) -> None:
+        """Apply physical-stage state to the régie surface."""
+        if result is None:
+            return
+        if result.outcome is StageOutcome.STAGED:
+            self._surface.show_dashboard()
+        if result.staged_pane != self.staged_pane:
+            self.staged_pane = result.staged_pane
+        self._notify_stage_result(result)
+
     async def action_stage(self) -> None:
         """Stage the selected agent: join its pane into the régie's window.
 
@@ -1418,9 +1413,7 @@ class RegieApp(App):
             footer_active=self._usage_keyboard_metric is not None,
             selected_participant_fn=selected_participant,
         )
-        if result.staged_pane != self.staged_pane:
-            self.staged_pane = result.staged_pane
-        self._notify_stage_result(result)
+        self._apply_stage_result(result)
 
     async def action_kill(self) -> None:
         """Kill the selected participant."""
@@ -1564,9 +1557,7 @@ class RegieApp(App):
             footer_active=self._usage_keyboard_metric is not None,
             selected_participant_fn=selected_participant,
         )
-        if result.staged_pane != self.staged_pane:
-            self.staged_pane = result.staged_pane
-        self._notify_stage_result(result.stage_result)
+        self._apply_stage_result(result.stage_result)
         if result.should_select and result.pane:
             try:
                 await panes.select_pane(result.pane)

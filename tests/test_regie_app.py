@@ -1736,10 +1736,16 @@ async def test_a_pane_that_will_not_join_is_reported_not_recorded(daemon, tmux, 
 async def test_the_staged_line_is_marked_in_the_tree(daemon, tmux):
     app, _ = make_app()
     async with app.run_test() as pilot:
-        await pilot.press("enter")
         panel = app.query_one("#tree-panel", app_mod.TreePanel)
-        assert panel.children[0].has_class("tree-staged")
+        leaf = panel.children[0]
+        original_lines = leaf.render().split("\n", allow_blank=True)
+        await pilot.press("enter")
+        assert leaf.has_class("tree-staged")
         assert not panel.children[1].has_class("tree-staged")
+        marked_lines = leaf.render().split("\n", allow_blank=True)
+        assert [line.plain[2:] for line in marked_lines] == [line.plain for line in original_lines]
+        assert all(line.plain.startswith("▌ ") for line in marked_lines)
+        assert all(line.spans[0].style == "$primary" for line in marked_lines)
 
 
 # ---- trajectory surface -------------------------------------------------
@@ -1748,6 +1754,8 @@ async def test_the_staged_line_is_marked_in_the_tree(daemon, tmux):
 async def test_first_h_stages_trajectory_and_second_h_focuses_it(daemon, tmux):
     app, _ = make_app()
     async with app.run_test(size=(160, 40)) as pilot:
+        leaf = app.query_one("#tree-panel", app_mod.TreePanel).children[0]
+        original_lines = leaf.render().split("\n", allow_blank=True)
         await pilot.press("h")
         view = app.query_one("#trajectory-view", app_mod.TrajectoryView)
         ledger = view.query_one("#trajectory-ledger")
@@ -1758,6 +1766,12 @@ async def test_first_h_stages_trajectory_and_second_h_focuses_it(daemon, tmux):
         assert app.staged_pane is None
         assert not ledger.has_focus
         assert len(daemon["clients"]) == 3
+        assert leaf.has_class("tree-trajectory-staged")
+        assert not leaf.has_class("tree-staged")
+        marked_lines = leaf.render().split("\n", allow_blank=True)
+        assert [line.plain[2:] for line in marked_lines] == [line.plain for line in original_lines]
+        assert all(line.plain.startswith("▌ ") for line in marked_lines)
+        assert all(line.spans[0].style == "$accent" for line in marked_lines)
         assert view.region.x == right_surface.content_region.x
         assert view.region.right == right_surface.content_region.right
         assert search.region.x == view.content_region.x
@@ -1847,18 +1861,35 @@ async def test_h_recovers_when_the_staged_pane_has_disappeared(daemon, tmux, mon
     assert not notes
 
 
-async def test_l_hides_but_does_not_unpin_trajectory(daemon, tmux):
+@pytest.mark.parametrize("stage_key", ["enter", "l"])
+async def test_tmux_staging_replaces_trajectory_with_dashboard(daemon, tmux, stage_key):
     app, _ = make_app()
     async with app.run_test() as pilot:
         await pilot.press("h")
-        await pilot.press("l")
+        view = app.query_one("#trajectory-view")
+        dashboard = app.query_one("#welcome-dashboard", WelcomeDashboard)
+        await pilot.press(stage_key)
+        leaf = app.query_one("#tree-panel", app_mod.TreePanel).children[0]
         assert app.staged_pane == "%10"
-        assert app.trajectory_participant == PARENT["id"]
+        assert app.right_surface is app_mod.RightSurface.DASHBOARD
+        assert app.trajectory_participant is None
+        assert leaf.has_class("tree-staged")
+        assert not leaf.has_class("tree-trajectory-staged")
+        assert all(
+            line.spans[0].style == "$primary"
+            for line in leaf.render().split("\n", allow_blank=True)
+        )
         assert app.query_one("#right-surface").styles.display == "none"
+        assert dashboard.styles.display == "none"
 
         await pilot.press("enter")
         assert app.staged_pane is None
-        assert app.query_one("#trajectory-view").styles.display != "none"
+        assert app.right_surface is app_mod.RightSurface.DASHBOARD
+        assert app.trajectory_participant is None
+        assert not leaf.has_class("tree-trajectory-staged")
+        assert not leaf.has_class("tree-staged")
+        assert dashboard.styles.display != "none"
+        assert view.styles.display == "none"
 
 
 async def test_tree_movement_does_not_retarget_pinned_trajectory(daemon, tmux):
@@ -1868,8 +1899,8 @@ async def test_tree_movement_does_not_retarget_pinned_trajectory(daemon, tmux):
         panel = app.query_one("#tree-panel", app_mod.TreePanel)
         assert app.cursor == 1
         assert app.trajectory_participant == PARENT["id"]
-        assert panel.children[0].has_class("tree-staged")
-        assert not panel.children[1].has_class("tree-staged")
+        assert panel.children[0].has_class("tree-trajectory-staged")
+        assert not panel.children[1].has_class("tree-trajectory-staged")
 
 
 @pytest.mark.parametrize("tier", ["external", "spawned"])

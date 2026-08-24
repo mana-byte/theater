@@ -50,6 +50,11 @@ class SurfaceController:
             and self.trajectory_participant is not None
         )
 
+    def show_dashboard(self) -> None:
+        """Forget the selected trajectory and restore the dashboard surface."""
+        self.surface = RightSurface.DASHBOARD
+        self.trajectory_participant = None
+
     async def stage_trajectory(
         self,
         *,

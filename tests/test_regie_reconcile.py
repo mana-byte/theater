@@ -233,6 +233,8 @@ async def test_agent_spawned_leaf_retires_before_unmount(daemon, tmux, monkeypat
         assert leaf in panel.children
         assert not leaf.has_class("tree-cursor")
         assert not leaf.has_class("tree-staged")
+        assert not leaf.has_class("tree-trajectory-staged")
+        assert leaf._stage_marker is None
         assert app._leaf_retirement_timer is not None
 
         width = leaf.required_reveal_width

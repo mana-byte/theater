@@ -13,7 +13,7 @@ costs no frames.
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from textual import events
 from textual.content import Content
@@ -25,6 +25,8 @@ from theater.regie.animations.routes import LeafOverlay
 from theater.regie.animations.spinner import advance_spinner_frame
 from theater.regie.render.glyphs import node_label
 from theater.regie.render.layout import Key
+
+type StageMarker = Literal["tmux", "trajectory"]
 
 
 class AgentLeaf(Static):
@@ -45,28 +47,16 @@ class AgentLeaf(Static):
         padding: 0 2;
         margin: 0 0;
     }
-    /* Row states are tinted with $accent and $primary, never $boost.
-       $boost resolves to #00000000 on 20 of Textual's 21 built-in themes —
-       only textual-dark, the default, gives it a value. A $boost tint is
-       therefore invisible on the ansi themes, a black smear on the light
-       ones, and convincing only on the theme it was authored against.
-       Weakest to strongest: hover, cursor, staged. Order matters as much
-       as specificity here: these selectors tie, so the later rule wins. */
+    /* Cursor and hover use fills; staged leaves draw inside their left gutter. */
     AgentLeaf:hover {
         background: $accent 10%;
     }
-    AgentLeaf.tree-staged {
-        background: $primary 20%;
-    }
-    AgentLeaf.tree-staged:hover {
-        background: $primary 20%;
+    AgentLeaf.tree-staged,
+    AgentLeaf.tree-trajectory-staged {
+        padding: 0 2 0 0;
     }
     AgentLeaf.tree-cursor {
         background: $accent 20%;
-        text-style: bold;
-    }
-    AgentLeaf.tree-cursor.tree-staged {
-        background: $accent 30%;
         text-style: bold;
     }
     """
@@ -93,6 +83,7 @@ class AgentLeaf(Static):
         self._reveal = reveal
         self._frame: int = 0
         self._timer: Timer | None = None
+        self._stage_marker: StageMarker | None = None
         #: Heavy line glyphs a tree-route animation is drawing on this leaf.
         self._overlay: LeafOverlay | None = None
         # Render the initial content so the leaf is not blank before its first update_node call.
@@ -103,7 +94,7 @@ class AgentLeaf(Static):
         return self._key
 
     def _render_label(self) -> Content:
-        return node_label(
+        content = node_label(
             self._node,
             self._prefix,
             cont_prefix=self._cont_prefix,
@@ -113,6 +104,11 @@ class AgentLeaf(Static):
             overlay=self._overlay,
             reveal=self._reveal,
         )
+        if self._stage_marker is None:
+            return content
+        style = "$primary" if self._stage_marker == "tmux" else "$accent"
+        lines = content.split("\n", allow_blank=True)
+        return Content("\n").join(Content.assemble(("▌", style), " ", line) for line in lines)
 
     @property
     def required_reveal_width(self) -> int:
@@ -151,11 +147,20 @@ class AgentLeaf(Static):
         self._overlay = overlay or None
         self.update(self._render_label(), layout=False)
 
+    def set_stage_marker(self, marker: StageMarker | None) -> None:
+        """Set the staged-surface marker without shifting tree content."""
+        if marker == self._stage_marker:
+            return
+        self._stage_marker = marker
+        self.update(self._render_label(), layout=False)
+
     def retire(self) -> None:
         """Stop activity while this leaf remains mounted only to shrink away."""
         self.set_overlay(None)
+        self.set_stage_marker(None)
         self.remove_class("tree-cursor")
         self.remove_class("tree-staged")
+        self.remove_class("tree-trajectory-staged")
         self._stop_timer()
 
     def _tick(self) -> None:
