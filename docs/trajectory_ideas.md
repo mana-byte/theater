@@ -220,8 +220,8 @@ The shared trajectory layer now implements the full delivery order:
 Fidelity remains source-dependent. Every built-in plugin keeps native keys and parsing rules in
 its own monolithic module and emits only normalized contract values. No current built-in claims
 retry support, so retry UI and aggregation remain dormant until a plugin supplies an explicit
-native retry link. Missing provider, first-token, failure, cost, or causal data remains unknown;
-Theater does not infer it.
+native retry link. Missing provider, first-token, failure, or causal data remains unknown. Theater
+estimates missing cost from known model pricing and token usage but does not infer the other fields.
 
 ## Explicit non-goals for now
 

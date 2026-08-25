@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import replace
 from hashlib import sha256
 
 from theater.constants.trajectory import TRAJECTORY_IDENTIFIER_MAX_BYTES
 from theater.harness.contracts.events import Event, EventKind
 from theater.harness.contracts.trajectory import TrajectoryFact
+from theater.pricing import estimate_cost_usd
 from theater.trajectory.content import ContentFormat, DetailField
 from theater.trajectory.enums import (
+    CostProvenance,
     TimingProvenance,
     TrajectoryKind,
     TrajectoryLane,
@@ -123,7 +126,7 @@ def fact_to_record(
         parent_call_id=fact.parent_call_id,
         links=tuple(links),
         timing=fact.timing,
-        usage=fact.usage,
+        usage=_priced_usage(fact.usage),
         failure=fact.failure,
         retry_of_record_id=(
             _namespaced_native_id(fact.retry_of_native_id, source_epoch)
@@ -241,6 +244,33 @@ def _usage(event: Event) -> TrajectoryUsage | None:
         cost_usd=event.usage.cost_usd,
         cost_provenance=event.usage.cost_provenance,
     )
+
+
+def _priced_usage(usage: TrajectoryUsage | None) -> TrajectoryUsage | None:
+    if usage is None or usage.cost_usd is not None:
+        return usage
+    if not any(
+        (
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_read_tokens,
+            usage.cache_write_tokens,
+            usage.reasoning_tokens,
+        )
+    ):
+        return usage
+    cost = estimate_cost_usd(
+        usage.model,
+        provider=usage.provider,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cache_read_tokens=usage.cache_read_tokens,
+        cache_write_tokens=usage.cache_write_tokens,
+        reasoning_tokens=usage.reasoning_tokens,
+    )
+    if cost is None:
+        return usage
+    return replace(usage, cost_usd=cost, cost_provenance=CostProvenance.ESTIMATED)
 
 
 def _namespaced_native_id(native_id: str, source_epoch: str) -> str:

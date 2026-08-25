@@ -192,6 +192,56 @@ def test_baseline_usage_preserves_cost_provenance() -> None:
     assert fact.usage.cost_provenance is CostProvenance.REPORTED
 
 
+def test_canonical_projection_estimates_missing_usage_cost() -> None:
+    fact = TrajectoryFact(
+        kind=TrajectoryKind.ASSISTANT,
+        usage=TrajectoryUsage(
+            model="claude-sonnet-5",
+            input_tokens=1_000_000,
+            output_tokens=1_000_000,
+            cache_read_tokens=1_000_000,
+            cache_write_tokens=1_000_000,
+        ),
+    )
+
+    record = fact_to_record(fact, participant_id="p", source_epoch="epoch")
+
+    assert record.usage is not None
+    assert record.usage.cost_usd == pytest.approx(14.7)
+    assert record.usage.cost_provenance is CostProvenance.ESTIMATED
+
+
+def test_canonical_projection_keeps_reported_usage_cost() -> None:
+    fact = TrajectoryFact(
+        kind=TrajectoryKind.ASSISTANT,
+        usage=TrajectoryUsage(
+            model="claude-sonnet-5",
+            input_tokens=1_000_000,
+            cost_usd=0.25,
+            cost_provenance=CostProvenance.REPORTED,
+        ),
+    )
+
+    record = fact_to_record(fact, participant_id="p", source_epoch="epoch")
+
+    assert record.usage is not None
+    assert record.usage.cost_usd == 0.25
+    assert record.usage.cost_provenance is CostProvenance.REPORTED
+
+
+def test_canonical_projection_does_not_price_model_metadata_as_zero_usage() -> None:
+    fact = TrajectoryFact(
+        kind=TrajectoryKind.ASSISTANT,
+        usage=TrajectoryUsage(model="claude-sonnet-5"),
+    )
+
+    record = fact_to_record(fact, participant_id="p", source_epoch="epoch")
+
+    assert record.usage is not None
+    assert record.usage.cost_usd is None
+    assert record.usage.cost_provenance is CostProvenance.UNKNOWN
+
+
 def test_utf8_preview_keeps_safe_head_tail_and_exact_omission() -> None:
     original = "é" * 20_000
     preview = bounded_preview(original)
