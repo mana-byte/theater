@@ -1808,6 +1808,42 @@ async def test_first_h_stages_trajectory_and_second_h_focuses_it(daemon, tmux):
         assert ledger.has_focus
 
 
+async def test_reentering_trajectory_resumes_at_latest_span(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test(size=(160, 40)):
+        await app._show_trajectory(PARENT["id"], managed=True)
+        view = app.query_one("#trajectory-view", app_mod.TrajectoryView)
+        await view.wait_until_loaded()
+        first = trajectory_record(PARENT["id"], "bus:1")
+        latest = trajectory_record(PARENT["id"], "bus:2")
+        view.state.upsert((first, latest))
+        view.state.select(first.record_id)
+        view.state.pause_follow()
+        view.state.hovered_id = first.record_id
+        view.state.expanded_id = first.record_id
+
+        await app._show_trajectory(PARENT["id"], managed=True)
+
+        assert view.state.follow_tail
+        assert view.state.selected_id == latest.record_id
+        assert view.state.hovered_id is None
+        assert view.state.expanded_id is None
+
+
+async def test_rapid_trajectory_switch_ignores_removed_view_callbacks(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test(size=(160, 40)) as pilot:
+        await app._show_trajectory(PARENT["id"], managed=True)
+        removed = app.query_one("#trajectory-view", app_mod.TrajectoryView)
+        await app._show_trajectory(CHILD["id"], managed=True)
+        removed._finish_mount()
+        await pilot.pause()
+
+        views = list(app.query("#trajectory-view"))
+        assert len(views) == 1
+        assert views[0].participant_id == CHILD["id"]
+
+
 async def test_capital_h_stages_and_focuses_trajectory_immediately(daemon, tmux):
     app, _ = make_app()
     async with app.run_test() as pilot:

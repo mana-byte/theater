@@ -77,7 +77,10 @@ def status_label(status: TrajectoryStatus) -> str:
 def format_duration(timing: Timing | None) -> str:
     if timing is None or timing.duration_ms is None:
         return "—"
-    milliseconds = timing.duration_ms
+    return _format_milliseconds(timing.duration_ms)
+
+
+def _format_milliseconds(milliseconds: float) -> str:
     if milliseconds < 1_000:
         return f"{milliseconds:g}ms"
     seconds = milliseconds / 1_000
@@ -381,11 +384,43 @@ def detail_record_links_by_line(
 
 
 def tooltip_text(record: TrajectoryRecord) -> str:
-    """Return a small bounded hover detail."""
-    summary = " ".join(plain_text(record.summary).splitlines())
-    if cell_len(summary) > TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS:
-        summary = set_cell_size(summary, TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS - 1).rstrip() + "…"
-    return f"{record.kind.value} · {record.source}\n{summary}\n{format_duration(record.timing)}"
+    """Return bounded, type-aware hover detail."""
+    usage = record.usage
+    identity = record.source
+    if usage is not None and usage.model and usage.model != identity:
+        identity = f"{identity} · {usage.model}"
+    elif record.kind is TrajectoryKind.TOOL_CALL and record.summary:
+        identity = f"{identity} · {' '.join(plain_text(record.summary).splitlines())}"
+    kind = record.kind.value.replace("_", " ").upper()
+    heading = f"{kind_glyph(record.kind)} {kind} · {identity} · {status_label(record.status)}"
+    summary = " ".join(plain_text(record.summary).splitlines()) or "No preview available"
+    metrics: list[str] = []
+    timing = record.timing
+    duration = format_duration(timing)
+    if duration != "—":
+        metrics.append(f"total {duration}")
+    if timing is not None and timing.ttft_ms is not None:
+        metrics.append(f"TTFT {_format_milliseconds(timing.ttft_ms)}")
+    if timing is not None and timing.generation_duration_ms is not None:
+        metrics.append(f"generation {_format_milliseconds(timing.generation_duration_ms)}")
+    if usage is not None:
+        metrics.extend(
+            (
+                f"in {compact_number(usage.input_tokens)}",
+                f"out {compact_number(usage.output_tokens)}",
+            )
+        )
+        if usage.cost_usd is not None:
+            metrics.append(f"cost ${compact_cost(usage.cost_usd)}")
+    detail = " · ".join(metrics) or "timing unavailable"
+    return "\n".join(_bounded_tooltip_line(line) for line in (heading, summary, detail))
+
+
+def _bounded_tooltip_line(value: str) -> str:
+    value = sanitize_text(value).replace("\r", " ").replace("\n", " ")
+    if cell_len(value) <= TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS:
+        return value
+    return set_cell_size(value, TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS - 1).rstrip() + "…"
 
 
 def count_label(value: str, count: int) -> str:

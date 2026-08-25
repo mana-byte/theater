@@ -9,7 +9,7 @@ from typing import ClassVar
 from rich.segment import Segment
 from rich.style import Style
 from textual import events
-from textual.geometry import Size
+from textual.geometry import Offset, Size
 from textual.message import Message
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
@@ -17,14 +17,17 @@ from textual.strip import Strip
 from theater.regie.trajectory.constants import (
     TIMELINE_CONTENT_HEIGHT,
     TIMELINE_HEIGHT,
+    TIMELINE_HOVER_LEFT_GLYPH,
+    TIMELINE_HOVER_RIGHT_GLYPH,
+    TIMELINE_HOVER_SINGLE_GLYPH,
     TIMELINE_LABEL_RIGHT_PADDING,
     TIMELINE_LABEL_WIDTH,
     TIMELINE_LANE_HEIGHT,
+    TIMELINE_RELATED_GLYPH,
     TIMELINE_SPAN_MIN_WIDTH,
     TIMELINE_TURN_BOUNDARY_GLYPH,
 )
 from theater.regie.trajectory.enums import OrderMode
-from theater.regie.trajectory.render import tooltip_text
 from theater.regie.trajectory.timeline_layout import (
     TimelineLayout,
     TimelineSpan,
@@ -69,6 +72,7 @@ class Timeline(ScrollView):
         "trajectory-timeline--model",
         "trajectory-timeline--muted",
         "trajectory-timeline--rail",
+        "trajectory-timeline--related",
         "trajectory-timeline--running",
         "trajectory-timeline--selected",
         "trajectory-timeline--theater",
@@ -84,7 +88,7 @@ class Timeline(ScrollView):
         min-height: {TIMELINE_HEIGHT};
         overflow-x: auto;
         overflow-y: hidden;
-        scrollbar-size: 1 1;
+        scrollbar-size: 0 0;
         background: $background;
         border-bottom: solid $foreground 12%;
     }}
@@ -102,7 +106,8 @@ class Timeline(ScrollView):
     Timeline > .trajectory-timeline--error {{ background: $error 38%; }}
     Timeline > .trajectory-timeline--running {{ background: $warning 32%; }}
     Timeline > .trajectory-timeline--muted {{ opacity: 32%; }}
-    Timeline > .trajectory-timeline--hovered {{ background: $accent 30%; }}
+    Timeline > .trajectory-timeline--hovered {{ color: $text; text-style: bold; }}
+    Timeline > .trajectory-timeline--related {{ color: $text-muted; text-style: bold; }}
     Timeline > .trajectory-timeline--selected {{
         background: $accent 40%;
     }}
@@ -127,6 +132,7 @@ class Timeline(ScrollView):
         self._span_indices: dict[str, int] = {}
         self._span_index = 0
         self._hovered_id: str | None = None
+        self._related_ids: frozenset[str] = frozenset()
         self._selected_id = selected_id
         self._matched_ids: frozenset[str] = frozenset()
         self._duration_mode = duration_mode
@@ -156,6 +162,10 @@ class Timeline(ScrollView):
     @property
     def hovered_id(self) -> str | None:
         return self._hovered_id
+
+    @property
+    def related_ids(self) -> frozenset[str]:
+        return self._related_ids
 
     @property
     def selected_id(self) -> str | None:
@@ -195,8 +205,6 @@ class Timeline(ScrollView):
             style += self._component("running")
         if record.record_id not in self._matched_ids:
             style += self._component("muted")
-        if record.record_id == self._hovered_id:
-            style += self._component("hovered")
         if record.record_id == self._selected_id:
             style += self._component("selected")
         return style
@@ -233,6 +241,37 @@ class Timeline(ScrollView):
         segments.append(Segment("".join(characters[start:width]), active))
         return Strip(segments, width)
 
+    def _paint_marker(
+        self,
+        characters: list[str],
+        styles: list[Style],
+        span: TimelineSpan,
+        start: int,
+        width: int,
+        *,
+        related: bool,
+    ) -> None:
+        visible_start = max(span.visual_start, start)
+        visible_end = min(span.visual_end, start + width)
+        if visible_start >= visible_end:
+            return
+        left = visible_start - start
+        right = visible_end - start - 1
+        component = self._component("related" if related else "hovered")
+        marker_style = Style(color=component.color, bold=True)
+        if related:
+            position = (left + right) // 2
+            characters[position] = TIMELINE_RELATED_GLYPH
+            styles[position] += marker_style
+        elif left == right:
+            characters[left] = TIMELINE_HOVER_SINGLE_GLYPH
+            styles[left] += marker_style
+        else:
+            characters[left] = TIMELINE_HOVER_LEFT_GLYPH
+            characters[right] = TIMELINE_HOVER_RIGHT_GLYPH
+            styles[left] += marker_style
+            styles[right] += marker_style
+
     def _lane_strip(
         self,
         lane: TrajectoryLane,
@@ -259,6 +298,13 @@ class Timeline(ScrollView):
                     min(width, span.visual_end - start),
                 ):
                     styles[x] = style
+            for record_id in self._related_ids:
+                related_span = self._span_by_id.get(record_id)
+                if related_span is not None and related_span.lane is lane:
+                    self._paint_marker(characters, styles, related_span, start, width, related=True)
+            hovered_span = self._span_by_id.get(self._hovered_id or "")
+            if hovered_span is not None and hovered_span.lane is lane:
+                self._paint_marker(characters, styles, hovered_span, start, width, related=False)
         first_boundary = bisect_left(self._turn_boundaries, start)
         last_boundary = bisect_left(self._turn_boundaries, start + width)
         boundary_style = self._component("turn")
@@ -334,6 +380,7 @@ class Timeline(ScrollView):
         *,
         matched_ids: frozenset[str] | set[str] | None = None,
         hovered_id: str | None = None,
+        related_ids: frozenset[str] | set[str] | None = None,
         selected_id: str | None = None,
         duration_mode: bool = False,
         scroll_offset: int | None = None,
@@ -349,6 +396,11 @@ class Timeline(ScrollView):
         )
         self._selected_id = selected_id
         self._hovered_id = hovered_id if hovered_id in self._records_by_id else None
+        self._related_ids = frozenset(
+            record_id
+            for record_id in related_ids or ()
+            if record_id in self._records_by_id and record_id != self._hovered_id
+        )
         self._duration_mode = duration_mode
         mode = OrderMode.DURATION if duration_mode else OrderMode.ORDER
         self._layout = build_timeline_layout(
@@ -405,9 +457,7 @@ class Timeline(ScrollView):
         chart_x = x - TIMELINE_LABEL_WIDTH + self._scroll_offset
         if chart_x < 0:
             return None
-        lane, row = lane_row
-        if row != TIMELINE_LANE_HEIGHT // 2:
-            return None
+        lane, _row = lane_row
         spans = self._lane_spans[lane]
         index = bisect_right(self._lane_starts[lane], chart_x) - 1
         matches: list[TimelineSpan] = []
@@ -415,7 +465,7 @@ class Timeline(ScrollView):
             if self._lane_max_ends[lane][index] <= chart_x:
                 break
             span = spans[index]
-            if span.visual_start <= chart_x < span.visual_end:
+            if span.x <= chart_x < span.end:
                 matches.append(span)
             index -= 1
         if not matches:
@@ -423,32 +473,63 @@ class Timeline(ScrollView):
         span = min(matches, key=lambda item: (item.width, -item.x))
         return self._records_by_id.get(span.record_id)
 
+    def hover_anchor(self, record_id: str | None) -> Offset | None:
+        span = self._span_by_id.get(record_id or "")
+        if span is None:
+            return None
+        viewport_start = self._scroll_offset
+        viewport_end = viewport_start + self._available_cells()
+        visible_start = max(span.visual_start, viewport_start)
+        visible_end = min(span.visual_end, viewport_end)
+        if visible_start >= visible_end:
+            return None
+        label_width = min(TIMELINE_LABEL_WIDTH, max(1, self.size.width - 1))
+        center = (visible_start + visible_end - 1) // 2
+        return Offset(
+            self.content_region.x + label_width + center - viewport_start,
+            self.content_region.y,
+        )
+
     def _set_hover(
         self,
         record: TrajectoryRecord | None,
         *,
         notify: bool = True,
-        update_tooltip: bool = True,
+        related_ids: frozenset[str] | set[str] | None = None,
     ) -> None:
         record_id = record.record_id if record else None
-        if record_id == self._hovered_id:
-            if update_tooltip:
-                self.tooltip = tooltip_text(record) if record is not None else None
+        record_changed = record_id != self._hovered_id
+        next_related = (
+            frozenset(
+                candidate
+                for candidate in related_ids
+                if candidate in self._records_by_id and candidate != record_id
+            )
+            if related_ids is not None
+            else self._related_ids
+            if not record_changed
+            else frozenset()
+        )
+        if not record_changed and next_related == self._related_ids:
             return
         self._hovered_id = record_id
+        self._related_ids = next_related
         if record_id is not None:
             self._span_index = self._span_indices[record_id]
-        if update_tooltip:
-            self.tooltip = tooltip_text(record) if record is not None else None
         self.refresh()
-        if notify:
+        if notify and record_changed:
             self.post_message(TimelineSpanHovered(record_id))
 
-    def set_hovered(self, record_id: str | None) -> None:
+    def set_hovered(
+        self,
+        record_id: str | None,
+        *,
+        related_ids: frozenset[str] | set[str] | None = None,
+    ) -> None:
         self._set_hover(
             self._records_by_id.get(record_id or ""),
             notify=False,
-            update_tooltip=False,
+            related_ids=related_ids,
         )
 
     def set_selected(self, record_id: str | None) -> None:
@@ -485,6 +566,7 @@ class Timeline(ScrollView):
                 self._records,
                 matched_ids=self._matched_ids,
                 hovered_id=self._hovered_id,
+                related_ids=self._related_ids,
                 selected_id=self._selected_id,
                 duration_mode=self._duration_mode,
             )

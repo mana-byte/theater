@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable
 
 from textual import events
 from textual.app import ComposeResult
+from textual.await_remove import AwaitRemove
 from textual.containers import Vertical
 from textual.message import Message
 from textual.widget import Widget
@@ -41,6 +42,7 @@ from theater.regie.trajectory.footer import (
     FooterPageRequested,
     TrajectoryFooter,
 )
+from theater.regie.trajectory.hover_card import TimelineHoverCard
 from theater.regie.trajectory.ledger import (
     Ledger,
     LedgerDetailTabChanged,
@@ -231,6 +233,7 @@ class TrajectoryView(Vertical):
         self._visible_indices: dict[str, int] = {}
         self._search_refresh_pending = False
         self._load_worker: Worker[TrajectoryPage | None] | None = None
+        self._retiring = False
 
     def compose(self) -> ComposeResult:
         yield Input(
@@ -242,6 +245,7 @@ class TrajectoryView(Vertical):
         yield FilterPanel(id="trajectory-filters", classes="-hidden")
         yield Ledger(id="trajectory-ledger")
         yield TrajectoryFooter(id="trajectory-footer")
+        yield TimelineHoverCard(id="trajectory-hover-card")
 
     def on_mount(self) -> None:
         if self.controller is not None:
@@ -254,13 +258,20 @@ class TrajectoryView(Vertical):
         self.call_after_refresh(self._finish_mount)
 
     def _finish_mount(self) -> None:
+        if self._retiring or not self.is_attached:
+            return
         self._refresh()
         if self.state.search_open:
             self._focus_search()
         elif self._focus_on_mount:
             self.focus_region(self.state.focus_region)
 
+    def remove(self) -> AwaitRemove:
+        self._retiring = True
+        return super().remove()
+
     def on_unmount(self) -> None:
+        self._retiring = True
         if self._unsubscribe is not None:
             self._unsubscribe()
             self._unsubscribe = None
@@ -271,7 +282,7 @@ class TrajectoryView(Vertical):
         if state.participant_id != self.participant_id:
             return
         self.state = state
-        if self.is_mounted:
+        if not self._retiring and self.is_attached:
             self._refresh()
 
     def _make_search_key(self, records: tuple[TrajectoryRecord, ...]) -> tuple[object, ...]:
@@ -338,10 +349,10 @@ class TrajectoryView(Vertical):
     def _sync_page(self) -> None:
         selected_anchor = self._logical_row_id(self.state.selected_id)
         selected_index = self._all_visible_indices.get(selected_anchor or "")
-        if selected_index is not None:
-            requested_page = selected_index // self.state_store.page_size
-        elif self.state.follow_tail and self._all_visible_ids:
+        if self.state.follow_tail and self._all_visible_ids:
             requested_page = (len(self._all_visible_ids) - 1) // self.state_store.page_size
+        elif selected_index is not None:
+            requested_page = selected_index // self.state_store.page_size
         else:
             requested_page = self.state.ledger_page
         self._ledger_page = paginate_search_result(
@@ -361,7 +372,7 @@ class TrajectoryView(Vertical):
             if record_id in self._ordered_indices
         )
         selected_anchor = self._logical_row_id(self.state.selected_id)
-        if self.state.follow_tail and selected_anchor not in self._visible_id_set:
+        if self.state.follow_tail:
             self.state.select(self._visible_ids[-1] if self._visible_ids else None)
         elif selected_anchor not in self._visible_id_set:
             self.state.select(self._visible_ids[0] if self._visible_ids else None)
@@ -381,7 +392,7 @@ class TrajectoryView(Vertical):
         else:
             records = self._ordered_records
         self._sync_page()
-        if not self.is_mounted:
+        if self._retiring or not self.is_attached:
             return
         timeline = self.query_one("#trajectory-timeline", Timeline)
         overview_strip = self.query_one("#trajectory-overview", TrajectoryOverviewStrip)
@@ -407,12 +418,18 @@ class TrajectoryView(Vertical):
             records,
             matched_ids=self._search_result.matched_ids,
             hovered_id=self.state.hovered_id,
+            related_ids=self.state.related_record_ids(self.state.hovered_id),
             selected_id=self.state.selected_id,
             duration_mode=self.state.order_mode is OrderMode.DURATION,
             scroll_offset=timeline_offset,
         )
         if self.state.follow_tail:
             timeline.scroll_to_tail()
+        hover_card = self.query_one("#trajectory-hover-card", TimelineHoverCard)
+        if hover_card.record_id is not None and hover_card.record_id == self.state.hovered_id:
+            self._show_timeline_hover(hover_card.record_id)
+        else:
+            hover_card.hide()
         self.state.timeline_scroll = timeline.horizontal_offset
         ledger.update_rows(
             records,
@@ -500,12 +517,21 @@ class TrajectoryView(Vertical):
     def focus_region(self, region: FocusRegion) -> FocusRegion:
         self.state.focus_region = region
         if self.is_mounted:
+            if region is not FocusRegion.TIMELINE:
+                self.query_one("#trajectory-hover-card", TimelineHoverCard).hide()
             widget = {
                 FocusRegion.TIMELINE: self.query_one("#trajectory-timeline", Timeline),
                 FocusRegion.LEDGER: self.query_one("#trajectory-ledger", Ledger),
             }[region]
             widget.focus()
         return region
+
+    def enter_live_tail(self) -> None:
+        """Enter this trajectory at its live tail without stale transient details."""
+        self.state.resume_follow()
+        self.state.hovered_id = None
+        self.state.expanded_id = None
+        self._refresh()
 
     def _sync_filter_panel(self, *, update_options: bool = False) -> None:
         if not self.is_mounted:
@@ -572,6 +598,7 @@ class TrajectoryView(Vertical):
             self.state.status_filters.clear()
             self.state.source_filters.clear()
         self.state.select(anchor)
+        self._update_follow_for_selection(anchor)
         self.state.expanded_id = anchor
         operation_id = self.state.tool_index.by_record_id.get(anchor)
         if operation_id is not None:
@@ -583,7 +610,6 @@ class TrajectoryView(Vertical):
                 self.state.records[anchor], self.state.detail_tab
             )
         self._refresh()
-        self._update_follow_for_selection(anchor)
         self._sync_selection()
         if self.is_mounted:
             self.query_one("#trajectory-ledger", Ledger).focus()
@@ -602,7 +628,8 @@ class TrajectoryView(Vertical):
 
     def _update_follow_for_selection(self, record_id: str | None) -> None:
         tail_id = self._all_visible_ids[-1] if self._all_visible_ids else None
-        if self._logical_row_id(record_id) == tail_id:
+        row_id = self._logical_row_id(record_id)
+        if row_id is not None and row_id == tail_id:
             self.state.follow_tail = True
             self.state.new_count = 0
         else:
@@ -986,15 +1013,18 @@ class TrajectoryView(Vertical):
 
     def on_descendant_focus(self, event: events.DescendantFocus) -> None:
         widget = event.widget
+        timeline = self.query_one("#trajectory-timeline", Timeline)
+        ancestors = set(widget.ancestors)
+        if widget is not timeline and timeline not in ancestors:
+            self.query_one("#trajectory-hover-card", TimelineHoverCard).hide()
         search = self.query_one("#trajectory-search", Input)
         if widget is search:
             self.state.search_open = True
             return
         regions = (
-            (FocusRegion.TIMELINE, self.query_one("#trajectory-timeline", Timeline)),
+            (FocusRegion.TIMELINE, timeline),
             (FocusRegion.LEDGER, self.query_one("#trajectory-ledger", Ledger)),
         )
-        ancestors = set(widget.ancestors)
         for region, container in regions:
             if widget is container or container in ancestors:
                 self.state.focus_region = region
@@ -1003,8 +1033,22 @@ class TrajectoryView(Vertical):
     def on_timeline_span_hovered(self, message: TimelineSpanHovered) -> None:
         self.state.hovered_id = message.record_id
         if self.is_mounted:
-            self.query_one("#trajectory-timeline", Timeline).set_hovered(message.record_id)
+            self.query_one("#trajectory-timeline", Timeline).set_hovered(
+                message.record_id,
+                related_ids=self.state.related_record_ids(message.record_id),
+            )
             self.query_one("#trajectory-ledger", Ledger).set_hovered(message.record_id)
+            self._show_timeline_hover(message.record_id)
+
+    def _show_timeline_hover(self, record_id: str | None) -> None:
+        card = self.query_one("#trajectory-hover-card", TimelineHoverCard)
+        timeline = self.query_one("#trajectory-timeline", Timeline)
+        record = self.state.records.get(record_id or "")
+        anchor = timeline.hover_anchor(record_id)
+        if record is None or anchor is None:
+            card.hide()
+            return
+        card.show_record(record, anchor)
 
     def on_timeline_span_clicked(self, message: TimelineSpanClicked) -> None:
         self._update_follow_for_selection(message.record_id)
@@ -1018,6 +1062,9 @@ class TrajectoryView(Vertical):
     def on_timeline_scrolled(self, message: TimelineScrolled) -> None:
         self.state.timeline_scroll = message.offset
         timeline = self.query_one("#trajectory-timeline", Timeline)
+        card = self.query_one("#trajectory-hover-card", TimelineHoverCard)
+        if card.record_id is not None:
+            self._show_timeline_hover(card.record_id)
         if message.offset < timeline.tail_offset:
             self.state.pause_follow()
             self._update_status()
@@ -1025,7 +1072,11 @@ class TrajectoryView(Vertical):
     def on_ledger_record_hovered(self, message: LedgerRecordHovered) -> None:
         self.state.hovered_id = message.record_id
         if self.is_mounted:
-            self.query_one("#trajectory-timeline", Timeline).set_hovered(message.record_id)
+            self.query_one("#trajectory-hover-card", TimelineHoverCard).hide()
+            self.query_one("#trajectory-timeline", Timeline).set_hovered(
+                message.record_id,
+                related_ids=self.state.related_record_ids(message.record_id),
+            )
             self.query_one("#trajectory-ledger", Ledger).set_hovered(message.record_id)
 
     def on_ledger_record_clicked(self, message: LedgerRecordClicked) -> None:

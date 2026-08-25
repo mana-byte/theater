@@ -15,9 +15,12 @@ from theater.regie.trajectory.constants import (
     LEDGER_CELL_PADDING,
     LEDGER_OVERSCAN_ROWS,
     LEDGER_ROW_HEIGHT,
+    TIMELINE_HOVER_LEFT_GLYPH,
+    TIMELINE_HOVER_RIGHT_GLYPH,
     TIMELINE_LABEL_RIGHT_PADDING,
     TIMELINE_LABEL_WIDTH,
     TIMELINE_LANE_HEIGHT,
+    TIMELINE_RELATED_GLYPH,
     TIMELINE_SPAN_MIN_WIDTH,
     TIMELINE_TURN_BOUNDARY_GLYPH,
     TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS,
@@ -29,6 +32,7 @@ from theater.regie.trajectory.details import (
 )
 from theater.regie.trajectory.enums import FilterDimension, InspectorTab, OrderMode
 from theater.regie.trajectory.filter_panel import FilterPanel
+from theater.regie.trajectory.hover_card import TimelineHoverCard
 from theater.regie.trajectory.ledger import (
     Ledger,
     LedgerOlderClicked,
@@ -46,7 +50,7 @@ from theater.regie.trajectory.render import (
     tooltip_text,
 )
 from theater.regie.trajectory.search import FilterCounts, search_records
-from theater.regie.trajectory.timeline import Timeline, TimelineSpanClicked
+from theater.regie.trajectory.timeline import Timeline, TimelineSpanClicked, TimelineSpanHovered
 from theater.regie.trajectory.timeline_layout import build_timeline_layout
 from theater.regie.trajectory.view import TrajectoryParticipantSelected, TrajectoryView
 from theater.trajectory import (
@@ -75,7 +79,10 @@ def wire_record(
     summary: str | None = None,
     details: list[dict[str, object]] | None = None,
     links: list[dict[str, object]] | None = None,
+    request_id: str | None = None,
+    call_id: str | None = None,
     timing: dict[str, object] | None = None,
+    usage: dict[str, object] | None = None,
 ) -> dict[str, object]:
     result: dict[str, object] = {
         "record_id": record_id,
@@ -96,8 +103,14 @@ def wire_record(
         result["details"] = details
     if links is not None:
         result["links"] = links
+    if request_id is not None:
+        result["request_id"] = request_id
+    if call_id is not None:
+        result["call_id"] = call_id
     if timing is not None:
         result["timing"] = timing
+    if usage is not None:
+        result["usage"] = usage
     return result
 
 
@@ -221,9 +234,10 @@ async def test_timeline_scroll_hit_testing_and_positioned_spans() -> None:
         assert len(timeline.projection.spans) == len(records)
         assert {span.width for span in timeline.projection.spans} == {TIMELINE_SPAN_MIN_WIDTH}
         assert timeline.tail_offset > 0
-        normal_background = timeline._span_style(records[-1]).bgcolor
-        timeline._hovered_id = "r9"
-        assert timeline._span_style(records[-1]).bgcolor != normal_background
+        normal_style = timeline._span_style(records[-1])
+        timeline.set_hovered("r9")
+        hovered_style = timeline._span_style(records[-1])
+        assert hovered_style.bgcolor == normal_style.bgcolor
 
 
 async def test_timeline_projects_four_lanes_and_duration_widths() -> None:
@@ -245,8 +259,11 @@ async def test_timeline_projects_four_lanes_and_duration_widths() -> None:
             assert (
                 timeline._record_at(TIMELINE_LABEL_WIDTH + span.visual_start, middle) == record_item
             )
-            assert timeline._record_at(TIMELINE_LABEL_WIDTH + span.x, middle) is None
-            assert timeline._record_at(TIMELINE_LABEL_WIDTH + span.visual_start, middle - 1) is None
+            assert timeline._record_at(TIMELINE_LABEL_WIDTH + span.x, middle) == record_item
+            assert (
+                timeline._record_at(TIMELINE_LABEL_WIDTH + span.visual_start, middle - 1)
+                == record_item
+            )
 
         assert timeline.projection.width == timeline._available_cells()
         assert timeline.projection.spans[0].x == 0
@@ -283,6 +300,34 @@ async def test_timeline_projects_four_lanes_and_duration_widths() -> None:
     assert duration.has_timing
     assert duration.span_for("long").width > duration.span_for("short").width
     assert all(span.width >= TIMELINE_SPAN_MIN_WIDTH for span in duration.spans)
+
+
+async def test_timeline_hover_marks_span_edges_and_related_records() -> None:
+    records = [
+        record("first", index=0, request_id="request"),
+        record("second", index=1, request_id="request"),
+        record("call", index=2, lane="tools", kind="tool_call", call_id="tool"),
+        record("result", index=3, lane="tools", kind="tool_result", call_id="tool"),
+    ]
+    app = Host()
+    async with app.run_test(size=(100, 30)):
+        view = await populate(app, records)
+        timeline = view.query_one(Timeline)
+
+        view.on_timeline_span_hovered(TimelineSpanHovered("first"))
+
+        assert timeline.related_ids == frozenset({"second"})
+        assert view.state.related_record_ids("call") == frozenset({"result"})
+        strip = timeline._lane_strip(TrajectoryLane.MODEL, 0, timeline.projection.width)
+        hovered = timeline.projection.span_for("first")
+        related = timeline.projection.span_for("second")
+        assert hovered is not None and related is not None
+        assert strip.text[hovered.visual_start] == TIMELINE_HOVER_LEFT_GLYPH
+        assert strip.text[hovered.visual_end - 1] == TIMELINE_HOVER_RIGHT_GLYPH
+        assert (
+            strip.text[(related.visual_start + related.visual_end - 1) // 2]
+            == TIMELINE_RELATED_GLYPH
+        )
 
 
 async def test_timeline_uses_two_rows_per_lane_and_marks_new_turns() -> None:
@@ -441,6 +486,7 @@ async def test_duration_mode_marks_only_independently_reported_intervals() -> No
     app = Host()
     async with app.run_test(size=(100, 30)):
         view = await populate(app, records)
+        view.state.pause_follow()
         view.state.select("derived")
         view.action_toggle_mode()
         ledger = app.query_one(Ledger)
@@ -510,6 +556,67 @@ def test_timeline_tooltip_flattens_and_bounds_large_summaries() -> None:
     assert len(lines) == 3
     assert cell_len(lines[1]) <= TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS
     assert lines[1].endswith("…")
+
+
+def test_timeline_tooltip_surfaces_model_timing_and_usage() -> None:
+    item = TrajectoryRecord.from_wire(
+        wire_record(
+            "r1",
+            timing={
+                "start": 10,
+                "first_token": 10.25,
+                "end": 12,
+                "duration_ms": 2_000,
+                "provenance": "source",
+            },
+            usage={
+                "model": "model-x",
+                "input_tokens": 1_200,
+                "output_tokens": 34,
+                "reasoning_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "cost_usd": 0.1234,
+            },
+        )
+    )
+
+    heading, _summary, metrics = tooltip_text(item).splitlines()
+
+    assert heading == "◆ ASSISTANT · claude · model-x · completed"
+    assert metrics == "total 2.0s · TTFT 250ms · generation 1.8s · in 1.2K · out 34 · cost $0.1234"
+
+
+async def test_repeated_hover_reuses_tooltip_without_reprocessing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        item = record("r1")
+        view = await populate(app, [item])
+        timeline = view.query_one(Timeline)
+        card = view.query_one(TimelineHoverCard)
+        calls = 0
+
+        def render_tooltip(_record: TrajectoryRecord) -> str:
+            nonlocal calls
+            calls += 1
+            return "tooltip"
+
+        monkeypatch.setattr("theater.regie.trajectory.hover_card.tooltip_text", render_tooltip)
+        lane_y = tuple(TrajectoryLane).index(item.lane) * TIMELINE_LANE_HEIGHT + 1
+        await pilot.hover(timeline, offset=(TIMELINE_LABEL_WIDTH + 2, lane_y))
+        await pilot.hover(timeline, offset=(TIMELINE_LABEL_WIDTH + 3, lane_y))
+
+        assert card.display
+        assert card.record_id == "r1"
+        assert card.region.bottom <= timeline.region.y
+        assert timeline.tooltip is None
+
+        timeline._set_hover(None)
+        timeline._set_hover(item)
+
+        assert calls == 1
 
 
 async def test_clicks_and_movement_pause_tail_but_hover_does_not() -> None:

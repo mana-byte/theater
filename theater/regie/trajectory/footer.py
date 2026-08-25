@@ -183,9 +183,6 @@ class TrajectoryFooter(Horizontal):
             if self._active_filters
             else "≡ Filters"
         )
-        filters.tooltip = (
-            f"Filters ({self._active_filters} active)" if self._active_filters else "Filters"
-        )
         filters.set_class(self._active_filters > 0, "-selected")
         mode = self.query_one("#trajectory-mode-action", Button)
         mode.label = (
@@ -197,15 +194,9 @@ class TrajectoryFooter(Horizontal):
             if self._mode is OrderMode.DURATION
             else "◷ Duration"
         )
-        mode.tooltip = (
-            "Switch to event order"
-            if self._mode is OrderMode.DURATION
-            else "Switch to recorded duration"
-        )
         mode.set_class(self._mode is OrderMode.DURATION, "-selected")
         view = self.query_one("#trajectory-view-action", Button)
         view.label = "◫" if self._compact else f"◫ {self._view.value.title()}"
-        view.tooltip = f"Diagnostic view: {self._view.value.title()} · press V"
         view.set_class(self._view is not DiagnosticView.ALL, "-selected")
         follow = self.query_one("#trajectory-follow-action", Button)
         follow.label = (
@@ -221,7 +212,6 @@ class TrajectoryFooter(Horizontal):
             if self._new_count
             else "Ⅱ Paused"
         )
-        follow.tooltip = "Following live events" if self._follow_tail else "Resume live tail"
         follow.set_class(self._follow_tail, "-selected")
 
     def _update_pagination(self) -> None:
@@ -300,10 +290,8 @@ class TrajectoryFooter(Horizontal):
         status_text = " · ".join(details)
         status_label = self.query_one("#trajectory-status", Label)
         status_label.update(status_text)
-        status_label.tooltip = status_text
         search = self.query_one("#trajectory-search-action", Button)
         search.set_class(bool(query), "-selected")
-        search.tooltip = "Focus trajectory search"
         self._active_filters = active_filters
         self._mode = mode
         self._view = view

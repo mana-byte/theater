@@ -15,10 +15,10 @@ from theater.regie.trajectory.enums import FocusRegion, InspectorTab
 from theater.regie.trajectory.filter_panel import FilterPanel
 from theater.regie.trajectory.footer import TrajectoryFooter
 from theater.regie.trajectory.ledger import Ledger
-from theater.regie.trajectory.state import TrajectoryStateStore
+from theater.regie.trajectory.state import ParticipantTrajectoryState, TrajectoryStateStore
 from theater.regie.trajectory.timeline import Timeline
 from theater.regie.trajectory.view import ReturnToTree, TrajectoryRetryRequested, TrajectoryView
-from theater.trajectory import PanelState, PanelStateInfo, TrajectoryRecord
+from theater.trajectory import PanelState, PanelStateInfo, TrajectoryPage, TrajectoryRecord
 
 
 def make_record(record_id: str, summary: str, *, turn_id: str | None = "t1") -> TrajectoryRecord:
@@ -78,6 +78,53 @@ async def add_records(app: Host) -> TrajectoryView:
     return view
 
 
+def test_snapshot_preserves_selection_only_while_tail_following_is_paused() -> None:
+    state = ParticipantTrajectoryState("p1")
+    first = make_record("r1", "first")
+    second = make_record("r2", "second")
+    third = make_record("r3", "third")
+    state.apply_snapshot(TrajectoryPage(PanelStateInfo(PanelState.READY), records=(first, second)))
+    state.select("r1")
+
+    state.apply_snapshot(
+        TrajectoryPage(PanelStateInfo(PanelState.READY), records=(first, second, third))
+    )
+
+    assert state.selected_id == "r3"
+    state.pause_follow()
+    state.select("r1")
+    state.apply_snapshot(
+        TrajectoryPage(PanelStateInfo(PanelState.READY), records=(first, second, third))
+    )
+    assert state.selected_id == "r1"
+
+
+async def test_enter_live_tail_selects_final_page_and_clears_transient_details() -> None:
+    app = Host()
+    async with app.run_test(size=(100, 30)):
+        view = app.query_one(TrajectoryView)
+        view.state_store.page_size = 1
+        view.state.upsert(
+            [
+                make_record("r1", "first"),
+                make_record("r2", "second"),
+                make_record("r3", "third"),
+            ]
+        )
+        view.state.select("r1")
+        view.state.pause_follow()
+        view.state.hovered_id = "r1"
+        view.state.expanded_id = "r1"
+
+        view.enter_live_tail()
+
+        assert view.state.follow_tail
+        assert view.state.selected_id == "r3"
+        assert view.state.ledger_page == 2
+        assert view.state.hovered_id is None
+        assert view.state.expanded_id is None
+
+
 async def test_surface_uses_fixed_timeline_and_virtualized_ledger() -> None:
     app = Host()
     async with app.run_test(size=(100, 30)):
@@ -96,11 +143,16 @@ async def test_surface_uses_fixed_timeline_and_virtualized_ledger() -> None:
         assert view.query_one(TrajectoryFooter).region.height == TRAJECTORY_FOOTER_HEIGHT
         search = view.query_one("#trajectory-search", Input)
         timeline = view.query_one(Timeline)
+        ledger = view.query_one(Ledger)
         assert search.region.height == SEARCH_HEIGHT
         assert search.region.y < timeline.region.y
         assert search.region.width == timeline.region.width == view.content_region.width
-        assert view.query_one(Ledger).header_height == LEDGER_HEADER_HEIGHT
-        assert all(row.height == LEDGER_ROW_HEIGHT for row in view.query_one(Ledger).rows.values())
+        assert timeline.styles.scrollbar_size_horizontal == 0
+        assert timeline.styles.scrollbar_size_vertical == 0
+        assert ledger.styles.scrollbar_size_horizontal == 0
+        assert ledger.styles.scrollbar_size_vertical == 0
+        assert ledger.header_height == LEDGER_HEADER_HEIGHT
+        assert all(row.height == LEDGER_ROW_HEIGHT for row in ledger.rows.values())
         assert all(
             button.region.height == 1
             for button in view.query_one(TrajectoryFooter).query(Button)

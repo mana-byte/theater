@@ -1138,6 +1138,7 @@ class RegieApp(App):
             self.staged_pane = result.staged_pane
         assert result.participant_id is not None
         view = await self._mount_trajectory(result.participant_id)
+        view.enter_live_tail()
         self._sync_right_surface()
         self._render_tree()
         if result.outcome is TrajectoryStageOutcome.FOCUS or focus_after_stage:

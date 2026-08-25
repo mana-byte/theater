@@ -369,6 +369,7 @@ async def test_ledger_request_headers_are_noninteractive_and_patch_in_place(
         assert ledger.ordered_rows[row].height == 2
         assert ledger.line_ids == (None, "record")
         assert "model-x" in ledger.get_cell(key, Ledger.COLUMN_SOURCE).plain
+        assert ledger.get_cell(key, Ledger.COLUMN_POSITION).plain.strip() == "↗"
         assert "cost $0.1" in ledger.get_cell(key, Ledger.COLUMN_SUMMARY).plain
         request_style = ledger._component("request")
         assert request_style.bgcolor is None

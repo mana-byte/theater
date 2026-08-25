@@ -32,6 +32,7 @@ from theater.regie.trajectory.constants import (
     TRAJECTORY_INSPECTOR_RATIO_DEFAULT,
     TRAJECTORY_INSPECTOR_RATIO_MAX,
     TRAJECTORY_INSPECTOR_RATIO_MIN,
+    TRAJECTORY_REQUEST_POSITION_GLYPH,
 )
 from theater.regie.trajectory.details import (
     DETAIL_PARTICIPANT_CORRELATION_KEY_META,
@@ -186,7 +187,7 @@ class Ledger(DataTable[Text | str]):
         min-height: 4;
         background: $background;
         color: $foreground;
-        scrollbar-size: 1 1;
+        scrollbar-size: 0 0;
     }
     Ledger > .datatable--header {
         background: $foreground 3%;
@@ -680,7 +681,7 @@ class Ledger(DataTable[Text | str]):
         request = self._requests.get(entry.request_id or "")
         if request is None:
             return {
-                self.COLUMN_POSITION: "╭",
+                self.COLUMN_POSITION: TRAJECTORY_REQUEST_POSITION_GLYPH,
                 self.COLUMN_EVENT: "◆ REQUEST",
                 self.COLUMN_SOURCE: "model unknown",
                 self.COLUMN_SUMMARY: "usage unavailable",
@@ -689,7 +690,7 @@ class Ledger(DataTable[Text | str]):
             }
         text = request_row_text(request, compact=self._compact_columns)
         return {
-            self.COLUMN_POSITION: "╭",
+            self.COLUMN_POSITION: TRAJECTORY_REQUEST_POSITION_GLYPH,
             self.COLUMN_EVENT: text.event,
             self.COLUMN_SOURCE: text.source,
             self.COLUMN_SUMMARY: f"{'  ' * entry.depth}{text.summary}",

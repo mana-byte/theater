@@ -133,10 +133,6 @@ class ParticipantTrajectoryState:
     def selected_record(self) -> TrajectoryRecord | None:
         return self.records.get(self.selected_id) if self.selected_id is not None else None
 
-    @property
-    def at_tail(self) -> bool:
-        return self.follow_tail
-
     def _set_panel(self, panel: PanelStateInfo) -> None:
         self.panel = panel
         self.stale = panel.state is PanelState.STALE
@@ -169,6 +165,22 @@ class ParticipantTrajectoryState:
         if operation_id is not None:
             return self.tool_index.anchor_by_id.get(operation_id)
         return record_id if record_id in self.records else None
+
+    def related_record_ids(self, record_id: str | None) -> frozenset[str]:
+        """Return retained records in the same request or tool operation."""
+        if record_id is None or record_id not in self.records:
+            return frozenset()
+        related: set[str] = set()
+        request_id = self.request_index.by_record_id.get(record_id)
+        if request_id is not None:
+            request = self.request_index.by_id.get(request_id)
+            if request is not None:
+                related.update(request.record_ids)
+        operation_id = self.tool_index.by_record_id.get(record_id)
+        if operation_id is not None:
+            related.update(self.tool_index.members_by_id.get(operation_id, ()))
+        related.discard(record_id)
+        return frozenset(candidate for candidate in related if candidate in self.records)
 
     def _trim(self, *, evict_newest: bool) -> None:
         while (
@@ -280,7 +292,9 @@ class ParticipantTrajectoryState:
             self._apply_records(page.records)
             self.groups = page.groups or self.groups
         self.apply_panel_state(page.panel_state)
-        if prior_selection in self.records:
+        if self.follow_tail and self.records:
+            self.selected_id = self.record_list[-1].record_id
+        elif prior_selection in self.records:
             self.selected_id = prior_selection
         elif self.records:
             self.selected_id = next(reversed(self.records))
