@@ -20,13 +20,13 @@ from theater.trajectory.content import (
     bounded_text,
 )
 from theater.trajectory.enums import (
-    TimingProvenance,
     TrajectoryKind,
     TrajectoryStatus,
     TrajectoryValidationError,
 )
 from theater.trajectory.grouping import deterministic_record_order
 from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryRecord
+from theater.trajectory.timing import derived_interval, terminal_timestamp
 from theater.trajectory.validation import (
     boolean,
     enum_value,
@@ -419,19 +419,14 @@ def _timing(
     ends: list[Timing] = []
     for record in end_records:
         timing = record.timing
-        if timing is not None and timing.end is not None:
+        if timing is not None and terminal_timestamp(timing) is not None:
             ends.append(timing)
-    end_timing = (
-        max(ends, key=lambda timing: timing.end if timing.end is not None else 0) if ends else None
-    )
-    end = end_timing.end if end_timing is not None else None
-    if start is not None and end is not None and end >= start:
-        return Timing(
-            start=start,
-            end=end,
-            duration_ms=(end - start) * 1000,
-            provenance=TimingProvenance.DERIVED,
-        )
+    end_timing = max(ends, key=lambda timing: terminal_timestamp(timing) or 0) if ends else None
+    end = terminal_timestamp(end_timing) if end_timing is not None else None
+    if start_timing is not None and end_timing is not None:
+        interval = derived_interval(start_timing, end_timing)
+        if interval is not None:
+            return interval
     for candidate in (primary_result, primary_call):
         if (
             candidate is not None

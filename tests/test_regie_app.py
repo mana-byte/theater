@@ -1820,14 +1820,14 @@ async def test_reentering_trajectory_resumes_at_latest_span(daemon, tmux):
         view.state.select(first.record_id)
         view.state.pause_follow()
         view.state.hovered_id = first.record_id
-        view.state.expanded_id = first.record_id
+        view.state.detail_id = first.record_id
 
         await app._show_trajectory(PARENT["id"], managed=True)
 
         assert view.state.follow_tail
         assert view.state.selected_id == latest.record_id
         assert view.state.hovered_id is None
-        assert view.state.expanded_id is None
+        assert view.state.detail_id is None
 
 
 async def test_rapid_trajectory_switch_ignores_removed_view_callbacks(daemon, tmux):
@@ -1887,15 +1887,12 @@ async def test_tmux_return_signal_moves_trajectory_focus_back_to_the_tree(daemon
     ) in tmux
 
 
-async def test_trajectory_uses_the_configured_inline_detail_ratio(daemon, tmux):
-    app, _ = make_app(trajectory_inspector_ratio=0.6, trajectory_page_size=17)
+async def test_trajectory_uses_the_configured_page_size(daemon, tmux):
+    app, _ = make_app(trajectory_page_size=17)
     async with app.run_test() as pilot:
         await pilot.press("h")
         view = app.query_one("#trajectory-view", app_mod.TrajectoryView)
-        ledger = view.query_one("#trajectory-ledger")
-        assert view.state.detail_ratio == 0.6
         assert view.state_store.page_size == 17
-        assert ledger.detail_ratio == 0.6
 
 
 async def test_h_parks_a_live_pane_before_showing_trajectory(daemon, tmux):
@@ -2079,7 +2076,7 @@ async def test_exact_trajectory_link_locates_record_and_back_restores_origin(dae
         target_view = app.query_one("#trajectory-view", app_mod.TrajectoryView)
         assert target_view.participant_id == CHILD["id"]
         assert target_view.state.selected_id == target_id
-        assert target_view.state.expanded_id == target_id
+        assert target_view.state.detail_id == target_id
         assert any(
             params == {"id": CHILD["id"], "record_id": target_id}
             for client in daemon["clients"]
@@ -2939,8 +2936,7 @@ async def test_configured_sidebar_width_reaches_both_style_and_resize(daemon, tm
 # ---- mouse --------------------------------------------------------------
 
 
-async def test_single_click_moves_the_cursor(daemon, tmux):
-    """A single click on a leaf moves the cursor to that participant."""
+async def test_single_left_click_selects_and_stages_the_agent(daemon, tmux):
     app, _ = make_app()
     async with app.run_test(size=(80, 40)) as pilot:
         assert app.cursor == 0
@@ -2948,20 +2944,52 @@ async def test_single_click_moves_the_cursor(daemon, tmux):
         child_widget = panel._key_widgets[("p", CHILD["id"])]
         await pilot.click(widget=child_widget)
         assert app.cursor == 1
+        assert app.staged_pane == "%11"
+    assert ("join", "%11", "@7") in tmux
 
 
-async def test_double_click_stages_the_agent(daemon, tmux):
-    """A double click on a leaf stages it, the same as pressing enter."""
+async def test_left_double_click_stages_only_once(daemon, tmux):
     app, _ = make_app()
     async with app.run_test() as pilot:
         panel = app.query_one("#tree-panel", app_mod.TreePanel)
         parent_widget = panel._key_widgets[("p", PARENT["id"])]
         await pilot.click(widget=parent_widget, times=2)
         assert app.staged_pane == "%10"
-    assert ("join", "%10", "@7") in tmux
+        assert tmux.count(("join", "%10", "@7")) == 1
+        assert ("break", "%10") not in tmux
 
 
-async def test_click_on_any_row_of_a_leaf_moves_the_cursor(daemon, tmux):
+async def test_right_click_toggles_the_selected_trajectory(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test(size=(160, 40)) as pilot:
+        panel = app.query_one("#tree-panel", app_mod.TreePanel)
+        child_widget = panel._key_widgets[("p", CHILD["id"])]
+
+        await pilot.click(widget=child_widget, button=3)
+        assert app.cursor == 1
+        assert app.right_surface is app_mod.RightSurface.TRAJECTORY
+        assert app.trajectory_participant == CHILD["id"]
+        assert child_widget.has_class("tree-trajectory-staged")
+        assert app.focused is None
+
+        await pilot.click(widget=child_widget, button=3)
+        assert app.right_surface is app_mod.RightSurface.DASHBOARD
+        assert app.trajectory_participant is None
+        assert not child_widget.has_class("tree-trajectory-staged")
+        assert app.focused is None
+
+
+async def test_right_double_click_does_not_stage_the_agent(daemon, tmux):
+    app, _ = make_app()
+    async with app.run_test(size=(160, 40)) as pilot:
+        panel = app.query_one("#tree-panel", app_mod.TreePanel)
+        parent_widget = panel._key_widgets[("p", PARENT["id"])]
+        await pilot.click(widget=parent_widget, times=2, button=3)
+        assert app.staged_pane is None
+    assert ("join", "%10", "@7") not in tmux
+
+
+async def test_click_on_any_row_of_a_leaf_stages_it(daemon, tmux):
     """All three rows of a leaf are one click target."""
     app, _ = make_app()
     async with app.run_test(size=(80, 40)) as pilot:
@@ -2971,6 +2999,7 @@ async def test_click_on_any_row_of_a_leaf_moves_the_cursor(daemon, tmux):
         # Click at offset (0, 2) — the third row (cwd), still inside the leaf.
         await pilot.click(widget=child_widget, offset=(0, 2))
         assert app.cursor == 1
+        assert app.staged_pane == "%11"
 
 
 async def test_tree_click_takes_cursor_back_from_footer(daemon, tmux):
@@ -2987,9 +3016,5 @@ async def test_tree_click_takes_cursor_back_from_footer(daemon, tmux):
         assert not breakdown.has_class("-visible")
         assert app.cursor == 0
         assert parent_widget.has_class("tree-cursor")
-
-        app.cursor = len(app.tree_lines) - 1
-        await pilot.press("j")
-        await pilot.click(widget=parent_widget, times=2)
         assert app.staged_pane == "%10"
     assert ("join", "%10", "@7") in tmux

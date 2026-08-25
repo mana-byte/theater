@@ -210,7 +210,11 @@ class FilterPanel(Vertical):
         )
         self._append_dimension(
             FilterDimension.KIND,
-            [(kind.value, counts.kinds.get(kind, 0)) for kind in TrajectoryKind],
+            [
+                (kind.value, counts.kinds.get(kind, 0))
+                for kind in TrajectoryKind
+                if kind is not TrajectoryKind.USAGE
+            ],
             {kind.value for kind in kinds},
             choices,
         )

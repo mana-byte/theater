@@ -1607,9 +1607,8 @@ class CodexObserver(TranscriptObserver):
                 )
                 if usage is not None:
                     add(
-                        TrajectoryKind.ASSISTANT,
+                        TrajectoryKind.USAGE,
                         TrajectoryLane.MODEL,
-                        "token usage",
                         native_id=event_id,
                         status=TrajectoryStatus.COMPLETED,
                         usage=usage,

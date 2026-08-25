@@ -21,11 +21,17 @@ from theater.constants.trajectory import (
 from theater.daemon.trajectory.cache import CacheStream, RecordChange, TrajectoryCache
 from theater.daemon.trajectory.history import HistoryLoad, load_history, source_epoch_for
 from theater.daemon.trajectory.merge import is_interaction, is_mutable, order_records
+from theater.daemon.trajectory.observed_timing import (
+    ObservationPoint,
+    apply_live_observation,
+    apply_observation_points,
+    observation_points_for_history,
+)
 from theater.daemon.trajectory.project import project_batch, project_history_page
 from theater.daemon.trajectory.theater_events import ALLOWLISTED_BUS_KINDS, project_bus_row
 from theater.harness import normalize
 from theater.harness.contracts.source import Batch
-from theater.models import NotFound, Participant, Status, Tier
+from theater.models import NotFound, Participant, Status, Tier, now
 from theater.provenance import is_trusted_provenance
 from theater.trajectory import (
     CoverageGap,
@@ -50,6 +56,7 @@ logger = logging.getLogger("theater.daemon.trajectory")
 class CapturedBatch:
     serial: int
     batch: Batch
+    observed_at: float
 
 
 @dataclass(slots=True)
@@ -66,6 +73,7 @@ class TrajectoryStream:
     declared_capabilities: TrajectoryCapabilities = field(default_factory=TrajectoryCapabilities)
     live_updates_observed: bool = False
     pending_live: list[CapturedBatch] = field(default_factory=list)
+    observation_points: tuple[ObservationPoint, ...] = ()
     followers: dict[int, asyncio.Event] = field(default_factory=dict)
     capture_serial: int = 0
     initialized: bool = False
@@ -123,7 +131,7 @@ class TrajectoryRuntime:
         try:
             self.cache.touch(participant_id)
             stream.capture_serial += 1
-            captured = CapturedBatch(stream.capture_serial, batch)
+            captured = CapturedBatch(stream.capture_serial, batch, now())
             if not stream.initialized:
                 stream.pending_live.append(captured)
             else:
@@ -257,6 +265,7 @@ class TrajectoryRuntime:
                     or stream.source_epoch
                     or source_epoch_for(stream.participant, None),
                 )
+                records = apply_observation_points(records, stream.observation_points)
                 loaded_records.extend(records)
                 self._merge_records(stream, records, notify=False)
                 source_before = result.page.older_cursor if result.page.has_older else None
@@ -370,11 +379,16 @@ class TrajectoryRuntime:
                     self._add_boundary(stream, stream.source_epoch, result.source_epoch)
                     self._add_gap(stream, "transcript", "transcript session rotated")
                 stream.source_epoch = result.source_epoch
+            stream.observation_points = self._history_observation_points(
+                stream.participant.id,
+                page.location,
+            )
             records = project_history_page(
                 page,
                 participant_id=stream.participant.id,
                 source_epoch=stream.source_epoch or source_epoch_for(stream.participant, None),
             )
+            records = apply_observation_points(records, stream.observation_points)
             self._merge_records(stream, records, notify=False)
             if page.older_cursor is not None and page.has_older:
                 stream.source_before = page.older_cursor
@@ -481,6 +495,12 @@ class TrajectoryRuntime:
             return
         epoch = stream.source_epoch or source_epoch_for(stream.participant, None)
         records = project_batch(batch, participant_id=stream.participant.id, source_epoch=epoch)
+        previous = {
+            record.record_id: existing
+            for record in records
+            if (existing := stream.ring.get(record.record_id)) is not None
+        }
+        records = apply_live_observation(records, captured.observed_at, previous)
         changes = self._merge_records(stream, records, notify=notify)
         if changes:
             stream.live_updates_observed = True
@@ -711,6 +731,17 @@ class TrajectoryRuntime:
             if stream is not None:
                 self._add_gap(stream, "theater", f"theater bus history unavailable: {exc}")
             return []
+
+    def _history_observation_points(
+        self,
+        participant_id: str,
+        location: str | None,
+    ) -> tuple[ObservationPoint, ...]:
+        try:
+            return observation_points_for_history(self.store, participant_id, location)
+        except Exception as exc:
+            logger.debug("trajectory observation timing unavailable: %s", exc)
+            return ()
 
     def _discard_stream(self, participant_id: str, cache_stream: CacheStream) -> None:
         current = self.streams.get(participant_id)

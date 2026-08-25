@@ -8,6 +8,9 @@ from types import SimpleNamespace
 import pytest
 
 from theater.constants.daemon import (
+    BUS_KIND_AGENT_TOOL_CALL,
+    BUS_KIND_AGENT_TOOL_RESULT,
+    BUS_KIND_AGENT_TRANSCRIPT,
     BUS_KIND_JOB_AWAIT_END,
     BUS_KIND_JOB_AWAIT_START,
     BUS_KIND_PARTICIPANT_KILL_REQUESTED,
@@ -26,6 +29,7 @@ from theater.models import BadRequest, NotFound, Participant, Status, Tier
 from theater.trajectory import (
     LinkDirection,
     PanelState,
+    TimingProvenance,
     TrajectoryKind,
     TrajectoryLane,
     TrajectoryRecord,
@@ -231,6 +235,58 @@ async def test_snapshot_is_lazy_and_merges_race_captures(source_opener):
     assert any(record.summary == "live" for record in page.records)
     assert "bus:1" in record_ids
     assert source.closed is True
+    await service.aclose()
+
+
+async def test_snapshot_recovers_observed_timing_for_matching_transcript(source_opener):
+    participant = _participant("p")
+    store = _Store()
+    store.rows.extend(
+        (
+            {
+                "id": 1,
+                "ts": 1.0,
+                "from_id": None,
+                "to_id": participant.id,
+                "kind": BUS_KIND_AGENT_TRANSCRIPT,
+                "payload": {"path": participant.transcript_location},
+            },
+            {
+                "id": 2,
+                "ts": 10.0,
+                "from_id": participant.id,
+                "to_id": None,
+                "kind": BUS_KIND_AGENT_TOOL_CALL,
+                "payload": {"index": 1},
+            },
+            {
+                "id": 3,
+                "ts": 12.0,
+                "from_id": participant.id,
+                "to_id": None,
+                "kind": BUS_KIND_AGENT_TOOL_RESULT,
+                "payload": {"index": 2},
+            },
+        )
+    )
+    source_opener[participant.id] = _Source(
+        _page(
+            Event(kind=EventKind.TOOL_CALL, tool_name="read", raw_index=1),
+            Event(kind=EventKind.TOOL_RESULT, text="done", raw_index=2),
+            location=participant.transcript_location,
+        )
+    )
+    service = TrajectoryService(store, _Registry([participant]), _Observer())
+
+    page = await service.snapshot(participant.id)
+    by_kind = {record.kind: record for record in page.records}
+
+    assert by_kind[TrajectoryKind.TOOL_CALL].timing is not None
+    assert by_kind[TrajectoryKind.TOOL_CALL].timing.start == 10.0
+    assert by_kind[TrajectoryKind.TOOL_CALL].timing.provenance is TimingProvenance.OBSERVED
+    assert by_kind[TrajectoryKind.TOOL_RESULT].timing is not None
+    assert by_kind[TrajectoryKind.TOOL_RESULT].timing.end == 12.0
+    assert by_kind[TrajectoryKind.TOOL_RESULT].timing.provenance is TimingProvenance.OBSERVED
     await service.aclose()
 
 

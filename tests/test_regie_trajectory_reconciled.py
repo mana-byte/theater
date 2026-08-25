@@ -8,7 +8,7 @@ from rich.console import Console
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.coordinate import Coordinate
-from textual.widgets import Button, Input, Select, SelectionList
+from textual.widgets import Button, Input, RichLog, Select, SelectionList
 
 from theater.regie.trajectory.constants import (
     FILTER_MAX_ROWS,
@@ -27,8 +27,7 @@ from theater.regie.trajectory.constants import (
 )
 from theater.regie.trajectory.details import (
     DETAIL_PARTICIPANT_META,
-    DETAIL_TAB_META,
-    build_inline_details,
+    build_span_details,
 )
 from theater.regie.trajectory.enums import FilterDimension, InspectorTab, OrderMode
 from theater.regie.trajectory.filter_panel import FilterPanel
@@ -50,6 +49,7 @@ from theater.regie.trajectory.render import (
     tooltip_text,
 )
 from theater.regie.trajectory.search import FilterCounts, search_records
+from theater.regie.trajectory.span_detail import SpanDetailPanel
 from theater.regie.trajectory.timeline import Timeline, TimelineSpanClicked, TimelineSpanHovered
 from theater.regie.trajectory.timeline_layout import build_timeline_layout
 from theater.regie.trajectory.view import TrajectoryParticipantSelected, TrajectoryView
@@ -587,6 +587,56 @@ def test_timeline_tooltip_surfaces_model_timing_and_usage() -> None:
     assert metrics == "total 2.0s · TTFT 250ms · generation 1.8s · in 1.2K · out 34 · cost $0.1234"
 
 
+def test_timeline_tooltip_labels_observed_duration_and_point_time() -> None:
+    item = TrajectoryRecord.from_wire(wire_record("r1"))
+    estimated = Timing(
+        start=10,
+        end=12,
+        duration_ms=2_000,
+        provenance=TimingProvenance.OBSERVED,
+    )
+    point = Timing(end=12, provenance=TimingProvenance.OBSERVED)
+
+    estimated_metrics = tooltip_text(item, timing=estimated, timing_scope="request").splitlines()[2]
+    point_metrics = tooltip_text(item, timing=point).splitlines()[2]
+
+    assert estimated_metrics == "request ~2.0s observed"
+    assert "observed" in point_metrics
+    assert "timing unavailable" not in point_metrics
+
+
+async def test_timeline_hover_prefers_tool_operation_timing() -> None:
+    app = Host()
+    async with app.run_test(size=(100, 30)):
+        call = record(
+            "call",
+            index=1,
+            lane="tools",
+            kind="tool_call",
+            call_id="shared",
+            timing={"start": 10, "provenance": "observed"},
+        )
+        result = record(
+            "result",
+            index=2,
+            lane="tools",
+            kind="tool_result",
+            call_id="shared",
+            timing={"end": 12, "provenance": "observed"},
+        )
+        view = await populate(app, [call, result])
+
+        timing, scope = view._hover_timing("call")
+
+        assert scope == "tool"
+        assert timing == Timing(
+            start=10,
+            end=12,
+            duration_ms=2_000,
+            provenance=TimingProvenance.OBSERVED,
+        )
+
+
 async def test_repeated_hover_reuses_tooltip_without_reprocessing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -598,7 +648,7 @@ async def test_repeated_hover_reuses_tooltip_without_reprocessing(
         card = view.query_one(TimelineHoverCard)
         calls = 0
 
-        def render_tooltip(_record: TrajectoryRecord) -> str:
+        def render_tooltip(_record: TrajectoryRecord, **_kwargs) -> str:
             nonlocal calls
             calls += 1
             return "tooltip"
@@ -617,6 +667,30 @@ async def test_repeated_hover_reuses_tooltip_without_reprocessing(
         timeline._set_hover(item)
 
         assert calls == 1
+
+
+@pytest.mark.parametrize(("width", "record_index"), [(100, 0), (100, -1), (50, -1)])
+async def test_timeline_hover_card_stays_inside_terminal_edges(
+    width: int,
+    record_index: int,
+) -> None:
+    app = Host()
+    async with app.run_test(size=(width, 30)) as pilot:
+        records = [record(f"r{index}", index=index, summary="x" * 200) for index in range(10)]
+        view = await populate(app, records)
+        timeline = view.query_one(Timeline)
+        card = view.query_one(TimelineHoverCard)
+        item = records[record_index]
+        anchor = timeline.hover_anchor(item.record_id)
+        assert anchor is not None
+        lane_y = tuple(TrajectoryLane).index(item.lane) * TIMELINE_LANE_HEIGHT + 1
+
+        await pilot.hover(timeline, offset=(anchor.x - timeline.region.x, lane_y))
+        await pilot.pause()
+
+        assert card.display
+        assert card.region.x >= app.screen.region.x
+        assert card.region.right <= app.screen.region.right
 
 
 async def test_clicks_and_movement_pause_tail_but_hover_does_not() -> None:
@@ -692,8 +766,9 @@ async def test_selection_and_hover_use_incremental_widget_updates(monkeypatch) -
         assert timeline.hovered_id == "r1"
         assert timeline.selected_id == "r1"
         assert ledger._hovered_id == "r1"
-        assert ledger.expanded_id == "r1"
-        assert ledger.get_row_index("detail:r1") == ledger.get_row_index("record:r1") + 1
+        assert view.state.detail_id == "r1"
+        assert view.query_one(SpanDetailPanel).record_id == "r1"
+        assert ledger.has_class("-hidden")
         summary = ledger.get_cell("record:r1", Ledger.COLUMN_SUMMARY)
         assert isinstance(summary, Text)
         assert "underline" not in str(summary.get_style_at_offset(Console(), 1))
@@ -800,7 +875,7 @@ def test_context_tabs_render_matching_formats_and_copy_exactly() -> None:
     assert "--- old" in diff and "No diff" not in diff
 
 
-def test_inline_details_use_only_contextual_tabs() -> None:
+def test_span_details_use_only_contextual_tabs() -> None:
     item = record(
         "system",
         kind="system",
@@ -812,21 +887,16 @@ def test_inline_details_use_only_contextual_tabs() -> None:
             }
         ],
     )
-    details = build_inline_details(item, InspectorTab.CURRENT, max_height=20)
+    details = build_span_details(item, InspectorTab.CURRENT)
     assert details.tabs == (
         InspectorTab.CURRENT,
         InspectorTab.PREVIOUS,
         InspectorTab.DIFF,
     )
     assert details.tab is InspectorTab.CURRENT
-    assert {
-        span.style.meta[DETAIL_TAB_META]
-        for span in details.menu.spans
-        if span.style and DETAIL_TAB_META in span.style.meta
-    } == {tab.value for tab in details.tabs}
 
 
-async def test_inline_detail_tab_updates_without_rebuilding_the_ledger(monkeypatch) -> None:
+async def test_span_detail_tab_and_content_update_without_rebuilding_ledger(monkeypatch) -> None:
     item = record(
         "r1",
         details=[
@@ -840,8 +910,9 @@ async def test_inline_detail_tab_updates_without_rebuilding_the_ledger(monkeypat
     app = Host()
     async with app.run_test(size=(80, 24)):
         view = await populate(app, [item])
-        view._toggle_details("r1")
+        view._open_details("r1")
         ledger = view.query_one(Ledger)
+        panel = view.query_one(SpanDetailPanel)
         rebuilds = 0
         original = ledger._rebuild
 
@@ -851,11 +922,11 @@ async def test_inline_detail_tab_updates_without_rebuilding_the_ledger(monkeypat
             original(preserve_scroll=preserve_scroll)
 
         monkeypatch.setattr(ledger, "_rebuild", count_rebuild)
-        ledger.set_details("r1", InspectorTab.OUTPUT)
+        panel.set_tab(InspectorTab.OUTPUT)
 
         assert rebuilds == 0
-        assert ledger.detail_tab is InspectorTab.OUTPUT
-        assert "output: line" in ledger.copy_text
+        assert panel.tab is InspectorTab.OUTPUT
+        assert "output: line" in panel.copy_text
 
         payload = item.to_wire()
         payload["revision"] = 2
@@ -867,15 +938,10 @@ async def test_inline_detail_tab_updates_without_rebuilding_the_ledger(monkeypat
             }
         ]
         updated = TrajectoryRecord.from_wire(payload)
-        ledger.update_rows(
-            [updated],
-            search_records([updated]),
-            selected_id="r1",
-            expanded_id="r1",
-            detail_tab=InspectorTab.OUTPUT,
-        )
+        view.state.upsert([updated])
+        view._refresh()
         assert rebuilds == 0
-        assert "output: updated" in ledger.copy_text
+        assert "output: updated" in panel.copy_text
 
 
 @pytest.mark.asyncio
@@ -919,7 +985,7 @@ async def test_links_are_exact_and_callback_excludes_fallback() -> None:
             {"participant_id": "p-long", "relation": "child", "direction": "outgoing"},
         ],
     )
-    details = build_inline_details(item, InspectorTab.SUMMARY, max_height=20)
+    details = build_span_details(item, InspectorTab.SUMMARY)
     linked = {
         meta[DETAIL_PARTICIPANT_META]
         for span in details.content.spans
@@ -943,15 +1009,14 @@ async def test_links_are_exact_and_callback_excludes_fallback() -> None:
         view = link_app.query_one(TrajectoryView)
         view.state.upsert([item])
         view._refresh()
-        view._toggle_details("system")
-        ledger = view.query_one(Ledger)
-        row = ledger.get_row_index("detail:system")
-        column = ledger.get_column_index(Ledger.COLUMN_SUMMARY)
-        region = ledger._get_cell_region(Coordinate(row, column))
-        await pilot.click(
-            ledger,
-            offset=(region.x + 2, region.y - int(ledger.scroll_y) + 3),
+        view._open_details("system")
+        await pilot.pause()
+        log = view.query_one(
+            "#trajectory-span-detail-content-current",
+            RichLog,
         )
+        await pilot.click(log, offset=(3, 4))
+        await pilot.pause()
     assert called == ["p"]
 
 

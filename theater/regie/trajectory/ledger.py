@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from math import isfinite
 from typing import ClassVar
 
 from rich.cells import cell_len
@@ -15,13 +13,11 @@ from textual import events
 from textual.coordinate import Coordinate
 from textual.message import Message
 from textual.widgets import DataTable
-from textual.widgets.data_table import RowDoesNotExist
 
 from theater.regie.trajectory.constants import (
     LEDGER_CELL_PADDING,
     LEDGER_COMPACT_WIDTH,
     LEDGER_DEFAULT_VIEWPORT_ROWS,
-    LEDGER_DETAIL_MIN_HEIGHT,
     LEDGER_DURATION_COLUMN_WIDTH,
     LEDGER_HEADER_HEIGHT,
     LEDGER_MIN_SUMMARY_WIDTH,
@@ -29,27 +25,9 @@ from theater.regie.trajectory.constants import (
     LEDGER_ROW_HEIGHT,
     LEDGER_SCROLLBAR_WIDTH,
     LEDGER_STATUS_COLUMN_WIDTH,
-    TRAJECTORY_INSPECTOR_RATIO_DEFAULT,
-    TRAJECTORY_INSPECTOR_RATIO_MAX,
-    TRAJECTORY_INSPECTOR_RATIO_MIN,
     TRAJECTORY_REQUEST_POSITION_GLYPH,
 )
-from theater.regie.trajectory.details import (
-    DETAIL_PARTICIPANT_CORRELATION_KEY_META,
-    DETAIL_PARTICIPANT_CORRELATION_TYPE_META,
-    DETAIL_PARTICIPANT_DIRECTION_META,
-    DETAIL_PARTICIPANT_EXACT_META,
-    DETAIL_PARTICIPANT_META,
-    DETAIL_PARTICIPANT_RELATION_META,
-    DETAIL_PARTICIPANT_TARGET_META,
-    DETAIL_PARTICIPANT_UNRESOLVED_META,
-    DETAIL_RECORD_TARGET_META,
-    DETAIL_TAB_META,
-    InlineDetails,
-    build_inline_details,
-    build_tool_inline_details,
-)
-from theater.regie.trajectory.enums import InspectorTab, OrderMode
+from theater.regie.trajectory.enums import OrderMode
 from theater.regie.trajectory.render import (
     format_duration,
     kind_glyph,
@@ -61,16 +39,12 @@ from theater.regie.trajectory.request_rows import request_row_text
 from theater.regie.trajectory.search import LedgerEntry, SearchResult
 from theater.regie.trajectory.tool_rows import tool_row_text
 from theater.trajectory import (
-    LinkDirection,
-    ParticipantLink,
     TrajectoryLane,
     TrajectoryRecord,
     TrajectoryRequest,
     TrajectoryStatus,
     TrajectoryToolOperation,
 )
-
-RETRY_ACTION_META = "trajectory_retry"
 
 
 class LedgerRecordHovered(Message):
@@ -97,49 +71,6 @@ class LedgerOlderClicked(Message):
     """The visible earlier-history row was activated."""
 
 
-class LedgerDetailTabChanged(Message):
-    """An inline detail tab was activated."""
-
-    def __init__(self, tab: InspectorTab) -> None:
-        super().__init__()
-        self.tab = tab
-
-
-class LedgerParticipantLinkClicked(Message):
-    """An inline participant link was activated."""
-
-    def __init__(
-        self,
-        participant_id: str,
-        target_record_id: str | None = None,
-        *,
-        exact: bool | None = None,
-        unresolved: bool = False,
-        link: ParticipantLink | None = None,
-    ) -> None:
-        super().__init__()
-        self.participant_id = participant_id
-        self.target_record_id = target_record_id
-        self.exact = target_record_id is not None if exact is None else exact
-        self.unresolved = unresolved
-        self.is_exact = self.exact
-        self.is_unresolved = self.unresolved
-        self.link = link
-
-
-class LedgerRecordLinkClicked(Message):
-    """An inline association asks to reveal another record."""
-
-    def __init__(self, record_id: str) -> None:
-        super().__init__()
-        self.record_id = record_id
-
-
-@dataclass(frozen=True, slots=True)
-class _DetailRow:
-    record_id: str
-
-
 class Ledger(DataTable[Text | str]):
     """Render records as native table rows with content-sized columns."""
 
@@ -157,7 +88,6 @@ class Ledger(DataTable[Text | str]):
     REQUEST_PREFIX = "request:"
     RECORD_PREFIX = "record:"
     TOOL_PREFIX = "tool:"
-    DETAIL_PREFIX = "detail:"
     COLUMN_LABELS: ClassVar[dict[str, str]] = {
         COLUMN_POSITION: "#",
         COLUMN_EVENT: "EVENT",
@@ -263,9 +193,6 @@ class Ledger(DataTable[Text | str]):
         has_older: bool = False,
         loading_older: bool = False,
         retry_message: str | None = None,
-        expanded_id: str | None = None,
-        detail_tab: InspectorTab = InspectorTab.SUMMARY,
-        detail_ratio: float = TRAJECTORY_INSPECTOR_RATIO_DEFAULT,
         position_offset: int = 0,
         **kwargs,
     ) -> None:
@@ -281,25 +208,19 @@ class Ledger(DataTable[Text | str]):
         )
         self._records: dict[str, TrajectoryRecord] = {}
         self._requests: dict[str, TrajectoryRequest] = {}
-        self._request_id_by_row_id: dict[str, str] = {}
         self._tools: dict[str, TrajectoryToolOperation] = {}
         self._entries: tuple[LedgerEntry, ...] = ()
         self._entry_indices: dict[str, int] = {}
         self._line_ids: tuple[str | None, ...] = ()
         self._record_indices: tuple[int | None, ...] = ()
-        self._row_entries: dict[str, LedgerEntry | _DetailRow | str] = {}
+        self._row_entries: dict[str, LedgerEntry | str] = {}
         self._selected_id = selected_id
         self._hovered_id = hovered_id
         self._order_mode = order_mode
         self._has_older = has_older
         self._loading_older = loading_older
         self._retry_message = retry_message
-        self._expanded_id = self._row_id_for_record(expanded_id)
-        self._detail_tab = detail_tab
-        self._detail_ratio = self._validated_detail_ratio(detail_ratio)
         self._position_offset = max(0, int(position_offset))
-        self._detail: InlineDetails | None = None
-        self._detail_height_limit = LEDGER_DETAIL_MIN_HEIGHT
         self._scroll_offset = 0
         self._viewport_height = 0
         self._rendered_line_ids: tuple[str | None, ...] = ()
@@ -317,6 +238,7 @@ class Ledger(DataTable[Text | str]):
         self._compact_columns = False
         self._building = False
         self._syncing_cursor = False
+        self._mouse_activation_key: str | None = None
         if search_result is not None:
             self.update_rows(
                 records,
@@ -327,9 +249,6 @@ class Ledger(DataTable[Text | str]):
                 has_older=has_older,
                 loading_older=loading_older,
                 retry_message=retry_message,
-                expanded_id=expanded_id,
-                detail_tab=detail_tab,
-                detail_ratio=detail_ratio,
                 position_offset=position_offset,
             )
 
@@ -356,41 +275,14 @@ class Ledger(DataTable[Text | str]):
         return self._rendered_record_count
 
     @property
-    def expanded_id(self) -> str | None:
-        return self._expanded_id if self._detail_entry_index is not None else None
-
-    @property
-    def detail_tab(self) -> InspectorTab:
-        return self._detail_tab
-
-    @property
-    def detail_ratio(self) -> float:
-        return self._detail_ratio
-
-    @property
-    def copy_text(self) -> str:
-        return self._detail.copy_text if self._detail is not None else ""
-
-    @property
     def retry_line_index(self) -> int | None:
         if not self._retry_message:
             return None
-        return self._row_prefix + len(self._entries) + int(self._detail_entry_index is not None)
+        return self._row_prefix + len(self._entries)
 
     @property
     def _row_prefix(self) -> int:
         return int(self._has_older)
-
-    @property
-    def _detail_entry_index(self) -> int | None:
-        if self._expanded_id is None:
-            return None
-        return self._entry_indices.get(self._expanded_id)
-
-    @property
-    def _detail_row_index(self) -> int | None:
-        index = self._detail_entry_index
-        return None if index is None else self._row_prefix + index + 1
 
     def _viewport_rows(self) -> int:
         if self._viewport_height:
@@ -403,21 +295,6 @@ class Ledger(DataTable[Text | str]):
             return self._viewport_height * LEDGER_ROW_HEIGHT
         return max(1, self.region.height - self.header_height)
 
-    @staticmethod
-    def _validated_detail_ratio(ratio: float) -> float:
-        if not isinstance(ratio, (int, float)) or isinstance(ratio, bool) or not isfinite(ratio):
-            raise ValueError("detail ratio must be finite")
-        return max(
-            TRAJECTORY_INSPECTOR_RATIO_MIN,
-            min(TRAJECTORY_INSPECTOR_RATIO_MAX, float(ratio)),
-        )
-
-    def _detail_limit_for_height(self, height: int) -> int:
-        available = max(1, height - self.header_height)
-        return max(
-            1, min(available, max(LEDGER_DETAIL_MIN_HEIGHT, round(available * self._detail_ratio)))
-        )
-
     def _row_key(self, entry: LedgerEntry) -> str:
         if entry.is_request_header:
             return f"{self.REQUEST_PREFIX}{entry.request_id}"
@@ -427,7 +304,7 @@ class Ledger(DataTable[Text | str]):
             return f"{self.TOOL_PREFIX}{entry.tool_operation_id}"
         return f"{self.RECORD_PREFIX}{entry.record_id}"
 
-    def _entry_for_key(self, key: object) -> LedgerEntry | _DetailRow | str | None:
+    def _entry_for_key(self, key: object) -> LedgerEntry | str | None:
         value = getattr(key, "value", key)
         return self._row_entries.get(str(value))
 
@@ -440,29 +317,11 @@ class Ledger(DataTable[Text | str]):
         index = self._entry_index_for_record(record_id)
         return self._entries[index].record_id if index is not None else None
 
-    def _tool_for_record(self, record_id: str | None) -> TrajectoryToolOperation | None:
-        index = self._entry_index_for_record(record_id)
-        if index is None:
-            return None
-        operation_id = self._entries[index].tool_operation_id
-        return self._tools.get(operation_id or "")
-
-    def _request_for_record(self, record_id: str | None) -> TrajectoryRequest | None:
-        row_id = self._row_id_for_record(record_id)
-        request_id = self._request_id_by_row_id.get(row_id or "")
-        return self._requests.get(request_id or "")
-
-    def _detail_key(self, record_id: str) -> str:
-        operation = self._tool_for_record(record_id)
-        identity = f"{self.TOOL_PREFIX}{operation.operation_id}" if operation else record_id
-        return f"{self.DETAIL_PREFIX}{identity}"
-
     def _row_index_for_record(self, record_id: str | None) -> int | None:
         index = self._entry_index_for_record(record_id)
         if index is None:
             return None
-        detail_index = self._detail_entry_index
-        return self._row_prefix + index + int(detail_index is not None and index > detail_index)
+        return self._row_prefix + index
 
     def _record_index_map(self) -> tuple[int | None, ...]:
         count = self._position_offset
@@ -573,13 +432,7 @@ class Ledger(DataTable[Text | str]):
         return self._component("muted")
 
     def _record_values(self, record: TrajectoryRecord, index: int, *, depth: int) -> dict[str, str]:
-        marker = (
-            "▾"
-            if record.record_id == self.expanded_id
-            else "●"
-            if record.record_id == self._hovered_id
-            else "▸"
-        )
+        marker = "●" if record.record_id == self._hovered_id else "▸"
         summary = f"{'  ' * depth}{sanitize_text(record.summary)}"
         if self._compact_columns:
             summary = f"[{sanitize_text(record.source)}] {summary}"
@@ -628,13 +481,7 @@ class Ledger(DataTable[Text | str]):
             )
         text = tool_row_text(tool, compact=self._compact_columns)
         hovered = entry.record_id == self._row_id_for_record(self._hovered_id)
-        marker = (
-            "▾"
-            if entry.record_id == self._row_id_for_record(self._expanded_id)
-            else "●"
-            if hovered
-            else "▸"
-        )
+        marker = "●" if hovered else "▸"
         status = Text(no_wrap=True)
         status.append("●", style=self._status_style(tool.status))
         status.append(f" {text.status}", style="dim")
@@ -743,43 +590,6 @@ class Ledger(DataTable[Text | str]):
             self.COLUMN_STATUS: " ↻ Retry ",
         }
 
-    def _build_detail(self) -> InlineDetails | None:
-        expanded_row_id = self._row_id_for_record(self._expanded_id)
-        for entry in self._entries:
-            if entry.record_id == expanded_row_id and entry.is_tool_operation:
-                tool = self._tools.get(entry.tool_operation_id or "")
-                if tool is not None:
-                    detail = build_tool_inline_details(
-                        tool,
-                        self._detail_tab,
-                        max_height=self._detail_height_limit,
-                        accent_style=self._component("accent"),
-                    )
-                    self._detail_tab = detail.tab
-                    return detail
-        record = self._records.get(self._expanded_id or "")
-        if record is None or self._detail_entry_index is None:
-            return None
-        detail = build_inline_details(
-            record,
-            self._detail_tab,
-            max_height=self._detail_height_limit,
-            accent_style=self._component("accent"),
-            request=self._request_for_record(self._expanded_id),
-        )
-        self._detail_tab = detail.tab
-        return detail
-
-    def _detail_values(self, detail: InlineDetails) -> dict[str, str]:
-        return {
-            self.COLUMN_POSITION: "╰",
-            self.COLUMN_EVENT: detail.menu.plain,
-            self.COLUMN_SOURCE: "",
-            self.COLUMN_SUMMARY: detail.content.plain,
-            self.COLUMN_STATUS: "",
-            self.COLUMN_DURATION: "",
-        }
-
     def _measure_column_widths(self) -> dict[str, int]:
         widths = {key: self._text_width(label) for key, label in self.COLUMN_LABELS.items()}
 
@@ -809,8 +619,6 @@ class Ledger(DataTable[Text | str]):
                         depth=entry.depth,
                     )
                 )
-        if self._detail is not None:
-            include(self._detail_values(self._detail))
         if self._retry_message:
             include(self._retry_values())
         if any(entry.is_tool_operation for entry in self._entries):
@@ -837,23 +645,6 @@ class Ledger(DataTable[Text | str]):
             key=key,
         )
 
-    def _add_detail_row(self, record_id: str, detail: InlineDetails) -> None:
-        key = self._detail_key(record_id)
-        cells: dict[str, Text | str] = {
-            self.COLUMN_POSITION: Text("╰", style=self._component("accent")),
-            self.COLUMN_EVENT: detail.menu,
-            self.COLUMN_SOURCE: "",
-            self.COLUMN_SUMMARY: detail.content,
-            self.COLUMN_STATUS: "",
-            self.COLUMN_DURATION: "",
-        }
-        self.add_row(
-            *(cells.get(column, "") for column in self._column_keys),
-            height=detail.height,
-            key=key,
-        )
-        self._row_entries[key] = _DetailRow(record_id)
-
     def _structure_key(self) -> tuple[object, ...]:
         return (
             self._order_mode,
@@ -865,11 +656,6 @@ class Ledger(DataTable[Text | str]):
             ),
             self._summary_width,
             self._position_offset,
-            (
-                self.expanded_id,
-                self._detail_tab,
-                self._detail_height_limit,
-            ),
             self._has_older,
             self._loading_older,
             self._retry_message,
@@ -941,8 +727,6 @@ class Ledger(DataTable[Text | str]):
                 else self._record_cells(record, record_index, depth=entry.depth)
             )
             self._add_cells(cells, key=key)
-            if entry.record_id == self.expanded_id and self._detail is not None:
-                self._add_detail_row(record.record_id, self._detail)
         if self._retry_message:
             values = self._retry_values()
             self._add_cells(
@@ -961,7 +745,7 @@ class Ledger(DataTable[Text | str]):
                     ),
                     self.COLUMN_STATUS: Text(
                         values[self.COLUMN_STATUS],
-                        style=self._component("retry") + Style(meta={RETRY_ACTION_META: True}),
+                        style=self._component("retry"),
                     ),
                 },
                 key=self.RETRY_KEY,
@@ -999,40 +783,6 @@ class Ledger(DataTable[Text | str]):
             offset += row.height
         self._row_starts = tuple(starts)
         self._rows_height = offset
-
-    def _render_detail_row(self) -> None:
-        detail = self._detail
-        record_id = self.expanded_id
-        if detail is None or record_id is None:
-            return
-        key = self._detail_key(record_id)
-        try:
-            row_index = self.get_row_index(key)
-        except RowDoesNotExist:
-            self._rebuild()
-            return
-        cells: dict[str, Text | str] = {
-            self.COLUMN_POSITION: Text("╰", style=self._component("accent")),
-            self.COLUMN_EVENT: detail.menu,
-            self.COLUMN_SOURCE: "",
-            self.COLUMN_SUMMARY: detail.content,
-            self.COLUMN_STATUS: "",
-            self.COLUMN_DURATION: "",
-        }
-        for column in self._column_keys:
-            self.update_cell(key, column, cells.get(column, ""))
-        row = self.ordered_rows[row_index]
-        if row.height != detail.height:
-            row.height = detail.height
-            self._require_update_dimensions = True
-            self.check_idle()
-            self.refresh(layout=True)
-        self._update_row_starts()
-        self._structure = self._structure_key()
-
-    def _update_detail_row(self) -> None:
-        self._detail = self._build_detail()
-        self._render_detail_row()
 
     def _refresh_changed_records(self) -> None:
         for line_index, entry in enumerate(self._entries):
@@ -1081,7 +831,6 @@ class Ledger(DataTable[Text | str]):
     ) -> None:
         self._records = {record.record_id: record for record in records}
         self._requests = dict(search_result.requests)
-        self._request_id_by_row_id = dict(search_result.request_id_by_row_id)
         self._tools = dict(search_result.tools)
         self._entries = search_result.entries
         self._entry_indices = {
@@ -1104,19 +853,10 @@ class Ledger(DataTable[Text | str]):
         has_older: bool = False,
         loading_older: bool = False,
         retry_message: str | None = None,
-        expanded_id: str | None = None,
-        detail_tab: InspectorTab = InspectorTab.SUMMARY,
-        detail_ratio: float = TRAJECTORY_INSPECTOR_RATIO_DEFAULT,
         position_offset: int = 0,
     ) -> None:
         old_selected_line = self._row_index_for_record(self._selected_id)
         old_selected = self._selected_id
-        previous_expanded_id = self.expanded_id
-        previous_detail_tab = self._detail_tab
-        previous_detail_limit = self._detail_height_limit
-        previous_detail_record = self._records.get(previous_expanded_id or "")
-        previous_detail_tool = self._tool_for_record(previous_expanded_id)
-        previous_detail_request = self._request_for_record(previous_expanded_id)
         self._set_content(records, search_result)
         self._selected_id = selected_id
         self._hovered_id = hovered_id
@@ -1124,27 +864,9 @@ class Ledger(DataTable[Text | str]):
         self._has_older = has_older
         self._loading_older = loading_older
         self._retry_message = retry_message
-        self._expanded_id = self._row_id_for_record(expanded_id)
-        self._detail_tab = detail_tab
-        self._detail_ratio = self._validated_detail_ratio(detail_ratio)
         self._position_offset = max(0, int(position_offset))
-        if self.region.height:
-            self._detail_height_limit = self._detail_limit_for_height(self.region.height)
         self._line_ids = tuple(entry.record_id for entry in self._entries)
         self._record_indices = self._record_index_map()
-        current_detail_record = self._records.get(self.expanded_id or "")
-        current_detail_tool = self._tool_for_record(self.expanded_id)
-        current_detail_request = self._request_for_record(self.expanded_id)
-        detail_changed = (
-            self._expanded_id != previous_expanded_id
-            or self._detail_tab != previous_detail_tab
-            or self._detail_height_limit != previous_detail_limit
-            or current_detail_record != previous_detail_record
-            or current_detail_tool != previous_detail_tool
-            or current_detail_request != previous_detail_request
-        )
-        if detail_changed:
-            self._detail = self._build_detail()
         self._column_widths = self._measure_column_widths()
         self._summary_width = self._columns_width()
         new_selected_line = self._row_index_for_record(selected_id)
@@ -1161,38 +883,9 @@ class Ledger(DataTable[Text | str]):
             self._refresh_changed_records()
             self._refresh_changed_requests()
             self._refresh_changed_tools()
-            if detail_changed and self.expanded_id is not None:
-                self._render_detail_row()
             self._sync_selection()
             self.set_scroll_offset(self._scroll_offset)
         self._update_render_window()
-
-    def set_details(
-        self,
-        expanded_id: str | None,
-        tab: InspectorTab,
-        *,
-        detail_ratio: float | None = None,
-    ) -> None:
-        if detail_ratio is not None:
-            self._detail_ratio = self._validated_detail_ratio(detail_ratio)
-            if self.region.height:
-                self._detail_height_limit = self._detail_limit_for_height(self.region.height)
-        expanded_id = self._row_id_for_record(expanded_id)
-        same_record = expanded_id == self.expanded_id
-        self._expanded_id = expanded_id
-        self._detail_tab = tab
-        if same_record and expanded_id is not None and self._detail is not None:
-            self._update_detail_row()
-        elif same_record and expanded_id is None:
-            return
-        else:
-            self._detail = self._build_detail()
-            self._column_widths = self._measure_column_widths()
-            self._summary_width = self._columns_width()
-            self._rebuild()
-        if expanded_id is not None:
-            self.scroll_to_record(expanded_id, include_detail=True)
 
     def _sync_selection(self) -> None:
         line = self._row_index_for_record(self._selected_id)
@@ -1209,7 +902,6 @@ class Ledger(DataTable[Text | str]):
             1,
             self._row_prefix
             + len(self._entries)
-            + int(self._detail_entry_index is not None)
             + (1 if self._retry_message else 0),
         )
 
@@ -1259,14 +951,12 @@ class Ledger(DataTable[Text | str]):
         self._update_render_window()
         return self._scroll_offset
 
-    def scroll_to_record(self, record_id: str | None, *, include_detail: bool = False) -> int:
+    def scroll_to_record(self, record_id: str | None) -> int:
         record_id = self._row_id_for_record(record_id)
         line = self._row_index_for_record(record_id)
         if line is None:
             return self._scroll_offset
-        last_line = (
-            self._detail_row_index if include_detail and record_id == self.expanded_id else line
-        )
+        last_line = line
         if last_line is None or line >= len(self._row_starts) or last_line >= len(self._row_starts):
             return self._scroll_offset
         top = self._row_starts[line]
@@ -1333,17 +1023,12 @@ class Ledger(DataTable[Text | str]):
         )
         compact_columns = event.size.width < LEDGER_COMPACT_WIDTH
         columns_changed = compact_columns != self._compact_columns
-        detail_height = self._detail_limit_for_height(event.size.height)
-        detail_height_changed = detail_height != self._detail_height_limit
-        self._detail_height_limit = detail_height
         if columns_changed:
             self._compact_columns = compact_columns
-        if columns_changed or detail_height_changed:
-            if detail_height_changed:
-                self._detail = self._build_detail()
+        if columns_changed:
             self._column_widths = self._measure_column_widths()
         summary_width = self._columns_width(event.size.width)
-        if summary_width != self._summary_width or columns_changed or detail_height_changed:
+        if summary_width != self._summary_width or columns_changed:
             self._summary_width = summary_width
             if len(self.columns):
                 self._rebuild()
@@ -1364,12 +1049,9 @@ class Ledger(DataTable[Text | str]):
         key = self.coordinate_to_cell_key(value).row_key
         entry = self._entry_for_key(key)
         record_id: str | None
-        if isinstance(entry, _DetailRow):
-            record_id = entry.record_id
-        else:
-            record_id = (
-                entry.record_id if isinstance(entry, LedgerEntry) and not entry.is_header else None
-            )
+        record_id = (
+            entry.record_id if isinstance(entry, LedgerEntry) and not entry.is_header else None
+        )
         self.post_message(LedgerRecordHovered(record_id))
 
     def _on_leave(self, event: events.Leave) -> None:
@@ -1379,107 +1061,53 @@ class Ledger(DataTable[Text | str]):
     def on_data_table_row_selected(self, message: DataTable.RowSelected) -> None:
         if message.data_table is not self:
             return
-        entry = self._entry_for_key(message.row_key)
+        key = str(message.row_key.value)
+        if key == self._mouse_activation_key:
+            self._mouse_activation_key = None
+            message.stop()
+            return
+        self._activate_entry(self._entry_for_key(message.row_key))
+        message.stop()
+
+    def _activate_entry(self, entry: LedgerEntry | str | None) -> None:
         if entry == self.OLDER_KEY:
             if not self._loading_older:
                 self.post_message(LedgerOlderClicked())
         elif entry == self.RETRY_KEY:
             self.post_message(LedgerRetryClicked())
-        elif isinstance(entry, _DetailRow) or (isinstance(entry, LedgerEntry) and entry.is_header):
+        elif isinstance(entry, LedgerEntry) and entry.is_header:
             self._sync_selection()
         elif isinstance(entry, LedgerEntry):
             self._selected_id = entry.record_id
             self.post_message(LedgerRecordClicked(entry.record_id))
-        message.stop()
 
-    def on_mouse_down(self, event: events.MouseDown) -> None:
+    async def _on_click(self, event: events.Click) -> None:
         if event.button != 1:
             return
         meta = event.style.meta
-        if meta.get(RETRY_ACTION_META):
-            event.stop()
-            self.post_message(LedgerRetryClicked())
-            return
-        if link := _participant_link_from_meta(meta):
-            event.stop()
-            self.post_message(
-                LedgerParticipantLinkClicked(
-                    link.participant_id,
-                    link.target_record_id,
-                    exact=meta.get(DETAIL_PARTICIPANT_EXACT_META) == "1",
-                    unresolved=meta.get(DETAIL_PARTICIPANT_UNRESOLVED_META) == "1",
-                    link=link,
-                )
-            )
-            return
-        if participant_id := meta.get(DETAIL_PARTICIPANT_META):
-            if isinstance(participant_id, str):
-                event.stop()
-                self.post_message(LedgerParticipantLinkClicked(participant_id))
-            return
-        if record_id := meta.get(DETAIL_RECORD_TARGET_META):
-            if isinstance(record_id, str):
-                event.stop()
-                self.post_message(LedgerRecordLinkClicked(record_id))
-            return
-        if tab_value := meta.get(DETAIL_TAB_META):
-            try:
-                tab = InspectorTab(str(tab_value))
-            except ValueError:
-                return
-            event.stop()
-            self.post_message(LedgerDetailTabChanged(tab))
-            return
         row = meta.get("row")
+        column = meta.get("column")
         if not isinstance(row, int) or not self.is_valid_row_index(row):
             return
-        if isinstance(self._entry_for_key(self.ordered_rows[row].key), _DetailRow):
-            owner = max(0, row - 1)
-            self.move_cursor(row=owner, column=0, animate=False)
-            event.stop()
-            return
-        self.move_cursor(row=row, column=0, animate=False)
+        if not isinstance(column, int) or not self.is_valid_column_index(column):
+            column = 0
+        self._set_hover_cursor(True)
+        self.move_cursor(row=row, column=column, animate=False)
+        row_key = self.ordered_rows[row].key
+        self._mouse_activation_key = str(row_key.value)
+        self._activate_entry(self._entry_for_key(row_key))
+        self.call_after_refresh(self._clear_mouse_activation, self._mouse_activation_key)
+        event.stop()
 
-
-def _participant_link_from_meta(meta: dict[str, object]) -> ParticipantLink | None:
-    participant_id = meta.get(DETAIL_PARTICIPANT_META)
-    relation = meta.get(DETAIL_PARTICIPANT_RELATION_META)
-    direction = meta.get(DETAIL_PARTICIPANT_DIRECTION_META)
-    if (
-        not isinstance(participant_id, str)
-        or not isinstance(relation, str)
-        or not isinstance(direction, str)
-    ):
-        return None
-    target_record_id = meta.get(DETAIL_PARTICIPANT_TARGET_META)
-    correlation_type = meta.get(DETAIL_PARTICIPANT_CORRELATION_TYPE_META)
-    correlation_key = meta.get(DETAIL_PARTICIPANT_CORRELATION_KEY_META)
-    if target_record_id is not None and not isinstance(target_record_id, str):
-        return None
-    if correlation_type is not None and not isinstance(correlation_type, str):
-        return None
-    if correlation_key is not None and not isinstance(correlation_key, str):
-        return None
-    try:
-        return ParticipantLink(
-            participant_id,
-            relation,
-            LinkDirection(direction),
-            target_record_id=target_record_id,
-            correlation_type=correlation_type,
-            correlation_key=correlation_key,
-        )
-    except ValueError:
-        return None
+    def _clear_mouse_activation(self, key: str) -> None:
+        if self._mouse_activation_key == key:
+            self._mouse_activation_key = None
 
 
 __all__ = [
     "Ledger",
-    "LedgerDetailTabChanged",
     "LedgerOlderClicked",
-    "LedgerParticipantLinkClicked",
     "LedgerRecordClicked",
     "LedgerRecordHovered",
-    "LedgerRecordLinkClicked",
     "LedgerRetryClicked",
 ]

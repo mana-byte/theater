@@ -15,7 +15,6 @@ from theater.constants.trajectory import (
 )
 from theater.trajectory.content import bounded_text
 from theater.trajectory.enums import (
-    TimingProvenance,
     TrajectoryKind,
     TrajectoryLane,
     TrajectoryStatus,
@@ -23,6 +22,7 @@ from theater.trajectory.enums import (
 )
 from theater.trajectory.grouping import deterministic_record_order
 from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryRecord, TrajectoryUsage
+from theater.trajectory.timing import derived_interval, terminal_timestamp
 from theater.trajectory.validation import (
     boolean,
     enum_value,
@@ -472,11 +472,13 @@ def _consistent_identity(records: list[TrajectoryRecord], name: str) -> str | No
 
 
 def _timing(records: list[TrajectoryRecord], status: TrajectoryStatus) -> Timing | None:
-    values = [record.timing for record in records if record.timing is not None]
+    timed_records = [record for record in records if record.timing is not None]
+    values = [record.timing for record in timed_records if record.timing is not None]
     if not values:
         return None
-    starts = [timing.start for timing in values if timing.start is not None]
-    start = min(starts) if starts else None
+    starts = [timing for timing in values if timing.start is not None]
+    start_timing = min(starts, key=lambda timing: timing.start or 0) if starts else None
+    start = start_timing.start if start_timing is not None else None
     latest = values[-1]
     first_tokens = [
         timing.first_token
@@ -485,20 +487,21 @@ def _timing(records: list[TrajectoryRecord], status: TrajectoryStatus) -> Timing
     ]
     first_token = min(first_tokens) if first_tokens else None
     if status in _ACTIVE:
-        return Timing(start=start, first_token=first_token, provenance=latest.provenance)
+        provenance = start_timing.provenance if start_timing is not None else latest.provenance
+        return Timing(start=start, first_token=first_token, provenance=provenance)
     if status in _TERMINAL:
-        ends = [timing.end for timing in values if timing.end is not None]
-        end = max(ends) if ends else None
-        if start is not None and end is not None and end >= start:
-            if first_token is not None and first_token > end:
-                first_token = None
-            return Timing(
-                start=start,
-                end=end,
-                duration_ms=max(0.0, (end - start) * 1000),
-                provenance=TimingProvenance.DERIVED,
-                first_token=first_token,
-            )
+        ends = [
+            record.timing
+            for record in timed_records
+            if record.status in _TERMINAL
+            and record.timing is not None
+            and terminal_timestamp(record.timing) is not None
+        ]
+        end_timing = max(ends, key=lambda timing: terminal_timestamp(timing) or 0) if ends else None
+        if start_timing is not None and end_timing is not None:
+            interval = derived_interval(start_timing, end_timing, first_token=first_token)
+            if interval is not None:
+                return interval
         with_duration = next(
             (timing for timing in reversed(values) if timing.duration_ms is not None),
             None,

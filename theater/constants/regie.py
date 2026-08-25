@@ -205,10 +205,10 @@ REGIE_DASHBOARD_TIPS: tuple[tuple[str | tuple[str, str], ...], ...] = (
     ),
     (
         ("Tips: ", _D),
-        ("single-click", _T),
-        (" an agent to select it; ", _D),
-        ("double-click", _T),
-        (" to stage it", _D),
+        ("left-click", _T),
+        (" an agent to stage it; ", _D),
+        ("right-click", _T),
+        (" to toggle its trajectory", _D),
     ),
     (
         ("Tips: hover a ", _D),

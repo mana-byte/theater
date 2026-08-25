@@ -172,6 +172,8 @@ def test_codex_facts_include_rollout_items_calls_parent_ids_reasoning_usage_and_
     assert mcp_result.timing is not None
     assert mcp_result.timing.duration_ms == pytest.approx(1500)
     assert reasoning.summary == "explicit summary"
+    assert usage.kind is TrajectoryKind.USAGE
+    assert usage.summary == ""
     assert usage.usage is not None
     assert usage.usage.model == "codex-test"
     assert usage.usage.provider == "openai"

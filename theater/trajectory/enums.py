@@ -20,6 +20,7 @@ class TrajectoryKind(StrEnum):
     USER = "user"
     ASSISTANT = "assistant"
     REASONING = "reasoning"
+    USAGE = "usage"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
     ERROR = "error"

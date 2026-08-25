@@ -220,6 +220,7 @@ def _lane_for_kind(kind: TrajectoryKind) -> TrajectoryLane:
     if kind in (
         TrajectoryKind.ASSISTANT,
         TrajectoryKind.REASONING,
+        TrajectoryKind.USAGE,
         TrajectoryKind.SYSTEM,
         TrajectoryKind.CONTEXT,
     ):

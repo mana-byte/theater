@@ -56,6 +56,8 @@ TRAJECTORY_IDLE_TTL_SECONDS = 5 * 60.0
 TRAJECTORY_CACHE_SWEEP_SECONDS = 30.0
 # Maximum bus rows projected before yielding back to the event loop.
 TRAJECTORY_BUS_DRAIN_BATCH = 256
+# Maximum persisted observation rows used to estimate transcript timing.
+TRAJECTORY_OBSERVATION_TIMING_ROW_LIMIT = 800
 # Maximum records retained in one régie participant window.
 TRAJECTORY_UI_RECORD_LIMIT = 2_000
 # Maximum record links retained by one request projection.
@@ -82,13 +84,6 @@ TRAJECTORY_FOLLOW_TIMEOUT_SECONDS = 20.0
 TRAJECTORY_TOOLTIP_DELAY_MS = 50
 # Maximum terminal cells shown from a record summary in a timeline tooltip.
 TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS = 240
-# Default inline trajectory detail height ratio.
-TRAJECTORY_INSPECTOR_RATIO_DEFAULT = 0.35
-# Minimum inline trajectory detail height ratio.
-TRAJECTORY_INSPECTOR_RATIO_MIN = 0.20
-# Maximum inline trajectory detail height ratio.
-TRAJECTORY_INSPECTOR_RATIO_MAX = 0.75
-
 __all__ = [
     "TRAJECTORY_BUS_DRAIN_BATCH",
     "TRAJECTORY_CACHE_SWEEP_SECONDS",
@@ -99,9 +94,6 @@ __all__ = [
     "TRAJECTORY_FOLLOW_TIMEOUT_SECONDS",
     "TRAJECTORY_IDENTIFIER_MAX_BYTES",
     "TRAJECTORY_IDLE_TTL_SECONDS",
-    "TRAJECTORY_INSPECTOR_RATIO_DEFAULT",
-    "TRAJECTORY_INSPECTOR_RATIO_MAX",
-    "TRAJECTORY_INSPECTOR_RATIO_MIN",
     "TRAJECTORY_LEDGER_PAGE_SIZE_DEFAULT",
     "TRAJECTORY_LEDGER_PAGE_SIZE_MAX",
     "TRAJECTORY_MAX_COVERAGE_GAPS",
@@ -111,6 +103,7 @@ __all__ = [
     "TRAJECTORY_MAX_LINKS_PER_RECORD",
     "TRAJECTORY_MAX_PAGE_GROUPS",
     "TRAJECTORY_MUTABLE_UPDATE_COALESCE_MS",
+    "TRAJECTORY_OBSERVATION_TIMING_ROW_LIMIT",
     "TRAJECTORY_OLDER_CURSOR_LIMIT",
     "TRAJECTORY_OVERVIEW_MAX_COST_USD",
     "TRAJECTORY_OVERVIEW_MAX_COUNT",

@@ -150,11 +150,14 @@ class Reducer:
         """
         job_handle: str | None = None
         last = None
+        observed_at: float | None = None
         for event in batch.events:
             if event.usage is not None:
                 self.record_usage(pid, event)
             if event.usage_only:
                 continue
+            if observed_at is None:
+                observed_at = self._wall_now_fn()
             self.store.bus_append(
                 f"agent.{event.kind}",
                 from_id=pid,
@@ -165,6 +168,7 @@ class Reducer:
                     "turn_end": event.turn_end,
                     "turn": event.turn_id,
                     "index": event.raw_index,
+                    "observed_at": observed_at,
                 },
             )
             last = event

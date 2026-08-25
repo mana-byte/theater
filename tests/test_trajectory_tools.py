@@ -322,13 +322,39 @@ def test_timing_derivation_fallback_contradictions_and_call_only() -> None:
     )[0]
 
     assert derived.timing == Timing(
-        start=1, end=4, duration_ms=3000, provenance=TimingProvenance.DERIVED
+        start=1, end=4, duration_ms=3000, provenance=TimingProvenance.OBSERVED
     )
     assert fallback.timing == Timing(start=4, duration_ms=7, provenance=TimingProvenance.OBSERVED)
     assert call_only.timing == Timing(
         start=1, end=9, duration_ms=8000, provenance=TimingProvenance.DERIVED
     )
     assert running_call_only.timing == Timing(start=1, provenance=TimingProvenance.UNAVAILABLE)
+
+
+def test_tool_timing_treats_terminal_result_point_as_operation_end() -> None:
+    operation = tool_operations_for_records(
+        (
+            _call(
+                "call",
+                1,
+                "shared",
+                timing=Timing(start=10, provenance=TimingProvenance.SOURCE),
+            ),
+            _result(
+                "result",
+                2,
+                "shared",
+                timing=Timing(start=12, provenance=TimingProvenance.SOURCE),
+            ),
+        )
+    )[0]
+
+    assert operation.timing == Timing(
+        start=10,
+        end=12,
+        duration_ms=2_000,
+        provenance=TimingProvenance.DERIVED,
+    )
 
 
 def test_operation_ids_and_previews_are_bounded_and_details_preserve_omission() -> None:

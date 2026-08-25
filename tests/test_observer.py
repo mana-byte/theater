@@ -135,6 +135,7 @@ async def test_new_records_reach_the_bus_as_normalized_events(registry, vibe_tre
     assert rows[0]["from_id"] == p.id
     # Vibe keeps no clock of its own; the payload says so rather than lying.
     assert rows[0]["payload"]["ts"] is None
+    assert rows[0]["payload"]["observed_at"] > 0
     assert rows[0]["ts"] > 0
 
 

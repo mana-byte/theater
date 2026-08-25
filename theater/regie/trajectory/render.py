@@ -7,6 +7,7 @@ import json
 from rich.cells import cell_len, set_cell_size
 from rich.text import Text
 
+from theater.formatting import event_stamp
 from theater.regie.trajectory.constants import (
     KIND_GLYPHS_BY_VALUE,
     LANE_GLYPHS_BY_VALUE,
@@ -77,7 +78,8 @@ def status_label(status: TrajectoryStatus) -> str:
 def format_duration(timing: Timing | None) -> str:
     if timing is None or timing.duration_ms is None:
         return "—"
-    return _format_milliseconds(timing.duration_ms)
+    prefix = "~" if timing.provenance is TimingProvenance.OBSERVED else ""
+    return f"{prefix}{_format_milliseconds(timing.duration_ms)}"
 
 
 def _format_milliseconds(milliseconds: float) -> str:
@@ -383,7 +385,12 @@ def detail_record_links_by_line(
     }
 
 
-def tooltip_text(record: TrajectoryRecord) -> str:
+def tooltip_text(
+    record: TrajectoryRecord,
+    *,
+    timing: Timing | None = None,
+    timing_scope: str | None = None,
+) -> str:
     """Return bounded, type-aware hover detail."""
     usage = record.usage
     identity = record.source
@@ -395,10 +402,26 @@ def tooltip_text(record: TrajectoryRecord) -> str:
     heading = f"{kind_glyph(record.kind)} {kind} · {identity} · {status_label(record.status)}"
     summary = " ".join(plain_text(record.summary).splitlines()) or "No preview available"
     metrics: list[str] = []
-    timing = record.timing
+    timing = timing or record.timing
     duration = format_duration(timing)
-    if duration != "—":
-        metrics.append(f"total {duration}")
+    if timing is not None and timing.duration_ms is not None:
+        provenance = _timing_provenance_suffix(timing)
+        metrics.append(f"{timing_scope or 'total'} {duration}{provenance}")
+    elif timing is not None and (timing.end is not None or timing.start is not None):
+        timestamp = timing.end if timing.end is not None else timing.start
+        assert timestamp is not None
+        qualifier = (
+            "observed"
+            if timing.provenance is TimingProvenance.OBSERVED
+            else timing.provenance.value
+        )
+        phase = "ended" if timing.end is not None and timing_scope is not None else "at"
+        scope = f"{timing_scope} " if timing_scope else ""
+        metrics.append(f"{scope}{phase} {event_stamp(timestamp)} · {qualifier}")
+    elif record.kind in _POINT_EVENT_KINDS:
+        metrics.append("point event")
+    else:
+        metrics.append(f"{timing_scope + ' ' if timing_scope else ''}duration unavailable")
     if timing is not None and timing.ttft_ms is not None:
         metrics.append(f"TTFT {_format_milliseconds(timing.ttft_ms)}")
     if timing is not None and timing.generation_duration_ms is not None:
@@ -412,8 +435,32 @@ def tooltip_text(record: TrajectoryRecord) -> str:
         )
         if usage.cost_usd is not None:
             metrics.append(f"cost ${compact_cost(usage.cost_usd)}")
-    detail = " · ".join(metrics) or "timing unavailable"
+    detail = " · ".join(metrics)
     return "\n".join(_bounded_tooltip_line(line) for line in (heading, summary, detail))
+
+
+_POINT_EVENT_KINDS = frozenset(
+    {
+        TrajectoryKind.USER,
+        TrajectoryKind.SYSTEM,
+        TrajectoryKind.CONTEXT,
+        TrajectoryKind.THEATER,
+        TrajectoryKind.SPAWN,
+        TrajectoryKind.RESUME,
+        TrajectoryKind.SEND,
+        TrajectoryKind.RECEIVE,
+        TrajectoryKind.KILL,
+        TrajectoryKind.TRANSCRIPT_BOUNDARY,
+        TrajectoryKind.SESSION_BOUNDARY,
+        TrajectoryKind.OBSERVATION_ERROR,
+    }
+)
+
+
+def _timing_provenance_suffix(timing: Timing) -> str:
+    if timing.provenance is TimingProvenance.SOURCE:
+        return ""
+    return f" {timing.provenance.value}"
 
 
 def _bounded_tooltip_line(value: str) -> str:

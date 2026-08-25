@@ -197,13 +197,7 @@ class AgentLeaf(Static):
             self._stop_timer()
 
     async def _on_click(self, event: events.Click) -> None:
-        """Single click moves the cursor; double click stages.
-
-        Staging mutates the user's tmux window layout, so it takes a
-        deliberate gesture — a stray click should not join a pane. The
-        check is ``event.chain >= 2``, the same discrimination vibe makes
-        in its config screen.
-        """
+        """Stage on left-click or toggle trajectory on right-click."""
         from theater.regie.app import RegieApp
 
         event.stop()
@@ -216,7 +210,9 @@ class AgentLeaf(Static):
         if app._usage_keyboard_metric is not None:
             app._leave_usage_metrics()
         app.cursor = index
-        if event.chain >= 2:
+        if event.button == 3:
+            await app.action_toggle_trajectory()
+        elif event.button == 1 and event.chain == 1:
             await app.action_stage()
 
     def on_mount(self) -> None:

@@ -11,17 +11,15 @@ from theater.regie.trajectory.details import (
     DETAIL_PARTICIPANT_RELATION_META,
     DETAIL_PARTICIPANT_TARGET_META,
     DETAIL_PARTICIPANT_UNRESOLVED_META,
-    build_inline_details,
+    build_span_details,
+    participant_link_from_meta,
 )
 from theater.regie.trajectory.enums import DiagnosticView, InspectorTab
-from theater.regie.trajectory.ledger import (
-    LedgerParticipantLinkClicked,
-    _participant_link_from_meta,
-)
 from theater.regie.trajectory.navigation import (
     TrajectoryNavigationHistory,
     TrajectoryNavigationTarget,
 )
+from theater.regie.trajectory.span_detail import SpanDetailParticipantLinkClicked
 from theater.regie.trajectory.view import (
     TrajectoryBackRequested,
     TrajectoryParticipantSelected,
@@ -104,9 +102,7 @@ def test_detail_link_metadata_preserves_only_bounded_link_primitives() -> None:
         correlation_type="job_handle",
         correlation_key="job-1",
     )
-    details = build_inline_details(
-        _record("source", 1, links=(link,)), InspectorTab.SUMMARY, max_height=20
-    )
+    details = build_span_details(_record("source", 1, links=(link,)), InspectorTab.SUMMARY)
     metadata = next(
         meta
         for span in details.content.spans
@@ -125,12 +121,10 @@ def test_detail_link_metadata_preserves_only_bounded_link_primitives() -> None:
     }
     assert all(isinstance(value, str) for value in metadata.values())
     assert "exact target target" in details.copy_text
-    assert _participant_link_from_meta(metadata) == link
-    clicked = LedgerParticipantLinkClicked("p2", "target", exact=True, link=link)
+    assert participant_link_from_meta(metadata) == link
+    clicked = SpanDetailParticipantLinkClicked(link, exact=True, unresolved=False)
     assert clicked.link == link
-    assert clicked.is_exact and not clicked.is_unresolved
-    legacy = LedgerParticipantLinkClicked("p2")
-    assert legacy.target_record_id is None and not legacy.exact
+    assert clicked.exact and not clicked.unresolved
 
 
 async def test_exact_links_request_target_selection_and_back_is_keyboard_accessible() -> None:
@@ -144,8 +138,8 @@ async def test_exact_links_request_target_selection_and_back_is_keyboard_accessi
         view.state.select("source")
         view._refresh()
 
-        view.on_ledger_participant_link_clicked(
-            LedgerParticipantLinkClicked("p2", "target", exact=True, link=link)
+        view.on_span_detail_participant_link_clicked(
+            SpanDetailParticipantLinkClicked(link, exact=True, unresolved=False)
         )
         await pilot.pause()
 
@@ -190,7 +184,7 @@ async def test_select_and_reveal_exact_loaded_record_clears_only_needed_filters(
         assert view.select_and_reveal_record("hidden")
 
         assert view.state.selected_id == "hidden"
-        assert view.state.expanded_id == "hidden"
+        assert view.state.detail_id == "hidden"
         assert view.state.diagnostic_view is DiagnosticView.ALL
         assert view.state.query == ""
         assert not view.state.lane_filters
@@ -198,5 +192,5 @@ async def test_select_and_reveal_exact_loaded_record_clears_only_needed_filters(
         assert view.state.ledger_page == 1
         assert view.select_and_reveal_record("result")
         assert view.state.selected_id == "call"
-        assert view.state.expanded_id == "call"
+        assert view.state.detail_id == "call"
         assert not view.select_and_reveal_record("missing")

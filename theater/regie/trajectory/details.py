@@ -1,4 +1,4 @@
-"""Pure rendering for one inline trajectory detail row."""
+"""Pure rendering for the full-height span detail panel."""
 
 from __future__ import annotations
 
@@ -20,6 +20,8 @@ from theater.regie.trajectory.render import (
 from theater.trajectory import (
     ContentFormat,
     DetailField,
+    LinkDirection,
+    ParticipantLink,
     TrajectoryRecord,
     TrajectoryRequest,
     bounded_preview,
@@ -35,17 +37,14 @@ DETAIL_PARTICIPANT_CORRELATION_KEY_META = "trajectory_detail_participant_correla
 DETAIL_PARTICIPANT_EXACT_META = "trajectory_detail_participant_exact"
 DETAIL_PARTICIPANT_UNRESOLVED_META = "trajectory_detail_participant_unresolved"
 DETAIL_RECORD_TARGET_META = "trajectory_detail_record_target"
-DETAIL_TAB_META = "trajectory_detail_tab"
 
 
 @dataclass(frozen=True, slots=True)
-class InlineDetails:
+class SpanDetails:
     tab: InspectorTab
     tabs: tuple[InspectorTab, ...]
-    menu: Text
     content: Text
     copy_text: str
-    height: int
 
 
 def active_detail_tab(record: TrajectoryRecord, requested: InspectorTab) -> InspectorTab:
@@ -53,55 +52,37 @@ def active_detail_tab(record: TrajectoryRecord, requested: InspectorTab) -> Insp
     return requested if requested in tabs else tabs[0]
 
 
-def move_detail_tab(record: TrajectoryRecord, active: InspectorTab, delta: int) -> InspectorTab:
-    tabs = tabs_for_record(record)
-    current = tabs.index(active) if active in tabs else 0
-    return tabs[max(0, min(len(tabs) - 1, current + delta))]
+def _participant_link_meta(link: ParticipantLink) -> dict[str, str]:
+    meta = {
+        DETAIL_PARTICIPANT_META: link.participant_id,
+        DETAIL_PARTICIPANT_RELATION_META: link.relation,
+        DETAIL_PARTICIPANT_DIRECTION_META: link.direction.value,
+        DETAIL_PARTICIPANT_EXACT_META: "1" if link.target_record_id is not None else "0",
+        DETAIL_PARTICIPANT_UNRESOLVED_META: "0",
+    }
+    if link.target_record_id is not None:
+        meta[DETAIL_PARTICIPANT_TARGET_META] = link.target_record_id
+    if link.correlation_type is not None:
+        meta[DETAIL_PARTICIPANT_CORRELATION_TYPE_META] = link.correlation_type
+        assert link.correlation_key is not None
+        meta[DETAIL_PARTICIPANT_CORRELATION_KEY_META] = link.correlation_key
+    return meta
 
 
-def _tab_menu(
-    record: TrajectoryRecord,
-    tabs: tuple[InspectorTab, ...],
-    active: InspectorTab,
+def _styled_content(
+    copy_text: str,
+    *,
     accent_style: Style,
+    participant_links: dict[int, ParticipantLink] | None = None,
+    record_links: dict[int, str] | None = None,
 ) -> Text:
-    menu = Text(no_wrap=True, overflow="ellipsis")
-    for index, tab in enumerate(tabs):
-        if index:
-            menu.append("\n")
-        selected = tab is active
-        state_style = Style(
-            bold=selected,
-            dim=not selected,
-            meta={DETAIL_TAB_META: tab.value, "trajectory_detail_record": record.record_id},
-        )
-        style = accent_style + state_style if selected else state_style
-        menu.append(f"{'▸' if selected else ' '} {tab.value.replace('_', ' ').upper()}", style)
-    return menu
-
-
-def _content(
-    record: TrajectoryRecord,
-    tab: InspectorTab,
-    max_height: int,
-    accent_style: Style,
-    request: TrajectoryRequest | None,
-) -> tuple[Text, str]:
-    copy_text = detail_text(record, tab, request)
-    links = detail_links_by_line(record, tab, request)
-    record_links = detail_record_links_by_line(record, tab, request)
-    lines = copy_text.splitlines() or [""]
-    clipped = len(lines) > max_height
-    visible = lines[:max_height]
-    if clipped:
-        visible[-1] = "… preview clipped"
-    content = Text(no_wrap=True, overflow="ellipsis")
-    for index, line in enumerate(visible):
+    participant_links = participant_links or {}
+    record_links = record_links or {}
+    content = Text(overflow="fold")
+    for index, line in enumerate(copy_text.splitlines() or [""]):
         if index:
             content.append("\n")
-        if clipped and index == len(visible) - 1:
-            content.append(line, style="dim italic")
-        elif link := links.get(index):
+        if link := participant_links.get(index):
             content.append(
                 line,
                 accent_style + Style(underline=True, meta=_participant_link_meta(link)),
@@ -121,47 +102,30 @@ def _content(
             content.append(value)
         else:
             content.append(line)
-    return content, copy_text
+    return content
 
 
-def _participant_link_meta(link) -> dict[str, str]:
-    meta = {
-        DETAIL_PARTICIPANT_META: link.participant_id,
-        DETAIL_PARTICIPANT_RELATION_META: link.relation,
-        DETAIL_PARTICIPANT_DIRECTION_META: link.direction.value,
-        DETAIL_PARTICIPANT_EXACT_META: "1" if link.target_record_id is not None else "0",
-        DETAIL_PARTICIPANT_UNRESOLVED_META: "0",
-    }
-    if link.target_record_id is not None:
-        meta[DETAIL_PARTICIPANT_TARGET_META] = link.target_record_id
-    if link.correlation_type is not None:
-        meta[DETAIL_PARTICIPANT_CORRELATION_TYPE_META] = link.correlation_type
-        assert link.correlation_key is not None
-        meta[DETAIL_PARTICIPANT_CORRELATION_KEY_META] = link.correlation_key
-    return meta
-
-
-def build_inline_details(
+def build_span_details(
     record: TrajectoryRecord,
     tab: InspectorTab,
     *,
-    max_height: int,
     accent_style: Style | None = None,
     request: TrajectoryRequest | None = None,
-) -> InlineDetails:
+) -> SpanDetails:
     tabs = tabs_for_record(record)
     active = active_detail_tab(record, tab)
     accent = accent_style or Style(dim=True)
-    height_limit = max(len(tabs), int(max_height), 1)
-    content, copy_text = _content(record, active, height_limit, accent, request)
-    height = min(height_limit, max(len(tabs), len(content.plain.splitlines()) or 1))
-    return InlineDetails(
+    copy_text = detail_text(record, active, request)
+    return SpanDetails(
         tab=active,
         tabs=tabs,
-        menu=_tab_menu(record, tabs, active, accent),
-        content=content,
+        content=_styled_content(
+            copy_text,
+            accent_style=accent,
+            participant_links=detail_links_by_line(record, active, request),
+            record_links=detail_record_links_by_line(record, active, request),
+        ),
         copy_text=copy_text,
-        height=height,
     )
 
 
@@ -170,13 +134,6 @@ _TOOL_TABS = (InspectorTab.SUMMARY, InspectorTab.INPUT, InspectorTab.RESULT, Ins
 
 def active_tool_detail_tab(_tool: TrajectoryToolOperation, requested: InspectorTab) -> InspectorTab:
     return requested if requested in _TOOL_TABS else InspectorTab.SUMMARY
-
-
-def move_tool_detail_tab(
-    _tool: TrajectoryToolOperation, active: InspectorTab, delta: int
-) -> InspectorTab:
-    current = _TOOL_TABS.index(active) if active in _TOOL_TABS else 0
-    return _TOOL_TABS[max(0, min(len(_TOOL_TABS) - 1, current + delta))]
 
 
 def _tool_field_lines(fields: tuple[DetailField, ...], aliases: set[str]) -> list[str]:
@@ -256,50 +213,57 @@ def tool_detail_text(tool: TrajectoryToolOperation, tab: InspectorTab) -> str:
     return _bounded_tool_details(tool, tab)[0]
 
 
-def build_tool_inline_details(
+def build_tool_span_details(
     tool: TrajectoryToolOperation,
     tab: InspectorTab,
     *,
-    max_height: int,
     accent_style: Style | None = None,
-) -> InlineDetails:
+) -> SpanDetails:
     active = active_tool_detail_tab(tool, tab)
     accent = accent_style or Style(dim=True)
-    menu = Text(no_wrap=True, overflow="ellipsis")
-    for index, candidate in enumerate(_TOOL_TABS):
-        if index:
-            menu.append("\n")
-        selected = candidate is active
-        menu.append(
-            f"{'▸' if selected else ' '} {candidate.value.upper()}",
-            accent
-            + Style(bold=selected, dim=not selected, meta={DETAIL_TAB_META: candidate.value}),
-        )
     copy_text, record_links = _bounded_tool_details(tool, active)
-    lines = copy_text.splitlines() or [""]
-    limit = max(len(_TOOL_TABS), int(max_height), 1)
-    visible = lines[:limit]
-    if len(lines) > limit:
-        visible[-1] = "… preview clipped"
-    content = Text(no_wrap=True, overflow="ellipsis")
-    for index, line in enumerate(visible):
-        if index:
-            content.append("\n")
-        if record_id := record_links.get(index):
-            content.append(
-                line,
-                accent + Style(underline=True, meta={DETAIL_RECORD_TARGET_META: record_id}),
-            )
-        else:
-            content.append(line)
-    return InlineDetails(
+    return SpanDetails(
         tab=active,
         tabs=_TOOL_TABS,
-        menu=menu,
-        content=content,
+        content=_styled_content(
+            copy_text,
+            accent_style=accent,
+            record_links=record_links,
+        ),
         copy_text=copy_text,
-        height=min(limit, max(len(_TOOL_TABS), len(visible))),
     )
+
+
+def participant_link_from_meta(meta: dict[str, object]) -> ParticipantLink | None:
+    participant_id = meta.get(DETAIL_PARTICIPANT_META)
+    relation = meta.get(DETAIL_PARTICIPANT_RELATION_META)
+    direction = meta.get(DETAIL_PARTICIPANT_DIRECTION_META)
+    if (
+        not isinstance(participant_id, str)
+        or not isinstance(relation, str)
+        or not isinstance(direction, str)
+    ):
+        return None
+    target_record_id = meta.get(DETAIL_PARTICIPANT_TARGET_META)
+    correlation_type = meta.get(DETAIL_PARTICIPANT_CORRELATION_TYPE_META)
+    correlation_key = meta.get(DETAIL_PARTICIPANT_CORRELATION_KEY_META)
+    if target_record_id is not None and not isinstance(target_record_id, str):
+        return None
+    if correlation_type is not None and not isinstance(correlation_type, str):
+        return None
+    if correlation_key is not None and not isinstance(correlation_key, str):
+        return None
+    try:
+        return ParticipantLink(
+            participant_id,
+            relation,
+            LinkDirection(direction),
+            target_record_id=target_record_id,
+            correlation_type=correlation_type,
+            correlation_key=correlation_key,
+        )
+    except ValueError:
+        return None
 
 
 __all__ = [
@@ -312,13 +276,11 @@ __all__ = [
     "DETAIL_PARTICIPANT_TARGET_META",
     "DETAIL_PARTICIPANT_UNRESOLVED_META",
     "DETAIL_RECORD_TARGET_META",
-    "DETAIL_TAB_META",
-    "InlineDetails",
+    "SpanDetails",
     "active_detail_tab",
     "active_tool_detail_tab",
-    "build_inline_details",
-    "build_tool_inline_details",
-    "move_detail_tab",
-    "move_tool_detail_tab",
+    "build_span_details",
+    "build_tool_span_details",
+    "participant_link_from_meta",
     "tool_detail_text",
 ]

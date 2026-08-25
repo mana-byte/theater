@@ -22,6 +22,7 @@ class DiagnosticView(StrEnum):
 class FocusRegion(StrEnum):
     TIMELINE = "timeline"
     LEDGER = "ledger"
+    DETAIL = "detail"
 
 
 class FilterDimension(StrEnum):

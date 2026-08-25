@@ -33,9 +33,6 @@ from theater.constants.observability import (
     OTLP_PROTOCOLS,
 )
 from theater.constants.trajectory import (
-    TRAJECTORY_INSPECTOR_RATIO_DEFAULT,
-    TRAJECTORY_INSPECTOR_RATIO_MAX,
-    TRAJECTORY_INSPECTOR_RATIO_MIN,
     TRAJECTORY_LEDGER_PAGE_SIZE_DEFAULT,
     TRAJECTORY_LEDGER_PAGE_SIZE_MAX,
 )
@@ -130,11 +127,6 @@ class RegieSection:
     dashboard_tip_hold_seconds: float = field(default=6.0, metadata={"min": MIN_INTERVAL})
     #: Seconds between characters while typing a dashboard tip in or out.
     dashboard_tip_char_interval: float = field(default=0.04, metadata={"min": MIN_INTERVAL})
-    #: Maximum inline trajectory detail height as a fraction of the ledger.
-    trajectory_inspector_ratio: float = field(
-        default=TRAJECTORY_INSPECTOR_RATIO_DEFAULT,
-        metadata={"min": TRAJECTORY_INSPECTOR_RATIO_MIN, "max": TRAJECTORY_INSPECTOR_RATIO_MAX},
-    )
     #: Records shown on one trajectory ledger page.
     trajectory_page_size: int = field(
         default=TRAJECTORY_LEDGER_PAGE_SIZE_DEFAULT,

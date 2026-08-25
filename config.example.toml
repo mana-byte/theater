@@ -103,9 +103,6 @@ dashboard_tip_hold_seconds = 6.0
 # Seconds between characters while typing a dashboard tip in or out.
 dashboard_tip_char_interval = 0.04
 
-# Maximum inline trajectory detail height as a fraction of the ledger.
-trajectory_inspector_ratio = 0.35
-
 # Number of records shown on one trajectory ledger page.
 trajectory_page_size = 30
 

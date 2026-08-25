@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from textual.app import App, ComposeResult
 from textual.coordinate import Coordinate
-from textual.widgets import Button, DataTable, Input, Select, SelectionList
+from textual.widgets import Button, DataTable, Input, RichLog, Select, SelectionList
 
 from theater.regie.trajectory.constants import (
     LEDGER_HEADER_HEIGHT,
     LEDGER_ROW_HEIGHT,
     SEARCH_HEIGHT,
+    TIMELINE_LANE_HEIGHT,
     TRAJECTORY_FOOTER_HEIGHT,
     TRAJECTORY_HORIZONTAL_PADDING,
 )
@@ -15,10 +16,17 @@ from theater.regie.trajectory.enums import FocusRegion, InspectorTab
 from theater.regie.trajectory.filter_panel import FilterPanel
 from theater.regie.trajectory.footer import TrajectoryFooter
 from theater.regie.trajectory.ledger import Ledger
+from theater.regie.trajectory.span_detail import SpanDetailPanel
 from theater.regie.trajectory.state import ParticipantTrajectoryState, TrajectoryStateStore
 from theater.regie.trajectory.timeline import Timeline
 from theater.regie.trajectory.view import ReturnToTree, TrajectoryRetryRequested, TrajectoryView
-from theater.trajectory import PanelState, PanelStateInfo, TrajectoryPage, TrajectoryRecord
+from theater.trajectory import (
+    PanelState,
+    PanelStateInfo,
+    TrajectoryLane,
+    TrajectoryPage,
+    TrajectoryRecord,
+)
 
 
 def make_record(record_id: str, summary: str, *, turn_id: str | None = "t1") -> TrajectoryRecord:
@@ -114,7 +122,7 @@ async def test_enter_live_tail_selects_final_page_and_clears_transient_details()
         view.state.select("r1")
         view.state.pause_follow()
         view.state.hovered_id = "r1"
-        view.state.expanded_id = "r1"
+        view.state.detail_id = "r1"
 
         view.enter_live_tail()
 
@@ -122,7 +130,7 @@ async def test_enter_live_tail_selects_final_page_and_clears_transient_details()
         assert view.state.selected_id == "r3"
         assert view.state.ledger_page == 2
         assert view.state.hovered_id is None
-        assert view.state.expanded_id is None
+        assert view.state.detail_id is None
 
 
 async def test_surface_uses_fixed_timeline_and_virtualized_ledger() -> None:
@@ -132,6 +140,7 @@ async def test_surface_uses_fixed_timeline_and_virtualized_ledger() -> None:
 
         assert isinstance(view.query_one("#trajectory-timeline"), Timeline)
         assert isinstance(view.query_one("#trajectory-ledger"), Ledger)
+        assert isinstance(view.query_one("#trajectory-span-detail"), SpanDetailPanel)
         assert isinstance(view.query_one("#trajectory-footer"), TrajectoryFooter)
         assert isinstance(view.query_one("#trajectory-filters"), FilterPanel)
         assert isinstance(view.query_one("#trajectory-filter-options"), SelectionList)
@@ -173,8 +182,8 @@ async def test_keys_route_regions_selection_search_reset_and_escape() -> None:
         await pilot.press("k")
         assert view.state.selected_id == "r1"
         await pilot.press("enter")
-        assert view.state.focus_region is FocusRegion.LEDGER
-        assert view.state.expanded_id == "r1"
+        assert view.state.focus_region is FocusRegion.DETAIL
+        assert view.state.detail_id == "r1"
         old_tab = view.state.detail_tab
         await pilot.press("l")
         assert view.state.detail_tab != old_tab
@@ -245,12 +254,16 @@ async def test_native_controls_handle_mouse_search_filters_and_row_activation() 
 
         ledger = app.query_one(Ledger)
         row = ledger.get_row_index("record:r1")
-        await pilot.click(
-            ledger,
-            offset=(2, ledger.header_height + row * LEDGER_ROW_HEIGHT + 1),
-        )
-        assert view.state.selected_id == "r1"
-        assert view.state.expanded_id == "r1"
+        for column in range(len(ledger.ordered_columns)):
+            region = ledger._get_cell_region(Coordinate(row, column))
+            await pilot.click(
+                ledger,
+                offset=(region.x + max(0, region.width - 2), region.y + 1),
+            )
+            assert view.state.selected_id == "r1"
+            assert view.state.detail_id == "r1"
+            view._close_details()
+            await pilot.pause()
 
 
 async def test_transcript_failure_shows_retry_inside_the_error_row() -> None:
@@ -300,28 +313,98 @@ async def test_copy_is_injected_and_literal_data_is_not_rich_escaped() -> None:
         assert "[literal] \\ path" in copied[0]
 
 
-async def test_details_expand_beneath_the_record_and_toggle_closed() -> None:
+async def test_details_replace_only_the_ledger_and_close_back_to_the_list() -> None:
     app = Host()
     async with app.run_test(size=(100, 30)) as pilot:
         view = await add_records(app)
         ledger = view.query_one("#trajectory-ledger", Ledger)
-        await pilot.press("enter")
-        record_row = ledger.get_row_index("record:r2")
-        assert ledger.get_row_index("detail:r2") == record_row + 1
-        assert ledger.ordered_rows[record_row].height == LEDGER_ROW_HEIGHT
-        assert ledger.ordered_rows[record_row + 1].height >= 3
+        panel = view.query_one("#trajectory-span-detail", SpanDetailPanel)
+        ledger_region = ledger.region
+        search_region = view.query_one("#trajectory-search", Input).region
+        timeline_region = view.query_one(Timeline).region
+        footer_region = view.query_one(TrajectoryFooter).region
 
-        event_column = ledger.get_column_index(Ledger.COLUMN_EVENT)
-        detail_region = ledger._get_cell_region(Coordinate(record_row + 1, event_column))
-        await pilot.click(
-            ledger,
-            offset=(detail_region.x + 2, detail_region.y - int(ledger.scroll_y) + 1),
-        )
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert view.state.detail_id == "r2"
+        assert ledger.has_class("-hidden")
+        assert not panel.has_class("-hidden")
+        assert panel.region == ledger_region
+        assert view.query_one("#trajectory-search", Input).region == search_region
+        assert view.query_one(Timeline).region == timeline_region
+        assert view.query_one(TrajectoryFooter).region == footer_region
+        assert panel.copy_text.endswith("second")
+        assert panel.query_one("#trajectory-span-detail-content-summary", RichLog).lines
+        assert not panel.query("#trajectory-span-detail-maximize")
+        assert not panel.query("#trajectory-span-detail-resize")
+
+        await pilot.press("l")
         assert view.state.detail_tab is InspectorTab.OUTPUT
 
+        await pilot.click("#trajectory-span-detail-close")
+        assert view.state.detail_id is None
+        assert not ledger.has_class("-hidden")
+        assert panel.has_class("-hidden")
+        assert app.focused is ledger
+
+
+async def test_timeline_click_replaces_the_open_span_detail() -> None:
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await add_records(app)
+        view._open_details("r1")
+        panel = view.query_one(SpanDetailPanel)
+        timeline = view.query_one(Timeline)
+
+        assert panel.record_id == "r1"
+        assert panel.copy_text.endswith("first")
+
+        record = view.state.records["r2"]
+        anchor = timeline.hover_anchor(record.record_id)
+        assert anchor is not None
+        lane_y = tuple(TrajectoryLane).index(record.lane) * TIMELINE_LANE_HEIGHT + 1
+        await pilot.click(
+            timeline,
+            offset=(anchor.x - timeline.region.x, lane_y),
+        )
+        await pilot.pause()
+
+        assert view.state.detail_id == "r2"
+        assert panel.record_id == "r2"
+        assert panel.copy_text.endswith("second")
+        assert not panel.has_class("-hidden")
+        assert view.query_one(Ledger).has_class("-hidden")
+
+
+async def test_span_detail_keeps_full_bounded_content_scrollable() -> None:
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        view = app.query_one(TrajectoryView)
+        long_text = "\n".join(f"line {index}" for index in range(100))
+        view.state.upsert([make_record("r1", long_text, turn_id=None)])
+        view._refresh()
+
         await pilot.press("enter")
-        assert view.state.expanded_id is None
-        assert "detail:r2" not in {row.key.value for row in ledger.ordered_rows}
+        await pilot.pause()
+
+        panel = view.query_one(SpanDetailPanel)
+        log = panel.query_one("#trajectory-span-detail-content-summary", RichLog)
+        assert "line 99" in panel.copy_text
+        assert log.virtual_size.height > log.scrollable_content_region.height
+
+
+async def test_escape_closes_span_before_returning_to_tree() -> None:
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await add_records(app)
+        await pilot.press("enter", "escape")
+
+        assert view.state.detail_id is None
+        assert app.returned == 0
+
+        await pilot.press("escape")
+        assert app.returned == 1
 
 
 async def test_remount_restores_the_participant_search_state() -> None:

@@ -25,9 +25,6 @@ from theater.regie.trajectory.constants import (
 from theater.regie.trajectory.controller import TrajectoryController
 from theater.regie.trajectory.details import (
     active_detail_tab,
-    active_tool_detail_tab,
-    move_detail_tab,
-    move_tool_detail_tab,
 )
 from theater.regie.trajectory.diagnostic_views import ordering_for_projection
 from theater.regie.trajectory.enums import DiagnosticView, FilterDimension, FocusRegion, OrderMode
@@ -45,12 +42,9 @@ from theater.regie.trajectory.footer import (
 from theater.regie.trajectory.hover_card import TimelineHoverCard
 from theater.regie.trajectory.ledger import (
     Ledger,
-    LedgerDetailTabChanged,
     LedgerOlderClicked,
-    LedgerParticipantLinkClicked,
     LedgerRecordClicked,
     LedgerRecordHovered,
-    LedgerRecordLinkClicked,
     LedgerRetryClicked,
 )
 from theater.regie.trajectory.ordering import TrajectoryOrdering, build_ordering
@@ -58,6 +52,13 @@ from theater.regie.trajectory.overview_strip import TrajectoryOverviewStrip
 from theater.regie.trajectory.pagination import paginate_search_result
 from theater.regie.trajectory.render import detail_text, sanitize_text
 from theater.regie.trajectory.search import FilterCounts, SearchCache, SearchResult, search_records
+from theater.regie.trajectory.span_detail import (
+    SpanDetailClosed,
+    SpanDetailPanel,
+    SpanDetailParticipantLinkClicked,
+    SpanDetailRecordLinkClicked,
+    SpanDetailTabChanged,
+)
 from theater.regie.trajectory.state import ParticipantTrajectoryState, TrajectoryStateStore
 from theater.regie.trajectory.timeline import (
     Timeline,
@@ -67,6 +68,7 @@ from theater.regie.trajectory.timeline import (
 )
 from theater.trajectory import (
     ParticipantLink,
+    Timing,
     TrajectoryGroup,
     TrajectoryKind,
     TrajectoryLane,
@@ -148,6 +150,7 @@ class TrajectoryView(Vertical):
     TrajectoryView > #trajectory-search,
     TrajectoryView > #trajectory-overview,
     TrajectoryView > #trajectory-ledger,
+    TrajectoryView > #trajectory-span-detail,
     TrajectoryView > #trajectory-footer {{
         layer: trajectory-base;
     }}
@@ -163,6 +166,11 @@ class TrajectoryView(Vertical):
         display: block;
     }}
     TrajectoryView > #trajectory-ledger {{
+        width: 1fr;
+        height: 1fr;
+        min-height: 0;
+    }}
+    TrajectoryView > #trajectory-span-detail {{
         width: 1fr;
         height: 1fr;
         min-height: 0;
@@ -244,6 +252,7 @@ class TrajectoryView(Vertical):
         yield Timeline(id="trajectory-timeline")
         yield FilterPanel(id="trajectory-filters", classes="-hidden")
         yield Ledger(id="trajectory-ledger")
+        yield SpanDetailPanel(id="trajectory-span-detail", classes="-hidden")
         yield TrajectoryFooter(id="trajectory-footer")
         yield TimelineHoverCard(id="trajectory-hover-card")
 
@@ -278,6 +287,14 @@ class TrajectoryView(Vertical):
         if self._load_worker is not None and not self._load_worker.is_finished:
             self._load_worker.cancel()
 
+    def on_resize(self, _event: events.Resize) -> None:
+        if not self.is_mounted:
+            return
+        card = self.query_one("#trajectory-hover-card", TimelineHoverCard)
+        card.fit_to_viewport(self.content_region.width)
+        if card.record_id is not None:
+            self.call_after_refresh(self._show_timeline_hover, card.record_id)
+
     def _controller_state_changed(self, state: ParticipantTrajectoryState) -> None:
         if state.participant_id != self.participant_id:
             return
@@ -285,8 +302,10 @@ class TrajectoryView(Vertical):
         if not self._retiring and self.is_attached:
             self._refresh()
 
-    def _make_search_key(self, records: tuple[TrajectoryRecord, ...]) -> tuple[object, ...]:
-        record_key = tuple((record.record_id, record.revision) for record in records)
+    def _make_search_key(self) -> tuple[object, ...]:
+        record_key = tuple(
+            (record.record_id, record.revision) for record in self.state.records.values()
+        )
         groups = tuple(self._group_signature(group) for group in self.state.groups)
         requests = tuple(
             (request.request_id, request.record_ids) for request in self.state.request_index.ordered
@@ -321,7 +340,7 @@ class TrajectoryView(Vertical):
         self._ordered_indices = {
             record.record_id: index for index, record in enumerate(self._ordered_records)
         }
-        key = self._make_search_key(records)
+        key = self._make_search_key()
         if key == self._search_key:
             return
         self._search_key = key
@@ -386,7 +405,7 @@ class TrajectoryView(Vertical):
 
     def _refresh(self, *, recompute: bool = True) -> None:
         if recompute or not self._ordered_records:
-            ordering = build_ordering(tuple(self.state.records.values()), self.state.groups)
+            ordering = build_ordering(tuple(self.state.display_records), self.state.groups)
             records = ordering.records
             self._recompute_search(records, ordering)
         else:
@@ -440,12 +459,9 @@ class TrajectoryView(Vertical):
             has_older=self.state.has_older and self._ledger_page.index == 0,
             loading_older=self.state.loading_older and self._ledger_page.index == 0,
             retry_message=self.state.retry_message if self.state.retry_kind else None,
-            expanded_id=self.state.expanded_id,
-            detail_tab=self.state.detail_tab,
-            detail_ratio=self.state.detail_ratio,
             position_offset=self._ledger_page.first_item - 1,
         )
-        self.state.detail_tab = ledger.detail_tab
+        self._sync_detail_panel()
         self._sync_filter_panel(update_options=True)
         if self.state.follow_tail:
             ledger.scroll_to_record(self.state.selected_id)
@@ -482,8 +498,8 @@ class TrajectoryView(Vertical):
             record_count=(
                 len(self.state.tool_index.ordered)
                 + sum(
-                    record_id not in self.state.tool_index.by_record_id
-                    for record_id in self.state.records
+                    record.record_id not in self.state.tool_index.by_record_id
+                    for record in self._ordered_records
                 )
             ),
             visible_count=len(self._search_result.row_ids),
@@ -506,7 +522,7 @@ class TrajectoryView(Vertical):
 
     @property
     def search_result(self) -> SearchResult:
-        ordering = build_ordering(tuple(self.state.records.values()), self.state.groups)
+        ordering = build_ordering(tuple(self.state.display_records), self.state.groups)
         self._recompute_search(ordering.records, ordering)
         return self._search_result
 
@@ -515,6 +531,10 @@ class TrajectoryView(Vertical):
         return self.state.focus_region
 
     def focus_region(self, region: FocusRegion) -> FocusRegion:
+        if region is FocusRegion.DETAIL and self.state.detail_id is None:
+            region = FocusRegion.LEDGER
+        elif region is FocusRegion.LEDGER and self.state.detail_id is not None:
+            region = FocusRegion.DETAIL
         self.state.focus_region = region
         if self.is_mounted:
             if region is not FocusRegion.TIMELINE:
@@ -522,6 +542,7 @@ class TrajectoryView(Vertical):
             widget = {
                 FocusRegion.TIMELINE: self.query_one("#trajectory-timeline", Timeline),
                 FocusRegion.LEDGER: self.query_one("#trajectory-ledger", Ledger),
+                FocusRegion.DETAIL: self.query_one("#trajectory-span-detail", SpanDetailPanel),
             }[region]
             widget.focus()
         return region
@@ -530,7 +551,8 @@ class TrajectoryView(Vertical):
         """Enter this trajectory at its live tail without stale transient details."""
         self.state.resume_follow()
         self.state.hovered_id = None
-        self.state.expanded_id = None
+        self.state.detail_id = None
+        self.state.focus_region = FocusRegion.LEDGER
         self._refresh()
 
     def _sync_filter_panel(self, *, update_options: bool = False) -> None:
@@ -581,6 +603,31 @@ class TrajectoryView(Vertical):
         request_id = self.state.request_index.by_record_id.get(record_id)
         return self.state.request_index.by_id.get(request_id or "")
 
+    def _sync_detail_panel(self) -> None:
+        ledger = self.query_one("#trajectory-ledger", Ledger)
+        panel = self.query_one("#trajectory-span-detail", SpanDetailPanel)
+        record_id = self.state.row_anchor(self.state.detail_id)
+        record = self.state.records.get(record_id or "")
+        if record is None:
+            self.state.detail_id = None
+            self._set_class(ledger, "-hidden", False)
+            self._set_class(panel, "-hidden", True)
+            if self.state.focus_region is FocusRegion.DETAIL:
+                self.state.focus_region = FocusRegion.LEDGER
+            return
+        assert record_id is not None
+        operation_id = self.state.tool_index.by_record_id.get(record_id)
+        tool = self.state.tool_index.by_id.get(operation_id) if operation_id is not None else None
+        self.state.detail_id = record_id
+        self._set_class(ledger, "-hidden", True)
+        self._set_class(panel, "-hidden", False)
+        self.state.detail_tab = panel.set_span(
+            record,
+            tool=tool,
+            request=self._request_for_record(record_id),
+            tab=self.state.detail_tab,
+        )
+
     def select_and_reveal_record(self, record_id: str) -> bool:
         """Select and open a loaded record without requesting more trajectory data."""
         if record_id not in self.state.records:
@@ -599,20 +646,12 @@ class TrajectoryView(Vertical):
             self.state.source_filters.clear()
         self.state.select(anchor)
         self._update_follow_for_selection(anchor)
-        self.state.expanded_id = anchor
-        operation_id = self.state.tool_index.by_record_id.get(anchor)
-        if operation_id is not None:
-            self.state.detail_tab = active_tool_detail_tab(
-                self.state.tool_index.by_id[operation_id], self.state.detail_tab
-            )
-        else:
-            self.state.detail_tab = active_detail_tab(
-                self.state.records[anchor], self.state.detail_tab
-            )
+        self.state.detail_id = anchor
+        self.state.focus_region = FocusRegion.DETAIL
         self._refresh()
         self._sync_selection()
         if self.is_mounted:
-            self.query_one("#trajectory-ledger", Ledger).focus()
+            self.query_one("#trajectory-span-detail", SpanDetailPanel).focus()
         return True
 
     async def wait_until_loaded(self) -> None:
@@ -817,46 +856,43 @@ class TrajectoryView(Vertical):
                 self.controller.resume_follow(self.participant_id), name="trajectory-follow"
             )
 
-    def _toggle_details(self, record_id: str | None) -> None:
+    def _open_details(self, record_id: str | None) -> None:
         record_id = self.state.row_anchor(record_id)
         if record_id is None:
             return
-        opening = self.state.expanded_id != record_id
         self.state.select(record_id)
-        self.state.expanded_id = record_id if opening else None
-        if opening:
-            operation_id = self.state.tool_index.by_record_id.get(record_id)
-            if operation_id is not None:
-                self.state.detail_tab = active_tool_detail_tab(
-                    self.state.tool_index.by_id[operation_id], self.state.detail_tab
-                )
-            else:
-                self.state.detail_tab = active_detail_tab(
-                    self.state.records[record_id], self.state.detail_tab
-                )
-        self.state.focus_region = FocusRegion.LEDGER
+        self.state.detail_id = record_id
+        self.state.focus_region = FocusRegion.DETAIL
         self._sync_selection(scroll=False)
         if not self.is_mounted:
             return
-        ledger = self.query_one("#trajectory-ledger", Ledger)
-        ledger.set_details(
-            self.state.expanded_id,
-            self.state.detail_tab,
-            detail_ratio=self.state.detail_ratio,
-        )
-        self.state.detail_tab = ledger.detail_tab
-        if not opening:
-            ledger.scroll_to_record(record_id)
+        self._sync_detail_panel()
         self.state.timeline_scroll = self.query_one(
             "#trajectory-timeline", Timeline
         ).scroll_span_into_view(record_id)
+        self.query_one("#trajectory-span-detail", SpanDetailPanel).focus()
+
+    def _close_details(self) -> None:
+        record_id = self.state.detail_id
+        self.state.detail_id = None
+        self.state.focus_region = FocusRegion.LEDGER
+        if not self.is_mounted:
+            return
+        self._sync_detail_panel()
+        ledger = self.query_one("#trajectory-ledger", Ledger)
+        ledger.scroll_to_record(record_id)
         ledger.focus()
 
-    def action_toggle_details(self) -> None:
-        self._toggle_details(self.state.selected_id)
+    def action_open_details(self) -> None:
+        if self.state.detail_id is None:
+            self._open_details(self.state.selected_id)
 
     def action_cycle_region(self, delta: int = 1) -> None:
-        regions = tuple(FocusRegion)
+        regions = (
+            (FocusRegion.TIMELINE, FocusRegion.DETAIL)
+            if self.state.detail_id is not None
+            else (FocusRegion.TIMELINE, FocusRegion.LEDGER)
+        )
         index = regions.index(self.state.focus_region)
         self.focus_region(regions[(index + delta) % len(regions)])
 
@@ -881,9 +917,8 @@ class TrajectoryView(Vertical):
                 await result
 
     def action_copy(self) -> None:
-        ledger = self.query_one("#trajectory-ledger", Ledger)
-        if ledger.expanded_id is not None:
-            text = ledger.copy_text
+        if self.state.detail_id is not None:
+            text = self.query_one("#trajectory-span-detail", SpanDetailPanel).copy_text
         elif self.state.selected_record is not None:
             record = self.state.selected_record
             text = detail_text(
@@ -911,18 +946,23 @@ class TrajectoryView(Vertical):
             else:
                 self.action_timeline_next()
         else:
-            ledger = self.query_one("#trajectory-ledger", Ledger)
-            record_id = ledger.expanded_id
-            operation_id = self.state.tool_index.by_record_id.get(record_id or "")
-            record = self.state.records.get(record_id or "")
-            if operation_id is not None:
-                self.state.detail_tab = move_tool_detail_tab(
-                    self.state.tool_index.by_id[operation_id], self.state.detail_tab, delta
-                )
-                ledger.set_details(record_id, self.state.detail_tab)
-            elif record is not None:
-                self.state.detail_tab = move_detail_tab(record, self.state.detail_tab, delta)
-                ledger.set_details(record_id, self.state.detail_tab)
+            panel = self.query_one("#trajectory-span-detail", SpanDetailPanel)
+            if self.state.detail_id is not None:
+                self.state.detail_tab = panel.move_tab(delta)
+
+    def _handle_contextual_vertical(self, delta: int) -> None:
+        if self.state.focus_region is FocusRegion.DETAIL:
+            self.query_one("#trajectory-span-detail", SpanDetailPanel).scroll_content(delta)
+        elif delta < 0:
+            self.action_select_previous()
+        else:
+            self.action_select_next()
+
+    def _handle_escape(self) -> None:
+        if self.state.detail_id is not None:
+            self._close_details()
+        else:
+            self.action_return_to_tree()
 
     def _search_owns_focus(self) -> bool:
         return self.is_mounted and self.app.focused is self.query_one("#trajectory-search", Input)
@@ -952,10 +992,10 @@ class TrajectoryView(Vertical):
         if self._page_select_owns_focus():
             return
         actions: dict[str, Callable[[], None]] = {
-            "j": self.action_select_next,
-            "down": self.action_select_next,
-            "k": self.action_select_previous,
-            "up": self.action_select_previous,
+            "j": lambda: self._handle_contextual_vertical(1),
+            "down": lambda: self._handle_contextual_vertical(1),
+            "k": lambda: self._handle_contextual_vertical(-1),
+            "up": lambda: self._handle_contextual_vertical(-1),
             "h": lambda: self._handle_contextual_horizontal(-1),
             "left": lambda: self._handle_contextual_horizontal(-1),
             "l": lambda: self._handle_contextual_horizontal(1),
@@ -977,10 +1017,10 @@ class TrajectoryView(Vertical):
             "R": self.action_retry,
             "shift+r": self.action_retry,
             "y": self.action_copy,
-            "enter": self.action_toggle_details,
+            "enter": self.action_open_details,
             "tab": lambda: self.action_cycle_region(1),
             "shift+tab": lambda: self.action_cycle_region(-1),
-            "escape": self.action_return_to_tree,
+            "escape": self._handle_escape,
         }
         action = actions.get(event.key)
         if action is None:
@@ -1024,6 +1064,10 @@ class TrajectoryView(Vertical):
         regions = (
             (FocusRegion.TIMELINE, timeline),
             (FocusRegion.LEDGER, self.query_one("#trajectory-ledger", Ledger)),
+            (
+                FocusRegion.DETAIL,
+                self.query_one("#trajectory-span-detail", SpanDetailPanel),
+            ),
         )
         for region, container in regions:
             if widget is container or container in ancestors:
@@ -1043,21 +1087,41 @@ class TrajectoryView(Vertical):
     def _show_timeline_hover(self, record_id: str | None) -> None:
         card = self.query_one("#trajectory-hover-card", TimelineHoverCard)
         timeline = self.query_one("#trajectory-timeline", Timeline)
+        card.fit_to_viewport(self.content_region.width)
         record = self.state.records.get(record_id or "")
         anchor = timeline.hover_anchor(record_id)
         if record is None or anchor is None:
             card.hide()
             return
-        card.show_record(record, anchor)
+        timing, scope = self._hover_timing(record.record_id)
+        card.show_record(record, anchor, timing=timing, timing_scope=scope)
+
+    def _hover_timing(self, record_id: str) -> tuple[Timing | None, str | None]:
+        operation_id = self.state.tool_index.by_record_id.get(record_id)
+        if operation_id is not None:
+            timing = self.state.tool_index.by_id[operation_id].timing
+            if timing is not None:
+                return timing, "tool"
+        request_id = self.state.request_index.by_record_id.get(record_id)
+        if request_id is not None:
+            timing = self.state.request_index.by_id[request_id].timing
+            if timing is not None:
+                return timing, "request"
+        return self.state.records[record_id].timing, None
 
     def on_timeline_span_clicked(self, message: TimelineSpanClicked) -> None:
         self._update_follow_for_selection(message.record_id)
         self.state.select(message.record_id)
         self.state.focus_region = FocusRegion.TIMELINE
+        detail_open = self.state.detail_id is not None
+        if detail_open:
+            self.state.detail_id = self.state.row_anchor(message.record_id)
         if self._reveal_selection_page(message.record_id):
             self._refresh(recompute=False)
         else:
             self._sync_selection()
+            if detail_open:
+                self._sync_detail_panel()
 
     def on_timeline_scrolled(self, message: TimelineScrolled) -> None:
         self.state.timeline_scroll = message.offset
@@ -1082,7 +1146,7 @@ class TrajectoryView(Vertical):
     def on_ledger_record_clicked(self, message: LedgerRecordClicked) -> None:
         self._update_follow_for_selection(message.record_id)
         self.state.select(message.record_id)
-        self._toggle_details(message.record_id)
+        self._open_details(message.record_id)
 
     def on_ledger_retry_clicked(self, _message: LedgerRetryClicked) -> None:
         self.action_retry()
@@ -1154,7 +1218,9 @@ class TrajectoryView(Vertical):
     def on_footer_page_requested(self, message: FooterPageRequested) -> None:
         self.action_select_page(message.page_index)
 
-    def on_ledger_participant_link_clicked(self, message: LedgerParticipantLinkClicked) -> None:
+    def on_span_detail_participant_link_clicked(
+        self, message: SpanDetailParticipantLinkClicked
+    ) -> None:
         if message.target_record_id is None and self._participant_link is not None:
             self.run_worker(
                 self._call_participant_link(message.participant_id),
@@ -1171,7 +1237,7 @@ class TrajectoryView(Vertical):
                 )
             )
 
-    def on_ledger_record_link_clicked(self, message: LedgerRecordLinkClicked) -> None:
+    def on_span_detail_record_link_clicked(self, message: SpanDetailRecordLinkClicked) -> None:
         self.run_worker(
             self._reveal_record_link(message.record_id),
             name="trajectory-record-link",
@@ -1197,12 +1263,11 @@ class TrajectoryView(Vertical):
         if not self.select_and_reveal_record(record_id):
             self.notify("linked event could not be shown", severity="warning")
 
-    def on_ledger_detail_tab_changed(self, message: LedgerDetailTabChanged) -> None:
+    def on_span_detail_tab_changed(self, message: SpanDetailTabChanged) -> None:
         self.state.detail_tab = message.tab
-        self.query_one("#trajectory-ledger", Ledger).set_details(
-            self.state.expanded_id,
-            self.state.detail_tab,
-        )
+
+    def on_span_detail_closed(self, _message: SpanDetailClosed) -> None:
+        self._close_details()
 
 
 __all__ = [

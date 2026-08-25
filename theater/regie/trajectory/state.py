@@ -6,14 +6,10 @@ import json
 from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from math import isfinite
 
 from theater.regie.trajectory.constants import (
     TRAJECTORY_DETAIL_FIELD_MAX_BYTES,
     TRAJECTORY_IDENTIFIER_MAX_BYTES,
-    TRAJECTORY_INSPECTOR_RATIO_DEFAULT,
-    TRAJECTORY_INSPECTOR_RATIO_MAX,
-    TRAJECTORY_INSPECTOR_RATIO_MIN,
     TRAJECTORY_LEDGER_PAGE_SIZE_DEFAULT,
     TRAJECTORY_LEDGER_PAGE_SIZE_MAX,
     TRAJECTORY_UI_MAX_BYTES,
@@ -92,9 +88,8 @@ class ParticipantTrajectoryState:
     order_mode: OrderMode = OrderMode.ORDER
     ledger_page: int = 0
     timeline_scroll: int = 0
-    expanded_id: str | None = None
+    detail_id: str | None = None
     detail_tab: InspectorTab = InspectorTab.SUMMARY
-    detail_ratio: float = TRAJECTORY_INSPECTOR_RATIO_DEFAULT
     focus_region: FocusRegion = FocusRegion.LEDGER
     stale: bool = False
     stale_message: str = ""
@@ -113,7 +108,6 @@ class ParticipantTrajectoryState:
             raise ValueError("participant_id must be a non-empty string")
         if len(self.participant_id.encode("utf-8")) > TRAJECTORY_IDENTIFIER_MAX_BYTES:
             raise ValueError("participant_id is too large")
-        self.set_detail_ratio(self.detail_ratio)
         if not isinstance(self.ledger_page, int) or isinstance(self.ledger_page, bool):
             raise TypeError("ledger page must be an integer")
         self.ledger_page = max(0, self.ledger_page)
@@ -128,6 +122,11 @@ class ParticipantTrajectoryState:
     @property
     def record_list(self) -> list[TrajectoryRecord]:
         return list(canonical_group_records(tuple(self.records.values()), self.groups))
+
+    @property
+    def display_records(self) -> list[TrajectoryRecord]:
+        """Return user-facing activity while retaining accounting records in state."""
+        return [record for record in self.record_list if record.kind is not TrajectoryKind.USAGE]
 
     @property
     def selected_record(self) -> TrajectoryRecord | None:
@@ -197,8 +196,8 @@ class ParticipantTrajectoryState:
                 self.selected_id = None
             if record_id == self.hovered_id:
                 self.hovered_id = None
-            if record_id == self.expanded_id:
-                self.expanded_id = None
+            if record_id == self.detail_id:
+                self.detail_id = None
 
     def _apply_records(
         self, records: Sequence[TrajectoryRecord], *, older: bool = False
@@ -240,8 +239,9 @@ class ParticipantTrajectoryState:
         )
         self._trim(evict_newest=older)
         self._rebuild_groups()
-        if self.selected_id is None and self.records and self.follow_tail:
-            self.selected_id = self.record_list[-1].record_id
+        display_records = self.display_records
+        if self.selected_id is None and display_records and self.follow_tail:
+            self.selected_id = display_records[-1].record_id
         return added, updated
 
     def upsert(
@@ -292,16 +292,18 @@ class ParticipantTrajectoryState:
             self._apply_records(page.records)
             self.groups = page.groups or self.groups
         self.apply_panel_state(page.panel_state)
-        if self.follow_tail and self.records:
-            self.selected_id = self.record_list[-1].record_id
-        elif prior_selection in self.records:
+        display_records = self.display_records
+        display_ids = {record.record_id for record in display_records}
+        if self.follow_tail:
+            self.selected_id = display_records[-1].record_id if display_records else None
+        elif prior_selection in display_ids:
             self.selected_id = prior_selection
-        elif self.records:
-            self.selected_id = next(reversed(self.records))
+        elif display_records:
+            self.selected_id = display_records[-1].record_id
         else:
             self.selected_id = None
-        if self.row_anchor(self.expanded_id) is None:
-            self.expanded_id = None
+        if self.row_anchor(self.detail_id) is None:
+            self.detail_id = None
 
     def apply_older(self, page: TrajectoryPage) -> None:
         if page.stream_id is not None and self.stream_id not in {None, page.stream_id}:
@@ -345,12 +347,16 @@ class ParticipantTrajectoryState:
             if not isinstance(panel, PanelStateInfo):
                 raise TrajectoryValidationError("follow panel state is invalid")
             self.apply_panel_state(panel)
+        previous_display_ids = {record.record_id for record in self.display_records}
         added, updated = self._apply_records([upsert.record for upsert in delta.upserts])
-        if added and not self.follow_tail:
-            self.new_count += added
-        elif added:
+        displayed_added = sum(
+            record.record_id not in previous_display_ids for record in self.display_records
+        )
+        if displayed_added and not self.follow_tail:
+            self.new_count += displayed_added
+        elif displayed_added:
             self.new_count = 0
-            self.selected_id = self.record_list[-1].record_id
+            self.selected_id = self.display_records[-1].record_id
         if panel is None and self.retry_kind != "resync":
             self.retry_kind = None
             self.retry_message = ""
@@ -384,8 +390,8 @@ class ParticipantTrajectoryState:
     def resume_follow(self) -> None:
         self.follow_tail = True
         self.new_count = 0
-        if self.records:
-            self.selected_id = self.record_list[-1].record_id
+        if self.display_records:
+            self.selected_id = self.display_records[-1].record_id
 
     def select(self, record_id: str | None) -> bool:
         if record_id is None:
@@ -400,7 +406,7 @@ class ParticipantTrajectoryState:
         ids = (
             list(visible_ids)
             if visible_ids is not None
-            else [record.record_id for record in self.record_list]
+            else [record.record_id for record in self.display_records]
         )
         if not ids:
             self.selected_id = None
@@ -419,15 +425,6 @@ class ParticipantTrajectoryState:
             self.pause_follow()
         return self.selected_id
 
-    def set_detail_ratio(self, ratio: float) -> float:
-        if not isinstance(ratio, (int, float)) or isinstance(ratio, bool) or not isfinite(ratio):
-            raise ValueError("detail ratio must be finite")
-        self.detail_ratio = max(
-            TRAJECTORY_INSPECTOR_RATIO_MIN,
-            min(TRAJECTORY_INSPECTOR_RATIO_MAX, float(ratio)),
-        )
-        return self.detail_ratio
-
     def reset_ui(self) -> None:
         """Reset only this participant's in-memory presentation state."""
         resync_pending = self.retry_kind == "resync"
@@ -443,7 +440,7 @@ class ParticipantTrajectoryState:
         self.order_mode = OrderMode.ORDER
         self.ledger_page = 0
         self.timeline_scroll = 0
-        self.expanded_id = None
+        self.detail_id = None
         self.detail_tab = InspectorTab.SUMMARY
         self.focus_region = FocusRegion.LEDGER
         self.search_open = False
@@ -461,17 +458,10 @@ class TrajectoryStateStore:
         self,
         *,
         max_participants: int = TRAJECTORY_WARM_STREAM_LIMIT,
-        detail_ratio: float = TRAJECTORY_INSPECTOR_RATIO_DEFAULT,
         page_size: int = TRAJECTORY_LEDGER_PAGE_SIZE_DEFAULT,
     ) -> None:
         if max_participants < 1:
             raise ValueError("max_participants must be positive")
-        if (
-            not isinstance(detail_ratio, (int, float))
-            or isinstance(detail_ratio, bool)
-            or not isfinite(detail_ratio)
-        ):
-            raise ValueError("detail ratio must be finite")
         if (
             not isinstance(page_size, int)
             or isinstance(page_size, bool)
@@ -479,10 +469,6 @@ class TrajectoryStateStore:
         ):
             raise ValueError("page size is outside the supported range")
         self.max_participants = max_participants
-        self.detail_ratio = max(
-            TRAJECTORY_INSPECTOR_RATIO_MIN,
-            min(TRAJECTORY_INSPECTOR_RATIO_MAX, float(detail_ratio)),
-        )
         self.page_size = page_size
         self._states: OrderedDict[str, ParticipantTrajectoryState] = OrderedDict()
 
@@ -495,10 +481,7 @@ class TrajectoryStateStore:
             state = self._states.pop(participant_id)
             self._states[participant_id] = state
             return state
-        state = ParticipantTrajectoryState(
-            participant_id,
-            detail_ratio=self.detail_ratio,
-        )
+        state = ParticipantTrajectoryState(participant_id)
         self._states[participant_id] = state
         while len(self._states) > self.max_participants:
             self._states.popitem(last=False)

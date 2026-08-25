@@ -8,7 +8,7 @@ from textual.app import App, ComposeResult
 from textual.coordinate import Coordinate
 
 import theater.regie.trajectory.state as state_module
-from theater.regie.trajectory.details import build_inline_details
+from theater.regie.trajectory.details import build_span_details
 from theater.regie.trajectory.enums import InspectorTab
 from theater.regie.trajectory.inspector import (
     request_association_lines,
@@ -19,12 +19,13 @@ from theater.regie.trajectory.ledger import (
     Ledger,
     LedgerRecordClicked,
     LedgerRecordHovered,
-    LedgerRecordLinkClicked,
 )
 from theater.regie.trajectory.pagination import paginate_search_result
 from theater.regie.trajectory.request_rows import build_request_index, request_row_text
 from theater.regie.trajectory.search import search_records
+from theater.regie.trajectory.span_detail import SpanDetailRecordLinkClicked
 from theater.regie.trajectory.state import ParticipantTrajectoryState
+from theater.regie.trajectory.timeline import Timeline
 from theater.regie.trajectory.view import TrajectoryView
 from theater.trajectory import (
     PanelState,
@@ -307,11 +308,10 @@ def test_request_inspector_exposes_diagnostics_and_exact_associations() -> None:
     usage = "\n".join(line.text for line in request_usage_lines(request))
     timing = "\n".join(line.text for line in request_timing_lines(request))
     associations = request_association_lines(request)
-    details = build_inline_details(
+    details = build_span_details(
         model,
         InspectorTab.ASSOCIATIONS,
         request=request,
-        max_height=20,
     )
 
     assert "Provider: provider-x" in usage
@@ -401,7 +401,6 @@ async def test_ledger_request_headers_are_noninteractive_and_patch_in_place(
         ledger.watch_hover_coordinate(Coordinate(-1, -1), Coordinate(row, 0))
         await pilot.pause()
         assert ledger._selected_id == "record"
-        assert ledger.expanded_id is None
         assert app.clicked == []
         assert app.hovered[-1] is None
         assert ledger.rendered_record_count == 1
@@ -457,6 +456,71 @@ async def test_view_places_request_before_step_and_keeps_record_navigation() -> 
 
 
 @pytest.mark.asyncio
+async def test_accounting_records_feed_requests_without_rendering_as_activity() -> None:
+    answer = record("answer", 1, request_id="request")
+    accounting = replace(
+        record(
+            "accounting",
+            2,
+            request_id="request",
+            usage=TrajectoryUsage(model="model-x", input_tokens=42, output_tokens=7),
+        ),
+        kind=TrajectoryKind.USAGE,
+        summary="",
+    )
+
+    class ViewHost(App):
+        def compose(self) -> ComposeResult:
+            yield TrajectoryView("p1")
+
+    app = ViewHost()
+    async with app.run_test(size=(100, 30)):
+        view = app.query_one(TrajectoryView)
+        view.state.upsert((answer, accounting))
+        view._refresh()
+        ledger = view.query_one(Ledger)
+
+        assert tuple(view.state.records) == ("answer", "accounting")
+        assert [item.record_id for item in view.state.display_records] == ["answer"]
+        assert view.state.selected_id == "answer"
+        request = view.state.request_index.ordered[0]
+        assert request.usage == accounting.usage
+        assert view.query_one(Timeline).span_ids == ("answer",)
+        assert ledger.line_ids == (None, "answer")
+        assert all(entry.record_id != "accounting" for entry in ledger.entries)
+
+
+def test_accounting_follow_update_does_not_announce_new_activity() -> None:
+    answer = record("answer", 1, request_id="request")
+    accounting = replace(
+        record(
+            "accounting",
+            2,
+            request_id="request",
+            usage=TrajectoryUsage(input_tokens=42),
+        ),
+        kind=TrajectoryKind.USAGE,
+        summary="",
+    )
+    state = ParticipantTrajectoryState("p1")
+    state.apply_snapshot(
+        TrajectoryPage(
+            PanelStateInfo(PanelState.READY),
+            stream_id="stream",
+            records=(answer,),
+        )
+    )
+    state.pause_follow()
+
+    assert state.apply_follow(
+        TrajectoryDelta("stream", upserts=(TrajectoryUpsert(accounting),))
+    ) == (1, 0)
+    assert state.new_count == 0
+    assert state.selected_id == "answer"
+    assert state.request_index.ordered[0].usage == accounting.usage
+
+
+@pytest.mark.asyncio
 async def test_loaded_request_association_link_reveals_exact_record() -> None:
     class ViewHost(App):
         def compose(self) -> ComposeResult:
@@ -472,8 +536,8 @@ async def test_loaded_request_association_link_reveals_exact_record() -> None:
             )
         )
         view._refresh()
-        view.on_ledger_record_link_clicked(LedgerRecordLinkClicked("first"))
+        view.on_span_detail_record_link_clicked(SpanDetailRecordLinkClicked("first"))
         await pilot.pause()
 
         assert view.state.selected_id == "first"
-        assert view.state.expanded_id == "first"
+        assert view.state.detail_id == "first"

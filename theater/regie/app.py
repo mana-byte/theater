@@ -348,7 +348,6 @@ class RegieApp(App):
         self._staging = StageController(self.settings.regie, panes)
         self._surface = SurfaceController(panes)
         self._trajectory_states = TrajectoryStateStore(
-            detail_ratio=self.settings.regie.trajectory_inspector_ratio,
             page_size=self.settings.regie.trajectory_page_size,
         )
         self._trajectory_controller: TrajectoryController | None = None
@@ -1408,6 +1407,22 @@ class RegieApp(App):
         participant_id, managed = self._selected_trajectory_target()
         self._trajectory_navigation.clear()
         await self._show_trajectory(participant_id, managed=managed)
+
+    async def action_toggle_trajectory(self) -> None:
+        """Toggle the selected leaf's trajectory while keeping focus in the tree."""
+        participant_id, managed = self._selected_trajectory_target()
+        self._trajectory_navigation.clear()
+        if (
+            participant_id is not None
+            and self._surface.trajectory_visible(self.staged_pane)
+            and self.trajectory_participant == participant_id
+        ):
+            self._surface.show_dashboard()
+            self._sync_right_surface()
+            self._focus_tree()
+            return
+        await self._show_trajectory(participant_id, managed=managed)
+        self._focus_tree()
 
     async def action_stage_and_focus_trajectory(self) -> None:
         """Stage the selected trajectory and focus it immediately."""

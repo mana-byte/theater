@@ -14,7 +14,7 @@ from theater.regie.trajectory.constants import (
 )
 from theater.regie.trajectory.details import (
     DETAIL_RECORD_TARGET_META,
-    build_tool_inline_details,
+    build_tool_span_details,
     tool_detail_text,
 )
 from theater.regie.trajectory.enums import InspectorTab
@@ -23,6 +23,7 @@ from theater.regie.trajectory.ledger import Ledger
 from theater.regie.trajectory.pagination import paginate_search_result
 from theater.regie.trajectory.request_rows import RequestIndex
 from theater.regie.trajectory.search import search_records
+from theater.regie.trajectory.span_detail import SpanDetailPanel
 from theater.regie.trajectory.state import TrajectoryStateStore
 from theater.regie.trajectory.tool_rows import build_tool_index, tool_row_text
 from theater.regie.trajectory.view import TrajectoryView
@@ -139,13 +140,14 @@ def test_tool_summary_exposes_typed_failure_and_retry_target() -> None:
         retry_attempt=2,
     )
     operation = build_tool_index((result,)).ordered[0]
-    detail = build_tool_inline_details(operation, InspectorTab.SUMMARY, max_height=20)
+    detail = build_tool_span_details(operation, InspectorTab.SUMMARY)
 
     assert "Failure: tool" in detail.copy_text
     assert "Code: exit_1" in detail.copy_text
     assert "Retry of: prior · attempt 2" in detail.copy_text
     assert any(
-        span.style.meta.get(DETAIL_RECORD_TARGET_META) == "prior" for span in detail.content.spans
+        getattr(span.style, "meta", {}).get(DETAIL_RECORD_TARGET_META) == "prior"
+        for span in detail.content.spans
     )
 
 
@@ -224,18 +226,49 @@ def test_tool_name_prefix_and_summary_bound() -> None:
         assert len(text) <= TOOL_ROW_SUMMARY_MAX_CHARS
 
 
+def test_tool_summary_prefers_structured_call_input_over_result_text() -> None:
+    call = _tool(
+        "call",
+        1,
+        TrajectoryKind.TOOL_CALL,
+        "one",
+        details=(
+            DetailField.from_text("tool", "runner"),
+            DetailField.from_text(
+                "arguments",
+                '{"noise":"ignored","query":"needle","path":"src/app.py",'
+                '"command":"uv run pytest"}',
+                format=ContentFormat.JSON,
+            ),
+        ),
+    )
+    result = _tool(
+        "result",
+        2,
+        TrajectoryKind.TOOL_RESULT,
+        "one",
+        details=(DetailField.from_text("result", "verbose output that should stay in details"),),
+    )
+    operation = build_tool_index((call, result)).ordered[0]
+
+    assert tool_row_text(operation).summary == (
+        "[runner] command=uv run pytest · path=src/app.py · query=needle"
+    )
+    assert tool_row_text(operation, compact=True).summary == "[runner] command=uv run pytest"
+    assert "verbose output" not in tool_row_text(operation).summary
+
+
 def test_tool_details_bound_copy_and_show_omission() -> None:
     preview = ContentPreview(text='{"value":"' + "x" * 5000 + '"}', omitted_bytes=77)
     field = DetailField("result", preview, ContentFormat.JSON)
     result = _tool("result", 2, TrajectoryKind.TOOL_RESULT, "one", details=(field,))
     operation = build_tool_index((result,)).ordered[0]
     text = tool_detail_text(operation, InspectorTab.RESULT)
-    detail = build_tool_inline_details(operation, InspectorTab.RESULT, max_height=1)
+    detail = build_tool_span_details(operation, InspectorTab.RESULT)
 
     assert len(text.encode()) <= TRAJECTORY_DETAIL_RECORD_MAX_BYTES
     assert "77 source bytes omitted" in text
     assert detail.copy_text == text
-    assert detail.height >= 4
     assert detail.tabs == (
         InspectorTab.SUMMARY,
         InspectorTab.INPUT,
@@ -364,7 +397,7 @@ def test_result_match_keeps_the_logical_anchor_group_path() -> None:
 
 class _LedgerHost(App):
     def compose(self) -> ComposeResult:
-        yield Ledger()
+        yield TrajectoryView("participant")
 
 
 @pytest.mark.asyncio
@@ -393,8 +426,12 @@ async def test_result_member_hover_and_expansion_target_combined_row() -> None:
 
     app = _LedgerHost()
     async with app.run_test(size=(110, 24)) as pilot:
-        ledger = app.query_one(Ledger)
-        ledger.update_rows(records, search, selected_id="result")
+        view = app.query_one(TrajectoryView)
+        view.state.upsert(records)
+        view.state.follow_tail = False
+        view.state.select("result")
+        view._refresh()
+        ledger = view.query_one(Ledger)
         await pilot.pause()
         row_key = f"{Ledger.TOOL_PREFIX}{operation.operation_id}"
 
@@ -409,13 +446,13 @@ async def test_result_member_hover_and_expansion_target_combined_row() -> None:
             == ledger._status_style(operation.status).color
         )
 
-        ledger.set_details("result", InspectorTab.RESULT)
+        view.state.detail_tab = InspectorTab.RESULT
+        view._open_details("result")
         await pilot.pause()
-        assert ledger.expanded_id == "call"
-        assert "finished" in ledger.copy_text
-        detail_key = f"{Ledger.DETAIL_PREFIX}{Ledger.TOOL_PREFIX}{operation.operation_id}"
-        assert ledger.get_row_index(detail_key) > ledger.get_row_index(row_key)
-        ledger.scroll_to_record("result", include_detail=True)
+        panel = view.query_one(SpanDetailPanel)
+        assert view.state.detail_id == "call"
+        assert "finished" in panel.copy_text
+        assert ledger.has_class("-hidden")
 
 
 @pytest.mark.asyncio
@@ -430,38 +467,32 @@ async def test_call_only_to_matched_patches_without_rebuild(
         details=(DetailField.from_text("tool", "runner"),),
         status=TrajectoryStatus.RUNNING,
     )
-    initial = search_records((call,), tool_index=build_tool_index((call,)))
-    operation_id = next(iter(initial.tools))
     app = _LedgerHost()
 
     async with app.run_test(size=(110, 24)) as pilot:
-        ledger = app.query_one(Ledger)
-        ledger.update_rows(
-            (call,), initial, selected_id="call", expanded_id="call", detail_tab=InspectorTab.RESULT
-        )
+        view = app.query_one(TrajectoryView)
+        view.state.upsert((call,))
+        view.state.follow_tail = False
+        view.state.select("call")
+        view.state.detail_tab = InspectorTab.RESULT
+        view._refresh()
+        view._open_details("call")
         await pilot.pause()
+        ledger = view.query_one(Ledger)
+        panel = view.query_one(SpanDetailPanel)
+        operation_id = next(iter(view.state.tool_index.by_id))
         row_key = f"{Ledger.TOOL_PREFIX}{operation_id}"
-        detail_key = f"{Ledger.DETAIL_PREFIX}{Ledger.TOOL_PREFIX}{operation_id}"
-        assert "No result supplied" in ledger.copy_text
-        assert ledger.get_row_index(detail_key) > ledger.get_row_index(row_key)
+        assert "No result supplied" in panel.copy_text
 
         rebuilds = 0
-        detail_renders = 0
         original_rebuild = ledger._rebuild
-        original_render = ledger._render_detail_row
 
         def count_rebuild(*, preserve_scroll: bool = True) -> None:
             nonlocal rebuilds
             rebuilds += 1
             original_rebuild(preserve_scroll=preserve_scroll)
 
-        def count_detail_render() -> None:
-            nonlocal detail_renders
-            detail_renders += 1
-            original_render()
-
         monkeypatch.setattr(ledger, "_rebuild", count_rebuild)
-        monkeypatch.setattr(ledger, "_render_detail_row", count_detail_render)
         result_record = _tool(
             "result",
             2,
@@ -470,32 +501,18 @@ async def test_call_only_to_matched_patches_without_rebuild(
             details=(DetailField.from_text("result", "finished"),),
         )
         records = (call, result_record)
+        view.state.upsert((result_record,))
+        view._refresh()
         matched = search_records(records, tool_index=build_tool_index(records))
-        ledger.update_rows(
-            records,
-            matched,
-            selected_id="result",
-            expanded_id="result",
-            detail_tab=InspectorTab.RESULT,
-        )
 
         assert next(iter(matched.tools)) == operation_id
         assert matched.row_ids == ("call",)
         assert ledger.get_row_index(row_key) >= 0
-        assert ledger.get_row_index(detail_key) > ledger.get_row_index(row_key)
         assert rebuilds == 0
-        assert detail_renders == 1
-        assert "finished" in ledger.copy_text
+        assert "finished" in panel.copy_text
 
-        ledger.update_rows(
-            records,
-            matched,
-            selected_id="result",
-            expanded_id="result",
-            detail_tab=InspectorTab.RESULT,
-        )
+        view._refresh()
         assert rebuilds == 0
-        assert detail_renders == 1
 
 
 class _ViewHost(App):

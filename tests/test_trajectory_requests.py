@@ -417,6 +417,56 @@ def test_request_timing_falls_back_when_cross_record_clocks_contradict() -> None
     assert request.timing == Timing(end=5, provenance=TimingProvenance.SOURCE)
 
 
+def test_request_timing_uses_terminal_point_and_marks_observed_estimate() -> None:
+    source = requests_for_records(
+        (
+            _record(
+                "start",
+                1,
+                request_id="source-points",
+                status=TrajectoryStatus.RUNNING,
+                timing=Timing(start=10, provenance=TimingProvenance.SOURCE),
+            ),
+            _record(
+                "end",
+                2,
+                request_id="source-points",
+                timing=Timing(start=12, provenance=TimingProvenance.SOURCE),
+            ),
+        )
+    )[0]
+    observed = requests_for_records(
+        (
+            _record(
+                "observed-start",
+                1,
+                request_id="observed-points",
+                status=TrajectoryStatus.RUNNING,
+                timing=Timing(start=20, provenance=TimingProvenance.OBSERVED),
+            ),
+            _record(
+                "observed-end",
+                2,
+                request_id="observed-points",
+                timing=Timing(end=23, provenance=TimingProvenance.OBSERVED),
+            ),
+        )
+    )[0]
+
+    assert source.timing == Timing(
+        start=10,
+        end=12,
+        duration_ms=2_000,
+        provenance=TimingProvenance.DERIVED,
+    )
+    assert observed.timing == Timing(
+        start=20,
+        end=23,
+        duration_ms=3_000,
+        provenance=TimingProvenance.OBSERVED,
+    )
+
+
 def test_request_record_links_keep_newest_ids_and_aggregate_full_group() -> None:
     records = tuple(
         _record(
