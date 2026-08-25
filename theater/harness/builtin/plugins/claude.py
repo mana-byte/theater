@@ -367,7 +367,10 @@ class _ClaudeSource(TranscriptSource):
         try:
             path.stat()
         except FileNotFoundError:
-            return Batch(waiting=True)
+            relocated = await self._locate(session_id=self._session_id)
+            if relocated is None or self._observer.session_id(relocated) != self._session_id:
+                return Batch(waiting=True)
+            path = relocated
         except OSError as exc:
             return self._source_unavailable_batch(exc)
 
