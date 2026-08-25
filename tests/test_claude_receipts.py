@@ -459,6 +459,66 @@ async def test_missing_claude_receipt_waits_until_materialized_then_becomes_stri
     assert confirmed_missing.error_code == "transcript_identity_lost"
 
 
+async def test_claude_resume_follows_exact_session_and_records_usage(
+    claude_daemon, claude_client, tmp_path
+):
+    daemon, root = claude_daemon
+    daemon.observer.search = 0.01
+    current_cwd = tmp_path / "current"
+    original_cwd = tmp_path / "original"
+    current_cwd.mkdir()
+    original_cwd.mkdir()
+    session_id = "11111111-1111-4111-8111-111111111111"
+    _spawn_claude(daemon, current_cwd, pid="p-claude", token="secret")
+    participant = daemon.store.get_participant("p-claude")
+    assert participant is not None
+    participant.session_id = session_id
+    participant.session_correlation = str(TranscriptProvenance.EXACT)
+    daemon.store.upsert_participant(participant)
+    expected = root / "current-project" / f"{session_id}.jsonl"
+
+    result = await _receipt(
+        client=claude_client,
+        pid=participant.id,
+        token="secret",
+        session_id=session_id,
+        transcript_path=str(expected),
+    )
+
+    assert result["admission"] == "staged"
+
+    actual = _transcript(root, session_id, original_cwd, project="original-project")
+    assert await _until(
+        lambda: (
+            daemon.store.get_participant(participant.id).transcript_location
+            == str(actual.resolve())
+        )
+    )
+
+    usage_record = {
+        "type": "assistant",
+        "sessionId": session_id,
+        "cwd": str(original_cwd),
+        "timestamp": "2026-08-25T08:04:20.459Z",
+        "requestId": "request-1",
+        "message": {
+            "id": "message-1",
+            "model": "claude-sonnet-5",
+            "content": [{"type": "text", "text": "done"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 7, "output_tokens": 3},
+        },
+    }
+    with actual.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(usage_record) + "\n")
+
+    assert await _until(lambda: daemon.store.usage_totals()["input_tokens"] == 7)
+    totals = daemon.store.usage_totals()
+
+    assert totals["output_tokens"] == 3
+    assert totals["cost_microcents"] > 0
+
+
 async def test_current_path_receipt_does_not_detach_or_reset_mid_turn(registry, tmp_path):
     from theater.daemon.jobs import JobManager
     from theater.daemon.observer import Observer, QuietClock, TurnAccumulator
