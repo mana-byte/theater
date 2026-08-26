@@ -6,7 +6,7 @@ from textual.geometry import Offset
 from textual.widgets import Static
 
 from theater.constants.regie_trajectory import TIMELINE_HOVER_CARD_MAX_WIDTH
-from theater.regie.trajectory.render import tooltip_text
+from theater.regie.trajectory.render.records import tooltip_text
 from theater.trajectory import Timing, TrajectoryRecord
 
 

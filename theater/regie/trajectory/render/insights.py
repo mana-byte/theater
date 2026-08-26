@@ -24,7 +24,7 @@ from theater.regie.trajectory.analysis import (
 )
 from theater.regie.trajectory.analysis.waterfall import timing_interval
 from theater.regie.trajectory.enums import DiagnosticView
-from theater.regie.trajectory.render import (
+from theater.regie.trajectory.render.records import (
     compact_cost,
     compact_number,
     format_duration,

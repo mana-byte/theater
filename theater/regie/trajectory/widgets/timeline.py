@@ -28,7 +28,7 @@ from theater.constants.regie_trajectory import (
     TIMELINE_TURN_BOUNDARY_GLYPH,
 )
 from theater.regie.trajectory.enums import OrderMode
-from theater.regie.trajectory.timeline_layout import (
+from theater.regie.trajectory.render.timeline import (
     TimelineLayout,
     TimelineSpan,
     build_timeline_layout,

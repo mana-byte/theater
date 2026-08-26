@@ -5,11 +5,11 @@ from textual.app import App, ComposeResult
 from textual.widgets import Input, Label
 
 from theater.constants.regie_trajectory import TRAJECTORY_OVERVIEW_HEIGHT
-from theater.regie.trajectory import overview_strip
-from theater.regie.trajectory.overview_strip import TrajectoryOverviewStrip
 from theater.regie.trajectory.state import ParticipantTrajectoryState
-from theater.regie.trajectory.timeline import Timeline
 from theater.regie.trajectory.view import TrajectoryView
+from theater.regie.trajectory.widgets import overview as trajectory_overview
+from theater.regie.trajectory.widgets.overview import TrajectoryOverviewStrip
+from theater.regie.trajectory.widgets.timeline import Timeline
 from theater.trajectory import (
     PanelState,
     PanelStateInfo,
@@ -317,7 +317,7 @@ async def test_tick_updates_only_elapsed_primary_and_identical_state_is_quiet(mo
     async with app.run_test():
         strip = TrajectoryOverviewStrip()
         await app.mount(strip)
-        monkeypatch.setattr(overview_strip.time, "time", lambda: 100.0)
+        monkeypatch.setattr(trajectory_overview.time, "time", lambda: 100.0)
         overview = TrajectoryOverview(current=current(start=98.0, duration_ms=None))
         strip.update_state(
             panel=panel(), capabilities=TrajectoryCapabilities(), overview=overview, loading=False
@@ -337,7 +337,7 @@ async def test_tick_updates_only_elapsed_primary_and_identical_state_is_quiet(mo
             panel=panel(), capabilities=TrajectoryCapabilities(), overview=overview, loading=False
         )
         assert calls == 0
-        monkeypatch.setattr(overview_strip.time, "time", lambda: 101.0)
+        monkeypatch.setattr(trajectory_overview.time, "time", lambda: 101.0)
         strip._tick()
         assert calls == 1
         assert "3.0s" in text(primary)

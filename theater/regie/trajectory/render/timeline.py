@@ -12,7 +12,7 @@ from theater.constants.regie_trajectory import (
     TIMELINE_SPAN_MIN_WIDTH,
 )
 from theater.regie.trajectory.enums import OrderMode
-from theater.regie.trajectory.render import supports_duration_interval
+from theater.regie.trajectory.render.records import supports_duration_interval
 from theater.trajectory import TrajectoryLane, TrajectoryRecord
 
 

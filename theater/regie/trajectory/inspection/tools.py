@@ -7,8 +7,8 @@ from dataclasses import dataclass
 
 from theater.constants.trajectory import TRAJECTORY_DETAIL_RECORD_MAX_BYTES
 from theater.regie.trajectory.enums import InspectorTab
-from theater.regie.trajectory.formatting import sanitize_text
 from theater.regie.trajectory.inspection.lines import InspectorLine, tool_summary_lines
+from theater.regie.trajectory.render.formatting import sanitize_text
 from theater.trajectory import ContentFormat, DetailField, bounded_preview
 from theater.trajectory.tools import TrajectoryToolOperation
 

@@ -11,12 +11,12 @@ from theater.constants.regie_trajectory import (
     TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT,
     TRAJECTORY_SPAN_ROW_HEIGHT,
 )
-from theater.regie.trajectory.badges import provenance_badges
-from theater.regie.trajectory.breadcrumb import TrajectoryBreadcrumb, breadcrumb_text
 from theater.regie.trajectory.enums import DiagnosticView, FocusRegion
-from theater.regie.trajectory.insights import InsightsPanel
-from theater.regie.trajectory.ledger import Ledger
+from theater.regie.trajectory.render.badges import provenance_badges
 from theater.regie.trajectory.view import TrajectoryView
+from theater.regie.trajectory.widgets.breadcrumb import TrajectoryBreadcrumb, breadcrumb_text
+from theater.regie.trajectory.widgets.insights import InsightsPanel
+from theater.regie.trajectory.widgets.ledger import Ledger
 from theater.regie.trajectory.widgets.span_detail import SpanDetailPanel
 from theater.trajectory import (
     ContentFormat,

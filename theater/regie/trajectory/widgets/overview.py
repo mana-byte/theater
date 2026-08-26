@@ -16,7 +16,7 @@ from theater.constants.regie_trajectory import (
     TRAJECTORY_OVERVIEW_SECONDS_PER_MINUTE,
     TRAJECTORY_OVERVIEW_TICK_SECONDS,
 )
-from theater.regie.trajectory.render import compact_cost, compact_number, sanitize_text
+from theater.regie.trajectory.render.records import compact_cost, compact_number, sanitize_text
 from theater.trajectory import (
     PanelState,
     PanelStateInfo,

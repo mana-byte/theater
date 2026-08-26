@@ -8,9 +8,9 @@ from dataclasses import dataclass, field, replace
 from typing import TypeVar
 
 from theater.constants.regie_trajectory import MAX_SEARCH_CACHE_ENTRIES
-from theater.regie.trajectory.ordering import TrajectoryOrdering, build_ordering
-from theater.regie.trajectory.request_rows import RequestIndex
-from theater.regie.trajectory.tool_rows import ToolIndex
+from theater.regie.trajectory.render.ordering import TrajectoryOrdering, build_ordering
+from theater.regie.trajectory.render.requests import RequestIndex
+from theater.regie.trajectory.render.tools import ToolIndex
 from theater.trajectory import (
     GroupKind,
     TrajectoryGroup,

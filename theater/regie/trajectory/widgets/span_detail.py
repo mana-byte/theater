@@ -25,7 +25,7 @@ from theater.regie.trajectory.inspection.styled import (
     build_span_details,
     build_tool_span_details,
 )
-from theater.regie.trajectory.render import format_duration, sanitize_text
+from theater.regie.trajectory.render.records import format_duration, sanitize_text
 from theater.trajectory import ParticipantLink, TrajectoryRecord, TrajectoryRequest
 from theater.trajectory.tools import TrajectoryToolOperation
 

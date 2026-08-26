@@ -14,13 +14,13 @@ from theater.constants.regie_trajectory import (
     TRAJECTORY_SPAN_ROW_HEIGHT,
 )
 from theater.regie.trajectory.enums import FocusRegion, InspectorTab
-from theater.regie.trajectory.filter_panel import FilterPanel
-from theater.regie.trajectory.footer import TrajectoryFooter
-from theater.regie.trajectory.ledger import Ledger
 from theater.regie.trajectory.state import ParticipantTrajectoryState, TrajectoryStateStore
-from theater.regie.trajectory.timeline import Timeline
 from theater.regie.trajectory.view import ReturnToTree, TrajectoryRetryRequested, TrajectoryView
+from theater.regie.trajectory.widgets.filter_panel import FilterPanel
+from theater.regie.trajectory.widgets.footer import TrajectoryFooter
+from theater.regie.trajectory.widgets.ledger import Ledger
 from theater.regie.trajectory.widgets.span_detail import SpanDetailPanel
+from theater.regie.trajectory.widgets.timeline import Timeline
 from theater.trajectory import (
     PanelState,
     PanelStateInfo,

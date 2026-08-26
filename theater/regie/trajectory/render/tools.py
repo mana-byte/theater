@@ -15,7 +15,7 @@ from theater.constants.regie_trajectory import (
     TOOL_ROW_INPUT_VALUE_MAX_CHARS,
     TOOL_ROW_SUMMARY_MAX_CHARS,
 )
-from theater.regie.trajectory.render import format_duration, sanitize_text, status_label
+from theater.regie.trajectory.render.records import format_duration, sanitize_text, status_label
 from theater.trajectory import DetailField, TrajectoryRecord
 from theater.trajectory.grouping import deterministic_record_order
 from theater.trajectory.tools import (

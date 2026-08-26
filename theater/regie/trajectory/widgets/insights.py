@@ -19,13 +19,13 @@ from theater.constants.regie_trajectory import (
 )
 from theater.regie.trajectory.analysis import TrajectoryAnalysisIndex
 from theater.regie.trajectory.enums import DiagnosticView
-from theater.regie.trajectory.insight_tables import (
+from theater.regie.trajectory.render.insights import (
     InsightEntry,
     InsightTableModel,
     build_insight_table,
 )
-from theater.regie.trajectory.render import bottom_aligned_cell
-from theater.regie.trajectory.table_rows import resize_rows
+from theater.regie.trajectory.render.records import bottom_aligned_cell
+from theater.regie.trajectory.widgets.rows import resize_rows
 from theater.trajectory import ParticipantLink
 
 _EMPTY_KEY = "__empty__"

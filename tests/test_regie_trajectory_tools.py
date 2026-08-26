@@ -11,19 +11,19 @@ from textual.app import App, ComposeResult
 from theater.constants.regie_trajectory import TOOL_ROW_SUMMARY_MAX_CHARS
 from theater.constants.trajectory import TRAJECTORY_DETAIL_RECORD_MAX_BYTES
 from theater.regie.trajectory.enums import InspectorTab
-from theater.regie.trajectory.footer import TrajectoryFooter
 from theater.regie.trajectory.inspection.links import DETAIL_RECORD_TARGET_META
 from theater.regie.trajectory.inspection.styled import (
     build_tool_span_details,
 )
 from theater.regie.trajectory.inspection.tools import tool_detail_text
-from theater.regie.trajectory.ledger import Ledger
-from theater.regie.trajectory.pagination import paginate_search_result
-from theater.regie.trajectory.request_rows import RequestIndex
+from theater.regie.trajectory.render.pagination import paginate_search_result
+from theater.regie.trajectory.render.requests import RequestIndex
+from theater.regie.trajectory.render.tools import build_tool_index, tool_row_text
 from theater.regie.trajectory.search import search_records
 from theater.regie.trajectory.state import TrajectoryStateStore
-from theater.regie.trajectory.tool_rows import build_tool_index, tool_row_text
 from theater.regie.trajectory.view import TrajectoryView
+from theater.regie.trajectory.widgets.footer import TrajectoryFooter
+from theater.regie.trajectory.widgets.ledger import Ledger
 from theater.regie.trajectory.widgets.span_detail import SpanDetailPanel
 from theater.trajectory import (
     ContentFormat,

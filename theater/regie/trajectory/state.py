@@ -21,19 +21,19 @@ from theater.regie.trajectory.analysis import (
     build_analysis_index,
     empty_analysis_index,
 )
-from theater.regie.trajectory.diagnostic_views import (
+from theater.regie.trajectory.enums import DiagnosticView, FocusRegion, InspectorTab, OrderMode
+from theater.regie.trajectory.render.diagnostics import (
     DiagnosticIndex,
     build_diagnostic_index,
     empty_diagnostic_index,
 )
-from theater.regie.trajectory.enums import DiagnosticView, FocusRegion, InspectorTab, OrderMode
-from theater.regie.trajectory.ordering import canonical_group_records
-from theater.regie.trajectory.request_rows import (
+from theater.regie.trajectory.render.ordering import canonical_group_records
+from theater.regie.trajectory.render.requests import (
     RequestIndex,
     build_request_index,
     empty_request_index,
 )
-from theater.regie.trajectory.tool_rows import ToolIndex, build_tool_index, empty_tool_index
+from theater.regie.trajectory.render.tools import ToolIndex, build_tool_index, empty_tool_index
 from theater.trajectory import (
     PanelState,
     PanelStateInfo,

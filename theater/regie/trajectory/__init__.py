@@ -13,8 +13,7 @@ from theater.regie.trajectory.navigation import (
     TrajectoryNavigationHistory,
     TrajectoryNavigationTarget,
 )
-from theater.regie.trajectory.overview_strip import TrajectoryOverviewStrip
-from theater.regie.trajectory.pagination import LedgerPage, paginate_search_result
+from theater.regie.trajectory.render.pagination import LedgerPage, paginate_search_result
 from theater.regie.trajectory.search import (
     FilterCounts,
     SearchResult,
@@ -31,6 +30,7 @@ from theater.regie.trajectory.view import (
     TrajectoryRetryRequested,
     TrajectoryView,
 )
+from theater.regie.trajectory.widgets.overview import TrajectoryOverviewStrip
 from theater.trajectory import (
     ContentFormat,
     ContentPreview,

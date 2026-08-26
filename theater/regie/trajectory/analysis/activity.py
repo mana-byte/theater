@@ -17,8 +17,8 @@ from theater.regie.trajectory.analysis.waterfall import (
     request_anchor,
     request_label,
 )
-from theater.regie.trajectory.request_rows import RequestIndex
-from theater.regie.trajectory.tool_rows import ToolIndex
+from theater.regie.trajectory.render.requests import RequestIndex
+from theater.regie.trajectory.render.tools import ToolIndex
 from theater.trajectory import (
     CostProvenance,
     ParticipantLink,

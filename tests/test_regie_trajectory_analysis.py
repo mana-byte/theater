@@ -6,9 +6,9 @@ import pytest
 
 from theater.regie.trajectory.analysis import build_analysis_index
 from theater.regie.trajectory.enums import DiagnosticView
-from theater.regie.trajectory.insights import build_insight_table
-from theater.regie.trajectory.request_rows import build_request_index
-from theater.regie.trajectory.tool_rows import build_tool_index
+from theater.regie.trajectory.render.requests import build_request_index
+from theater.regie.trajectory.render.tools import build_tool_index
+from theater.regie.trajectory.widgets.insights import build_insight_table
 from theater.trajectory import (
     ContentFormat,
     CostProvenance,

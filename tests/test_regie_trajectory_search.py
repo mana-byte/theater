@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from theater.regie.trajectory.pagination import paginate_search_result
+from theater.regie.trajectory.render.pagination import paginate_search_result
 from theater.regie.trajectory.search import (
     TrajectoryFilters,
     fuzzy_subsequence_score,

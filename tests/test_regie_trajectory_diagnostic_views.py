@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from theater.constants.trajectory import TRAJECTORY_MAX_GROUP_RECORD_IDS
-from theater.regie.trajectory.diagnostic_views import (
+from theater.regie.trajectory.enums import DiagnosticView
+from theater.regie.trajectory.render.diagnostics import (
     build_diagnostic_index,
     ordering_for_projection,
 )
-from theater.regie.trajectory.enums import DiagnosticView
-from theater.regie.trajectory.request_rows import build_request_index
+from theater.regie.trajectory.render.requests import build_request_index
+from theater.regie.trajectory.render.tools import build_tool_index
 from theater.regie.trajectory.search import search_records
-from theater.regie.trajectory.tool_rows import build_tool_index
 from theater.trajectory import (
     Timing,
     TrajectoryKind,

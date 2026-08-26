@@ -6,7 +6,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from theater.regie.trajectory.render import (
+from theater.regie.trajectory.render.records import (
     compact_cost,
     compact_number,
     format_duration,

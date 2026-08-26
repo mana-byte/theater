@@ -30,7 +30,7 @@ from theater.constants.regie_trajectory import (
     TRAJECTORY_TABLE_CELL_PADDING,
 )
 from theater.regie.trajectory.enums import OrderMode
-from theater.regie.trajectory.render import (
+from theater.regie.trajectory.render.records import (
     bottom_aligned_cell,
     format_duration,
     kind_glyph,
@@ -38,10 +38,10 @@ from theater.regie.trajectory.render import (
     status_label,
     supports_duration_interval,
 )
-from theater.regie.trajectory.request_rows import request_row_text
+from theater.regie.trajectory.render.requests import request_row_text
+from theater.regie.trajectory.render.tools import tool_row_text
 from theater.regie.trajectory.search import LedgerEntry, SearchResult
-from theater.regie.trajectory.table_rows import resize_rows
-from theater.regie.trajectory.tool_rows import tool_row_text
+from theater.regie.trajectory.widgets.rows import resize_rows
 from theater.trajectory import (
     TrajectoryLane,
     TrajectoryRecord,

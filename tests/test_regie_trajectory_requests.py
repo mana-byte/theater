@@ -15,18 +15,18 @@ from theater.regie.trajectory.inspection.lines import (
     request_usage_lines,
 )
 from theater.regie.trajectory.inspection.styled import build_span_details
-from theater.regie.trajectory.ledger import (
+from theater.regie.trajectory.render.pagination import paginate_search_result
+from theater.regie.trajectory.render.requests import build_request_index, request_row_text
+from theater.regie.trajectory.search import search_records
+from theater.regie.trajectory.state import ParticipantTrajectoryState
+from theater.regie.trajectory.view import TrajectoryView
+from theater.regie.trajectory.widgets.ledger import (
     Ledger,
     LedgerRecordClicked,
     LedgerRecordHovered,
 )
-from theater.regie.trajectory.pagination import paginate_search_result
-from theater.regie.trajectory.request_rows import build_request_index, request_row_text
-from theater.regie.trajectory.search import search_records
-from theater.regie.trajectory.state import ParticipantTrajectoryState
-from theater.regie.trajectory.timeline import Timeline
-from theater.regie.trajectory.view import TrajectoryView
 from theater.regie.trajectory.widgets.span_detail import SpanDetailRecordLinkClicked
+from theater.regie.trajectory.widgets.timeline import Timeline
 from theater.trajectory import (
     PanelState,
     PanelStateInfo,

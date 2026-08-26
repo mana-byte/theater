@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from rich.text import Text
 
-from theater.regie.trajectory.render import sanitize_text
+from theater.regie.trajectory.render.records import sanitize_text
 from theater.trajectory import (
     CostProvenance,
     Timing,

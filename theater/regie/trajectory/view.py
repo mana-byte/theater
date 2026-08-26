@@ -22,9 +22,7 @@ from theater.constants.regie_trajectory import (
     TIMELINE_HEIGHT,
     TRAJECTORY_HORIZONTAL_PADDING,
 )
-from theater.regie.trajectory.breadcrumb import TrajectoryBreadcrumb
 from theater.regie.trajectory.controller import TrajectoryController
-from theater.regie.trajectory.diagnostic_views import ordering_for_projection
 from theater.regie.trajectory.enums import (
     INSIGHT_VIEWS,
     DiagnosticView,
@@ -32,50 +30,52 @@ from theater.regie.trajectory.enums import (
     FocusRegion,
     OrderMode,
 )
-from theater.regie.trajectory.filter_panel import (
+from theater.regie.trajectory.inspection.project import active_detail_tab, detail_text
+from theater.regie.trajectory.render.diagnostics import ordering_for_projection
+from theater.regie.trajectory.render.ordering import TrajectoryOrdering, build_ordering
+from theater.regie.trajectory.render.pagination import paginate_search_result
+from theater.regie.trajectory.render.records import sanitize_text
+from theater.regie.trajectory.search import FilterCounts, SearchCache, SearchResult, search_records
+from theater.regie.trajectory.state import ParticipantTrajectoryState, TrajectoryStateStore
+from theater.regie.trajectory.widgets.breadcrumb import TrajectoryBreadcrumb
+from theater.regie.trajectory.widgets.filter_panel import (
     FilterClearRequested,
     FilterPanel,
     FilterPanelClosed,
     FilterValueClicked,
 )
-from theater.regie.trajectory.footer import (
+from theater.regie.trajectory.widgets.footer import (
     FooterActionRequested,
     FooterPageRequested,
     FooterViewRequested,
     TrajectoryFooter,
 )
-from theater.regie.trajectory.hover_card import TimelineHoverCard
-from theater.regie.trajectory.insights import (
+from theater.regie.trajectory.widgets.hover_card import TimelineHoverCard
+from theater.regie.trajectory.widgets.insights import (
     InsightActivated,
     InsightHighlighted,
     InsightsPanel,
 )
-from theater.regie.trajectory.inspection.project import active_detail_tab, detail_text
-from theater.regie.trajectory.ledger import (
+from theater.regie.trajectory.widgets.ledger import (
     Ledger,
     LedgerOlderClicked,
     LedgerRecordClicked,
     LedgerRecordHovered,
     LedgerRetryClicked,
 )
-from theater.regie.trajectory.ordering import TrajectoryOrdering, build_ordering
-from theater.regie.trajectory.overview_strip import TrajectoryOverviewStrip
-from theater.regie.trajectory.pagination import paginate_search_result
-from theater.regie.trajectory.render import sanitize_text
-from theater.regie.trajectory.search import FilterCounts, SearchCache, SearchResult, search_records
-from theater.regie.trajectory.state import ParticipantTrajectoryState, TrajectoryStateStore
-from theater.regie.trajectory.timeline import (
-    Timeline,
-    TimelineScrolled,
-    TimelineSpanClicked,
-    TimelineSpanHovered,
-)
+from theater.regie.trajectory.widgets.overview import TrajectoryOverviewStrip
 from theater.regie.trajectory.widgets.span_detail import (
     SpanDetailClosed,
     SpanDetailPanel,
     SpanDetailParticipantLinkClicked,
     SpanDetailRecordLinkClicked,
     SpanDetailTabChanged,
+)
+from theater.regie.trajectory.widgets.timeline import (
+    Timeline,
+    TimelineScrolled,
+    TimelineSpanClicked,
+    TimelineSpanHovered,
 )
 from theater.trajectory import (
     ParticipantLink,

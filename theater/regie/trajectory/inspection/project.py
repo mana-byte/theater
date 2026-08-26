@@ -9,11 +9,6 @@ from types import MappingProxyType
 
 from theater.constants.trajectory import TRAJECTORY_DETAIL_RECORD_MAX_BYTES
 from theater.regie.trajectory.enums import InspectorTab
-from theater.regie.trajectory.formatting import (
-    format_duration,
-    plain_text,
-    status_label,
-)
 from theater.regie.trajectory.inspection.lines import (
     InspectorLine,
     failure_lines,
@@ -22,6 +17,11 @@ from theater.regie.trajectory.inspection.lines import (
     request_timing_lines,
     request_usage_lines,
     retry_lines,
+)
+from theater.regie.trajectory.render.formatting import (
+    format_duration,
+    plain_text,
+    status_label,
 )
 from theater.trajectory import (
     ContentFormat,

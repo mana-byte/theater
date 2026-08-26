@@ -26,26 +26,30 @@ from theater.constants.regie_trajectory import (
 )
 from theater.constants.trajectory import TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS
 from theater.regie.trajectory.enums import FilterDimension, InspectorTab, OrderMode
-from theater.regie.trajectory.filter_panel import FilterPanel
-from theater.regie.trajectory.hover_card import TimelineHoverCard
 from theater.regie.trajectory.inspection.links import DETAIL_PARTICIPANT_META
 from theater.regie.trajectory.inspection.project import detail_text, tabs_for_record
 from theater.regie.trajectory.inspection.styled import build_span_details
-from theater.regie.trajectory.ledger import (
+from theater.regie.trajectory.models import decode_delta, decode_page
+from theater.regie.trajectory.render.ordering import build_ordering
+from theater.regie.trajectory.render.records import record_line, sanitize_text, tooltip_text
+from theater.regie.trajectory.render.timeline import build_timeline_layout
+from theater.regie.trajectory.search import FilterCounts, search_records
+from theater.regie.trajectory.view import TrajectoryParticipantSelected, TrajectoryView
+from theater.regie.trajectory.widgets.filter_panel import FilterPanel
+from theater.regie.trajectory.widgets.hover_card import TimelineHoverCard
+from theater.regie.trajectory.widgets.ledger import (
     Ledger,
     LedgerOlderClicked,
     LedgerRecordClicked,
     LedgerRecordHovered,
     LedgerRetryClicked,
 )
-from theater.regie.trajectory.models import decode_delta, decode_page
-from theater.regie.trajectory.ordering import build_ordering
-from theater.regie.trajectory.render import record_line, sanitize_text, tooltip_text
-from theater.regie.trajectory.search import FilterCounts, search_records
-from theater.regie.trajectory.timeline import Timeline, TimelineSpanClicked, TimelineSpanHovered
-from theater.regie.trajectory.timeline_layout import build_timeline_layout
-from theater.regie.trajectory.view import TrajectoryParticipantSelected, TrajectoryView
 from theater.regie.trajectory.widgets.span_detail import SpanDetailPanel
+from theater.regie.trajectory.widgets.timeline import (
+    Timeline,
+    TimelineSpanClicked,
+    TimelineSpanHovered,
+)
 from theater.trajectory import (
     GroupKind,
     PanelState,
@@ -646,7 +650,9 @@ async def test_repeated_hover_reuses_tooltip_without_reprocessing(
             calls += 1
             return "tooltip"
 
-        monkeypatch.setattr("theater.regie.trajectory.hover_card.tooltip_text", render_tooltip)
+        monkeypatch.setattr(
+            "theater.regie.trajectory.widgets.hover_card.tooltip_text", render_tooltip
+        )
         lane_y = tuple(TrajectoryLane).index(item.lane) * TIMELINE_LANE_HEIGHT + 1
         await pilot.hover(timeline, offset=(TIMELINE_LABEL_WIDTH + 2, lane_y))
         await pilot.hover(timeline, offset=(TIMELINE_LABEL_WIDTH + 3, lane_y))

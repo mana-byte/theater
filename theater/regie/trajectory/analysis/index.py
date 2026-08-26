@@ -13,8 +13,8 @@ from theater.regie.trajectory.analysis.activity import (
 from theater.regie.trajectory.analysis.files import build_file_activity
 from theater.regie.trajectory.analysis.models import TrajectoryAnalysisIndex
 from theater.regie.trajectory.analysis.waterfall import build_waterfalls
-from theater.regie.trajectory.request_rows import RequestIndex
-from theater.regie.trajectory.tool_rows import ToolIndex
+from theater.regie.trajectory.render.requests import RequestIndex
+from theater.regie.trajectory.render.tools import ToolIndex
 from theater.trajectory import TrajectoryRecord
 
 

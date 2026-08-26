@@ -1,1 +1,1 @@
-"""Textual widgets for the trajectory surface."""
+"""Trajectory Textual widgets."""

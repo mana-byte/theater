@@ -15,13 +15,13 @@ from theater.constants.regie_trajectory import (
 )
 from theater.constants.trajectory import TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS
 from theater.formatting import event_stamp
-from theater.regie.trajectory.formatting import (
+from theater.regie.trajectory.render.formatting import (
     format_duration,
     plain_text,
     sanitize_text,
     status_label,
 )
-from theater.regie.trajectory.formatting import (
+from theater.regie.trajectory.render.formatting import (
     format_milliseconds as _format_milliseconds,
 )
 from theater.trajectory import (

@@ -16,7 +16,7 @@ from theater.constants.regie_trajectory import (
 )
 from theater.regie.trajectory.analysis.models import FileActivity, FileOperationActivity
 from theater.regie.trajectory.analysis.waterfall import operation_position
-from theater.regie.trajectory.tool_rows import ToolIndex
+from theater.regie.trajectory.render.tools import ToolIndex
 from theater.trajectory import ContentFormat, TrajectoryStatus, TrajectoryToolOperation
 
 

@@ -17,7 +17,7 @@ from theater.constants.regie_trajectory import (
     SEARCH_HEIGHT,
 )
 from theater.regie.trajectory.enums import FilterDimension
-from theater.regie.trajectory.render import sanitize_text
+from theater.regie.trajectory.render.records import sanitize_text
 from theater.regie.trajectory.search import FilterCounts
 from theater.trajectory import TrajectoryKind, TrajectoryLane, TrajectoryStatus
 

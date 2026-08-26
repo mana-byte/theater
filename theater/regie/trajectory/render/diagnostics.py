@@ -10,9 +10,9 @@ from types import MappingProxyType
 from theater.constants.trajectory import TRAJECTORY_MAX_GROUP_RECORD_IDS
 from theater.regie.trajectory.analysis import TrajectoryAnalysisIndex, empty_analysis_index
 from theater.regie.trajectory.enums import DiagnosticView
-from theater.regie.trajectory.ordering import TrajectoryOrdering
-from theater.regie.trajectory.request_rows import RequestIndex
-from theater.regie.trajectory.tool_rows import ToolIndex
+from theater.regie.trajectory.render.ordering import TrajectoryOrdering
+from theater.regie.trajectory.render.requests import RequestIndex
+from theater.regie.trajectory.render.tools import ToolIndex
 from theater.trajectory import (
     GroupKind,
     TrajectoryGroup,
