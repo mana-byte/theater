@@ -709,7 +709,7 @@ theater/
 │   ├── worktrees/      repository, unique and named worktree implementations
 │   ├── trajectory/     canonical projection, ingestion, cache, aggregation, responses
 │   │   ├── runtime.py    composition facade over stream, panel, and mutations
-│   │   ├── telemetry/    bounded agent metrics, labels, deduplication, catalog
+│   │   ├── telemetry/    bounded agent logs, spans, metrics, and deduplication
 │   │   └── history_ingest.py · live_ingest.py · bus_ingest.py
 │   ├── observer.py · store.py · methods.py · spawner.py · worktree.py
 │   │                   compatibility facades for established import paths
@@ -793,6 +793,7 @@ theater/observability/
 ├── engine.py     timing context, exact prose rendering, log extras, metric bridge
 ├── metrics.py    histogram registry, views, cached gauges, GaugeSampler
 ├── tracing.py    span lifecycle, explicit W3C inject/extract
+├── signals.py    direct structured-log and completed-span transport
 ├── logging.py    owned handlers, crash capture, rotation, stderr pruning
 └── runtime.py    process-level composition and RuntimeHandle shutdown
 ```
@@ -803,8 +804,9 @@ unchanged.
 
 Dependency direction is strictly layered: `constants/observability.py` imports
 no feature package; `catalog.py` imports only dataclasses, enums, and constants;
-`metrics.py`, `tracing.py`, and `engine.py` may import `catalog.py`; `runtime.py`
-composes logging, metrics, and tracing. Lower modules never import `runtime`.
+`metrics.py`, `tracing.py`, `signals.py`, and `engine.py` may import `catalog.py`;
+`runtime.py` composes logging, metrics, tracing, and direct signals. Lower modules
+never import `runtime`.
 Domain objects (`Registry`, `JobManager`, repositories) never import OpenTelemetry.
 Only setup helpers in `runtime.py` import SDK/exporter modules, and only after
 configuration says export is enabled.
@@ -862,11 +864,20 @@ token, cost, and failure metrics. Token and cost increments emit only after the 
 repository accepts the corresponding idempotency key. Model and tool labels, plus
 emitted-record deduplication state, have hard process bounds.
 
-`agent_logs` emits metadata only by default. `agent_log_content` is opt-in because
-bounded content can include prompts and tool payloads. `agent_spans` emits only honest
-absolute intervals carried by a batch; cross-batch timing is not guessed. It uses links
-and correlation attributes rather than invented cross-process parentage. Signal failures
-are contained and never affect observation.
+`agent_logs` emits each accepted highest record revision, metadata only by default.
+`agent_log_content` is opt-in because bounded content can include prompts, responses,
+paths, and tool payloads. `agent_spans` emits only honest absolute intervals; a retained
+call and later result may form one interval, but duration-only data never fabricates a
+timestamp. Request/tool relationships use links, and only interval-compatible nested
+tools use parentage. Signal failures are contained and never affect observation.
+
+The agent metric catalog contains request duration and TTFT, tool duration, durable
+token and cost totals, failure totals, and terminal request/tool-call totals. Metric
+labels have explicit cardinality bounds. Logs and traces retain bounded exact model and
+tool identities. Projection keeps a bounded, content-free record snapshot per
+participant/source epoch so records split across observer batches can still pair. The
+deduplication guarantee is process- and retention-bounded; a daemon restart or LRU
+eviction may export an old operation again.
 
 Enable it by installing the optional dependency and setting the config key:
 

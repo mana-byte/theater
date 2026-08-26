@@ -248,6 +248,12 @@ Then enable the exporter in the machine configuration:
 otlp_enabled = true
 ~~~
 
+This exports daemon/RPC health signals plus accepted agent trajectory metrics,
+structured record logs, and request/tool spans. Agent log content is excluded
+by default; enable `agent_log_content` only when transcript payloads may leave
+the machine. Individual agent signal families can be disabled with
+`agent_metrics`, `agent_logs`, or `agent_spans`.
+
 ## Development
 
 ~~~sh

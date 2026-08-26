@@ -74,6 +74,7 @@ theater/
 │   ├── engine.py         timing context, prose rendering, log extras, metric bridge
 │   ├── metrics.py        histogram registry, views, cached gauges, GaugeSampler
 │   ├── tracing.py        span lifecycle, explicit W3C inject/extract
+│   ├── signals.py        direct structured-log and completed-span transport
 │   ├── logging.py        owned handlers, rotation, stderr-generation pruning
 │   └── runtime.py        process-level composition and RuntimeHandle shutdown
 ├── timing.py           compatibility facade — re-exports observability engine, preserves old API
@@ -93,7 +94,7 @@ theater/
 │   ├── runtime/        socket dispatch, maintenance loops, lifecycle
 │   ├── spawning/       launch planning, resume, service
 │   ├── worktrees/      unique and named shared worktree paths and repos
-│   ├── trajectory/     canonical projection, ingestion, cache, aggregation, responses
+│   ├── trajectory/     canonical projection, ingestion, cache, telemetry, responses
 │   ├── observer.py     compatibility facade — re-exports the observation package
 │   ├── store.py        compatibility facade — re-exports the persistence package
 │   ├── methods.py      compatibility facade — re-exports the rpc package

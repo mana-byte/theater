@@ -340,7 +340,7 @@ agent_logs = true
 # Whether agent telemetry spans export when OTLP is enabled.
 agent_spans = true
 
-# Include prompt and tool payload content in agent logs. Opt-in only.
+# Include transcript text, paths, and tool payloads in agent logs. Opt-in only.
 agent_log_content = false
 
 # Transport protocol: "grpc" or "http".
