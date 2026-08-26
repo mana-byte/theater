@@ -26,6 +26,7 @@ from theater.constants.observability import (
     PROCESS_ROLE_DAEMON,
     PROCESS_ROLES,
 )
+from theater.observability.metrics import MetricKind, MetricSpec
 
 logger = logging.getLogger("theater.observability.runtime")
 
@@ -273,6 +274,7 @@ def configure(
     log_backup_count: int = DEFAULT_LOG_BACKUP_COUNT,
     log_path: Path | None = None,
     foreground: bool = False,
+    metric_specs: tuple[MetricSpec, ...] = (),
 ) -> RuntimeHandle:
     """Configure process-level observability exactly once."""
     global _configured  # noqa: PLW0603
@@ -317,6 +319,7 @@ def configure(
                     export_interval_ms,
                     level,
                     file_entry,
+                    metric_specs,
                 )
         except Exception:
             handle.shutdown()
@@ -365,20 +368,32 @@ def _build_exporters(
     return trace_exporter, metric_exporter, log_exporter
 
 
-def _build_views() -> list[Any]:
+def _build_views(metric_specs: tuple[MetricSpec, ...] = ()) -> list[Any]:
     from opentelemetry.sdk.metrics.view import ExponentialBucketHistogramAggregation, View
 
     from theater.observability.catalog import OPERATIONS
 
     views: list[Any] = []
     seen: set[str] = set()
-    for spec in OPERATIONS:
-        if spec.metric_name is None or spec.metric_name in seen:
+    for operation in OPERATIONS:
+        if operation.metric_name is None or operation.metric_name in seen:
             continue
-        seen.add(spec.metric_name)
+        seen.add(operation.metric_name)
         views.append(
             View(
-                instrument_name=spec.metric_name,
+                instrument_name=operation.metric_name,
+                aggregation=ExponentialBucketHistogramAggregation(
+                    max_size=HISTOGRAM_MAX_SIZE, max_scale=HISTOGRAM_MAX_SCALE
+                ),
+            )
+        )
+    for spec in metric_specs:
+        if spec.kind is not MetricKind.HISTOGRAM or spec.name in seen:
+            continue
+        seen.add(spec.name)
+        views.append(
+            View(
+                instrument_name=spec.name,
                 aggregation=ExponentialBucketHistogramAggregation(
                     max_size=HISTOGRAM_MAX_SIZE, max_scale=HISTOGRAM_MAX_SCALE
                 ),
@@ -443,6 +458,7 @@ def _stage_otel(
     export_interval_ms: int,
     log_level: int,
     file_entry: _HandlerEntry | None,
+    metric_specs: tuple[MetricSpec, ...],
 ) -> None:
     """Build, publish, and attach OTel providers with staged rollback."""
     from opentelemetry.sdk.resources import Resource
@@ -461,7 +477,7 @@ def _stage_otel(
         trace_exp, metric_exp, log_exp = _build_exporters(protocol, endpoints, staged)
         _check_existing_provider()
 
-        views = _build_views()
+        views = _build_views(metric_specs)
         tracer_provider, meter_provider, logger_provider = _stage_providers(
             staged, resource, trace_exp, metric_exp, log_exp, export_interval_ms, views
         )
@@ -469,12 +485,21 @@ def _stage_otel(
         # Build registry, bridge, gauge cache.
         from theater.observability.catalog import OPERATIONS
         from theater.observability.engine import set_metric_bridge
-        from theater.observability.metrics import GaugeCache, HistogramRegistry, MetricBridge
+        from theater.observability.metrics import (
+            CounterRegistry,
+            GaugeCache,
+            HistogramRegistry,
+            MetricBridge,
+        )
 
         meter = meter_provider.get_meter("theater", version)
         registry = HistogramRegistry(meter=meter)
-        registry.register_from_catalog(OPERATIONS)
-        bridge = MetricBridge(registry)
+        counter_registry = CounterRegistry(meter=meter)
+        bridge = MetricBridge(registry, counter_registry)
+        for spec in OPERATIONS:
+            if spec.metric_name is not None:
+                bridge.register_histogram(spec.metric_name, spec.description or "", spec.unit)
+        bridge.register_specs(metric_specs)
 
         gauge_cache = GaugeCache()
         gauge_cache.register_observable_gauges(meter)

@@ -146,6 +146,27 @@ def test_views_built_from_catalog(monkeypatch):
     )
 
 
+def test_views_include_external_histograms_but_not_counters(monkeypatch):
+    from opentelemetry.sdk.metrics import view as view_mod
+
+    from theater.observability.metrics import MetricKind, MetricSpec
+    from theater.observability.runtime import _build_views
+
+    definitions = []
+    monkeypatch.setattr(view_mod, "View", lambda **kwargs: definitions.append(kwargs) or kwargs)
+    _build_views(
+        (
+            MetricSpec(
+                "theater.external.duration", "External duration", "ms", MetricKind.HISTOGRAM
+            ),
+            MetricSpec("theater.external.total", "External count", "1", MetricKind.COUNTER),
+        )
+    )
+    names = {definition["instrument_name"] for definition in definitions}
+    assert "theater.external.duration" in names
+    assert "theater.external.total" not in names
+
+
 def test_views_passed_to_meter_provider_constructor():
     """MeterProvider receives views= in constructor."""
     _run("""

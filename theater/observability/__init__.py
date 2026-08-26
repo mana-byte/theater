@@ -21,10 +21,13 @@ from theater.observability.engine import (
     span,
 )
 from theater.observability.metrics import (
+    CounterRegistry,
     GaugeCache,
     GaugeSampler,
     HistogramRegistry,
     MetricBridge,
+    MetricKind,
+    MetricSpec,
     create_active_gauge_sampler,
 )
 from theater.observability.runtime import (
@@ -43,10 +46,13 @@ __all__ = [
     "OPERATIONS",
     "RESULTS",
     "AttrMapping",
+    "CounterRegistry",
     "GaugeCache",
     "GaugeSampler",
     "HistogramRegistry",
     "MetricBridge",
+    "MetricKind",
+    "MetricSpec",
     "ObservabilityError",
     "OperationSpec",
     "RuntimeHandle",
