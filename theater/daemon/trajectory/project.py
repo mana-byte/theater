@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import replace
 
+from theater.daemon.trajectory.mcp_projection import classify_mcp_fact
 from theater.harness.contracts.events import Event, EventKind
 from theater.harness.contracts.source import Batch, HistoryPage
 from theater.harness.contracts.trajectory import TrajectoryFact
@@ -152,6 +153,7 @@ def fact_to_record(
     links: Iterable = (),
 ) -> TrajectoryRecord:
     """Add daemon-supplied participant identity to a source-local fact."""
+    fact = classify_mcp_fact(fact)
     lane = fact.lane or _lane_for_kind(fact.kind)
     return TrajectoryRecord(
         record_id=record_id_for_fact(fact, source_epoch),
@@ -176,6 +178,8 @@ def fact_to_record(
         request_id=fact.request_id,
         call_id=fact.call_id,
         parent_call_id=fact.parent_call_id,
+        mcp_server=fact.mcp_server,
+        mcp_tool=fact.mcp_tool,
         links=tuple(links),
         timing=fact.timing,
         usage=_priced_usage(fact.usage),

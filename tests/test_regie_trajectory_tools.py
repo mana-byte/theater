@@ -7,6 +7,7 @@ from types import MappingProxyType
 import pytest
 from rich.console import Console
 from textual.app import App, ComposeResult
+from textual.widgets import Tab, TabbedContent
 
 from theater.constants.regie_trajectory import TOOL_ROW_SUMMARY_MAX_CHARS
 from theater.constants.trajectory import TRAJECTORY_DETAIL_RECORD_MAX_BYTES
@@ -399,6 +400,30 @@ class _LedgerHost(App):
 
 
 @pytest.mark.asyncio
+async def test_tool_detail_tabs_render_and_move_in_contextual_order() -> None:
+    call = _tool("call", 1, TrajectoryKind.TOOL_CALL, "one")
+    result = _tool("result", 2, TrajectoryKind.TOOL_RESULT, "one")
+    app = _LedgerHost()
+
+    async with app.run_test(size=(110, 24)) as pilot:
+        view = app.query_one(TrajectoryView)
+        view.state.upsert((call, result))
+        view._refresh()
+        view._open_details("call")
+        await pilot.pause()
+
+        panel = view.query_one(SpanDetailPanel)
+        content = panel.query_one(TabbedContent)
+        visible_tabs = [tab for tab in content.query(Tab) if tab.display]
+        expected_tabs = [content.get_tab(panel._pane_id(tab)) for tab in panel.tabs]
+        assert visible_tabs == expected_tabs
+
+        for expected in panel.tabs[1:]:
+            await pilot.press("l")
+            assert panel.tab is expected
+
+
+@pytest.mark.asyncio
 async def test_result_member_hover_and_expansion_target_combined_row() -> None:
     call = _tool(
         "call",
@@ -436,13 +461,9 @@ async def test_result_member_hover_and_expansion_target_combined_row() -> None:
         ledger.set_hovered("result")
         position = ledger.get_cell(row_key, Ledger.COLUMN_POSITION)
         summary = ledger.get_cell(row_key, Ledger.COLUMN_SUMMARY)
-        status = ledger.get_cell(row_key, Ledger.COLUMN_STATUS)
         assert "●" in position.plain
         assert summary.get_style_at_offset(Console(), 1).bold
-        assert (
-            status.get_style_at_offset(Console(), 1).color
-            == ledger._status_style(operation.status).color
-        )
+        assert "COMPLETED" not in summary.plain
 
         view.state.detail_tab = InspectorTab.RESULT
         view._open_details("result")

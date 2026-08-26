@@ -23,6 +23,8 @@ class TrajectoryKind(StrEnum):
     USAGE = "usage"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
+    THEATER_CALL = "theater_call"
+    THEATER_RESULT = "theater_result"
     ERROR = "error"
     SYSTEM = "system"
     CONTEXT = "context"

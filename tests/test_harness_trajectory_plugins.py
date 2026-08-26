@@ -5,13 +5,14 @@ import json
 from pathlib import Path
 
 import pytest
-from shipped import OpenCodeObserver, VibeObserver
+from shipped import ClaudeCodeObserver, CodexObserver, OpenCodeObserver, VibeObserver
 from test_harness_opencode import Recorder
 
 from theater.harness import EventKind
 from theater.trajectory import TrajectoryKind, TrajectoryStatus
 
 FIXTURE = Path(__file__).parent / "fixtures" / "vibe_messages.jsonl"
+CODEX_FIXTURE = Path(__file__).parent / "fixtures" / "trajectory_codex.jsonl"
 
 
 @pytest.fixture
@@ -93,6 +94,97 @@ def test_vibe_facts_bound_malformed_large_content_without_timing() -> None:
     )
 
 
+def test_vibe_extracts_theater_mcp_identity_without_classifying_it() -> None:
+    observer = VibeObserver()
+    call = observer.parse_record(
+        json.dumps(
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "function": {"name": "theater_send", "arguments": "{}"},
+                    }
+                ],
+            }
+        ),
+        0,
+    ).trajectory[-1]
+    result = observer.parse_record(
+        json.dumps(
+            {
+                "role": "tool",
+                "name": "theater_send",
+                "tool_call_id": "call-1",
+                "content": "sent",
+            }
+        ),
+        1,
+    ).trajectory[0]
+
+    assert call.kind is TrajectoryKind.TOOL_CALL
+    assert result.kind is TrajectoryKind.TOOL_RESULT
+    assert (call.mcp_server, call.mcp_tool) == ("theater", "send")
+    assert (result.mcp_server, result.mcp_tool) == ("theater", "send")
+
+
+def test_claude_extracts_and_remembers_mcp_identity_for_results() -> None:
+    observer = ClaudeCodeObserver()
+    call = observer.parse_record(
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "message-1",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "call-1",
+                            "name": "mcp__theater__send",
+                            "input": {},
+                        }
+                    ],
+                },
+            }
+        ),
+        0,
+    ).trajectory[0]
+    result = observer.parse_record(
+        json.dumps(
+            {
+                "type": "user",
+                "message": {
+                    "content": [{"type": "tool_result", "tool_use_id": "call-1", "content": "sent"}]
+                },
+            }
+        ),
+        1,
+    ).trajectory[0]
+
+    assert call.kind is TrajectoryKind.TOOL_CALL
+    assert result.kind is TrajectoryKind.TOOL_RESULT
+    assert (call.mcp_server, call.mcp_tool) == ("theater", "send")
+    assert (result.mcp_server, result.mcp_tool) == ("theater", "send")
+
+
+def test_codex_extracts_and_remembers_mcp_identity_for_results() -> None:
+    observer = CodexObserver()
+    facts = [
+        fact
+        for index, line in enumerate(CODEX_FIXTURE.read_text().splitlines())
+        for fact in observer.parse_record(line, index).trajectory
+        if fact.call_id == "mcp-1"
+    ]
+
+    assert [fact.kind for fact in facts] == [
+        TrajectoryKind.TOOL_CALL,
+        TrajectoryKind.TOOL_RESULT,
+    ]
+    assert {(fact.mcp_server, fact.mcp_tool) for fact in facts} == {
+        ("theater", "list_participants")
+    }
+
+
 def test_opencode_facts_upsert_running_tool_to_terminal(rec, workdir) -> None:
     source = _source(rec, workdir)
     rec.message("message-1", "assistant")
@@ -155,6 +247,33 @@ def test_opencode_live_and_history_revisions_share_coordinates(rec, workdir) -> 
         fact for fact in completed.trajectory if fact.kind is TrajectoryKind.TOOL_CALL
     )
     assert completed_call.revision > stored_call.revision
+
+
+def test_opencode_extracts_theater_mcp_identity_live_and_from_history(rec, workdir) -> None:
+    source = _source(rec, workdir)
+    message = rec.message("message-1", "assistant")
+    running = {
+        "id": "part-1",
+        "messageID": message["id"],
+        "type": "tool",
+        "callID": "call-1",
+        "tool": "theater_send",
+        "state": {"status": "running", "input": {}},
+    }
+    rec._part(running)
+    live = asyncio.run(source.read())
+    rec._part({**running, "state": {"status": "completed", "output": "sent"}})
+    completed = asyncio.run(source.read())
+    history = asyncio.run(source.history_page(limit=10))
+
+    facts = (*live.trajectory, *completed.trajectory, *history.trajectory)
+    mcp_facts = [
+        fact
+        for fact in facts
+        if fact.kind in {TrajectoryKind.TOOL_CALL, TrajectoryKind.TOOL_RESULT}
+    ]
+    assert mcp_facts
+    assert {(fact.mcp_server, fact.mcp_tool) for fact in mcp_facts} == {("theater", "send")}
 
 
 def test_opencode_history_page_is_keyset_and_does_not_move_live_cursor(rec, workdir) -> None:

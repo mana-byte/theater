@@ -95,7 +95,6 @@ LEDGER_OVERSCAN_ROWS = 4
 LEDGER_DEFAULT_VIEWPORT_ROWS = 12
 LEDGER_COMPACT_WIDTH = 64
 LEDGER_MIN_SUMMARY_WIDTH = 8
-LEDGER_STATUS_COLUMN_WIDTH = 16
 LEDGER_DURATION_COLUMN_WIDTH = 8
 # Keep tool-row summaries and selected input details readable.
 TOOL_ROW_SUMMARY_MAX_CHARS = 160
@@ -140,6 +139,8 @@ KIND_GLYPHS_BY_VALUE = {
     "usage": "∑",
     "tool_call": "⚙",
     "tool_result": "✓",
+    "theater_call": "◇",
+    "theater_result": "✓",
     "error": "!",
     "system": "§",
     "context": "⇄",
@@ -155,6 +156,18 @@ KIND_GLYPHS_BY_VALUE = {
     "transcript_boundary": "║",
     "session_boundary": "║",
     "observation_error": "!",
+    "unknown": "?",
+}
+
+# Mark only non-completed trajectory states in dense ledger rows.
+TRAJECTORY_STATUS_GLYPHS_BY_VALUE = {
+    "pending": "…",
+    "running": "…",
+    "partial": "◐",
+    "timeout": "!",
+    "cancelled": "×",
+    "error": "!",
+    "interrupted": "!",
     "unknown": "?",
 }
 
@@ -174,7 +187,6 @@ __all__ = [
     "LEDGER_MIN_SUMMARY_WIDTH",
     "LEDGER_OVERSCAN_ROWS",
     "LEDGER_SCROLLBAR_WIDTH",
-    "LEDGER_STATUS_COLUMN_WIDTH",
     "MAX_QUERY_BYTES",
     "MAX_SEARCH_CACHE_ENTRIES",
     "SEARCH_HEIGHT",
@@ -223,6 +235,7 @@ __all__ = [
     "TRAJECTORY_RESOURCE_HEAT_GLYPH",
     "TRAJECTORY_RESOURCE_HEAT_WIDTH",
     "TRAJECTORY_SPAN_ROW_HEIGHT",
+    "TRAJECTORY_STATUS_GLYPHS_BY_VALUE",
     "TRAJECTORY_TABLE_CELL_PADDING",
     "TRAJECTORY_TOOL_READ_HINTS",
     "TRAJECTORY_TOOL_WRITE_HINTS",

@@ -42,7 +42,6 @@ class InspectorTab(StrEnum):
     OUTPUT = "output"
     REASONING = "reasoning"
     USAGE = "usage"
-    TIMING = "timing"
     INPUT = "input"
     RESULT = "result"
     PREVIEW = "preview"
@@ -52,6 +51,7 @@ class InspectorTab(StrEnum):
     CURRENT = "current"
     PREVIOUS = "previous"
     DIFF = "diff"
+    TIMING = "timing"
     ASSOCIATIONS = "associations"
 
 

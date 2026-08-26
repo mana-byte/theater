@@ -625,6 +625,9 @@ class TrajectoryView(Vertical):
     def _select(self, delta: int) -> None:
         before = self.state.selected_id
         visible_ids = self._selected_visible_ids()
+        boundary = visible_ids[0 if delta < 0 else -1] if visible_ids else None
+        if before == boundary and self._change_page(delta):
+            return
         if (
             delta < 0
             and before
@@ -690,16 +693,17 @@ class TrajectoryView(Vertical):
         else:
             self._sync_selection()
 
-    def _change_page(self, delta: int) -> None:
+    def _change_page(self, delta: int) -> bool:
         if self.state.diagnostic_view in INSIGHT_VIEWS:
-            return
+            return False
         target = max(
             0,
             min(self.projection.ledger_page.count - 1, self.state.ledger_page + delta),
         )
         if target == self.state.ledger_page:
-            return
+            return False
         self._show_page(target, select_last=delta < 0)
+        return True
 
     def _show_page(self, target: int, *, select_last: bool = False) -> None:
         page = self.projection.page_for(target, self.state_store.page_size)

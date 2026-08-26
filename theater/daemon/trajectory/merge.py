@@ -23,6 +23,8 @@ _INTERACTION_KINDS = frozenset(
         TrajectoryKind.AWAIT_START,
         TrajectoryKind.AWAIT_END,
         TrajectoryKind.KILL,
+        TrajectoryKind.THEATER_CALL,
+        TrajectoryKind.THEATER_RESULT,
         TrajectoryKind.JOB_FAILURE,
         TrajectoryKind.TRANSCRIPT_BOUNDARY,
         TrajectoryKind.SESSION_BOUNDARY,

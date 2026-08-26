@@ -50,10 +50,14 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, BinaryIO, Literal
 
 from theater import paths
-from theater.constants.trajectory import TRAJECTORY_IDENTIFIER_MAX_BYTES
+from theater.constants.trajectory import (
+    TRAJECTORY_IDENTIFIER_MAX_BYTES,
+    TRAJECTORY_MCP_CALL_CONTEXT_LIMIT,
+    TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES,
+)
 from theater.harness.base import (
     APPROVALS,
     SERVER_NAME,
@@ -255,6 +259,17 @@ def _trajectory_id(value: object) -> str | None:
     if len(value.encode("utf-8")) > TRAJECTORY_IDENTIFIER_MAX_BYTES:
         return None
     return value
+
+
+def _claude_mcp_identity(value: object) -> tuple[str, str] | None:
+    if not isinstance(value, str) or not value.startswith("mcp__"):
+        return None
+    server, separator, tool = value.removeprefix("mcp__").partition("__")
+    if not separator:
+        return None
+    server_id = _trajectory_id(server)
+    tool_id = _trajectory_id(tool)
+    return (server_id, tool_id) if server_id is not None and tool_id is not None else None
 
 
 def _stable_json(value: object) -> str:
@@ -559,9 +574,13 @@ class _ClaudeSource(TranscriptSource):
     disappears.
     """
 
-    def __init__(self, observer: TranscriptObserver, **kwargs) -> None:
+    def __init__(self, observer: ClaudeCodeObserver, **kwargs) -> None:
         super().__init__(observer, **kwargs)
+        self._claude = observer
         self._expected_location: Path | None = None
+
+    def _prepare_history_parse(self, fh: BinaryIO, start: int) -> None:
+        self._claude._seed_mcp_context(fh, start)
 
     async def read(self) -> Batch:
         self._require_decision()
@@ -637,6 +656,7 @@ class ClaudeCodeObserver(TranscriptObserver):
     def __init__(self, root: Path | None = None):
         #: Injectable so tests never touch the real ~/.claude.
         self.root = root or Path.home() / ".claude" / "projects"
+        self._mcp_calls: dict[str, tuple[str, str]] = {}
 
     def open_source(
         self,
@@ -645,8 +665,9 @@ class ClaudeCodeObserver(TranscriptObserver):
         session_id: str | None = None,
         after: float | None = None,
     ) -> _ClaudeSource:
+        reader = ClaudeCodeObserver(root=self.root)
         return _ClaudeSource(
-            self,
+            reader,
             cwd=cwd,
             session_id=session_id,
             after=after,
@@ -663,8 +684,9 @@ class ClaudeCodeObserver(TranscriptObserver):
         session_provenance: str | TranscriptProvenance | None = None,
         known_location: str | None = None,
     ) -> _ClaudeSource:
+        reader = ClaudeCodeObserver(root=self.root)
         return _ClaudeSource(
-            self,
+            reader,
             cwd=cwd,
             session_id=session_id,
             after=after,
@@ -958,6 +980,41 @@ class ClaudeCodeObserver(TranscriptObserver):
             raise ValueError(f"claude receipt transcript_path is not readable: {exc}") from exc
         return found_evidence
 
+    def _remember_mcp_calls(self, record: dict) -> None:
+        if record.get("type") != "assistant":
+            return
+        message = record.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            return
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") not in {
+                "tool_use",
+                "server_tool_use",
+            }:
+                continue
+            call_id = _trajectory_id(block.get("id") or block.get("call_id"))
+            identity = _claude_mcp_identity(block.get("name"))
+            if call_id is None or identity is None:
+                continue
+            self._mcp_calls[call_id] = identity
+            while len(self._mcp_calls) > TRAJECTORY_MCP_CALL_CONTEXT_LIMIT:
+                self._mcp_calls.pop(next(iter(self._mcp_calls)))
+
+    def _seed_mcp_context(self, fh: BinaryIO, start: int) -> None:
+        self._mcp_calls.clear()
+        scan_start = max(0, start - TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES)
+        fh.seek(scan_start)
+        context = fh.read(start - scan_start)
+        if scan_start:
+            _, separator, context = context.partition(b"\n")
+            if not separator:
+                return
+        for raw in context.splitlines():
+            record = self._decode(raw.decode("utf-8", errors="replace"))
+            if record is not None:
+                self._remember_mcp_calls(record)
+
     def parse(self, line: str, index: int, *, clip_text: bool = True) -> list[Event]:
         record = self._decode(line)
         if record is None:
@@ -981,6 +1038,7 @@ class ClaudeCodeObserver(TranscriptObserver):
         record = self._decode(line)
         if record is None:
             return ParsedRecord()
+        self._remember_mcp_calls(record)
         return ParsedRecord(
             events=tuple(self._parse_decoded(record, index, clip_text=clip_text)),
             trajectory=tuple(self._trajectory_facts(record, index)),
@@ -1191,6 +1249,8 @@ class ClaudeCodeObserver(TranscriptObserver):
             request: str | None = None,
             call_id: str | None = None,
             parent_call_id: str | None = None,
+            mcp_server: str | None = None,
+            mcp_tool: str | None = None,
             fact_timing: Timing | None = timing,
             usage: TrajectoryUsage | None = None,
             failure: TrajectoryFailure | None = None,
@@ -1213,6 +1273,8 @@ class ClaudeCodeObserver(TranscriptObserver):
                     request_id=_trajectory_id(request),
                     call_id=_trajectory_id(call_id),
                     parent_call_id=_trajectory_id(parent_call_id),
+                    mcp_server=_trajectory_id(mcp_server),
+                    mcp_tool=_trajectory_id(mcp_tool),
                     timing=fact_timing,
                     usage=usage,
                     failure=failure,
@@ -1280,6 +1342,8 @@ class ClaudeCodeObserver(TranscriptObserver):
                     )
                 elif block_type in ("tool_use", "server_tool_use"):
                     name = _safe_trajectory_text(block.get("name"))
+                    mcp_identity = _claude_mcp_identity(name)
+                    mcp_server, mcp_tool = mcp_identity or (None, None)
                     call_id = _trajectory_id(block.get("id") or block.get("call_id"))
                     input_value = block.get("input")
                     block_details = (
@@ -1297,11 +1361,15 @@ class ClaudeCodeObserver(TranscriptObserver):
                         request=request,
                         call_id=call_id,
                         parent_call_id=parent_call_id,
+                        mcp_server=mcp_server,
+                        mcp_tool=mcp_tool,
                         details=block_details,
                     )
                 elif block_type == "tool_result":
                     raw = _claude_content_text(block.get("content"))
                     call_id = _trajectory_id(block.get("tool_use_id") or block.get("call_id"))
+                    mcp_identity = self._mcp_calls.get(call_id) if call_id is not None else None
+                    mcp_server, mcp_tool = mcp_identity or (None, None)
                     result_status = (
                         TrajectoryStatus.ERROR
                         if block.get("is_error") is True
@@ -1331,6 +1399,8 @@ class ClaudeCodeObserver(TranscriptObserver):
                         turn=message_turn,
                         call_id=call_id,
                         parent_call_id=parent_call_id or call_id,
+                        mcp_server=mcp_server,
+                        mcp_tool=mcp_tool,
                         failure=(
                             TrajectoryFailure(TrajectoryFailureCategory.TOOL, detail=raw)
                             if block.get("is_error") is True
@@ -1378,6 +1448,8 @@ class ClaudeCodeObserver(TranscriptObserver):
                 elif block_type == "tool_result":
                     raw = _claude_content_text(block.get("content"))
                     call_id = _trajectory_id(block.get("tool_use_id") or block.get("call_id"))
+                    mcp_identity = self._mcp_calls.get(call_id) if call_id is not None else None
+                    mcp_server, mcp_tool = mcp_identity or (None, None)
                     parent_call_id = _trajectory_id(
                         block.get("parent_call_id") or block.get("parentCallId")
                     )
@@ -1409,6 +1481,8 @@ class ClaudeCodeObserver(TranscriptObserver):
                         status=result_status,
                         call_id=call_id,
                         parent_call_id=parent_call_id or call_id,
+                        mcp_server=mcp_server,
+                        mcp_tool=mcp_tool,
                         failure=(
                             TrajectoryFailure(TrajectoryFailureCategory.TOOL, detail=raw)
                             if block.get("is_error") is True

@@ -384,6 +384,14 @@ def _trajectory_string(value) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _opencode_mcp_identity(value: object) -> tuple[str, str] | None:
+    prefix = f"{SERVER_NAME}_"
+    if not isinstance(value, str) or not value.startswith(prefix):
+        return None
+    tool = _trajectory_identifier(value.removeprefix(prefix), "tool")
+    return (SERVER_NAME, tool) if tool is not None else None
+
+
 def _trajectory_lane(kind: TrajectoryKind) -> TrajectoryLane:
     if kind is TrajectoryKind.USER:
         return TrajectoryLane.INPUT
@@ -1588,6 +1596,8 @@ class OpenCodeSource(Source):
         request_id: str | None = None,
         call_id: str | None = None,
         parent_call_id: str | None = None,
+        mcp_server: str | None = None,
+        mcp_tool: str | None = None,
         timing: Timing | None = None,
         usage: TrajectoryUsage | None = None,
         failure: TrajectoryFailure | None = None,
@@ -1611,6 +1621,8 @@ class OpenCodeSource(Source):
             request_id=_trajectory_identifier(request_id, "request"),
             call_id=_trajectory_identifier(call_id, "call"),
             parent_call_id=_trajectory_identifier(parent_call_id, "parent-call"),
+            mcp_server=_trajectory_identifier(mcp_server, "mcp-server"),
+            mcp_tool=_trajectory_identifier(mcp_tool, "mcp-tool"),
             timing=timing,
             usage=usage,
             failure=failure,
@@ -1783,6 +1795,8 @@ class OpenCodeSource(Source):
         call = part.get("callID") or part.get("id")
         call_id = call if isinstance(call, str) else None
         tool_name = part.get("tool") if isinstance(part.get("tool"), str) else None
+        mcp_identity = _opencode_mcp_identity(tool_name)
+        mcp_server, mcp_tool = mcp_identity or (None, None)
         parent = part.get("parentCallID") or state.get("parentCallID")
         parent_id = parent if isinstance(parent, str) else None
         details = [
@@ -1806,6 +1820,8 @@ class OpenCodeSource(Source):
                 turn_id=mid or None,
                 call_id=call_id,
                 parent_call_id=parent_id,
+                mcp_server=mcp_server,
+                mcp_tool=mcp_tool,
                 timing=_part_timing(part),
                 request_id=request_id if role == "assistant" else None,
                 details=details,
@@ -1831,6 +1847,8 @@ class OpenCodeSource(Source):
                     turn_id=mid or None,
                     call_id=call_id,
                     parent_call_id=parent_id,
+                    mcp_server=mcp_server,
+                    mcp_tool=mcp_tool,
                     failure=(
                         TrajectoryFailure(TrajectoryFailureCategory.TOOL, detail=result)
                         if state_status == "error"
@@ -2180,6 +2198,8 @@ class OpenCodeSource(Source):
         request_id: str | None = None,
         call_id: str | None = None,
         parent_call_id: str | None = None,
+        mcp_server: str | None = None,
+        mcp_tool: str | None = None,
         timing: Timing | None = None,
         usage: TrajectoryUsage | None = None,
         failure: TrajectoryFailure | None = None,
@@ -2203,6 +2223,8 @@ class OpenCodeSource(Source):
             request_id=_trajectory_identifier(request_id, "request"),
             call_id=_trajectory_identifier(call_id, "call"),
             parent_call_id=_trajectory_identifier(parent_call_id, "parent-call"),
+            mcp_server=_trajectory_identifier(mcp_server, "mcp-server"),
+            mcp_tool=_trajectory_identifier(mcp_tool, "mcp-tool"),
             timing=timing,
             usage=usage,
             failure=failure,
@@ -2372,6 +2394,8 @@ class OpenCodeSource(Source):
         call = part.get("callID") or part.get("id")
         call_id = call if isinstance(call, str) else None
         tool_name = part.get("tool") if isinstance(part.get("tool"), str) else None
+        mcp_identity = _opencode_mcp_identity(tool_name)
+        mcp_server, mcp_tool = mcp_identity or (None, None)
         parent = part.get("parentCallID") or state.get("parentCallID")
         parent_id = parent if isinstance(parent, str) else None
         details: list[DetailField] = []
@@ -2396,6 +2420,8 @@ class OpenCodeSource(Source):
             request_id=request_id,
             call_id=call_id,
             parent_call_id=parent_id,
+            mcp_server=mcp_server,
+            mcp_tool=mcp_tool,
             timing=timing,
             details=details,
             revision_hint=revision_hint,
@@ -2424,6 +2450,8 @@ class OpenCodeSource(Source):
                 request_id=request_id,
                 call_id=call_id,
                 parent_call_id=parent_id,
+                mcp_server=mcp_server,
+                mcp_tool=mcp_tool,
                 failure=(
                     TrajectoryFailure(TrajectoryFailureCategory.TOOL, detail=result)
                     if state_status == "error"

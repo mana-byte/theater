@@ -7,8 +7,9 @@ from rich.cells import cell_len
 from rich.console import Console
 from rich.text import Text
 from textual.app import App, ComposeResult
+from textual.color import Color
 from textual.coordinate import Coordinate
-from textual.widgets import Button, Input, RichLog, Select, SelectionList
+from textual.widgets import Button, Input, RichLog, Select, SelectionList, Tab
 
 from theater.constants.regie_trajectory import (
     FILTER_MAX_ROWS,
@@ -187,11 +188,20 @@ async def test_ledger_sizes_non_summary_columns_to_displayed_content() -> None:
         columns = {column.key.value: column for column in ledger.ordered_columns}
 
         assert ledger.cell_padding == TRAJECTORY_TABLE_CELL_PADDING
-        assert columns[Ledger.COLUMN_SOURCE].width == cell_len("long-adapter-source")
-        assert columns[Ledger.COLUMN_STATUS].width == cell_len("● INTERRUPTED")
-        assert columns[Ledger.COLUMN_SOURCE].get_render_width(ledger) == (
-            cell_len("long-adapter-source") + 2 * TRAJECTORY_TABLE_CELL_PADDING
+        assert tuple(columns) == (
+            Ledger.COLUMN_POSITION,
+            Ledger.COLUMN_EVENT,
+            Ledger.COLUMN_SUMMARY,
+            Ledger.COLUMN_DURATION,
         )
+        event = "◆ ASSISTANT"
+        assert columns[Ledger.COLUMN_EVENT].width == cell_len(event)
+        assert columns[Ledger.COLUMN_EVENT].get_render_width(ledger) == (
+            cell_len(event) + 2 * TRAJECTORY_TABLE_CELL_PADDING
+        )
+        summary = ledger.get_cell("record:long", Ledger.COLUMN_SUMMARY)
+        assert "INTERRUPTED" in summary.plain
+        assert "long-adapter-source" not in summary.plain
 
 
 async def test_turn_groups_stay_expanded_when_horizontal_keys_are_pressed() -> None:
@@ -231,10 +241,12 @@ async def test_timeline_scroll_hit_testing_and_positioned_spans() -> None:
         assert len(timeline.projection.spans) == len(records)
         assert {span.width for span in timeline.projection.spans} == {TIMELINE_SPAN_MIN_WIDTH}
         assert timeline.tail_offset > 0
+        timeline.update_records(records, matched_ids=frozenset(), selected_id=None)
         normal_style = timeline._span_style(records[-1])
         timeline.set_hovered("r9")
         hovered_style = timeline._span_style(records[-1])
-        assert hovered_style.bgcolor == normal_style.bgcolor
+        assert hovered_style != normal_style
+        assert hovered_style == timeline._lane_style(records[-1].lane, highlighted=True)
 
 
 async def test_timeline_projects_four_lanes_and_duration_widths() -> None:
@@ -319,8 +331,10 @@ async def test_timeline_hover_marks_span_edges_and_related_records() -> None:
         hovered = timeline.projection.span_for("first")
         related = timeline.projection.span_for("second")
         assert hovered is not None and related is not None
-        assert strip.text[hovered.visual_start] == TIMELINE_HOVER_LEFT_GLYPH
-        assert strip.text[hovered.visual_end - 1] == TIMELINE_HOVER_RIGHT_GLYPH
+        assert strip.text[hovered.x] == TIMELINE_HOVER_LEFT_GLYPH
+        assert strip.text[hovered.end - 1] == TIMELINE_HOVER_RIGHT_GLYPH
+        assert hovered.visual_start > hovered.x
+        assert hovered.visual_end < hovered.end
         assert (
             strip.text[(related.visual_start + related.visual_end - 1) // 2]
             == TIMELINE_RELATED_GLYPH
@@ -813,6 +827,37 @@ async def test_ledger_pages_with_shift_h_and_shift_l() -> None:
         assert view.state.follow_tail
 
 
+async def test_ledger_selection_crosses_page_boundaries_with_j_and_k() -> None:
+    records = [record(f"r{index}", index=index, turn_id=None) for index in range(5)]
+    app = Host()
+    async with app.run_test(size=(100, 24)) as pilot:
+        view = app.query_one(TrajectoryView)
+        view.state_store.page_size = 2
+        view.state.panel = PanelStateInfo(PanelState.READY, participant_state="live")
+        view.state.upsert(records)
+        view._refresh()
+
+        await pilot.press("shift+h", "k")
+        assert view.state.ledger_page == 1
+        assert view.state.selected_id == "r2"
+
+        await pilot.press("k")
+        assert view.state.ledger_page == 0
+        assert view.state.selected_id == "r1"
+
+        await pilot.press("j")
+        assert view.state.ledger_page == 1
+        assert view.state.selected_id == "r2"
+
+        await pilot.press("j")
+        assert view.state.ledger_page == 1
+        assert view.state.selected_id == "r3"
+
+        await pilot.press("j")
+        assert view.state.ledger_page == 2
+        assert view.state.selected_id == "r4"
+
+
 async def test_footer_page_buttons_and_selector_change_pages() -> None:
     records = [record(f"r{index}", index=index, turn_id=None) for index in range(5)]
     app = Host()
@@ -843,6 +888,40 @@ async def test_footer_page_buttons_and_selector_change_pages() -> None:
         assert view.state.ledger_page == 0
         assert selector.value == 0
         assert previous.disabled
+
+
+async def test_trajectory_controls_use_muted_theme_interaction_colors() -> None:
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await populate(app, [record("r1", turn_id=None)])
+        accent = Color.parse(app.get_css_variables()["accent"])
+
+        search = view.query_one("#trajectory-search-action", Button)
+        await pilot.hover(search)
+        assert search.styles.background == accent.with_alpha(0.1)
+
+        selector = view.query_one("#trajectory-view-action", Select)
+        current = selector.query_one("SelectCurrent")
+        await pilot.hover(current)
+        assert current.styles.background == accent.with_alpha(0.1)
+        await pilot.click(selector)
+        assert selector.query_one("SelectOverlay").styles.background_tint == Color(0, 0, 0, 0)
+        await pilot.press("escape")
+
+        view.action_toggle_filters()
+        await pilot.pause()
+        clear = view.query_one("#trajectory-filter-clear", Button)
+        await pilot.hover(clear)
+        assert clear.styles.background == accent.with_alpha(0.1)
+
+        view.action_toggle_filters()
+        view.action_open_details()
+        await pilot.pause()
+        close = view.query_one("#trajectory-span-detail-close", Button)
+        await pilot.hover(close)
+        assert close.styles.background == accent.with_alpha(0.15)
+        active_tab = view.query_one("#trajectory-span-detail-tabs Tab.-active", Tab)
+        assert active_tab.styles.background == accent.with_alpha(0.2)
 
 
 def test_context_tabs_render_matching_formats_and_copy_exactly() -> None:
@@ -1042,12 +1121,12 @@ async def test_retry_action_inside_error_row_is_clickable_and_keyboard_accessibl
     async with app.run_test(size=(80, 20)) as pilot:
         ledger = app.query_one(Ledger)
         ledger.update_rows([], search_records([]), retry_message="try again")
-        retry = ledger.get_cell(Ledger.RETRY_KEY, Ledger.COLUMN_STATUS)
+        retry = ledger.get_cell(Ledger.RETRY_KEY, Ledger.COLUMN_SUMMARY)
         assert isinstance(retry, Text)
-        assert retry.plain.strip() == "↻ Retry"
+        assert retry.plain.strip() == "try again · ↻ Retry"
         row = ledger.get_row_index(Ledger.RETRY_KEY)
         assert ledger.ordered_rows[row].height == 2
-        column = ledger.get_column_index(Ledger.COLUMN_STATUS)
+        column = ledger.get_column_index(Ledger.COLUMN_SUMMARY)
         region = ledger._get_cell_region(Coordinate(row, column))
         await pilot.click(
             ledger,

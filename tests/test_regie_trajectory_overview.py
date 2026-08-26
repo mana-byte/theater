@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import pytest
+from textual import events
 from textual.app import App, ComposeResult
+from textual.containers import HorizontalScroll
 from textual.widgets import Input, Label
 
 from theater.constants.regie_trajectory import TRAJECTORY_OVERVIEW_HEIGHT
@@ -117,6 +119,51 @@ async def test_strip_mounts_between_search_and_timeline_at_fixed_height() -> Non
         assert search.region.y < strip.region.y < timeline.region.y
         assert strip.region.height == TRAJECTORY_OVERVIEW_HEIGHT
         assert not strip.can_focus
+
+
+async def test_meta_line_scrolls_horizontally_without_visible_scrollbars() -> None:
+    app = App()
+    async with app.run_test(size=(32, 8)) as pilot:
+        strip = TrajectoryOverviewStrip()
+        await app.mount(strip)
+        strip.update_state(
+            panel=panel(),
+            capabilities=TrajectoryCapabilities(
+                supported=frozenset(TrajectoryFeature),
+                observed=frozenset(TrajectoryFeature),
+            ),
+            overview=TrajectoryOverview(
+                record_count=1_500,
+                model_operations=200,
+                tool_operations=300,
+                input_tokens=4_000,
+                output_tokens=5_000,
+            ),
+            loading=False,
+        )
+        await pilot.pause()
+
+        scroll = strip.query_one("#trajectory-overview-meta-scroll", HorizontalScroll)
+        assert scroll.virtual_size.width > scroll.scrollable_content_region.width
+        assert scroll.styles.scrollbar_size_horizontal == 0
+        assert scroll.styles.scrollbar_size_vertical == 0
+        scroll.post_message(
+            events.MouseScrollDown(
+                scroll,
+                x=1,
+                y=0,
+                delta_x=0,
+                delta_y=1,
+                button=0,
+                shift=False,
+                meta=False,
+                ctrl=False,
+            )
+        )
+        await pilot.pause()
+        assert scroll.scroll_x > 0
+        scroll.scroll_to(x=scroll.max_scroll_x, animate=False, immediate=True)
+        assert scroll.scroll_x == scroll.max_scroll_x > 0
 
 
 async def test_live_current_renders_glyph_status_model_duration_and_summary() -> None:

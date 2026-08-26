@@ -74,6 +74,8 @@ class TrajectoryFact:
     request_id: str | None = None
     call_id: str | None = None
     parent_call_id: str | None = None
+    mcp_server: str | None = None
+    mcp_tool: str | None = None
     timing: Timing | None = None
     usage: TrajectoryUsage | None = None
     failure: TrajectoryFailure | None = None
@@ -183,6 +185,8 @@ def _validate_fact_identity(fact: TrajectoryFact) -> None:
         "request_id",
         "call_id",
         "parent_call_id",
+        "mcp_server",
+        "mcp_tool",
         "retry_of_native_id",
     ):
         value = getattr(fact, name)
@@ -197,6 +201,8 @@ def _validate_fact_identity(fact: TrajectoryFact) -> None:
                     nonempty=True,
                 ),
             )
+    if (fact.mcp_server is None) != (fact.mcp_tool is None):
+        raise TrajectoryValidationError("fact MCP identity requires both server and tool")
 
 
 def _validate_fact_payload(fact: TrajectoryFact) -> None:

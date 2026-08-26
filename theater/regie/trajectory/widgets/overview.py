@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import time
 
+from textual import events
 from textual.app import ComposeResult
-from textual.containers import Vertical
+from textual.containers import HorizontalScroll, Vertical
 from textual.widgets import Label
 
 from theater.constants.regie_trajectory import (
@@ -27,6 +28,22 @@ from theater.trajectory import (
     TrajectoryOverview,
     TrajectoryParticipantState,
 )
+
+
+class OverviewMetaScroll(HorizontalScroll):
+    can_focus = False
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        if self.max_scroll_x:
+            event.stop()
+            self.scroll_relative(
+                x=-self.app.scroll_sensitivity_x, animate=False, immediate=True
+            )
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        if self.max_scroll_x:
+            event.stop()
+            self.scroll_relative(x=self.app.scroll_sensitivity_x, animate=False, immediate=True)
 
 
 class TrajectoryOverviewStrip(Vertical):
@@ -74,18 +91,31 @@ class TrajectoryOverviewStrip(Vertical):
         text-opacity: 75%;
     }}
     TrajectoryOverviewStrip #trajectory-overview-meta {{
+        width: auto;
+        min-width: 100%;
         color: $text-muted;
         text-opacity: 75%;
+        text-overflow: clip;
+    }}
+    TrajectoryOverviewStrip #trajectory-overview-meta-scroll {{
+        width: 1fr;
+        min-width: 0;
+        height: 1;
+        min-height: 1;
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-size: 0 0;
     }}
     """
 
     def compose(self) -> ComposeResult:
         yield Label("Loading trajectory…", id="trajectory-overview-current", markup=False)
-        yield Label(
-            "coverage unknown · capabilities unknown",
-            id="trajectory-overview-meta",
-            markup=False,
-        )
+        with OverviewMetaScroll(id="trajectory-overview-meta-scroll"):
+            yield Label(
+                "coverage unknown · capabilities unknown",
+                id="trajectory-overview-meta",
+                markup=False,
+            )
 
     def on_mount(self) -> None:
         self._state_key = None

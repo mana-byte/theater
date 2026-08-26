@@ -391,6 +391,8 @@ class TrajectoryRecord:
     request_id: str | None = None
     call_id: str | None = None
     parent_call_id: str | None = None
+    mcp_server: str | None = None
+    mcp_tool: str | None = None
     links: tuple[ParticipantLink, ...] = ()
     timing: Timing | None = None
     usage: TrajectoryUsage | None = None
@@ -447,6 +449,8 @@ class TrajectoryRecord:
             "request_id",
             "call_id",
             "parent_call_id",
+            "mcp_server",
+            "mcp_tool",
             "retry_of_record_id",
         ):
             value = getattr(self, name)
@@ -461,6 +465,8 @@ class TrajectoryRecord:
                         nonempty=True,
                     ),
                 )
+        if (self.mcp_server is None) != (self.mcp_tool is None):
+            raise TrajectoryValidationError("record MCP identity requires both server and tool")
         object.__setattr__(self, "links", tuple(self.links))
         if len(self.links) > TRAJECTORY_MAX_LINKS_PER_RECORD:
             raise TrajectoryValidationError(
@@ -508,6 +514,9 @@ class TrajectoryRecord:
         }
         if self.request_id is not None:
             value["request_id"] = self.request_id
+        if self.mcp_server is not None:
+            value["mcp_server"] = self.mcp_server
+            value["mcp_tool"] = self.mcp_tool
         if self.failure is not None:
             value["failure"] = self.failure.to_wire()
         if self.retry_of_record_id is not None:
@@ -539,6 +548,8 @@ class TrajectoryRecord:
             "request_id",
             "call_id",
             "parent_call_id",
+            "mcp_server",
+            "mcp_tool",
             "links",
             "timing",
             "usage",
@@ -571,6 +582,8 @@ class TrajectoryRecord:
             request_id=string_or_none(data.get("request_id"), "record.request_id"),
             call_id=string_or_none(data.get("call_id"), "record.call_id"),
             parent_call_id=string_or_none(data.get("parent_call_id"), "record.parent_call_id"),
+            mcp_server=string_or_none(data.get("mcp_server"), "record.mcp_server"),
+            mcp_tool=string_or_none(data.get("mcp_tool"), "record.mcp_tool"),
             links=tuple(
                 ParticipantLink.from_wire(item)
                 for item in sequence(data.get("links", []), "record.links")

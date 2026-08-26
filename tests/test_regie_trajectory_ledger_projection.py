@@ -74,17 +74,15 @@ def _palette() -> LedgerStylePalette:
     )
 
 
-def test_record_values_are_immutable_and_compact_projection_is_canonical() -> None:
+def test_record_values_are_immutable_and_omit_routine_metadata() -> None:
     record = _record(summary="first\nsecond")
 
-    values = record_values(record, 2, depth=1, hovered=True, compact=True)
+    values = record_values(record, 2, depth=1, hovered=True)
 
     assert values == LedgerRowValues(
         position="●  3",
         event="◆ ASSISTANT",
-        source="adapter",
-        summary="[adapter]   first\nsecond",
-        status="● completed",
+        summary="  first\nsecond",
         duration="—",
     )
     assert dict(values)["summary"] == values.summary
@@ -96,15 +94,25 @@ def test_record_values_are_immutable_and_compact_projection_is_canonical() -> No
 def test_rich_cells_use_the_canonical_values_and_explicit_palette() -> None:
     record = _record()
     palette = _palette()
-    values = record_values(record, 0, depth=0, hovered=True, compact=False)
+    values = record_values(record, 0, depth=0, hovered=True)
     cells = record_cells(record, values, palette, hovered=True, duration_mode=False)
 
     assert {key: cell.plain for key, cell in cells.items()} == dict(values)
     assert cells["event"].get_style_at_offset(Console(), 0).color == palette.model.color
-    assert cells["status"].get_style_at_offset(Console(), 0).color == palette.muted.color
+    assert "COMPLETED" not in cells["event"].plain
     assert cells["summary"].get_style_at_offset(Console(), 0).bold
     assert isinstance(Ledger.COLUMN_LABELS, dict)
     assert Ledger.COLUMN_LABELS == COLUMN_LABELS
+
+    failed = replace(record, status=TrajectoryStatus.ERROR)
+    failed_values = record_values(failed, 0, depth=0, hovered=False)
+    failed_cells = record_cells(
+        failed, failed_values, palette, hovered=False, duration_mode=False
+    )
+    error_offset = failed_cells["summary"].plain.index("ERROR")
+    assert failed_cells["summary"].get_style_at_offset(Console(), error_offset).color == (
+        palette.error.color
+    )
 
 
 def test_tool_request_group_and_auxiliary_rows_keep_plain_text() -> None:
@@ -123,21 +131,18 @@ def test_tool_request_group_and_auxiliary_rows_keep_plain_text() -> None:
     tool = build_tool_index((tool_record,)).ordered[0]
 
     assert tool_values(tool, 0, depth=2, hovered=False, compact=False) == LedgerRowValues(
-        position="▸  1",
+        position="   1",
         event="⚙ TOOL",
-        source="adapter",
-        summary="    [runner] awaiting result",
-        status="● running",
+        summary="… RUNNING ·     [runner] awaiting result",
         duration="—",
     )
-    assert request_values(request, depth=1, compact=False).summary.startswith("  in 3 · out 2")
-    assert request_values(None, depth=0, compact=False) == LedgerRowValues(
+    assert request_values(request, depth=1).summary.startswith("  model-x · in 3 · out 2")
+    assert request_values(None, depth=0) == LedgerRowValues(
         position="↗",
         event="◆ REQUEST",
-        source="model unknown",
-        summary="usage unavailable",
-        status="● unknown",
+        summary="? UNKNOWN · model unknown · usage unavailable",
         duration="—",
+        identity="model unknown",
     )
     assert group_values(GroupKind.TURN, "Turn", depth=1) == LedgerRowValues(
         event="TURN", summary="  Turn"
@@ -145,4 +150,4 @@ def test_tool_request_group_and_auxiliary_rows_keep_plain_text() -> None:
     assert history_values(loading=False).summary == "Load earlier events"
     assert history_values(loading=True).position == "…"
     assert empty_values().event == "EMPTY"
-    assert retry_values("try\nagain").summary == "try again"
+    assert retry_values("try\nagain").summary == "try again · ↻ Retry"

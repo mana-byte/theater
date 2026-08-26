@@ -263,6 +263,7 @@ def _current(ordered: tuple[TrajectoryRecord, ...]) -> TrajectoryCurrentOperatio
             and record.kind
             in {
                 TrajectoryKind.TOOL_RESULT,
+                TrajectoryKind.THEATER_RESULT,
                 TrajectoryKind.AWAIT_END,
             }
             and record.status in _TERMINAL
@@ -274,7 +275,12 @@ def _current(ordered: tuple[TrajectoryRecord, ...]) -> TrajectoryCurrentOperatio
             continue
         if (
             family is not None
-            and record.kind in {TrajectoryKind.TOOL_CALL, TrajectoryKind.AWAIT_START}
+            and record.kind
+            in {
+                TrajectoryKind.TOOL_CALL,
+                TrajectoryKind.THEATER_CALL,
+                TrajectoryKind.AWAIT_START,
+            }
             and record.call_id is not None
             and (family, record.source_epoch, record.call_id) in closed_calls
         ):
@@ -388,6 +394,8 @@ def _slowest_tool(tools: tuple[TrajectoryToolOperation, ...]) -> TrajectorySlowO
 def _call_family(kind: TrajectoryKind) -> str | None:
     if kind in {TrajectoryKind.TOOL_CALL, TrajectoryKind.TOOL_RESULT}:
         return "tool"
+    if kind in {TrajectoryKind.THEATER_CALL, TrajectoryKind.THEATER_RESULT}:
+        return "theater"
     if kind in {TrajectoryKind.AWAIT_START, TrajectoryKind.AWAIT_END}:
         return "await"
     return None

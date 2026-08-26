@@ -11,7 +11,6 @@ from theater.regie.trajectory.render.records import (
     compact_number,
     format_duration,
     sanitize_text,
-    status_label,
 )
 from theater.trajectory import TrajectoryRecord, TrajectoryRequest, requests_for_records
 
@@ -57,9 +56,8 @@ class RequestRowText:
     """Plain, bounded presentation values for one request header."""
 
     event: str
-    source: str
+    identity: str
     summary: str
-    status: str
     duration: str
 
 
@@ -67,13 +65,13 @@ def _one_line(value: str) -> str:
     return sanitize_text(value).replace("\r", " ").replace("\n", " ").replace("\t", " ")
 
 
-def request_row_text(request: TrajectoryRequest, *, compact: bool = False) -> RequestRowText:
+def request_row_text(request: TrajectoryRequest) -> RequestRowText:
     """Build one non-interactive request header without Rich or Textual values."""
     model = _one_line(request.model) if request.model else "model unknown"
     provider = _one_line(request.provider) if request.provider else ""
-    source = model
+    identity = model
     if provider and not model.startswith(f"{provider}/"):
-        source = f"{provider}/{model}"
+        identity = f"{provider}/{model}"
     if request.usage is None:
         summary = "usage unavailable"
     else:
@@ -99,13 +97,10 @@ def request_row_text(request: TrajectoryRequest, *, compact: bool = False) -> Re
     if request.retry_of_record_id is not None:
         attempt = f" {request.retry_attempt}" if request.retry_attempt is not None else ""
         summary += f" · retry{attempt}"
-    if compact:
-        summary = f"[{source}] {summary}"
     return RequestRowText(
         event="◆ REQUEST",
-        source=source,
+        identity=identity,
         summary=summary,
-        status=status_label(request.status),
         duration=format_duration(request.timing),
     )
 

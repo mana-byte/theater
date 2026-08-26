@@ -58,6 +58,8 @@ TRAJECTORY_CACHE_SWEEP_SECONDS = 30.0
 TRAJECTORY_BUS_DRAIN_BATCH = 256
 # Maximum persisted observation rows used to estimate transcript timing.
 TRAJECTORY_OBSERVATION_TIMING_ROW_LIMIT = 800
+# Maximum remembered MCP call identities used to classify result-only records.
+TRAJECTORY_MCP_CALL_CONTEXT_LIMIT = 2_000
 # Maximum records retained in one régie participant window.
 TRAJECTORY_UI_RECORD_LIMIT = 2_000
 # Maximum record links retained by one request projection.
@@ -102,6 +104,7 @@ __all__ = [
     "TRAJECTORY_MAX_GROUP_RECORD_IDS",
     "TRAJECTORY_MAX_LINKS_PER_RECORD",
     "TRAJECTORY_MAX_PAGE_GROUPS",
+    "TRAJECTORY_MCP_CALL_CONTEXT_LIMIT",
     "TRAJECTORY_MUTABLE_UPDATE_COALESCE_MS",
     "TRAJECTORY_OBSERVATION_TIMING_ROW_LIMIT",
     "TRAJECTORY_OLDER_CURSOR_LIMIT",

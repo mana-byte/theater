@@ -154,14 +154,48 @@ class TrajectoryFooter(Horizontal):
         color: $text-muted;
         background: $background;
     }}
-    TrajectoryFooter Button:hover,
-    TrajectoryFooter Button:focus {{
+    TrajectoryFooter Button.-style-flat:hover,
+    TrajectoryFooter Button.-style-flat:focus {{
+        color: $text;
+        background: $accent 10%;
+        tint: transparent;
+    }}
+    TrajectoryFooter Button.-style-flat.-active,
+    TrajectoryFooter Button.-style-flat.-selected {{
+        color: $text;
+        background: $accent 20%;
+        tint: transparent;
+    }}
+    TrajectoryFooter #trajectory-page SelectCurrent:hover,
+    TrajectoryFooter #trajectory-view-action SelectCurrent:hover,
+    TrajectoryFooter #trajectory-page:focus > SelectCurrent,
+    TrajectoryFooter #trajectory-view-action:focus > SelectCurrent,
+    TrajectoryFooter #trajectory-page.-expanded > SelectCurrent,
+    TrajectoryFooter #trajectory-view-action.-expanded > SelectCurrent {{
+        color: $text;
+        background: $accent 10%;
+        background-tint: transparent;
+    }}
+    TrajectoryFooter #trajectory-view-action.-selected > SelectCurrent {{
+        color: $text;
+        background: $accent 20%;
+    }}
+    TrajectoryFooter SelectOverlay,
+    TrajectoryFooter SelectOverlay:focus {{
+        color: $text;
+        background: $background;
+        background-tint: transparent !important;
+        border: solid $accent 20%;
+    }}
+    TrajectoryFooter SelectOverlay > .option-list--option-hover {{
         color: $text;
         background: $accent 10%;
     }}
-    TrajectoryFooter Button.-selected {{
+    TrajectoryFooter SelectOverlay > .option-list--option-highlighted,
+    TrajectoryFooter SelectOverlay:focus > .option-list--option-highlighted {{
         color: $text;
         background: $accent 20%;
+        text-style: bold;
     }}
     TrajectoryFooter.-compact Button {{
         min-width: 3;

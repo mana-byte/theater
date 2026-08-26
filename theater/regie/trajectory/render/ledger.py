@@ -9,7 +9,10 @@ from types import MappingProxyType
 from rich.style import Style
 from rich.text import Text
 
-from theater.constants.regie_trajectory import TRAJECTORY_REQUEST_POSITION_GLYPH
+from theater.constants.regie_trajectory import (
+    TRAJECTORY_REQUEST_POSITION_GLYPH,
+    TRAJECTORY_STATUS_GLYPHS_BY_VALUE,
+)
 from theater.regie.trajectory.render.records import (
     format_duration,
     kind_glyph,
@@ -31,25 +34,19 @@ from theater.trajectory import (
 
 COLUMN_POSITION = "position"
 COLUMN_EVENT = "event"
-COLUMN_SOURCE = "source"
 COLUMN_SUMMARY = "summary"
-COLUMN_STATUS = "status"
 COLUMN_DURATION = "duration"
 COLUMN_KEYS = (
     COLUMN_POSITION,
     COLUMN_EVENT,
-    COLUMN_SOURCE,
     COLUMN_SUMMARY,
-    COLUMN_STATUS,
     COLUMN_DURATION,
 )
 COLUMN_LABELS: Mapping[str, str] = MappingProxyType(
     {
         COLUMN_POSITION: "#",
         COLUMN_EVENT: "EVENT",
-        COLUMN_SOURCE: "SOURCE",
         COLUMN_SUMMARY: "SUMMARY",
-        COLUMN_STATUS: "STATE",
         COLUMN_DURATION: "TIME",
     }
 )
@@ -61,10 +58,9 @@ class LedgerRowValues(Mapping[str, str]):
 
     position: str = ""
     event: str = ""
-    source: str = ""
     summary: str = ""
-    status: str = ""
     duration: str = ""
+    identity: str = ""
 
     def __getitem__(self, key: str) -> str:
         match key:
@@ -72,12 +68,8 @@ class LedgerRowValues(Mapping[str, str]):
                 return self.position
             case "event":
                 return self.event
-            case "source":
-                return self.source
             case "summary":
                 return self.summary
-            case "status":
-                return self.status
             case "duration":
                 return self.duration
             case _:
@@ -112,18 +104,14 @@ def record_values(
     *,
     depth: int,
     hovered: bool,
-    compact: bool,
 ) -> LedgerRowValues:
     """Project one record row's plain cells."""
     summary = f"{'  ' * depth}{sanitize_text(record.summary)}"
-    if compact:
-        summary = f"[{sanitize_text(record.source)}] {summary}"
+    event = f"{kind_glyph(record.kind)} {record.kind.value.replace('_', ' ').upper()}"
     return LedgerRowValues(
-        position=f"{'●' if hovered else '▸'}{index + 1:>3}",
-        event=f"{kind_glyph(record.kind)} {record.kind.value.replace('_', ' ').upper()}",
-        source=sanitize_text(record.source),
-        summary=summary,
-        status=f"● {status_label(record.status)}",
+        position=f"{'●' if hovered else ' '}{index + 1:>3}",
+        event=event,
+        summary=_summary_value(summary, record.status),
         duration=format_duration(record.timing),
     )
 
@@ -139,11 +127,9 @@ def tool_values(
     """Project one logical tool-operation row's plain cells."""
     text = tool_row_text(tool, compact=compact)
     return LedgerRowValues(
-        position=f"{'●' if hovered else '▸'}{index + 1:>3}",
+        position=f"{'●' if hovered else ' '}{index + 1:>3}",
         event=text.event,
-        source=text.source,
-        summary=f"{'  ' * depth}{text.summary}",
-        status=f"● {text.status}",
+        summary=_summary_value(f"{'  ' * depth}{text.summary}", tool.status),
         duration=text.duration,
     )
 
@@ -152,26 +138,25 @@ def request_values(
     request: TrajectoryRequest | None,
     *,
     depth: int,
-    compact: bool,
 ) -> LedgerRowValues:
     """Project one request-header row's plain cells."""
     if request is None:
         return LedgerRowValues(
             position=TRAJECTORY_REQUEST_POSITION_GLYPH,
             event="◆ REQUEST",
-            source="model unknown",
-            summary="usage unavailable",
-            status="● unknown",
+            summary=_summary_value("model unknown · usage unavailable", TrajectoryStatus.UNKNOWN),
             duration="—",
+            identity="model unknown",
         )
-    text = request_row_text(request, compact=compact)
+    text = request_row_text(request)
     return LedgerRowValues(
         position=TRAJECTORY_REQUEST_POSITION_GLYPH,
         event=text.event,
-        source=text.source,
-        summary=f"{'  ' * depth}{text.summary}",
-        status=f"● {text.status}",
+        summary=_summary_value(
+            f"{'  ' * depth}{text.identity} · {text.summary}", request.status
+        ),
         duration=text.duration,
+        identity=text.identity,
     )
 
 
@@ -192,7 +177,6 @@ def history_values(*, loading: bool) -> LedgerRowValues:
         position="…" if loading else "↑",
         event="HISTORY",
         summary="Loading earlier events…" if loading else "Load earlier events",
-        status="waiting" if loading else "activate",
     )
 
 
@@ -207,7 +191,8 @@ def empty_values() -> LedgerRowValues:
 def retry_values(message: str | None) -> LedgerRowValues:
     """Project the retry activation row."""
     retry = sanitize_text(message or "").replace("\r", " ").replace("\n", " ")
-    return LedgerRowValues(position="!", event="ERROR", summary=retry, status=" ↻ Retry ")
+    summary = f"{retry} · ↻ Retry" if retry else "↻ Retry"
+    return LedgerRowValues(position="!", event="ERROR", summary=summary)
 
 
 def entry_values(
@@ -223,14 +208,25 @@ def entry_values(
 ) -> LedgerRowValues | None:
     """Project any visible search entry into its canonical row values."""
     if entry.is_request_header:
-        return request_values(request, depth=entry.depth, compact=compact)
+        return request_values(request, depth=entry.depth)
     if entry.is_group_header:
         return group_values(entry.group_kind, entry.group_label, depth=entry.depth)
     if record is None:
         return None
     if entry.is_tool_operation and tool is not None:
         return tool_values(tool, index, depth=entry.depth, hovered=entry_hovered, compact=compact)
-    return record_values(record, index, depth=entry.depth, hovered=record_hovered, compact=compact)
+    return record_values(record, index, depth=entry.depth, hovered=record_hovered)
+
+
+def status_signal(status: TrajectoryStatus) -> str:
+    """Return compact text for a non-completed state."""
+    glyph = TRAJECTORY_STATUS_GLYPHS_BY_VALUE.get(status.value)
+    return f"{glyph} {status_label(status).upper()}" if glyph else ""
+
+
+def _summary_value(summary: str, status: TrajectoryStatus) -> str:
+    signal = status_signal(status)
+    return f"{signal} · {summary}" if signal else summary
 
 
 def lane_style(lane: TrajectoryLane, palette: LedgerStylePalette) -> Style:
@@ -259,6 +255,20 @@ def status_style(status: TrajectoryStatus, palette: LedgerStylePalette) -> Style
     return palette.muted
 
 
+def _append_status_prefix(
+    summary: Text,
+    value: str,
+    status: TrajectoryStatus,
+    palette: LedgerStylePalette,
+) -> str:
+    signal = status_signal(status)
+    if signal:
+        summary.append(signal, style=status_style(status, palette) + Style(bold=True))
+        summary.append(" · ")
+        return value.removeprefix(f"{signal} · ")
+    return value
+
+
 def record_cells(
     record: TrajectoryRecord,
     values: LedgerRowValues,
@@ -273,21 +283,17 @@ def record_cells(
     glyph = kind_glyph(record.kind)
     event.append(glyph, style=lane_style(record.lane, palette))
     event.append(values[COLUMN_EVENT][len(glyph) :], style="bold")
-    summary = Text(values[COLUMN_SUMMARY])
+    summary = Text()
+    summary.append(_append_status_prefix(summary, values[COLUMN_SUMMARY], record.status, palette))
     if hovered:
         summary.stylize("bold")
-    status = Text(no_wrap=True)
-    status.append("●", style=status_style(record.status, palette))
-    status.append(values[COLUMN_STATUS][1:], style="dim")
     duration = Text(values[COLUMN_DURATION], justify="right")
     if duration_mode and supports_duration_interval(record):
         duration.stylize(palette.accent + Style(bold=True))
     return {
         COLUMN_POSITION: position,
         COLUMN_EVENT: event,
-        COLUMN_SOURCE: Text(values[COLUMN_SOURCE], style="dim"),
         COLUMN_SUMMARY: summary,
-        COLUMN_STATUS: status,
         COLUMN_DURATION: duration,
     }
 
@@ -300,15 +306,14 @@ def tool_cells(
     hovered: bool,
 ) -> dict[str, Text]:
     """Build Rich cells for one canonical tool projection."""
-    status = Text(no_wrap=True)
-    status.append("●", style=status_style(tool.status, palette))
-    status.append(values[COLUMN_STATUS][1:], style="dim")
+    summary = Text()
+    summary.append(_append_status_prefix(summary, values[COLUMN_SUMMARY], tool.status, palette))
+    if hovered:
+        summary.stylize("bold")
     return {
         COLUMN_POSITION: Text(values[COLUMN_POSITION], style="bold" if hovered else "dim"),
         COLUMN_EVENT: Text(values[COLUMN_EVENT], style=palette.tools + Style(bold=True)),
-        COLUMN_SOURCE: Text(values[COLUMN_SOURCE], style="dim"),
-        COLUMN_SUMMARY: Text(values[COLUMN_SUMMARY], style="bold" if hovered else ""),
-        COLUMN_STATUS: status,
+        COLUMN_SUMMARY: summary,
         COLUMN_DURATION: Text(values[COLUMN_DURATION], justify="right"),
     }
 
@@ -321,15 +326,21 @@ def request_cells(
     """Build Rich cells for one canonical request projection."""
     status = request.status if request is not None else TrajectoryStatus.UNKNOWN
     dim_request_style = palette.request + Style(dim=True)
-    state = Text(no_wrap=True)
-    state.append("●", style=palette.request + status_style(status, palette))
-    state.append(values[COLUMN_STATUS][1:], style=dim_request_style)
+    summary = Text()
+    summary_value = _append_status_prefix(summary, values[COLUMN_SUMMARY], status, palette)
+    identity_start = summary_value.find(values.identity)
+    identity_start = max(0, identity_start)
+    identity_end = identity_start + len(values.identity)
+    summary.append(summary_value[:identity_start], style=dim_request_style)
+    summary.append(
+        summary_value[identity_start:identity_end],
+        style=palette.request + Style(bold=True, dim=False),
+    )
+    summary.append(summary_value[identity_end:], style=dim_request_style)
     return {
         COLUMN_POSITION: Text(values[COLUMN_POSITION], style=palette.request),
         COLUMN_EVENT: Text(values[COLUMN_EVENT], style=palette.request + Style(bold=True)),
-        COLUMN_SOURCE: Text(values[COLUMN_SOURCE], style=dim_request_style),
-        COLUMN_SUMMARY: Text(values[COLUMN_SUMMARY], style=dim_request_style),
-        COLUMN_STATUS: state,
+        COLUMN_SUMMARY: summary,
         COLUMN_DURATION: Text(values[COLUMN_DURATION], justify="right", style=dim_request_style),
     }
 
@@ -339,9 +350,7 @@ def group_cells(values: LedgerRowValues) -> dict[str, Text | str]:
     return {
         COLUMN_POSITION: "",
         COLUMN_EVENT: Text(values[COLUMN_EVENT], style="bold"),
-        COLUMN_SOURCE: "",
         COLUMN_SUMMARY: Text(values[COLUMN_SUMMARY], style="bold"),
-        COLUMN_STATUS: Text(values[COLUMN_STATUS], style="dim"),
         COLUMN_DURATION: "",
     }
 
@@ -357,7 +366,6 @@ def history_cells(
         COLUMN_POSITION: Text(values[COLUMN_POSITION], style=palette.accent + Style(bold=True)),
         COLUMN_EVENT: Text(values[COLUMN_EVENT], style=palette.accent + Style(bold=True)),
         COLUMN_SUMMARY: Text(values[COLUMN_SUMMARY], style="dim" if loading else palette.accent),
-        COLUMN_STATUS: Text(values[COLUMN_STATUS], style="dim"),
     }
 
 
@@ -371,11 +379,13 @@ def empty_cells(values: LedgerRowValues) -> dict[str, Text]:
 
 def retry_cells(values: LedgerRowValues, palette: LedgerStylePalette) -> dict[str, Text]:
     """Build Rich cells for the retry activation row."""
+    summary = Text(values[COLUMN_SUMMARY], style=palette.warning)
+    action_start = max(0, len(values[COLUMN_SUMMARY]) - len("↻ Retry"))
+    summary.stylize(palette.retry, action_start)
     return {
         COLUMN_POSITION: Text(values[COLUMN_POSITION], style=palette.warning + Style(bold=True)),
         COLUMN_EVENT: Text(values[COLUMN_EVENT], style=palette.warning + Style(bold=True)),
-        COLUMN_SUMMARY: Text(values[COLUMN_SUMMARY], style=palette.warning),
-        COLUMN_STATUS: Text(values[COLUMN_STATUS], style=palette.retry),
+        COLUMN_SUMMARY: summary,
     }
 
 
@@ -411,8 +421,6 @@ __all__ = [
     "COLUMN_KEYS",
     "COLUMN_LABELS",
     "COLUMN_POSITION",
-    "COLUMN_SOURCE",
-    "COLUMN_STATUS",
     "COLUMN_SUMMARY",
     "LedgerRowValues",
     "LedgerStylePalette",
@@ -431,6 +439,7 @@ __all__ = [
     "request_values",
     "retry_cells",
     "retry_values",
+    "status_signal",
     "status_style",
     "tool_cells",
     "tool_values",

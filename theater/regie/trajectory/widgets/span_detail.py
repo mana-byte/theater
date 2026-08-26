@@ -107,10 +107,16 @@ class SpanDetailPanel(Vertical):
         color: $text-muted;
         background: $background;
     }
-    SpanDetailPanel #trajectory-span-detail-close:hover,
-    SpanDetailPanel #trajectory-span-detail-close:focus {
+    SpanDetailPanel #trajectory-span-detail-close.-style-flat:hover,
+    SpanDetailPanel #trajectory-span-detail-close.-style-flat:focus {
         color: $text;
         background: $accent 15%;
+        tint: transparent;
+    }
+    SpanDetailPanel #trajectory-span-detail-close.-style-flat.-active {
+        color: $text;
+        background: $accent 20%;
+        tint: transparent;
     }
     SpanDetailPanel > #trajectory-span-detail-tabs {
         width: 1fr;
@@ -125,6 +131,19 @@ class SpanDetailPanel(Vertical):
         height: 3;
         padding: 0 1;
         content-align: center middle;
+    }
+    SpanDetailPanel Tab:hover {
+        color: $text;
+        background: $accent 10%;
+    }
+    SpanDetailPanel Tab.-active,
+    SpanDetailPanel Tabs:focus Tab.-active {
+        color: $text;
+        background: $accent 20%;
+        text-style: bold;
+    }
+    SpanDetailPanel Tabs:focus .underline--bar {
+        background: $accent 30%;
     }
     SpanDetailPanel TabPane {
         padding: 0;

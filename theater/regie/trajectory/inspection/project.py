@@ -66,6 +66,8 @@ def tabs_for_record(record: TrajectoryRecord | None) -> tuple[InspectorTab, ...]
         or record.lane is TrajectoryLane.TOOLS
     ):
         return (InspectorTab.SUMMARY, InspectorTab.INPUT, InspectorTab.RESULT, InspectorTab.TIMING)
+    if record.kind in {TrajectoryKind.THEATER_CALL, TrajectoryKind.THEATER_RESULT}:
+        return (InspectorTab.SUMMARY, InspectorTab.INPUT, InspectorTab.RESULT, InspectorTab.TIMING)
     if record.kind is TrajectoryKind.USER or record.lane is TrajectoryLane.INPUT:
         return (InspectorTab.PREVIEW, InspectorTab.RAW, InspectorTab.SOURCE)
     if record.lane is TrajectoryLane.THEATER:

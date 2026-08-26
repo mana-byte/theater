@@ -433,7 +433,8 @@ def test_input_is_not_mutated_and_supported_fixtures_pair_exact_ids() -> None:
     claude = tool_operations_for_records(
         _fixture_records(ClaudeCodeObserver(), "trajectory_claude.jsonl")
     )
-    codex = tool_operations_for_records(_fixture_records(CodexObserver(), "trajectory_codex.jsonl"))
+    codex_records = _fixture_records(CodexObserver(), "trajectory_codex.jsonl")
+    codex = tool_operations_for_records(codex_records)
 
     assert records == original
     assert next(operation for operation in claude if operation.call_id == "tool-1").identity is (
@@ -445,6 +446,9 @@ def test_input_is_not_mutated_and_supported_fixtures_pair_exact_ids() -> None:
         if operation.call_id in {"call-1", "mcp-1", "unmatched-call"}
     } == {
         "call-1": TrajectoryToolIdentity.MATCHED,
-        "mcp-1": TrajectoryToolIdentity.MATCHED,
         "unmatched-call": TrajectoryToolIdentity.RESULT_ONLY,
+    }
+    assert {record.kind for record in codex_records if record.call_id == "mcp-1"} == {
+        TrajectoryKind.THEATER_CALL,
+        TrajectoryKind.THEATER_RESULT,
     }

@@ -246,18 +246,16 @@ def test_request_text_marks_missing_values_and_uses_reported_usage() -> None:
         timing=Timing(duration_ms=2_000, provenance=TimingProvenance.SOURCE),
     )
     request = build_request_index((complete,)).ordered[0]
-    text = request_row_text(request, compact=True)
+    text = request_row_text(request)
 
     assert text.event == "◆ REQUEST"
-    assert text.source == "model-x"
-    assert text.summary == (
-        "[model-x] in 1.2K · out 34 · cache 11 · reasoning 7 · cost $0.1234 reported"
-    )
-    assert (text.status, text.duration) == ("completed", "2.0s")
+    assert text.identity == "model-x"
+    assert text.summary == "in 1.2K · out 34 · cache 11 · reasoning 7 · cost $0.1234 reported"
+    assert text.duration == "2.0s"
 
     missing_request = build_request_index((record("missing", 2, request_id="missing"),)).ordered[0]
     missing = request_row_text(missing_request)
-    assert (missing.source, missing.summary) == ("model unknown", "usage unavailable")
+    assert (missing.identity, missing.summary) == ("model unknown", "usage unavailable")
 
 
 def test_request_inspector_exposes_diagnostics_and_exact_associations() -> None:
@@ -315,7 +313,7 @@ def test_request_inspector_exposes_diagnostics_and_exact_associations() -> None:
     )
 
     assert "Provider: provider-x" in usage
-    assert request_row_text(request).source == "provider-x/model-x"
+    assert request_row_text(request).identity == "provider-x/model-x"
     assert "Cost: $0.25 · reported" in usage
     assert "Time to first token: 200ms" in timing
     assert "Generation duration: 1s" in timing
@@ -368,7 +366,7 @@ async def test_ledger_request_headers_are_noninteractive_and_patch_in_place(
         row = ledger.get_row_index(key)
         assert ledger.ordered_rows[row].height == 2
         assert ledger.line_ids == (None, "record")
-        assert "model-x" in ledger.get_cell(key, Ledger.COLUMN_SOURCE).plain
+        assert "model-x" in ledger.get_cell(key, Ledger.COLUMN_SUMMARY).plain
         assert ledger.get_cell(key, Ledger.COLUMN_POSITION).plain.strip() == "↗"
         assert "cost $0.1" in ledger.get_cell(key, Ledger.COLUMN_SUMMARY).plain
         request_style = ledger._component("request")
@@ -378,9 +376,7 @@ async def test_ledger_request_headers_are_noninteractive_and_patch_in_place(
             for column in (
                 Ledger.COLUMN_POSITION,
                 Ledger.COLUMN_EVENT,
-                Ledger.COLUMN_SOURCE,
                 Ledger.COLUMN_SUMMARY,
-                Ledger.COLUMN_STATUS,
                 Ledger.COLUMN_DURATION,
             )
         }
@@ -388,11 +384,16 @@ async def test_ledger_request_headers_are_noninteractive_and_patch_in_place(
         styles = {column: cell.get_style_at_offset(Console(), 1) for column, cell in cells.items()}
         assert all(style.bgcolor == request_style.bgcolor for style in styles.values())
         assert styles[Ledger.COLUMN_EVENT].bold
-        assert styles[Ledger.COLUMN_SOURCE].dim
-        assert styles[Ledger.COLUMN_SUMMARY].dim
         assert styles[Ledger.COLUMN_DURATION].dim
-        assert styles[Ledger.COLUMN_STATUS].color == ledger._status_style(initial.status).color
-        assert cells[Ledger.COLUMN_STATUS].get_style_at_offset(Console(), 3).dim
+        model_style = cells[Ledger.COLUMN_SUMMARY].get_style_at_offset(
+            Console(), cells[Ledger.COLUMN_SUMMARY].plain.index("model-x")
+        )
+        assert model_style.bold and not model_style.dim
+        pending = cells[Ledger.COLUMN_SUMMARY].plain.index("PENDING")
+        assert (
+            cells[Ledger.COLUMN_SUMMARY].get_style_at_offset(Console(), pending).color
+            == ledger._component("warning").color
+        )
 
         await pilot.click(ledger, offset=(2, ledger.header_height + row * 2 + 1))
         ledger.focus()
@@ -425,7 +426,7 @@ async def test_ledger_request_headers_are_noninteractive_and_patch_in_place(
         ledger.update_rows((updated,), second, selected_id="record")
         assert rebuilds == 0
         assert "in 99" in ledger.get_cell(key, Ledger.COLUMN_SUMMARY).plain
-        assert "running" in ledger.get_cell(key, Ledger.COLUMN_STATUS).plain
+        assert "RUNNING" in ledger.get_cell(key, Ledger.COLUMN_SUMMARY).plain
 
 
 @pytest.mark.asyncio
@@ -455,7 +456,8 @@ async def test_view_places_request_before_step_and_keeps_record_navigation() -> 
         await pilot.press("shift+h")
         assert view._selected_visible_ids() == ("second",)
         await pilot.press("k")
-        assert view.state.selected_id == "second"
+        assert view._selected_visible_ids() == ("first",)
+        assert view.state.selected_id == "first"
 
 
 @pytest.mark.asyncio

@@ -658,6 +658,8 @@ Trajectory is a logical right-hand surface, not another tmux pane. The shared
 values. Harness plugins alone translate native transcript or database facts
 into that contract. The daemon's `trajectory/` package then owns ingestion,
 identity, causal links, pricing, aggregation, warm streams, and RPC responses.
+Plugins expose native MCP calls as normalized `mcp_server` / `mcp_tool` facts;
+daemon projection alone classifies calls to Theater's server into the Theater lane.
 
 The régie's `trajectory/` package is presentation-only. Its controller owns
 snapshot and follow clients; state owns the bounded participant window; the
@@ -680,7 +682,7 @@ theater/
 ├── observability/      one package, one process-level lifecycle (see §13)
 │   ├── catalog.py        immutable operation/attribute specs (frozen, slotted)
 │   ├── engine.py         timing context, prose rendering, log extras, metric bridge
-│   ├── metrics.py        histogram registry, views, cached gauges, GaugeSampler
+│   ├── metrics.py        metric specs, histogram/counter registries, cached gauges
 │   ├── tracing.py        span lifecycle, explicit W3C inject/extract
 │   ├── logging.py        owned handlers, rotation, stderr-generation pruning
 │   └── runtime.py        process-level composition and RuntimeHandle shutdown
@@ -707,6 +709,7 @@ theater/
 │   ├── worktrees/      repository, unique and named worktree implementations
 │   ├── trajectory/     canonical projection, ingestion, cache, aggregation, responses
 │   │   ├── runtime.py    composition facade over stream, panel, and mutations
+│   │   ├── telemetry/    bounded agent metrics, labels, deduplication, catalog
 │   │   └── history_ingest.py · live_ingest.py · bus_ingest.py
 │   ├── observer.py · store.py · methods.py · spawner.py · worktree.py
 │   │                   compatibility facades for established import paths
@@ -850,6 +853,15 @@ delegates all owned handler work to `observability/logging.py`.
 
 Export is off by default (`otlp_enabled = false`). When off, Theater starts no
 exporter thread and makes no network call; daemon log rotation still runs.
+
+When export is enabled, `agent_metrics = true` also projects accepted transcript
+batches into request, TTFT, tool-duration, token, cost, and failure metrics. This
+projection runs in the daemon observer independently of any open trajectory viewer;
+the bounded Régie cache is never a telemetry source. Token and cost increments are
+emitted only after the usage repository accepts the corresponding idempotency key.
+Only complete timing carried by the current batch is exported; cross-batch timing is
+not guessed. Model and tool labels, plus emitted-record deduplication state, have hard
+process bounds.
 
 Enable it by installing the optional dependency and setting the config key:
 

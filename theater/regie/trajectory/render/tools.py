@@ -15,7 +15,7 @@ from theater.constants.regie_trajectory import (
     TOOL_ROW_INPUT_VALUE_MAX_CHARS,
     TOOL_ROW_SUMMARY_MAX_CHARS,
 )
-from theater.regie.trajectory.render.records import format_duration, sanitize_text, status_label
+from theater.regie.trajectory.render.records import format_duration, sanitize_text
 from theater.trajectory import DetailField, TrajectoryRecord
 from theater.trajectory.grouping import deterministic_record_order
 from theater.trajectory.tools import (
@@ -85,9 +85,7 @@ def build_tool_index(records: Iterable[TrajectoryRecord]) -> ToolIndex:
 @dataclass(frozen=True, slots=True)
 class ToolRowText:
     event: str
-    source: str
     summary: str
-    status: str
     duration: str
 
 
@@ -155,7 +153,6 @@ def _input_preview(operation: TrajectoryToolOperation, *, compact: bool) -> str 
 def tool_row_text(operation: TrajectoryToolOperation, *, compact: bool = False) -> ToolRowText:
     """Build bounded, plain values for one logical tool operation."""
     name = _one_line(operation.tool_name) if operation.tool_name else "unknown tool"
-    source = _one_line(operation.source)
     preview = _input_preview(operation, compact=compact)
     if operation.identity is TrajectoryToolIdentity.CALL_ONLY:
         summary = f"{preview} · awaiting result" if preview else "awaiting result"
@@ -175,9 +172,7 @@ def tool_row_text(operation: TrajectoryToolOperation, *, compact: bool = False) 
     summary = _clip(f"[{name}] {summary}", TOOL_ROW_SUMMARY_MAX_CHARS)
     return ToolRowText(
         event="⚙ TOOL",
-        source=source,
         summary=summary,
-        status=status_label(operation.status),
         duration=format_duration(operation.timing),
     )
 

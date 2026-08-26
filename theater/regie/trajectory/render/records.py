@@ -176,6 +176,8 @@ _POINT_EVENT_KINDS = frozenset(
         TrajectoryKind.SYSTEM,
         TrajectoryKind.CONTEXT,
         TrajectoryKind.THEATER,
+        TrajectoryKind.THEATER_CALL,
+        TrajectoryKind.THEATER_RESULT,
         TrajectoryKind.SPAWN,
         TrajectoryKind.RESUME,
         TrajectoryKind.SEND,

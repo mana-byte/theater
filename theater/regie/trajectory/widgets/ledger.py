@@ -21,7 +21,6 @@ from theater.constants.regie_trajectory import (
     LEDGER_MIN_SUMMARY_WIDTH,
     LEDGER_OVERSCAN_ROWS,
     LEDGER_SCROLLBAR_WIDTH,
-    LEDGER_STATUS_COLUMN_WIDTH,
     TRAJECTORY_AUXILIARY_ROW_HEIGHT,
     TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT,
     TRAJECTORY_SPAN_ROW_HEIGHT,
@@ -41,12 +40,6 @@ from theater.regie.trajectory.render.ledger import (
     COLUMN_POSITION as LEDGER_COLUMN_POSITION,
 )
 from theater.regie.trajectory.render.ledger import (
-    COLUMN_SOURCE as LEDGER_COLUMN_SOURCE,
-)
-from theater.regie.trajectory.render.ledger import (
-    COLUMN_STATUS as LEDGER_COLUMN_STATUS,
-)
-from theater.regie.trajectory.render.ledger import (
     COLUMN_SUMMARY as LEDGER_COLUMN_SUMMARY,
 )
 from theater.regie.trajectory.render.ledger import (
@@ -61,9 +54,6 @@ from theater.regie.trajectory.render.ledger import (
     retry_cells,
     retry_values,
 )
-from theater.regie.trajectory.render.ledger import (
-    status_style as ledger_status_style,
-)
 from theater.regie.trajectory.render.records import bottom_aligned_cell
 from theater.regie.trajectory.search import LedgerEntry, SearchResult
 from theater.regie.trajectory.widgets.ledger_viewport import (
@@ -77,7 +67,6 @@ from theater.regie.trajectory.widgets.rows import resize_rows
 from theater.trajectory import (
     TrajectoryRecord,
     TrajectoryRequest,
-    TrajectoryStatus,
     TrajectoryToolOperation,
 )
 
@@ -112,9 +101,7 @@ class Ledger(DataTable[Text | str]):
     can_focus = True
     COLUMN_POSITION = LEDGER_COLUMN_POSITION
     COLUMN_EVENT = LEDGER_COLUMN_EVENT
-    COLUMN_SOURCE = LEDGER_COLUMN_SOURCE
     COLUMN_SUMMARY = LEDGER_COLUMN_SUMMARY
-    COLUMN_STATUS = LEDGER_COLUMN_STATUS
     COLUMN_DURATION = LEDGER_COLUMN_DURATION
     EMPTY_KEY = "__empty__"
     OLDER_KEY = "__older__"
@@ -373,14 +360,11 @@ class Ledger(DataTable[Text | str]):
                 self.COLUMN_POSITION,
                 self.COLUMN_EVENT,
                 self.COLUMN_SUMMARY,
-                self.COLUMN_STATUS,
             )
         return (
             self.COLUMN_POSITION,
             self.COLUMN_EVENT,
-            self.COLUMN_SOURCE,
             self.COLUMN_SUMMARY,
-            self.COLUMN_STATUS,
             self.COLUMN_DURATION,
         )
 
@@ -415,21 +399,10 @@ class Ledger(DataTable[Text | str]):
             width=self._column_widths[self.COLUMN_EVENT],
             key=self.COLUMN_EVENT,
         )
-        if not self._compact_columns:
-            self.add_column(
-                Text(f"\n{self.COLUMN_LABELS[self.COLUMN_SOURCE]}"),
-                width=self._column_widths[self.COLUMN_SOURCE],
-                key=self.COLUMN_SOURCE,
-            )
         self.add_column(
             Text(f"\n{self.COLUMN_LABELS[self.COLUMN_SUMMARY]}"),
             width=self._summary_width,
             key=self.COLUMN_SUMMARY,
-        )
-        self.add_column(
-            Text(f"\n{self.COLUMN_LABELS[self.COLUMN_STATUS]}"),
-            width=self._column_widths[self.COLUMN_STATUS],
-            key=self.COLUMN_STATUS,
         )
         if not self._compact_columns:
             self.add_column(
@@ -454,9 +427,6 @@ class Ledger(DataTable[Text | str]):
             retry=self._component("retry"),
             request=self._component("request"),
         )
-
-    def _status_style(self, status: TrajectoryStatus) -> Style:
-        return ledger_status_style(status, self._style_palette())
 
     def _entry_context(
         self, entry: LedgerEntry
@@ -532,7 +502,6 @@ class Ledger(DataTable[Text | str]):
         if self._retry_message:
             include(retry_values(self._retry_message))
         if any(entry.is_tool_operation for entry in self._entries):
-            widths[self.COLUMN_STATUS] = LEDGER_STATUS_COLUMN_WIDTH
             widths[self.COLUMN_DURATION] = LEDGER_DURATION_COLUMN_WIDTH
         return widths
 

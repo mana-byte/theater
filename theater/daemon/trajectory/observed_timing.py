@@ -193,7 +193,11 @@ def _advance_observed(timing: Timing, record: TrajectoryRecord, observed_at: flo
 
 
 def _is_terminal_point(record: TrajectoryRecord) -> bool:
-    return record.kind in {TrajectoryKind.TOOL_RESULT, TrajectoryKind.ERROR} or (
+    return record.kind in {
+        TrajectoryKind.TOOL_RESULT,
+        TrajectoryKind.THEATER_RESULT,
+        TrajectoryKind.ERROR,
+    } or (
         record.lane is TrajectoryLane.MODEL and record.status in _TERMINAL_STATUSES
     )
 

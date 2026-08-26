@@ -337,6 +337,14 @@ def _vibe_detail(
         return None
 
 
+def _vibe_mcp_identity(value: object) -> tuple[str, str] | None:
+    prefix = f"{SERVER_NAME}_"
+    if not isinstance(value, str) or not value.startswith(prefix):
+        return None
+    tool = _vibe_identifier(value.removeprefix(prefix))
+    return (SERVER_NAME, tool) if tool is not None else None
+
+
 def _vibe_fact(
     *,
     kind: TrajectoryKind,
@@ -348,6 +356,8 @@ def _vibe_fact(
     turn_id: str | None = None,
     call_id: str | None = None,
     parent_call_id: str | None = None,
+    mcp_server: str | None = None,
+    mcp_tool: str | None = None,
     failure: TrajectoryFailure | None = None,
     details: tuple[DetailField, ...] = (),
 ) -> TrajectoryFact:
@@ -370,6 +380,8 @@ def _vibe_fact(
         turn_id=_vibe_identifier(turn_id),
         call_id=_vibe_identifier(call_id),
         parent_call_id=_vibe_identifier(parent_call_id),
+        mcp_server=_vibe_identifier(mcp_server),
+        mcp_tool=_vibe_identifier(mcp_tool),
         failure=failure,
         details=details,
     )
@@ -1372,6 +1384,8 @@ class VibeObserver(TranscriptObserver):
                 call_id = call_id if isinstance(call_id, str) else None
                 name = function.get("name")
                 name = name if isinstance(name, str) else None
+                mcp_identity = _vibe_mcp_identity(name)
+                mcp_server, mcp_tool = mcp_identity or (None, None)
                 details = [
                     value
                     for value in (
@@ -1397,6 +1411,8 @@ class VibeObserver(TranscriptObserver):
                         turn_id=turn_id,
                         call_id=call_id,
                         parent_call_id=parent,
+                        mcp_server=mcp_server,
+                        mcp_tool=mcp_tool,
                         details=tuple(details),
                     )
                 )
@@ -1410,6 +1426,8 @@ class VibeObserver(TranscriptObserver):
         call_id = call_id if isinstance(call_id, str) else None
         name = record.get("name")
         name = name if isinstance(name, str) else None
+        mcp_identity = _vibe_mcp_identity(name)
+        mcp_server, mcp_tool = mcp_identity or (None, None)
         details = [
             value
             for value in (
@@ -1433,6 +1451,8 @@ class VibeObserver(TranscriptObserver):
                 status=status,
                 turn_id=turn_id,
                 call_id=call_id,
+                mcp_server=mcp_server,
+                mcp_tool=mcp_tool,
                 failure=(
                     TrajectoryFailure(
                         TrajectoryFailureCategory.TOOL,

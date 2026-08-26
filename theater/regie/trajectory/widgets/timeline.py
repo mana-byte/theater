@@ -68,15 +68,20 @@ class Timeline(ScrollView):
         "trajectory-timeline--error",
         "trajectory-timeline--hovered",
         "trajectory-timeline--input",
+        "trajectory-timeline--input-highlighted",
         "trajectory-timeline--label",
         "trajectory-timeline--model",
+        "trajectory-timeline--model-highlighted",
         "trajectory-timeline--muted",
         "trajectory-timeline--rail",
         "trajectory-timeline--related",
         "trajectory-timeline--running",
+        "trajectory-timeline--running-highlighted",
         "trajectory-timeline--selected",
         "trajectory-timeline--theater",
+        "trajectory-timeline--theater-highlighted",
         "trajectory-timeline--tools",
+        "trajectory-timeline--tools-highlighted",
         "trajectory-timeline--track",
         "trajectory-timeline--turn",
     }
@@ -100,11 +105,16 @@ class Timeline(ScrollView):
     Timeline > .trajectory-timeline--rail {{ background: $foreground 3%; }}
     Timeline > .trajectory-timeline--turn {{ color: $text-muted; text-style: bold; }}
     Timeline > .trajectory-timeline--input {{ background: $primary 28%; }}
+    Timeline > .trajectory-timeline--input-highlighted {{ background: $primary; }}
     Timeline > .trajectory-timeline--model {{ background: $accent 28%; }}
+    Timeline > .trajectory-timeline--model-highlighted {{ background: $accent; }}
     Timeline > .trajectory-timeline--tools {{ background: $warning 26%; }}
+    Timeline > .trajectory-timeline--tools-highlighted {{ background: $warning; }}
     Timeline > .trajectory-timeline--theater {{ background: $secondary 26%; }}
+    Timeline > .trajectory-timeline--theater-highlighted {{ background: $secondary; }}
     Timeline > .trajectory-timeline--error {{ background: $error; }}
     Timeline > .trajectory-timeline--running {{ background: $warning 32%; }}
+    Timeline > .trajectory-timeline--running-highlighted {{ background: $warning; }}
     Timeline > .trajectory-timeline--muted {{ opacity: 32%; }}
     Timeline > .trajectory-timeline--hovered {{ color: $text; text-style: bold; }}
     Timeline > .trajectory-timeline--related {{ color: $text-muted; text-style: bold; }}
@@ -194,18 +204,23 @@ class Timeline(ScrollView):
     def _component(self, name: str) -> Style:
         return self.get_component_rich_style(f"trajectory-timeline--{name}")
 
-    def _lane_style(self, lane: TrajectoryLane) -> Style:
-        return self._component(lane.value)
+    def _lane_style(self, lane: TrajectoryLane, *, highlighted: bool = False) -> Style:
+        suffix = "-highlighted" if highlighted else ""
+        return self._component(f"{lane.value}{suffix}")
+
+    def _highlighted_id(self) -> str | None:
+        return self._hovered_id or self._selected_id
 
     def _span_style(self, record: TrajectoryRecord) -> Style:
-        style = self._lane_style(record.lane)
+        highlighted = record.record_id == self._highlighted_id()
+        style = self._lane_style(record.lane, highlighted=highlighted)
         if record.status in {TrajectoryStatus.ERROR, TrajectoryStatus.INTERRUPTED}:
             style += self._component("error")
         elif record.status in {TrajectoryStatus.PENDING, TrajectoryStatus.RUNNING}:
-            style += self._component("running")
-        if record.record_id not in self._matched_ids:
+            style += self._component("running-highlighted" if highlighted else "running")
+        if record.record_id not in self._matched_ids and not highlighted:
             style += self._component("muted")
-        if record.record_id == self._selected_id:
+        if record.record_id == self._selected_id and not highlighted:
             style += self._component("selected")
         return style
 
@@ -251,8 +266,10 @@ class Timeline(ScrollView):
         *,
         related: bool,
     ) -> None:
-        visible_start = max(span.visual_start, start)
-        visible_end = min(span.visual_end, start + width)
+        span_start = span.visual_start if related else span.x
+        span_end = span.visual_end if related else span.end
+        visible_start = max(span_start, start)
+        visible_end = min(span_end, start + width)
         if visible_start >= visible_end:
             return
         left = visible_start - start
@@ -288,14 +305,20 @@ class Timeline(ScrollView):
         last = bisect_left(self._lane_starts[lane], start + width)
         if paints_spans:
             visible_spans = spans[first:last]
-            for span in sorted(visible_spans, key=lambda item: item.width, reverse=True):
+            highlighted_id = self._highlighted_id()
+            for span in sorted(
+                visible_spans,
+                key=lambda item: (item.record_id == highlighted_id, -item.width),
+            ):
                 record = self._records_by_id.get(span.record_id)
                 if record is None:
                     continue
                 style = self._span_style(record)
+                span_start = span.x if span.record_id == highlighted_id else span.visual_start
+                span_end = span.end if span.record_id == highlighted_id else span.visual_end
                 for x in range(
-                    max(0, span.visual_start - start),
-                    min(width, span.visual_end - start),
+                    max(0, span_start - start),
+                    min(width, span_end - start),
                 ):
                     styles[x] = style
             for record_id in self._related_ids:

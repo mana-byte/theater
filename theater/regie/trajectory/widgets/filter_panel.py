@@ -90,10 +90,16 @@ class FilterPanel(Vertical):
         color: $text-muted;
         background: $foreground 3%;
     }}
-    FilterPanel Button:hover,
-    FilterPanel Button:focus {{
+    FilterPanel Button.-style-flat:hover,
+    FilterPanel Button.-style-flat:focus {{
         color: $text;
         background: $accent 10%;
+        tint: transparent;
+    }}
+    FilterPanel Button.-style-flat.-active {{
+        color: $text;
+        background: $accent 20%;
+        tint: transparent;
     }}
     FilterPanel SelectionList {{
         width: 1fr;
@@ -112,6 +118,19 @@ class FilterPanel(Vertical):
     }}
     FilterPanel SelectionList > .option-list--option-hover {{
         background: $accent 10%;
+    }}
+    FilterPanel SelectionList:focus {{
+        background-tint: transparent;
+    }}
+    FilterPanel SelectionList > .selection-list--button,
+    FilterPanel SelectionList > .selection-list--button-highlighted {{
+        color: $text-muted;
+        background: $background;
+    }}
+    FilterPanel SelectionList > .selection-list--button-selected,
+    FilterPanel SelectionList > .selection-list--button-selected-highlighted {{
+        color: $accent;
+        background: $background;
     }}
     FilterPanel > .trajectory-filter--dimension {{
         color: $text-muted;

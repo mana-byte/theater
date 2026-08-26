@@ -343,12 +343,12 @@ async def test_transcript_failure_shows_retry_inside_the_error_row() -> None:
         view._refresh()
         await pilot.pause()
         ledger = app.query_one(Ledger)
-        retry = ledger.get_cell(Ledger.RETRY_KEY, Ledger.COLUMN_STATUS)
+        retry = ledger.get_cell(Ledger.RETRY_KEY, Ledger.COLUMN_SUMMARY)
 
         assert "Retry" in retry.plain
         assert not app.query("#trajectory-retry-action")
         row = ledger.get_row_index(Ledger.RETRY_KEY)
-        column = ledger.get_column_index(Ledger.COLUMN_STATUS)
+        column = ledger.get_column_index(Ledger.COLUMN_SUMMARY)
         region = ledger._get_cell_region(Coordinate(row, column))
         await pilot.click(
             ledger,

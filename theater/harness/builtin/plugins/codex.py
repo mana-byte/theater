@@ -124,6 +124,7 @@ from typing import TYPE_CHECKING, BinaryIO, Literal
 from theater import proc
 from theater.constants.trajectory import (
     TRAJECTORY_IDENTIFIER_MAX_BYTES,
+    TRAJECTORY_MCP_CALL_CONTEXT_LIMIT,
     TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES,
 )
 from theater.harness.base import (
@@ -363,6 +364,17 @@ def _trajectory_id(value: object) -> str | None:
     if any(ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in value):
         return None
     return value
+
+
+def _codex_mcp_identity(value: object) -> tuple[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    invocation = value.get("invocation")
+    if isinstance(invocation, dict):
+        value = invocation
+    server = _trajectory_id(value.get("server"))
+    tool = _trajectory_id(value.get("tool"))
+    return (server, tool) if server is not None and tool is not None else None
 
 
 def _stable_json(value: object) -> str:
@@ -757,6 +769,7 @@ class CodexObserver(TranscriptObserver):
         self._last_cwd: str | None = None
         self._active_turn_id: str | None = None
         self._pending_patch_exec: tuple[str, float] | None = None
+        self._mcp_calls: dict[str, tuple[str, str]] = {}
         #: Whether the id this clone opened with is itself proof — token or receipt, not file-read.
         provenance = normalize_provenance(session_provenance)
         self._session_exact = session_exact or provenance is TranscriptProvenance.EXACT
@@ -1189,6 +1202,7 @@ class CodexObserver(TranscriptObserver):
 
     def _remember_context(self, record: dict, payload: dict) -> None:
         self._remember_patch_exec(record, payload)
+        self._remember_mcp_call(record, payload)
         turn_id = _codex_trajectory_turn_id(payload)
         if turn_id is not None:
             self._active_turn_id = turn_id
@@ -1223,6 +1237,25 @@ class CodexObserver(TranscriptObserver):
         if isinstance(provider, str) and provider:
             self._last_provider = provider
 
+    def _remember_mcp_call(self, record: dict, payload: dict) -> None:
+        record_kind = record.get("type")
+        payload_kind = payload.get("type")
+        if record_kind == "event_msg" and payload_kind in {
+            "mcp_tool_call_begin",
+            "mcp_tool_call_end",
+        }:
+            identity = _codex_mcp_identity(payload.get("invocation"))
+        elif record_kind == "response_item" and payload_kind == "mcp_tool_call":
+            identity = _codex_mcp_identity(payload)
+        else:
+            return
+        call_id = _trajectory_id(payload.get("call_id"))
+        if identity is None or call_id is None:
+            return
+        self._mcp_calls[call_id] = identity
+        while len(self._mcp_calls) > TRAJECTORY_MCP_CALL_CONTEXT_LIMIT:
+            self._mcp_calls.pop(next(iter(self._mcp_calls)))
+
     def _remember_patch_exec(self, record: dict, payload: dict) -> None:
         if record.get("type") != "response_item":
             return
@@ -1253,6 +1286,7 @@ class CodexObserver(TranscriptObserver):
         self._last_provider = None
         self._last_cwd = None
         self._pending_patch_exec = None
+        self._mcp_calls.clear()
 
         fh.seek(0)
         first_line = fh.readline(min(_CWD_PROBE_BYTES, max(0, start)))
@@ -1510,6 +1544,8 @@ class CodexObserver(TranscriptObserver):
             request_from_turn: bool = True,
             call_id: str | None = None,
             parent_call_id: str | None = None,
+            mcp_server: str | None = None,
+            mcp_tool: str | None = None,
             fact_timing: Timing | None = timing,
             usage: TrajectoryUsage | None = None,
             failure: TrajectoryFailure | None = None,
@@ -1536,6 +1572,8 @@ class CodexObserver(TranscriptObserver):
                     else None,
                     call_id=_trajectory_id(call_id),
                     parent_call_id=_trajectory_id(parent_call_id),
+                    mcp_server=_trajectory_id(mcp_server),
+                    mcp_tool=_trajectory_id(mcp_tool),
                     timing=fact_timing,
                     usage=usage,
                     failure=failure,
@@ -1707,6 +1745,10 @@ class CodexObserver(TranscriptObserver):
                 mcp_parts = [invocation.get("server"), invocation.get("tool")]
                 tool_name = ".".join(str(part) for part in mcp_parts if part)
                 call_id = _trajectory_id(payload.get("call_id"))
+                mcp_identity = _codex_mcp_identity(invocation)
+                if mcp_identity is None and call_id is not None:
+                    mcp_identity = self._mcp_calls.get(call_id)
+                mcp_server, mcp_tool = mcp_identity or (None, None)
                 if event_type == "mcp_tool_call_begin":
                     args = invocation.get("arguments") or invocation.get("input")
                     mcp_details = (
@@ -1724,6 +1766,8 @@ class CodexObserver(TranscriptObserver):
                         parent_call_id=_trajectory_id(
                             payload.get("parent_call_id") or payload.get("parent_id")
                         ),
+                        mcp_server=mcp_server,
+                        mcp_tool=mcp_tool,
                         details=mcp_details,
                     )
                 else:
@@ -1747,6 +1791,8 @@ class CodexObserver(TranscriptObserver):
                             payload.get("parent_call_id") or payload.get("parent_id")
                         )
                         or call_id,
+                        mcp_server=mcp_server,
+                        mcp_tool=mcp_tool,
                         failure=(
                             TrajectoryFailure(TrajectoryFailureCategory.TOOL, detail=raw)
                             if result_error
@@ -1927,6 +1973,10 @@ class CodexObserver(TranscriptObserver):
             }
             if item_type in call_types:
                 name = _safe_trajectory_text(payload.get("name") or item_type)
+                mcp_identity = (
+                    _codex_mcp_identity(payload) if item_type == "mcp_tool_call" else None
+                )
+                mcp_server, mcp_tool = mcp_identity or (None, None)
                 input_value = payload.get("input")
                 if input_value is None:
                     input_value = payload.get("arguments")
@@ -1939,6 +1989,8 @@ class CodexObserver(TranscriptObserver):
                     turn=item_turn,
                     call_id=call_id,
                     parent_call_id=parent_call_id,
+                    mcp_server=mcp_server,
+                    mcp_tool=mcp_tool,
                     usage=_codex_usage(
                         record,
                         payload,
@@ -1953,6 +2005,10 @@ class CodexObserver(TranscriptObserver):
                     ),
                 )
             elif item_type in result_types:
+                mcp_identity = _codex_mcp_identity(payload)
+                if mcp_identity is None and item_type == "mcp_tool_call_output" and call_id:
+                    mcp_identity = self._mcp_calls.get(call_id)
+                mcp_server, mcp_tool = mcp_identity or (None, None)
                 output = payload.get("output")
                 if output is None:
                     output = payload.get("result")
@@ -1966,6 +2022,8 @@ class CodexObserver(TranscriptObserver):
                     turn=item_turn,
                     call_id=call_id,
                     parent_call_id=parent_call_id or call_id,
+                    mcp_server=mcp_server,
+                    mcp_tool=mcp_tool,
                     details=(
                         (
                             _trajectory_detail(
