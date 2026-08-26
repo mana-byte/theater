@@ -371,18 +371,24 @@ def test_timeline_layout_reflows_existing_events_to_available_width() -> None:
     assert updated.spans[-1].end == 18
 
 
-def test_search_cache_and_hover_path_do_not_recompute_search() -> None:
+def test_projection_cache_and_hover_path_do_not_recompute_search() -> None:
     async def scenario() -> None:
         app = Host()
         async with app.run_test(size=(100, 30)):
             view = await populate(app, [record("r1"), record("r2", index=2, turn_id=None)])
-            key = view._search_key
-            cache_sizes = (len(view._search_cache.corpus), len(view._search_cache.query_scores))
+            projection = view.projection
+            key = projection.search_key
+            cache_sizes = (
+                len(projection.search_cache.corpus),
+                len(projection.search_cache.query_scores),
+            )
+            assert view.search_result is projection.search_result
+            assert projection.search_key == key
             view.on_ledger_record_hovered(type("Hover", (), {"record_id": "r1"})())
-            assert view._search_key == key
+            assert projection.search_key == key
             assert (
-                len(view._search_cache.corpus),
-                len(view._search_cache.query_scores),
+                len(projection.search_cache.corpus),
+                len(projection.search_cache.query_scores),
             ) == cache_sizes
 
     asyncio.run(scenario())

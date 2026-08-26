@@ -5,13 +5,12 @@ from __future__ import annotations
 import contextlib
 import inspect
 from bisect import bisect_left, bisect_right
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 
 from textual import events
 from textual.app import ComposeResult
 from textual.await_remove import AwaitRemove
 from textual.containers import Vertical
-from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Input, Select
 from textual.worker import Worker, WorkerCancelled, WorkerFailed
@@ -31,11 +30,18 @@ from theater.regie.trajectory.enums import (
     OrderMode,
 )
 from theater.regie.trajectory.inspection.project import active_detail_tab, detail_text
-from theater.regie.trajectory.render.diagnostics import ordering_for_projection
-from theater.regie.trajectory.render.ordering import TrajectoryOrdering, build_ordering
-from theater.regie.trajectory.render.pagination import paginate_search_result
+from theater.regie.trajectory.messages import (
+    CopyRequest,
+    ParticipantLinkRequest,
+    ReturnToTree,
+    TrajectoryBackRequested,
+    TrajectoryCopyRequested,
+    TrajectoryParticipantSelected,
+    TrajectoryRetryRequested,
+)
+from theater.regie.trajectory.projection import TrajectoryViewProjection
 from theater.regie.trajectory.render.records import sanitize_text
-from theater.regie.trajectory.search import FilterCounts, SearchCache, SearchResult, search_records
+from theater.regie.trajectory.search import SearchResult
 from theater.regie.trajectory.state import ParticipantTrajectoryState, TrajectoryStateStore
 from theater.regie.trajectory.widgets.breadcrumb import TrajectoryBreadcrumb
 from theater.regie.trajectory.widgets.filter_panel import (
@@ -80,7 +86,6 @@ from theater.regie.trajectory.widgets.timeline import (
 from theater.trajectory import (
     ParticipantLink,
     Timing,
-    TrajectoryGroup,
     TrajectoryKind,
     TrajectoryLane,
     TrajectoryPage,
@@ -90,56 +95,6 @@ from theater.trajectory import (
     TrajectoryToolOperation,
 )
 from theater.trajectory.location import TrajectoryLocationResolution
-
-
-class ReturnToTree(Message):
-    """Esc asks the owning app to return focus to the participant tree."""
-
-
-class TrajectoryCopyRequested(Message):
-    """Bounded trajectory detail is ready for the owning app's copy abstraction."""
-
-    def __init__(self, text: str) -> None:
-        super().__init__()
-        self.text = text
-
-
-class TrajectoryParticipantSelected(Message):
-    """A participant link asks the owning app to stage that tree leaf."""
-
-    def __init__(
-        self,
-        participant_id: str,
-        target_record_id: str | None = None,
-        *,
-        exact: bool | None = None,
-        unresolved: bool = False,
-        link: ParticipantLink | None = None,
-    ) -> None:
-        super().__init__()
-        self.participant_id = participant_id
-        self.target_record_id = target_record_id
-        self.exact = target_record_id is not None if exact is None else exact
-        self.unresolved = unresolved
-        self.is_exact = self.exact
-        self.is_unresolved = self.unresolved
-        self.link = link
-
-
-class TrajectoryBackRequested(Message):
-    """The current trajectory asks the owning app to navigate back."""
-
-
-class TrajectoryRetryRequested(Message):
-    """A host without an injected controller can handle a retry request."""
-
-    def __init__(self, participant_id: str) -> None:
-        super().__init__()
-        self.participant_id = participant_id
-
-
-CopyRequest = Callable[[str], object | Awaitable[object]]
-ParticipantLinkRequest = Callable[[str], object | Awaitable[object]]
 
 
 class TrajectoryView(Vertical):
@@ -242,22 +197,7 @@ class TrajectoryView(Vertical):
         self._participant_link = participant_link
         self._focus_on_mount = focus_on_mount
         self._unsubscribe: Callable[[], None] | None = None
-        self._search_result = SearchResult((), (), frozenset(), {}, FilterCounts())
-        self._ledger_page = paginate_search_result(
-            self._search_result,
-            self.state.ledger_page,
-            self.state_store.page_size,
-        )
-        self._search_cache = SearchCache()
-        self._search_key: tuple[object, ...] | None = None
-        self._ordered_records: tuple[TrajectoryRecord, ...] = ()
-        self._ordered_indices: dict[str, int] = {}
-        self._all_visible_ids: tuple[str, ...] = ()
-        self._all_visible_indices: dict[str, int] = {}
-        self._visible_ids: tuple[str, ...] = ()
-        self._visible_positions: tuple[int, ...] = ()
-        self._visible_id_set: frozenset[str] = frozenset()
-        self._visible_indices: dict[str, int] = {}
+        self.projection = TrajectoryViewProjection(self.state, self.state_store.page_size)
         self._search_refresh_pending = False
         self._load_worker: Worker[TrajectoryPage | None] | None = None
         self._retiring = False
@@ -323,100 +263,6 @@ class TrajectoryView(Vertical):
         if not self._retiring and self.is_attached:
             self._refresh()
 
-    def _make_search_key(self) -> tuple[object, ...]:
-        record_key = tuple(
-            (record.record_id, record.revision) for record in self.state.records.values()
-        )
-        groups = tuple(self._group_signature(group) for group in self.state.groups)
-        requests = tuple(
-            (request.request_id, request.record_ids) for request in self.state.request_index.ordered
-        )
-        return (
-            record_key,
-            self.state.query,
-            frozenset(self.state.lane_filters),
-            frozenset(self.state.kind_filters),
-            frozenset(self.state.status_filters),
-            frozenset(self.state.source_filters),
-            self.state.diagnostic_view,
-            groups,
-            requests,
-        )
-
-    @staticmethod
-    def _group_signature(group: TrajectoryGroup) -> tuple[object, ...]:
-        return (
-            group.group_id,
-            group.label,
-            group.record_ids,
-            group.turn_id,
-            group.step_id,
-            tuple(TrajectoryView._group_signature(child) for child in group.children),
-        )
-
-    def _recompute_search(
-        self, records: tuple[TrajectoryRecord, ...], ordering: TrajectoryOrdering
-    ) -> None:
-        self._ordered_records = records
-        self._ordered_indices = {
-            record.record_id: index for index, record in enumerate(self._ordered_records)
-        }
-        key = self._make_search_key()
-        if key == self._search_key:
-            return
-        self._search_key = key
-        projection = self.state.diagnostic_index.projection_for(self.state.diagnostic_view)
-        diagnostic_ordering = ordering_for_projection(records, projection)
-        self._search_result = search_records(
-            records,
-            query=self.state.query,
-            lane_filters=self.state.lane_filters,
-            kind_filters=self.state.kind_filters,
-            status_filters=self.state.status_filters,
-            source_filters=self.state.source_filters,
-            groups=self.state.groups,
-            cache=self._search_cache,
-            ordering=diagnostic_ordering or ordering,
-            request_index=self.state.request_index,
-            tool_index=self.state.tool_index,
-            candidate_ids=projection.record_ids,
-        )
-        self._all_visible_ids = self._search_result.row_ids
-        self._all_visible_indices = {
-            record_id: index for index, record_id in enumerate(self._all_visible_ids)
-        }
-
-    def _sync_page(self) -> None:
-        selected_anchor = self._logical_row_id(self.state.selected_id)
-        selected_index = self._all_visible_indices.get(selected_anchor or "")
-        if self.state.follow_tail and self._all_visible_ids:
-            requested_page = (len(self._all_visible_ids) - 1) // self.state_store.page_size
-        elif selected_index is not None:
-            requested_page = selected_index // self.state_store.page_size
-        else:
-            requested_page = self.state.ledger_page
-        self._ledger_page = paginate_search_result(
-            self._search_result,
-            requested_page,
-            self.state_store.page_size,
-        )
-        self.state.ledger_page = self._ledger_page.index
-        self._visible_ids = self._ledger_page.result.row_ids
-        self._visible_id_set = frozenset(self._visible_ids)
-        self._visible_indices = {
-            record_id: index for index, record_id in enumerate(self._visible_ids)
-        }
-        self._visible_positions = tuple(
-            self._ordered_indices[record_id]
-            for record_id in self._visible_ids
-            if record_id in self._ordered_indices
-        )
-        selected_anchor = self._logical_row_id(self.state.selected_id)
-        if self.state.follow_tail:
-            self.state.select(self._visible_ids[-1] if self._visible_ids else None)
-        elif selected_anchor not in self._visible_id_set:
-            self.state.select(self._visible_ids[0] if self._visible_ids else None)
-
     @staticmethod
     def _set_class(widget: Widget, class_name: str, enabled: bool) -> bool:
         if widget.has_class(class_name) == enabled:
@@ -425,13 +271,11 @@ class TrajectoryView(Vertical):
         return True
 
     def _refresh(self, *, recompute: bool = True) -> None:
-        if recompute or not self._ordered_records:
-            ordering = build_ordering(tuple(self.state.display_records), self.state.groups)
-            records = ordering.records
-            self._recompute_search(records, ordering)
-        else:
-            records = self._ordered_records
-        self._sync_page()
+        records = self.projection.refresh(
+            self.state,
+            self.state_store.page_size,
+            recompute=recompute,
+        )
         if self._retiring or not self.is_attached:
             return
         timeline = self.query_one("#trajectory-timeline", Timeline)
@@ -444,7 +288,7 @@ class TrajectoryView(Vertical):
             selected_id = insights.update_analysis(
                 self.state.diagnostic_view,
                 self.state.analysis_index,
-                frozenset(self._search_result.record_ids),
+                frozenset(self.projection.search_result.record_ids),
                 selected_id=self.state.selected_id,
                 follow_tail=self.state.follow_tail,
             )
@@ -469,7 +313,7 @@ class TrajectoryView(Vertical):
             timeline_offset = None
         timeline.update_records(
             records,
-            matched_ids=self._search_result.matched_ids,
+            matched_ids=self.projection.search_result.matched_ids,
             hovered_id=self.state.hovered_id,
             related_ids=self.state.related_record_ids(self.state.hovered_id),
             selected_id=self.state.selected_id,
@@ -487,14 +331,14 @@ class TrajectoryView(Vertical):
         if not insight_view:
             ledger.update_rows(
                 records,
-                self._ledger_page.result,
+                self.projection.ledger_page.result,
                 selected_id=self.state.selected_id,
                 hovered_id=self.state.hovered_id,
                 order_mode=self.state.order_mode,
-                has_older=self.state.has_older and self._ledger_page.index == 0,
-                loading_older=self.state.loading_older and self._ledger_page.index == 0,
+                has_older=self.state.has_older and self.projection.ledger_page.index == 0,
+                loading_older=self.state.loading_older and self.projection.ledger_page.index == 0,
                 retry_message=self.state.retry_message if self.state.retry_kind else None,
-                position_offset=self._ledger_page.first_item - 1,
+                position_offset=self.projection.ledger_page.first_item - 1,
             )
         record, request, tool = self._selection_context()
         breadcrumb.update_context(record, request=request, tool=tool)
@@ -535,11 +379,15 @@ class TrajectoryView(Vertical):
             if insight_view
             else 0
         )
-        visible_count = insight_count if insight_view else len(self._search_result.row_ids)
-        page_number = 1 if insight_view else self._ledger_page.number
-        page_count = 1 if insight_view else self._ledger_page.count
-        first_item = int(visible_count > 0) if insight_view else self._ledger_page.first_item
-        last_item = visible_count if insight_view else self._ledger_page.last_item
+        visible_count = (
+            insight_count if insight_view else len(self.projection.search_result.row_ids)
+        )
+        page_number = 1 if insight_view else self.projection.ledger_page.number
+        page_count = 1 if insight_view else self.projection.ledger_page.count
+        first_item = (
+            int(visible_count > 0) if insight_view else self.projection.ledger_page.first_item
+        )
+        last_item = visible_count if insight_view else self.projection.ledger_page.last_item
         footer.update_state(
             status=status,
             message=footer_message,
@@ -547,7 +395,7 @@ class TrajectoryView(Vertical):
                 len(self.state.tool_index.ordered)
                 + sum(
                     record.record_id not in self.state.tool_index.by_record_id
-                    for record in self._ordered_records
+                    for record in self.projection.ordered_records
                 )
             ),
             visible_count=visible_count,
@@ -570,9 +418,7 @@ class TrajectoryView(Vertical):
 
     @property
     def search_result(self) -> SearchResult:
-        ordering = build_ordering(tuple(self.state.display_records), self.state.groups)
-        self._recompute_search(ordering.records, ordering)
-        return self._search_result
+        return self.projection.search_result
 
     @property
     def active_region(self) -> FocusRegion:
@@ -624,7 +470,7 @@ class TrajectoryView(Vertical):
         panel = self.query_one("#trajectory-filters", FilterPanel)
         if self.state.filters_open and update_options:
             panel.update_filters(
-                self._search_result.counts,
+                self.projection.search_result.counts,
                 lanes=self.state.lane_filters,
                 kinds=self.state.kind_filters,
                 statuses=self.state.status_filters,
@@ -653,18 +499,12 @@ class TrajectoryView(Vertical):
         if record_id is None or not self.is_mounted:
             return
         if self.state.diagnostic_view not in INSIGHT_VIEWS:
-            row_id = self._logical_row_id(record_id)
-            if row_id not in self._visible_id_set:
+            row_id = self.projection.logical_row_id(record_id)
+            if row_id not in self.projection.visible_id_set:
                 return
             self.query_one("#trajectory-ledger", Ledger).scroll_to_record(record_id)
         timeline = self.query_one("#trajectory-timeline", Timeline)
         self.state.timeline_scroll = timeline.scroll_span_into_view(record_id)
-
-    def _logical_row_id(self, record_id: str | None) -> str | None:
-        row_id = self._search_result.row_id_for_record(record_id)
-        if row_id is not None:
-            return row_id
-        return record_id if record_id in self._all_visible_indices else None
 
     def _request_for_record(self, record_id: str | None) -> TrajectoryRequest | None:
         if record_id is None:
@@ -723,7 +563,7 @@ class TrajectoryView(Vertical):
         anchor = self.state.row_anchor(record_id)
         if anchor is None:
             return False
-        if self._logical_row_id(record_id) not in self._all_visible_indices:
+        if self.projection.logical_row_id(record_id) not in self.projection.all_visible_indices:
             self.state.diagnostic_view = DiagnosticView.ALL
             self.state.query = ""
             if self.is_mounted:
@@ -751,7 +591,7 @@ class TrajectoryView(Vertical):
             await worker.wait()
 
     def _selected_visible_ids(self) -> tuple[str, ...]:
-        return self._visible_ids
+        return self.projection.visible_ids
 
     def _update_follow_for_selection(self, record_id: str | None) -> None:
         insight_view = self.state.diagnostic_view in INSIGHT_VIEWS and self.is_mounted
@@ -760,8 +600,9 @@ class TrajectoryView(Vertical):
                 record_id
             )
         else:
-            tail_id = self._all_visible_ids[-1] if self._all_visible_ids else None
-            row_id = self._logical_row_id(record_id)
+            visible_ids = self.projection.all_visible_ids
+            tail_id = visible_ids[-1] if visible_ids else None
+            row_id = self.projection.logical_row_id(record_id)
             at_tail = row_id is not None and row_id == tail_id
         if at_tail:
             self.state.follow_tail = True
@@ -770,7 +611,9 @@ class TrajectoryView(Vertical):
             self.state.pause_follow()
 
     def _reveal_selection_page(self, record_id: str | None) -> bool:
-        index = self._all_visible_indices.get(self._logical_row_id(record_id) or "")
+        index = self.projection.all_visible_indices.get(
+            self.projection.logical_row_id(record_id) or ""
+        )
         if index is None:
             return False
         page = index // self.state_store.page_size
@@ -799,18 +642,18 @@ class TrajectoryView(Vertical):
                 exclusive=True,
             )
         if visible_ids:
-            current = self._visible_indices.get(before) if before is not None else None
+            current = self.projection.visible_indices.get(before) if before is not None else None
             if current is None:
-                order_index = self._ordered_indices.get(before or "")
+                order_index = self.projection.ordered_indices.get(before or "")
                 if order_index is None:
                     target = 0 if delta > 0 else len(visible_ids) - 1
                 elif delta > 0:
                     target = min(
                         len(visible_ids) - 1,
-                        bisect_right(self._visible_positions, order_index),
+                        bisect_right(self.projection.visible_positions, order_index),
                     )
                 else:
-                    target = max(0, bisect_left(self._visible_positions, order_index) - 1)
+                    target = max(0, bisect_left(self.projection.visible_positions, order_index) - 1)
             else:
                 target = max(0, min(len(visible_ids) - 1, current + delta))
             self.state.select(visible_ids[target])
@@ -850,17 +693,16 @@ class TrajectoryView(Vertical):
     def _change_page(self, delta: int) -> None:
         if self.state.diagnostic_view in INSIGHT_VIEWS:
             return
-        target = max(0, min(self._ledger_page.count - 1, self.state.ledger_page + delta))
+        target = max(
+            0,
+            min(self.projection.ledger_page.count - 1, self.state.ledger_page + delta),
+        )
         if target == self.state.ledger_page:
             return
         self._show_page(target, select_last=delta < 0)
 
     def _show_page(self, target: int, *, select_last: bool = False) -> None:
-        page = paginate_search_result(
-            self._search_result,
-            target,
-            self.state_store.page_size,
-        )
+        page = self.projection.page_for(target, self.state_store.page_size)
         self.state.ledger_page = page.index
         if not page.record_ids:
             record_id = None
@@ -879,7 +721,7 @@ class TrajectoryView(Vertical):
         self._change_page(1)
 
     def action_select_page(self, page_index: int) -> None:
-        target = max(0, min(self._ledger_page.count - 1, page_index))
+        target = max(0, min(self.projection.ledger_page.count - 1, page_index))
         if target != self.state.ledger_page:
             self._show_page(target)
 
@@ -948,7 +790,7 @@ class TrajectoryView(Vertical):
 
     def action_oldest(self) -> None:
         self.state.pause_follow()
-        visible = self._all_visible_ids
+        visible = self.projection.all_visible_ids
         self.state.ledger_page = 0
         self.state.select(visible[0] if visible else None)
         self.state.timeline_scroll = 0
@@ -956,7 +798,8 @@ class TrajectoryView(Vertical):
 
     def action_tail(self) -> None:
         self.state.resume_follow()
-        self.state.select(self._all_visible_ids[-1] if self._all_visible_ids else None)
+        visible = self.projection.all_visible_ids
+        self.state.select(visible[-1] if visible else None)
         self._refresh(recompute=False)
         if self.controller is not None:
             self.run_worker(
