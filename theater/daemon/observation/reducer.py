@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from theater.daemon import lineage
 from theater.daemon.observation.screen import end_turn_from_screen_text
 from theater.daemon.observation.turns import Turn, TurnAccumulator
-from theater.harness import EventKind, HarnessObserver, ScreenKind, status_after
+from theater.harness import Event, EventKind, HarnessObserver, ScreenKind, status_after
 from theater.harness.source import Batch, Source
 from theater.models import Status
 from theater.pricing import usage_cost_microcents
@@ -81,6 +81,7 @@ class Reducer:
         monotonic_fn,
         config_fn,
         jobs_fn,
+        telemetry_fn=None,
     ):
         self.store = store
         self.registry = registry
@@ -89,6 +90,7 @@ class Reducer:
         self._monotonic_fn = monotonic_fn
         self._config_fn = config_fn
         self._jobs_fn = jobs_fn
+        self._telemetry_fn = telemetry_fn
 
     @property
     def jobs(self):
@@ -151,9 +153,14 @@ class Reducer:
         job_handle: str | None = None
         last = None
         observed_at: float | None = None
+        new_usage_events: list[Event] | None = [] if self._telemetry_fn is not None else None
         for event in batch.events:
-            if event.usage is not None:
-                self.record_usage(pid, event)
+            if (
+                event.usage is not None
+                and self.record_usage(pid, event)
+                and new_usage_events is not None
+            ):
+                new_usage_events.append(event)
             if event.usage_only:
                 continue
             if observed_at is None:
@@ -198,7 +205,13 @@ class Reducer:
             p_now = self.store.get_participant(pid)
             if p_now is not None and floor_is_present(p_now.resume_floor):
                 self.store.clear_resume_floor(pid)
-        return batch.progressed or bool(batch.events) or batch.attached is not None
+        result = batch.progressed or bool(batch.events) or batch.attached is not None
+        if self._telemetry_fn is not None:
+            try:
+                self._telemetry_fn(pid, batch, tuple(new_usage_events or ()))
+            except Exception:
+                logger.exception("agent telemetry failed for %s", pid)
+        return result
 
     @staticmethod
     def has_semantic_progress(batch: Batch) -> bool:

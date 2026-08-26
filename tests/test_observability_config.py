@@ -11,6 +11,7 @@ from theater.config.models import ObservabilitySection
 def test_defaults():
     s = ObservabilitySection()
     assert s.otlp_enabled is False
+    assert s.agent_metrics is True
     assert s.otlp_protocol == "grpc"
     assert s.otlp_endpoint is None
     assert s.service_name == "theater"
@@ -72,9 +73,17 @@ def test_otlp_enabled(tmp_path, monkeypatch):
     )
 
 
+def test_agent_metrics(tmp_path, monkeypatch):
+    config = _load(tmp_path, monkeypatch, "[observability]\nagent_metrics = false\n")
+    assert config.observability.agent_metrics is False
+    rows = {k: (v, s) for k, v, s in cfg.describe(config)}
+    assert rows["observability.agent_metrics"] == ("False", "config.toml")
+
+
 def test_describe():
     rows = {k: (v, s) for k, v, s in cfg.describe(cfg.Config())}
     assert rows["observability.otlp_enabled"] == ("False", "default")
+    assert rows["observability.agent_metrics"] == ("True", "default")
     assert rows["observability.otlp_protocol"] == ("grpc", "default")
     assert rows["observability.otlp_endpoint"] == ("(unset)", "default")
 

@@ -138,6 +138,8 @@ class RegieSection:
 class ObservabilitySection:
     #: Whether to export traces, metrics, and logs via OTLP. Off by default.
     otlp_enabled: bool = False
+    #: Whether agent telemetry metrics export when OTLP is enabled.
+    agent_metrics: bool = True
     #: OTLP transport protocol: "grpc" or "http".
     otlp_protocol: str = field(
         default=DEFAULT_OTLP_PROTOCOL,

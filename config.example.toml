@@ -331,6 +331,9 @@ disabled = []
 # Whether OTLP export is enabled.
 otlp_enabled = false
 
+# Whether agent telemetry metrics export when OTLP is enabled.
+agent_metrics = true
+
 # Transport protocol: "grpc" or "http".
 otlp_protocol = "grpc"
 
