@@ -24,7 +24,7 @@ from theater.regie.trajectory.render.insights import (
     InsightTableModel,
     build_insight_table,
 )
-from theater.regie.trajectory.render.records import bottom_aligned_cell
+from theater.regie.trajectory.render.records import bottom_aligned_cell, vertically_centered_cell
 from theater.regie.trajectory.widgets.rows import resize_rows
 from theater.trajectory import ParticipantLink
 
@@ -225,7 +225,12 @@ class InsightsPanel(DataTable[Text | str]):
             if candidate is None or entry is None:
                 continue
             for column, cell in zip(self.ordered_columns, entry.cells, strict=True):
-                self.update_cell(candidate, column.key, bottom_aligned_cell(cell, height))
+                aligned = (
+                    vertically_centered_cell(cell, height)
+                    if height == TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT
+                    else bottom_aligned_cell(cell, height)
+                )
+                self.update_cell(candidate, column.key, aligned)
             heights[candidate] = height
         self._expanded_span_key = key
         resize_rows(self, heights)

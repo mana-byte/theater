@@ -205,7 +205,7 @@ async def test_pointer_hover_expands_only_the_active_ledger_span(monkeypatch) ->
         first_region = ledger._get_cell_region(Coordinate(first_row, 0))
         await pilot.hover(ledger, offset=(first_region.x, first_region.y))
 
-        assert ledger.ordered_rows[first_row].height == TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT
+        assert ledger.ordered_rows[first_row].height == 3
         assert ledger.get_cell("record:r1", Ledger.COLUMN_SUMMARY).plain.startswith("\n")
         assert not ledger.get_cell("record:r1", Ledger.COLUMN_SUMMARY).plain.startswith("\n\n")
 

@@ -39,6 +39,16 @@ KIND_GLYPHS = {TrajectoryKind(value): glyph for value, glyph in KIND_GLYPHS_BY_V
 def bottom_aligned_cell(value: Text | str, height: int) -> Text:
     """Place one-line table content on the last line of a fixed-height row."""
     aligned = Text("\n" * max(0, height - 1))
+    return _append_cell_value(aligned, value)
+
+
+def vertically_centered_cell(value: Text | str, height: int) -> Text:
+    """Place one-line table content on the middle line of a fixed-height row."""
+    aligned = Text("\n" * max(0, (height - 1) // 2))
+    return _append_cell_value(aligned, value)
+
+
+def _append_cell_value(aligned: Text, value: Text | str) -> Text:
     if isinstance(value, Text):
         aligned.append_text(value)
         aligned.justify = value.justify

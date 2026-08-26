@@ -54,7 +54,7 @@ from theater.regie.trajectory.render.ledger import (
     retry_cells,
     retry_values,
 )
-from theater.regie.trajectory.render.records import bottom_aligned_cell
+from theater.regie.trajectory.render.records import bottom_aligned_cell, vertically_centered_cell
 from theater.regie.trajectory.search import LedgerEntry, SearchResult
 from theater.regie.trajectory.widgets.ledger_viewport import (
     max_scroll_row,
@@ -506,7 +506,9 @@ class Ledger(DataTable[Text | str]):
         return widths
 
     @staticmethod
-    def _bottom_cell(value: Text | str, height: int = TRAJECTORY_SPAN_ROW_HEIGHT) -> Text:
+    def _row_cell(value: Text | str, height: int = TRAJECTORY_SPAN_ROW_HEIGHT) -> Text:
+        if height == TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT:
+            return vertically_centered_cell(value, height)
         return bottom_aligned_cell(value, height)
 
     def _add_cells(
@@ -517,7 +519,7 @@ class Ledger(DataTable[Text | str]):
         height: int = TRAJECTORY_SPAN_ROW_HEIGHT,
     ) -> None:
         self.add_row(
-            *(self._bottom_cell(cells.get(column, ""), height) for column in self._column_keys),
+            *(self._row_cell(cells.get(column, ""), height) for column in self._column_keys),
             height=height,
             key=key,
         )
@@ -638,7 +640,7 @@ class Ledger(DataTable[Text | str]):
                 continue
             height = self._span_row_height(key)
             for column in self._column_keys:
-                self.update_cell(key, column, self._bottom_cell(cells[column], height))
+                self.update_cell(key, column, self._row_cell(cells[column], height))
             self._revisions[entry.record_id] = record.revision
 
     def _refresh_changed_requests(self, palette: LedgerStylePalette) -> None:
@@ -656,7 +658,7 @@ class Ledger(DataTable[Text | str]):
                 self.update_cell(
                     key,
                     column,
-                    self._bottom_cell(cells[column], TRAJECTORY_AUXILIARY_ROW_HEIGHT),
+                    self._row_cell(cells[column], TRAJECTORY_AUXILIARY_ROW_HEIGHT),
                 )
             self._rendered_requests[entry.request_id] = request
 
@@ -673,7 +675,7 @@ class Ledger(DataTable[Text | str]):
             key = self._row_key(entry)
             height = self._span_row_height(key)
             for column in self._column_keys:
-                self.update_cell(key, column, self._bottom_cell(cells[column], height))
+                self.update_cell(key, column, self._row_cell(cells[column], height))
             self._rendered_tools[entry.tool_operation_id] = tool
 
     def _span_row_height(self, key: str) -> int:
@@ -714,7 +716,7 @@ class Ledger(DataTable[Text | str]):
             if cells is None:
                 continue
             for column in self._column_keys:
-                self.update_cell(candidate, column, self._bottom_cell(cells[column], height))
+                self.update_cell(candidate, column, self._row_cell(cells[column], height))
             heights[candidate] = height
         self._expanded_span_key = key
         if resize_rows(self, heights):
@@ -893,12 +895,12 @@ class Ledger(DataTable[Text | str]):
             self.update_cell(
                 key,
                 self.COLUMN_POSITION,
-                self._bottom_cell(cells[self.COLUMN_POSITION], height),
+                self._row_cell(cells[self.COLUMN_POSITION], height),
             )
             self.update_cell(
                 key,
                 self.COLUMN_SUMMARY,
-                self._bottom_cell(cells[self.COLUMN_SUMMARY], height),
+                self._row_cell(cells[self.COLUMN_SUMMARY], height),
             )
 
     def set_selected(self, record_id: str | None) -> None:
