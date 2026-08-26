@@ -1166,8 +1166,9 @@ def test_regie_logs_uncaught_startup_failure_and_shuts_down(monkeypatch, caplog)
     monkeypatch.setattr(cli.tmux, "inside_tmux", lambda: True)
     monkeypatch.setattr(app_mod, "run_regie", fail)
 
-    with caplog.at_level(logging.ERROR, logger="theater.regie"), pytest.raises(
-        ValueError, match="boom"
+    with (
+        caplog.at_level(logging.ERROR, logger="theater.regie"),
+        pytest.raises(ValueError, match="boom"),
     ):
         cli.cmd_regie(parse("regie"))
 
