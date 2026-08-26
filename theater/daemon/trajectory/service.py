@@ -4,20 +4,26 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import math
 import uuid
 from collections import deque
 from dataclasses import dataclass
 
 from theater.constants.trajectory import (
     TRAJECTORY_CURSOR_MAX_BYTES,
-    TRAJECTORY_FOLLOW_TIMEOUT_SECONDS,
     TRAJECTORY_IDENTIFIER_MAX_BYTES,
     TRAJECTORY_OLDER_CURSOR_LIMIT,
     TRAJECTORY_PAGE_RECORD_LIMIT,
 )
 from theater.daemon.trajectory.cache import CacheStream, RecordChange, TrajectoryCache
 from theater.daemon.trajectory.merge import order_records
+from theater.daemon.trajectory.params import (
+    validate_bounded_string,
+    validate_identifier,
+    validate_limit,
+    validate_optional_cursor,
+    validate_participant_token,
+    validate_wait,
+)
 from theater.daemon.trajectory.responses import (
     TrajectoryResponseTooLarge,
     decode_follow_cursor,
@@ -82,8 +88,8 @@ class TrajectoryService:
         self._runtime.capture_batch(participant_id, batch)
 
     def locate(self, participant_token: str, record_id: str) -> TrajectoryLocation:
-        _validate_identifier(participant_token, "trajectory.locate", "id")
-        _validate_identifier(record_id, "trajectory.locate", "record_id")
+        validate_identifier(participant_token, "trajectory.locate", "id")
+        validate_identifier(record_id, "trajectory.locate", "record_id")
         participant = self._resolve(participant_token, missing=True)
         if participant is None:
             return TrajectoryLocation(
@@ -137,9 +143,9 @@ class TrajectoryService:
         limit: int = TRAJECTORY_PAGE_RECORD_LIMIT,
     ) -> TrajectoryPage:
         self._runtime.set_loop()
-        limit = _validate_limit(limit, "trajectory.snapshot")
-        _validate_participant_token(participant_token, "trajectory.snapshot")
-        _validate_optional_cursor(before, "trajectory.snapshot")
+        limit = validate_limit(limit, "trajectory.snapshot")
+        validate_participant_token(participant_token, "trajectory.snapshot")
+        validate_optional_cursor(before, "trajectory.snapshot")
         if before is not None and not before.startswith("o1-"):
             raise BadRequest("trajectory.snapshot parameter 'before' is not a valid older cursor")
         participant = self._resolve(participant_token, missing=True)
@@ -220,11 +226,11 @@ class TrajectoryService:
         limit: int,
     ) -> TrajectoryDelta:
         self._runtime.set_loop()
-        _validate_participant_token(participant_token, "trajectory.follow")
-        _validate_bounded_string(stream_id, "stream_id", TRAJECTORY_IDENTIFIER_MAX_BYTES)
-        _validate_bounded_string(after, "after", TRAJECTORY_CURSOR_MAX_BYTES)
-        wait = _validate_wait(wait, "trajectory.follow")
-        limit = _validate_limit(limit, "trajectory.follow")
+        validate_participant_token(participant_token, "trajectory.follow")
+        validate_bounded_string(stream_id, "stream_id", TRAJECTORY_IDENTIFIER_MAX_BYTES)
+        validate_bounded_string(after, "after", TRAJECTORY_CURSOR_MAX_BYTES)
+        wait = validate_wait(wait, "trajectory.follow")
+        limit = validate_limit(limit, "trajectory.follow")
         parsed = decode_follow_cursor(after)
         if parsed is None:
             raise BadRequest(
@@ -277,9 +283,9 @@ class TrajectoryService:
     def close_viewer(self, participant_token: str, stream_id: str | None = None) -> bool:
         if self._closed:
             return False
-        _validate_participant_token(participant_token, "trajectory.close")
+        validate_participant_token(participant_token, "trajectory.close")
         if stream_id is not None:
-            _validate_bounded_string(stream_id, "stream_id", TRAJECTORY_IDENTIFIER_MAX_BYTES)
+            validate_bounded_string(stream_id, "stream_id", TRAJECTORY_IDENTIFIER_MAX_BYTES)
         participant = self._resolve(participant_token, missing=True)
         if participant is None:
             return False
@@ -446,24 +452,6 @@ class TrajectoryService:
             raise
 
 
-def _validate_participant_token(value: object, method_name: str) -> None:
-    if not isinstance(value, str) or not value:
-        raise BadRequest(f"{method_name} requires non-empty string parameter 'id'")
-    _validate_encoded_length(
-        value, TRAJECTORY_IDENTIFIER_MAX_BYTES, f"{method_name} parameter 'id'"
-    )
-
-
-def _validate_identifier(value: object, method_name: str, key: str) -> None:
-    if not isinstance(value, str) or not value:
-        raise BadRequest(f"{method_name} requires non-empty string parameter {key!r}")
-    _validate_encoded_length(
-        value, TRAJECTORY_IDENTIFIER_MAX_BYTES, f"{method_name} parameter {key!r}"
-    )
-    if any(ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in value):
-        raise BadRequest(f"{method_name} parameter {key!r} must not contain control characters")
-
-
 def _bus_record_id(record_id: str) -> int | None:
     prefix = "bus:"
     if not record_id.startswith(prefix):
@@ -480,48 +468,6 @@ def _terminal_participant_state(stream: TrajectoryStream) -> bool:
         TrajectoryParticipantState.EXTERNAL,
         TrajectoryParticipantState.MISSING,
     }
-
-
-def _validate_bounded_string(value: object, key: str, maximum: int) -> None:
-    if not isinstance(value, str) or not value:
-        raise BadRequest(f"trajectory parameter {key!r} must be a non-empty string")
-    _validate_encoded_length(value, maximum, f"trajectory parameter {key!r}")
-
-
-def _validate_optional_cursor(value: object, method_name: str) -> None:
-    if value is None:
-        return
-    if not isinstance(value, str) or not value:
-        raise BadRequest(f"{method_name} parameter 'before' must be a non-empty string or null")
-    _validate_encoded_length(
-        value, TRAJECTORY_CURSOR_MAX_BYTES, f"{method_name} parameter 'before'"
-    )
-
-
-def _validate_limit(value: object, method_name: str) -> int:
-    if type(value) is not int or value <= 0:
-        raise BadRequest(f"{method_name} parameter 'limit' must be a positive integer")
-    return min(value, TRAJECTORY_PAGE_RECORD_LIMIT)
-
-
-def _validate_wait(value: object, method_name: str) -> float:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value < 0
-    ):
-        raise BadRequest(f"{method_name} parameter 'wait' must be a non-negative finite number")
-    return min(float(value), TRAJECTORY_FOLLOW_TIMEOUT_SECONDS)
-
-
-def _validate_encoded_length(value: str, maximum: int, label: str) -> None:
-    try:
-        encoded_length = len(value.encode("utf-8"))
-    except UnicodeEncodeError as exc:
-        raise BadRequest(f"{label} must contain valid UTF-8") from exc
-    if encoded_length > maximum:
-        raise BadRequest(f"{label} exceeds {maximum} encoded bytes")
 
 
 __all__ = ["TrajectoryService"]
