@@ -92,6 +92,8 @@ def test_counter_registry_create_reuse_and_metadata_conflict():
     assert len(meter.counters) == 1
     with pytest.raises(ValueError, match="description mismatch"):
         reg.get_or_create("m", "other", "1")
+    with pytest.raises(ValueError, match="unit mismatch"):
+        reg.get_or_create("m", "d", "ms")
 
 
 def test_counter_registry_add_rejects_negative_and_releases_lock():
@@ -159,6 +161,43 @@ def test_bridge_rejects_metric_name_kind_conflict():
     bridge.register_histogram("m", "d", "ms")
     with pytest.raises(ValueError, match="kind mismatch"):
         bridge.register_counter("m", "d", "1")
+
+
+def test_bridge_rejects_duplicate_schema_and_preserves_registered_spec():
+    meter = _Meter()
+    bridge = MetricBridge(HistogramRegistry(meter))
+    registered = MetricSpec("m", "description", "ms", MetricKind.HISTOGRAM, ("kind",))
+    conflicting = MetricSpec("m", "description", "ms", MetricKind.HISTOGRAM, ("other",))
+    bridge.register_specs((registered,))
+    with pytest.raises(ValueError, match="specification mismatch"):
+        bridge.register_specs((conflicting,))
+    bridge.observe(registered, 1, {"kind": "x"})
+    assert meter.histograms[0][1].calls == [(1, {"kind": "x"})]
+
+
+def test_bridge_rejects_unregistered_and_mismatched_observe_specs():
+    bridge = MetricBridge(HistogramRegistry())
+    registered = MetricSpec("m", "description", "ms", MetricKind.HISTOGRAM)
+    equivalent = MetricSpec("m", "description", "ms", MetricKind.HISTOGRAM)
+    other = MetricSpec("m", "other", "ms", MetricKind.HISTOGRAM)
+    with pytest.raises(ValueError, match="not registered"):
+        bridge.observe(registered, 1)
+    bridge.register_specs((registered,))
+    with pytest.raises(ValueError, match="specification mismatch"):
+        bridge.observe(equivalent, 1)
+    with pytest.raises(ValueError, match="specification mismatch"):
+        bridge.observe(other, 1)
+
+
+def test_bridge_registry_failure_does_not_register_spec():
+    registry = HistogramRegistry()
+    registry.get_or_create("m", "existing", "ms")
+    bridge = MetricBridge(registry)
+    spec = MetricSpec("m", "new", "ms", MetricKind.HISTOGRAM)
+    with pytest.raises(ValueError, match="description mismatch"):
+        bridge.register_specs((spec,))
+    with pytest.raises(ValueError, match="not registered"):
+        bridge.observe(spec, 1)
 
 
 def test_bridge_inactive_noop():

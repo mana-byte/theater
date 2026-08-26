@@ -285,7 +285,7 @@ def create_active_gauge_sampler(
 class MetricBridge:
     """Thin bridge between the engine and registered metric instruments."""
 
-    __slots__ = ("_active", "_counter_registry", "_gauge_cache", "_kinds", "_registry")
+    __slots__ = ("_active", "_counter_registry", "_gauge_cache", "_kinds", "_registry", "_specs")
 
     def __init__(
         self,
@@ -297,6 +297,7 @@ class MetricBridge:
         self._active = registry is not None or counter_registry is not None
         self._gauge_cache: GaugeCache | None = None
         self._kinds: dict[str, MetricKind] = {}
+        self._specs: dict[str, MetricSpec] = {}
 
     @property
     def active(self) -> bool:
@@ -316,34 +317,60 @@ class MetricBridge:
             return
         self._registry.record(metric_name, value, attributes)
 
-    def _register_kind(self, name: str, kind: MetricKind) -> None:
-        existing = self._kinds.get(name)
+    @staticmethod
+    def _check_kind(name: str, kind: MetricKind, kinds: Mapping[str, MetricKind]) -> None:
+        existing = kinds.get(name)
         if existing is not None and existing is not kind:
             raise ValueError(f"metric {name}: kind mismatch ({existing.value} != {kind.value})")
-        self._kinds[name] = kind
+
+    def _check_spec_metadata(self, name: str, description: str, unit: str) -> None:
+        existing = self._specs.get(name)
+        if existing is not None and (existing.description != description or existing.unit != unit):
+            raise ValueError(f"metric {name}: specification mismatch")
 
     def register_histogram(
         self, name: str, description: str, unit: str, aggregation: str = "exponential"
     ) -> None:
-        self._register_kind(name, MetricKind.HISTOGRAM)
+        self._check_kind(name, MetricKind.HISTOGRAM, self._kinds)
+        self._check_spec_metadata(name, description, unit)
         if self._registry is not None:
             self._registry.get_or_create(name, description, unit, aggregation)
+        self._kinds[name] = MetricKind.HISTOGRAM
 
     def register_counter(self, name: str, description: str, unit: str) -> None:
-        self._register_kind(name, MetricKind.COUNTER)
+        self._check_kind(name, MetricKind.COUNTER, self._kinds)
+        self._check_spec_metadata(name, description, unit)
         if self._counter_registry is not None:
             self._counter_registry.get_or_create(name, description, unit)
+        self._kinds[name] = MetricKind.COUNTER
 
     def register_specs(self, specs: tuple[MetricSpec, ...]) -> None:
+        staged_kinds = dict(self._kinds)
+        staged_specs = dict(self._specs)
+        for spec in specs:
+            existing = staged_specs.get(spec.name)
+            if existing is not None and existing != spec:
+                raise ValueError(f"metric {spec.name}: specification mismatch")
+            self._check_kind(spec.name, spec.kind, staged_kinds)
+            staged_kinds[spec.name] = spec.kind
+            staged_specs[spec.name] = spec
         for spec in specs:
             if spec.kind is MetricKind.HISTOGRAM:
-                self.register_histogram(spec.name, spec.description, spec.unit)
-            else:
-                self.register_counter(spec.name, spec.description, spec.unit)
+                if self._registry is not None:
+                    self._registry.get_or_create(spec.name, spec.description, spec.unit)
+            elif self._counter_registry is not None:
+                self._counter_registry.get_or_create(spec.name, spec.description, spec.unit)
+        self._kinds = staged_kinds
+        self._specs = staged_specs
 
     def observe(
         self, spec: MetricSpec, value: float, attributes: Mapping[str, Any] | None = None
     ) -> None:
+        registered = self._specs.get(spec.name)
+        if registered is None:
+            raise ValueError(f"metric {spec.name}: specification is not registered")
+        if registered is not spec:
+            raise ValueError(f"metric {spec.name}: specification mismatch")
         actual_keys = set(attributes) if attributes is not None else set()
         expected_keys = set(spec.attribute_keys)
         if actual_keys != expected_keys:
