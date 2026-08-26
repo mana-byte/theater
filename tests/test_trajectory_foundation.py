@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import re
 from dataclasses import FrozenInstanceError
 from pathlib import Path
@@ -957,6 +959,43 @@ async def test_history_cursor_invalidates_after_rewrite_and_rotation(tmp_path) -
     replacement.replace(path)
     rotated = await source.history_page(before=page.older_cursor, limit=1)
     assert rotated.error_code == "history_cursor_invalid"
+
+
+async def test_history_cursor_remains_a_v3_transcript_identity_snapshot(tmp_path) -> None:
+    path = tmp_path / "cursor.jsonl"
+    path.write_text("one\ntwo\n", encoding="utf-8")
+    source = TranscriptSource(LegacyCountingObserver(path), cwd=str(tmp_path))
+
+    page = await source.history_page(limit=1)
+
+    assert page.cursor is not None
+    encoded = page.cursor.removeprefix("trj1.")
+    payload = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+    assert set(payload) == {"v", "path", "identity", "end", "end_index"}
+    assert payload["v"] == 3
+    assert set(payload["identity"]) == {
+        "dev",
+        "ino",
+        "size",
+        "mtime_ns",
+        "ctime_ns",
+        "head",
+        "boundary_offset",
+        "boundary",
+    }
+
+
+async def test_history_cursor_rejects_a_shrunk_transcript(tmp_path) -> None:
+    path = tmp_path / "shrunken.jsonl"
+    path.write_text("one\ntwo\nthree\n", encoding="utf-8")
+    source = TranscriptSource(LegacyCountingObserver(path), cwd=str(tmp_path))
+    page = await source.history_page(limit=1)
+    assert page.older_cursor is not None
+
+    path.write_text("one\n", encoding="utf-8")
+
+    older = await source.history_page(before=page.older_cursor, limit=1)
+    assert older.error_code == "history_cursor_invalid"
 
 
 async def test_history_cursor_survives_append(tmp_path) -> None:
