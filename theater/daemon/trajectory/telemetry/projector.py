@@ -1,13 +1,9 @@
-"""Bounded agent telemetry projection from live trajectory batches."""
+"""Projection of accepted agent batches into bounded metric observations."""
 
 from __future__ import annotations
 
 import math
-import unicodedata
-from collections import OrderedDict
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
-from types import MappingProxyType
+from collections.abc import Sequence
 from typing import Any
 
 from theater.constants.observability import (
@@ -20,12 +16,6 @@ from theater.constants.observability import (
     AGENT_RESULT_INTERRUPTED,
     AGENT_RESULT_SUCCESS,
     AGENT_RESULT_TIMEOUT,
-    AGENT_TELEMETRY_EMITTED_SIGNAL_LIMIT,
-    AGENT_TELEMETRY_LABEL_MAX_BYTES,
-    AGENT_TELEMETRY_MODEL_CARDINALITY_LIMIT,
-    AGENT_TELEMETRY_OTHER_LABEL,
-    AGENT_TELEMETRY_PARTICIPANT_STATE_LIMIT,
-    AGENT_TELEMETRY_TOOL_CARDINALITY_LIMIT,
     AGENT_TELEMETRY_UNKNOWN_LABEL,
     AGENT_TOKEN_KIND_CACHE_READ,
     AGENT_TOKEN_KIND_CACHE_WRITE,
@@ -39,7 +29,7 @@ from theater.daemon.trajectory.history import source_epoch_for
 from theater.daemon.trajectory.project import project_batch
 from theater.harness.contracts.events import Event, TokenUsage
 from theater.harness.contracts.source import Batch
-from theater.observability.metrics import MetricBridge, MetricKind, MetricSpec
+from theater.observability.metrics import MetricBridge, MetricSpec
 from theater.pricing import estimate_cost_usd
 from theater.trajectory import (
     CostProvenance,
@@ -54,6 +44,10 @@ from theater.trajectory import (
     requests_for_records,
     tool_operations_for_records,
 )
+
+from .catalog import AGENT_METRIC_SPECS, metric_spec
+from .labels import AgentMetricLabels, normalize_label
+from .state import AgentTelemetryState, ParticipantEmissionState
 
 _TERMINAL_STATUSES = frozenset(
     {
@@ -80,66 +74,12 @@ _RESULTS = {
     TrajectoryStatus.INTERRUPTED: AGENT_RESULT_INTERRUPTED,
 }
 _COST_PROVENANCE = frozenset(provenance.value for provenance in CostProvenance)
-
-AGENT_METRIC_SPECS: tuple[MetricSpec, ...] = (
-    MetricSpec(
-        AGENT_REQUEST_DURATION_METRIC,
-        "Terminal agent model request duration.",
-        "ms",
-        MetricKind.HISTOGRAM,
-        ("harness", "model", "result", "timing_provenance"),
-    ),
-    MetricSpec(
-        AGENT_REQUEST_TTFT_METRIC,
-        "Terminal agent model request time to first token.",
-        "ms",
-        MetricKind.HISTOGRAM,
-        ("harness", "model", "result", "timing_provenance"),
-    ),
-    MetricSpec(
-        AGENT_TOKENS_METRIC,
-        "Agent tokens accepted into durable usage accounting.",
-        "{token}",
-        MetricKind.COUNTER,
-        ("harness", "model", "kind"),
-    ),
-    MetricSpec(
-        AGENT_COST_METRIC,
-        "Agent cost accepted into durable usage accounting.",
-        "USD",
-        MetricKind.COUNTER,
-        ("harness", "model", "provenance"),
-    ),
-    MetricSpec(
-        AGENT_TOOL_DURATION_METRIC,
-        "Terminal agent tool call duration.",
-        "ms",
-        MetricKind.HISTOGRAM,
-        ("harness", "tool", "result", "timing_provenance"),
-    ),
-    MetricSpec(
-        AGENT_FAILURES_METRIC,
-        "Terminal agent trajectory failures.",
-        "{failure}",
-        MetricKind.COUNTER,
-        ("harness", "category"),
-    ),
-)
-_SPECS_BY_NAME: Mapping[str, MetricSpec] = MappingProxyType(
-    {spec.name: spec for spec in AGENT_METRIC_SPECS}
-)
-_REQUEST_DURATION_SPEC = _SPECS_BY_NAME[AGENT_REQUEST_DURATION_METRIC]
-_REQUEST_TTFT_SPEC = _SPECS_BY_NAME[AGENT_REQUEST_TTFT_METRIC]
-_TOKENS_SPEC = _SPECS_BY_NAME[AGENT_TOKENS_METRIC]
-_COST_SPEC = _SPECS_BY_NAME[AGENT_COST_METRIC]
-_TOOL_DURATION_SPEC = _SPECS_BY_NAME[AGENT_TOOL_DURATION_METRIC]
-_FAILURES_SPEC = _SPECS_BY_NAME[AGENT_FAILURES_METRIC]
-
-
-@dataclass(slots=True)
-class _ParticipantState:
-    source_epoch: str
-    emitted: OrderedDict[tuple[str, str], None] = field(default_factory=OrderedDict)
+_REQUEST_DURATION_SPEC = metric_spec(AGENT_REQUEST_DURATION_METRIC)
+_REQUEST_TTFT_SPEC = metric_spec(AGENT_REQUEST_TTFT_METRIC)
+_TOKENS_SPEC = metric_spec(AGENT_TOKENS_METRIC)
+_COST_SPEC = metric_spec(AGENT_COST_METRIC)
+_TOOL_DURATION_SPEC = metric_spec(AGENT_TOOL_DURATION_METRIC)
+_FAILURES_SPEC = metric_spec(AGENT_FAILURES_METRIC)
 
 
 class AgentTelemetry:
@@ -148,9 +88,8 @@ class AgentTelemetry:
     def __init__(self, store: Any, bridge: MetricBridge) -> None:
         self._store = store
         self._bridge = bridge
-        self._participants: OrderedDict[str, _ParticipantState] = OrderedDict()
-        self._models: set[str] = set()
-        self._tools: set[str] = set()
+        self._labels = AgentMetricLabels()
+        self._state = AgentTelemetryState()
 
     def record_batch(
         self,
@@ -168,8 +107,8 @@ class AgentTelemetry:
             else participant.transcript_location
         )
         source_epoch = source_epoch_for(participant, location)
-        state = self._state_for(participant_id, source_epoch)
-        harness = _label(participant.harness)
+        state = self._state.for_participant(participant_id, source_epoch)
+        harness = normalize_label(participant.harness)
         self._record_usage(harness, new_usage_events)
         records = project_batch(batch, participant_id=participant_id, source_epoch=source_epoch)
         self._record_requests(state, harness, records)
@@ -179,24 +118,14 @@ class AgentTelemetry:
 
     def discard(self, participant_id: str) -> None:
         """Forget deduplication state for a discarded participant stream."""
-        self._participants.pop(participant_id, None)
-
-    def _state_for(self, participant_id: str, source_epoch: str) -> _ParticipantState:
-        state = self._participants.get(participant_id)
-        if state is None or state.source_epoch != source_epoch:
-            state = _ParticipantState(source_epoch)
-            self._participants[participant_id] = state
-        self._participants.move_to_end(participant_id)
-        while len(self._participants) > AGENT_TELEMETRY_PARTICIPANT_STATE_LIMIT:
-            self._participants.popitem(last=False)
-        return state
+        self._state.discard(participant_id)
 
     def _record_usage(self, harness: str, events: tuple[Event, ...]) -> None:
         for event in events:
             usage = event.usage
             if usage is None:
                 continue
-            model = self._model_label(usage.model)
+            model = self._labels.model(usage.model)
             counts = (
                 (AGENT_TOKEN_KIND_INPUT, _positive_tokens(usage.input_tokens)),
                 (AGENT_TOKEN_KIND_OUTPUT, _positive_tokens(usage.output_tokens)),
@@ -221,7 +150,7 @@ class AgentTelemetry:
 
     def _record_requests(
         self,
-        state: _ParticipantState,
+        state: ParticipantEmissionState,
         harness: str,
         records: tuple[TrajectoryRecord, ...],
     ) -> None:
@@ -241,7 +170,7 @@ class AgentTelemetry:
 
     def _record_request(
         self,
-        state: _ParticipantState,
+        state: ParticipantEmissionState,
         harness: str,
         request: TrajectoryRequest,
     ) -> None:
@@ -256,7 +185,7 @@ class AgentTelemetry:
 
     def _record_fallback_request(
         self,
-        state: _ParticipantState,
+        state: ParticipantEmissionState,
         harness: str,
         record: TrajectoryRecord,
     ) -> None:
@@ -276,7 +205,7 @@ class AgentTelemetry:
 
     def _record_request_timing(
         self,
-        state: _ParticipantState,
+        state: ParticipantEmissionState,
         harness: str,
         request_id: str,
         status: TrajectoryStatus,
@@ -288,7 +217,7 @@ class AgentTelemetry:
         assert timing is not None
         attributes = {
             "harness": harness,
-            "model": self._model_label(model),
+            "model": self._labels.model(model),
             "result": _RESULTS[status],
             "timing_provenance": timing.provenance.value,
         }
@@ -312,7 +241,7 @@ class AgentTelemetry:
 
     def _record_tools(
         self,
-        state: _ParticipantState,
+        state: ParticipantEmissionState,
         harness: str,
         records: tuple[TrajectoryRecord, ...],
     ) -> None:
@@ -327,7 +256,7 @@ class AgentTelemetry:
 
     def _record_tool(
         self,
-        state: _ParticipantState,
+        state: ParticipantEmissionState,
         harness: str,
         operation: TrajectoryToolOperation,
         members: Sequence[TrajectoryRecord],
@@ -352,7 +281,7 @@ class AgentTelemetry:
 
     def _record_failure(
         self,
-        state: _ParticipantState,
+        state: ParticipantEmissionState,
         harness: str,
         record: TrajectoryRecord,
     ) -> None:
@@ -360,78 +289,47 @@ class AgentTelemetry:
             return
         if record.failure is None and record.status not in _FAILURE_STATUSES:
             return
-        category = _failure_category(record)
         self._observe_signal(
             state,
             _FAILURES_SPEC,
             record.record_id,
             1,
-            {"harness": harness, "category": _label(category)},
-        )
-
-    def _model_label(self, value: object) -> str:
-        return self._bounded_cardinality_label(
-            value,
-            self._models,
-            AGENT_TELEMETRY_MODEL_CARDINALITY_LIMIT,
+            {"harness": harness, "category": normalize_label(_failure_category(record))},
         )
 
     def _tool_label(self, records: Sequence[TrajectoryRecord]) -> str:
         for record in reversed(records):
-            mcp_tool = _label(getattr(record, "mcp_tool", None))
+            mcp_tool = normalize_label(getattr(record, "mcp_tool", None))
             if mcp_tool == AGENT_TELEMETRY_UNKNOWN_LABEL:
                 continue
-            mcp_server = _label(getattr(record, "mcp_server", None))
+            mcp_server = normalize_label(getattr(record, "mcp_server", None))
             value = (
                 f"{mcp_server}/{mcp_tool}"
                 if mcp_server != AGENT_TELEMETRY_UNKNOWN_LABEL
                 else mcp_tool
             )
-            return self._bounded_cardinality_label(
-                value,
-                self._tools,
-                AGENT_TELEMETRY_TOOL_CARDINALITY_LIMIT,
-            )
+            return self._labels.tool(value)
         for record in reversed(records):
             for detail in reversed(record.details):
                 if detail.name != "tool":
                     continue
-                label = _label(detail.preview.text)
+                label = normalize_label(detail.preview.text)
                 if label != AGENT_TELEMETRY_UNKNOWN_LABEL:
-                    return self._bounded_cardinality_label(
-                        label,
-                        self._tools,
-                        AGENT_TELEMETRY_TOOL_CARDINALITY_LIMIT,
-                    )
+                    return self._labels.tool(label)
         return AGENT_TELEMETRY_UNKNOWN_LABEL
-
-    @staticmethod
-    def _bounded_cardinality_label(value: object, seen: set[str], limit: int) -> str:
-        label = _label(value)
-        if label in {AGENT_TELEMETRY_UNKNOWN_LABEL, AGENT_TELEMETRY_OTHER_LABEL}:
-            return label
-        if label in seen:
-            return label
-        if len(seen) >= limit:
-            return AGENT_TELEMETRY_OTHER_LABEL
-        seen.add(label)
-        return label
 
     def _observe_signal(
         self,
-        state: _ParticipantState,
+        state: ParticipantEmissionState,
         spec: MetricSpec,
         signal_id: str,
         value: float | int,
         attributes: dict[str, str],
     ) -> None:
-        key = (spec.name, signal_id)
-        if key in state.emitted:
+        if self._state.contains(state, spec.name, signal_id):
             return
         self._bridge.observe(spec, value, attributes)
-        state.emitted[key] = None
-        while len(state.emitted) > AGENT_TELEMETRY_EMITTED_SIGNAL_LIMIT:
-            state.emitted.popitem(last=False)
+        self._state.remember(state, spec.name, signal_id)
 
 
 def create_agent_telemetry(
@@ -466,7 +364,7 @@ def _failure_category(record: TrajectoryRecord) -> str:
 def _usage_cost(usage: TokenUsage) -> tuple[float | None, str]:
     reported = _nonnegative_number(usage.cost_usd)
     if reported is not None:
-        provenance = _label(getattr(usage.cost_provenance, "value", usage.cost_provenance))
+        provenance = normalize_label(getattr(usage.cost_provenance, "value", usage.cost_provenance))
         return (
             reported,
             provenance if provenance in _COST_PROVENANCE else AGENT_TELEMETRY_UNKNOWN_LABEL,
@@ -494,20 +392,4 @@ def _nonnegative_number(value: object) -> float | None:
     return number if math.isfinite(number) and number >= 0 else None
 
 
-def _label(value: object) -> str:
-    if not isinstance(value, str):
-        return AGENT_TELEMETRY_UNKNOWN_LABEL
-    value = " ".join(unicodedata.normalize("NFKC", value).split())
-    if not value:
-        return AGENT_TELEMETRY_UNKNOWN_LABEL
-    try:
-        encoded = value.encode("utf-8")
-    except UnicodeEncodeError:
-        return AGENT_TELEMETRY_UNKNOWN_LABEL
-    if len(encoded) <= AGENT_TELEMETRY_LABEL_MAX_BYTES:
-        return value
-    truncated = encoded[:AGENT_TELEMETRY_LABEL_MAX_BYTES].decode("utf-8", "ignore")
-    return truncated or AGENT_TELEMETRY_UNKNOWN_LABEL
-
-
-__all__ = ["AGENT_METRIC_SPECS", "AgentTelemetry", "create_agent_telemetry"]
+__all__ = ["AgentTelemetry", "create_agent_telemetry"]

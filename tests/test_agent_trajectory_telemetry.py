@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
+import theater.daemon.trajectory.telemetry.labels as telemetry_labels
 from theater.constants.observability import (
     AGENT_COST_METRIC,
     AGENT_FAILURES_METRIC,
@@ -18,7 +19,6 @@ from theater.constants.observability import (
     AGENT_TOKENS_METRIC,
     AGENT_TOOL_DURATION_METRIC,
 )
-from theater.daemon.trajectory import telemetry
 from theater.daemon.trajectory.telemetry import (
     AGENT_METRIC_SPECS,
     AgentTelemetry,
@@ -28,7 +28,13 @@ from theater.harness.contracts.events import Event, EventKind, TokenUsage
 from theater.harness.contracts.source import Attachment, Batch
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.models import Participant
-from theater.observability.metrics import MetricKind, MetricSpec
+from theater.observability.metrics import (
+    CounterRegistry,
+    HistogramRegistry,
+    MetricBridge,
+    MetricKind,
+    MetricSpec,
+)
 from theater.trajectory import (
     DetailField,
     Timing,
@@ -145,6 +151,21 @@ def test_create_requires_enabled_active_bridge_and_registers() -> None:
     assert create_agent_telemetry(store, inactive, enabled=True) is None
     assert create_agent_telemetry(store, active, enabled=True) is not None
     assert active.registered == [AGENT_METRIC_SPECS]
+
+
+def test_real_bridge_accepts_an_equal_agent_metric_catalog() -> None:
+    equal_specs = tuple(
+        MetricSpec(spec.name, spec.description, spec.unit, spec.kind, spec.attribute_keys)
+        for spec in AGENT_METRIC_SPECS
+    )
+    bridge = MetricBridge(HistogramRegistry(), CounterRegistry())
+
+    bridge.register_specs(equal_specs)
+    bridge.observe(
+        AGENT_METRIC_SPECS[0],
+        1,
+        {"harness": "codex", "model": "gpt-4o", "result": "success", "timing_provenance": "source"},
+    )
 
 
 def test_usage_comes_only_from_new_events_with_estimated_cost_and_no_identity_attribute() -> None:
@@ -295,8 +316,8 @@ def test_terminal_record_is_deduplicated_until_epoch_rotation_or_discard() -> No
 def test_model_and_tool_caps_use_other_and_tool_never_uses_summary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(telemetry, "AGENT_TELEMETRY_MODEL_CARDINALITY_LIMIT", 1)
-    monkeypatch.setattr(telemetry, "AGENT_TELEMETRY_TOOL_CARDINALITY_LIMIT", 1)
+    monkeypatch.setattr(telemetry_labels, "AGENT_TELEMETRY_MODEL_CARDINALITY_LIMIT", 1)
+    monkeypatch.setattr(telemetry_labels, "AGENT_TELEMETRY_TOOL_CARDINALITY_LIMIT", 1)
     bridge = _Bridge()
     projector = AgentTelemetry(_Store(_participant()), bridge)  # type: ignore[arg-type]
     first_usage = Event(EventKind.ASSISTANT, usage=TokenUsage(model="first", input_tokens=1))
