@@ -30,7 +30,6 @@ from theater.trajectory import (
 )
 from theater.trajectory.enums import TrajectoryFailureCategory
 from theater.trajectory.records import TrajectoryFailure
-from theater.trajectory.wire import from_wire, to_wire
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -379,7 +378,7 @@ def test_operation_ids_and_previews_are_bounded_and_details_preserve_omission() 
     assert first.call_details[0].preview.omitted_bytes == detail.preview.omitted_bytes
 
 
-def test_tool_wire_is_strict_and_supports_generic_helpers() -> None:
+def test_tool_wire_is_strict_and_round_trips_directly() -> None:
     operation = tool_operations_for_records((_call("call", 1, "id"), _result("result", 2, "id")))[0]
     invalid = operation.to_wire()
     invalid["extra"] = True
@@ -394,8 +393,9 @@ def test_tool_wire_is_strict_and_supports_generic_helpers() -> None:
     zero_count = operation.to_wire()
     zero_count["call_count"] = 0
 
-    assert TrajectoryToolOperation.from_wire(operation.to_wire()) == operation
-    assert from_wire(TrajectoryToolOperation, to_wire(operation)) == operation
+    wire = operation.to_wire()
+    assert TrajectoryToolOperation.from_wire(wire) == operation
+    assert TrajectoryToolOperation.from_wire(wire).to_wire() == wire
     with pytest.raises(TrajectoryValidationError):
         TrajectoryToolOperation.from_wire(invalid)
     with pytest.raises(TrajectoryValidationError):
@@ -406,6 +406,8 @@ def test_tool_wire_is_strict_and_supports_generic_helpers() -> None:
         TrajectoryToolOperation.from_wire(missing_retained)
     with pytest.raises(TrajectoryValidationError):
         TrajectoryToolOperation.from_wire(zero_count)
+    with pytest.raises(TrajectoryValidationError):
+        TrajectoryToolOperation.from_wire([])
 
     truncated = TrajectoryToolOperation(
         operation_id="tool",
