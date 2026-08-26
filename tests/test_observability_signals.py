@@ -44,18 +44,21 @@ def test_log_forwards_structured_event_and_copies_attributes() -> None:
 
     logger = _Logger()
     attrs = {"kind": "test"}
+    context = object()
     SignalBridge(logger, object()).emit_log(
         "agent.event",
         body={"message": "hello"},
         attributes=attrs,
         timestamp_ns=123,
         severity_text="WARNING",
+        context=context,
     )
     attrs["kind"] = "changed"
 
     assert logger.calls == [
         {
             "timestamp": 123,
+            "context": context,
             "severity_number": SeverityNumber.WARN,
             "severity_text": "WARNING",
             "body": {"message": "hello"},

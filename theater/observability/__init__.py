@@ -36,12 +36,7 @@ from theater.observability.runtime import (
     configure,
     is_configured,
 )
-from theater.observability.signals import (
-    SignalBridge,
-    set_signal_bridge,
-    signal_bridge,
-    signal_bridge_active,
-)
+from theater.observability.signals import SignalBridge
 from theater.observability.tracing import (
     extract_trace_context,
     inject_trace_context,
@@ -77,9 +72,6 @@ __all__ = [
     "metric_bridge_active",
     "ready_lag",
     "set_metric_bridge",
-    "set_signal_bridge",
-    "signal_bridge",
-    "signal_bridge_active",
     "span",
     "start_span",
 ]

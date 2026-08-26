@@ -5,8 +5,6 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-_bridge: SignalBridge | None = None
-
 
 class SignalBridge:
     """Transport bridge for agent-originated OpenTelemetry signals."""
@@ -33,6 +31,7 @@ class SignalBridge:
         attributes: Mapping[str, Any],
         timestamp_ns: int | None = None,
         severity_text: str = "INFO",
+        context: Any = None,
     ) -> None:
         if not self._active:
             return
@@ -45,6 +44,7 @@ class SignalBridge:
             severity_number = getattr(SeverityNumber, severity_name, SeverityNumber.INFO)
             self._logger.emit(
                 timestamp=timestamp_ns,
+                context=context,
                 severity_number=severity_number,
                 severity_text=severity_text,
                 body=body,
@@ -98,16 +98,3 @@ class SignalBridge:
                 except Exception:
                     failed = True
         return None if failed else context
-
-
-def set_signal_bridge(bridge: SignalBridge | None) -> None:
-    global _bridge  # noqa: PLW0603
-    _bridge = bridge
-
-
-def signal_bridge() -> SignalBridge | None:
-    return _bridge
-
-
-def signal_bridge_active() -> bool:
-    return _bridge is not None and _bridge.active

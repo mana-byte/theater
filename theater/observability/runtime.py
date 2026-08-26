@@ -6,7 +6,7 @@ import contextlib
 import logging
 import threading
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from theater.constants.observability import (
     BATCH_QUEUE_SIZE,
@@ -27,6 +27,9 @@ from theater.constants.observability import (
     PROCESS_ROLES,
 )
 from theater.observability.metrics import MetricKind, MetricSpec
+
+if TYPE_CHECKING:
+    from theater.observability.signals import SignalBridge
 
 logger = logging.getLogger("theater.observability.runtime")
 
@@ -167,7 +170,7 @@ class RuntimeHandle:
         self._tracer_provider: Any = None
         self._logger_provider: Any = None
         self._metric_bridge: Any = None
-        self._signal_bridge: Any = None
+        self._signal_bridge: SignalBridge | None = None
         self._otel_entry: _HandlerEntry | None = None
 
     def add_handler(
@@ -205,19 +208,21 @@ class RuntimeHandle:
     def closed(self) -> bool:
         return self._closed
 
+    @property
+    def signal_bridge(self) -> SignalBridge | None:
+        return self._signal_bridge
+
     def shutdown(self) -> None:
         with self._lock:
             if self._closed:
                 return
             self._closed = True
         from theater.observability.engine import set_metric_bridge
-        from theater.observability.signals import set_signal_bridge
 
-        with contextlib.suppress(Exception):
-            set_signal_bridge(None)
         if self._signal_bridge is not None:
             with contextlib.suppress(Exception):
                 self._signal_bridge.deactivate()
+            self._signal_bridge = None
         with contextlib.suppress(Exception):
             set_metric_bridge(None)
         if self._metric_bridge is not None:
@@ -499,7 +504,7 @@ def _stage_otel(
             HistogramRegistry,
             MetricBridge,
         )
-        from theater.observability.signals import SignalBridge, set_signal_bridge
+        from theater.observability.signals import SignalBridge
 
         meter = meter_provider.get_meter("theater", version)
         registry = HistogramRegistry(meter=meter)
@@ -536,7 +541,6 @@ def _stage_otel(
         set_metric_bridge(bridge)
         staged.transfer(handle, tracer_provider, meter_provider, logger_provider)
         handle._signal_bridge = signal
-        set_signal_bridge(signal)
 
     except Exception:
         staged.rollback()
