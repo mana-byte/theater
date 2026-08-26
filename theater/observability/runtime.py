@@ -154,6 +154,7 @@ class RuntimeHandle:
         "_meter_provider",
         "_metric_bridge",
         "_otel_entry",
+        "_signal_bridge",
         "_tracer_provider",
     )
 
@@ -166,6 +167,7 @@ class RuntimeHandle:
         self._tracer_provider: Any = None
         self._logger_provider: Any = None
         self._metric_bridge: Any = None
+        self._signal_bridge: Any = None
         self._otel_entry: _HandlerEntry | None = None
 
     def add_handler(
@@ -209,7 +211,13 @@ class RuntimeHandle:
                 return
             self._closed = True
         from theater.observability.engine import set_metric_bridge
+        from theater.observability.signals import set_signal_bridge
 
+        with contextlib.suppress(Exception):
+            set_signal_bridge(None)
+        if self._signal_bridge is not None:
+            with contextlib.suppress(Exception):
+                self._signal_bridge.deactivate()
         with contextlib.suppress(Exception):
             set_metric_bridge(None)
         if self._metric_bridge is not None:
@@ -491,6 +499,7 @@ def _stage_otel(
             HistogramRegistry,
             MetricBridge,
         )
+        from theater.observability.signals import SignalBridge, set_signal_bridge
 
         meter = meter_provider.get_meter("theater", version)
         registry = HistogramRegistry(meter=meter)
@@ -504,6 +513,11 @@ def _stage_otel(
         gauge_cache = GaugeCache()
         gauge_cache.register_observable_gauges(meter)
         bridge.set_gauge_cache(gauge_cache)
+
+        signal = SignalBridge(
+            logger_provider.get_logger("theater.agent", version),
+            tracer_provider.get_tracer("theater.agent", version),
+        )
 
         from opentelemetry.sdk._logs import LoggingHandler
 
@@ -521,6 +535,8 @@ def _stage_otel(
         handle._metric_bridge = bridge
         set_metric_bridge(bridge)
         staged.transfer(handle, tracer_provider, meter_provider, logger_provider)
+        handle._signal_bridge = signal
+        set_signal_bridge(signal)
 
     except Exception:
         staged.rollback()

@@ -67,8 +67,10 @@ def test_disabled_no_sdk():
     _run("""
         import sys
         from theater.observability.runtime import configure, is_configured
+        from theater.observability.signals import signal_bridge
         h = configure(role="daemon", otlp_enabled=False)
         assert not any(name.startswith("opentelemetry.sdk") for name in sys.modules)
+        assert signal_bridge() is None
         assert not h.closed
         h.shutdown()
         assert h.closed and is_configured()
@@ -124,6 +126,37 @@ def test_non_daemon_null_handler():
         otel = logging.getLogger("opentelemetry")
         assert any(isinstance(x, logging.NullHandler) for x in otel.handlers)
         h.shutdown()
+        print("OK")
+    """)
+
+
+def test_enabled_runtime_publishes_then_removes_signal_bridge():
+    _run("""
+        from theater.observability.runtime import configure
+        from theater.observability.signals import signal_bridge
+        h = configure(role="mcp", otlp_enabled=True)
+        bridge = signal_bridge()
+        assert bridge is not None and bridge.active
+        h.shutdown()
+        assert signal_bridge() is None
+        assert not bridge.active
+        print("OK")
+    """)
+
+
+def test_otel_rollback_does_not_publish_signal_bridge():
+    _run("""
+        from unittest.mock import patch
+        from theater.observability import runtime
+        from theater.observability.signals import signal_bridge
+        with patch.object(runtime, "_attach_otel_logging", side_effect=RuntimeError("boom")):
+            try:
+                runtime.configure(role="daemon", otlp_enabled=True)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("configure succeeded")
+        assert signal_bridge() is None
         print("OK")
     """)
 
