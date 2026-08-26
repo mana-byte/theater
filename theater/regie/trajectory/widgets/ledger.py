@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from bisect import bisect_right
 from collections.abc import Mapping, Sequence
 from typing import ClassVar
 
@@ -25,25 +24,57 @@ from theater.constants.regie_trajectory import (
     LEDGER_STATUS_COLUMN_WIDTH,
     TRAJECTORY_AUXILIARY_ROW_HEIGHT,
     TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT,
-    TRAJECTORY_REQUEST_POSITION_GLYPH,
     TRAJECTORY_SPAN_ROW_HEIGHT,
     TRAJECTORY_TABLE_CELL_PADDING,
 )
 from theater.regie.trajectory.enums import OrderMode
-from theater.regie.trajectory.render.records import (
-    bottom_aligned_cell,
-    format_duration,
-    kind_glyph,
-    sanitize_text,
-    status_label,
-    supports_duration_interval,
+from theater.regie.trajectory.render.ledger import (
+    COLUMN_DURATION as LEDGER_COLUMN_DURATION,
 )
-from theater.regie.trajectory.render.requests import request_row_text
-from theater.regie.trajectory.render.tools import tool_row_text
+from theater.regie.trajectory.render.ledger import (
+    COLUMN_EVENT as LEDGER_COLUMN_EVENT,
+)
+from theater.regie.trajectory.render.ledger import (
+    COLUMN_LABELS as LEDGER_COLUMN_LABELS,
+)
+from theater.regie.trajectory.render.ledger import (
+    COLUMN_POSITION as LEDGER_COLUMN_POSITION,
+)
+from theater.regie.trajectory.render.ledger import (
+    COLUMN_SOURCE as LEDGER_COLUMN_SOURCE,
+)
+from theater.regie.trajectory.render.ledger import (
+    COLUMN_STATUS as LEDGER_COLUMN_STATUS,
+)
+from theater.regie.trajectory.render.ledger import (
+    COLUMN_SUMMARY as LEDGER_COLUMN_SUMMARY,
+)
+from theater.regie.trajectory.render.ledger import (
+    LedgerRowValues,
+    LedgerStylePalette,
+    empty_cells,
+    empty_values,
+    entry_cells,
+    entry_values,
+    history_cells,
+    history_values,
+    retry_cells,
+    retry_values,
+)
+from theater.regie.trajectory.render.ledger import (
+    status_style as ledger_status_style,
+)
+from theater.regie.trajectory.render.records import bottom_aligned_cell
 from theater.regie.trajectory.search import LedgerEntry, SearchResult
+from theater.regie.trajectory.widgets.ledger_viewport import (
+    max_scroll_row,
+    render_slice,
+    row_at_offset,
+    row_offsets,
+    target_scroll_position,
+)
 from theater.regie.trajectory.widgets.rows import resize_rows
 from theater.trajectory import (
-    TrajectoryLane,
     TrajectoryRecord,
     TrajectoryRequest,
     TrajectoryStatus,
@@ -79,12 +110,12 @@ class Ledger(DataTable[Text | str]):
     """Render records as native table rows with content-sized columns."""
 
     can_focus = True
-    COLUMN_POSITION = "position"
-    COLUMN_EVENT = "event"
-    COLUMN_SOURCE = "source"
-    COLUMN_SUMMARY = "summary"
-    COLUMN_STATUS = "status"
-    COLUMN_DURATION = "duration"
+    COLUMN_POSITION = LEDGER_COLUMN_POSITION
+    COLUMN_EVENT = LEDGER_COLUMN_EVENT
+    COLUMN_SOURCE = LEDGER_COLUMN_SOURCE
+    COLUMN_SUMMARY = LEDGER_COLUMN_SUMMARY
+    COLUMN_STATUS = LEDGER_COLUMN_STATUS
+    COLUMN_DURATION = LEDGER_COLUMN_DURATION
     EMPTY_KEY = "__empty__"
     OLDER_KEY = "__older__"
     RETRY_KEY = "__retry__"
@@ -92,14 +123,7 @@ class Ledger(DataTable[Text | str]):
     REQUEST_PREFIX = "request:"
     RECORD_PREFIX = "record:"
     TOOL_PREFIX = "tool:"
-    COLUMN_LABELS: ClassVar[dict[str, str]] = {
-        COLUMN_POSITION: "#",
-        COLUMN_EVENT: "EVENT",
-        COLUMN_SOURCE: "SOURCE",
-        COLUMN_SUMMARY: "SUMMARY",
-        COLUMN_STATUS: "STATE",
-        COLUMN_DURATION: "TIME",
-    }
+    COLUMN_LABELS: ClassVar[dict[str, str]] = dict(LEDGER_COLUMN_LABELS)
 
     COMPONENT_CLASSES: ClassVar[set[str]] = DataTable.COMPONENT_CLASSES | {
         "trajectory-ledger--accent",
@@ -417,186 +441,78 @@ class Ledger(DataTable[Text | str]):
     def _component(self, name: str) -> Style:
         return self.get_component_rich_style(f"trajectory-ledger--{name}", partial=True)
 
-    def _lane_style(self, lane: TrajectoryLane) -> Style:
-        return {
-            TrajectoryLane.INPUT: self._component("input"),
-            TrajectoryLane.MODEL: self._component("model"),
-            TrajectoryLane.TOOLS: self._component("tools"),
-            TrajectoryLane.THEATER: self._component("theater"),
-        }[lane]
+    def _style_palette(self) -> LedgerStylePalette:
+        return LedgerStylePalette(
+            input=self._component("input"),
+            model=self._component("model"),
+            tools=self._component("tools"),
+            theater=self._component("theater"),
+            muted=self._component("muted"),
+            warning=self._component("warning"),
+            error=self._component("error"),
+            accent=self._component("accent"),
+            retry=self._component("retry"),
+            request=self._component("request"),
+        )
 
     def _status_style(self, status: TrajectoryStatus) -> Style:
-        if status is TrajectoryStatus.COMPLETED:
-            return self._component("muted")
-        if status in {TrajectoryStatus.RUNNING, TrajectoryStatus.PENDING, TrajectoryStatus.PARTIAL}:
-            return self._component("warning")
-        if status in {
-            TrajectoryStatus.ERROR,
-            TrajectoryStatus.INTERRUPTED,
-            TrajectoryStatus.CANCELLED,
-            TrajectoryStatus.TIMEOUT,
-        }:
-            return self._component("error")
-        return self._component("muted")
+        return ledger_status_style(status, self._style_palette())
 
-    def _record_values(self, record: TrajectoryRecord, index: int, *, depth: int) -> dict[str, str]:
-        marker = "●" if record.record_id == self._hovered_id else "▸"
-        summary = f"{'  ' * depth}{sanitize_text(record.summary)}"
-        if self._compact_columns:
-            summary = f"[{sanitize_text(record.source)}] {summary}"
-        return {
-            self.COLUMN_POSITION: f"{marker}{index + 1:>3}",
-            self.COLUMN_EVENT: (
-                f"{kind_glyph(record.kind)} {record.kind.value.replace('_', ' ').upper()}"
-            ),
-            self.COLUMN_SOURCE: sanitize_text(record.source),
-            self.COLUMN_SUMMARY: summary,
-            self.COLUMN_STATUS: f"● {status_label(record.status)}",
-            self.COLUMN_DURATION: format_duration(record.timing),
-        }
+    def _entry_context(
+        self, entry: LedgerEntry
+    ) -> tuple[TrajectoryRecord | None, TrajectoryRequest | None, TrajectoryToolOperation | None]:
+        return (
+            self._records.get(entry.record_id or ""),
+            self._requests.get(entry.request_id or ""),
+            self._tools.get(entry.tool_operation_id or ""),
+        )
 
-    def _record_cells(self, record: TrajectoryRecord, index: int, *, depth: int) -> dict[str, Text]:
-        values = self._record_values(record, index, depth=depth)
-        hovered = record.record_id == self._hovered_id
-        position = Text(values[self.COLUMN_POSITION], style="bold" if hovered else "dim")
-        event = Text()
-        event.append(kind_glyph(record.kind), style=self._lane_style(record.lane))
-        event.append(f" {record.kind.value.replace('_', ' ').upper()}", style="bold")
-        source = Text(values[self.COLUMN_SOURCE], style="dim")
-        summary = Text(values[self.COLUMN_SUMMARY])
-        if hovered:
-            summary.stylize("bold")
-        status = Text(no_wrap=True)
-        status.append("●", style=self._status_style(record.status))
-        status.append(f" {status_label(record.status)}", style="dim")
-        duration = Text(values[self.COLUMN_DURATION], justify="right")
-        if self._order_mode is OrderMode.DURATION and supports_duration_interval(record):
-            duration.stylize(self._component("accent") + Style(bold=True))
-        return {
-            self.COLUMN_POSITION: position,
-            self.COLUMN_EVENT: event,
-            self.COLUMN_SOURCE: source,
-            self.COLUMN_SUMMARY: summary,
-            self.COLUMN_STATUS: status,
-            self.COLUMN_DURATION: duration,
-        }
+    def _entry_values(
+        self,
+        entry: LedgerEntry,
+        line_index: int,
+        *,
+        record: TrajectoryRecord | None = None,
+        request: TrajectoryRequest | None = None,
+        tool: TrajectoryToolOperation | None = None,
+    ) -> LedgerRowValues | None:
+        if record is None and request is None and tool is None:
+            record, request, tool = self._entry_context(entry)
+        return entry_values(
+            entry,
+            record=record,
+            request=request,
+            tool=tool,
+            index=self._record_indices[line_index] or 0,
+            record_hovered=record is not None and record.record_id == self._hovered_id,
+            entry_hovered=entry.record_id == self._row_id_for_record(self._hovered_id),
+            compact=self._compact_columns,
+        )
 
-    def _tool_cells(self, entry: LedgerEntry, index: int) -> dict[str, Text]:
-        tool = self._tools.get(entry.tool_operation_id or "")
-        if tool is None:
-            return self._record_cells(
-                self._records[entry.record_id or ""], index, depth=entry.depth
-            )
-        text = tool_row_text(tool, compact=self._compact_columns)
-        hovered = entry.record_id == self._row_id_for_record(self._hovered_id)
-        marker = "●" if hovered else "▸"
-        status = Text(no_wrap=True)
-        status.append("●", style=self._status_style(tool.status))
-        status.append(f" {text.status}", style="dim")
-        return {
-            self.COLUMN_POSITION: Text(
-                f"{marker}{index + 1:>3}", style="bold" if hovered else "dim"
-            ),
-            self.COLUMN_EVENT: Text(text.event, style=self._component("tools") + Style(bold=True)),
-            self.COLUMN_SOURCE: Text(text.source, style="dim"),
-            self.COLUMN_SUMMARY: Text(
-                f"{'  ' * entry.depth}{text.summary}", style="bold" if hovered else ""
-            ),
-            self.COLUMN_STATUS: status,
-            self.COLUMN_DURATION: Text(text.duration, justify="right"),
-        }
-
-    def _tool_values(self, entry: LedgerEntry, index: int) -> dict[str, str]:
-        return {key: value.plain for key, value in self._tool_cells(entry, index).items()}
-
-    def _group_values(self, entry: LedgerEntry) -> dict[str, str]:
-        kind = entry.group_kind.value.replace("_", " ").upper() if entry.group_kind else "GROUP"
-        label = sanitize_text(entry.group_label)
-        return {
-            self.COLUMN_POSITION: "",
-            self.COLUMN_EVENT: kind,
-            self.COLUMN_SOURCE: "",
-            self.COLUMN_SUMMARY: f"{'  ' * entry.depth}{label}",
-            self.COLUMN_STATUS: "",
-            self.COLUMN_DURATION: "",
-        }
-
-    def _group_cells(self, entry: LedgerEntry) -> dict[str, Text | str]:
-        values = self._group_values(entry)
-        return {
-            self.COLUMN_POSITION: "",
-            self.COLUMN_EVENT: Text(values[self.COLUMN_EVENT], style="bold"),
-            self.COLUMN_SOURCE: "",
-            self.COLUMN_SUMMARY: Text(values[self.COLUMN_SUMMARY], style="bold"),
-            self.COLUMN_STATUS: Text(values[self.COLUMN_STATUS], style="dim"),
-            self.COLUMN_DURATION: "",
-        }
-
-    def _request_values(self, entry: LedgerEntry) -> dict[str, str]:
-        request = self._requests.get(entry.request_id or "")
-        if request is None:
-            return {
-                self.COLUMN_POSITION: TRAJECTORY_REQUEST_POSITION_GLYPH,
-                self.COLUMN_EVENT: "◆ REQUEST",
-                self.COLUMN_SOURCE: "model unknown",
-                self.COLUMN_SUMMARY: "usage unavailable",
-                self.COLUMN_STATUS: "● unknown",
-                self.COLUMN_DURATION: "—",
-            }
-        text = request_row_text(request, compact=self._compact_columns)
-        return {
-            self.COLUMN_POSITION: TRAJECTORY_REQUEST_POSITION_GLYPH,
-            self.COLUMN_EVENT: text.event,
-            self.COLUMN_SOURCE: text.source,
-            self.COLUMN_SUMMARY: f"{'  ' * entry.depth}{text.summary}",
-            self.COLUMN_STATUS: f"● {text.status}",
-            self.COLUMN_DURATION: text.duration,
-        }
-
-    def _request_cells(self, entry: LedgerEntry) -> dict[str, Text | str]:
-        values = self._request_values(entry)
-        request = self._requests.get(entry.request_id or "")
-        status = request.status if request is not None else TrajectoryStatus.UNKNOWN
-        request_style = self._component("request")
-        dim_request_style = request_style + Style(dim=True)
-        event = Text(values[self.COLUMN_EVENT], style=request_style + Style(bold=True))
-        state = Text(no_wrap=True)
-        state.append("●", style=request_style + self._status_style(status))
-        state.append(f" {status_label(status)}", style=dim_request_style)
-        return {
-            self.COLUMN_POSITION: Text(values[self.COLUMN_POSITION], style=request_style),
-            self.COLUMN_EVENT: event,
-            self.COLUMN_SOURCE: Text(values[self.COLUMN_SOURCE], style=dim_request_style),
-            self.COLUMN_SUMMARY: Text(values[self.COLUMN_SUMMARY], style=dim_request_style),
-            self.COLUMN_STATUS: state,
-            self.COLUMN_DURATION: Text(
-                values[self.COLUMN_DURATION], justify="right", style=dim_request_style
-            ),
-        }
-
-    def _older_values(self) -> dict[str, str]:
-        loading = self._loading_older
-        return {
-            self.COLUMN_POSITION: "…" if loading else "↑",
-            self.COLUMN_EVENT: "HISTORY",
-            self.COLUMN_SUMMARY: "Loading earlier events…" if loading else "Load earlier events",
-            self.COLUMN_STATUS: "waiting" if loading else "activate",
-        }
-
-    def _empty_values(self) -> dict[str, str]:
-        return {
-            self.COLUMN_EVENT: "EMPTY",
-            self.COLUMN_SUMMARY: "No loaded records match the current search or filters.",
-        }
-
-    def _retry_values(self) -> dict[str, str]:
-        retry = sanitize_text(self._retry_message or "").replace("\r", " ").replace("\n", " ")
-        return {
-            self.COLUMN_POSITION: "!",
-            self.COLUMN_EVENT: "ERROR",
-            self.COLUMN_SUMMARY: retry,
-            self.COLUMN_STATUS: " ↻ Retry ",
-        }
+    def _entry_cells(
+        self, entry: LedgerEntry, line_index: int, palette: LedgerStylePalette
+    ) -> Mapping[str, Text | str] | None:
+        record, request, tool = self._entry_context(entry)
+        values = self._entry_values(
+            entry,
+            line_index,
+            record=record,
+            request=request,
+            tool=tool,
+        )
+        if values is None:
+            return None
+        return entry_cells(
+            entry,
+            values,
+            record=record,
+            request=request,
+            tool=tool,
+            palette=palette,
+            record_hovered=record is not None and record.record_id == self._hovered_id,
+            entry_hovered=entry.record_id == self._row_id_for_record(self._hovered_id),
+            duration_mode=self._order_mode is OrderMode.DURATION,
+        )
 
     def _measure_column_widths(self) -> dict[str, int]:
         widths = {key: self._text_width(label) for key, label in self.COLUMN_LABELS.items()}
@@ -606,29 +522,15 @@ class Ledger(DataTable[Text | str]):
                 widths[key] = max(widths[key], self._text_width(value))
 
         if self._has_older:
-            include(self._older_values())
+            include(history_values(loading=self._loading_older))
         if not self._entries and not self._retry_message and not self._has_older:
-            include(self._empty_values())
+            include(empty_values())
         for line_index, entry in enumerate(self._entries):
-            if entry.is_request_header:
-                include(self._request_values(entry))
-                continue
-            if entry.is_group_header:
-                include(self._group_values(entry))
-                continue
-            record = self._records.get(entry.record_id or "")
-            if entry.is_tool_operation:
-                include(self._tool_values(entry, self._record_indices[line_index] or 0))
-            elif record is not None:
-                include(
-                    self._record_values(
-                        record,
-                        self._record_indices[line_index] or 0,
-                        depth=entry.depth,
-                    )
-                )
+            values = self._entry_values(entry, line_index)
+            if values is not None:
+                include(values)
         if self._retry_message:
-            include(self._retry_values())
+            include(retry_values(self._retry_message))
         if any(entry.is_tool_operation for entry in self._entries):
             widths[self.COLUMN_STATUS] = LEDGER_STATUS_COLUMN_WIDTH
             widths[self.COLUMN_DURATION] = LEDGER_DURATION_COLUMN_WIDTH
@@ -678,39 +580,22 @@ class Ledger(DataTable[Text | str]):
             ),
         )
 
-    def _populate_rows(self) -> None:
+    def _populate_rows(self, palette: LedgerStylePalette) -> None:
         self._ensure_columns()
         self._row_entries.clear()
         if self._has_older:
             loading = self._loading_older
-            values = self._older_values()
+            values = history_values(loading=loading)
             self._add_cells(
-                {
-                    self.COLUMN_POSITION: Text(
-                        values[self.COLUMN_POSITION],
-                        style=self._component("accent") + Style(bold=True),
-                    ),
-                    self.COLUMN_EVENT: Text(
-                        values[self.COLUMN_EVENT],
-                        style=self._component("accent") + Style(bold=True),
-                    ),
-                    self.COLUMN_SUMMARY: Text(
-                        values[self.COLUMN_SUMMARY],
-                        style="dim" if loading else self._component("accent"),
-                    ),
-                    self.COLUMN_STATUS: Text(values[self.COLUMN_STATUS], style="dim"),
-                },
+                history_cells(values, palette, loading=loading),
                 key=self.OLDER_KEY,
                 height=TRAJECTORY_AUXILIARY_ROW_HEIGHT,
             )
             self._row_entries[self.OLDER_KEY] = self.OLDER_KEY
         if not self._entries and not self._retry_message and not self._has_older:
-            values = self._empty_values()
+            values = empty_values()
             self._add_cells(
-                {
-                    self.COLUMN_EVENT: Text(values[self.COLUMN_EVENT], style="dim"),
-                    self.COLUMN_SUMMARY: Text(values[self.COLUMN_SUMMARY], style="dim"),
-                },
+                empty_cells(values),
                 key=self.EMPTY_KEY,
                 height=TRAJECTORY_AUXILIARY_ROW_HEIGHT,
             )
@@ -719,51 +604,22 @@ class Ledger(DataTable[Text | str]):
         for line_index, entry in enumerate(self._entries):
             key = self._row_key(entry)
             self._row_entries[key] = entry
-            if entry.is_request_header:
-                self._add_cells(
-                    self._request_cells(entry),
-                    key=key,
-                    height=TRAJECTORY_AUXILIARY_ROW_HEIGHT,
-                )
+            cells = self._entry_cells(entry, line_index, palette)
+            if cells is None:
                 continue
-            if entry.is_group_header:
-                self._add_cells(
-                    self._group_cells(entry),
-                    key=key,
-                    height=TRAJECTORY_AUXILIARY_ROW_HEIGHT,
-                )
-                continue
-            record = self._records.get(entry.record_id or "")
-            if record is None:
-                continue
-            record_index = self._record_indices[line_index] or 0
-            cells = (
-                self._tool_cells(entry, record_index)
-                if entry.is_tool_operation
-                else self._record_cells(record, record_index, depth=entry.depth)
-            )
-            self._add_cells(cells, key=key)
-        if self._retry_message:
-            values = self._retry_values()
             self._add_cells(
-                {
-                    self.COLUMN_POSITION: Text(
-                        values[self.COLUMN_POSITION],
-                        style=self._component("warning") + Style(bold=True),
-                    ),
-                    self.COLUMN_EVENT: Text(
-                        values[self.COLUMN_EVENT],
-                        style=self._component("warning") + Style(bold=True),
-                    ),
-                    self.COLUMN_SUMMARY: Text(
-                        values[self.COLUMN_SUMMARY],
-                        style=self._component("warning"),
-                    ),
-                    self.COLUMN_STATUS: Text(
-                        values[self.COLUMN_STATUS],
-                        style=self._component("retry"),
-                    ),
-                },
+                cells,
+                key=key,
+                height=(
+                    TRAJECTORY_AUXILIARY_ROW_HEIGHT
+                    if entry.is_header
+                    else TRAJECTORY_SPAN_ROW_HEIGHT
+                ),
+            )
+        if self._retry_message:
+            values = retry_values(self._retry_message)
+            self._add_cells(
+                retry_cells(values, palette),
                 key=self.RETRY_KEY,
                 height=TRAJECTORY_AUXILIARY_ROW_HEIGHT,
             )
@@ -771,13 +627,14 @@ class Ledger(DataTable[Text | str]):
 
     def _rebuild(self, *, preserve_scroll: bool = True) -> None:
         previous_scroll = self._scroll_offset if preserve_scroll else 0
+        palette = self._style_palette()
         self._pointer_hover_key = None
         self._expanded_span_key = None
         self._building = True
         try:
             self.clear(columns=True)
             self._ensure_columns()
-            self._populate_rows()
+            self._populate_rows(palette)
             self._revisions = {
                 record_id: record.revision for record_id, record in self._records.items()
             }
@@ -792,18 +649,14 @@ class Ledger(DataTable[Text | str]):
         finally:
             self._building = False
         self.set_scroll_offset(previous_scroll)
-        self._sync_selection()
+        self._sync_selection(palette)
 
     def _update_row_starts(self) -> None:
-        starts: list[int] = []
-        offset = 0
-        for row in self.ordered_rows:
-            starts.append(offset)
-            offset += row.height
-        self._row_starts = tuple(starts)
-        self._rows_height = offset
+        offsets = row_offsets(tuple(row.height for row in self.ordered_rows))
+        self._row_starts = offsets.starts
+        self._rows_height = offsets.content_height
 
-    def _refresh_changed_records(self) -> None:
+    def _refresh_changed_records(self, palette: LedgerStylePalette) -> None:
         for line_index, entry in enumerate(self._entries):
             if entry.is_header or entry.is_tool_operation or entry.record_id is None:
                 continue
@@ -811,23 +664,25 @@ class Ledger(DataTable[Text | str]):
             if record is None or self._revisions.get(entry.record_id) == record.revision:
                 continue
             key = self._row_key(entry)
-            cells = self._record_cells(
-                record, self._record_indices[line_index] or 0, depth=entry.depth
-            )
+            cells = self._entry_cells(entry, line_index, palette)
+            if cells is None:
+                continue
             height = self._span_row_height(key)
             for column in self._column_keys:
                 self.update_cell(key, column, self._bottom_cell(cells[column], height))
             self._revisions[entry.record_id] = record.revision
 
-    def _refresh_changed_requests(self) -> None:
-        for entry in self._entries:
+    def _refresh_changed_requests(self, palette: LedgerStylePalette) -> None:
+        for line_index, entry in enumerate(self._entries):
             if not entry.is_request_header or entry.request_id is None:
                 continue
             request = self._requests.get(entry.request_id)
             if request is None or self._rendered_requests.get(entry.request_id) == request:
                 continue
             key = self._row_key(entry)
-            cells = self._request_cells(entry)
+            cells = self._entry_cells(entry, line_index, palette)
+            if cells is None:
+                continue
             for column in self._column_keys:
                 self.update_cell(
                     key,
@@ -836,14 +691,16 @@ class Ledger(DataTable[Text | str]):
                 )
             self._rendered_requests[entry.request_id] = request
 
-    def _refresh_changed_tools(self) -> None:
+    def _refresh_changed_tools(self, palette: LedgerStylePalette) -> None:
         for line_index, entry in enumerate(self._entries):
             if not entry.is_tool_operation or entry.tool_operation_id is None:
                 continue
             tool = self._tools.get(entry.tool_operation_id)
             if tool is None or self._rendered_tools.get(entry.tool_operation_id) == tool:
                 continue
-            cells = self._tool_cells(entry, self._record_indices[line_index] or 0)
+            cells = self._entry_cells(entry, line_index, palette)
+            if cells is None:
+                continue
             key = self._row_key(entry)
             height = self._span_row_height(key)
             for column in self._column_keys:
@@ -857,21 +714,6 @@ class Ledger(DataTable[Text | str]):
             else TRAJECTORY_SPAN_ROW_HEIGHT
         )
 
-    def _entry_cells(self, entry: LedgerEntry) -> Mapping[str, Text | str] | None:
-        if entry.is_header or entry.record_id is None:
-            return None
-        line_index = self._entry_indices.get(entry.record_id)
-        record = self._records.get(entry.record_id)
-        if line_index is None or record is None:
-            return None
-        if entry.is_tool_operation:
-            return self._tool_cells(entry, self._record_indices[line_index] or 0)
-        return self._record_cells(
-            record,
-            self._record_indices[line_index] or 0,
-            depth=entry.depth,
-        )
-
     def _actual_row_key(self, record_id: str | None) -> str | None:
         index = self._entry_index_for_record(record_id)
         if index is None:
@@ -879,13 +721,15 @@ class Ledger(DataTable[Text | str]):
         entry = self._entries[index]
         return None if entry.is_header else self._row_key(entry)
 
-    def _sync_expanded_span(self) -> None:
+    def _sync_expanded_span(self, palette: LedgerStylePalette | None = None) -> None:
         key = self._pointer_hover_key or self._actual_row_key(self._selected_id)
         entry = self._row_entries.get(key or "")
         if not isinstance(entry, LedgerEntry) or entry.is_header:
             key = None
         if key == self._expanded_span_key:
             return
+        if palette is None:
+            palette = self._style_palette()
         heights: dict[str, int] = {}
         for candidate, height in (
             (self._expanded_span_key, TRAJECTORY_SPAN_ROW_HEIGHT),
@@ -894,7 +738,10 @@ class Ledger(DataTable[Text | str]):
             row_entry = self._row_entries.get(candidate or "")
             if candidate is None or not isinstance(row_entry, LedgerEntry):
                 continue
-            cells = self._entry_cells(row_entry)
+            line_index = self._entry_indices.get(row_entry.record_id or "")
+            if line_index is None:
+                continue
+            cells = self._entry_cells(row_entry, line_index, palette)
             if cells is None:
                 continue
             for column in self._column_keys:
@@ -968,14 +815,15 @@ class Ledger(DataTable[Text | str]):
         if structure != self._structure or not len(self.columns):
             self._rebuild()
         else:
-            self._refresh_changed_records()
-            self._refresh_changed_requests()
-            self._refresh_changed_tools()
-            self._sync_selection()
+            palette = self._style_palette()
+            self._refresh_changed_records(palette)
+            self._refresh_changed_requests(palette)
+            self._refresh_changed_tools(palette)
+            self._sync_selection(palette)
             self.set_scroll_offset(self._scroll_offset)
         self._update_render_window()
 
-    def _sync_selection(self) -> None:
+    def _sync_selection(self, palette: LedgerStylePalette | None = None) -> None:
         line = self._row_index_for_record(self._selected_id)
         if line is not None and self.row_count:
             self._syncing_cursor = True
@@ -983,33 +831,31 @@ class Ledger(DataTable[Text | str]):
                 self.move_cursor(row=line, column=0, animate=False, scroll=False)
             finally:
                 self._syncing_cursor = False
-        self._sync_expanded_span()
-
-    def _total_lines(self) -> int:
-        return max(
-            1,
-            self._row_prefix + len(self._entries) + (1 if self._retry_message else 0),
-        )
+        self._sync_expanded_span(palette)
 
     def _max_scroll_row(self) -> int:
-        if not self._row_starts:
-            return max(0, self._total_lines() - self._viewport_rows())
-        viewport_height = self._viewport_content_height()
-        max_y = max(0, self._rows_height - viewport_height)
-        return max(0, bisect_right(self._row_starts, max_y) - 1)
+        return max_scroll_row(
+            self._row_starts,
+            self._rows_height,
+            viewport_height=self._viewport_content_height(),
+            row_count=max(1, self._row_prefix + len(self._entries) + bool(self._retry_message)),
+            viewport_rows=self._viewport_rows(),
+        )
 
     def _clamp_scroll(self) -> None:
         self._scroll_offset = max(0, min(self._scroll_offset, self._max_scroll_row()))
 
     def _update_render_window(self) -> None:
         self._clamp_scroll()
-        start = max(0, self._scroll_offset - LEDGER_OVERSCAN_ROWS)
-        end = min(
-            len(self.ordered_rows),
-            self._scroll_offset + self._viewport_rows() + LEDGER_OVERSCAN_ROWS,
+        window = render_slice(
+            self._scroll_offset,
+            row_count=len(self.ordered_rows),
+            viewport_rows=self._viewport_rows(),
+            overscan_rows=LEDGER_OVERSCAN_ROWS,
         )
         visible = [
-            self._row_entries.get(str(row.key.value)) for row in self.ordered_rows[start:end]
+            self._row_entries.get(str(row.key.value))
+            for row in self.ordered_rows[window.start : window.end]
         ]
         self._rendered_line_ids = tuple(
             entry.record_id if isinstance(entry, LedgerEntry) else None for entry in visible
@@ -1042,23 +888,19 @@ class Ledger(DataTable[Text | str]):
         line = self._row_index_for_record(record_id)
         if line is None:
             return self._scroll_offset
-        last_line = line
-        if last_line is None or line >= len(self._row_starts) or last_line >= len(self._row_starts):
+        if line >= len(self._row_starts):
             return self._scroll_offset
-        top = self._row_starts[line]
-        bottom = self._row_starts[last_line] + self.ordered_rows[last_line].height
-        viewport_height = self._viewport_content_height()
-        current_y = int(self.scroll_y)
-        target_y = current_y
-        if top < current_y:
-            target_y = top
-        elif bottom > current_y + viewport_height:
-            target_y = max(top, bottom - viewport_height)
-        if target_y != current_y:
-            max_y = max(0, self._rows_height - viewport_height)
-            target_y = min(target_y, max_y)
-            self._scroll_offset = max(0, bisect_right(self._row_starts, target_y) - 1)
-            self.scroll_to(y=target_y, animate=False, force=True)
+        target = target_scroll_position(
+            self._row_starts,
+            tuple(row.height for row in self.ordered_rows),
+            row=line,
+            current_y=int(self.scroll_y),
+            viewport_height=self._viewport_content_height(),
+            content_height=self._rows_height,
+        )
+        if target.changed:
+            self._scroll_offset = target.row
+            self.scroll_to(y=target.y, animate=False, force=True)
             self._update_render_window()
         return self._scroll_offset
 
@@ -1068,20 +910,15 @@ class Ledger(DataTable[Text | str]):
             return
         previous = self._hovered_id
         self._hovered_id = record_id
+        palette = self._style_palette()
         for candidate in (previous, record_id):
             line_index = self._entry_index_for_record(candidate)
             if line_index is None or candidate not in self._records:
                 continue
             entry = self._entries[line_index]
-            cells = (
-                self._tool_cells(entry, self._record_indices[line_index] or 0)
-                if entry.is_tool_operation
-                else self._record_cells(
-                    self._records[candidate],
-                    self._record_indices[line_index] or 0,
-                    depth=entry.depth,
-                )
-            )
+            cells = self._entry_cells(entry, line_index, palette)
+            if cells is None:
+                continue
             key = self._row_key(entry)
             height = self._span_row_height(key)
             self.update_cell(
@@ -1125,7 +962,7 @@ class Ledger(DataTable[Text | str]):
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_y(old_value, new_value)
-        self._scroll_offset = max(0, bisect_right(self._row_starts, int(new_value)) - 1)
+        self._scroll_offset = row_at_offset(self._row_starts, int(new_value))
         self._update_render_window()
 
     def watch_hover_coordinate(self, old: Coordinate, value: Coordinate) -> None:
