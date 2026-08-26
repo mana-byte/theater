@@ -454,7 +454,7 @@ class Timeline(ScrollView):
             raise TypeError("timeline scroll offset must be an integer")
         self._scroll_offset = max(0, min(int(offset), self.tail_offset))
         if self.is_mounted:
-            self.scroll_x = self._scroll_offset
+            self.scroll_to(x=self._scroll_offset, animate=False, force=True)
         if repaint:
             self.refresh()
         return self._scroll_offset

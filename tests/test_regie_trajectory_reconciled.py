@@ -249,6 +249,26 @@ async def test_timeline_scroll_hit_testing_and_positioned_spans() -> None:
         assert hovered_style == timeline._lane_style(records[-1].lane, highlighted=True)
 
 
+async def test_timeline_manual_scroll_continues_from_automatic_reveal() -> None:
+    records = [record(f"r{index}", index=index, turn_id=None) for index in range(40)]
+    app = Host()
+    async with app.run_test(size=(50, 30)) as pilot:
+        view = await populate(app, records)
+        timeline = view.query_one(Timeline)
+        await pilot.pause()
+
+        timeline.set_scroll_offset(80)
+        automatic_offset = timeline.horizontal_offset
+
+        assert automatic_offset == 80
+        assert timeline.scroll_target_x == automatic_offset
+
+        timeline._scroll_left_for_pointer(animate=False)
+        await pilot.pause()
+
+        assert timeline.horizontal_offset == automatic_offset - app.scroll_sensitivity_x
+
+
 async def test_timeline_projects_four_lanes_and_duration_widths() -> None:
     records = [
         record("input", index=0, lane="input", kind="user"),
