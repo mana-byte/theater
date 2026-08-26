@@ -9,9 +9,9 @@ from theater.constants.trajectory import (
     TRAJECTORY_RESPONSE_MAX_BYTES,
     TRAJECTORY_RESPONSE_SIZING_REQUEST_ID,
 )
+from theater.daemon.trajectory.aggregation import TrajectoryResponseValues, response_values_for
 from theater.daemon.trajectory.cache import RecordChange
 from theater.daemon.trajectory.merge import groups_for_records
-from theater.daemon.trajectory.overview import TrajectoryResponseValues, response_values_for
 from theater.daemon.trajectory.panel import participant_state
 from theater.daemon.trajectory.stream import TrajectoryStream
 from theater.trajectory import (

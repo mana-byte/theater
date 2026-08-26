@@ -10,7 +10,7 @@ from theater.constants.trajectory import (
     TRAJECTORY_OVERVIEW_MAX_DURATION_MS,
     TRAJECTORY_OVERVIEW_MAX_TOKENS,
 )
-from theater.daemon.trajectory.overview import capabilities_for, overview_for
+from theater.daemon.trajectory.aggregation import capabilities_for, overview_for
 from theater.trajectory import (
     Timing,
     TimingProvenance,

@@ -11,7 +11,7 @@ from theater.constants.trajectory import (
     TRAJECTORY_IDENTIFIER_MAX_BYTES,
     TRAJECTORY_REQUEST_RECORD_LIMIT,
 )
-from theater.daemon.trajectory.overview import capabilities_for, overview_for
+from theater.daemon.trajectory.aggregation import capabilities_for, overview_for
 from theater.daemon.trajectory.project import event_to_fact, fact_to_record
 from theater.harness.builtin.plugins.claude import ClaudeCodeObserver
 from theater.harness.builtin.plugins.codex import CodexObserver

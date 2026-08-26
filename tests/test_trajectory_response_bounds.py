@@ -17,7 +17,7 @@ from theater.daemon.trajectory.responses import (
     resync_delta,
     wire_bytes,
 )
-from theater.daemon.trajectory.runtime import TrajectoryStream
+from theater.daemon.trajectory.stream import TrajectoryStream
 from theater.models import Participant
 from theater.trajectory import (
     CoverageGap,

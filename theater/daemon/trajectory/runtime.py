@@ -562,4 +562,4 @@ class TrajectoryRuntime:
             self._unregister_bus_listener()
 
 
-__all__ = ["TrajectoryRuntime", "TrajectoryStream", "participant_state"]
+__all__ = ["TrajectoryRuntime"]
