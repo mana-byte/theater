@@ -5,7 +5,7 @@ from __future__ import annotations
 from textual.geometry import Offset
 from textual.widgets import Static
 
-from theater.regie.trajectory.constants import TIMELINE_HOVER_CARD_MAX_WIDTH
+from theater.constants.regie_trajectory import TIMELINE_HOVER_CARD_MAX_WIDTH
 from theater.regie.trajectory.render import tooltip_text
 from theater.trajectory import Timing, TrajectoryRecord
 

@@ -7,6 +7,14 @@ from dataclasses import dataclass
 
 from rich.text import Text
 
+from theater.constants.regie_trajectory import (
+    TRAJECTORY_AUXILIARY_ROW_HEIGHT,
+    TRAJECTORY_INSIGHT_ROW_LIMIT,
+    TRAJECTORY_RESOURCE_HEAT_GLYPH,
+    TRAJECTORY_RESOURCE_HEAT_WIDTH,
+    TRAJECTORY_SPAN_ROW_HEIGHT,
+    WATERFALL_BAR_WIDTH,
+)
 from theater.regie.trajectory.analysis import (
     ProblemActivity,
     ResourceValues,
@@ -15,14 +23,6 @@ from theater.regie.trajectory.analysis import (
     WaterfallRow,
 )
 from theater.regie.trajectory.analysis.waterfall import timing_interval
-from theater.regie.trajectory.constants import (
-    TRAJECTORY_INSIGHT_AUXILIARY_ROW_HEIGHT,
-    TRAJECTORY_INSIGHT_ROW_LIMIT,
-    TRAJECTORY_INSIGHT_SPAN_ROW_HEIGHT,
-    TRAJECTORY_RESOURCE_HEAT_GLYPH,
-    TRAJECTORY_RESOURCE_HEAT_WIDTH,
-    WATERFALL_BAR_WIDTH,
-)
 from theater.regie.trajectory.enums import DiagnosticView
 from theater.regie.trajectory.render import (
     compact_cost,
@@ -55,7 +55,7 @@ class InsightTableModel:
     columns: tuple[InsightColumn, ...]
     entries: tuple[InsightEntry, ...]
     empty_message: str
-    row_height: int = TRAJECTORY_INSIGHT_SPAN_ROW_HEIGHT
+    row_height: int = TRAJECTORY_SPAN_ROW_HEIGHT
 
 
 def _clip(value: str, limit: int) -> str:
@@ -135,7 +135,7 @@ def _waterfall_entries(
                         format_duration(row.timing),
                         _status(row.status),
                     ),
-                    row_height=TRAJECTORY_INSIGHT_SPAN_ROW_HEIGHT,
+                    row_height=TRAJECTORY_SPAN_ROW_HEIGHT,
                 )
             )
         block = tuple(entries)
@@ -166,7 +166,7 @@ def _file_entries(
                     "—",
                     _status(row.status),
                 ),
-                row_height=TRAJECTORY_INSIGHT_AUXILIARY_ROW_HEIGHT,
+                row_height=TRAJECTORY_AUXILIARY_ROW_HEIGHT,
             )
         )
         for position, operation in enumerate(row.operations, start=1):
@@ -190,7 +190,7 @@ def _file_entries(
                         format_duration(operation.timing),
                         _status(operation.status),
                     ),
-                    row_height=TRAJECTORY_INSIGHT_SPAN_ROW_HEIGHT,
+                    row_height=TRAJECTORY_SPAN_ROW_HEIGHT,
                 )
             )
     return tuple(entries)
@@ -273,9 +273,9 @@ def _resource_entries(
                 _cost(row.values),
             ),
             row_height=(
-                TRAJECTORY_INSIGHT_AUXILIARY_ROW_HEIGHT
+                TRAJECTORY_AUXILIARY_ROW_HEIGHT
                 if row.scope == "turn"
-                else TRAJECTORY_INSIGHT_SPAN_ROW_HEIGHT
+                else TRAJECTORY_SPAN_ROW_HEIGHT
             ),
         )
         for row in rows
@@ -364,7 +364,7 @@ def build_insight_table(
             ),
             _delegation_entries(index, visible_ids),
             "No cross-participant activity in the loaded scope",
-            row_height=TRAJECTORY_INSIGHT_AUXILIARY_ROW_HEIGHT,
+            row_height=TRAJECTORY_AUXILIARY_ROW_HEIGHT,
         )
     if view is DiagnosticView.RESOURCES:
         return InsightTableModel(

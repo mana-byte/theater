@@ -11,7 +11,7 @@ from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.widgets import Button, Label, SelectionList
 
-from theater.regie.trajectory.constants import (
+from theater.constants.regie_trajectory import (
     FILTER_HEADER_HEIGHT,
     FILTER_MAX_ROWS,
     SEARCH_HEIGHT,

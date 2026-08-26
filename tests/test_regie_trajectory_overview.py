@@ -4,8 +4,8 @@ import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Input, Label
 
+from theater.constants.regie_trajectory import TRAJECTORY_OVERVIEW_HEIGHT
 from theater.regie.trajectory import overview_strip
-from theater.regie.trajectory.constants import TRAJECTORY_OVERVIEW_HEIGHT
 from theater.regie.trajectory.overview_strip import TrajectoryOverviewStrip
 from theater.regie.trajectory.state import ParticipantTrajectoryState
 from theater.regie.trajectory.timeline import Timeline

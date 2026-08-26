@@ -8,14 +8,14 @@ from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from theater.regie.trajectory.analysis.models import FileActivity, FileOperationActivity
-from theater.regie.trajectory.analysis.waterfall import operation_position
-from theater.regie.trajectory.constants import (
+from theater.constants.regie_trajectory import (
     TRAJECTORY_FILE_PATH_KEYS,
     TRAJECTORY_INSIGHT_ROW_LIMIT,
     TRAJECTORY_TOOL_READ_HINTS,
     TRAJECTORY_TOOL_WRITE_HINTS,
 )
+from theater.regie.trajectory.analysis.models import FileActivity, FileOperationActivity
+from theater.regie.trajectory.analysis.waterfall import operation_position
 from theater.regie.trajectory.tool_rows import ToolIndex
 from theater.trajectory import ContentFormat, TrajectoryStatus, TrajectoryToolOperation
 

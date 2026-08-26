@@ -10,11 +10,9 @@ from textual.app import App, ComposeResult
 from textual.coordinate import Coordinate
 from textual.widgets import Button, Input, RichLog, Select, SelectionList
 
-from theater.regie.trajectory.constants import (
+from theater.constants.regie_trajectory import (
     FILTER_MAX_ROWS,
-    LEDGER_CELL_PADDING,
     LEDGER_OVERSCAN_ROWS,
-    LEDGER_SPAN_ROW_HEIGHT,
     TIMELINE_HOVER_LEFT_GLYPH,
     TIMELINE_HOVER_RIGHT_GLYPH,
     TIMELINE_LABEL_RIGHT_PADDING,
@@ -23,8 +21,10 @@ from theater.regie.trajectory.constants import (
     TIMELINE_RELATED_GLYPH,
     TIMELINE_SPAN_MIN_WIDTH,
     TIMELINE_TURN_BOUNDARY_GLYPH,
-    TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS,
+    TRAJECTORY_SPAN_ROW_HEIGHT,
+    TRAJECTORY_TABLE_CELL_PADDING,
 )
+from theater.constants.trajectory import TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS
 from theater.regie.trajectory.enums import FilterDimension, InspectorTab, OrderMode
 from theater.regie.trajectory.filter_panel import FilterPanel
 from theater.regie.trajectory.hover_card import TimelineHoverCard
@@ -147,7 +147,7 @@ async def test_ledger_window_is_bounded_and_scroll_hit_testing_uses_offset() -> 
         ledger.set_scroll_offset(10)
         await pilot.pause()
         assert ledger.entries[11].record_id == "r11"
-        assert int(ledger.scroll_y) == 10 * LEDGER_SPAN_ROW_HEIGHT
+        assert int(ledger.scroll_y) == 10 * TRAJECTORY_SPAN_ROW_HEIGHT
         assert ledger.rendered_record_count <= 5 + 2 * LEDGER_OVERSCAN_ROWS
 
 
@@ -182,11 +182,11 @@ async def test_ledger_sizes_non_summary_columns_to_displayed_content() -> None:
         ledger = app.query_one(Ledger)
         columns = {column.key.value: column for column in ledger.ordered_columns}
 
-        assert ledger.cell_padding == LEDGER_CELL_PADDING
+        assert ledger.cell_padding == TRAJECTORY_TABLE_CELL_PADDING
         assert columns[Ledger.COLUMN_SOURCE].width == cell_len("long-adapter-source")
         assert columns[Ledger.COLUMN_STATUS].width == cell_len("● INTERRUPTED")
         assert columns[Ledger.COLUMN_SOURCE].get_render_width(ledger) == (
-            cell_len("long-adapter-source") + 2 * LEDGER_CELL_PADDING
+            cell_len("long-adapter-source") + 2 * TRAJECTORY_TABLE_CELL_PADDING
         )
 
 

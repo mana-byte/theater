@@ -16,13 +16,13 @@ from textual.widget import Widget
 from textual.widgets import Input, Select
 from textual.worker import Worker, WorkerCancelled, WorkerFailed
 
-from theater.regie.trajectory.breadcrumb import TrajectoryBreadcrumb
-from theater.regie.trajectory.constants import (
+from theater.constants.regie_trajectory import (
     MAX_QUERY_BYTES,
     SEARCH_HEIGHT,
     TIMELINE_HEIGHT,
     TRAJECTORY_HORIZONTAL_PADDING,
 )
+from theater.regie.trajectory.breadcrumb import TrajectoryBreadcrumb
 from theater.regie.trajectory.controller import TrajectoryController
 from theater.regie.trajectory.diagnostic_views import ordering_for_projection
 from theater.regie.trajectory.enums import (

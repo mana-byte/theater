@@ -10,14 +10,14 @@ from textual.coordinate import Coordinate
 from textual.message import Message
 from textual.widgets import DataTable
 
-from theater.regie.trajectory.analysis import TrajectoryAnalysisIndex
-from theater.regie.trajectory.constants import (
-    TRAJECTORY_INSIGHT_AUXILIARY_ROW_HEIGHT,
-    TRAJECTORY_INSIGHT_CELL_PADDING,
+from theater.constants.regie_trajectory import (
+    TRAJECTORY_AUXILIARY_ROW_HEIGHT,
+    TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT,
     TRAJECTORY_INSIGHT_HEADER_HEIGHT,
-    TRAJECTORY_INSIGHT_HOVERED_SPAN_ROW_HEIGHT,
-    TRAJECTORY_INSIGHT_SPAN_ROW_HEIGHT,
+    TRAJECTORY_SPAN_ROW_HEIGHT,
+    TRAJECTORY_TABLE_CELL_PADDING,
 )
+from theater.regie.trajectory.analysis import TrajectoryAnalysisIndex
 from theater.regie.trajectory.enums import DiagnosticView
 from theater.regie.trajectory.insight_tables import (
     InsightEntry,
@@ -85,7 +85,7 @@ class InsightsPanel(DataTable[Text | str]):
             show_row_labels=False,
             zebra_stripes=True,
             cursor_type="row",
-            cell_padding=TRAJECTORY_INSIGHT_CELL_PADDING,
+            cell_padding=TRAJECTORY_TABLE_CELL_PADDING,
             header_height=TRAJECTORY_INSIGHT_HEADER_HEIGHT,
             **kwargs,
         )
@@ -162,11 +162,11 @@ class InsightsPanel(DataTable[Text | str]):
                 cells.extend("" for _ in model.columns[1:])
                 self.add_row(
                     *(
-                        bottom_aligned_cell(cell, TRAJECTORY_INSIGHT_AUXILIARY_ROW_HEIGHT)
+                        bottom_aligned_cell(cell, TRAJECTORY_AUXILIARY_ROW_HEIGHT)
                         for cell in cells
                     ),
                     key=_EMPTY_KEY,
-                    height=TRAJECTORY_INSIGHT_AUXILIARY_ROW_HEIGHT,
+                    height=TRAJECTORY_AUXILIARY_ROW_HEIGHT,
                 )
             if follow_tail:
                 self._set_tail_cursor()
@@ -215,14 +215,14 @@ class InsightsPanel(DataTable[Text | str]):
 
     def _sync_expanded_span(self) -> None:
         key = self._pointer_hover_key or self._selected_key
-        if self._row_heights.get(key or "") != TRAJECTORY_INSIGHT_SPAN_ROW_HEIGHT:
+        if self._row_heights.get(key or "") != TRAJECTORY_SPAN_ROW_HEIGHT:
             key = None
         if key == self._expanded_span_key:
             return
         heights: dict[str, int] = {}
         for candidate, height in (
-            (self._expanded_span_key, TRAJECTORY_INSIGHT_SPAN_ROW_HEIGHT),
-            (key, TRAJECTORY_INSIGHT_HOVERED_SPAN_ROW_HEIGHT),
+            (self._expanded_span_key, TRAJECTORY_SPAN_ROW_HEIGHT),
+            (key, TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT),
         ):
             entry = self._entries.get(candidate or "")
             if candidate is None or entry is None:
@@ -235,7 +235,7 @@ class InsightsPanel(DataTable[Text | str]):
 
     def _set_pointer_hover_key(self, key: str | None) -> None:
         self._pointer_hover_key = (
-            key if self._row_heights.get(key or "") == TRAJECTORY_INSIGHT_SPAN_ROW_HEIGHT else None
+            key if self._row_heights.get(key or "") == TRAJECTORY_SPAN_ROW_HEIGHT else None
         )
         self._sync_expanded_span()
 

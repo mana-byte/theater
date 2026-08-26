@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from theater.regie.trajectory.analysis.models import WaterfallProjection, WaterfallRow
-from theater.regie.trajectory.constants import (
+from theater.constants.regie_trajectory import (
     TRAJECTORY_INSIGHT_ROW_LIMIT,
     WATERFALL_MAX_DEPTH,
     WATERFALL_ROWS_PER_REQUEST,
 )
+from theater.regie.trajectory.analysis.models import WaterfallProjection, WaterfallRow
 from theater.regie.trajectory.request_rows import RequestIndex
 from theater.regie.trajectory.tool_rows import ToolIndex
 from theater.trajectory import Timing, TrajectoryRequest, TrajectoryToolOperation

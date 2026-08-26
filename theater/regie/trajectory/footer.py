@@ -8,7 +8,7 @@ from textual.containers import Horizontal
 from textual.message import Message
 from textual.widgets import Button, Label, Select
 
-from theater.regie.trajectory.constants import (
+from theater.constants.regie_trajectory import (
     TRAJECTORY_FOOTER_COMPACT_WIDTH,
     TRAJECTORY_FOOTER_HEIGHT,
     TRAJECTORY_FOOTER_NARROW_WIDTH,

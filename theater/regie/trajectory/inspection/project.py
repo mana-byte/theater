@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from theater.regie.trajectory.constants import TRAJECTORY_DETAIL_RECORD_MAX_BYTES
+from theater.constants.trajectory import TRAJECTORY_DETAIL_RECORD_MAX_BYTES
 from theater.regie.trajectory.enums import InspectorTab
 from theater.regie.trajectory.formatting import (
     format_duration,

@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from theater.regie.trajectory.constants import TRAJECTORY_UI_RECORD_LIMIT
+from theater.constants.trajectory import TRAJECTORY_UI_RECORD_LIMIT
 from theater.trajectory import TrajectoryGroup, TrajectoryRecord, group_records
 
 GroupUnit = str | TrajectoryGroup

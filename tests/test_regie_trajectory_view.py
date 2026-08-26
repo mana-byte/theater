@@ -4,14 +4,14 @@ from textual.app import App, ComposeResult
 from textual.coordinate import Coordinate
 from textual.widgets import Button, DataTable, Input, RichLog, Select, SelectionList
 
-from theater.regie.trajectory.constants import (
+from theater.constants.regie_trajectory import (
     LEDGER_HEADER_HEIGHT,
-    LEDGER_HOVERED_SPAN_ROW_HEIGHT,
-    LEDGER_SPAN_ROW_HEIGHT,
     SEARCH_HEIGHT,
     TIMELINE_LANE_HEIGHT,
     TRAJECTORY_FOOTER_HEIGHT,
     TRAJECTORY_HORIZONTAL_PADDING,
+    TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT,
+    TRAJECTORY_SPAN_ROW_HEIGHT,
 )
 from theater.regie.trajectory.enums import FocusRegion, InspectorTab
 from theater.regie.trajectory.filter_panel import FilterPanel
@@ -164,8 +164,8 @@ async def test_surface_uses_fixed_timeline_and_virtualized_ledger() -> None:
         assert ledger.styles.scrollbar_size_vertical == 0
         assert ledger.header_height == LEDGER_HEADER_HEIGHT
         assert [row.height for row in ledger.ordered_rows] == [
-            LEDGER_SPAN_ROW_HEIGHT,
-            LEDGER_HOVERED_SPAN_ROW_HEIGHT,
+            TRAJECTORY_SPAN_ROW_HEIGHT,
+            TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT,
         ]
         assert all(
             button.region.height == 1
@@ -197,36 +197,37 @@ async def test_pointer_hover_expands_only_the_active_ledger_span(monkeypatch) ->
         first_region = ledger._get_cell_region(Coordinate(first_row, 0))
         await pilot.hover(ledger, offset=(first_region.x, first_region.y))
 
-        assert ledger.ordered_rows[first_row].height == LEDGER_HOVERED_SPAN_ROW_HEIGHT
+        assert ledger.ordered_rows[first_row].height == TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT
         assert ledger.get_cell("record:r1", Ledger.COLUMN_SUMMARY).plain.startswith("\n")
         assert not ledger.get_cell("record:r1", Ledger.COLUMN_SUMMARY).plain.startswith("\n\n")
 
         ledger.set_hovered("r2")
-        assert ledger.ordered_rows[first_row].height == LEDGER_HOVERED_SPAN_ROW_HEIGHT
+        assert ledger.ordered_rows[first_row].height == TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT
         assert (
-            ledger.ordered_rows[ledger.get_row_index("record:r2")].height == LEDGER_SPAN_ROW_HEIGHT
+            ledger.ordered_rows[ledger.get_row_index("record:r2")].height
+            == TRAJECTORY_SPAN_ROW_HEIGHT
         )
 
         second_row = ledger.get_row_index("record:r2")
         second_region = ledger._get_cell_region(Coordinate(second_row, 0))
         await pilot.hover(ledger, offset=(second_region.x, second_region.y))
 
-        assert ledger.ordered_rows[first_row].height == LEDGER_SPAN_ROW_HEIGHT
-        assert ledger.ordered_rows[second_row].height == LEDGER_HOVERED_SPAN_ROW_HEIGHT
+        assert ledger.ordered_rows[first_row].height == TRAJECTORY_SPAN_ROW_HEIGHT
+        assert ledger.ordered_rows[second_row].height == TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT
         assert not ledger.get_cell("record:r1", Ledger.COLUMN_SUMMARY).plain.startswith("\n")
         assert ledger.get_cell("record:r2", Ledger.COLUMN_SUMMARY).plain.startswith("\n")
         assert not ledger.get_cell("record:r2", Ledger.COLUMN_SUMMARY).plain.startswith("\n\n")
 
         await pilot.hover("#trajectory-search")
         assert [row.height for row in ledger.ordered_rows] == [
-            LEDGER_SPAN_ROW_HEIGHT,
-            LEDGER_HOVERED_SPAN_ROW_HEIGHT,
+            TRAJECTORY_SPAN_ROW_HEIGHT,
+            TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT,
         ]
 
         await pilot.press("k")
         assert [row.height for row in ledger.ordered_rows] == [
-            LEDGER_HOVERED_SPAN_ROW_HEIGHT,
-            LEDGER_SPAN_ROW_HEIGHT,
+            TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT,
+            TRAJECTORY_SPAN_ROW_HEIGHT,
         ]
         assert rebuilds == 0
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from math import ceil
 
-from theater.regie.trajectory.constants import (
+from theater.constants.regie_trajectory import (
     TIMELINE_DURATION_MIN_WIDTH,
     TIMELINE_DURATION_UNTIMED_GAP,
     TIMELINE_SPAN_GUTTER,

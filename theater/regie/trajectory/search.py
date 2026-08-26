@@ -7,7 +7,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TypeVar
 
-from theater.regie.trajectory.constants import MAX_SEARCH_CACHE_ENTRIES
+from theater.constants.regie_trajectory import MAX_SEARCH_CACHE_ENTRIES
 from theater.regie.trajectory.ordering import TrajectoryOrdering, build_ordering
 from theater.regie.trajectory.request_rows import RequestIndex
 from theater.regie.trajectory.tool_rows import ToolIndex

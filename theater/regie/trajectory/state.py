@@ -7,12 +7,7 @@ from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from theater.regie.trajectory.analysis import (
-    TrajectoryAnalysisIndex,
-    build_analysis_index,
-    empty_analysis_index,
-)
-from theater.regie.trajectory.constants import (
+from theater.constants.trajectory import (
     TRAJECTORY_DETAIL_FIELD_MAX_BYTES,
     TRAJECTORY_IDENTIFIER_MAX_BYTES,
     TRAJECTORY_LEDGER_PAGE_SIZE_DEFAULT,
@@ -20,6 +15,11 @@ from theater.regie.trajectory.constants import (
     TRAJECTORY_UI_MAX_BYTES,
     TRAJECTORY_UI_RECORD_LIMIT,
     TRAJECTORY_WARM_STREAM_LIMIT,
+)
+from theater.regie.trajectory.analysis import (
+    TrajectoryAnalysisIndex,
+    build_analysis_index,
+    empty_analysis_index,
 )
 from theater.regie.trajectory.diagnostic_views import (
     DiagnosticIndex,

@@ -14,20 +14,20 @@ from textual.coordinate import Coordinate
 from textual.message import Message
 from textual.widgets import DataTable
 
-from theater.regie.trajectory.constants import (
-    LEDGER_AUXILIARY_ROW_HEIGHT,
-    LEDGER_CELL_PADDING,
+from theater.constants.regie_trajectory import (
     LEDGER_COMPACT_WIDTH,
     LEDGER_DEFAULT_VIEWPORT_ROWS,
     LEDGER_DURATION_COLUMN_WIDTH,
     LEDGER_HEADER_HEIGHT,
-    LEDGER_HOVERED_SPAN_ROW_HEIGHT,
     LEDGER_MIN_SUMMARY_WIDTH,
     LEDGER_OVERSCAN_ROWS,
     LEDGER_SCROLLBAR_WIDTH,
-    LEDGER_SPAN_ROW_HEIGHT,
     LEDGER_STATUS_COLUMN_WIDTH,
+    TRAJECTORY_AUXILIARY_ROW_HEIGHT,
+    TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT,
     TRAJECTORY_REQUEST_POSITION_GLYPH,
+    TRAJECTORY_SPAN_ROW_HEIGHT,
+    TRAJECTORY_TABLE_CELL_PADDING,
 )
 from theater.regie.trajectory.enums import OrderMode
 from theater.regie.trajectory.render import (
@@ -206,7 +206,7 @@ class Ledger(DataTable[Text | str]):
             fixed_columns=2,
             zebra_stripes=True,
             cursor_type="row",
-            cell_padding=LEDGER_CELL_PADDING,
+            cell_padding=TRAJECTORY_TABLE_CELL_PADDING,
             header_height=LEDGER_HEADER_HEIGHT,
             **kwargs,
         )
@@ -294,11 +294,13 @@ class Ledger(DataTable[Text | str]):
         if self._viewport_height:
             return self._viewport_height
         height = self.region.height - self.header_height
-        return max(1, height // LEDGER_SPAN_ROW_HEIGHT) if height else LEDGER_DEFAULT_VIEWPORT_ROWS
+        return (
+            max(1, height // TRAJECTORY_SPAN_ROW_HEIGHT) if height else LEDGER_DEFAULT_VIEWPORT_ROWS
+        )
 
     def _viewport_content_height(self) -> int:
         if self._viewport_height:
-            return self._viewport_height * LEDGER_SPAN_ROW_HEIGHT
+            return self._viewport_height * TRAJECTORY_SPAN_ROW_HEIGHT
         return max(1, self.region.height - self.header_height)
 
     def _row_key(self, entry: LedgerEntry) -> str:
@@ -633,7 +635,7 @@ class Ledger(DataTable[Text | str]):
         return widths
 
     @staticmethod
-    def _bottom_cell(value: Text | str, height: int = LEDGER_SPAN_ROW_HEIGHT) -> Text:
+    def _bottom_cell(value: Text | str, height: int = TRAJECTORY_SPAN_ROW_HEIGHT) -> Text:
         return bottom_aligned_cell(value, height)
 
     def _add_cells(
@@ -641,7 +643,7 @@ class Ledger(DataTable[Text | str]):
         cells: Mapping[str, Text | str],
         *,
         key: str,
-        height: int = LEDGER_SPAN_ROW_HEIGHT,
+        height: int = TRAJECTORY_SPAN_ROW_HEIGHT,
     ) -> None:
         self.add_row(
             *(self._bottom_cell(cells.get(column, ""), height) for column in self._column_keys),
@@ -699,7 +701,7 @@ class Ledger(DataTable[Text | str]):
                     self.COLUMN_STATUS: Text(values[self.COLUMN_STATUS], style="dim"),
                 },
                 key=self.OLDER_KEY,
-                height=LEDGER_AUXILIARY_ROW_HEIGHT,
+                height=TRAJECTORY_AUXILIARY_ROW_HEIGHT,
             )
             self._row_entries[self.OLDER_KEY] = self.OLDER_KEY
         if not self._entries and not self._retry_message and not self._has_older:
@@ -710,7 +712,7 @@ class Ledger(DataTable[Text | str]):
                     self.COLUMN_SUMMARY: Text(values[self.COLUMN_SUMMARY], style="dim"),
                 },
                 key=self.EMPTY_KEY,
-                height=LEDGER_AUXILIARY_ROW_HEIGHT,
+                height=TRAJECTORY_AUXILIARY_ROW_HEIGHT,
             )
             self._row_entries[self.EMPTY_KEY] = self.EMPTY_KEY
             return
@@ -721,14 +723,14 @@ class Ledger(DataTable[Text | str]):
                 self._add_cells(
                     self._request_cells(entry),
                     key=key,
-                    height=LEDGER_AUXILIARY_ROW_HEIGHT,
+                    height=TRAJECTORY_AUXILIARY_ROW_HEIGHT,
                 )
                 continue
             if entry.is_group_header:
                 self._add_cells(
                     self._group_cells(entry),
                     key=key,
-                    height=LEDGER_AUXILIARY_ROW_HEIGHT,
+                    height=TRAJECTORY_AUXILIARY_ROW_HEIGHT,
                 )
                 continue
             record = self._records.get(entry.record_id or "")
@@ -763,7 +765,7 @@ class Ledger(DataTable[Text | str]):
                     ),
                 },
                 key=self.RETRY_KEY,
-                height=LEDGER_AUXILIARY_ROW_HEIGHT,
+                height=TRAJECTORY_AUXILIARY_ROW_HEIGHT,
             )
             self._row_entries[self.RETRY_KEY] = self.RETRY_KEY
 
@@ -830,7 +832,7 @@ class Ledger(DataTable[Text | str]):
                 self.update_cell(
                     key,
                     column,
-                    self._bottom_cell(cells[column], LEDGER_AUXILIARY_ROW_HEIGHT),
+                    self._bottom_cell(cells[column], TRAJECTORY_AUXILIARY_ROW_HEIGHT),
                 )
             self._rendered_requests[entry.request_id] = request
 
@@ -850,9 +852,9 @@ class Ledger(DataTable[Text | str]):
 
     def _span_row_height(self, key: str) -> int:
         return (
-            LEDGER_HOVERED_SPAN_ROW_HEIGHT
+            TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT
             if key == self._expanded_span_key
-            else LEDGER_SPAN_ROW_HEIGHT
+            else TRAJECTORY_SPAN_ROW_HEIGHT
         )
 
     def _entry_cells(self, entry: LedgerEntry) -> Mapping[str, Text | str] | None:
@@ -886,8 +888,8 @@ class Ledger(DataTable[Text | str]):
             return
         heights: dict[str, int] = {}
         for candidate, height in (
-            (self._expanded_span_key, LEDGER_SPAN_ROW_HEIGHT),
-            (key, LEDGER_HOVERED_SPAN_ROW_HEIGHT),
+            (self._expanded_span_key, TRAJECTORY_SPAN_ROW_HEIGHT),
+            (key, TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT),
         ):
             row_entry = self._row_entries.get(candidate or "")
             if candidate is None or not isinstance(row_entry, LedgerEntry):
@@ -1106,7 +1108,7 @@ class Ledger(DataTable[Text | str]):
     def on_resize(self, event: events.Resize) -> None:
         self._viewport_height = max(
             1,
-            (event.size.height - self.header_height) // LEDGER_SPAN_ROW_HEIGHT,
+            (event.size.height - self.header_height) // TRAJECTORY_SPAN_ROW_HEIGHT,
         )
         compact_columns = event.size.width < LEDGER_COMPACT_WIDTH
         columns_changed = compact_columns != self._compact_columns

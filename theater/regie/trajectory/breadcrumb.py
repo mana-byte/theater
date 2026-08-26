@@ -7,8 +7,8 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Static
 
+from theater.constants.regie_trajectory import TRAJECTORY_BREADCRUMB_HEIGHT
 from theater.regie.trajectory.badges import provenance_badges
-from theater.regie.trajectory.constants import TRAJECTORY_BREADCRUMB_HEIGHT
 from theater.regie.trajectory.render import sanitize_text
 from theater.trajectory import TrajectoryRecord, TrajectoryRequest, TrajectoryToolOperation
 

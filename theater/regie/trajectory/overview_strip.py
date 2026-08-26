@@ -8,7 +8,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Label
 
-from theater.regie.trajectory.constants import (
+from theater.constants.regie_trajectory import (
     KIND_GLYPHS_BY_VALUE,
     TRAJECTORY_OVERVIEW_HEIGHT,
     TRAJECTORY_OVERVIEW_MILLISECONDS_PER_SECOND,

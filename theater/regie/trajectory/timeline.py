@@ -14,7 +14,7 @@ from textual.message import Message
 from textual.scroll_view import ScrollView
 from textual.strip import Strip
 
-from theater.regie.trajectory.constants import (
+from theater.constants.regie_trajectory import (
     TIMELINE_CONTENT_HEIGHT,
     TIMELINE_HEIGHT,
     TIMELINE_HOVER_LEFT_GLYPH,

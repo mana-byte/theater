@@ -7,7 +7,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from theater.regie.trajectory.constants import (
+from theater.constants.regie_trajectory import (
     TOOL_ROW_INPUT_COMPACT_FIELD_LIMIT,
     TOOL_ROW_INPUT_DETAIL_NAMES,
     TOOL_ROW_INPUT_FIELD_LIMIT,

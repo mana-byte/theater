@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from theater.regie.trajectory.constants import TRAJECTORY_RESPONSE_MAX_BYTES
+from theater.constants.trajectory import TRAJECTORY_RESPONSE_MAX_BYTES
 from theater.regie.trajectory.enums import FilterDimension, FocusRegion, InspectorTab, OrderMode
 from theater.trajectory import (
     ContentFormat,

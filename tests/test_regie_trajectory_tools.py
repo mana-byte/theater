@@ -8,10 +8,8 @@ import pytest
 from rich.console import Console
 from textual.app import App, ComposeResult
 
-from theater.regie.trajectory.constants import (
-    TOOL_ROW_SUMMARY_MAX_CHARS,
-    TRAJECTORY_DETAIL_RECORD_MAX_BYTES,
-)
+from theater.constants.regie_trajectory import TOOL_ROW_SUMMARY_MAX_CHARS
+from theater.constants.trajectory import TRAJECTORY_DETAIL_RECORD_MAX_BYTES
 from theater.regie.trajectory.enums import InspectorTab
 from theater.regie.trajectory.footer import TrajectoryFooter
 from theater.regie.trajectory.inspection.links import DETAIL_RECORD_TARGET_META

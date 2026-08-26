@@ -5,16 +5,16 @@ from __future__ import annotations
 from rich.cells import cell_len, set_cell_size
 from rich.text import Text
 
-from theater.formatting import event_stamp
-from theater.regie.trajectory.constants import (
+from theater.constants.regie_trajectory import (
     KIND_GLYPHS_BY_VALUE,
     LANE_GLYPHS_BY_VALUE,
     STYLE_DURATION,
     STYLE_MATCHED,
     TOOLTIP_DELAY,
     TRAJECTORY_OVERVIEW_COMPACT_NUMBER_THRESHOLD,
-    TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS,
 )
+from theater.constants.trajectory import TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS
+from theater.formatting import event_stamp
 from theater.regie.trajectory.formatting import (
     format_duration,
     plain_text,

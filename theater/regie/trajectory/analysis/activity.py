@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 
+from theater.constants.regie_trajectory import TRAJECTORY_INSIGHT_ROW_LIMIT, WATERFALL_MAX_DEPTH
 from theater.regie.trajectory.analysis.models import (
     DelegationActivity,
     ProblemActivity,
@@ -16,7 +17,6 @@ from theater.regie.trajectory.analysis.waterfall import (
     request_anchor,
     request_label,
 )
-from theater.regie.trajectory.constants import TRAJECTORY_INSIGHT_ROW_LIMIT, WATERFALL_MAX_DEPTH
 from theater.regie.trajectory.request_rows import RequestIndex
 from theater.regie.trajectory.tool_rows import ToolIndex
 from theater.trajectory import (

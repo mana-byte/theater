@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from theater.regie.trajectory.constants import TRAJECTORY_DETAIL_RECORD_MAX_BYTES
+from theater.constants.trajectory import TRAJECTORY_DETAIL_RECORD_MAX_BYTES
 from theater.regie.trajectory.enums import InspectorTab
 from theater.regie.trajectory.formatting import sanitize_text
 from theater.regie.trajectory.inspection.lines import InspectorLine, tool_summary_lines

@@ -8,7 +8,7 @@ import inspect
 from collections.abc import Callable
 from typing import Protocol
 
-from theater.regie.trajectory.constants import (
+from theater.constants.trajectory import (
     TRAJECTORY_FOLLOW_TIMEOUT_SECONDS,
     TRAJECTORY_PAGE_RECORD_LIMIT,
 )

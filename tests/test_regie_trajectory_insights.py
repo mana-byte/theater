@@ -6,13 +6,13 @@ from textual.app import App, ComposeResult
 from textual.coordinate import Coordinate
 from textual.widgets import Static
 
+from theater.constants.regie_trajectory import (
+    TRAJECTORY_AUXILIARY_ROW_HEIGHT,
+    TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT,
+    TRAJECTORY_SPAN_ROW_HEIGHT,
+)
 from theater.regie.trajectory.badges import provenance_badges
 from theater.regie.trajectory.breadcrumb import TrajectoryBreadcrumb, breadcrumb_text
-from theater.regie.trajectory.constants import (
-    TRAJECTORY_INSIGHT_AUXILIARY_ROW_HEIGHT,
-    TRAJECTORY_INSIGHT_HOVERED_SPAN_ROW_HEIGHT,
-    TRAJECTORY_INSIGHT_SPAN_ROW_HEIGHT,
-)
 from theater.regie.trajectory.enums import DiagnosticView, FocusRegion
 from theater.regie.trajectory.insights import InsightsPanel
 from theater.regie.trajectory.ledger import Ledger
@@ -141,8 +141,8 @@ async def test_specialized_views_reuse_one_table_and_restore_the_ledger_after_de
         insights = view.query_one(InsightsPanel)
         assert insights.insight_count == 2
         assert [row.height for row in insights.ordered_rows] == [
-            TRAJECTORY_INSIGHT_SPAN_ROW_HEIGHT,
-            TRAJECTORY_INSIGHT_HOVERED_SPAN_ROW_HEIGHT,
+            TRAJECTORY_SPAN_ROW_HEIGHT,
+            TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT,
         ]
         assert all(not str(cell).startswith("\n") for cell in insights.get_row_at(0))
         assert all(
@@ -225,9 +225,9 @@ async def test_file_view_lists_chronological_operations_and_opens_exact_spans() 
         panel = view.query_one(SpanDetailPanel)
         assert insights.insight_count == 3
         assert [row.height for row in insights.ordered_rows] == [
-            TRAJECTORY_INSIGHT_AUXILIARY_ROW_HEIGHT,
-            TRAJECTORY_INSIGHT_SPAN_ROW_HEIGHT,
-            TRAJECTORY_INSIGHT_HOVERED_SPAN_ROW_HEIGHT,
+            TRAJECTORY_AUXILIARY_ROW_HEIGHT,
+            TRAJECTORY_SPAN_ROW_HEIGHT,
+            TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT,
         ]
         assert "src/shared.py" in str(insights.get_row_at(0)[1])
         assert "├─ read_file" in str(insights.get_row_at(1)[1])
@@ -296,31 +296,31 @@ async def test_pointer_hover_expands_only_insight_spans() -> None:
 
         directory_region = insights._get_cell_region(Coordinate(0, 0))
         await pilot.hover(insights, offset=(directory_region.x, directory_region.y))
-        assert insights.ordered_rows[0].height == TRAJECTORY_INSIGHT_AUXILIARY_ROW_HEIGHT
+        assert insights.ordered_rows[0].height == TRAJECTORY_AUXILIARY_ROW_HEIGHT
 
         first_region = insights._get_cell_region(Coordinate(1, 0))
         await pilot.hover(insights, offset=(first_region.x, first_region.y))
-        assert insights.ordered_rows[1].height == TRAJECTORY_INSIGHT_HOVERED_SPAN_ROW_HEIGHT
+        assert insights.ordered_rows[1].height == TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT
         assert insights.get_row_at(1)[1].plain.startswith("\n")
         assert not insights.get_row_at(1)[1].plain.startswith("\n\n")
 
         second_region = insights._get_cell_region(Coordinate(2, 0))
         await pilot.hover(insights, offset=(second_region.x, second_region.y))
-        assert insights.ordered_rows[1].height == TRAJECTORY_INSIGHT_SPAN_ROW_HEIGHT
-        assert insights.ordered_rows[2].height == TRAJECTORY_INSIGHT_HOVERED_SPAN_ROW_HEIGHT
+        assert insights.ordered_rows[1].height == TRAJECTORY_SPAN_ROW_HEIGHT
+        assert insights.ordered_rows[2].height == TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT
 
         await pilot.hover("#trajectory-search")
         assert [row.height for row in insights.ordered_rows] == [
-            TRAJECTORY_INSIGHT_AUXILIARY_ROW_HEIGHT,
-            TRAJECTORY_INSIGHT_SPAN_ROW_HEIGHT,
-            TRAJECTORY_INSIGHT_HOVERED_SPAN_ROW_HEIGHT,
+            TRAJECTORY_AUXILIARY_ROW_HEIGHT,
+            TRAJECTORY_SPAN_ROW_HEIGHT,
+            TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT,
         ]
 
         await pilot.press("k")
         assert [row.height for row in insights.ordered_rows] == [
-            TRAJECTORY_INSIGHT_AUXILIARY_ROW_HEIGHT,
-            TRAJECTORY_INSIGHT_HOVERED_SPAN_ROW_HEIGHT,
-            TRAJECTORY_INSIGHT_SPAN_ROW_HEIGHT,
+            TRAJECTORY_AUXILIARY_ROW_HEIGHT,
+            TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT,
+            TRAJECTORY_SPAN_ROW_HEIGHT,
         ]
 
 
@@ -449,11 +449,11 @@ async def test_resource_spans_are_one_line_and_turn_rows_remain_two_lines() -> N
         row_count = len(insights.ordered_rows)
         assert row_count == 12
         assert [row.height for row in insights.ordered_rows] == [
-            TRAJECTORY_INSIGHT_AUXILIARY_ROW_HEIGHT,
-            TRAJECTORY_INSIGHT_SPAN_ROW_HEIGHT,
+            TRAJECTORY_AUXILIARY_ROW_HEIGHT,
+            TRAJECTORY_SPAN_ROW_HEIGHT,
         ] * 5 + [
-            TRAJECTORY_INSIGHT_AUXILIARY_ROW_HEIGHT,
-            TRAJECTORY_INSIGHT_HOVERED_SPAN_ROW_HEIGHT,
+            TRAJECTORY_AUXILIARY_ROW_HEIGHT,
+            TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT,
         ]
         assert all(
             str(cell).startswith("\n") and not str(cell).startswith("\n\n")
@@ -493,7 +493,7 @@ async def test_failure_view_uses_navigator_instead_of_generic_ledger() -> None:
 
         insights = view.query_one(InsightsPanel)
         assert insights.insight_count == 1
-        assert insights.ordered_rows[0].height == TRAJECTORY_INSIGHT_HOVERED_SPAN_ROW_HEIGHT
+        assert insights.ordered_rows[0].height == TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT
         assert all(str(cell).startswith("\n") for cell in insights.get_row_at(0))
         assert view.active_region is FocusRegion.INSIGHTS
         assert any("FAILURE" in str(column.label) for column in insights.columns.values())
