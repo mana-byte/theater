@@ -59,6 +59,19 @@ def plain_text(value: str) -> str:
     return sanitize_text(value)
 
 
+def bottom_aligned_cell(value: Text | str, height: int) -> Text:
+    """Place one-line table content on the last line of a fixed-height row."""
+    aligned = Text("\n" * max(0, height - 1))
+    if isinstance(value, Text):
+        aligned.append_text(value)
+        aligned.justify = value.justify
+    else:
+        aligned.append(value)
+    aligned.no_wrap = True
+    aligned.overflow = "ellipsis"
+    return aligned
+
+
 def _compact(value: str, limit: int) -> str:
     return sanitize_text(value).replace("\r", " ").replace("\n", " ")[:limit]
 

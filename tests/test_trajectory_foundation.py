@@ -17,7 +17,7 @@ from theater.constants.trajectory import (
     TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES,
     TRAJECTORY_TRANSCRIPT_HISTORY_WINDOW_BYTES,
 )
-from theater.harness.contracts.events import Event, EventKind, TokenUsage
+from theater.harness.contracts.events import Event, EventKind, EventPath, TokenUsage
 from theater.harness.contracts.source import (
     Batch,
     History,
@@ -190,6 +190,22 @@ def test_baseline_usage_preserves_cost_provenance() -> None:
 
     assert fact.usage is not None
     assert fact.usage.cost_provenance is CostProvenance.REPORTED
+
+
+def test_baseline_projection_preserves_structured_event_paths() -> None:
+    record = event_to_record(
+        Event(
+            kind=EventKind.TOOL_CALL,
+            tool_name="read_file",
+            paths=(EventPath("src/app.py", "read"),),
+        ),
+        participant_id="p",
+        source_epoch="epoch",
+    )
+
+    path = next(detail for detail in record.details if detail.format is ContentFormat.PATH)
+    assert path.name == "path.read"
+    assert path.preview.text == "src/app.py"
 
 
 def test_canonical_projection_estimates_missing_usage_cost() -> None:

@@ -103,7 +103,7 @@ class Timeline(ScrollView):
     Timeline > .trajectory-timeline--model {{ background: $accent 28%; }}
     Timeline > .trajectory-timeline--tools {{ background: $warning 26%; }}
     Timeline > .trajectory-timeline--theater {{ background: $secondary 26%; }}
-    Timeline > .trajectory-timeline--error {{ background: $error 38%; }}
+    Timeline > .trajectory-timeline--error {{ background: $error; }}
     Timeline > .trajectory-timeline--running {{ background: $warning 32%; }}
     Timeline > .trajectory-timeline--muted {{ opacity: 32%; }}
     Timeline > .trajectory-timeline--hovered {{ color: $text; text-style: bold; }}

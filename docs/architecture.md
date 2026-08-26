@@ -785,7 +785,7 @@ theater/observability/
 ├── engine.py     timing context, exact prose rendering, log extras, metric bridge
 ├── metrics.py    histogram registry, views, cached gauges, GaugeSampler
 ├── tracing.py    span lifecycle, explicit W3C inject/extract
-├── logging.py    owned handlers, rotation, stderr-generation pruning
+├── logging.py    owned handlers, crash capture, rotation, stderr pruning
 └── runtime.py    process-level composition and RuntimeHandle shutdown
 ```
 
@@ -831,10 +831,12 @@ generation; the current path is pinned regardless of mtime. Only `LockHeld`
 (the singleton race loser) deletes its own generation — every other failure
 keeps it, whether before or after lock acquisition.
 
-MCP and régie do not alter their logging setup when OTLP is disabled. When
-enabled, they attach only the OTel `LoggingHandler` to `theater` and set
-`propagate = False`. MCP stdout remains protocol-only — never attach a stdout
-handler. There is no local MCP/régie log file.
+Each régie writes a rotating `regie.pane-<id>.log` beside the daemon logs, with
+a PID fallback when no pane identity is available. Per-pane files prevent two
+régie processes from rotating the same inode. Its event-loop lag monitor and
+unhandled Textual exceptions use the same shared logging and OTel pipeline.
+MCP attaches only the OTel `LoggingHandler`; stdout remains protocol-only and
+there is no local MCP log file.
 
 `logging.basicConfig` was removed from the daemon start path; `runtime.configure()`
 delegates all owned handler work to `observability/logging.py`.

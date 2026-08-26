@@ -231,6 +231,9 @@ turn boundaries, and harness-specific status.
 
 ## Optional observability
 
+Human-readable diagnostics are always written to rotating `daemon.log` and
+per-pane `regie.pane-<id>.log` files under `$THEATER_HOME`.
+
 OTLP traces, metrics, and structured logs are off by default. In a source
 checkout, install the optional dependencies:
 

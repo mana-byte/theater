@@ -16,12 +16,17 @@ class DiagnosticView(StrEnum):
     ERRORS = "errors"
     SLOW = "slow"
     TOOLS = "tools"
+    WATERFALL = "waterfall"
+    FILES = "files"
+    RESOURCES = "resources"
+    DELEGATION = "delegation"
     COORDINATION = "coordination"
 
 
 class FocusRegion(StrEnum):
     TIMELINE = "timeline"
     LEDGER = "ledger"
+    INSIGHTS = "insights"
     DETAIL = "detail"
 
 
@@ -50,4 +55,22 @@ class InspectorTab(StrEnum):
     ASSOCIATIONS = "associations"
 
 
-__all__ = ["DiagnosticView", "FilterDimension", "FocusRegion", "InspectorTab", "OrderMode"]
+INSIGHT_VIEWS = frozenset(
+    {
+        DiagnosticView.ERRORS,
+        DiagnosticView.WATERFALL,
+        DiagnosticView.FILES,
+        DiagnosticView.RESOURCES,
+        DiagnosticView.DELEGATION,
+    }
+)
+
+
+__all__ = [
+    "INSIGHT_VIEWS",
+    "DiagnosticView",
+    "FilterDimension",
+    "FocusRegion",
+    "InspectorTab",
+    "OrderMode",
+]

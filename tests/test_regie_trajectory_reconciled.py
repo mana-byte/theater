@@ -14,7 +14,7 @@ from theater.regie.trajectory.constants import (
     FILTER_MAX_ROWS,
     LEDGER_CELL_PADDING,
     LEDGER_OVERSCAN_ROWS,
-    LEDGER_ROW_HEIGHT,
+    LEDGER_SPAN_ROW_HEIGHT,
     TIMELINE_HOVER_LEFT_GLYPH,
     TIMELINE_HOVER_RIGHT_GLYPH,
     TIMELINE_LABEL_RIGHT_PADDING,
@@ -154,7 +154,7 @@ async def test_ledger_window_is_bounded_and_scroll_hit_testing_uses_offset() -> 
         ledger.set_scroll_offset(10)
         await pilot.pause()
         assert ledger.entries[11].record_id == "r11"
-        assert int(ledger.scroll_y) == 10 * LEDGER_ROW_HEIGHT
+        assert int(ledger.scroll_y) == 10 * LEDGER_SPAN_ROW_HEIGHT
         assert ledger.rendered_record_count <= 5 + 2 * LEDGER_OVERSCAN_ROWS
 
 
@@ -1041,6 +1041,7 @@ async def test_retry_action_inside_error_row_is_clickable_and_keyboard_accessibl
         assert isinstance(retry, Text)
         assert retry.plain.strip() == "↻ Retry"
         row = ledger.get_row_index(Ledger.RETRY_KEY)
+        assert ledger.ordered_rows[row].height == 2
         column = ledger.get_column_index(Ledger.COLUMN_STATUS)
         region = ledger._get_cell_region(Coordinate(row, column))
         await pilot.click(
@@ -1071,6 +1072,7 @@ async def test_earlier_history_row_is_clickable_once() -> None:
     async with app.run_test(size=(80, 20)) as pilot:
         ledger = app.query_one(Ledger)
         ledger.update_rows([], search_records([]), has_older=True)
+        assert ledger.ordered_rows[ledger.get_row_index(Ledger.OLDER_KEY)].height == 2
         await pilot.click(ledger, offset=(2, ledger.header_height + 1))
         assert app.loads == 1
 

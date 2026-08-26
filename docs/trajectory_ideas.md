@@ -217,6 +217,17 @@ The shared trajectory layer now implements the full delivery order:
 - contextual model, request, tool, context, and Theater inspection with clickable record and
   participant links.
 
+Régie's cached diagnostic layer also provides:
+
+- a request/tool latency waterfall with nested calls and first-token markers;
+- a persistent turn/request/tool breadcrumb with timing, cost, state, source, and link fidelity;
+- structured file activity, cross-participant delegation, and token/cost heatmap tables;
+- a failure and retry navigator that keeps typed categories, codes, and retry ancestry visible.
+
+These tables reuse one virtualized Textual widget. Filtering happens against the existing bounded
+record window, hover performs no parsing, and missing timing or cost remains explicitly unknown.
+The footer exposes direct view selection while `v` retains fast keyboard cycling.
+
 Fidelity remains source-dependent. Every built-in plugin keeps native keys and parsing rules in
 its own monolithic module and emits only normalized contract values. No current built-in claims
 retry support, so retry UI and aggregation remain dormant until a plugin supplies an explicit

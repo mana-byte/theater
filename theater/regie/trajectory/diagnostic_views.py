@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import batched
 from types import MappingProxyType
 
+from theater.constants.trajectory import TRAJECTORY_MAX_GROUP_RECORD_IDS
+from theater.regie.trajectory.analysis import TrajectoryAnalysisIndex, empty_analysis_index
 from theater.regie.trajectory.enums import DiagnosticView
 from theater.regie.trajectory.ordering import TrajectoryOrdering
 from theater.regie.trajectory.request_rows import RequestIndex
@@ -120,9 +123,13 @@ def _slow_projection(
 
 
 def build_diagnostic_index(
-    records: Iterable[TrajectoryRecord], request_index: RequestIndex, tool_index: ToolIndex
+    records: Iterable[TrajectoryRecord],
+    request_index: RequestIndex,
+    tool_index: ToolIndex,
+    analysis_index: TrajectoryAnalysisIndex | None = None,
 ) -> DiagnosticIndex:
     ordered = tuple(records)
+    analysis = analysis_index or empty_analysis_index()
     all_ids = frozenset(record.record_id for record in ordered)
     running = {record.record_id for record in ordered if record.status in _ACTIVE}
     errors = {record.record_id for record in ordered if record.status in _ERRORS}
@@ -133,12 +140,29 @@ def build_diagnostic_index(
             running.update(members)
         if operation.status in _ERRORS:
             errors.update(members)
+    errors.update(
+        record_id for problem in analysis.problems for record_id in problem.member_record_ids
+    )
     projections = {
         DiagnosticView.ALL: DiagnosticProjection(all_ids),
         DiagnosticView.RUNNING: DiagnosticProjection(frozenset(running)),
         DiagnosticView.ERRORS: DiagnosticProjection(frozenset(errors)),
         DiagnosticView.SLOW: _slow_projection(ordered, request_index, tool_index),
         DiagnosticView.TOOLS: DiagnosticProjection(frozenset(tools)),
+        DiagnosticView.WATERFALL: DiagnosticProjection(
+            frozenset(
+                record_id for waterfall in analysis.waterfalls for record_id in waterfall.record_ids
+            )
+        ),
+        DiagnosticView.FILES: DiagnosticProjection(
+            frozenset(record_id for row in analysis.files for record_id in row.record_ids)
+        ),
+        DiagnosticView.RESOURCES: DiagnosticProjection(
+            frozenset(record_id for row in analysis.resources for record_id in row.record_ids)
+        ),
+        DiagnosticView.DELEGATION: DiagnosticProjection(
+            frozenset(record_id for row in analysis.delegations for record_id in row.record_ids)
+        ),
         DiagnosticView.COORDINATION: DiagnosticProjection(
             frozenset(
                 record.record_id for record in ordered if record.lane is TrajectoryLane.THEATER
@@ -159,17 +183,25 @@ def ordering_for_projection(
     )
     if not ordered:
         return None
-    group = TrajectoryGroup(
-        group_id="diagnostic:slow",
-        kind=GroupKind.BETWEEN_TURNS,
-        label="Slow operations",
-        record_ids=tuple(record.record_id for record in ordered),
+    groups = tuple(
+        TrajectoryGroup(
+            group_id=f"diagnostic:slow:{index}",
+            kind=GroupKind.BETWEEN_TURNS,
+            label="Slow operations",
+            record_ids=record_ids,
+        )
+        for index, record_ids in enumerate(
+            batched(
+                (record.record_id for record in ordered),
+                TRAJECTORY_MAX_GROUP_RECORD_IDS,
+            )
+        )
     )
     return TrajectoryOrdering(
         source=ordered,
-        groups=(group,),
+        groups=groups,
         records=ordered,
-        _units=MappingProxyType({id(group): group.record_ids}),
+        _units=MappingProxyType({id(group): group.record_ids for group in groups}),
     )
 
 

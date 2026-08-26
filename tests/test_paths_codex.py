@@ -22,8 +22,11 @@ import json
 
 from shipped import CodexObserver
 
+from theater.daemon.trajectory.project import project_events_and_facts
 from theater.harness import plan_launch
 from theater.harness.base import EventKind, EventPath
+from theater.trajectory import ContentFormat, TimingProvenance, TrajectoryKind
+from theater.trajectory.tools import TrajectoryToolIdentity, tool_operations_for_records
 
 #: A minimal apply_patch input that touches three files: one update, one add,
 #: one delete. The patch body is irrelevant to path extraction — only the
@@ -90,6 +93,180 @@ def test_apply_patch_with_multiple_files_yields_multiple_paths():
         "src/new_module.py",
         "src/old_module.py",
     }
+
+
+def test_patch_apply_end_uses_structured_changes_and_relativizes_paths():
+    observer = CodexObserver()
+    observer.parse(
+        json.dumps({"type": "session_meta", "payload": {"cwd": "/repo"}}),
+        0,
+    )
+    parsed = observer.parse_record(
+        json.dumps(
+            {
+                "type": "event_msg",
+                "timestamp": "2026-08-25T21:14:41Z",
+                "payload": {
+                    "type": "patch_apply_end",
+                    "call_id": "exec-1",
+                    "success": True,
+                    "status": "completed",
+                    "stdout": "Success",
+                    "changes": {
+                        "/repo/src/main.py": {
+                            "type": "update",
+                            "unified_diff": "@@ -1 +1 @@",
+                            "move_path": "/repo/src/moved.py",
+                        },
+                        "/repo/src/new.py": {"type": "add", "content": "new"},
+                        "/outside/secret.py": {"type": "delete", "content": "secret"},
+                    },
+                },
+            }
+        ),
+        1,
+    )
+    events = parsed.events
+
+    assert len(events) == 1
+    assert events[0].kind is EventKind.TOOL_CALL
+    assert events[0].tool_name == "apply_patch"
+    assert events[0].paths == (
+        EventPath("src/main.py", "write"),
+        EventPath("src/moved.py", "write"),
+        EventPath("src/new.py", "write"),
+    )
+    assert [fact.kind for fact in parsed.trajectory] == [
+        TrajectoryKind.TOOL_CALL,
+        TrajectoryKind.TOOL_RESULT,
+    ]
+    records = project_events_and_facts(
+        parsed.baseline_events,
+        parsed.trajectory,
+        participant_id="participant",
+        source_epoch="epoch",
+        source="codex",
+    )
+    operation = tool_operations_for_records(records)[0]
+    assert operation.identity is TrajectoryToolIdentity.MATCHED
+    assert operation.tool_name == "apply_patch"
+    assert any(field.name == "input" for field in operation.call_details)
+    assert {
+        field.preview.text for field in operation.call_details if field.format is ContentFormat.PATH
+    } == {"src/main.py", "src/moved.py", "src/new.py"}
+    result = next(field for field in operation.result_details if field.name == "result")
+    assert '"success":true' in result.preview.text
+
+
+def test_patch_apply_end_derives_timing_from_enclosing_exec():
+    observer = CodexObserver()
+    observer.parse_record(
+        json.dumps(
+            {
+                "type": "response_item",
+                "timestamp": "2026-08-25T21:14:40Z",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "exec",
+                    "call_id": "outer",
+                    "input": "const patch = await tools.apply_patch('patch')",
+                },
+            }
+        ),
+        0,
+    )
+    parsed = observer.parse_record(
+        json.dumps(
+            {
+                "type": "event_msg",
+                "timestamp": "2026-08-25T21:14:41Z",
+                "payload": {
+                    "type": "patch_apply_end",
+                    "call_id": "inner",
+                    "success": True,
+                    "status": "completed",
+                    "changes": {"src/main.py": {"type": "update"}},
+                },
+            }
+        ),
+        1,
+    )
+    records = project_events_and_facts(
+        parsed.baseline_events,
+        parsed.trajectory,
+        participant_id="participant",
+        source_epoch="epoch",
+        source="codex",
+    )
+
+    operation = tool_operations_for_records(records)[0]
+    assert operation.timing is not None
+    assert operation.timing.duration_ms == 1_000
+    assert operation.timing.provenance is TimingProvenance.DERIVED
+
+    observer.parse_record(
+        json.dumps(
+            {
+                "type": "response_item",
+                "timestamp": "2026-08-25T21:14:41.1Z",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "outer",
+                    "output": "done",
+                },
+            }
+        ),
+        2,
+    )
+    unmatched = observer.parse_record(
+        json.dumps(
+            {
+                "type": "event_msg",
+                "timestamp": "2026-08-25T21:14:42Z",
+                "payload": {
+                    "type": "patch_apply_end",
+                    "call_id": "unmatched",
+                    "success": True,
+                    "status": "completed",
+                    "changes": {"src/other.py": {"type": "update"}},
+                },
+            }
+        ),
+        3,
+    )
+    unmatched_records = project_events_and_facts(
+        unmatched.baseline_events,
+        unmatched.trajectory,
+        participant_id="participant",
+        source_epoch="epoch",
+        source="codex",
+    )
+    unmatched_operation = tool_operations_for_records(unmatched_records)[0]
+    assert unmatched_operation.timing is not None
+    assert unmatched_operation.timing.duration_ms is None
+
+
+def test_patch_apply_end_without_valid_changes_is_not_an_activity():
+    observer = CodexObserver()
+    observer.parse(
+        json.dumps({"type": "session_meta", "payload": {"cwd": "/repo"}}),
+        0,
+    )
+    events = observer.parse(
+        json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "patch_apply_end",
+                    "success": False,
+                    "changes": {"/repo/not-a-change": {"type": "unknown"}},
+                },
+            }
+        ),
+        1,
+    )
+
+    assert events == []
 
 
 # ---- read: codex has no structured read tool ---------------------------

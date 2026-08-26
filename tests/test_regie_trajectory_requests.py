@@ -384,6 +384,7 @@ async def test_ledger_request_headers_are_noninteractive_and_patch_in_place(
                 Ledger.COLUMN_DURATION,
             )
         }
+        assert all(cell.plain.startswith("\n") for cell in cells.values())
         styles = {column: cell.get_style_at_offset(Console(), 1) for column, cell in cells.items()}
         assert all(style.bgcolor == request_style.bgcolor for style in styles.values())
         assert styles[Ledger.COLUMN_EVENT].bold
@@ -448,6 +449,8 @@ async def test_view_places_request_before_step_and_keeps_record_navigation() -> 
         ledger = app.query_one(Ledger)
         assert ledger.entries[0].is_request_header
         assert ledger.entries[1].is_group_header
+        group_key = f"{Ledger.GROUP_PREFIX}{ledger.entries[1].group_id}"
+        assert ledger.ordered_rows[ledger.get_row_index(group_key)].height == 2
         assert view._selected_visible_ids() == ("third",)
         await pilot.press("shift+h")
         assert view._selected_visible_ids() == ("second",)

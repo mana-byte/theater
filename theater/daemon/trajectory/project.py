@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import replace
 
 from theater.harness.contracts.events import Event
 from theater.harness.contracts.source import Batch, HistoryPage
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.trajectory import (
+    ContentFormat,
     TrajectoryKind,
     TrajectoryRecord,
     event_to_record,
@@ -80,8 +82,8 @@ def project_events_and_facts(
         )
         for fact in rich_facts
     )
-    replaced = _without_replaced_baseline(baseline, rich, rich_facts)
-    return merge_records((), (*replaced, *rich))
+    retained, enriched = _merge_replaced_baseline(baseline, rich, rich_facts)
+    return merge_records((), (*retained, *enriched))
 
 
 def _event_ordinals(events: tuple[Event, ...]) -> tuple[tuple[Event, int], ...]:
@@ -95,13 +97,16 @@ def _event_ordinals(events: tuple[Event, ...]) -> tuple[tuple[Event, int], ...]:
     return tuple(result)
 
 
-def _without_replaced_baseline(
+def _merge_replaced_baseline(
     baseline: tuple[TrajectoryRecord, ...],
     rich: tuple[TrajectoryRecord, ...],
     facts: tuple[TrajectoryFact, ...],
-) -> tuple[TrajectoryRecord, ...]:
+) -> tuple[tuple[TrajectoryRecord, ...], tuple[TrajectoryRecord, ...]]:
     used: set[str] = set()
+    baseline_ids = frozenset(record.record_id for record in baseline)
+    enriched: list[TrajectoryRecord] = []
     for fact, rich_record in zip(facts, rich, strict=True):
+        enriched_record = rich_record
         candidates = [
             record
             for record in baseline
@@ -111,10 +116,28 @@ def _without_replaced_baseline(
             same_kind = [record for record in candidates if _same_kind(record, fact.kind)]
             candidates = same_kind or candidates
         if candidates:
-            used.add(candidates[0].record_id)
-        elif rich_record.record_id in {record.record_id for record in baseline}:
+            baseline_record = candidates[0]
+            used.add(baseline_record.record_id)
+            rich_paths = {
+                (detail.name, detail.preview.text)
+                for detail in rich_record.details
+                if detail.format is ContentFormat.PATH
+            }
+            path_details = tuple(
+                detail
+                for detail in baseline_record.details
+                if detail.format is ContentFormat.PATH
+                and (detail.name, detail.preview.text) not in rich_paths
+            )
+            if path_details:
+                enriched_record = replace(
+                    rich_record, details=(*rich_record.details, *path_details)
+                )
+        elif rich_record.record_id in baseline_ids:
             used.add(rich_record.record_id)
-    return tuple(record for record in baseline if record.record_id not in used)
+        enriched.append(enriched_record)
+    retained = tuple(record for record in baseline if record.record_id not in used)
+    return retained, tuple(enriched)
 
 
 def _same_coordinate(record: TrajectoryRecord, fact: TrajectoryFact) -> bool:

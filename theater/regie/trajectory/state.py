@@ -7,6 +7,11 @@ from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
+from theater.regie.trajectory.analysis import (
+    TrajectoryAnalysisIndex,
+    build_analysis_index,
+    empty_analysis_index,
+)
 from theater.regie.trajectory.constants import (
     TRAJECTORY_DETAIL_FIELD_MAX_BYTES,
     TRAJECTORY_IDENTIFIER_MAX_BYTES,
@@ -74,6 +79,7 @@ class ParticipantTrajectoryState:
     request_index: RequestIndex = field(default_factory=empty_request_index)
     tool_index: ToolIndex = field(default_factory=empty_tool_index)
     diagnostic_index: DiagnosticIndex = field(default_factory=empty_diagnostic_index)
+    analysis_index: TrajectoryAnalysisIndex = field(default_factory=empty_analysis_index)
     loaded_bytes: int = 0
     follow_tail: bool = True
     new_count: int = 0
@@ -152,8 +158,11 @@ class ParticipantTrajectoryState:
         self.groups = group_records(self.record_list)
         self.request_index = build_request_index(self.records.values())
         self.tool_index = build_tool_index(self.records.values())
-        self.diagnostic_index = build_diagnostic_index(
+        self.analysis_index = build_analysis_index(
             self.records.values(), self.request_index, self.tool_index
+        )
+        self.diagnostic_index = build_diagnostic_index(
+            self.records.values(), self.request_index, self.tool_index, self.analysis_index
         )
 
     def row_anchor(self, record_id: str | None) -> str | None:
@@ -259,6 +268,7 @@ class ParticipantTrajectoryState:
         prior_request_index = self.request_index
         prior_tool_index = self.tool_index
         prior_diagnostic_index = self.diagnostic_index
+        prior_analysis_index = self.analysis_index
         preserve_trace = (
             page.panel_state.state
             in {PanelState.STALE, PanelState.UNAVAILABLE, PanelState.UNTRUSTED}
@@ -288,6 +298,7 @@ class ParticipantTrajectoryState:
             self.request_index = prior_request_index
             self.tool_index = prior_tool_index
             self.diagnostic_index = prior_diagnostic_index
+            self.analysis_index = prior_analysis_index
         else:
             self._apply_records(page.records)
             self.groups = page.groups or self.groups

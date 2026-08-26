@@ -32,6 +32,14 @@ class FooterPageRequested(Message):
         self.page_index = page_index
 
 
+class FooterViewRequested(Message):
+    """A trajectory diagnostic view was chosen from the footer."""
+
+    def __init__(self, view: DiagnosticView) -> None:
+        super().__init__()
+        self.view = view
+
+
 class TrajectoryFooter(Horizontal):
     """Two-line footer for trajectory navigation and actions."""
 
@@ -87,6 +95,32 @@ class TrajectoryFooter(Horizontal):
     TrajectoryFooter #trajectory-page SelectOverlay > .option-list--option {{
         padding: 0 2;
     }}
+    TrajectoryFooter #trajectory-view-action {{
+        width: 16;
+        min-width: 12;
+        height: 1;
+        min-height: 1;
+        margin-left: 1;
+        background: $background;
+    }}
+    TrajectoryFooter #trajectory-view-action SelectCurrent {{
+        height: 1;
+        min-height: 1;
+        padding: 0 1;
+        background: $background;
+    }}
+    TrajectoryFooter #trajectory-view-action SelectCurrent Static#label {{
+        height: 1;
+        content-align: center middle;
+    }}
+    TrajectoryFooter #trajectory-view-action SelectCurrent .arrow {{
+        padding: 0;
+        color: $text-muted;
+    }}
+    TrajectoryFooter #trajectory-view-action SelectOverlay {{
+        width: 18;
+        max-height: 14;
+    }}
     TrajectoryFooter #trajectory-page-range {{
         width: auto;
         min-width: 14;
@@ -134,6 +168,11 @@ class TrajectoryFooter(Horizontal):
         padding: 0 1;
         margin-left: 0;
     }}
+    TrajectoryFooter.-compact #trajectory-view-action {{
+        width: 12;
+        min-width: 10;
+        margin-left: 0;
+    }}
     TrajectoryFooter.-compact #trajectory-state {{ display: none; }}
     TrajectoryFooter.-narrow #trajectory-status {{ display: none; }}
     TrajectoryFooter.-narrow #trajectory-page-range {{ display: none; }}
@@ -167,7 +206,13 @@ class TrajectoryFooter(Horizontal):
         yield Button("⌕ Search", id="trajectory-search-action", compact=True, flat=True)
         yield Button("≡ Filters", id="trajectory-filter-action", compact=True, flat=True)
         yield Button("◷ Duration", id="trajectory-mode-action", compact=True, flat=True)
-        yield Button("◫ All", id="trajectory-view-action", compact=True, flat=True)
+        yield Select(
+            [(view.value.title(), view.value) for view in DiagnosticView],
+            value=DiagnosticView.ALL.value,
+            allow_blank=False,
+            id="trajectory-view-action",
+            compact=True,
+        )
         yield Button("↓ Live", id="trajectory-follow-action", compact=True, flat=True)
 
     def _update_actions(self) -> None:
@@ -195,8 +240,9 @@ class TrajectoryFooter(Horizontal):
             else "◷ Duration"
         )
         mode.set_class(self._mode is OrderMode.DURATION, "-selected")
-        view = self.query_one("#trajectory-view-action", Button)
-        view.label = "◫" if self._compact else f"◫ {self._view.value.title()}"
+        view = self.query_one("#trajectory-view-action", Select)
+        if view.value != self._view.value:
+            view.value = self._view.value
         view.set_class(self._view is not DiagnosticView.ALL, "-selected")
         follow = self.query_one("#trajectory-follow-action", Button)
         follow.label = (
@@ -316,7 +362,6 @@ class TrajectoryFooter(Horizontal):
             "trajectory-search-action": "search",
             "trajectory-filter-action": "filters",
             "trajectory-mode-action": "mode",
-            "trajectory-view-action": "view",
             "trajectory-follow-action": "follow",
         }
         action = actions.get(message.button.id or "")
@@ -326,12 +371,15 @@ class TrajectoryFooter(Horizontal):
         self.post_message(FooterActionRequested(action))
 
     def on_select_changed(self, message: Select.Changed) -> None:
+        if message.select.id == "trajectory-view-action":
+            value = message.value
+            if not isinstance(value, str) or value == self._view.value:
+                return
+            message.stop()
+            self.post_message(FooterViewRequested(DiagnosticView(value)))
+            return
         page_index = message.value
-        if (
-            message.select.id != "trajectory-page"
-            or not isinstance(page_index, int)
-            or isinstance(page_index, bool)
-        ):
+        if not isinstance(page_index, int) or isinstance(page_index, bool):
             return
         message.stop()
         if page_index != message.select.value or page_index == self._page_number - 1:
@@ -339,4 +387,9 @@ class TrajectoryFooter(Horizontal):
         self.post_message(FooterPageRequested(page_index))
 
 
-__all__ = ["FooterActionRequested", "FooterPageRequested", "TrajectoryFooter"]
+__all__ = [
+    "FooterActionRequested",
+    "FooterPageRequested",
+    "FooterViewRequested",
+    "TrajectoryFooter",
+]

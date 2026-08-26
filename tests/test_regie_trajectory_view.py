@@ -6,7 +6,8 @@ from textual.widgets import Button, DataTable, Input, RichLog, Select, Selection
 
 from theater.regie.trajectory.constants import (
     LEDGER_HEADER_HEIGHT,
-    LEDGER_ROW_HEIGHT,
+    LEDGER_HOVERED_SPAN_ROW_HEIGHT,
+    LEDGER_SPAN_ROW_HEIGHT,
     SEARCH_HEIGHT,
     TIMELINE_LANE_HEIGHT,
     TRAJECTORY_FOOTER_HEIGHT,
@@ -146,8 +147,9 @@ async def test_surface_uses_fixed_timeline_and_virtualized_ledger() -> None:
         assert isinstance(view.query_one("#trajectory-filter-options"), SelectionList)
         assert isinstance(view.query_one("#trajectory-ledger"), DataTable)
         assert isinstance(view.query_one("#trajectory-page"), Select)
+        assert isinstance(view.query_one("#trajectory-view-action"), Select)
         buttons = list(view.query_one(TrajectoryFooter).query(Button))
-        assert len(buttons) == 7
+        assert len(buttons) == 6
         assert all(button.display for button in buttons)
         assert view.query_one(TrajectoryFooter).region.height == TRAJECTORY_FOOTER_HEIGHT
         search = view.query_one("#trajectory-search", Input)
@@ -161,7 +163,10 @@ async def test_surface_uses_fixed_timeline_and_virtualized_ledger() -> None:
         assert ledger.styles.scrollbar_size_horizontal == 0
         assert ledger.styles.scrollbar_size_vertical == 0
         assert ledger.header_height == LEDGER_HEADER_HEIGHT
-        assert all(row.height == LEDGER_ROW_HEIGHT for row in ledger.rows.values())
+        assert [row.height for row in ledger.ordered_rows] == [
+            LEDGER_SPAN_ROW_HEIGHT,
+            LEDGER_HOVERED_SPAN_ROW_HEIGHT,
+        ]
         assert all(
             button.region.height == 1
             for button in view.query_one(TrajectoryFooter).query(Button)
@@ -171,6 +176,59 @@ async def test_surface_uses_fixed_timeline_and_virtualized_ledger() -> None:
         assert len(view.query("#trajectory-inspector")) == 0
         assert view.styles.padding.left == TRAJECTORY_HORIZONTAL_PADDING
         assert view.styles.padding.right == TRAJECTORY_HORIZONTAL_PADDING
+
+
+async def test_pointer_hover_expands_only_the_active_ledger_span(monkeypatch) -> None:
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await add_records(app)
+        await pilot.pause()
+        ledger = app.query_one(Ledger)
+        rebuilds = 0
+        original_rebuild = ledger._rebuild
+
+        def count_rebuild(*, preserve_scroll: bool = True) -> None:
+            nonlocal rebuilds
+            rebuilds += 1
+            original_rebuild(preserve_scroll=preserve_scroll)
+
+        monkeypatch.setattr(ledger, "_rebuild", count_rebuild)
+        first_row = ledger.get_row_index("record:r1")
+        first_region = ledger._get_cell_region(Coordinate(first_row, 0))
+        await pilot.hover(ledger, offset=(first_region.x, first_region.y))
+
+        assert ledger.ordered_rows[first_row].height == LEDGER_HOVERED_SPAN_ROW_HEIGHT
+        assert ledger.get_cell("record:r1", Ledger.COLUMN_SUMMARY).plain.startswith("\n")
+        assert not ledger.get_cell("record:r1", Ledger.COLUMN_SUMMARY).plain.startswith("\n\n")
+
+        ledger.set_hovered("r2")
+        assert ledger.ordered_rows[first_row].height == LEDGER_HOVERED_SPAN_ROW_HEIGHT
+        assert (
+            ledger.ordered_rows[ledger.get_row_index("record:r2")].height == LEDGER_SPAN_ROW_HEIGHT
+        )
+
+        second_row = ledger.get_row_index("record:r2")
+        second_region = ledger._get_cell_region(Coordinate(second_row, 0))
+        await pilot.hover(ledger, offset=(second_region.x, second_region.y))
+
+        assert ledger.ordered_rows[first_row].height == LEDGER_SPAN_ROW_HEIGHT
+        assert ledger.ordered_rows[second_row].height == LEDGER_HOVERED_SPAN_ROW_HEIGHT
+        assert not ledger.get_cell("record:r1", Ledger.COLUMN_SUMMARY).plain.startswith("\n")
+        assert ledger.get_cell("record:r2", Ledger.COLUMN_SUMMARY).plain.startswith("\n")
+        assert not ledger.get_cell("record:r2", Ledger.COLUMN_SUMMARY).plain.startswith("\n\n")
+
+        await pilot.hover("#trajectory-search")
+        assert [row.height for row in ledger.ordered_rows] == [
+            LEDGER_SPAN_ROW_HEIGHT,
+            LEDGER_HOVERED_SPAN_ROW_HEIGHT,
+        ]
+
+        await pilot.press("k")
+        assert [row.height for row in ledger.ordered_rows] == [
+            LEDGER_HOVERED_SPAN_ROW_HEIGHT,
+            LEDGER_SPAN_ROW_HEIGHT,
+        ]
+        assert rebuilds == 0
 
 
 async def test_keys_route_regions_selection_search_reset_and_escape() -> None:
@@ -213,11 +271,13 @@ async def test_diagnostic_view_action_updates_in_place() -> None:
         view._refresh()
         ledger = view.query_one(Ledger)
 
-        await pilot.click("#trajectory-view-action")
+        selector = view.query_one("#trajectory-view-action", Select)
+        selector.value = "running"
+        await pilot.pause()
 
         assert view.state.diagnostic_view.value == "running"
         assert view.query_one(Ledger) is ledger
-        assert "Running" in str(view.query_one("#trajectory-view-action", Button).label)
+        assert selector.value == "running"
         await pilot.press("v")
         assert view.state.diagnostic_view.value == "errors"
 
@@ -258,7 +318,7 @@ async def test_native_controls_handle_mouse_search_filters_and_row_activation() 
             region = ledger._get_cell_region(Coordinate(row, column))
             await pilot.click(
                 ledger,
-                offset=(region.x + max(0, region.width - 2), region.y + 1),
+                offset=(region.x + max(0, region.width - 2), region.y),
             )
             assert view.state.selected_id == "r1"
             assert view.state.detail_id == "r1"

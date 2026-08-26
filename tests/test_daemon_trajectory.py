@@ -19,14 +19,20 @@ from theater.constants.trajectory import TRAJECTORY_RESPONSE_MAX_BYTES
 from theater.daemon.rpc.trajectory import _trajectory_locate
 from theater.daemon.trajectory import history as history_module
 from theater.daemon.trajectory.cache import RecordRing, TrajectoryCache, encoded_record_bytes
-from theater.daemon.trajectory.project import project_batch, project_history_page
+from theater.daemon.trajectory.project import (
+    project_batch,
+    project_events_and_facts,
+    project_history_page,
+)
 from theater.daemon.trajectory.service import TrajectoryService
 from theater.daemon.trajectory.theater_events import project_bus_row
-from theater.harness.contracts.events import Event, EventKind
+from theater.harness.contracts.events import Event, EventKind, EventPath
 from theater.harness.contracts.source import Attachment, Batch, HistoryPage, Source
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.models import BadRequest, NotFound, Participant, Status, Tier
 from theater.trajectory import (
+    ContentFormat,
+    DetailField,
     LinkDirection,
     PanelState,
     TimingProvenance,
@@ -185,6 +191,39 @@ def _page(*events: Event, provenance: str = "operator", location: str | None = "
 
 def _wire_size(value: dict) -> int:
     return len(json.dumps(value, separators=(",", ":")).encode("utf-8"))
+
+
+def test_rich_projection_inherits_paths_from_its_replaced_baseline_event() -> None:
+    records = project_events_and_facts(
+        (
+            Event(
+                EventKind.TOOL_CALL,
+                tool_name="read_file",
+                raw_index=4,
+                paths=(EventPath("src/app.py", "read"),),
+            ),
+        ),
+        (
+            TrajectoryFact(
+                TrajectoryKind.TOOL_CALL,
+                summary="read_file",
+                raw_index=4,
+                details=(
+                    DetailField.from_text(
+                        "arguments", '{"file_path":"src/app.py"}', format=ContentFormat.JSON
+                    ),
+                ),
+            ),
+        ),
+        participant_id="p",
+        source_epoch="epoch",
+    )
+
+    assert len(records) == 1
+    assert any(
+        detail.format is ContentFormat.PATH and detail.preview.text == "src/app.py"
+        for detail in records[0].details
+    )
 
 
 @pytest.fixture

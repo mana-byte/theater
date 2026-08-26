@@ -116,10 +116,10 @@ import json
 import logging
 import math
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO
+from typing import TYPE_CHECKING, BinaryIO, Literal
 
 from theater import proc
 from theater.constants.trajectory import (
@@ -200,7 +200,24 @@ _STEM = re.compile(r"^rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-(.+)$")
 _PATCH_FILE_RE = re.compile(r"^\*\*\* (?:Update|Add|Delete) File: (.+)$", re.MULTILINE)
 
 
-def _apply_patch_paths(text: str) -> tuple[EventPath, ...]:
+def _event_path(value: str, *, cwd: str | None, mode: Literal["read", "write"]) -> EventPath | None:
+    path = Path(value)
+    if path.is_absolute():
+        if cwd is None:
+            return None
+        try:
+            path = path.resolve(strict=False).relative_to(Path(cwd).resolve(strict=False))
+        except (OSError, ValueError):
+            return None
+    elif ".." in path.parts:
+        return None
+    rendered = path.as_posix()
+    if rendered in {"", "."} or len(rendered) > 2048:
+        return None
+    return EventPath(path=rendered, mode=mode)
+
+
+def _apply_patch_paths(text: str, *, cwd: str | None = None) -> tuple[EventPath, ...]:
     """Extract file paths from an ``apply_patch`` tool input string.
 
     The apply_patch format is a structured patch grammar with explicit
@@ -215,9 +232,31 @@ def _apply_patch_paths(text: str) -> tuple[EventPath, ...]:
     """
     if not isinstance(text, str):
         return ()
-    return tuple(
-        EventPath(path=match.strip(), mode="write") for match in _PATCH_FILE_RE.findall(text)
+    paths = (
+        _event_path(match.strip(), cwd=cwd, mode="write") for match in _PATCH_FILE_RE.findall(text)
     )
+    return tuple(path for path in paths if path is not None)
+
+
+def _patch_change_paths(value: object, *, cwd: str | None) -> tuple[EventPath, ...]:
+    if not isinstance(value, Mapping):
+        return ()
+    paths: list[EventPath] = []
+    for raw_path, change in value.items():
+        if not isinstance(raw_path, str) or not isinstance(change, Mapping):
+            continue
+        if change.get("type") not in {"add", "delete", "update"}:
+            continue
+        candidates = [raw_path]
+        move_path = change.get("move_path")
+        if isinstance(move_path, str):
+            candidates.append(move_path)
+        paths.extend(
+            path
+            for candidate in candidates
+            if (path := _event_path(candidate, cwd=cwd, mode="write")) is not None
+        )
+    return tuple(dict.fromkeys(paths))
 
 
 def _in_screen_tail(capture: str, marker: str) -> bool:
@@ -715,7 +754,9 @@ class CodexObserver(TranscriptObserver):
         self.pane_pid = pane_pid
         self._last_model: str | None = None
         self._last_provider: str | None = None
+        self._last_cwd: str | None = None
         self._active_turn_id: str | None = None
+        self._pending_patch_exec: tuple[str, float] | None = None
         #: Whether the id this clone opened with is itself proof — token or receipt, not file-read.
         provenance = normalize_provenance(session_provenance)
         self._session_exact = session_exact or provenance is TranscriptProvenance.EXACT
@@ -1147,9 +1188,14 @@ class CodexObserver(TranscriptObserver):
         return []
 
     def _remember_context(self, record: dict, payload: dict) -> None:
+        self._remember_patch_exec(record, payload)
         turn_id = _codex_trajectory_turn_id(payload)
         if turn_id is not None:
             self._active_turn_id = turn_id
+
+        cwd = payload.get("cwd")
+        if isinstance(cwd, str) and cwd:
+            self._last_cwd = cwd
 
         kind = record.get("type")
         if kind == CODEX_SESSION_META_RECORD_TYPE:
@@ -1177,10 +1223,36 @@ class CodexObserver(TranscriptObserver):
         if isinstance(provider, str) and provider:
             self._last_provider = provider
 
+    def _remember_patch_exec(self, record: dict, payload: dict) -> None:
+        if record.get("type") != "response_item":
+            return
+        item_type = payload.get("type")
+        call_id = _trajectory_id(payload.get("call_id"))
+        if item_type in {"custom_tool_call", "function_call"}:
+            input_value = payload.get("input")
+            if input_value is None:
+                input_value = payload.get("arguments")
+            timing = _codex_timing(record, payload, _epoch(record.get("timestamp")))
+            self._pending_patch_exec = (
+                (call_id, timing.start)
+                if payload.get("name") == "exec"
+                and isinstance(input_value, str)
+                and "tools.apply_patch" in input_value
+                and call_id is not None
+                and timing is not None
+                and timing.start is not None
+                else None
+            )
+        elif item_type in {"custom_tool_call_output", "function_call_output"}:
+            if self._pending_patch_exec is not None and call_id == self._pending_patch_exec[0]:
+                self._pending_patch_exec = None
+
     def _seed_history_context(self, fh: BinaryIO, start: int) -> None:
         self._active_turn_id = None
         self._last_model = None
         self._last_provider = None
+        self._last_cwd = None
+        self._pending_patch_exec = None
 
         fh.seek(0)
         first_line = fh.readline(min(_CWD_PROBE_BYTES, max(0, start)))
@@ -1264,6 +1336,19 @@ class CodexObserver(TranscriptObserver):
                     turn_end=True,
                     turn_id=_turn_id(payload),
                     raw_index=index,
+                )
+            ]
+        if ptype == "patch_apply_end":
+            paths = _patch_change_paths(payload.get("changes"), cwd=self._last_cwd)
+            if not paths:
+                return []
+            return [
+                Event(
+                    kind=EventKind.TOOL_CALL,
+                    tool_name="apply_patch",
+                    ts=ts,
+                    raw_index=index,
+                    paths=paths,
                 )
             ]
         if ptype in ("mcp_tool_call_begin", "mcp_tool_call_end"):
@@ -1370,7 +1455,10 @@ class CodexObserver(TranscriptObserver):
             if name == "apply_patch":
                 # Patch markers are structured, not prose — path extraction reads a field.
                 raw_input = payload.get("input")
-                paths = _apply_patch_paths(raw_input if isinstance(raw_input, str) else "")
+                paths = _apply_patch_paths(
+                    raw_input if isinstance(raw_input, str) else "",
+                    cwd=self._last_cwd,
+                )
             return [
                 Event(
                     kind=EventKind.TOOL_CALL,
@@ -1537,6 +1625,80 @@ class CodexObserver(TranscriptObserver):
                     native_id=event_id or _codex_scoped_id(turn_id, "aborted"),
                     status=TrajectoryStatus.INTERRUPTED,
                     turn=_turn_id(payload),
+                )
+                return facts
+            if event_type == "patch_apply_end":
+                call_id = _trajectory_id(payload.get("call_id"))
+                paths = _patch_change_paths(payload.get("changes"), cwd=self._last_cwd)
+                status_name = payload.get("status")
+                status = (
+                    TrajectoryStatus.CANCELLED
+                    if status_name == "declined"
+                    else TrajectoryStatus.COMPLETED
+                    if payload.get("success") is True or status_name == "completed"
+                    else TrajectoryStatus.ERROR
+                )
+                path_details = tuple(
+                    _trajectory_detail(f"path.{path.mode}", path.path, format=ContentFormat.PATH)
+                    for path in paths
+                )
+                call_timing = result_timing = timing
+                if self._pending_patch_exec is not None and timestamp is not None:
+                    started_at = self._pending_patch_exec[1]
+                    if started_at < timestamp:
+                        call_timing = Timing(
+                            start=started_at,
+                            provenance=TimingProvenance.DERIVED,
+                        )
+                        result_timing = Timing(
+                            end=timestamp,
+                            provenance=TimingProvenance.DERIVED,
+                        )
+                add(
+                    TrajectoryKind.TOOL_CALL,
+                    TrajectoryLane.TOOLS,
+                    "apply_patch",
+                    native_id=_codex_scoped_id(call_id, "call"),
+                    status=status,
+                    call_id=call_id,
+                    fact_timing=call_timing,
+                    details=(
+                        _trajectory_detail(
+                            "input",
+                            {"files": [path.path for path in paths]},
+                            format=ContentFormat.JSON,
+                        ),
+                        *path_details,
+                    ),
+                )
+                patch_result = {
+                    "success": payload.get("success") is True,
+                    "status": status_name,
+                    "stdout": payload.get("stdout") or "",
+                    "stderr": payload.get("stderr") or "",
+                }
+                failure_detail = str(patch_result["stderr"] or patch_result["stdout"])
+                add(
+                    TrajectoryKind.TOOL_RESULT,
+                    TrajectoryLane.TOOLS,
+                    "patch applied" if status is TrajectoryStatus.COMPLETED else "patch failed",
+                    native_id=_codex_scoped_id(call_id, "result"),
+                    status=status,
+                    call_id=call_id,
+                    parent_call_id=call_id,
+                    fact_timing=result_timing,
+                    failure=(
+                        TrajectoryFailure(
+                            TrajectoryFailureCategory.TOOL,
+                            code=str(status_name or "failed"),
+                            detail=failure_detail,
+                        )
+                        if status is TrajectoryStatus.ERROR
+                        else None
+                    ),
+                    details=(
+                        _trajectory_detail("result", patch_result, format=ContentFormat.JSON),
+                    ),
                 )
                 return facts
             if event_type in ("mcp_tool_call_begin", "mcp_tool_call_end"):

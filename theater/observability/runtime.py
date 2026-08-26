@@ -295,7 +295,7 @@ def configure(
         handle = RuntimeHandle()
         file_entry: _HandlerEntry | None = None
         try:
-            if log_path is not None and role == PROCESS_ROLE_DAEMON:
+            if log_path is not None:
                 from theater.observability.logging import make_rotating_handler, make_stderr_handler
 
                 file_entry = handle.add_handler(
@@ -426,7 +426,7 @@ def _attach_otel_logging(
     handle.add_handler(handler, "theater", is_otel=True)
     handle.set_logger_propagate("theater", False)
     handle.set_logger_level("theater", log_level)
-    if role == PROCESS_ROLE_DAEMON and file_entry is not None:
+    if file_entry is not None:
         handle.share_handler(file_entry, "opentelemetry")
     elif role != PROCESS_ROLE_DAEMON:
         handle.add_handler(logging.NullHandler(), "opentelemetry")

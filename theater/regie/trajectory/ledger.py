@@ -15,20 +15,23 @@ from textual.message import Message
 from textual.widgets import DataTable
 
 from theater.regie.trajectory.constants import (
+    LEDGER_AUXILIARY_ROW_HEIGHT,
     LEDGER_CELL_PADDING,
     LEDGER_COMPACT_WIDTH,
     LEDGER_DEFAULT_VIEWPORT_ROWS,
     LEDGER_DURATION_COLUMN_WIDTH,
     LEDGER_HEADER_HEIGHT,
+    LEDGER_HOVERED_SPAN_ROW_HEIGHT,
     LEDGER_MIN_SUMMARY_WIDTH,
     LEDGER_OVERSCAN_ROWS,
-    LEDGER_ROW_HEIGHT,
     LEDGER_SCROLLBAR_WIDTH,
+    LEDGER_SPAN_ROW_HEIGHT,
     LEDGER_STATUS_COLUMN_WIDTH,
     TRAJECTORY_REQUEST_POSITION_GLYPH,
 )
 from theater.regie.trajectory.enums import OrderMode
 from theater.regie.trajectory.render import (
+    bottom_aligned_cell,
     format_duration,
     kind_glyph,
     sanitize_text,
@@ -37,6 +40,7 @@ from theater.regie.trajectory.render import (
 )
 from theater.regie.trajectory.request_rows import request_row_text
 from theater.regie.trajectory.search import LedgerEntry, SearchResult
+from theater.regie.trajectory.table_rows import resize_rows
 from theater.regie.trajectory.tool_rows import tool_row_text
 from theater.trajectory import (
     TrajectoryLane,
@@ -239,6 +243,8 @@ class Ledger(DataTable[Text | str]):
         self._building = False
         self._syncing_cursor = False
         self._mouse_activation_key: str | None = None
+        self._pointer_hover_key: str | None = None
+        self._expanded_span_key: str | None = None
         if search_result is not None:
             self.update_rows(
                 records,
@@ -288,11 +294,11 @@ class Ledger(DataTable[Text | str]):
         if self._viewport_height:
             return self._viewport_height
         height = self.region.height - self.header_height
-        return max(1, height // LEDGER_ROW_HEIGHT) if height else LEDGER_DEFAULT_VIEWPORT_ROWS
+        return max(1, height // LEDGER_SPAN_ROW_HEIGHT) if height else LEDGER_DEFAULT_VIEWPORT_ROWS
 
     def _viewport_content_height(self) -> int:
         if self._viewport_height:
-            return self._viewport_height * LEDGER_ROW_HEIGHT
+            return self._viewport_height * LEDGER_SPAN_ROW_HEIGHT
         return max(1, self.region.height - self.header_height)
 
     def _row_key(self, entry: LedgerEntry) -> str:
@@ -627,21 +633,19 @@ class Ledger(DataTable[Text | str]):
         return widths
 
     @staticmethod
-    def _middle_cell(value: Text | str) -> Text:
-        centered = Text("\n")
-        if isinstance(value, Text):
-            centered.append_text(value)
-            centered.justify = value.justify
-        else:
-            centered.append(value)
-        centered.no_wrap = True
-        centered.overflow = "ellipsis"
-        return centered
+    def _bottom_cell(value: Text | str, height: int = LEDGER_SPAN_ROW_HEIGHT) -> Text:
+        return bottom_aligned_cell(value, height)
 
-    def _add_cells(self, cells: Mapping[str, Text | str], *, key: str) -> None:
+    def _add_cells(
+        self,
+        cells: Mapping[str, Text | str],
+        *,
+        key: str,
+        height: int = LEDGER_SPAN_ROW_HEIGHT,
+    ) -> None:
         self.add_row(
-            *(self._middle_cell(cells.get(column, "")) for column in self._column_keys),
-            height=LEDGER_ROW_HEIGHT,
+            *(self._bottom_cell(cells.get(column, ""), height) for column in self._column_keys),
+            height=height,
             key=key,
         )
 
@@ -695,6 +699,7 @@ class Ledger(DataTable[Text | str]):
                     self.COLUMN_STATUS: Text(values[self.COLUMN_STATUS], style="dim"),
                 },
                 key=self.OLDER_KEY,
+                height=LEDGER_AUXILIARY_ROW_HEIGHT,
             )
             self._row_entries[self.OLDER_KEY] = self.OLDER_KEY
         if not self._entries and not self._retry_message and not self._has_older:
@@ -705,6 +710,7 @@ class Ledger(DataTable[Text | str]):
                     self.COLUMN_SUMMARY: Text(values[self.COLUMN_SUMMARY], style="dim"),
                 },
                 key=self.EMPTY_KEY,
+                height=LEDGER_AUXILIARY_ROW_HEIGHT,
             )
             self._row_entries[self.EMPTY_KEY] = self.EMPTY_KEY
             return
@@ -712,10 +718,18 @@ class Ledger(DataTable[Text | str]):
             key = self._row_key(entry)
             self._row_entries[key] = entry
             if entry.is_request_header:
-                self._add_cells(self._request_cells(entry), key=key)
+                self._add_cells(
+                    self._request_cells(entry),
+                    key=key,
+                    height=LEDGER_AUXILIARY_ROW_HEIGHT,
+                )
                 continue
             if entry.is_group_header:
-                self._add_cells(self._group_cells(entry), key=key)
+                self._add_cells(
+                    self._group_cells(entry),
+                    key=key,
+                    height=LEDGER_AUXILIARY_ROW_HEIGHT,
+                )
                 continue
             record = self._records.get(entry.record_id or "")
             if record is None:
@@ -749,11 +763,14 @@ class Ledger(DataTable[Text | str]):
                     ),
                 },
                 key=self.RETRY_KEY,
+                height=LEDGER_AUXILIARY_ROW_HEIGHT,
             )
             self._row_entries[self.RETRY_KEY] = self.RETRY_KEY
 
     def _rebuild(self, *, preserve_scroll: bool = True) -> None:
         previous_scroll = self._scroll_offset if preserve_scroll else 0
+        self._pointer_hover_key = None
+        self._expanded_span_key = None
         self._building = True
         try:
             self.clear(columns=True)
@@ -795,8 +812,9 @@ class Ledger(DataTable[Text | str]):
             cells = self._record_cells(
                 record, self._record_indices[line_index] or 0, depth=entry.depth
             )
+            height = self._span_row_height(key)
             for column in self._column_keys:
-                self.update_cell(key, column, self._middle_cell(cells[column]))
+                self.update_cell(key, column, self._bottom_cell(cells[column], height))
             self._revisions[entry.record_id] = record.revision
 
     def _refresh_changed_requests(self) -> None:
@@ -809,7 +827,11 @@ class Ledger(DataTable[Text | str]):
             key = self._row_key(entry)
             cells = self._request_cells(entry)
             for column in self._column_keys:
-                self.update_cell(key, column, self._middle_cell(cells[column]))
+                self.update_cell(
+                    key,
+                    column,
+                    self._bottom_cell(cells[column], LEDGER_AUXILIARY_ROW_HEIGHT),
+                )
             self._rendered_requests[entry.request_id] = request
 
     def _refresh_changed_tools(self) -> None:
@@ -820,9 +842,73 @@ class Ledger(DataTable[Text | str]):
             if tool is None or self._rendered_tools.get(entry.tool_operation_id) == tool:
                 continue
             cells = self._tool_cells(entry, self._record_indices[line_index] or 0)
+            key = self._row_key(entry)
+            height = self._span_row_height(key)
             for column in self._column_keys:
-                self.update_cell(self._row_key(entry), column, self._middle_cell(cells[column]))
+                self.update_cell(key, column, self._bottom_cell(cells[column], height))
             self._rendered_tools[entry.tool_operation_id] = tool
+
+    def _span_row_height(self, key: str) -> int:
+        return (
+            LEDGER_HOVERED_SPAN_ROW_HEIGHT
+            if key == self._expanded_span_key
+            else LEDGER_SPAN_ROW_HEIGHT
+        )
+
+    def _entry_cells(self, entry: LedgerEntry) -> Mapping[str, Text | str] | None:
+        if entry.is_header or entry.record_id is None:
+            return None
+        line_index = self._entry_indices.get(entry.record_id)
+        record = self._records.get(entry.record_id)
+        if line_index is None or record is None:
+            return None
+        if entry.is_tool_operation:
+            return self._tool_cells(entry, self._record_indices[line_index] or 0)
+        return self._record_cells(
+            record,
+            self._record_indices[line_index] or 0,
+            depth=entry.depth,
+        )
+
+    def _actual_row_key(self, record_id: str | None) -> str | None:
+        index = self._entry_index_for_record(record_id)
+        if index is None:
+            return None
+        entry = self._entries[index]
+        return None if entry.is_header else self._row_key(entry)
+
+    def _sync_expanded_span(self) -> None:
+        key = self._pointer_hover_key or self._actual_row_key(self._selected_id)
+        entry = self._row_entries.get(key or "")
+        if not isinstance(entry, LedgerEntry) or entry.is_header:
+            key = None
+        if key == self._expanded_span_key:
+            return
+        heights: dict[str, int] = {}
+        for candidate, height in (
+            (self._expanded_span_key, LEDGER_SPAN_ROW_HEIGHT),
+            (key, LEDGER_HOVERED_SPAN_ROW_HEIGHT),
+        ):
+            row_entry = self._row_entries.get(candidate or "")
+            if candidate is None or not isinstance(row_entry, LedgerEntry):
+                continue
+            cells = self._entry_cells(row_entry)
+            if cells is None:
+                continue
+            for column in self._column_keys:
+                self.update_cell(candidate, column, self._bottom_cell(cells[column], height))
+            heights[candidate] = height
+        self._expanded_span_key = key
+        if resize_rows(self, heights):
+            self._update_row_starts()
+            self._update_render_window()
+
+    def _set_pointer_hover_key(self, key: str | None) -> None:
+        entry = self._row_entries.get(key or "")
+        self._pointer_hover_key = (
+            key if isinstance(entry, LedgerEntry) and not entry.is_header else None
+        )
+        self._sync_expanded_span()
 
     def _set_content(
         self,
@@ -889,20 +975,18 @@ class Ledger(DataTable[Text | str]):
 
     def _sync_selection(self) -> None:
         line = self._row_index_for_record(self._selected_id)
-        if line is None or not self.row_count:
-            return
-        self._syncing_cursor = True
-        try:
-            self.move_cursor(row=line, column=0, animate=False, scroll=False)
-        finally:
-            self._syncing_cursor = False
+        if line is not None and self.row_count:
+            self._syncing_cursor = True
+            try:
+                self.move_cursor(row=line, column=0, animate=False, scroll=False)
+            finally:
+                self._syncing_cursor = False
+        self._sync_expanded_span()
 
     def _total_lines(self) -> int:
         return max(
             1,
-            self._row_prefix
-            + len(self._entries)
-            + (1 if self._retry_message else 0),
+            self._row_prefix + len(self._entries) + (1 if self._retry_message else 0),
         )
 
     def _max_scroll_row(self) -> int:
@@ -996,15 +1080,17 @@ class Ledger(DataTable[Text | str]):
                     depth=entry.depth,
                 )
             )
+            key = self._row_key(entry)
+            height = self._span_row_height(key)
             self.update_cell(
-                self._row_key(entry),
+                key,
                 self.COLUMN_POSITION,
-                self._middle_cell(cells[self.COLUMN_POSITION]),
+                self._bottom_cell(cells[self.COLUMN_POSITION], height),
             )
             self.update_cell(
-                self._row_key(entry),
+                key,
                 self.COLUMN_SUMMARY,
-                self._middle_cell(cells[self.COLUMN_SUMMARY]),
+                self._bottom_cell(cells[self.COLUMN_SUMMARY], height),
             )
 
     def set_selected(self, record_id: str | None) -> None:
@@ -1012,6 +1098,7 @@ class Ledger(DataTable[Text | str]):
         if index is not None:
             record_id = self._entries[index].record_id
         if record_id == self._selected_id:
+            self._sync_expanded_span()
             return
         self._selected_id = record_id
         self._sync_selection()
@@ -1019,7 +1106,7 @@ class Ledger(DataTable[Text | str]):
     def on_resize(self, event: events.Resize) -> None:
         self._viewport_height = max(
             1,
-            (event.size.height - self.header_height) // LEDGER_ROW_HEIGHT,
+            (event.size.height - self.header_height) // LEDGER_SPAN_ROW_HEIGHT,
         )
         compact_columns = event.size.width < LEDGER_COMPACT_WIDTH
         columns_changed = compact_columns != self._compact_columns
@@ -1041,9 +1128,10 @@ class Ledger(DataTable[Text | str]):
 
     def watch_hover_coordinate(self, old: Coordinate, value: Coordinate) -> None:
         super().watch_hover_coordinate(old, value)
-        if self._building or not self._show_hover_cursor or old.row == value.row:
+        if self._building or not self._show_hover_cursor:
             return
         if not self.is_valid_coordinate(value):
+            self._set_pointer_hover_key(None)
             self.post_message(LedgerRecordHovered(None))
             return
         key = self.coordinate_to_cell_key(value).row_key
@@ -1052,9 +1140,14 @@ class Ledger(DataTable[Text | str]):
         record_id = (
             entry.record_id if isinstance(entry, LedgerEntry) and not entry.is_header else None
         )
+        pointer_key = str(key.value) if record_id is not None else None
+        if old.row == value.row and pointer_key == self._pointer_hover_key:
+            return
+        self._set_pointer_hover_key(pointer_key)
         self.post_message(LedgerRecordHovered(record_id))
 
     def _on_leave(self, event: events.Leave) -> None:
+        self._set_pointer_hover_key(None)
         super()._on_leave(event)
         self.post_message(LedgerRecordHovered(None))
 

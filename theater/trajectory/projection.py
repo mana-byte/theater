@@ -73,6 +73,10 @@ def event_to_fact(
     details: list[DetailField] = []
     if event.tool_name:
         details.append(DetailField.from_text("tool", event.tool_name, format=ContentFormat.TEXT))
+    details.extend(
+        DetailField.from_text(f"path.{path.mode}", path.path, format=ContentFormat.PATH)
+        for path in event.paths
+    )
     if event.raw_text is not None and event.raw_text != event.text:
         details.append(DetailField.from_text("raw", event.raw_text, format=ContentFormat.TEXT))
     return TrajectoryFact(

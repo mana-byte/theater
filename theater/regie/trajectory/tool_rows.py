@@ -143,9 +143,7 @@ def _input_preview(operation: TrajectoryToolOperation, *, compact: bool) -> str 
     field = _input_field(operation)
     if field is None or not field.preview.text:
         return None
-    field_limit = (
-        TOOL_ROW_INPUT_COMPACT_FIELD_LIMIT if compact else TOOL_ROW_INPUT_FIELD_LIMIT
-    )
+    field_limit = TOOL_ROW_INPUT_COMPACT_FIELD_LIMIT if compact else TOOL_ROW_INPUT_FIELD_LIMIT
     if field.preview.omitted_bytes == 0:
         try:
             return _structured_input(json.loads(field.preview.text), field_limit=field_limit)

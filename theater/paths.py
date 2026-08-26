@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
+
+_TMUX_PANE_ID = re.compile(r"^%([0-9]+)$")
 
 
 def home() -> Path:
@@ -21,6 +24,14 @@ def socket_path() -> Path:
 
 def log_path() -> Path:
     return home() / "daemon.log"
+
+
+def regie_log_path() -> Path:
+    """Per-pane log path, falling back to the process when outside tmux."""
+    pane = os.environ.get("TMUX_PANE", "")
+    match = _TMUX_PANE_ID.fullmatch(pane)
+    identity = f"pane-{match.group(1)}" if match is not None else f"pid-{os.getpid()}"
+    return home() / f"regie.{identity}.log"
 
 
 def pidfile_path() -> Path:

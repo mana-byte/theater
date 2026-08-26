@@ -34,6 +34,7 @@ the panel is showing or not.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from collections.abc import Iterable
@@ -57,6 +58,7 @@ from theater.constants import (
     MICROCENTS_PER_DOLLAR,
     USAGE_AVERAGE_WINDOW_DAYS,
 )
+from theater.constants.observability import PROCESS_ROLE_REGIE
 from theater.constants.regie import (
     REGIE_AWAIT_ANIM_TTL,
     REGIE_COST_WINDOW_HOURS,
@@ -80,6 +82,8 @@ from theater.constants.regie import (
     REGIE_USAGE_POLL_INTERVAL_SECONDS,
 )
 from theater.constants.trajectory import TRAJECTORY_TOOLTIP_DELAY_MS
+from theater.observability import lag_monitor
+from theater.observability.logging import log_exception
 from theater.regie.animations.footer import (  # noqa: F401
     _advance_float,
     _advance_int,
@@ -354,6 +358,8 @@ class RegieApp(App):
         self._trajectory_view_widget: TrajectoryView | None = None
         self._trajectory_navigation = TrajectoryNavigationHistory()
         self._session = SessionController(tmux, panes)
+        self._lag_stopping: asyncio.Event | None = None
+        self._lag_task: asyncio.Task[None] | None = None
 
     @property
     def bus_cursor(self) -> int:
@@ -467,6 +473,11 @@ class RegieApp(App):
                 yield command
 
     async def on_mount(self) -> None:
+        self._lag_stopping = asyncio.Event()
+        self._lag_task = asyncio.create_task(
+            lag_monitor(self._lag_stopping, role=PROCESS_ROLE_REGIE),
+            name="regie-event-loop-lag",
+        )
         self._client = DaemonClient()
         try:
             await self._client.connect()
@@ -701,15 +712,27 @@ class RegieApp(App):
         return _COST_WINDOWS["day"]
 
     async def on_unmount(self) -> None:
-        self._stop_leaf_reveal()
-        self._stop_leaf_retirement()
-        self._leaf_retirement.clear()
-        await self._teardown()
-        if self._trajectory_controller is not None:
-            await self._trajectory_controller.close()
-            self._trajectory_controller = None
-        if self._client:
-            await self._client.aclose()
+        if self._lag_stopping is not None:
+            self._lag_stopping.set()
+        try:
+            self._stop_leaf_reveal()
+            self._stop_leaf_retirement()
+            self._leaf_retirement.clear()
+            await self._teardown()
+            if self._trajectory_controller is not None:
+                await self._trajectory_controller.close()
+                self._trajectory_controller = None
+            if self._client:
+                await self._client.aclose()
+        finally:
+            if self._lag_task is not None:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await self._lag_task
+                self._lag_task = None
+
+    def _handle_exception(self, error: Exception) -> None:
+        log_exception(logger, "régie crashed", error)
+        super()._handle_exception(error)
 
     # ---- tmux lifecycle (delegates to SessionController) ----------------
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from theater.constants.trajectory import TRAJECTORY_MAX_GROUP_RECORD_IDS
 from theater.regie.trajectory.diagnostic_views import (
     build_diagnostic_index,
     ordering_for_projection,
@@ -158,6 +159,29 @@ def test_slow_orders_known_model_requests_and_logical_tools_by_duration() -> Non
     assert projection.record_ids == {"tool-call", "tool-result", "model-slow", "model-fast"}
     assert result.row_ids == ("tool-call", "model-slow", "model-fast")
     assert "model-unknown" not in result.record_ids
+
+
+def test_slow_order_chunks_large_projections_without_changing_rank() -> None:
+    count = TRAJECTORY_MAX_GROUP_RECORD_IDS + 1
+    records = tuple(
+        _record(f"record-{index}", index, timing=Timing(duration_ms=float(index + 1)))
+        for index in range(count)
+    )
+    index, _requests, _tools = _index(records)
+
+    ordering = ordering_for_projection(
+        records,
+        index.projection_for(DiagnosticView.SLOW),
+    )
+
+    assert ordering is not None
+    assert [len(group.record_ids) for group in ordering.groups] == [
+        TRAJECTORY_MAX_GROUP_RECORD_IDS,
+        1,
+    ]
+    assert [record.record_id for record in ordering.records] == [
+        f"record-{index}" for index in reversed(range(count))
+    ]
 
 
 def test_diagnostic_candidates_compose_with_text_and_typed_filters() -> None:

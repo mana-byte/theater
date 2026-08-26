@@ -76,6 +76,20 @@ def test_disabled_no_sdk():
     """)
 
 
+def test_regie_local_log_works_without_otel(tmp_path):
+    _run(f"""
+        import logging
+        from pathlib import Path
+        from theater.observability.runtime import configure
+        path = Path({str(tmp_path / "regie.pane-7.log")!r})
+        h = configure(role="regie", otlp_enabled=False, log_path=path)
+        logging.getLogger("theater.regie").warning("regie-visible")
+        h.shutdown()
+        assert "regie-visible" in path.read_text()
+        print("OK")
+    """)
+
+
 def test_shutdown_idempotent():
     _run("""
         from theater.observability.runtime import RuntimeHandle
