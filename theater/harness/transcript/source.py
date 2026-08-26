@@ -30,8 +30,7 @@ from theater.harness.contracts.source import (
 )
 from theater.harness.contracts.trajectory import ParsedRecord, TrajectoryFact
 from theater.harness.transcript.attachment import attach_point
-from theater.harness.transcript.history import HistoryPageError as _HistoryPageError
-from theater.harness.transcript.history import HistoryReader
+from theater.harness.transcript.history import HistoryPageError, HistoryReader
 from theater.provenance import (
     TranscriptProvenance,
     is_trusted_provenance,
@@ -318,23 +317,16 @@ class TranscriptSource(Source):
                 pinned=path_error.pinned,
             )
         try:
+            reader = self._history_reader()
             end, end_index, cursor_identity = (
-                self._decode_page_cursor(before, path) if before is not None else (None, None, None)
+                reader.decode_page_cursor(before, path)
+                if before is not None
+                else (None, None, None)
             )
             live_offset = self.offset if before is None and self.path == path else None
             live_index = self.index if before is None and self.path == path else None
-            (
-                events,
-                facts,
-                trajectory_events,
-                start,
-                page_end,
-                start_index,
-                page_end_index,
-                identity,
-                older_identity,
-            ) = await asyncio.to_thread(
-                self._read_page,
+            result = await asyncio.to_thread(
+                reader.read_page,
                 path,
                 end=end,
                 end_index=end_index if before is not None else live_index,
@@ -342,7 +334,7 @@ class TranscriptSource(Source):
                 limit=limit,
                 expected_identity=cursor_identity,
             )
-        except _HistoryPageError as exc:
+        except HistoryPageError as exc:
             return HistoryPage(error_code=exc.code, error=str(exc), pinned=pinned)
         except ValueError as exc:
             return HistoryPage(error_code="history_cursor_invalid", error=str(exc), pinned=pinned)
@@ -361,16 +353,20 @@ class TranscriptSource(Source):
         session_id = self._observer.session_id(path)
         return HistoryPage(
             location=str(path),
-            events=events,
-            trajectory=facts,
-            trajectory_events=trajectory_events,
-            cursor=self._encode_page_cursor(path, page_end, page_end_index, identity),
+            events=result.events,
+            trajectory=result.facts,
+            trajectory_events=result.trajectory_events,
+            cursor=reader.encode_page_cursor(
+                path, result.page_end, result.page_end_index, result.identity
+            ),
             older_cursor=(
-                self._encode_page_cursor(path, start, start_index, older_identity)
-                if 0 < start < page_end
+                reader.encode_page_cursor(
+                    path, result.start, result.start_index, result.older_identity
+                )
+                if 0 < result.start < result.page_end
                 else None
             ),
-            has_older=0 < start < page_end,
+            has_older=0 < result.start < result.page_end,
             provenance=self.correlation_for(path, session_id),
             pinned=pinned,
         )
@@ -474,77 +470,15 @@ class TranscriptSource(Source):
             return []
         return events
 
-    def _read_page(
-        self,
-        path: Path,
-        *,
-        end: int | None,
-        end_index: int | None,
-        live_offset: int | None,
-        limit: int,
-        expected_identity: dict[str, object] | None,
-    ) -> tuple[
-        list[Event],
-        list[TrajectoryFact],
-        list[Event],
-        int,
-        int,
-        int | None,
-        int | None,
-        dict[str, object],
-        dict[str, object],
-    ]:
-        result = HistoryReader(
-            parse_record=lambda line, index: self._parse_record(line, index, clip_text=False),
-            decorate_parsed=self._decorate_parsed,
-            prepare_history_parse=self._prepare_history_parse,
-        ).read_page(
-            path,
-            end=end,
-            end_index=end_index,
-            live_offset=live_offset,
-            limit=limit,
-            expected_identity=expected_identity,
-        )
-        return (
-            result.events,
-            result.facts,
-            result.trajectory_events,
-            result.start,
-            result.page_end,
-            result.start_index,
-            result.page_end_index,
-            result.identity,
-            result.older_identity,
-        )
-
-    def _prepare_history_parse(self, fh: BinaryIO, start: int) -> None:
-        """Let a stateful adapter seed bounded context before forward parsing."""
-
-    @classmethod
-    def _read_page_lines(cls, fh: BinaryIO, page_end: int) -> list[tuple[int, bytes]]:
-        return HistoryReader.read_page_lines(fh, page_end)
-
-    def _select_page_records(
-        self,
-        lines: list[tuple[int, bytes]],
-        *,
-        line_index_base: int,
-        page_end_index: int | None,
-        page_end: int,
-        limit: int,
-    ) -> tuple[list[Event], list[TrajectoryFact], list[Event], int, int | None]:
+    def _history_reader(self) -> HistoryReader:
         return HistoryReader(
             parse_record=lambda line, index: self._parse_record(line, index, clip_text=False),
             decorate_parsed=self._decorate_parsed,
             prepare_history_parse=self._prepare_history_parse,
-        ).select_page_records(
-            lines,
-            line_index_base=line_index_base,
-            page_end_index=page_end_index,
-            page_end=page_end,
-            limit=limit,
         )
+
+    def _prepare_history_parse(self, fh: BinaryIO, start: int) -> None:
+        """Let a stateful adapter seed bounded context before forward parsing."""
 
     def _parse_record(self, line: str, index: int, *, clip_text: bool) -> ParsedRecord:
         missing = object()
@@ -576,62 +510,6 @@ class TranscriptSource(Source):
                 )
             ),
         )
-
-    @staticmethod
-    def _byte_at(fh: BinaryIO, offset: int) -> bytes:
-        return HistoryReader.byte_at(fh, offset)
-
-    @classmethod
-    def _read_reverse_window(cls, fh: BinaryIO, page_end: int) -> tuple[int, bytes]:
-        return HistoryReader.read_reverse_window(fh, page_end)
-
-    @staticmethod
-    def _page_path_key(path: Path) -> str:
-        return HistoryReader.page_path_key(path)
-
-    @classmethod
-    def _encode_page_cursor(
-        cls,
-        path: Path,
-        end: int,
-        end_index: int | None,
-        identity: dict[str, object],
-    ) -> str:
-        return HistoryReader.encode_page_cursor(path, end, end_index, identity)
-
-    @classmethod
-    def _decode_page_cursor(
-        cls, cursor: str | None, path: Path
-    ) -> tuple[int, int | None, dict[str, object]]:
-        return HistoryReader.decode_page_cursor(cursor, path)
-
-    @classmethod
-    def _page_file_identity(
-        cls,
-        fh: BinaryIO,
-        stat: os.stat_result,
-        *,
-        snapshot_size: int | None = None,
-        boundary_offset: int | None = None,
-    ) -> dict[str, object]:
-        return HistoryReader.page_file_identity(
-            fh,
-            stat,
-            snapshot_size=snapshot_size,
-            boundary_offset=boundary_offset,
-        )
-
-    @classmethod
-    def _identity_at_boundary(
-        cls, fh: BinaryIO, base: dict[str, object], boundary_offset: int
-    ) -> dict[str, object]:
-        return HistoryReader.identity_at_boundary(fh, base, boundary_offset)
-
-    @classmethod
-    def _validate_page_identity(
-        cls, fh: BinaryIO, stat: os.stat_result, expected: dict[str, object]
-    ) -> None:
-        HistoryReader.validate_page_identity(fh, stat, expected)
 
     # ---- internals ------------------------------------------------------
 

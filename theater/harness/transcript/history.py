@@ -29,11 +29,11 @@ class HistoryPageError(ValueError):
         self.code = code
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PageReadResult:
-    events: list[Event]
-    facts: list[TrajectoryFact]
-    trajectory_events: list[Event]
+    events: tuple[Event, ...]
+    facts: tuple[TrajectoryFact, ...]
+    trajectory_events: tuple[Event, ...]
     start: int
     page_end: int
     start_index: int | None
@@ -48,7 +48,7 @@ PrepareHistoryParse = Callable[[BinaryIO, int], None]
 
 
 class HistoryReader:
-    """Read immutable bounded pages while adapters supply their parsing hooks."""
+    """Read bounded pages while adapters supply their parsing hooks."""
 
     def __init__(
         self,
@@ -108,9 +108,9 @@ class HistoryReader:
                 limit=limit,
             )
             return PageReadResult(
-                events=events,
-                facts=facts,
-                trajectory_events=trajectory_events,
+                events=tuple(events),
+                facts=tuple(facts),
+                trajectory_events=tuple(trajectory_events),
                 start=start,
                 page_end=page_end,
                 start_index=start_index,
