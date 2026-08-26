@@ -17,7 +17,7 @@ processes:
   forwards, never touches SQLite or tmux directly.
 - **régie** — a Textual TUI; also just a client, holds no state the daemon lacks.
 
-Python 3.12+, ~31,200 lines, 77 test modules. `theater` is the CLI entry point
+Python 3.12+, ~60,100 lines, 122 test modules. `theater` is the CLI entry point
 (`theater.cli:main`).
 
 ## The one constraint
@@ -77,6 +77,7 @@ theater/
 │   ├── logging.py        owned handlers, rotation, stderr-generation pruning
 │   └── runtime.py        process-level composition and RuntimeHandle shutdown
 ├── timing.py           compatibility facade — re-exports observability engine, preserves old API
+├── trajectory/         bounded harness-neutral records, requests, tools, causality, wire values
 ├── models.py           Tier, Status, Participant, Job, error codes
 ├── client.py           DaemonClient (NDJSON over Unix socket, autostarts the daemon)
 ├── protocol.py         NDJSON framing, PROTOCOL_VERSION = 1 (NOT JSON-RPC)
@@ -92,6 +93,7 @@ theater/
 │   ├── runtime/        socket dispatch, maintenance loops, lifecycle
 │   ├── spawning/       launch planning, resume, service
 │   ├── worktrees/      unique and named shared worktree paths and repos
+│   ├── trajectory/     canonical projection, ingestion, cache, aggregation, responses
 │   ├── observer.py     compatibility facade — re-exports the observation package
 │   ├── store.py        compatibility facade — re-exports the persistence package
 │   ├── methods.py      compatibility facade — re-exports the rpc package
@@ -105,9 +107,9 @@ theater/
 │   ├── schema.py       the one place table columns are declared
 │   └── migrations/     alembic env + versions/
 ├── harness/            plugin loader + adapters (no privileged built-in tier)
-│   ├── contracts/       Harness, Source, HarnessObserver, launch, events
+│   ├── contracts/       Harness, Source, HarnessObserver, launch, events, trajectory facts
 │   ├── registry/       plugin lookup, install, capabilities, claims
-│   ├── transcript/     transcript-file source, observer, attachment
+│   ├── transcript/     transcript-file source, observer, attachment, bounded history
 │   ├── builtin/plugins/  claude.py · codex.py · opencode.py · vibe.py
 │   ├── base.py         compatibility facade — re-exports contracts
 │   ├── observation.py  compatibility facade — re-exports contracts + transcript
@@ -124,6 +126,7 @@ theater/
     ├── dashboard/      unstaged welcome content and widgets
     ├── render/         layout, glyphs, routing
     ├── widgets/        chrome, leaf, tree, usage breakdown, usage footer
+    ├── trajectory/     controller/state, pure projection, analysis, inspection, render, widgets
     ├── app.py          the Textual application (composition surface)
     ├── tree.py         compatibility facade — re-exports render modules
     ├── palette.py      ctrl+p command-palette entries

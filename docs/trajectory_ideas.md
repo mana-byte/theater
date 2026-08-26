@@ -209,8 +209,8 @@ The shared trajectory layer now implements the full delivery order:
   slowest operations, errors, and explicit retry counts;
 - first-class request projections with provider/model, usage, cost provenance, timing diagnostics,
   typed failures, retry links, and exact retained-record associations;
-- paired tool operations with one expandable row, bounded input/result previews, typed failures,
-  retry links, timing, and unmatched-call states;
+- paired tool operations with one logical row and bounded detail panel, typed failures, retry
+  links, timing, and unmatched-call states;
 - All, Running, Errors, Slow, Tools, and Coordination views over the same cached records;
 - exact Theater bus correlations, bounded daemon lookup, cross-participant navigation, and bounded
   in-memory back history;

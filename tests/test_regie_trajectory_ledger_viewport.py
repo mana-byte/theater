@@ -21,13 +21,16 @@ def test_row_offsets_and_maximum_scroll_cover_empty_and_variable_rows() -> None:
     assert row_at_offset(offsets.starts, 0) == 0
     assert row_at_offset(offsets.starts, 2) == 1
     assert row_at_offset(offsets.starts, 4) == 2
-    assert max_scroll_row(
-        offsets.starts,
-        offsets.content_height,
-        viewport_height=3,
-        row_count=3,
-        viewport_rows=2,
-    ) == 2
+    assert (
+        max_scroll_row(
+            offsets.starts,
+            offsets.content_height,
+            viewport_height=3,
+            row_count=3,
+            viewport_rows=2,
+        )
+        == 2
+    )
     assert max_scroll_row((), 0, viewport_height=3, row_count=10, viewport_rows=3) == 7
 
 

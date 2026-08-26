@@ -1775,9 +1775,6 @@ async def test_the_staged_line_is_marked_in_the_tree(daemon, tmux):
         assert all(line.spans[0].style == "$primary" for line in marked_lines)
 
 
-# ---- trajectory surface -------------------------------------------------
-
-
 async def test_first_h_stages_trajectory_and_second_h_focuses_it(daemon, tmux):
     app, _ = make_app()
     async with app.run_test(size=(160, 40)) as pilot:

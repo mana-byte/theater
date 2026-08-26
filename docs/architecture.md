@@ -653,18 +653,30 @@ can be cancelled halfway.
 Textual's ctrl+p palette. It goes through the same `spawn` RPC as the CLI, with
 no prompt and no parent, so the régie gains no privileged path to the daemon.
 
+Trajectory is a logical right-hand surface, not another tmux pane. The shared
+`theater/trajectory/` package defines bounded, harness-neutral records and wire
+values. Harness plugins alone translate native transcript or database facts
+into that contract. The daemon's `trajectory/` package then owns ingestion,
+identity, causal links, pricing, aggregation, warm streams, and RPC responses.
+
+The régie's `trajectory/` package is presentation-only. Its controller owns
+snapshot and follow clients; state owns the bounded participant window; the
+Textual-free projection owns derived ordering, search, and pagination caches;
+analysis and inspection build display models; render helpers and widgets draw
+them. `ParticipantTrajectoryState.ledger_page` remains the canonical runtime
+page index, while the projection holds only the corresponding derived page. This
+keeps native parsing in plugins, canonical policy in the daemon, and widget
+mutation at the UI edge.
+
 ---
 
 ## 11. Module map
 
 ```
 theater/
-├── cli/                __init__.py 133 (entry point + main) · parser.py 287 · render.py 117
-│                       errors.py · commands/ (bus, identity, introspection, maintenance,
-│                       participants, process)
-├── config/             load.py 95 · models.py 148 · validation.py · describe.py
-├── constants/          __init__.py + cli, core, daemon, harness, limits, observation,
-│                       observability, regie, tmux, worktree
+├── cli/                entry point, parser, render, command modules
+├── config/             loading, models, validation, describe
+├── constants/          immutable values split by domain, including trajectory and régie
 ├── observability/      one package, one process-level lifecycle (see §13)
 │   ├── catalog.py        immutable operation/attribute specs (frozen, slotted)
 │   ├── engine.py         timing context, prose rendering, log extras, metric bridge
@@ -673,74 +685,67 @@ theater/
 │   ├── logging.py        owned handlers, rotation, stderr-generation pruning
 │   └── runtime.py        process-level composition and RuntimeHandle shutdown
 ├── timing.py           compatibility facade — re-exports observability engine
-├── models.py 325       Tier, Status, Participant, Job, error codes
-├── client.py 234       DaemonClient, autostarts the daemon
-├── protocol.py 114     NDJSON framing, PROTOCOL_VERSION = 1
-├── paths.py 71         $THEATER_HOME layout
-├── formatting.py 158   shared CLI/régie rendering, no rich/textual
-├── proc.py 222         process facts from ps / proc / lsof
+├── trajectory/         bounded harness-neutral domain and wire values
+│   ├── records.py        canonical records, details, links, usage, failures
+│   ├── requests.py       request-level aggregation
+│   ├── tools.py          paired tool-operation aggregation
+│   └── causality.py · grouping.py · timing.py · overview.py · page.py
+├── models.py           Tier, Status, Participant, Job, error codes
+├── client.py           DaemonClient, autostarts the daemon
+├── protocol.py         NDJSON framing, PROTOCOL_VERSION = 1
+├── paths.py            $THEATER_HOME layout
+├── formatting.py       shared CLI/régie rendering, no rich/textual
+├── proc.py             process facts from ps / proc / lsof
 ├── daemon/
-│   ├── observation/    service.py 788 (watch loop, observation orchestration root)
-│   │   ├── reducer.py  398 — QuietClock, three quiet timers, status policy
-│   │   ├── identity.py 209 · completion.py 186 · failures.py 230
-│   │   ├── screen.py 47 · turns.py 128 · attachment.py 349
-│   ├── persistence/    store.py 410 (SQLite over SQLAlchemy Core, sync on purpose)
-│   │   ├── database.py 84 · repositories/ (participants, jobs, bus, metadata,
+│   ├── observation/    watch loop, identity, completion, status policy
+│   ├── persistence/    SQLite repositories and store (sync on purpose)
+│   │   ├── database.py · repositories/ (participants, jobs, bus, metadata,
 │   │   │   receipts, scratchpad, statistics, usage, worktrees)
-│   ├── rpc/            33 @method handlers across admin, jobs, participants, recall,
-│   │                   scratchpad, sending, spawning, transcripts, usage
-│   ├── runtime/        lifecycle.py 193 · socket.py 111 · maintenance.py 135
-│   ├── spawning/       service.py 443 · planning.py 150 · resume.py 148 · models.py 56
-│   ├── worktrees/      repository.py 133 · unique.py 233 · named.py 289 · paths.py 99
-│   ├── observer.py 141       compatibility facade re-exporting observation/
-│   ├── store.py 16          compatibility facade re-exporting persistence/
-│   ├── methods.py 101       compatibility facade re-exporting rpc/
-│   ├── server.py 205        lifecycle only: socket, pidfile, wiring
-│   ├── spawner.py 25        compatibility facade re-exporting spawning/
-│   ├── worktree.py 69       compatibility facade re-exporting worktrees/
-│   ├── registry.py 391     tier assignment, pane eviction, lineage
-│   ├── jobs.py 438          JobManager, asyncio.Event per handle
-│   ├── gc.py 484            the retention sweep: bus, jobs+touch, participants
-│   ├── rails.py 258         depth / cycle / budget
-│   ├── recall.py 392 / recall_read.py 495  path-touch history + segment reader (v2)
-│   ├── harness_detect.py 223 · lineage.py 73 · lock.py 206 · blob.py 48
-│   ├── schema.py 178  table metadata, the one place columns are declared
+│   ├── rpc/            @method handlers, including trajectory snapshot/follow/history
+│   ├── runtime/        socket dispatch, lifecycle, maintenance loops
+│   ├── spawning/       launch planning, resume, service
+│   ├── worktrees/      repository, unique and named worktree implementations
+│   ├── trajectory/     canonical projection, ingestion, cache, aggregation, responses
+│   │   ├── runtime.py    composition facade over stream, panel, and mutations
+│   │   └── history_ingest.py · live_ingest.py · bus_ingest.py
+│   ├── observer.py · store.py · methods.py · spawner.py · worktree.py
+│   │                   compatibility facades for established import paths
+│   ├── server.py       lifecycle only: socket, pidfile, wiring
+│   ├── registry.py     tier assignment, pane eviction, lineage
+│   ├── jobs.py         JobManager, asyncio.Event per handle
+│   ├── gc.py           retention sweep: bus, jobs+touch, participants
+│   ├── rails.py        depth, cycle, and budget guards
+│   ├── recall.py · recall_read.py   path-touch history and segment reader
+│   ├── schema.py       table metadata, the one place columns are declared
 │   └── migrations/     alembic env + versions/
 ├── harness/
-│   ├── contracts/      harness.py 166 · source.py 285 · observation.py 332
-│   │                   launch.py 86 · events.py 133
-│   ├── registry/       lookup.py 108 · install.py 116 · capabilities.py 90 · claims.py 163
-│   ├── transcript/     source.py 595 (file-tailing, the observer's job-1 seam)
-│   │                   observer.py 249 · attachment.py 52
-│   ├── builtin/plugins/  opencode.py 1411 (a database, not a file)
-│   │                      codex.py 1053 · claude.py 1013 · vibe.py 1203
-│   ├── base.py 63          compatibility facade re-exporting contracts
-│   ├── observation.py 38   compatibility facade re-exporting contracts + transcript
-│   ├── source.py 43        compatibility facade re-exporting contracts + transcript
-│   └── plugins.py 427     the plugin loader
-├── mcp/      server.py 526 (14 agent tools, composition surface) · session.py 53
-│   ├── toolsets/       delegation.py 310 · participants.py 78 · recall.py 59 · transcripts.py 34
-│   └── tools.py 42     compatibility facade re-exporting toolsets + session
-├── tmux/     client.py 86 · command.py 121 · panes.py 311 · presence.py 53
-│            delivery.py 60 · facts.py 123 · options.py 90
-└── regie/    app.py 1203 (Textual app, composition surface) · palette.py 257 · bus_view.py 84
-    ├── controllers/    session.py 234 · navigation.py 124 · polling.py 203
-    │                   staging.py 242 · animation.py 356 · usage.py 212
-    ├── render/        layout.py 211 · glyphs.py 262 · routing.py 300
-    ├── widgets/       chrome.py 36 · leaf.py 186 · tree.py 268
-    │                   usage_breakdown.py 185 · usage_footer.py 408
-    └── tree.py 121    compatibility facade re-exporting render modules
+│   ├── contracts/      harness, source, observation, events, and trajectory facts
+│   ├── registry/       lookup, install, capabilities, claims
+│   ├── transcript/     source, observer, attachment, bounded history reader
+│   ├── builtin/plugins/  monolithic Claude, Codex, opencode, and Vibe adapters
+│   ├── base.py · observation.py · source.py   compatibility facades
+│   └── plugins.py      plugin loader
+├── mcp/                server composition, session, toolsets, compatibility facade
+├── tmux/               client, commands, panes, buffers, presence, delivery, facts, options
+└── regie/              Textual app composition, palette, bus view
+    ├── controllers/    session, navigation, polling, staging, surface, animation, usage
+    ├── render/         tree layout, glyphs, routing
+    ├── widgets/        chrome, leaf, tree, usage breakdown and footer
+    ├── trajectory/     participant trajectory presentation
+    │   ├── controller.py · state.py · projection.py · messages.py · view.py
+    │   ├── analysis/     cached diagnostic models
+    │   ├── inspection/   bounded detail projection and links
+    │   ├── render/       pure ordering, pagination, row, and timeline projection
+    │   └── widgets/      Textual timeline, ledger, inspector, filters, and footer
+    └── tree.py         compatibility facade re-exporting tree render modules
 ```
-
-Roughly 31,200 lines, 77 test modules (~39,500 test lines).
 
 The modular refactor decomposed the daemon's monolithic observer, methods,
 store, and server into packages (`observation/`, `rpc/`, `persistence/`,
-`runtime/`, `spawning/`, `worktrees/`), split the harness contracts and
-transcript into sub-packages, moved MCP tool bodies into `toolsets/`, and broke
-the régie into `controllers/`, `render/`, and `widgets/`. The old module paths
-survive as compatibility facades that re-export the new packages, so existing
-imports continue to work unchanged.
+`runtime/`, `spawning/`, `worktrees/`, `trajectory/`), split the harness
+contracts and transcript into sub-packages, moved MCP tool bodies into
+`toolsets/`, and broke the régie into controllers, projections, render helpers,
+and widgets. Compatibility facades remain only for established import paths.
 
 ---
 

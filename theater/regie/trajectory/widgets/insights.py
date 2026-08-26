@@ -161,10 +161,7 @@ class InsightsPanel(DataTable[Text | str]):
                 cells: list[Text | str] = [Text(model.empty_message, style="dim")]
                 cells.extend("" for _ in model.columns[1:])
                 self.add_row(
-                    *(
-                        bottom_aligned_cell(cell, TRAJECTORY_AUXILIARY_ROW_HEIGHT)
-                        for cell in cells
-                    ),
+                    *(bottom_aligned_cell(cell, TRAJECTORY_AUXILIARY_ROW_HEIGHT) for cell in cells),
                     key=_EMPTY_KEY,
                     height=TRAJECTORY_AUXILIARY_ROW_HEIGHT,
                 )
