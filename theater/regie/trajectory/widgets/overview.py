@@ -36,9 +36,7 @@ class OverviewMetaScroll(HorizontalScroll):
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
         if self.max_scroll_x:
             event.stop()
-            self.scroll_relative(
-                x=-self.app.scroll_sensitivity_x, animate=False, immediate=True
-            )
+            self.scroll_relative(x=-self.app.scroll_sensitivity_x, animate=False, immediate=True)
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
         if self.max_scroll_x:

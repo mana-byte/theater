@@ -53,9 +53,7 @@ class AgentTelemetry:
             else None
         )
         self._spans = (
-            AgentSpanEmitter(signal_bridge, self._state)
-            if signal_bridge is not None
-            else None
+            AgentSpanEmitter(signal_bridge, self._state) if signal_bridge is not None else None
         )
 
     def record_batch(
@@ -77,14 +75,9 @@ class AgentTelemetry:
         state = self._state.for_participant(participant_id, source_epoch)
         harness = normalize_label(participant.harness)
         records = project_batch(batch, participant_id=participant_id, source_epoch=source_epoch)
-        self._state.merge_records(state, records)
-        projection_records = self._state.records_for_projection(state)
-        current_records = tuple(
-            record
-            for record in records
-            if (retained := state.records.get(record.record_id)) is not None
-            and retained.revision == record.revision
-        )
+        accepted = self._state.merge_records(state, records)
+        current_records = self._state.current_records(state, records, accepted)
+        projection_records = self._state.records_for_projection(state, current_records)
         current_ids = {record.record_id for record in current_records}
         requests = tuple(
             request

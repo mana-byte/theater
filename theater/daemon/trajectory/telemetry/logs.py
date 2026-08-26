@@ -57,9 +57,7 @@ class AgentLogEmitter:
                 self._state.remember_log(state, record.record_id, record.revision)
 
 
-def _attributes(
-    record: TrajectoryRecord, participant: Any, harness: str
-) -> dict[str, Scalar]:
+def _attributes(record: TrajectoryRecord, participant: Any, harness: str) -> dict[str, Scalar]:
     attributes: dict[str, Scalar] = {
         "theater.agent.trajectory.schema.version": 1,
         "theater.agent.participant.id": record.participant_id,
@@ -95,9 +93,7 @@ def _attributes(
     return attributes
 
 
-def _timing_attributes(
-    attributes: dict[str, Scalar], timing: Timing | None
-) -> None:
+def _timing_attributes(attributes: dict[str, Scalar], timing: Timing | None) -> None:
     if timing is None:
         return
     attributes["theater.agent.timing.provenance"] = timing.provenance.value
@@ -107,9 +103,7 @@ def _timing_attributes(
     optional(attributes, "theater.agent.timing.duration_ms", timing.duration_ms)
 
 
-def _usage_attributes(
-    attributes: dict[str, Scalar], record: TrajectoryRecord
-) -> None:
+def _usage_attributes(attributes: dict[str, Scalar], record: TrajectoryRecord) -> None:
     usage = record.usage
     if usage is None:
         return

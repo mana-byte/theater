@@ -152,9 +152,7 @@ def request_values(
     return LedgerRowValues(
         position=TRAJECTORY_REQUEST_POSITION_GLYPH,
         event=text.event,
-        summary=_summary_value(
-            f"{'  ' * depth}{text.identity} · {text.summary}", request.status
-        ),
+        summary=_summary_value(f"{'  ' * depth}{text.identity} · {text.summary}", request.status),
         duration=text.duration,
         identity=text.identity,
     )

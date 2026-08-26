@@ -187,14 +187,17 @@ def test_completed_span_uses_links_without_parenting() -> None:
         "agent.request", attributes={}, start_time_ns=100, end_time_ns=200
     )
     request_span_context = get_current_span(request_context).get_span_context()
-    assert bridge.emit_span(
-        "agent.tool",
-        attributes={},
-        start_time_ns=300,
-        end_time_ns=400,
-        parent_context=Context(),
-        links=(request_span_context,),
-    ) is not None
+    assert (
+        bridge.emit_span(
+            "agent.tool",
+            attributes={},
+            start_time_ns=300,
+            end_time_ns=400,
+            parent_context=Context(),
+            links=(request_span_context,),
+        )
+        is not None
+    )
 
     request, tool = exporter.get_finished_spans()
     assert tool.parent is None

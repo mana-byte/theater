@@ -120,9 +120,7 @@ class Observer:
             monotonic_fn=self._monotonic,
             config_fn=lambda: self,
             jobs_fn=lambda: self.jobs,
-            telemetry_fn=(
-                agent_telemetry.record_batch if agent_telemetry is not None else None
-            ),
+            telemetry_fn=(agent_telemetry.record_batch if agent_telemetry is not None else None),
         )
 
     # ---- call-time hooks for monkeypatched globals ---------------------

@@ -197,9 +197,7 @@ def _is_terminal_point(record: TrajectoryRecord) -> bool:
         TrajectoryKind.TOOL_RESULT,
         TrajectoryKind.THEATER_RESULT,
         TrajectoryKind.ERROR,
-    } or (
-        record.lane is TrajectoryLane.MODEL and record.status in _TERMINAL_STATUSES
-    )
+    } or (record.lane is TrajectoryLane.MODEL and record.status in _TERMINAL_STATUSES)
 
 
 def _has_timing(timing: Timing | None) -> bool:

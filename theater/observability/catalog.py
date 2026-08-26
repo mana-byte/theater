@@ -129,8 +129,6 @@ def _validate_templates(spec: OperationSpec) -> None:
                 raise ValueError(f"{spec.key}: template field {field_name!r} not declared")
 
 
-# --- Catalog entries (plan v9 section 6.1) ---
-
 _PROC_ATTRS: tuple[AttrMapping, ...] = (
     AttrMapping(source="pid", prose_key="pid", otel_log_key="pid", trace_key="theater.pid"),
 )

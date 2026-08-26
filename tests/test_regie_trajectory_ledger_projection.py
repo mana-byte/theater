@@ -106,9 +106,7 @@ def test_rich_cells_use_the_canonical_values_and_explicit_palette() -> None:
 
     failed = replace(record, status=TrajectoryStatus.ERROR)
     failed_values = record_values(failed, 0, depth=0, hovered=False)
-    failed_cells = record_cells(
-        failed, failed_values, palette, hovered=False, duration_mode=False
-    )
+    failed_cells = record_cells(failed, failed_values, palette, hovered=False, duration_mode=False)
     error_offset = failed_cells["summary"].plain.index("ERROR")
     assert failed_cells["summary"].get_style_at_offset(Console(), error_offset).color == (
         palette.error.color

@@ -74,15 +74,21 @@ class AgentSpanEmitter:
                 for record_id in (*operation.call_record_ids, *operation.result_record_ids)
                 if record_id in by_record_id
             )
+            request_context = (
+                request_contexts.get(operation.request_id)
+                if operation.request_id is not None
+                else None
+            )
+            if request_context is None and operation.request_id is not None:
+                cached_request = self._state.span_context(state, "request", operation.request_id)
+                request_context = cached_request.context if cached_request is not None else None
             context = self._tool_span(
                 state,
                 participant,
                 harness,
                 operation,
                 members,
-                request_contexts.get(operation.request_id)
-                if operation.request_id is not None
-                else None,
+                request_context,
             )
             if context is None:
                 continue
@@ -320,9 +326,7 @@ class AgentSpanEmitter:
             contexts[record_id] = context
 
 
-def _common_attributes(
-    participant: Any, harness: str, source_epoch: str
-) -> dict[str, Scalar]:
+def _common_attributes(participant: Any, harness: str, source_epoch: str) -> dict[str, Scalar]:
     attributes: dict[str, Scalar] = {
         "theater.agent.participant.id": participant.id,
         "theater.agent.harness": harness,
@@ -333,9 +337,7 @@ def _common_attributes(
     return attributes
 
 
-def _timing_attributes(
-    attributes: dict[str, Scalar], timing: Timing | None
-) -> None:
+def _timing_attributes(attributes: dict[str, Scalar], timing: Timing | None) -> None:
     if timing is not None:
         attributes["theater.agent.timing.provenance"] = timing.provenance.value
 

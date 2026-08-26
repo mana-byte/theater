@@ -626,6 +626,50 @@ def test_completed_keyed_call_waits_for_result_before_final_tool_signals() -> No
     assert signals.spans[0]["end_time_ns"] == 12_000_000_000
 
 
+def test_split_request_and_tool_batches_keep_request_span_link() -> None:
+    signals = _SignalBridge()
+    telemetry = AgentTelemetry(
+        _Store(_participant()),
+        signal_bridge=signals,
+        metrics_enabled=False,
+        spans_enabled=True,
+    )
+    request = _fact(
+        "request",
+        request_id="request-id",
+        timing=Timing(start=1, end=4, duration_ms=3_000, provenance=TimingProvenance.SOURCE),
+    )
+    call = _fact(
+        "call",
+        kind=TrajectoryKind.TOOL_CALL,
+        lane=TrajectoryLane.TOOLS,
+        status=TrajectoryStatus.RUNNING,
+        request_id="request-id",
+        call_id="call-id",
+        timing=Timing(start=2, provenance=TimingProvenance.SOURCE),
+        details=(DetailField.from_text("tool", "shell"),),
+        raw_index=2,
+    )
+    result = _fact(
+        "result",
+        kind=TrajectoryKind.TOOL_RESULT,
+        lane=TrajectoryLane.TOOLS,
+        request_id="request-id",
+        call_id="call-id",
+        timing=Timing(end=3, provenance=TimingProvenance.SOURCE),
+        raw_index=3,
+    )
+
+    telemetry.record_batch("agent", Batch(trajectory=(request,)), ())
+    telemetry.record_batch("agent", Batch(trajectory=(call,)), ())
+    telemetry.record_batch("agent", Batch(trajectory=(result,)), ())
+
+    request_span, tool_span = signals.spans
+    request_context = get_current_span(request_span["context"]).get_span_context()
+    assert tool_span["links"][0].trace_id == request_context.trace_id
+    assert tool_span["links"][0].span_id == request_context.span_id
+
+
 def test_unrelated_batch_does_not_replay_evicted_historical_signals(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -659,6 +703,43 @@ def test_unrelated_batch_does_not_replay_evicted_historical_signals(
     assert len(signals.spans) == 3
     names = [item[0].name for item in metrics.observations]
     assert names.count("theater.agent.requests") == 3
+
+
+def test_snapshot_bound_does_not_drop_current_batch_signals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(telemetry_state, "AGENT_TELEMETRY_RECORD_SNAPSHOT_LIMIT", 2)
+    metrics = _MetricBridge()
+    signals = _SignalBridge()
+    telemetry = AgentTelemetry(
+        _Store(_participant()),
+        metrics,
+        signals,
+        logs_enabled=True,
+        spans_enabled=True,
+    )
+    records = tuple(
+        _fact(
+            f"request-{index}",
+            timing=Timing(
+                start=float(index),
+                end=float(index + 1),
+                duration_ms=1_000,
+                provenance=TimingProvenance.SOURCE,
+            ),
+            raw_index=index,
+        )
+        for index in range(3)
+    )
+
+    telemetry.record_batch("agent", Batch(trajectory=records), ())
+
+    assert len(signals.logs) == 3
+    assert len(signals.spans) == 3
+    names = [item[0].name for item in metrics.observations]
+    assert names.count("theater.agent.requests") == 3
+    state = next(iter(telemetry._state._participants.values()))
+    assert len(state.records) == 2
 
 
 def test_cached_span_context_correlates_retries_and_higher_revisions() -> None:

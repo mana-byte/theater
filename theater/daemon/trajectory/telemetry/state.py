@@ -208,19 +208,40 @@ class AgentTelemetryState:
         return tuple(accepted)
 
     @staticmethod
-    def records_for_projection(state: ParticipantEmissionState) -> tuple[TrajectoryRecord, ...]:
-        """Rehydrate only the metadata required by pure request and tool projections."""
-        return tuple(snapshot.to_record() for snapshot in state.records.values())
+    def current_records(
+        state: ParticipantEmissionState,
+        records: tuple[TrajectoryRecord, ...],
+        accepted: tuple[TrajectoryRecord, ...],
+    ) -> tuple[TrajectoryRecord, ...]:
+        """Return each current highest revision, including records evicted within this batch."""
+        accepted_by_id = {record.record_id: record for record in accepted}
+        current: dict[str, TrajectoryRecord] = {}
+        for record in records:
+            retained = state.records.get(record.record_id)
+            accepted_record = accepted_by_id.get(record.record_id)
+            revisions = tuple(
+                candidate.revision
+                for candidate in (retained, accepted_record)
+                if candidate is not None
+            )
+            if revisions and record.revision == max(revisions):
+                current[record.record_id] = record
+        return tuple(current.values())
+
+    @staticmethod
+    def records_for_projection(
+        state: ParticipantEmissionState,
+        current: tuple[TrajectoryRecord, ...] = (),
+    ) -> tuple[TrajectoryRecord, ...]:
+        """Combine bounded retained metadata with the complete current input batch."""
+        records = {snapshot.record_id: snapshot.to_record() for snapshot in state.records.values()}
+        records.update((record.record_id, record) for record in current)
+        return tuple(records.values())
 
     @staticmethod
     def needs_log(state: ParticipantEmissionState, record: TrajectoryRecord) -> bool:
-        """Whether this record's current retained revision has not logged successfully."""
-        current = state.records.get(record.record_id)
-        return (
-            current is not None
-            and current.revision == record.revision
-            and (state.log_revisions.get(record.record_id, -1) < record.revision)
-        )
+        """Whether this already-validated current revision has not logged successfully."""
+        return state.log_revisions.get(record.record_id, -1) < record.revision
 
     @staticmethod
     def remember_log(state: ParticipantEmissionState, record_id: str, revision: int) -> None:
