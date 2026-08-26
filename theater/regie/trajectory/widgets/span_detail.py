@@ -242,7 +242,7 @@ class SpanDetailPanel(Vertical):
         finally:
             self._syncing_tabs = False
 
-    def _render_content(self) -> None:
+    def _render_content(self, scroll_y: float | None = None) -> None:
         if not self.is_mounted:
             return
         self.query_one("#trajectory-span-detail-title", Label).update(self._title())
@@ -260,7 +260,10 @@ class SpanDetailPanel(Vertical):
         log = self.query_one(f"#{self._log_id(self._details.tab)}", RichLog)
         log.clear()
         log.write(self._details.content, scroll_end=False)
-        log.scroll_home(animate=False)
+        if scroll_y is None:
+            log.scroll_home(animate=False)
+        else:
+            log.scroll_to(y=scroll_y, animate=False, force=True)
 
     def set_span(
         self,
@@ -278,13 +281,24 @@ class SpanDetailPanel(Vertical):
             and tab is self._details.tab
         ):
             return self.tab
+        preserve_scroll = (
+            self._record is not None
+            and self._record.record_id == record.record_id
+            and self._details is not None
+            and tab is self._details.tab
+        )
+        scroll_y = (
+            float(self.query_one(f"#{self._log_id(self._details.tab)}", RichLog).scroll_y)
+            if preserve_scroll and self.is_mounted and self._details is not None
+            else None
+        )
         self._record = record
         self._tool = tool
         self._request = request
         self._details = self._build_details(tab)
-        self._render_content()
+        self._render_content(scroll_y)
         if self.is_mounted:
-            self.call_after_refresh(self._render_content)
+            self.call_after_refresh(self._render_content, scroll_y)
         return self.tab
 
     def set_tab(self, tab: InspectorTab) -> InspectorTab:

@@ -1028,6 +1028,43 @@ async def test_span_detail_tab_and_content_update_without_rebuilding_ledger(monk
         assert "output: updated" in panel.copy_text
 
 
+async def test_span_detail_preserves_scroll_during_live_request_updates() -> None:
+    output = "\n".join(f"line {index}" for index in range(120))
+    first = record(
+        "r1",
+        request_id="request-1",
+        details=[
+            {
+                "name": "output",
+                "format": "text",
+                "value": {"text": output, "omitted_bytes": 0},
+            }
+        ],
+    )
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        view = await populate(app, [first])
+        view._open_details("r1")
+        await pilot.pause()
+        panel = view.query_one(SpanDetailPanel)
+        log = panel.query_one("#trajectory-span-detail-content-summary", RichLog)
+        log.scroll_to(y=20, animate=False, force=True)
+        await pilot.pause()
+        scroll_y = float(log.scroll_y)
+
+        view.state.upsert([record("r2", index=2, request_id="request-1")])
+        view._refresh()
+        await pilot.pause()
+
+        assert scroll_y > 0
+        assert float(log.scroll_y) == scroll_y
+        assert panel.record_id == "r1"
+
+        view._open_details("r2")
+        await pilot.pause()
+        assert float(log.scroll_y) == 0
+
+
 @pytest.mark.asyncio
 async def test_filter_cursor_is_styled_and_scrolled_into_view() -> None:
     class FilterHost(App):
