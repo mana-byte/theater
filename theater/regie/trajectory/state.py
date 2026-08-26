@@ -413,29 +413,6 @@ class ParticipantTrajectoryState:
         self.selected_id = record_id
         return True
 
-    def move_selection(self, delta: int, visible_ids: Sequence[str] | None = None) -> str | None:
-        ids = (
-            list(visible_ids)
-            if visible_ids is not None
-            else [record.record_id for record in self.display_records]
-        )
-        if not ids:
-            self.selected_id = None
-            return None
-        current = (
-            ids.index(self.selected_id)
-            if self.selected_id in ids
-            else (len(ids) - 1 if delta > 0 else 0)
-        )
-        target = max(0, min(len(ids) - 1, current + delta))
-        self.selected_id = ids[target]
-        if target == len(ids) - 1:
-            self.follow_tail = True
-            self.new_count = 0
-        else:
-            self.pause_follow()
-        return self.selected_id
-
     def reset_ui(self) -> None:
         """Reset only this participant's in-memory presentation state."""
         resync_pending = self.retry_kind == "resync"
