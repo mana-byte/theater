@@ -24,9 +24,6 @@ from theater.regie.trajectory.constants import (
     TRAJECTORY_HORIZONTAL_PADDING,
 )
 from theater.regie.trajectory.controller import TrajectoryController
-from theater.regie.trajectory.details import (
-    active_detail_tab,
-)
 from theater.regie.trajectory.diagnostic_views import ordering_for_projection
 from theater.regie.trajectory.enums import (
     INSIGHT_VIEWS,
@@ -53,6 +50,7 @@ from theater.regie.trajectory.insights import (
     InsightHighlighted,
     InsightsPanel,
 )
+from theater.regie.trajectory.inspection.project import active_detail_tab, detail_text
 from theater.regie.trajectory.ledger import (
     Ledger,
     LedgerOlderClicked,
@@ -63,21 +61,21 @@ from theater.regie.trajectory.ledger import (
 from theater.regie.trajectory.ordering import TrajectoryOrdering, build_ordering
 from theater.regie.trajectory.overview_strip import TrajectoryOverviewStrip
 from theater.regie.trajectory.pagination import paginate_search_result
-from theater.regie.trajectory.render import detail_text, sanitize_text
+from theater.regie.trajectory.render import sanitize_text
 from theater.regie.trajectory.search import FilterCounts, SearchCache, SearchResult, search_records
-from theater.regie.trajectory.span_detail import (
-    SpanDetailClosed,
-    SpanDetailPanel,
-    SpanDetailParticipantLinkClicked,
-    SpanDetailRecordLinkClicked,
-    SpanDetailTabChanged,
-)
 from theater.regie.trajectory.state import ParticipantTrajectoryState, TrajectoryStateStore
 from theater.regie.trajectory.timeline import (
     Timeline,
     TimelineScrolled,
     TimelineSpanClicked,
     TimelineSpanHovered,
+)
+from theater.regie.trajectory.widgets.span_detail import (
+    SpanDetailClosed,
+    SpanDetailPanel,
+    SpanDetailParticipantLinkClicked,
+    SpanDetailRecordLinkClicked,
+    SpanDetailTabChanged,
 )
 from theater.trajectory import (
     ParticipantLink,

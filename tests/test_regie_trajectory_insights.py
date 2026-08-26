@@ -16,8 +16,8 @@ from theater.regie.trajectory.constants import (
 from theater.regie.trajectory.enums import DiagnosticView, FocusRegion
 from theater.regie.trajectory.insights import InsightsPanel
 from theater.regie.trajectory.ledger import Ledger
-from theater.regie.trajectory.span_detail import SpanDetailPanel
 from theater.regie.trajectory.view import TrajectoryView
+from theater.regie.trajectory.widgets.span_detail import SpanDetailPanel
 from theater.trajectory import (
     ContentFormat,
     CostProvenance,

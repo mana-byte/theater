@@ -12,21 +12,21 @@ from theater.regie.trajectory.constants import (
     TOOL_ROW_SUMMARY_MAX_CHARS,
     TRAJECTORY_DETAIL_RECORD_MAX_BYTES,
 )
-from theater.regie.trajectory.details import (
-    DETAIL_RECORD_TARGET_META,
-    build_tool_span_details,
-    tool_detail_text,
-)
 from theater.regie.trajectory.enums import InspectorTab
 from theater.regie.trajectory.footer import TrajectoryFooter
+from theater.regie.trajectory.inspection.links import DETAIL_RECORD_TARGET_META
+from theater.regie.trajectory.inspection.styled import (
+    build_tool_span_details,
+)
+from theater.regie.trajectory.inspection.tools import tool_detail_text
 from theater.regie.trajectory.ledger import Ledger
 from theater.regie.trajectory.pagination import paginate_search_result
 from theater.regie.trajectory.request_rows import RequestIndex
 from theater.regie.trajectory.search import search_records
-from theater.regie.trajectory.span_detail import SpanDetailPanel
 from theater.regie.trajectory.state import TrajectoryStateStore
 from theater.regie.trajectory.tool_rows import build_tool_index, tool_row_text
 from theater.regie.trajectory.view import TrajectoryView
+from theater.regie.trajectory.widgets.span_detail import SpanDetailPanel
 from theater.trajectory import (
     ContentFormat,
     ContentPreview,

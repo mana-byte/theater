@@ -12,17 +12,19 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Button, Label, RichLog, TabbedContent, TabPane
 
-from theater.regie.trajectory.details import (
+from theater.regie.trajectory.enums import InspectorTab
+from theater.regie.trajectory.inspection.links import (
     DETAIL_PARTICIPANT_EXACT_META,
     DETAIL_PARTICIPANT_META,
     DETAIL_PARTICIPANT_UNRESOLVED_META,
     DETAIL_RECORD_TARGET_META,
+    participant_link_from_meta,
+)
+from theater.regie.trajectory.inspection.styled import (
     SpanDetails,
     build_span_details,
     build_tool_span_details,
-    participant_link_from_meta,
 )
-from theater.regie.trajectory.enums import InspectorTab
 from theater.regie.trajectory.render import format_duration, sanitize_text
 from theater.trajectory import ParticipantLink, TrajectoryRecord, TrajectoryRequest
 from theater.trajectory.tools import TrajectoryToolOperation
@@ -43,13 +45,7 @@ class SpanDetailTabChanged(Message):
 class SpanDetailParticipantLinkClicked(Message):
     """A participant link in the detail content was activated."""
 
-    def __init__(
-        self,
-        link: ParticipantLink,
-        *,
-        exact: bool,
-        unresolved: bool,
-    ) -> None:
+    def __init__(self, link: ParticipantLink, *, exact: bool, unresolved: bool) -> None:
         super().__init__()
         self.link = link
         self.participant_id = link.participant_id
@@ -170,12 +166,7 @@ class SpanDetailPanel(Vertical):
         with TabbedContent(id="trajectory-span-detail-tabs"):
             for tab in InspectorTab:
                 with TabPane(tab.value.replace("_", " ").title(), id=self._pane_id(tab)):
-                    yield RichLog(
-                        id=self._log_id(tab),
-                        wrap=True,
-                        markup=False,
-                        highlight=False,
-                    )
+                    yield RichLog(id=self._log_id(tab), wrap=True, markup=False, highlight=False)
 
     @property
     def record_id(self) -> str | None:
@@ -198,12 +189,7 @@ class SpanDetailPanel(Vertical):
         if self._tool is not None:
             return build_tool_span_details(self._tool, tab, accent_style=accent)
         if self._record is not None:
-            return build_span_details(
-                self._record,
-                tab,
-                accent_style=accent,
-                request=self._request,
-            )
+            return build_span_details(self._record, tab, accent_style=accent, request=self._request)
         return None
 
     def _title(self) -> Text:
@@ -299,8 +285,7 @@ class SpanDetailPanel(Vertical):
         if not self.is_mounted or self._details is None:
             return
         self.query_one(f"#{self._log_id(self._details.tab)}", RichLog).scroll_relative(
-            y=delta,
-            animate=False,
+            y=delta, animate=False
         )
 
     def on_tabbed_content_tab_activated(self, message: TabbedContent.TabActivated) -> None:
@@ -342,9 +327,7 @@ class SpanDetailPanel(Vertical):
             event.stop()
             self.post_message(
                 SpanDetailParticipantLinkClicked(
-                    ParticipantLink(participant_id, "related"),
-                    exact=False,
-                    unresolved=False,
+                    ParticipantLink(participant_id, "related"), exact=False, unresolved=False
                 )
             )
             return

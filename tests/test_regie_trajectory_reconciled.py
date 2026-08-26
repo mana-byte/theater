@@ -25,13 +25,12 @@ from theater.regie.trajectory.constants import (
     TIMELINE_TURN_BOUNDARY_GLYPH,
     TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS,
 )
-from theater.regie.trajectory.details import (
-    DETAIL_PARTICIPANT_META,
-    build_span_details,
-)
 from theater.regie.trajectory.enums import FilterDimension, InspectorTab, OrderMode
 from theater.regie.trajectory.filter_panel import FilterPanel
 from theater.regie.trajectory.hover_card import TimelineHoverCard
+from theater.regie.trajectory.inspection.links import DETAIL_PARTICIPANT_META
+from theater.regie.trajectory.inspection.project import detail_text, tabs_for_record
+from theater.regie.trajectory.inspection.styled import build_span_details
 from theater.regie.trajectory.ledger import (
     Ledger,
     LedgerOlderClicked,
@@ -41,18 +40,12 @@ from theater.regie.trajectory.ledger import (
 )
 from theater.regie.trajectory.models import decode_delta, decode_page
 from theater.regie.trajectory.ordering import build_ordering
-from theater.regie.trajectory.render import (
-    detail_text,
-    record_line,
-    sanitize_text,
-    tabs_for_record,
-    tooltip_text,
-)
+from theater.regie.trajectory.render import record_line, sanitize_text, tooltip_text
 from theater.regie.trajectory.search import FilterCounts, search_records
-from theater.regie.trajectory.span_detail import SpanDetailPanel
 from theater.regie.trajectory.timeline import Timeline, TimelineSpanClicked, TimelineSpanHovered
 from theater.regie.trajectory.timeline_layout import build_timeline_layout
 from theater.regie.trajectory.view import TrajectoryParticipantSelected, TrajectoryView
+from theater.regie.trajectory.widgets.span_detail import SpanDetailPanel
 from theater.trajectory import (
     GroupKind,
     PanelState,

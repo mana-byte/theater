@@ -1,4 +1,4 @@
-"""Bounded presentation values for request, failure, and retry inspectors."""
+"""Bounded presentation values for request, failure, retry, and tool inspectors."""
 
 from __future__ import annotations
 

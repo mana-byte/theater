@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from textual.app import App, ComposeResult
 
-from theater.regie.trajectory.details import (
+from theater.regie.trajectory.enums import DiagnosticView, InspectorTab
+from theater.regie.trajectory.inspection.links import (
     DETAIL_PARTICIPANT_CORRELATION_KEY_META,
     DETAIL_PARTICIPANT_CORRELATION_TYPE_META,
     DETAIL_PARTICIPANT_DIRECTION_META,
@@ -11,20 +12,19 @@ from theater.regie.trajectory.details import (
     DETAIL_PARTICIPANT_RELATION_META,
     DETAIL_PARTICIPANT_TARGET_META,
     DETAIL_PARTICIPANT_UNRESOLVED_META,
-    build_span_details,
     participant_link_from_meta,
 )
-from theater.regie.trajectory.enums import DiagnosticView, InspectorTab
+from theater.regie.trajectory.inspection.styled import build_span_details
 from theater.regie.trajectory.navigation import (
     TrajectoryNavigationHistory,
     TrajectoryNavigationTarget,
 )
-from theater.regie.trajectory.span_detail import SpanDetailParticipantLinkClicked
 from theater.regie.trajectory.view import (
     TrajectoryBackRequested,
     TrajectoryParticipantSelected,
     TrajectoryView,
 )
+from theater.regie.trajectory.widgets.span_detail import SpanDetailParticipantLinkClicked
 from theater.trajectory import (
     PanelState,
     PanelStateInfo,
