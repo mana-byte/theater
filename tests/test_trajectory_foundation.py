@@ -14,6 +14,8 @@ from theater.constants.trajectory import (
     TRAJECTORY_IDENTIFIER_MAX_BYTES,
     TRAJECTORY_MAX_COVERAGE_GAPS,
     TRAJECTORY_MAX_DETAILS_PER_RECORD,
+    TRAJECTORY_MAX_GROUP_CHILDREN,
+    TRAJECTORY_MAX_GROUP_RECORD_IDS,
     TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES,
     TRAJECTORY_TRANSCRIPT_HISTORY_WINDOW_BYTES,
 )
@@ -370,6 +372,129 @@ def test_mixed_stream_grouping_preserves_transcript_turns() -> None:
     assert [group.kind for group in groups] == [GroupKind.TURN, GroupKind.BETWEEN_TURNS]
     assert groups[0].children[0].record_ids == ("step",)
     assert groups[1].record_ids == ("theater",)
+
+
+def test_grouping_chunks_turns_larger_than_the_wire_group_bounds() -> None:
+    direct = tuple(
+        make_record(f"direct-{index}", raw_index=index, turn_id="large-turn")
+        for index in range(TRAJECTORY_MAX_GROUP_RECORD_IDS * 2 + 1)
+    )
+    direct_groups = group_records(direct)
+
+    assert [len(group.record_ids) for group in direct_groups] == [
+        TRAJECTORY_MAX_GROUP_RECORD_IDS,
+        TRAJECTORY_MAX_GROUP_RECORD_IDS,
+        1,
+    ]
+    assert tuple(record_id for group in direct_groups for record_id in group.record_ids) == tuple(
+        record.record_id for record in direct
+    )
+    assert len({group.group_id for group in direct_groups}) == len(direct_groups)
+
+    stepped = tuple(
+        make_record(
+            f"step-{index}",
+            raw_index=index,
+            turn_id="large-turn",
+            step_id="large-step",
+        )
+        for index in range(TRAJECTORY_MAX_GROUP_RECORD_IDS * 2 + 1)
+    )
+    step_groups = tuple(child for group in group_records(stepped) for child in group.children)
+
+    assert [len(group.record_ids) for group in step_groups] == [
+        TRAJECTORY_MAX_GROUP_RECORD_IDS,
+        TRAJECTORY_MAX_GROUP_RECORD_IDS,
+        1,
+    ]
+    assert tuple(record_id for group in step_groups for record_id in group.record_ids) == tuple(
+        record.record_id for record in stepped
+    )
+    assert len({group.group_id for group in step_groups}) == len(step_groups)
+
+    at_limit = direct[:TRAJECTORY_MAX_GROUP_RECORD_IDS]
+    assert len(group_records(at_limit)) == 1
+
+
+def test_grouping_chunks_turn_records_in_source_order() -> None:
+    call = make_record(
+        "call",
+        raw_index=0,
+        turn_id="large-turn",
+        call_id="call-1",
+    )
+    linked = make_record("linked", raw_index=1, parent_call_id="call-1")
+    bulk = tuple(
+        make_record(f"direct-{index}", raw_index=index + 2, turn_id="large-turn")
+        for index in range(TRAJECTORY_MAX_GROUP_RECORD_IDS)
+    )
+    records = (call, linked, *bulk)
+
+    groups = group_records(records)
+
+    assert tuple(record_id for group in groups for record_id in group.record_ids) == tuple(
+        record.record_id for record in records
+    )
+
+
+def test_grouping_chunks_mixed_turn_units_at_each_bound() -> None:
+    records = tuple(
+        record
+        for index in range(TRAJECTORY_MAX_GROUP_RECORD_IDS + 1)
+        for record in (
+            make_record(f"direct-{index}", raw_index=index * 2, turn_id="large-turn"),
+            make_record(
+                f"step-{index}",
+                raw_index=index * 2 + 1,
+                turn_id="large-turn",
+                step_id=f"step-{index}",
+            ),
+        )
+    )
+
+    groups = group_records(records)
+
+    assert [(len(group.record_ids), len(group.children)) for group in groups] == [
+        (TRAJECTORY_MAX_GROUP_RECORD_IDS, TRAJECTORY_MAX_GROUP_CHILDREN),
+        (1, 1),
+    ]
+
+
+def test_grouping_chunks_turns_with_too_many_step_groups() -> None:
+    records = tuple(
+        make_record(
+            f"record-{index}",
+            raw_index=index,
+            turn_id="large-turn",
+            step_id=f"step-{index}",
+        )
+        for index in range(TRAJECTORY_MAX_GROUP_CHILDREN + 1)
+    )
+
+    groups = group_records(records)
+
+    assert [len(group.children) for group in groups] == [TRAJECTORY_MAX_GROUP_CHILDREN, 1]
+    assert len({group.group_id for group in groups}) == len(groups)
+
+
+def test_grouping_chunks_large_between_turn_buckets() -> None:
+    records = tuple(
+        make_record(f"between-{index}", raw_index=index)
+        for index in range(TRAJECTORY_MAX_GROUP_RECORD_IDS * 2 + 1)
+    )
+
+    groups = group_records(records)
+
+    assert [len(group.record_ids) for group in groups] == [
+        TRAJECTORY_MAX_GROUP_RECORD_IDS,
+        TRAJECTORY_MAX_GROUP_RECORD_IDS,
+        1,
+    ]
+    assert tuple(record_id for group in groups for record_id in group.record_ids) == tuple(
+        record.record_id for record in records
+    )
+    assert len({group.group_id for group in groups}) == len(groups)
+    assert len(group_records(records[:TRAJECTORY_MAX_GROUP_RECORD_IDS])) == 1
 
 
 def test_exact_call_link_positions_cross_stream_record() -> None:

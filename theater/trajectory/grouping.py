@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from hashlib import sha256
 from json import dumps
 
-from theater.constants.trajectory import TRAJECTORY_IDENTIFIER_MAX_BYTES
+from theater.constants.trajectory import (
+    TRAJECTORY_IDENTIFIER_MAX_BYTES,
+    TRAJECTORY_MAX_GROUP_CHILDREN,
+    TRAJECTORY_MAX_GROUP_RECORD_IDS,
+)
 from theater.trajectory.enums import GroupKind, TimingProvenance
 from theater.trajectory.page import TrajectoryGroup
 from theater.trajectory.records import TrajectoryRecord
@@ -76,6 +80,7 @@ def group_records(records: Iterable[TrajectoryRecord]) -> tuple[TrajectoryGroup,
     ordered = deterministic_record_order(records)
     if not ordered:
         return ()
+    positions = {record.record_id: position for position, record in enumerate(ordered)}
     turn_entries: dict[tuple[str, str], list[TrajectoryRecord]] = {}
     turn_order: list[tuple[str, str]] = []
     turn_first: dict[tuple[str, str], int] = {}
@@ -116,11 +121,9 @@ def group_records(records: Iterable[TrajectoryRecord]) -> tuple[TrajectoryGroup,
     groups: list[tuple[float, TrajectoryGroup]] = []
     for turn_key in turn_order:
         turn_records = turn_entries[turn_key]
-        groups.append(
-            (
-                float(turn_first[turn_key]),
-                _turn_group(turn_key, turn_records, record_step),
-            )
+        groups.extend(
+            (float(turn_first[turn_key]), group)
+            for group in _turn_groups(turn_key, turn_records, record_step, positions)
         )
 
     between_groups = _between_groups(unpositioned, turn_order, turn_entries, turn_first)
@@ -141,24 +144,60 @@ def _ensure_turn(
         first[key] = position
 
 
-def _turn_group(
+def _turn_groups(
     turn_key: tuple[str, str],
     records: Iterable[TrajectoryRecord],
     steps: dict[str, str | None],
-) -> TrajectoryGroup:
+    positions: Mapping[str, int],
+) -> tuple[TrajectoryGroup, ...]:
     source_epoch, turn_id = turn_key
-    values = tuple(records)
+    values = tuple(sorted(records, key=lambda record: positions[record.record_id]))
     children = _step_groups(values, turn_key, steps)
-    direct = tuple(
-        record.record_id for record in values if steps.get(record.record_id, record.step_id) is None
+    units: list[tuple[int, int, str | TrajectoryGroup]] = [
+        (positions[record.record_id], 0, record.record_id)
+        for record in values
+        if steps.get(record.record_id, record.step_id) is None
+    ]
+    units.extend(
+        (
+            min(positions[record_id] for record_id in child.record_ids),
+            1,
+            child,
+        )
+        for child in children
     )
-    return TrajectoryGroup(
-        group_id=_bounded_group_id("turn", source_epoch, turn_id),
-        kind=GroupKind.TURN,
-        label=f"Turn {turn_id}",
-        record_ids=direct,
-        children=children,
-        turn_id=turn_id,
+    units.sort(key=lambda item: item[:2])
+
+    parts: list[tuple[tuple[str, ...], tuple[TrajectoryGroup, ...]]] = []
+    direct: list[str] = []
+    nested: list[TrajectoryGroup] = []
+    for _position, _kind, unit in units:
+        full = (isinstance(unit, str) and len(direct) >= TRAJECTORY_MAX_GROUP_RECORD_IDS) or (
+            isinstance(unit, TrajectoryGroup) and len(nested) >= TRAJECTORY_MAX_GROUP_CHILDREN
+        )
+        if full:
+            parts.append((tuple(direct), tuple(nested)))
+            direct = []
+            nested = []
+        if isinstance(unit, str):
+            direct.append(unit)
+        else:
+            nested.append(unit)
+    if direct or nested:
+        parts.append((tuple(direct), tuple(nested)))
+
+    base_id = _bounded_group_id("turn", source_epoch, turn_id)
+    label = f"Turn {turn_id}"
+    return tuple(
+        TrajectoryGroup(
+            group_id=_part_group_id(base_id, "turn-part", index),
+            kind=GroupKind.TURN,
+            label=_part_label(label, index),
+            record_ids=direct_ids,
+            children=child_groups,
+            turn_id=turn_id,
+        )
+        for index, (direct_ids, child_groups) in enumerate(parts)
     )
 
 
@@ -167,6 +206,14 @@ def _bounded_group_id(prefix: str, source_epoch: str, *parts: str) -> str:
     if len(value.encode("utf-8")) <= TRAJECTORY_IDENTIFIER_MAX_BYTES:
         return value
     return f"{prefix}:{sha256(value.encode('utf-8')).hexdigest()}"
+
+
+def _part_group_id(base_id: str, prefix: str, index: int) -> str:
+    return base_id if index == 0 else _bounded_group_id(prefix, base_id, str(index + 1))
+
+
+def _part_label(label: str, index: int) -> str:
+    return label if index == 0 else f"{label} · continued {index + 1}"
 
 
 def _between_groups(
@@ -180,9 +227,10 @@ def _between_groups(
     if not turn_order:
         ordered = _order_between_records(records)
         return [
-            (
-                float(ordered[0][0]),
-                _between_group(ordered, _between_group_id(("unpositioned", 0), turn_order)),
+            (float(ordered[0][0]), group)
+            for group in _between_groups_for(
+                ordered,
+                _between_group_id(("unpositioned", 0), turn_order),
             )
         ]
     intervals = [_turn_interval(turn_entries[key]) for key in turn_order]
@@ -195,25 +243,32 @@ def _between_groups(
     for bucket_key, bucket_values in buckets.items():
         values = _order_between_records(bucket_values)
         group_position = _between_position(bucket_key, values[0][0], turn_order, turn_first)
-        result.append(
-            (
-                group_position,
-                _between_group(values, _between_group_id(bucket_key, turn_order)),
+        result.extend(
+            (group_position, group)
+            for group in _between_groups_for(
+                values,
+                _between_group_id(bucket_key, turn_order),
             )
         )
     return result
 
 
-def _between_group(
+def _between_groups_for(
     records: Iterable[tuple[int, TrajectoryRecord]], group_id: str
-) -> TrajectoryGroup:
+) -> tuple[TrajectoryGroup, ...]:
     values = tuple(record for _position, record in records)
-    return TrajectoryGroup(
-        group_id=group_id,
-        kind=GroupKind.BETWEEN_TURNS,
-        label="Between turns",
-        record_ids=tuple(record.record_id for record in values),
-    )
+    groups: list[TrajectoryGroup] = []
+    for index, start in enumerate(range(0, len(values), TRAJECTORY_MAX_GROUP_RECORD_IDS)):
+        chunk = values[start : start + TRAJECTORY_MAX_GROUP_RECORD_IDS]
+        groups.append(
+            TrajectoryGroup(
+                group_id=_part_group_id(group_id, "between-turns-part", index),
+                kind=GroupKind.BETWEEN_TURNS,
+                label=_part_label("Between turns", index),
+                record_ids=tuple(record.record_id for record in chunk),
+            )
+        )
+    return tuple(groups)
 
 
 def _order_between_records(
@@ -328,17 +383,24 @@ def _step_groups(
             order.append(step_id)
         entries[step_id].append(record)
     source_epoch, turn_id = turn_key
-    return tuple(
-        TrajectoryGroup(
-            group_id=_bounded_group_id("step", source_epoch, turn_id, step_id),
-            kind=GroupKind.STEP,
-            label=f"Step {step_id}",
-            record_ids=tuple(record.record_id for record in entries[step_id]),
-            step_id=step_id,
-            turn_id=turn_id,
-        )
-        for step_id in order
-    )
+    groups: list[TrajectoryGroup] = []
+    for step_id in order:
+        base_id = _bounded_group_id("step", source_epoch, turn_id, step_id)
+        label = f"Step {step_id}"
+        values = entries[step_id]
+        for index, start in enumerate(range(0, len(values), TRAJECTORY_MAX_GROUP_RECORD_IDS)):
+            chunk = values[start : start + TRAJECTORY_MAX_GROUP_RECORD_IDS]
+            groups.append(
+                TrajectoryGroup(
+                    group_id=_part_group_id(base_id, "step-part", index),
+                    kind=GroupKind.STEP,
+                    label=_part_label(label, index),
+                    record_ids=tuple(record.record_id for record in chunk),
+                    step_id=step_id,
+                    turn_id=turn_id,
+                )
+            )
+    return tuple(groups)
 
 
 __all__ = [
