@@ -30,14 +30,14 @@ def test_inactive_calls_do_not_touch_emitters() -> None:
     bridge = SignalBridge(logger, tracer)
     bridge.deactivate()
 
-    bridge.emit_log("agent.event", body={"value": 1}, attributes={"kind": "test"})
+    assert not bridge.emit_log("agent.event", body={"value": 1}, attributes={"kind": "test"})
     assert bridge.emit_span("agent.span", attributes={}) is None
     assert logger.calls == []
     assert tracer.calls == 0
     assert not bridge.active
 
 
-def test_log_forwards_structured_event_and_copies_attributes() -> None:
+def test_log_forwards_structured_event_and_copies_attributes(monkeypatch) -> None:
     from opentelemetry._logs import SeverityNumber
 
     from theater.observability.signals import SignalBridge
@@ -45,7 +45,8 @@ def test_log_forwards_structured_event_and_copies_attributes() -> None:
     logger = _Logger()
     attrs = {"kind": "test"}
     context = object()
-    SignalBridge(logger, object()).emit_log(
+    monkeypatch.setattr("theater.observability.signals.time.time_ns", lambda: 456)
+    assert SignalBridge(logger, object()).emit_log(
         "agent.event",
         body={"message": "hello"},
         attributes=attrs,
@@ -58,6 +59,7 @@ def test_log_forwards_structured_event_and_copies_attributes() -> None:
     assert logger.calls == [
         {
             "timestamp": 123,
+            "observed_timestamp": 456,
             "context": context,
             "severity_number": SeverityNumber.WARN,
             "severity_text": "WARNING",
@@ -71,8 +73,9 @@ def test_log_forwards_structured_event_and_copies_attributes() -> None:
 def test_completed_span_has_timestamps_error_and_parentable_context() -> None:
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExportResult
-    from opentelemetry.trace import get_current_span
+    from opentelemetry.trace import SpanKind, get_current_span
 
+    from theater.observability.catalog import TraceKind
     from theater.observability.signals import SignalBridge
 
     class Exporter:
@@ -98,6 +101,7 @@ def test_completed_span_has_timestamps_error_and_parentable_context() -> None:
         attributes=attributes,
         start_time_ns=100,
         end_time_ns=200,
+        kind=TraceKind.CLIENT,
         error=True,
         error_type="agent.failure",
     )
@@ -111,6 +115,7 @@ def test_completed_span_has_timestamps_error_and_parentable_context() -> None:
     completed = next(span for span in exporter.spans if span.name == "agent.completed")
     child_span = next(span for span in exporter.spans if span.name == "agent.child")
     assert completed.start_time == 100 and completed.end_time == 200
+    assert completed.kind is SpanKind.CLIENT
     assert completed.attributes == {"agent.kind": "delegate", "error.type": "agent.failure"}
     assert completed.status.status_code.name == "ERROR"
     assert child_span.parent is not None

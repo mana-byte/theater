@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping, Sequence
 from typing import Any
+
+from theater.constants.observability import MAX_ERROR_TYPE_LEN
+from theater.observability.catalog import TraceKind
 
 
 class SignalBridge:
@@ -32,27 +36,30 @@ class SignalBridge:
         timestamp_ns: int | None = None,
         severity_text: str = "INFO",
         context: Any = None,
-    ) -> None:
+    ) -> bool:
         if not self._active:
-            return
+            return False
         try:
             from opentelemetry._logs import SeverityNumber
 
+            normalized_severity = severity_text.upper()
             severity_name = {"WARNING": "WARN", "CRITICAL": "FATAL"}.get(
-                severity_text.upper(), severity_text.upper()
+                normalized_severity, normalized_severity
             )
             severity_number = getattr(SeverityNumber, severity_name, SeverityNumber.INFO)
             self._logger.emit(
                 timestamp=timestamp_ns,
+                observed_timestamp=time.time_ns(),
                 context=context,
                 severity_number=severity_number,
-                severity_text=severity_text,
+                severity_text=normalized_severity,
                 body=body,
                 attributes=dict(attributes),
                 event_name=event_name,
             )
         except Exception:
-            return
+            return False
+        return True
 
     def emit_span(
         self,
@@ -63,6 +70,7 @@ class SignalBridge:
         end_time_ns: int | None = None,
         parent_context: Any = None,
         links: Sequence[Any] = (),
+        kind: TraceKind = TraceKind.INTERNAL,
         error: bool = False,
         error_type: str | None = None,
     ) -> Any | None:
@@ -73,10 +81,17 @@ class SignalBridge:
         try:
             from opentelemetry.trace import Link, SpanKind, Status, StatusCode, set_span_in_context
 
+            span_kind = {
+                TraceKind.NONE: SpanKind.INTERNAL,
+                TraceKind.INTERNAL: SpanKind.INTERNAL,
+                TraceKind.CLIENT: SpanKind.CLIENT,
+                TraceKind.SERVER: SpanKind.SERVER,
+            }[kind]
+
             span = self._tracer.start_span(
                 name,
                 context=parent_context,
-                kind=SpanKind.INTERNAL,
+                kind=span_kind,
                 attributes=dict(attributes),
                 links=tuple(Link(link) for link in links),
                 start_time=start_time_ns,
@@ -86,7 +101,7 @@ class SignalBridge:
             if error:
                 span.set_status(Status(StatusCode.ERROR))
             if error_type:
-                span.set_attribute("error.type", error_type)
+                span.set_attribute("error.type", error_type[:MAX_ERROR_TYPE_LEN])
             context = set_span_in_context(span, parent_context)
         except Exception:
             failed = True
