@@ -12,11 +12,13 @@ from theater.constants.observability import (
     AGENT_FAILURES_METRIC,
     AGENT_REQUEST_DURATION_METRIC,
     AGENT_REQUEST_TTFT_METRIC,
+    AGENT_REQUESTS_METRIC,
     AGENT_TELEMETRY_EMITTED_SIGNAL_LIMIT,
     AGENT_TELEMETRY_OTHER_LABEL,
     AGENT_TELEMETRY_PARTICIPANT_STATE_LIMIT,
     AGENT_TELEMETRY_UNKNOWN_LABEL,
     AGENT_TOKENS_METRIC,
+    AGENT_TOOL_CALLS_METRIC,
     AGENT_TOOL_DURATION_METRIC,
 )
 from theater.daemon.trajectory.telemetry import (
@@ -135,6 +137,18 @@ def test_specs_have_exact_unique_schemas() -> None:
             ("harness", "tool", "result", "timing_provenance"),
         ),
         (AGENT_FAILURES_METRIC, MetricKind.COUNTER, "{failure}", ("harness", "category")),
+        (
+            AGENT_REQUESTS_METRIC,
+            MetricKind.COUNTER,
+            "{request}",
+            ("harness", "model", "result"),
+        ),
+        (
+            AGENT_TOOL_CALLS_METRIC,
+            MetricKind.COUNTER,
+            "{tool}",
+            ("harness", "tool", "result"),
+        ),
     ]
     assert AGENT_TELEMETRY_PARTICIPANT_STATE_LIMIT == 128
     assert AGENT_TELEMETRY_EMITTED_SIGNAL_LIMIT == 256

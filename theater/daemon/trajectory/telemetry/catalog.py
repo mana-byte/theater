@@ -10,7 +10,9 @@ from theater.constants.observability import (
     AGENT_FAILURES_METRIC,
     AGENT_REQUEST_DURATION_METRIC,
     AGENT_REQUEST_TTFT_METRIC,
+    AGENT_REQUESTS_METRIC,
     AGENT_TOKENS_METRIC,
+    AGENT_TOOL_CALLS_METRIC,
     AGENT_TOOL_DURATION_METRIC,
 )
 from theater.observability.metrics import MetricKind, MetricSpec
@@ -57,6 +59,20 @@ AGENT_METRIC_SPECS: tuple[MetricSpec, ...] = (
         "{failure}",
         MetricKind.COUNTER,
         ("harness", "category"),
+    ),
+    MetricSpec(
+        AGENT_REQUESTS_METRIC,
+        "Terminal agent model requests.",
+        "{request}",
+        MetricKind.COUNTER,
+        ("harness", "model", "result"),
+    ),
+    MetricSpec(
+        AGENT_TOOL_CALLS_METRIC,
+        "Terminal agent tool operations.",
+        "{tool}",
+        MetricKind.COUNTER,
+        ("harness", "tool", "result"),
     ),
 )
 
