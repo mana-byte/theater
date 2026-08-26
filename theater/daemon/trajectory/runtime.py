@@ -28,6 +28,7 @@ from theater.daemon.trajectory.history import HistoryLoad, load_history
 from theater.daemon.trajectory.history_ingest import apply_history, apply_older_history
 from theater.daemon.trajectory.live_ingest import apply_live
 from theater.daemon.trajectory.merge import is_interaction, is_mutable
+from theater.daemon.trajectory.mutations import TrajectoryMutationHooks
 from theater.daemon.trajectory.panel import initial_panel_state, participant_state
 from theater.daemon.trajectory.stream import CapturedBatch, TrajectoryStream, count_records_before
 from theater.daemon.trajectory.theater_events import ALLOWLISTED_BUS_KINDS
@@ -66,6 +67,7 @@ class TrajectoryRuntime:
         self._closed = False
         self._eviction_listener: Callable[[CacheStream], None] | None = None
         self._bus_listener_registered = False
+        self._mutations = self._mutation_hooks()
         if observer is not None:
             setter = getattr(observer, "set_trajectory_capture", None)
             if callable(setter):
@@ -101,11 +103,7 @@ class TrajectoryRuntime:
                     stream,
                     captured,
                     notify=True,
-                    merge_records=self._merge_records,
-                    add_gap=self._add_gap,
-                    add_boundary=self._add_boundary,
-                    set_panel=self._set_panel,
-                    wake_followers=self.wake_followers,
+                    hooks=self._mutations,
                 )
         except Exception:
             logger.exception("trajectory live capture failed for %s", participant_id)
@@ -149,7 +147,7 @@ class TrajectoryRuntime:
                 self.store,
                 stream.participant.id,
                 stream=stream,
-                add_gap=self._add_gap,
+                add_gap=self._mutations.add_gap,
             )
             self._apply_bus_rows(stream, historical_bus, notify=False)
             stream.bus_before = (
@@ -169,9 +167,7 @@ class TrajectoryRuntime:
                 result,
                 older=True,
                 store=self.store,
-                merge_records=self._merge_records,
-                add_gap=self._add_gap,
-                add_boundary=self._add_boundary,
+                hooks=self._mutations,
             )
             self._set_initial_state(stream, result)
             pending = tuple(stream.pending_live)
@@ -181,11 +177,7 @@ class TrajectoryRuntime:
                     stream,
                     captured,
                     notify=False,
-                    merge_records=self._merge_records,
-                    add_gap=self._add_gap,
-                    add_boundary=self._add_boundary,
-                    set_panel=self._set_panel,
-                    wake_followers=self.wake_followers,
+                    hooks=self._mutations,
                 )
             stream.initialized = True
             self.cache.touch(stream.participant.id)
@@ -216,9 +208,7 @@ class TrajectoryRuntime:
                 result,
                 older=False,
                 store=self.store,
-                merge_records=self._merge_records,
-                add_gap=self._add_gap,
-                add_boundary=self._add_boundary,
+                hooks=self._mutations,
             )
             panel_changed = self._set_initial_state(stream, result, notify=True)
             if gaps_changed and not panel_changed:
@@ -262,9 +252,7 @@ class TrajectoryRuntime:
                 stream,
                 result,
                 source_before=source_before,
-                merge_records=self._merge_records,
-                add_gap=self._add_gap,
-                set_panel=self._set_panel,
+                hooks=self._mutations,
             )
             loaded_records.extend(records)
         if bus_before is not None and needs_more:
@@ -273,7 +261,7 @@ class TrajectoryRuntime:
                 stream.participant.id,
                 before_id=bus_before,
                 stream=stream,
-                add_gap=self._add_gap,
+                add_gap=self._mutations.add_gap,
             )
             records = project_bus_rows(rows, stream.participant.id)
             loaded_records.extend(records)
@@ -379,7 +367,12 @@ class TrajectoryRuntime:
     def _apply_bus_rows(
         self, stream: TrajectoryStream, rows: Iterable[dict], *, notify: bool
     ) -> None:
-        if merge_bus_rows(stream, rows, notify=notify, merge_records=self._merge_records):
+        if merge_bus_rows(
+            stream,
+            rows,
+            notify=notify,
+            merge_records=self._mutations.merge_records,
+        ):
             self.refresh_participant(stream, notify=notify)
             self._replace_panel(
                 stream,
@@ -432,6 +425,15 @@ class TrajectoryRuntime:
             stream,
             PanelStateInfo(state, message, stream.panel_state.participant_state),
             notify=notify,
+        )
+
+    def _mutation_hooks(self) -> TrajectoryMutationHooks:
+        return TrajectoryMutationHooks(
+            merge_records=self._merge_records,
+            add_gap=self._add_gap,
+            add_boundary=self._add_boundary,
+            set_panel=self._set_panel,
+            wake_followers=self.wake_followers,
         )
 
     def _replace_panel(

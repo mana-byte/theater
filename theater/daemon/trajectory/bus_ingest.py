@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 
 from theater.constants.daemon import BUS_PARTICIPANT_PAGE_MAX_LIMIT
+from theater.daemon.trajectory.mutations import AddGap, MergeRecords
 from theater.daemon.trajectory.stream import TrajectoryStream
 from theater.daemon.trajectory.theater_events import ALLOWLISTED_BUS_KINDS, project_bus_row
 from theater.trajectory import TrajectoryRecord
@@ -19,7 +20,7 @@ def merge_bus_rows(
     rows: Iterable[dict],
     *,
     notify: bool,
-    merge_records: Callable[..., object],
+    merge_records: MergeRecords,
 ) -> bool:
     values = tuple(rows)
     records = project_bus_rows(values, stream.participant.id)
@@ -40,7 +41,7 @@ def bus_history(
     *,
     before_id: int | None = None,
     stream: TrajectoryStream | None = None,
-    add_gap: Callable[..., bool] | None = None,
+    add_gap: AddGap | None = None,
 ) -> list[dict]:
     try:
         return store.bus_page_for_participant(
