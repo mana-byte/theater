@@ -1,4 +1,4 @@
-"""Pure derived-state coverage for the Régie trajectory projection."""
+"""Derived-state coverage for the Régie trajectory projection."""
 
 from __future__ import annotations
 

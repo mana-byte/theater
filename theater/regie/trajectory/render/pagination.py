@@ -51,16 +51,15 @@ def paginate_search_result(result: SearchResult, page: int, page_size: int) -> L
     group_ids = {group_id for row_id in page_row_ids for group_id in result.path_for_record(row_id)}
     all_requests = tuple(result.requests.values())
     all_by_record_id = dict(result.request_id_by_row_id)
+    mapped_request_ids = frozenset(all_by_record_id.values())
     ordered_requests = tuple(
-        request
-        for request in all_requests
-        if request.request_id in result.request_id_by_row_id.values()
+        request for request in all_requests if request.request_id in mapped_request_ids
     )
+    known_request_ids = frozenset(request.request_id for request in ordered_requests)
     by_record_id = {
-        record_id: request.request_id
-        for request in ordered_requests
-        for record_id, mapped_request_id in result.request_id_by_row_id.items()
-        if mapped_request_id == request.request_id
+        record_id: request_id
+        for record_id, request_id in all_by_record_id.items()
+        if request_id in known_request_ids
     }
     base_entries = base_request_entries(
         result.entries,

@@ -126,7 +126,8 @@ theater/
     ├── dashboard/      unstaged welcome content and widgets
     ├── render/         layout, glyphs, routing
     ├── widgets/        chrome, leaf, tree, usage breakdown, usage footer
-    ├── trajectory/     controller/state, pure projection, analysis, inspection, render, widgets
+    ├── trajectory/     controller/state, Textual-free projection, analysis, inspection,
+    │                   render, widgets
     ├── app.py          the Textual application (composition surface)
     ├── tree.py         compatibility facade — re-exports render modules
     ├── palette.py      ctrl+p command-palette entries

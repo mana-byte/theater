@@ -1,4 +1,4 @@
-"""Pure derived search, ordering, and paging state for a trajectory view."""
+"""Textual-free search, ordering, and paging state for a trajectory view."""
 
 from __future__ import annotations
 

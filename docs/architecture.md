@@ -664,9 +664,9 @@ snapshot and follow clients; state owns the bounded participant window; the
 Textual-free projection owns derived ordering, search, and pagination caches;
 analysis and inspection build display models; render helpers and widgets draw
 them. `ParticipantTrajectoryState.ledger_page` remains the canonical runtime
-page index, while the projection holds only the corresponding derived page. This
-keeps native parsing in plugins, canonical policy in the daemon, and widget
-mutation at the UI edge.
+page index. Projection refresh writes its clamped index and selection back to
+that state while retaining only the derived page. This keeps native parsing in
+plugins, canonical policy in the daemon, and widget mutation at the UI edge.
 
 ---
 
