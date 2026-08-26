@@ -12,7 +12,8 @@ from theater.constants.trajectory import (
 from theater.daemon.trajectory.cache import RecordChange
 from theater.daemon.trajectory.merge import groups_for_records
 from theater.daemon.trajectory.overview import TrajectoryResponseValues, response_values_for
-from theater.daemon.trajectory.runtime import TrajectoryStream, participant_state
+from theater.daemon.trajectory.panel import participant_state
+from theater.daemon.trajectory.stream import TrajectoryStream
 from theater.trajectory import (
     CoverageGap,
     PanelState,

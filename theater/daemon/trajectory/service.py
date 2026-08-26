@@ -35,7 +35,8 @@ from theater.daemon.trajectory.responses import (
     resync_delta,
     stale_page,
 )
-from theater.daemon.trajectory.runtime import TrajectoryRuntime, TrajectoryStream
+from theater.daemon.trajectory.runtime import TrajectoryRuntime
+from theater.daemon.trajectory.stream import TrajectoryStream
 from theater.daemon.trajectory.theater_events import ALLOWLISTED_BUS_KINDS, project_bus_row
 from theater.models import BadRequest, NotFound, Participant
 from theater.trajectory import (
