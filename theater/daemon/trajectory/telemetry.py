@@ -5,7 +5,9 @@ from __future__ import annotations
 import math
 import unicodedata
 from collections import OrderedDict
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 from theater.constants.observability import (
@@ -41,11 +43,16 @@ from theater.observability.metrics import MetricBridge, MetricKind, MetricSpec
 from theater.pricing import estimate_cost_usd
 from theater.trajectory import (
     CostProvenance,
+    Timing,
     TimingProvenance,
     TrajectoryKind,
     TrajectoryLane,
     TrajectoryRecord,
+    TrajectoryRequest,
     TrajectoryStatus,
+    TrajectoryToolOperation,
+    requests_for_records,
+    tool_operations_for_records,
 )
 
 _TERMINAL_STATUSES = frozenset(
@@ -65,7 +72,6 @@ _FAILURE_STATUSES = frozenset(
         TrajectoryStatus.INTERRUPTED,
     }
 )
-_DIRECT_TIMING_PROVENANCE = frozenset({TimingProvenance.SOURCE, TimingProvenance.OBSERVED})
 _RESULTS = {
     TrajectoryStatus.COMPLETED: AGENT_RESULT_SUCCESS,
     TrajectoryStatus.ERROR: AGENT_RESULT_ERROR,
@@ -119,6 +125,15 @@ AGENT_METRIC_SPECS: tuple[MetricSpec, ...] = (
         ("harness", "category"),
     ),
 )
+_SPECS_BY_NAME: Mapping[str, MetricSpec] = MappingProxyType(
+    {spec.name: spec for spec in AGENT_METRIC_SPECS}
+)
+_REQUEST_DURATION_SPEC = _SPECS_BY_NAME[AGENT_REQUEST_DURATION_METRIC]
+_REQUEST_TTFT_SPEC = _SPECS_BY_NAME[AGENT_REQUEST_TTFT_METRIC]
+_TOKENS_SPEC = _SPECS_BY_NAME[AGENT_TOKENS_METRIC]
+_COST_SPEC = _SPECS_BY_NAME[AGENT_COST_METRIC]
+_TOOL_DURATION_SPEC = _SPECS_BY_NAME[AGENT_TOOL_DURATION_METRIC]
+_FAILURES_SPEC = _SPECS_BY_NAME[AGENT_FAILURES_METRIC]
 
 
 @dataclass(slots=True)
@@ -157,9 +172,9 @@ class AgentTelemetry:
         harness = _label(participant.harness)
         self._record_usage(harness, new_usage_events)
         records = project_batch(batch, participant_id=participant_id, source_epoch=source_epoch)
+        self._record_requests(state, harness, records)
+        self._record_tools(state, harness, records)
         for record in records:
-            self._record_request(state, harness, record)
-            self._record_tool(state, harness, record)
             self._record_failure(state, harness, record)
 
     def discard(self, participant_id: str) -> None:
@@ -192,83 +207,146 @@ class AgentTelemetry:
             for kind, count in counts:
                 if count:
                     self._bridge.observe(
-                        _spec(AGENT_TOKENS_METRIC),
+                        _TOKENS_SPEC,
                         count,
                         {"harness": harness, "model": model, "kind": kind},
                     )
             cost, provenance = _usage_cost(usage)
             if cost is not None:
                 self._bridge.observe(
-                    _spec(AGENT_COST_METRIC),
+                    _COST_SPEC,
                     cost,
                     {"harness": harness, "model": model, "provenance": provenance},
                 )
+
+    def _record_requests(
+        self,
+        state: _ParticipantState,
+        harness: str,
+        records: tuple[TrajectoryRecord, ...],
+    ) -> None:
+        request_records = tuple(
+            record
+            for record in records
+            if record.kind not in {TrajectoryKind.CONTEXT, TrajectoryKind.SYSTEM}
+        )
+        requests = requests_for_records(request_records)
+        associated = {record_id for request in requests for record_id in request.model_record_ids}
+        for request in requests:
+            if request.model_record_ids:
+                self._record_request(state, harness, request)
+        for record in records:
+            if record.record_id not in associated:
+                self._record_fallback_request(state, harness, record)
 
     def _record_request(
         self,
         state: _ParticipantState,
         harness: str,
-        record: TrajectoryRecord,
+        request: TrajectoryRequest,
     ) -> None:
-        if (
-            record.lane is not TrajectoryLane.MODEL
-            or record.kind in {TrajectoryKind.CONTEXT, TrajectoryKind.SYSTEM}
-            or record.status not in _TERMINAL_STATUSES
-            or not _has_direct_timing(record)
-        ):
-            return
-        assert record.timing is not None
-        result = _RESULTS[record.status]
-        model = self._model_label(record.usage.model if record.usage is not None else None)
-        attributes = {
-            "harness": harness,
-            "model": model,
-            "result": result,
-            "timing_provenance": record.timing.provenance.value,
-        }
-        if record.timing.duration_ms is not None:
-            self._observe_record(
-                state,
-                _spec(AGENT_REQUEST_DURATION_METRIC),
-                record,
-                record.timing.duration_ms,
-                attributes,
-            )
-        ttft_ms = record.timing.ttft_ms
-        if ttft_ms is not None:
-            self._observe_record(
-                state,
-                _spec(AGENT_REQUEST_TTFT_METRIC),
-                record,
-                ttft_ms,
-                attributes,
-            )
+        self._record_request_timing(
+            state,
+            harness,
+            request.request_id,
+            request.status,
+            request.timing,
+            request.model,
+        )
 
-    def _record_tool(
+    def _record_fallback_request(
         self,
         state: _ParticipantState,
         harness: str,
         record: TrajectoryRecord,
     ) -> None:
-        if (
-            record.kind not in {TrajectoryKind.TOOL_CALL, TrajectoryKind.TOOL_RESULT}
-            or record.status not in _TERMINAL_STATUSES
-            or not _has_direct_timing(record)
-        ):
+        if record.lane is not TrajectoryLane.MODEL or record.kind in {
+            TrajectoryKind.CONTEXT,
+            TrajectoryKind.SYSTEM,
+        }:
             return
-        assert record.timing is not None
-        if record.timing.duration_ms is None:
-            return
-        self._observe_record(
+        self._record_request_timing(
             state,
-            _spec(AGENT_TOOL_DURATION_METRIC),
-            record,
-            record.timing.duration_ms,
+            harness,
+            record.record_id,
+            record.status,
+            record.timing,
+            record.usage.model if record.usage is not None else None,
+        )
+
+    def _record_request_timing(
+        self,
+        state: _ParticipantState,
+        harness: str,
+        request_id: str,
+        status: TrajectoryStatus,
+        timing: Timing | None,
+        model: str | None,
+    ) -> None:
+        if status not in _TERMINAL_STATUSES or not _has_direct_timing(timing):
+            return
+        assert timing is not None
+        attributes = {
+            "harness": harness,
+            "model": self._model_label(model),
+            "result": _RESULTS[status],
+            "timing_provenance": timing.provenance.value,
+        }
+        if timing.duration_ms is not None:
+            self._observe_signal(
+                state,
+                _REQUEST_DURATION_SPEC,
+                request_id,
+                timing.duration_ms,
+                attributes,
+            )
+        ttft_ms = timing.ttft_ms
+        if ttft_ms is not None:
+            self._observe_signal(
+                state,
+                _REQUEST_TTFT_SPEC,
+                request_id,
+                ttft_ms,
+                attributes,
+            )
+
+    def _record_tools(
+        self,
+        state: _ParticipantState,
+        harness: str,
+        records: tuple[TrajectoryRecord, ...],
+    ) -> None:
+        by_record_id = {record.record_id: record for record in records}
+        for operation in tool_operations_for_records(records):
+            members = tuple(
+                by_record_id[record_id]
+                for record_id in (*operation.call_record_ids, *operation.result_record_ids)
+                if record_id in by_record_id
+            )
+            self._record_tool(state, harness, operation, members)
+
+    def _record_tool(
+        self,
+        state: _ParticipantState,
+        harness: str,
+        operation: TrajectoryToolOperation,
+        members: Sequence[TrajectoryRecord],
+    ) -> None:
+        if operation.status not in _TERMINAL_STATUSES or not _has_direct_timing(operation.timing):
+            return
+        assert operation.timing is not None
+        if operation.timing.duration_ms is None:
+            return
+        self._observe_signal(
+            state,
+            _TOOL_DURATION_SPEC,
+            operation.operation_id,
+            operation.timing.duration_ms,
             {
                 "harness": harness,
-                "tool": self._tool_label(record),
-                "result": _RESULTS[record.status],
-                "timing_provenance": record.timing.provenance.value,
+                "tool": self._tool_label(members),
+                "result": _RESULTS[operation.status],
+                "timing_provenance": operation.timing.provenance.value,
             },
         )
 
@@ -283,10 +361,10 @@ class AgentTelemetry:
         if record.failure is None and record.status not in _FAILURE_STATUSES:
             return
         category = _failure_category(record)
-        self._observe_record(
+        self._observe_signal(
             state,
-            _spec(AGENT_FAILURES_METRIC),
-            record,
+            _FAILURES_SPEC,
+            record.record_id,
             1,
             {"harness": harness, "category": _label(category)},
         )
@@ -298,9 +376,11 @@ class AgentTelemetry:
             AGENT_TELEMETRY_MODEL_CARDINALITY_LIMIT,
         )
 
-    def _tool_label(self, record: TrajectoryRecord) -> str:
-        mcp_tool = _label(getattr(record, "mcp_tool", None))
-        if mcp_tool != AGENT_TELEMETRY_UNKNOWN_LABEL:
+    def _tool_label(self, records: Sequence[TrajectoryRecord]) -> str:
+        for record in reversed(records):
+            mcp_tool = _label(getattr(record, "mcp_tool", None))
+            if mcp_tool == AGENT_TELEMETRY_UNKNOWN_LABEL:
+                continue
             mcp_server = _label(getattr(record, "mcp_server", None))
             value = (
                 f"{mcp_server}/{mcp_tool}"
@@ -312,13 +392,17 @@ class AgentTelemetry:
                 self._tools,
                 AGENT_TELEMETRY_TOOL_CARDINALITY_LIMIT,
             )
-        for detail in record.details:
-            if detail.name == "tool":
-                return self._bounded_cardinality_label(
-                    detail.preview.text,
-                    self._tools,
-                    AGENT_TELEMETRY_TOOL_CARDINALITY_LIMIT,
-                )
+        for record in reversed(records):
+            for detail in reversed(record.details):
+                if detail.name != "tool":
+                    continue
+                label = _label(detail.preview.text)
+                if label != AGENT_TELEMETRY_UNKNOWN_LABEL:
+                    return self._bounded_cardinality_label(
+                        label,
+                        self._tools,
+                        AGENT_TELEMETRY_TOOL_CARDINALITY_LIMIT,
+                    )
         return AGENT_TELEMETRY_UNKNOWN_LABEL
 
     @staticmethod
@@ -333,15 +417,15 @@ class AgentTelemetry:
         seen.add(label)
         return label
 
-    def _observe_record(
+    def _observe_signal(
         self,
         state: _ParticipantState,
         spec: MetricSpec,
-        record: TrajectoryRecord,
+        signal_id: str,
         value: float | int,
         attributes: dict[str, str],
     ) -> None:
-        key = (spec.name, record.record_id)
+        key = (spec.name, signal_id)
         if key in state.emitted:
             return
         self._bridge.observe(spec, value, attributes)
@@ -363,15 +447,11 @@ def create_agent_telemetry(
     return AgentTelemetry(store, bridge)
 
 
-def _spec(name: str) -> MetricSpec:
-    return next(spec for spec in AGENT_METRIC_SPECS if spec.name == name)
-
-
-def _has_direct_timing(record: TrajectoryRecord) -> bool:
+def _has_direct_timing(timing: Timing | None) -> bool:
     return (
-        record.timing is not None
-        and record.timing.provenance in _DIRECT_TIMING_PROVENANCE
-        and (record.timing.duration_ms is not None or record.timing.ttft_ms is not None)
+        timing is not None
+        and timing.provenance is not TimingProvenance.UNAVAILABLE
+        and (timing.duration_ms is not None or timing.ttft_ms is not None)
     )
 
 

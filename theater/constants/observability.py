@@ -119,10 +119,10 @@ AGENT_TELEMETRY_MODEL_CARDINALITY_LIMIT = 100
 AGENT_TELEMETRY_TOOL_CARDINALITY_LIMIT = 100
 
 #: Maximum participant deduplication states retained in one process.
-AGENT_TELEMETRY_PARTICIPANT_STATE_LIMIT = 1024
+AGENT_TELEMETRY_PARTICIPANT_STATE_LIMIT = 128
 
 #: Maximum emitted signal keys retained for one participant source epoch.
-AGENT_TELEMETRY_EMITTED_SIGNAL_LIMIT = 4096
+AGENT_TELEMETRY_EMITTED_SIGNAL_LIMIT = 256
 
 #: Label for an absent or invalid agent telemetry value.
 AGENT_TELEMETRY_UNKNOWN_LABEL = "unknown"

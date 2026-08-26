@@ -11,7 +11,9 @@ from theater.constants.observability import (
     AGENT_FAILURES_METRIC,
     AGENT_REQUEST_DURATION_METRIC,
     AGENT_REQUEST_TTFT_METRIC,
+    AGENT_TELEMETRY_EMITTED_SIGNAL_LIMIT,
     AGENT_TELEMETRY_OTHER_LABEL,
+    AGENT_TELEMETRY_PARTICIPANT_STATE_LIMIT,
     AGENT_TELEMETRY_UNKNOWN_LABEL,
     AGENT_TOKENS_METRIC,
     AGENT_TOOL_DURATION_METRIC,
@@ -76,6 +78,8 @@ def _fact(
     timing: Timing | None = None,
     usage: TrajectoryUsage | None = None,
     details: tuple[DetailField, ...] = (),
+    request_id: str | None = None,
+    call_id: str | None = None,
     summary: str = "",
     raw_index: int = 1,
 ) -> TrajectoryFact:
@@ -87,6 +91,8 @@ def _fact(
         timing=timing,
         usage=usage,
         details=details,
+        request_id=request_id,
+        call_id=call_id,
         summary=summary,
         raw_index=raw_index,
     )
@@ -124,6 +130,9 @@ def test_specs_have_exact_unique_schemas() -> None:
         ),
         (AGENT_FAILURES_METRIC, MetricKind.COUNTER, "{failure}", ("harness", "category")),
     ]
+    assert AGENT_TELEMETRY_PARTICIPANT_STATE_LIMIT == 128
+    assert AGENT_TELEMETRY_EMITTED_SIGNAL_LIMIT == 256
+    assert AGENT_TELEMETRY_PARTICIPANT_STATE_LIMIT * AGENT_TELEMETRY_EMITTED_SIGNAL_LIMIT == 32_768
 
 
 def test_create_requires_enabled_active_bridge_and_registers() -> None:
@@ -171,7 +180,7 @@ def test_terminal_direct_request_ttft_and_tool_duration_are_projected() -> None:
             start=1.0,
             first_token=1.2,
             duration_ms=500.0,
-            provenance=TimingProvenance.SOURCE,
+            provenance=TimingProvenance.DERIVED,
         ),
         usage=TrajectoryUsage(model="gpt-4o"),
     )
@@ -195,10 +204,61 @@ def test_terminal_direct_request_ttft_and_tool_duration_are_projected() -> None:
         "harness": "codex",
         "model": "gpt-4o",
         "result": "success",
-        "timing_provenance": "source",
+        "timing_provenance": "derived",
     }
     assert tools[0][1] == 25.0
     assert tools[0][2]["tool"] == "exec"
+
+
+def test_batch_request_and_matched_tool_each_emit_once() -> None:
+    bridge = _Bridge()
+    projector = AgentTelemetry(_Store(_participant()), bridge)  # type: ignore[arg-type]
+    request_first = _fact(
+        "request-first",
+        request_id="request-1",
+        timing=Timing(duration_ms=10.0, provenance=TimingProvenance.SOURCE),
+        raw_index=1,
+    )
+    request_last = _fact(
+        "request-last",
+        kind=TrajectoryKind.REASONING,
+        request_id="request-1",
+        timing=Timing(duration_ms=20.0, provenance=TimingProvenance.SOURCE),
+        raw_index=2,
+    )
+    tool_call = _fact(
+        "call",
+        kind=TrajectoryKind.TOOL_CALL,
+        lane=TrajectoryLane.TOOLS,
+        status=TrajectoryStatus.RUNNING,
+        call_id="call-1",
+        timing=Timing(start=3.0, provenance=TimingProvenance.SOURCE),
+        details=(DetailField.from_text("tool", "exec"),),
+        raw_index=3,
+    )
+    tool_result = _fact(
+        "result",
+        kind=TrajectoryKind.TOOL_RESULT,
+        lane=TrajectoryLane.TOOLS,
+        call_id="call-1",
+        timing=Timing(end=3.02, provenance=TimingProvenance.SOURCE),
+        summary="tool result summary must not become the label",
+        raw_index=4,
+    )
+
+    projector.record_batch(
+        "agent",
+        Batch(trajectory=(request_first, request_last, tool_call, tool_result)),
+        (),
+    )
+
+    request_durations = _observations(bridge, AGENT_REQUEST_DURATION_METRIC)
+    tool_durations = _observations(bridge, AGENT_TOOL_DURATION_METRIC)
+    assert len(request_durations) == 1
+    assert request_durations[0][1] == 20.0
+    assert len(tool_durations) == 1
+    assert tool_durations[0][1] == pytest.approx(20.0)
+    assert tool_durations[0][2]["tool"] == "exec"
 
 
 def test_running_or_missing_direct_timing_is_skipped_but_untimed_failure_counts() -> None:
