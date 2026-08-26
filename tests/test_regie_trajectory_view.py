@@ -16,9 +16,13 @@ from theater.constants.regie_trajectory import (
 from theater.regie.trajectory.enums import FocusRegion, InspectorTab
 from theater.regie.trajectory.state import ParticipantTrajectoryState, TrajectoryStateStore
 from theater.regie.trajectory.view import ReturnToTree, TrajectoryRetryRequested, TrajectoryView
+from theater.regie.trajectory.widgets.breadcrumb import TrajectoryBreadcrumb
 from theater.regie.trajectory.widgets.filter_panel import FilterPanel
 from theater.regie.trajectory.widgets.footer import TrajectoryFooter
+from theater.regie.trajectory.widgets.header import TrajectoryHeader
 from theater.regie.trajectory.widgets.ledger import Ledger
+from theater.regie.trajectory.widgets.overview import TrajectoryOverviewStrip
+from theater.regie.trajectory.widgets.search import TrajectorySearchInput
 from theater.regie.trajectory.widgets.span_detail import SpanDetailPanel
 from theater.regie.trajectory.widgets.timeline import Timeline
 from theater.trajectory import (
@@ -153,11 +157,15 @@ async def test_surface_uses_fixed_timeline_and_virtualized_ledger() -> None:
         assert all(button.display for button in buttons)
         assert view.query_one(TrajectoryFooter).region.height == TRAJECTORY_FOOTER_HEIGHT
         search = view.query_one("#trajectory-search", Input)
+        header = view.query_one("#trajectory-header", TrajectoryHeader)
+        overview = view.query_one("#trajectory-overview", TrajectoryOverviewStrip)
         timeline = view.query_one(Timeline)
         ledger = view.query_one(Ledger)
-        assert search.region.height == SEARCH_HEIGHT
-        assert search.region.y < timeline.region.y
-        assert search.region.width == timeline.region.width == view.content_region.width
+        assert search.styles.height is not None
+        assert search.styles.height.value == SEARCH_HEIGHT
+        assert header.region.height == SEARCH_HEIGHT
+        assert header.region.y == overview.region.bottom
+        assert timeline.region.width == view.content_region.width
         assert timeline.styles.scrollbar_size_horizontal == 0
         assert timeline.styles.scrollbar_size_vertical == 0
         assert ledger.styles.scrollbar_size_horizontal == 0
@@ -218,7 +226,7 @@ async def test_pointer_hover_expands_only_the_active_ledger_span(monkeypatch) ->
         assert ledger.get_cell("record:r2", Ledger.COLUMN_SUMMARY).plain.startswith("\n")
         assert not ledger.get_cell("record:r2", Ledger.COLUMN_SUMMARY).plain.startswith("\n\n")
 
-        await pilot.hover("#trajectory-search")
+        await pilot.hover("#trajectory-overview")
         assert [row.height for row in ledger.ordered_rows] == [
             TRAJECTORY_SPAN_ROW_HEIGHT,
             TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT,
@@ -303,7 +311,7 @@ async def test_native_controls_handle_mouse_search_filters_and_row_activation() 
         await pilot.click("#trajectory-filter-done")
         assert not view.state.filters_open
 
-        await pilot.click("#trajectory-search", offset=(3, 1))
+        await pilot.click("#trajectory-search-action")
         await pilot.press(*"first")
         assert view.state.query == "first"
         await pilot.press("left", "delete")
@@ -481,5 +489,47 @@ async def test_remount_restores_the_participant_search_state() -> None:
         search = app.query_one("#trajectory-search", Input)
         assert view.state is state
         assert view.state.search_open
-        assert not search.has_class("-hidden")
+        assert search.styles.visibility == "visible"
+        assert search.offset.y == 0
         assert search.value == "saved query"
+
+
+async def test_search_drawer_slides_for_keyboard_and_footer_actions() -> None:
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await add_records(app)
+        search = view.query_one("#trajectory-search", TrajectorySearchInput)
+        header = view.query_one("#trajectory-header", TrajectoryHeader)
+        breadcrumb = view.query_one("#trajectory-breadcrumb", TrajectoryBreadcrumb)
+
+        assert search.styles.visibility == "hidden"
+        assert search.offset.y == -SEARCH_HEIGHT
+        assert breadcrumb.region == header.region
+
+        await pilot.press("/")
+        await pilot.wait_for_scheduled_animations()
+        assert view.state.search_open
+        assert app.focused is search
+        assert search.styles.visibility == "visible"
+        assert search.offset.y == 0
+        assert search.region == header.region
+
+        await pilot.press("escape")
+        await pilot.wait_for_scheduled_animations()
+        assert not view.state.search_open
+        assert search.styles.visibility == "hidden"
+        assert search.offset.y == -SEARCH_HEIGHT
+
+        await pilot.click("#trajectory-search-action")
+        await pilot.wait_for_scheduled_animations()
+        assert view.state.search_open
+        assert app.focused is search
+        assert search.styles.visibility == "visible"
+        assert search.offset.y == 0
+
+        await pilot.click("#trajectory-filter-action")
+        await pilot.wait_for_scheduled_animations()
+        assert not view.state.search_open
+        assert view.state.filters_open
+        assert search.styles.visibility == "hidden"
+        assert search.offset.y == -SEARCH_HEIGHT

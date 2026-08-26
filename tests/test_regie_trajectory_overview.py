@@ -4,12 +4,13 @@ import pytest
 from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import HorizontalScroll
-from textual.widgets import Input, Label
+from textual.widgets import Label
 
 from theater.constants.regie_trajectory import TRAJECTORY_OVERVIEW_HEIGHT
 from theater.regie.trajectory.state import ParticipantTrajectoryState
 from theater.regie.trajectory.view import TrajectoryView
 from theater.regie.trajectory.widgets import overview as trajectory_overview
+from theater.regie.trajectory.widgets.header import TrajectoryHeader
 from theater.regie.trajectory.widgets.overview import TrajectoryOverviewStrip
 from theater.regie.trajectory.widgets.timeline import Timeline
 from theater.trajectory import (
@@ -109,14 +110,14 @@ def test_legacy_follow_preserves_backend_overview_facts() -> None:
     assert state.overview is overview
 
 
-async def test_strip_mounts_between_search_and_timeline_at_fixed_height() -> None:
+async def test_strip_mounts_above_context_header_and_timeline_at_fixed_height() -> None:
     app = Host()
     async with app.run_test(size=(100, 30)):
         view = app.query_one(TrajectoryView)
-        search = view.query_one("#trajectory-search", Input)
         strip = view.query_one("#trajectory-overview", TrajectoryOverviewStrip)
+        header = view.query_one("#trajectory-header", TrajectoryHeader)
         timeline = view.query_one(Timeline)
-        assert search.region.y < strip.region.y < timeline.region.y
+        assert strip.region.y < header.region.y < timeline.region.y
         assert strip.region.height == TRAJECTORY_OVERVIEW_HEIGHT
         assert not strip.can_focus
 

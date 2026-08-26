@@ -17,7 +17,6 @@ from textual.worker import Worker, WorkerCancelled, WorkerFailed
 
 from theater.constants.regie_trajectory import (
     MAX_QUERY_BYTES,
-    SEARCH_HEIGHT,
     TIMELINE_HEIGHT,
     TRAJECTORY_HORIZONTAL_PADDING,
 )
@@ -56,6 +55,7 @@ from theater.regie.trajectory.widgets.footer import (
     FooterViewRequested,
     TrajectoryFooter,
 )
+from theater.regie.trajectory.widgets.header import TrajectoryHeader
 from theater.regie.trajectory.widgets.hover_card import TimelineHoverCard
 from theater.regie.trajectory.widgets.insights import (
     InsightActivated,
@@ -70,6 +70,7 @@ from theater.regie.trajectory.widgets.ledger import (
     LedgerRetryClicked,
 )
 from theater.regie.trajectory.widgets.overview import TrajectoryOverviewStrip
+from theater.regie.trajectory.widgets.search import TrajectorySearchInput
 from theater.regie.trajectory.widgets.span_detail import (
     SpanDetailClosed,
     SpanDetailPanel,
@@ -114,9 +115,8 @@ class TrajectoryView(Vertical):
         padding: 0 {TRAJECTORY_HORIZONTAL_PADDING};
     }}
     TrajectoryView > #trajectory-timeline,
-    TrajectoryView > #trajectory-search,
+    TrajectoryView > #trajectory-header,
     TrajectoryView > #trajectory-overview,
-    TrajectoryView > #trajectory-breadcrumb,
     TrajectoryView > #trajectory-ledger,
     TrajectoryView > #trajectory-insights,
     TrajectoryView > #trajectory-span-detail,
@@ -148,20 +148,6 @@ class TrajectoryView(Vertical):
         width: 1fr;
         height: 1fr;
         min-height: 0;
-    }}
-    TrajectoryView > #trajectory-search {{
-        width: 1fr;
-        min-width: 0;
-        max-width: 100%;
-        height: {SEARCH_HEIGHT};
-        min-height: {SEARCH_HEIGHT};
-        padding: 0 1;
-        border: solid $foreground 12%;
-        background: $foreground 3%;
-    }}
-    TrajectoryView > #trajectory-search:focus {{
-        border: solid $accent 30%;
-        background: $accent 10%;
     }}
     TrajectoryView .-hidden {{
         display: none;
@@ -203,13 +189,9 @@ class TrajectoryView(Vertical):
         self._retiring = False
 
     def compose(self) -> ComposeResult:
-        yield Input(
-            placeholder="⌕ Search trajectory  /",
-            id="trajectory-search",
-        )
         yield TrajectoryOverviewStrip(id="trajectory-overview")
+        yield TrajectoryHeader(id="trajectory-header")
         yield Timeline(id="trajectory-timeline")
-        yield TrajectoryBreadcrumb(id="trajectory-breadcrumb")
         yield FilterPanel(id="trajectory-filters", classes="-hidden")
         yield Ledger(id="trajectory-ledger")
         yield InsightsPanel(id="trajectory-insights", classes="-hidden")
@@ -231,6 +213,7 @@ class TrajectoryView(Vertical):
         if self._retiring or not self.is_attached:
             return
         self._refresh()
+        self._sync_search_drawer(animate=False)
         if self.state.search_open:
             self._focus_search()
         elif self._focus_on_mount:
@@ -752,11 +735,13 @@ class TrajectoryView(Vertical):
             self.focus_region(self.state.focus_region)
 
     def action_open_search(self) -> None:
+        was_open = self.state.search_open
         self.state.search_open = True
         self.state.filters_open = False
         if self.is_mounted:
             search = self.query_one("#trajectory-search", Input)
             search.value = self.state.query
+            self._sync_search_drawer(animate=not was_open)
         self._sync_filter_panel()
         self._update_status()
         if self.is_mounted:
@@ -766,14 +751,27 @@ class TrajectoryView(Vertical):
         if self.state.search_open and self.is_mounted:
             self.app.set_focus(self.query_one("#trajectory-search", Input), scroll_visible=False)
 
-    def _close_search(self) -> None:
+    def _sync_search_drawer(self, *, animate: bool) -> None:
+        if not self.is_mounted:
+            return
+        search = self.query_one("#trajectory-search", TrajectorySearchInput)
+        if self.state.search_open:
+            search.reveal(animate=animate)
+        else:
+            search.conceal(animate=animate)
+
+    def _close_search(self, *, restore_focus: bool = True, animate: bool = True) -> None:
+        was_open = self.state.search_open
         self.state.search_open = False
-        self.focus_region(self.state.focus_region)
+        if was_open:
+            self._sync_search_drawer(animate=animate)
+        if restore_focus:
+            self.focus_region(self.state.focus_region)
 
     def action_toggle_filters(self) -> None:
         self.state.filters_open = not self.state.filters_open
-        if self.state.filters_open:
-            self.state.search_open = False
+        if self.state.filters_open and self.state.search_open:
+            self._close_search(restore_focus=False)
         self._sync_filter_panel(update_options=True)
         self._update_status()
         if self.state.filters_open and self.is_mounted:
@@ -784,6 +782,7 @@ class TrajectoryView(Vertical):
         if self.is_mounted:
             search = self.query_one("#trajectory-search", Input)
             search.value = ""
+            self._sync_search_drawer(animate=True)
         self._refresh()
         self.focus_region(self._content_region())
         if self.controller is not None:
@@ -1014,7 +1013,7 @@ class TrajectoryView(Vertical):
 
     def on_input_blurred(self, event: Input.Blurred) -> None:
         if event.input.id == "trajectory-search":
-            self.state.search_open = False
+            self._close_search(restore_focus=False)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "trajectory-search":
@@ -1030,7 +1029,10 @@ class TrajectoryView(Vertical):
             self.query_one("#trajectory-hover-card", TimelineHoverCard).hide()
         search = self.query_one("#trajectory-search", Input)
         if widget is search:
+            was_open = self.state.search_open
             self.state.search_open = True
+            if not was_open:
+                self._sync_search_drawer(animate=True)
             return
         regions = (
             (FocusRegion.TIMELINE, timeline),

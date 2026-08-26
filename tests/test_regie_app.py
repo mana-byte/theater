@@ -1784,7 +1784,7 @@ async def test_first_h_stages_trajectory_and_second_h_focuses_it(daemon, tmux):
         view = app.query_one("#trajectory-view", app_mod.TrajectoryView)
         ledger = view.query_one("#trajectory-ledger")
         right_surface = app.query_one("#right-surface")
-        search = view.query_one("#trajectory-search")
+        overview = view.query_one("#trajectory-overview")
         assert app.right_surface is app_mod.RightSurface.TRAJECTORY
         assert app.trajectory_participant == PARENT["id"]
         assert app.staged_pane is None
@@ -1798,8 +1798,8 @@ async def test_first_h_stages_trajectory_and_second_h_focuses_it(daemon, tmux):
         assert all(line.spans[0].style == "$accent" for line in marked_lines)
         assert view.region.x == right_surface.content_region.x
         assert view.region.right == right_surface.content_region.right
-        assert search.region.x == view.content_region.x
-        assert search.region.right == view.content_region.right
+        assert overview.region.x == view.content_region.x
+        assert overview.region.right == view.content_region.right
 
         await pilot.press("h")
         assert ledger.has_focus

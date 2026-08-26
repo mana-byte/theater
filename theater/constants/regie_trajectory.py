@@ -86,8 +86,10 @@ TRAJECTORY_TOOL_WRITE_HINTS = (
     "save",
     "write",
 )
-# Reserve rows for search and filter controls.
+# Size and animate search and filter controls.
 SEARCH_HEIGHT = 3
+TRAJECTORY_SEARCH_SLIDE_SECONDS = 0.12
+TRAJECTORY_SEARCH_SLIDE_EASING = "out_cubic"
 FILTER_MAX_ROWS = 12
 FILTER_HEADER_HEIGHT = 3
 # Tune ledger virtualization, density, and compact-layout thresholds.
@@ -234,6 +236,8 @@ __all__ = [
     "TRAJECTORY_REQUEST_POSITION_GLYPH",
     "TRAJECTORY_RESOURCE_HEAT_GLYPH",
     "TRAJECTORY_RESOURCE_HEAT_WIDTH",
+    "TRAJECTORY_SEARCH_SLIDE_EASING",
+    "TRAJECTORY_SEARCH_SLIDE_SECONDS",
     "TRAJECTORY_SPAN_ROW_HEIGHT",
     "TRAJECTORY_STATUS_GLYPHS_BY_VALUE",
     "TRAJECTORY_TABLE_CELL_PADDING",

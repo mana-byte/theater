@@ -309,7 +309,7 @@ async def test_pointer_hover_expands_only_insight_spans() -> None:
         assert insights.ordered_rows[1].height == TRAJECTORY_SPAN_ROW_HEIGHT
         assert insights.ordered_rows[2].height == TRAJECTORY_HOVERED_SPAN_ROW_HEIGHT
 
-        await pilot.hover("#trajectory-search")
+        await pilot.hover("#trajectory-overview")
         assert [row.height for row in insights.ordered_rows] == [
             TRAJECTORY_AUXILIARY_ROW_HEIGHT,
             TRAJECTORY_SPAN_ROW_HEIGHT,
