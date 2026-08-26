@@ -5,3 +5,17 @@ A controller owns a cohesive piece of behavior that grew too large for
 ``RegieApp`` remains the Textual composition and binding root; controllers
 hold no reference to it.
 """
+
+from theater.regie.controllers.surface import (
+    RightSurface,
+    SurfaceController,
+    TrajectoryStageOutcome,
+    TrajectoryStageResult,
+)
+
+__all__ = [
+    "RightSurface",
+    "SurfaceController",
+    "TrajectoryStageOutcome",
+    "TrajectoryStageResult",
+]

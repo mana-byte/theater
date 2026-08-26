@@ -34,12 +34,18 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
+from theater.constants.trajectory import (
+    TRAJECTORY_CURSOR_MAX_BYTES,
+    TRAJECTORY_PAGE_RECORD_LIMIT,
+)
 from theater.harness.contracts.events import Event
+from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.models import Status
 from theater.provenance import TranscriptProvenance
+from theater.trajectory.content import ContentPreview
 
 ReceiptAdmission = Literal["accepted", "staged"]
 
@@ -174,6 +180,84 @@ class History:
 
 
 @dataclass(frozen=True, slots=True)
+class HistoryPage:
+    """An independent bounded history read that never advances a live cursor."""
+
+    location: str | None = None
+    events: Sequence[Event] = ()
+    trajectory: Sequence[TrajectoryFact] = ()
+    #: None projects all control events into trajectory records.
+    trajectory_events: Sequence[Event] | None = None
+    cursor: str | None = None
+    older_cursor: str | None = None
+    has_older: bool = False
+    error_code: str | None = None
+    error: str | None = None
+    provenance: str = str(TranscriptProvenance.HEURISTIC)
+    pinned: bool = False
+
+    def __post_init__(self) -> None:
+        events = tuple(self.events)
+        trajectory = tuple(self.trajectory)
+        trajectory_events = (
+            None if self.trajectory_events is None else tuple(self.trajectory_events)
+        )
+        if any(not isinstance(event, Event) for event in events):
+            raise SourceContractError("history page events must contain Event values")
+        if any(not isinstance(fact, TrajectoryFact) for fact in trajectory):
+            raise SourceContractError("history page trajectory must contain TrajectoryFact values")
+        if trajectory_events is not None and any(
+            not isinstance(event, Event) for event in trajectory_events
+        ):
+            raise SourceContractError("history page trajectory_events must contain Event values")
+        if len(events) > TRAJECTORY_PAGE_RECORD_LIMIT:
+            raise SourceContractError("history page events exceed the page record limit")
+        if len(trajectory) > TRAJECTORY_PAGE_RECORD_LIMIT:
+            raise SourceContractError("history page trajectory exceeds the page record limit")
+        if trajectory_events is not None and len(trajectory_events) > TRAJECTORY_PAGE_RECORD_LIMIT:
+            raise SourceContractError("history page trajectory_events exceed the page record limit")
+        object.__setattr__(
+            self,
+            "events",
+            tuple(bound_history_event(event) for event in events),
+        )
+        object.__setattr__(self, "trajectory", trajectory)
+        object.__setattr__(self, "trajectory_events", trajectory_events)
+        for name in ("cursor", "older_cursor"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            try:
+                encoded_length = len(value.encode("utf-8")) if isinstance(value, str) else 0
+            except UnicodeEncodeError as exc:
+                raise SourceContractError(f"history page {name} is not valid UTF-8") from exc
+            if (
+                not isinstance(value, str)
+                or not value
+                or encoded_length > TRAJECTORY_CURSOR_MAX_BYTES
+            ):
+                raise SourceContractError(f"history page {name} exceeds identifier bounds")
+        if type(self.has_older) is not bool or type(self.pinned) is not bool:
+            raise SourceContractError("history page booleans must be booleans")
+
+    @property
+    def facts(self) -> tuple[TrajectoryFact, ...]:
+        return tuple(self.trajectory)
+
+    @property
+    def correlation(self) -> str:
+        return self.provenance
+
+
+def bound_history_event(event: Event) -> Event:
+    raw_text = ContentPreview.from_text(event.raw_text).text if event.raw_text is not None else None
+    return replace(event, text=ContentPreview.from_text(event.text).text, raw_text=raw_text)
+
+
+TrajectoryHistoryPage = HistoryPage
+
+
+@dataclass(frozen=True, slots=True)
 class Batch:
     """One poll's worth of facts from a source.
 
@@ -204,6 +288,21 @@ class Batch:
     #: Persistent channel failure; reducer reports it and retries for late recovery.
     error_code: str | None = None
     error: str | None = None
+    #: Rich facts are additive; the reducer continues to consume only events.
+    trajectory: Sequence[TrajectoryFact] = ()
+    #: None projects all control events into trajectory records.
+    trajectory_events: Sequence[Event] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "trajectory", tuple(self.trajectory))
+        if self.trajectory_events is not None:
+            object.__setattr__(self, "trajectory_events", tuple(self.trajectory_events))
+        if any(not isinstance(fact, TrajectoryFact) for fact in self.trajectory):
+            raise SourceContractError("batch trajectory must contain TrajectoryFact values")
+        if self.trajectory_events is not None and any(
+            not isinstance(event, Event) for event in self.trajectory_events
+        ):
+            raise SourceContractError("batch trajectory_events must contain Event values")
 
 
 class Source(ABC):
@@ -279,6 +378,39 @@ class Source(ABC):
         the honest answer for a source that can only see forward.
         """
         return History()
+
+    async def history_page(
+        self,
+        *,
+        before: str | None = None,
+        limit: int = TRAJECTORY_PAGE_RECORD_LIMIT,
+    ) -> HistoryPage:
+        """Read a bounded baseline page without changing the live watcher cursor.
+
+        The base contract can expose only a newest-page fallback. It therefore
+        never invents an older cursor and reports paging as unavailable when a
+        caller asks for one.
+        """
+        if type(limit) is not int or limit <= 0:
+            return HistoryPage(
+                error_code="invalid_limit", error="history page limit must be positive"
+            )
+        limit = min(limit, TRAJECTORY_PAGE_RECORD_LIMIT)
+        if before is not None:
+            return HistoryPage(
+                error_code="history_paging_unavailable",
+                error="this source provides a bounded newest page but cannot page older history",
+            )
+        history = await self.history(last_n=limit)
+        events = tuple(bound_history_event(event) for event in history.events[:limit])
+        return HistoryPage(
+            location=history.location,
+            events=events,
+            error_code=history.error_code,
+            error=history.error,
+            provenance=history.correlation,
+            pinned=history.pinned,
+        )
 
     async def aclose(self) -> None:
         """Release anything held open. Called once, when the watcher stops."""

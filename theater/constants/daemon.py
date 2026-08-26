@@ -33,11 +33,42 @@ TRANSCRIPT_READABLE_KINDS = ("assistant", "user", "tool_call", "tool_result")
 #: Bus kind for refused sends; GC protects it from age-based deletion and caps it separately.
 BUS_KIND_SEND_REFUSED = "send.refused"
 
+#: Maximum rows returned by one participant-scoped bus page.
+BUS_PARTICIPANT_PAGE_MAX_LIMIT = 200
+
+#: Bus kind for an accepted operator or agent kill request.
+BUS_KIND_PARTICIPANT_KILL_REQUESTED = "participant.kill_requested"
+
+#: Bus kind for a new participant crossing a resume/session boundary.
+BUS_KIND_PARTICIPANT_SESSION_BOUNDARY = "participant.session_boundary"
+
+#: Bus kind for the start of an announced jobs.await wait.
+BUS_KIND_JOB_AWAIT_START = "job.await.start"
+
+#: Bus kind for the end of an announced jobs.await wait.
+BUS_KIND_JOB_AWAIT_END = "job.await.end"
+
 #: Bus kind for agent observation errors in the transcript-identity audit stream.
 BUS_KIND_AGENT_OBSERVATION_ERROR = "agent.observation_error"
 
 #: Bus kind for agent transcript events in the audit stream.
 BUS_KIND_AGENT_TRANSCRIPT = "agent.transcript"
+
+#: Bus kinds whose row timestamps describe when Theater observed transcript events.
+BUS_KIND_AGENT_USER = "agent.user"
+BUS_KIND_AGENT_ASSISTANT = "agent.assistant"
+BUS_KIND_AGENT_TOOL_CALL = "agent.tool_call"
+BUS_KIND_AGENT_TOOL_RESULT = "agent.tool_result"
+BUS_KIND_AGENT_ERROR = "agent.error"
+AGENT_OBSERVATION_KINDS = frozenset(
+    {
+        BUS_KIND_AGENT_USER,
+        BUS_KIND_AGENT_ASSISTANT,
+        BUS_KIND_AGENT_TOOL_CALL,
+        BUS_KIND_AGENT_TOOL_RESULT,
+        BUS_KIND_AGENT_ERROR,
+    }
+)
 
 #: Bus kind for agent transcript receipts in the audit stream.
 BUS_KIND_AGENT_TRANSCRIPT_RECEIPT = "agent.transcript_receipt"

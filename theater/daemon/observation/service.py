@@ -77,6 +77,7 @@ class Observer:
         screen: float = SCREEN_INTERVAL,
         rescue: float = RESCUE_TIMEOUT,
         jobs=None,
+        agent_telemetry=None,
     ):
         self.registry = registry
         self.store = registry.store
@@ -89,11 +90,13 @@ class Observer:
         self.screen = screen
         self.rescue = rescue
         self.jobs = jobs
+        self.agent_telemetry = agent_telemetry
         self._tasks: dict[str, asyncio.Task] = {}
         self._retired: set[str] = set()
         self._unobservable: set[str] = set()
         self._supervisor: asyncio.Task | None = None
         self._stopping = asyncio.Event()
+        self._trajectory_capture = None
 
         # Concrete collaborators, explicitly wired.
         self._completion = CompletionTracker(self.store, self.registry, jobs_fn=lambda: self.jobs)
@@ -117,6 +120,7 @@ class Observer:
             monotonic_fn=self._monotonic,
             config_fn=lambda: self,
             jobs_fn=lambda: self.jobs,
+            telemetry_fn=(agent_telemetry.record_batch if agent_telemetry is not None else None),
         )
 
     # ---- call-time hooks for monkeypatched globals ---------------------
@@ -179,6 +183,27 @@ class Observer:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
         self._supervisor = None
+
+    def set_trajectory_capture(self, callback) -> None:
+        """Install the optional synchronous trajectory batch sink."""
+        self._trajectory_capture = callback
+
+    def _capture_trajectory(self, pid: str, batch: Batch) -> None:
+        callback = self._trajectory_capture
+        if callback is None:
+            return
+        try:
+            callback(pid, batch)
+        except Exception:
+            logger.exception("trajectory capture failed for %s", pid)
+
+    def _discard_agent_telemetry(self, pid: str) -> None:
+        if self.agent_telemetry is None:
+            return
+        try:
+            self.agent_telemetry.discard(pid)
+        except Exception:
+            logger.exception("discarding agent telemetry failed for %s", pid)
 
     async def reset_for_operator_bind(self, pid: str) -> None:
         task = self._tasks.pop(pid, None)
@@ -276,7 +301,13 @@ class Observer:
 
     # ---- one participant -----------------------------------------------
 
-    async def _watch(self, pid: str, harness_name: str) -> None:  # noqa: PLR0912, PLR0915
+    async def _watch(self, pid: str, harness_name: str) -> None:
+        try:
+            await self._watch_source(pid, harness_name)
+        finally:
+            self._discard_agent_telemetry(pid)
+
+    async def _watch_source(self, pid: str, harness_name: str) -> None:  # noqa: PLR0912, PLR0915
         observer = self.harnesses[harness_name].observer
         source = self._open_source(pid, observer)
         if source is None:
@@ -304,6 +335,7 @@ class Observer:
                     batch = await source.read()
                     self._validate_batch(source, batch)
                     if batch.waiting:
+                        self._capture_trajectory(pid, batch)
                         self._failures.update_source_error(pid, batch, finish_fn=self._finish)
                         await self._screen_only(pid, observer, clock)
                         await self._sleep(self.search)
@@ -313,6 +345,7 @@ class Observer:
                         await self._screen_only(pid, observer, clock)
                         await self._sleep(self.search)
                         continue
+                    self._capture_trajectory(pid, batch)
                     self._failures.clear_source_error_on_progress(pid, batch)
                     if self._reducer.apply(
                         pid,
@@ -381,27 +414,30 @@ class Observer:
         observer = self.harnesses[harness_name].observer
         idle_streak = 0
         ended = False
-        while not self._stopping.is_set():
-            try:
-                p = self.store.get_participant(pid)
-                if p is None or p.status is Status.DEAD:
-                    return
-                capture = await self._capture(p.tmux_pane) if p.tmux_pane else None
-                if capture is not None:
-                    idle_streak = idle_streak + 1 if observer.is_idle_screen(capture) else 0
-                    if idle_streak >= IDLE_CONFIRMATIONS:
-                        if not ended:
-                            ended = True
-                            self._end_turn_from_screen(pid, capture)
-                        self._settle(pid, Status.IDLE)
-                    elif idle_streak == 0:
-                        ended = False
-                        self._settle(pid, Status.WORKING)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("observing screen of %s failed", pid)
-            await self._sleep(self.screen)
+        try:
+            while not self._stopping.is_set():
+                try:
+                    p = self.store.get_participant(pid)
+                    if p is None or p.status is Status.DEAD:
+                        return
+                    capture = await self._capture(p.tmux_pane) if p.tmux_pane else None
+                    if capture is not None:
+                        idle_streak = idle_streak + 1 if observer.is_idle_screen(capture) else 0
+                        if idle_streak >= IDLE_CONFIRMATIONS:
+                            if not ended:
+                                ended = True
+                                self._end_turn_from_screen(pid, capture)
+                            self._settle(pid, Status.IDLE)
+                        elif idle_streak == 0:
+                            ended = False
+                            self._settle(pid, Status.WORKING)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("observing screen of %s failed", pid)
+                await self._sleep(self.screen)
+        finally:
+            self._discard_agent_telemetry(pid)
 
     def _open_source(self, pid: str, observer: HarnessObserver) -> Source | None:
         p = self.store.get_participant(pid)

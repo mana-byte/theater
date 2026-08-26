@@ -6,7 +6,7 @@ import contextlib
 import logging
 import threading
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from theater.constants.observability import (
     BATCH_QUEUE_SIZE,
@@ -26,6 +26,10 @@ from theater.constants.observability import (
     PROCESS_ROLE_DAEMON,
     PROCESS_ROLES,
 )
+from theater.observability.metrics import MetricKind, MetricSpec
+
+if TYPE_CHECKING:
+    from theater.observability.signals import SignalBridge
 
 logger = logging.getLogger("theater.observability.runtime")
 
@@ -153,6 +157,7 @@ class RuntimeHandle:
         "_meter_provider",
         "_metric_bridge",
         "_otel_entry",
+        "_signal_bridge",
         "_tracer_provider",
     )
 
@@ -165,6 +170,7 @@ class RuntimeHandle:
         self._tracer_provider: Any = None
         self._logger_provider: Any = None
         self._metric_bridge: Any = None
+        self._signal_bridge: SignalBridge | None = None
         self._otel_entry: _HandlerEntry | None = None
 
     def add_handler(
@@ -202,6 +208,10 @@ class RuntimeHandle:
     def closed(self) -> bool:
         return self._closed
 
+    @property
+    def signal_bridge(self) -> SignalBridge | None:
+        return self._signal_bridge
+
     def shutdown(self) -> None:
         with self._lock:
             if self._closed:
@@ -209,6 +219,10 @@ class RuntimeHandle:
             self._closed = True
         from theater.observability.engine import set_metric_bridge
 
+        if self._signal_bridge is not None:
+            with contextlib.suppress(Exception):
+                self._signal_bridge.deactivate()
+            self._signal_bridge = None
         with contextlib.suppress(Exception):
             set_metric_bridge(None)
         if self._metric_bridge is not None:
@@ -273,6 +287,7 @@ def configure(
     log_backup_count: int = DEFAULT_LOG_BACKUP_COUNT,
     log_path: Path | None = None,
     foreground: bool = False,
+    metric_specs: tuple[MetricSpec, ...] = (),
 ) -> RuntimeHandle:
     """Configure process-level observability exactly once."""
     global _configured  # noqa: PLW0603
@@ -295,7 +310,7 @@ def configure(
         handle = RuntimeHandle()
         file_entry: _HandlerEntry | None = None
         try:
-            if log_path is not None and role == PROCESS_ROLE_DAEMON:
+            if log_path is not None:
                 from theater.observability.logging import make_rotating_handler, make_stderr_handler
 
                 file_entry = handle.add_handler(
@@ -317,6 +332,7 @@ def configure(
                     export_interval_ms,
                     level,
                     file_entry,
+                    metric_specs,
                 )
         except Exception:
             handle.shutdown()
@@ -365,20 +381,32 @@ def _build_exporters(
     return trace_exporter, metric_exporter, log_exporter
 
 
-def _build_views() -> list[Any]:
+def _build_views(metric_specs: tuple[MetricSpec, ...] = ()) -> list[Any]:
     from opentelemetry.sdk.metrics.view import ExponentialBucketHistogramAggregation, View
 
     from theater.observability.catalog import OPERATIONS
 
     views: list[Any] = []
     seen: set[str] = set()
-    for spec in OPERATIONS:
-        if spec.metric_name is None or spec.metric_name in seen:
+    for operation in OPERATIONS:
+        if operation.metric_name is None or operation.metric_name in seen:
             continue
-        seen.add(spec.metric_name)
+        seen.add(operation.metric_name)
         views.append(
             View(
-                instrument_name=spec.metric_name,
+                instrument_name=operation.metric_name,
+                aggregation=ExponentialBucketHistogramAggregation(
+                    max_size=HISTOGRAM_MAX_SIZE, max_scale=HISTOGRAM_MAX_SCALE
+                ),
+            )
+        )
+    for spec in metric_specs:
+        if spec.kind is not MetricKind.HISTOGRAM or spec.name in seen:
+            continue
+        seen.add(spec.name)
+        views.append(
+            View(
+                instrument_name=spec.name,
                 aggregation=ExponentialBucketHistogramAggregation(
                     max_size=HISTOGRAM_MAX_SIZE, max_scale=HISTOGRAM_MAX_SCALE
                 ),
@@ -426,7 +454,7 @@ def _attach_otel_logging(
     handle.add_handler(handler, "theater", is_otel=True)
     handle.set_logger_propagate("theater", False)
     handle.set_logger_level("theater", log_level)
-    if role == PROCESS_ROLE_DAEMON and file_entry is not None:
+    if file_entry is not None:
         handle.share_handler(file_entry, "opentelemetry")
     elif role != PROCESS_ROLE_DAEMON:
         handle.add_handler(logging.NullHandler(), "opentelemetry")
@@ -443,6 +471,7 @@ def _stage_otel(
     export_interval_ms: int,
     log_level: int,
     file_entry: _HandlerEntry | None,
+    metric_specs: tuple[MetricSpec, ...],
 ) -> None:
     """Build, publish, and attach OTel providers with staged rollback."""
     from opentelemetry.sdk.resources import Resource
@@ -461,7 +490,7 @@ def _stage_otel(
         trace_exp, metric_exp, log_exp = _build_exporters(protocol, endpoints, staged)
         _check_existing_provider()
 
-        views = _build_views()
+        views = _build_views(metric_specs)
         tracer_provider, meter_provider, logger_provider = _stage_providers(
             staged, resource, trace_exp, metric_exp, log_exp, export_interval_ms, views
         )
@@ -469,16 +498,31 @@ def _stage_otel(
         # Build registry, bridge, gauge cache.
         from theater.observability.catalog import OPERATIONS
         from theater.observability.engine import set_metric_bridge
-        from theater.observability.metrics import GaugeCache, HistogramRegistry, MetricBridge
+        from theater.observability.metrics import (
+            CounterRegistry,
+            GaugeCache,
+            HistogramRegistry,
+            MetricBridge,
+        )
+        from theater.observability.signals import SignalBridge
 
         meter = meter_provider.get_meter("theater", version)
         registry = HistogramRegistry(meter=meter)
-        registry.register_from_catalog(OPERATIONS)
-        bridge = MetricBridge(registry)
+        counter_registry = CounterRegistry(meter=meter)
+        bridge = MetricBridge(registry, counter_registry)
+        for spec in OPERATIONS:
+            if spec.metric_name is not None:
+                bridge.register_histogram(spec.metric_name, spec.description or "", spec.unit)
+        bridge.register_specs(metric_specs)
 
         gauge_cache = GaugeCache()
         gauge_cache.register_observable_gauges(meter)
         bridge.set_gauge_cache(gauge_cache)
+
+        signal = SignalBridge(
+            logger_provider.get_logger("theater.agent", version),
+            tracer_provider.get_tracer("theater.agent", version),
+        )
 
         from opentelemetry.sdk._logs import LoggingHandler
 
@@ -496,6 +540,7 @@ def _stage_otel(
         handle._metric_bridge = bridge
         set_metric_bridge(bridge)
         staged.transfer(handle, tracer_provider, meter_provider, logger_provider)
+        handle._signal_bridge = signal
 
     except Exception:
         staged.rollback()

@@ -15,7 +15,7 @@
 # changes a default, your copy keeps the old value. Delete a key to track the
 # code's default instead.
 #
-# Read once, at daemon start. `theater restart` applies an edit.
+# Read at process start. Restart the daemon and régie to apply an edit everywhere.
 # Machine-scoped: there is no project-local config, because there is one daemon
 # per machine holding one registry.
 # An unknown key is a hard error naming the file, the key and the closest legal
@@ -102,6 +102,9 @@ dashboard_tip_hold_seconds = 6.0
 
 # Seconds between characters while typing a dashboard tip in or out.
 dashboard_tip_char_interval = 0.04
+
+# Number of records shown on one trajectory ledger page.
+trajectory_page_size = 30
 
 
 [rails]
@@ -321,12 +324,24 @@ disabled = []
 #
 # A missing extra with otlp_enabled = true is a fatal start-up error.
 # When disabled, no exporter thread starts and no network call is made.
-# The daemon log still rotates regardless of this setting.
+# Daemon and per-pane régie logs still rotate regardless of this setting.
 #
 # Read once, at daemon start. `theater restart` applies an edit.
 
 # Whether OTLP export is enabled.
 otlp_enabled = false
+
+# Whether agent telemetry metrics export when OTLP is enabled.
+agent_metrics = true
+
+# Whether agent telemetry logs export when OTLP is enabled.
+agent_logs = true
+
+# Whether agent telemetry spans export when OTLP is enabled.
+agent_spans = true
+
+# Include transcript text, paths, and tool payloads in agent logs. Opt-in only.
+agent_log_content = false
 
 # Transport protocol: "grpc" or "http".
 otlp_protocol = "grpc"
@@ -346,8 +361,8 @@ export_interval_ms = 5000
 # Gauge sample interval (seconds). Only relevant when OTLP is enabled.
 gauge_interval_s = 5.0
 
-# Rotating daemon log file size (bytes). The log rolls over at this size
-# and retains the configured number of backups.
+# Rotating daemon and per-pane régie log size (bytes). Each log rolls over at
+# this size and retains the configured number of backups.
 log_max_bytes = 10485760
 
 # Number of rotated log backups to retain.

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Collection
 
-from sqlalchemy import insert, select
+from sqlalchemy import insert, or_, select
 
 from theater.constants.daemon import (
     BUS_KIND_AGENT_TRANSCRIPT,
@@ -12,6 +13,7 @@ from theater.constants.daemon import (
     BUS_KIND_OPERATOR_TRANSCRIPT_BIND,
     BUS_KIND_OPERATOR_TRANSCRIPT_UNBIND,
     BUS_KIND_SEND_REFUSED,
+    BUS_PARTICIPANT_PAGE_MAX_LIMIT,
     TRANSCRIPT_AUDIT_KINDS,
 )
 from theater.daemon.persistence.database import Database
@@ -32,10 +34,11 @@ class BusRepository:
         from_id: str | None = None,
         to_id: str | None = None,
         payload: dict | None = None,
+        timestamp: float | None = None,
     ) -> int:
         result = self._db.conn.execute(
             insert(bus).values(
-                ts=now(),
+                ts=now() if timestamp is None else timestamp,
                 from_id=from_id,
                 to_id=to_id,
                 kind=kind,
@@ -46,16 +49,74 @@ class BusRepository:
         assert pk is not None
         return pk[0]
 
+    @staticmethod
+    def _decode(row) -> dict:
+        event = dict(row._mapping)
+        event["payload"] = json.loads(event["payload"]) if event["payload"] else None
+        return event
+
     def tail(self, limit: int = 100, *, after_id: int = 0) -> list[dict]:
         rows = self._db.conn.execute(
             select(bus).where(bus.c.id > after_id).order_by(bus.c.id.desc()).limit(limit)
         ).fetchall()
-        out = []
-        for r in reversed(rows):
-            d = dict(r._mapping)
-            d["payload"] = json.loads(d["payload"]) if d["payload"] else None
-            out.append(d)
-        return out
+        return [self._decode(row) for row in reversed(rows)]
+
+    def page_for_participant(
+        self,
+        participant_id: str,
+        *,
+        before_id: int | str | None = None,
+        limit: int = BUS_PARTICIPANT_PAGE_MAX_LIMIT,
+        kinds: Collection[str],
+    ) -> list[dict]:
+        """Return one bounded, ascending page of allowlisted participant events."""
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise ValueError("limit must be an integer")  # noqa: TRY004
+        if limit < 0:
+            raise ValueError("limit must be non-negative")
+        bounded_limit = min(limit, BUS_PARTICIPANT_PAGE_MAX_LIMIT)
+        cursor: int | None = None
+        if before_id is not None:
+            if isinstance(before_id, bool) or not isinstance(before_id, (int, str)):
+                raise ValueError("before_id must be an integer cursor")
+            try:
+                cursor = int(before_id)
+            except (TypeError, ValueError, OverflowError):
+                raise ValueError("before_id must be an integer cursor") from None
+            if cursor < 0:
+                raise ValueError("before_id must be a non-negative integer cursor")
+        if not participant_id or bounded_limit == 0 or not kinds:
+            return []
+
+        query = (
+            select(bus)
+            .where(or_(bus.c.from_id == participant_id, bus.c.to_id == participant_id))
+            .where(bus.c.kind.in_(tuple(kinds)))
+        )
+        if cursor is not None:
+            query = query.where(bus.c.id < cursor)
+        rows = self._db.conn.execute(
+            query.order_by(bus.c.id.desc()).limit(bounded_limit)
+        ).fetchall()
+        return [self._decode(row) for row in reversed(rows)]
+
+    def record_for_participant(
+        self,
+        participant_id: str,
+        row_id: int,
+        *,
+        kinds: Collection[str],
+    ) -> dict | None:
+        if not participant_id or type(row_id) is not int or row_id < 0 or not kinds:
+            return None
+        row = self._db.conn.execute(
+            select(bus)
+            .where(bus.c.id == row_id)
+            .where(or_(bus.c.from_id == participant_id, bus.c.to_id == participant_id))
+            .where(bus.c.kind.in_(tuple(kinds)))
+            .limit(1)
+        ).fetchone()
+        return self._decode(row) if row is not None else None
 
     def refusal_counts(self, *, since: float | None = None) -> dict[str, int]:
         """Sends refused before a job existed, counted by reason."""

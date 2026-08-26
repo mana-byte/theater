@@ -85,6 +85,8 @@ bus = Table(
 )
 
 Index("idx_bus_ts", bus.c.ts)
+Index("idx_bus_from_id_id", bus.c.from_id, bus.c.id)
+Index("idx_bus_to_id_id", bus.c.to_id, bus.c.id)
 
 budgets = Table(
     "budgets",

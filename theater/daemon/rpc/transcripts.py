@@ -283,15 +283,20 @@ async def _transcript_bind(daemon, params: dict) -> dict:
     harness = HARNESSES.get(harness_name)
     if harness is None:
         raise BadRequest(f"cannot bind transcript: harness {p.harness!r} is not known")
+    reaffirming = same_location(p.transcript_location, raw_candidate) and is_trusted_provenance(
+        p.session_correlation
+    )
     try:
         admitted = harness.observer.admit_operator_candidate(
             cwd=p.cwd,
             candidate=raw_candidate,
             domain=p.transcript_domain,
-            after=p.created_at if p.tier is Tier.SPAWNED else None,
+            after=None if reaffirming else p.created_at if p.tier is Tier.SPAWNED else None,
         )
     except ValueError as exc:
         raise BadRequest(f"cannot bind transcript: {exc}") from None
+    if reaffirming and p.session_id is not None and admitted.session_id != p.session_id:
+        raise BadRequest("cannot reaffirm transcript: candidate session id changed")
     location = canonical_location(admitted.location)
     owner = _candidate_owner(daemon, location, exclude=pid)
     prior_owner = None

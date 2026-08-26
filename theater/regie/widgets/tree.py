@@ -283,8 +283,13 @@ class TreePanel(VerticalScroll):
         """
         widget.remove()
 
-    def apply_cursor(self, cursor: int, staged_pane: str | None) -> None:
-        """Add CSS classes to the cursor and staged lines, remove from others.
+    def apply_cursor(
+        self,
+        cursor: int,
+        staged_pane: str | None,
+        trajectory_participant_id: str | None = None,
+    ) -> None:
+        """Apply cursor, pane-stage, and trajectory-stage CSS classes.
 
         Active keys, rather than child positions, own highlighting.
         """
@@ -294,8 +299,25 @@ class TreePanel(VerticalScroll):
                 continue
             widget.remove_class("tree-cursor")
             widget.remove_class("tree-staged")
-            if staged_pane and node.get("tmux_pane") == staged_pane:
+            widget.remove_class("tree-trajectory-staged")
+            pane_matches = staged_pane is not None and node.get("tmux_pane") == staged_pane
+            trajectory_matches = (
+                staged_pane is None
+                and trajectory_participant_id is not None
+                and key[0] == "p"
+                and node.get("id") == trajectory_participant_id
+            )
+            if pane_matches:
                 widget.add_class("tree-staged")
+            if trajectory_matches:
+                widget.add_class("tree-trajectory-staged")
+            if isinstance(widget, AgentLeaf):
+                if pane_matches:
+                    widget.set_stage_marker("tmux")
+                elif trajectory_matches:
+                    widget.set_stage_marker("trajectory")
+                else:
+                    widget.set_stage_marker(None)
             if i == cursor:
                 widget.add_class("tree-cursor")
 

@@ -109,6 +109,9 @@ def _build_section(path: Path, name: str, cls: type, raw: Any) -> Any:
         minimum = f.metadata.get("min")
         if minimum is not None and parsed < minimum:
             _fail(path, f"'{dotted}' must be >= {minimum}, got {parsed}")
+        maximum = f.metadata.get("max")
+        if maximum is not None and parsed > maximum:
+            _fail(path, f"'{dotted}' must be <= {maximum}, got {parsed}")
         if isinstance(parsed, float) and not math.isfinite(parsed):
             _fail(path, f"'{dotted}' must be finite, got {parsed}")
         if (

@@ -10,6 +10,8 @@ import pytest
 
 from theater import paths
 from theater.client import DaemonClient
+from theater.config import Config
+from theater.config.models import ObservabilitySection
 from theater.daemon import lock as lock_mod
 from theater.daemon.lock import DaemonLock, LockHeld
 from theater.daemon.server import Daemon
@@ -133,6 +135,112 @@ def test_daemon_gauge_sampler_initialized_none(theater_home, fake_tmux):
     d = Daemon(harnesses={})
     assert d._gauge_sampler is None
     d._lock.release()
+
+
+@pytest.mark.parametrize(
+    ("options", "has_metric_bridge", "has_signal_bridge"),
+    [
+        ({"agent_metrics": True, "agent_logs": False, "agent_spans": False}, True, False),
+        (
+            {
+                "agent_metrics": False,
+                "agent_logs": True,
+                "agent_spans": False,
+                "agent_log_content": True,
+            },
+            False,
+            True,
+        ),
+        ({"agent_metrics": False, "agent_logs": False, "agent_spans": True}, False, True),
+    ],
+)
+def test_daemon_composes_active_agent_telemetry(
+    theater_home, fake_tmux, monkeypatch, options, has_metric_bridge, has_signal_bridge
+):
+    from theater.daemon import server as server_mod
+
+    bridge = object() if has_metric_bridge else None
+    signal_bridge = object() if has_signal_bridge else None
+
+    class Sink:
+        def record_batch(self, *args):
+            pass
+
+        def discard(self, *args):
+            pass
+
+    sink = Sink()
+    captured = {}
+
+    def create(
+        store,
+        received_metric_bridge,
+        received_signal_bridge=None,
+        *,
+        metrics_enabled,
+        logs_enabled=False,
+        spans_enabled=False,
+        include_log_content=False,
+    ):
+        captured.update(
+            store=store,
+            metric_bridge=received_metric_bridge,
+            signal_bridge=received_signal_bridge,
+            metrics_enabled=metrics_enabled,
+            logs_enabled=logs_enabled,
+            spans_enabled=spans_enabled,
+            include_log_content=include_log_content,
+        )
+        if (metrics_enabled and received_metric_bridge is not None) or (
+            (logs_enabled or spans_enabled) and received_signal_bridge is not None
+        ):
+            return sink
+        return None
+
+    monkeypatch.setattr(server_mod, "metric_bridge", lambda: bridge)
+    monkeypatch.setattr(server_mod, "create_agent_telemetry", create)
+    daemon = Daemon(
+        harnesses={},
+        config=Config(observability=ObservabilitySection(**options)),
+        signal_bridge=signal_bridge,
+    )
+    try:
+        assert captured == {
+            "store": daemon.store,
+            "metric_bridge": bridge,
+            "signal_bridge": signal_bridge,
+            "metrics_enabled": options["agent_metrics"],
+            "logs_enabled": options["agent_logs"],
+            "spans_enabled": options["agent_spans"],
+            "include_log_content": options.get("agent_log_content", False),
+        }
+        assert daemon.observer.agent_telemetry is sink
+    finally:
+        daemon._lock.release()
+
+
+def test_otlp_disabled_daemon_skips_agent_telemetry_projection(
+    theater_home, fake_tmux, monkeypatch
+):
+    from theater.daemon import server as server_mod
+
+    captured = {}
+
+    def create(store, bridge, signal_bridge=None, **options):
+        captured.update(store=store, bridge=bridge, signal_bridge=signal_bridge, options=options)
+
+    monkeypatch.setattr(server_mod, "metric_bridge", lambda: None)
+    monkeypatch.setattr(server_mod, "create_agent_telemetry", create)
+    daemon = Daemon(
+        harnesses={}, config=Config(observability=ObservabilitySection(otlp_enabled=False))
+    )
+    try:
+        assert captured["bridge"] is None
+        assert captured["signal_bridge"] is None
+        assert daemon.observer.agent_telemetry is None
+        assert daemon.observer._reducer._telemetry_fn is None
+    finally:
+        daemon._lock.release()
 
 
 async def test_autostart_creates_mode_0600_generation(theater_home, monkeypatch):
@@ -281,12 +389,92 @@ def test_run_accepts_none_options(theater_home, fake_tmux, monkeypatch):
     from theater.observability import runtime as runtime_mod
 
     class _FakeHandle:
+        signal_bridge = None
+
         def shutdown(self):
             pass
 
     monkeypatch.setattr(runtime_mod, "configure", lambda **kw: _FakeHandle())
     asyncio.run(server_mod.run())
     assert started.is_set()
+
+
+@pytest.mark.parametrize("agent_metrics", [True, False])
+async def test_run_passes_agent_metric_specs_from_config(
+    theater_home, fake_tmux, monkeypatch, agent_metrics
+):
+    from theater.daemon import server as server_mod
+    from theater.daemon.trajectory.telemetry import AGENT_METRIC_SPECS
+    from theater.observability import runtime as runtime_mod
+
+    captured = {}
+
+    class Handle:
+        signal_bridge = None
+
+        def shutdown(self):
+            pass
+
+    async def serve(self):
+        self.stop()
+
+    async def aclose(self):
+        self._release_files()
+
+    def configure(**kwargs):
+        captured.update(kwargs)
+        return Handle()
+
+    monkeypatch.setattr(
+        server_mod,
+        "load_config",
+        lambda: Config(observability=ObservabilitySection(agent_metrics=agent_metrics)),
+    )
+    monkeypatch.setattr(runtime_mod, "configure", configure)
+    monkeypatch.setattr(Daemon, "serve", serve)
+    monkeypatch.setattr(Daemon, "aclose", aclose)
+
+    await server_mod.run()
+
+    assert captured["metric_specs"] == (AGENT_METRIC_SPECS if agent_metrics else ())
+
+
+async def test_run_passes_runtime_signal_bridge_to_daemon(theater_home, fake_tmux, monkeypatch):
+    from theater.daemon import server as server_mod
+    from theater.observability import runtime as runtime_mod
+
+    signal_bridge = object()
+    captured = {}
+
+    class Handle:
+        def __init__(self):
+            self.signal_bridge = signal_bridge
+
+        def shutdown(self):
+            pass
+
+    class FakeDaemon:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def stop(self):
+            pass
+
+        async def serve(self):
+            pass
+
+        async def aclose(self):
+            captured["lock"].release()
+
+        def _release_files(self):
+            captured["lock"].release()
+
+    monkeypatch.setattr(runtime_mod, "configure", lambda **kwargs: Handle())
+    monkeypatch.setattr(server_mod, "Daemon", FakeDaemon)
+
+    await server_mod.run()
+
+    assert captured["signal_bridge"] is signal_bridge
 
 
 async def test_run_rejects_invalid_programmatic_token_and_releases_lock(theater_home, fake_tmux):
@@ -307,6 +495,7 @@ async def test_run_shuts_runtime_when_daemon_aclose_fails(
 
     class Handle:
         shutdowns = 0
+        signal_bridge = None
 
         def shutdown(self):
             self.shutdowns += 1

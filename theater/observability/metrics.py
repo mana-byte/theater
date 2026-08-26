@@ -8,6 +8,8 @@ import inspect
 import logging
 import threading
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from theater.constants.observability import GAUGE_NAMES
@@ -16,6 +18,36 @@ from theater.observability.catalog import OperationSpec
 logger = logging.getLogger("theater.observability.metrics")
 
 CountSource = Callable[[], Any]
+
+
+class MetricKind(StrEnum):
+    HISTOGRAM = "histogram"
+    COUNTER = "counter"
+
+
+@dataclass(frozen=True, slots=True)
+class MetricSpec:
+    """Describes one explicitly registered metric and its exact attribute schema."""
+
+    name: str
+    description: str
+    unit: str
+    kind: MetricKind
+    attribute_keys: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for field in ("name", "description", "unit"):
+            value = getattr(self, field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"metric spec {field} must be nonempty")
+        if not isinstance(self.kind, MetricKind):
+            raise TypeError("metric spec kind must be a MetricKind")
+        keys = tuple(self.attribute_keys)
+        if any(not isinstance(key, str) or not key.strip() for key in keys):
+            raise ValueError("metric spec attribute keys must be nonempty")
+        if len(set(keys)) != len(keys):
+            raise ValueError("metric spec attribute keys must be unique")
+        object.__setattr__(self, "attribute_keys", keys)
 
 
 class _InstrumentEntry:
@@ -72,6 +104,44 @@ class HistogramRegistry:
             instrument = entry.instrument
         with contextlib.suppress(Exception):
             instrument.record(value, attributes=dict(attributes) if attributes else None)
+
+
+class CounterRegistry:
+    """Builds and caches one monotonic counter per unique metric name."""
+
+    def __init__(self, meter: Any | None = None) -> None:
+        self._meter = meter
+        self._entries: dict[str, _InstrumentEntry] = {}
+        self._lock = threading.Lock()
+
+    def get_or_create(self, name: str, description: str, unit: str) -> Any:
+        with self._lock:
+            entry = self._entries.get(name)
+            if entry is not None:
+                if entry.description != description:
+                    raise ValueError(f"counter {name}: description mismatch")
+                if entry.unit != unit:
+                    raise ValueError(f"counter {name}: unit mismatch")
+                return entry.instrument
+            instrument = self._create_counter(name, description, unit)
+            self._entries[name] = _InstrumentEntry(instrument, description, unit, "sum")
+            return instrument
+
+    def _create_counter(self, name: str, description: str, unit: str) -> Any:
+        if self._meter is None:
+            return None
+        return self._meter.create_counter(name=name, description=description, unit=unit)
+
+    def add(self, name: str, value: float, attributes: Mapping[str, Any] | None = None) -> None:
+        if value < 0:
+            raise ValueError(f"counter {name}: value must not be negative")
+        with self._lock:
+            entry = self._entries.get(name)
+            if entry is None or entry.instrument is None:
+                return
+            instrument = entry.instrument
+        with contextlib.suppress(Exception):
+            instrument.add(value, attributes=dict(attributes) if attributes else None)
 
 
 class _CachedGauge:
@@ -213,14 +283,21 @@ def create_active_gauge_sampler(
 
 
 class MetricBridge:
-    """Thin bridge between the engine and the histogram registry."""
+    """Thin bridge between the engine and registered metric instruments."""
 
-    __slots__ = ("_active", "_gauge_cache", "_registry")
+    __slots__ = ("_active", "_counter_registry", "_gauge_cache", "_kinds", "_registry", "_specs")
 
-    def __init__(self, registry: HistogramRegistry | None = None) -> None:
+    def __init__(
+        self,
+        registry: HistogramRegistry | None = None,
+        counter_registry: CounterRegistry | None = None,
+    ) -> None:
         self._registry = registry
-        self._active = registry is not None
+        self._counter_registry = counter_registry
+        self._active = registry is not None or counter_registry is not None
         self._gauge_cache: GaugeCache | None = None
+        self._kinds: dict[str, MetricKind] = {}
+        self._specs: dict[str, MetricSpec] = {}
 
     @property
     def active(self) -> bool:
@@ -239,6 +316,69 @@ class MetricBridge:
         if not self._active or self._registry is None:
             return
         self._registry.record(metric_name, value, attributes)
+
+    @staticmethod
+    def _check_kind(name: str, kind: MetricKind, kinds: Mapping[str, MetricKind]) -> None:
+        existing = kinds.get(name)
+        if existing is not None and existing is not kind:
+            raise ValueError(f"metric {name}: kind mismatch ({existing.value} != {kind.value})")
+
+    def _check_spec_metadata(self, name: str, description: str, unit: str) -> None:
+        existing = self._specs.get(name)
+        if existing is not None and (existing.description != description or existing.unit != unit):
+            raise ValueError(f"metric {name}: specification mismatch")
+
+    def register_histogram(
+        self, name: str, description: str, unit: str, aggregation: str = "exponential"
+    ) -> None:
+        self._check_kind(name, MetricKind.HISTOGRAM, self._kinds)
+        self._check_spec_metadata(name, description, unit)
+        if self._registry is not None:
+            self._registry.get_or_create(name, description, unit, aggregation)
+        self._kinds[name] = MetricKind.HISTOGRAM
+
+    def register_counter(self, name: str, description: str, unit: str) -> None:
+        self._check_kind(name, MetricKind.COUNTER, self._kinds)
+        self._check_spec_metadata(name, description, unit)
+        if self._counter_registry is not None:
+            self._counter_registry.get_or_create(name, description, unit)
+        self._kinds[name] = MetricKind.COUNTER
+
+    def register_specs(self, specs: tuple[MetricSpec, ...]) -> None:
+        staged_kinds = dict(self._kinds)
+        staged_specs = dict(self._specs)
+        for spec in specs:
+            existing = staged_specs.get(spec.name)
+            if existing is not None and existing != spec:
+                raise ValueError(f"metric {spec.name}: specification mismatch")
+            self._check_kind(spec.name, spec.kind, staged_kinds)
+            staged_kinds[spec.name] = spec.kind
+            staged_specs[spec.name] = spec
+        for spec in specs:
+            if spec.kind is MetricKind.HISTOGRAM:
+                if self._registry is not None:
+                    self._registry.get_or_create(spec.name, spec.description, spec.unit)
+            elif self._counter_registry is not None:
+                self._counter_registry.get_or_create(spec.name, spec.description, spec.unit)
+        self._kinds = staged_kinds
+        self._specs = staged_specs
+
+    def observe(
+        self, spec: MetricSpec, value: float, attributes: Mapping[str, Any] | None = None
+    ) -> None:
+        registered = self._specs.get(spec.name)
+        if registered is None:
+            raise ValueError(f"metric {spec.name}: specification is not registered")
+        if registered != spec:
+            raise ValueError(f"metric {spec.name}: specification mismatch")
+        actual_keys = set(attributes) if attributes is not None else set()
+        expected_keys = set(spec.attribute_keys)
+        if actual_keys != expected_keys:
+            raise ValueError(f"metric {spec.name}: attribute key set mismatch")
+        if spec.kind is MetricKind.HISTOGRAM:
+            self.record(spec.name, value, attributes)
+        elif self._active and self._counter_registry is not None:
+            self._counter_registry.add(spec.name, value, attributes)
 
     def deactivate(self) -> None:
         self._active = False

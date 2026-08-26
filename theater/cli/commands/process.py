@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 
-from theater import config
+from theater import config, paths
 from theater.tmux import client as tmux
 
 
@@ -84,10 +85,12 @@ def cmd_regie(args) -> int:
         )
         return 1
     from theater.constants.observability import PROCESS_ROLE_REGIE
+    from theater.observability.logging import log_unhandled_exceptions
     from theater.observability.runtime import configure
 
     settings = config.load()
     obs = settings.observability
+    paths.ensure_home()
     runtime_handle = configure(
         role=PROCESS_ROLE_REGIE,
         otlp_enabled=obs.otlp_enabled,
@@ -95,14 +98,21 @@ def cmd_regie(args) -> int:
         otlp_endpoint=obs.otlp_endpoint,
         service_name=obs.service_name,
         export_interval_ms=obs.export_interval_ms,
+        log_max_bytes=obs.log_max_bytes,
+        log_backup_count=obs.log_backup_count,
+        log_path=paths.regie_log_path(),
     )
+    regie_logger = logging.getLogger("theater.regie")
     try:
-        from theater import harness as harness_registry
+        with log_unhandled_exceptions(regie_logger, "régie"):
+            regie_logger.info("régie starting")
+            from theater import harness as harness_registry
 
-        harness_registry.install(settings)
-        from theater.regie.app import run_regie
+            harness_registry.install(settings)
+            from theater.regie.app import run_regie
 
-        run_regie(settings)
+            run_regie(settings)
+            regie_logger.info("régie stopped")
     finally:
         runtime_handle.shutdown()
     return 0

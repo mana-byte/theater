@@ -1127,12 +1127,53 @@ def test_regie_hands_the_config_to_the_app(monkeypatch):
         def shutdown(self) -> None:
             pass
 
-    monkeypatch.setattr(runtime_mod, "configure", lambda **kw: _FakeHandle())
+    configured: dict = {}
+
+    def configure(**kwargs):
+        configured.update(kwargs)
+        return _FakeHandle()
+
+    monkeypatch.setattr(runtime_mod, "configure", configure)
     monkeypatch.setattr(cli.tmux, "inside_tmux", lambda: True)
     seen: list = []
     monkeypatch.setattr(app_mod, "run_regie", seen.append)
     assert cli.cmd_regie(parse("regie")) == 0
     assert seen and seen[0].regie is not None
+    assert configured["role"] == "regie"
+    assert configured["log_path"] == paths.regie_log_path()
+    assert configured["log_max_bytes"] == seen[0].observability.log_max_bytes
+    assert configured["log_backup_count"] == seen[0].observability.log_backup_count
+
+
+def test_regie_logs_uncaught_startup_failure_and_shuts_down(monkeypatch, caplog):
+    import logging
+
+    import theater.regie.app as app_mod
+    from theater.observability import runtime as runtime_mod
+
+    class _FakeHandle:
+        shutdowns = 0
+
+        def shutdown(self) -> None:
+            self.shutdowns += 1
+
+    handle = _FakeHandle()
+
+    def fail(_settings):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(runtime_mod, "configure", lambda **kw: handle)
+    monkeypatch.setattr(cli.tmux, "inside_tmux", lambda: True)
+    monkeypatch.setattr(app_mod, "run_regie", fail)
+
+    with (
+        caplog.at_level(logging.ERROR, logger="theater.regie"),
+        pytest.raises(ValueError, match="boom"),
+    ):
+        cli.cmd_regie(parse("regie"))
+
+    assert handle.shutdowns == 1
+    assert any(record.message == "régie crashed" for record in caplog.records)
 
 
 def test_daemon_reports_a_refusal_to_start(monkeypatch, capsys):

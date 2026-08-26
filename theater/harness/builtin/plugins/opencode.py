@@ -76,8 +76,12 @@ a long turn is not silent.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import hashlib
 import json
 import logging
+import math
 import os
 import sqlite3
 import subprocess
@@ -102,28 +106,55 @@ from theater.harness.base import (
     theater_binary,
     whole,
 )
+from theater.harness.contracts.source import HistoryPage
+from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.observation import (
     HarnessObserver,
     ScreenConfidence,
     ScreenKind,
     ScreenReading,
 )
-from theater.harness.source import Attachment, Batch, History, Source, TranscriptCandidate
+from theater.harness.source import (
+    Attachment,
+    Batch,
+    History,
+    Source,
+    TranscriptCandidate,
+)
 from theater.models import BadRequest, Status
 
 if TYPE_CHECKING:
     from theater.models import Participant
+from theater.constants.trajectory import (
+    TRAJECTORY_CURSOR_MAX_BYTES,
+    TRAJECTORY_IDENTIFIER_MAX_BYTES,
+    TRAJECTORY_PAGE_RECORD_LIMIT,
+)
 from theater.provenance import (
     TranscriptProvenance,
     is_trusted_provenance,
     normalize_provenance,
 )
+from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFeature
+from theater.trajectory.content import ContentFormat, DetailField
+from theater.trajectory.enums import (
+    CostProvenance,
+    TimingProvenance,
+    TrajectoryFailureCategory,
+    TrajectoryKind,
+    TrajectoryLane,
+    TrajectoryStatus,
+)
+from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryUsage
 from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
     TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
 )
 
 logger = logging.getLogger("theater.harness.opencode")
+
+OPENCODE_PROVIDER_ID_KEY = "providerID"
+OPENCODE_MODEL_ID_KEY = "modelID"
 
 #: Reported by `opencode debug paths`. The `-stable` suffix is the release channel.
 DB_NAME = "opencode-stable.db"
@@ -271,8 +302,8 @@ def _opencode_usage(info: dict) -> TokenUsage | None:
     cost = info.get("cost")
     # OpenCode uses zero when it has no per-turn price; zero falls through to model pricing.
     cost = float(cost) if isinstance(cost, (int, float)) and cost > 0 else None
-    provider = info.get("providerID")
-    model_id = info.get("modelID")
+    provider = info.get(OPENCODE_PROVIDER_ID_KEY)
+    model_id = info.get(OPENCODE_MODEL_ID_KEY)
     if isinstance(provider, str) and isinstance(model_id, str) and provider and model_id:
         model = f"{provider}/{model_id}"
     elif isinstance(model_id, str) and model_id:
@@ -283,14 +314,31 @@ def _opencode_usage(info: dict) -> TokenUsage | None:
     usage_key = f"opencode:{native_id}" if isinstance(native_id, str) and native_id else None
     return TokenUsage(
         model=model,
+        provider=provider if isinstance(provider, str) and provider else None,
         input_tokens=int(tokens.get("input") or 0),
         output_tokens=int(tokens.get("output") or 0),
         cache_creation_input_tokens=int(cache.get("write") or 0),
         cache_read_input_tokens=int(cache.get("read") or 0),
         reasoning_output_tokens=int(tokens.get("reasoning") or 0),
         cost_usd=cost,
+        cost_provenance=(CostProvenance.REPORTED if cost is not None else CostProvenance.UNKNOWN),
         idempotency_key=usage_key,
     )
+
+
+def _opencode_model(info: dict) -> str | None:
+    model_data = _table(info.get("model"))
+    provider = info.get(OPENCODE_PROVIDER_ID_KEY) or model_data.get(OPENCODE_PROVIDER_ID_KEY)
+    model_id = (
+        info.get(OPENCODE_MODEL_ID_KEY)
+        or model_data.get(OPENCODE_MODEL_ID_KEY)
+        or model_data.get("id")
+    )
+    if isinstance(provider, str) and isinstance(model_id, str) and provider and model_id:
+        return f"{provider}/{model_id}"
+    if isinstance(model_id, str) and model_id:
+        return model_id
+    return None
 
 
 def _table(value) -> dict:
@@ -301,6 +349,168 @@ def _table(value) -> dict:
     leaves the result typed as the union it was before the test.
     """
     return value if isinstance(value, dict) else {}
+
+
+def _trajectory_identifier(value, prefix: str = "id") -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    if any(ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in value):
+        return None
+    if len(encoded) <= TRAJECTORY_IDENTIFIER_MAX_BYTES:
+        return value
+    return f"{prefix}:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _trajectory_text(value) -> str:
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return value.encode("utf-8", errors="replace").decode("utf-8")
+        return value
+    if isinstance(value, (dict, list, tuple)):
+        try:
+            return json.dumps(value, default=str, sort_keys=True)
+        except (TypeError, ValueError):
+            return ""
+    return ""
+
+
+def _trajectory_string(value) -> str:
+    return value if isinstance(value, str) else ""
+
+
+def _opencode_mcp_identity(value: object) -> tuple[str, str] | None:
+    prefix = f"{SERVER_NAME}_"
+    if not isinstance(value, str) or not value.startswith(prefix):
+        return None
+    tool = _trajectory_identifier(value.removeprefix(prefix), "tool")
+    return (SERVER_NAME, tool) if tool is not None else None
+
+
+def _trajectory_lane(kind: TrajectoryKind) -> TrajectoryLane:
+    if kind is TrajectoryKind.USER:
+        return TrajectoryLane.INPUT
+    if kind in (TrajectoryKind.TOOL_CALL, TrajectoryKind.TOOL_RESULT):
+        return TrajectoryLane.TOOLS
+    return TrajectoryLane.MODEL
+
+
+def _trajectory_detail(
+    name: str, value, *, format: ContentFormat = ContentFormat.TEXT
+) -> DetailField | None:
+    if value is None:
+        return None
+    text = _trajectory_text(value)
+    if not text and isinstance(value, (int, float, bool)):
+        text = json.dumps(value)
+    if not text:
+        return None
+    try:
+        return DetailField.from_text(name, text, format=format)
+    except ValueError:
+        return None
+
+
+def _trajectory_seconds(value) -> float | None:
+    found = _seconds(value)
+    return found if found is not None and math.isfinite(found) else None
+
+
+def _trajectory_timing(start, end, fallback=None) -> Timing | None:
+    start_value = _trajectory_seconds(start)
+    end_value = _trajectory_seconds(end)
+    if start_value is None and end_value is None and fallback is not None:
+        start_value = _trajectory_seconds(fallback)
+    if start_value is None and end_value is None:
+        return None
+    if end_value is not None and start_value is not None and end_value < start_value:
+        end_value = None
+    duration = (
+        (end_value - start_value) * 1000
+        if start_value is not None and end_value is not None
+        else None
+    )
+    try:
+        return Timing(
+            start=start_value,
+            end=end_value,
+            duration_ms=duration,
+            provenance=TimingProvenance.SOURCE,
+        )
+    except ValueError:
+        return None
+
+
+def _message_timing(info: dict) -> Timing | None:
+    time_data = _table(info.get("time"))
+    return _trajectory_timing(time_data.get("created"), time_data.get("completed"))
+
+
+def _part_timing(part: dict, fallback=None) -> Timing | None:
+    state = _table(part.get("state"))
+    time_data = _table(part.get("time")) or _table(state.get("time"))
+    return _trajectory_timing(
+        time_data.get("start") or time_data.get("created"),
+        time_data.get("end") or time_data.get("completed"),
+        fallback=fallback,
+    )
+
+
+def _trajectory_usage(info: dict) -> TrajectoryUsage | None:
+    model = _trajectory_identifier(_opencode_model(info), "model")
+    model_data = _table(info.get("model"))
+    provider = _trajectory_identifier(
+        info.get(OPENCODE_PROVIDER_ID_KEY) or model_data.get(OPENCODE_PROVIDER_ID_KEY),
+        "provider",
+    )
+    try:
+        usage = _opencode_usage(info)
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return TrajectoryUsage(model=model, provider=provider) if model or provider else None
+    if usage is None:
+        return TrajectoryUsage(model=model, provider=provider) if model or provider else None
+    values = {
+        name: max(0, value) if isinstance(value, int) else 0
+        for name, value in (
+            ("input_tokens", usage.input_tokens),
+            ("output_tokens", usage.output_tokens),
+            ("reasoning_tokens", usage.reasoning_output_tokens),
+            ("cache_read_tokens", usage.cache_read_input_tokens),
+            ("cache_write_tokens", usage.cache_creation_input_tokens),
+        )
+    }
+    cost = usage.cost_usd if usage.cost_usd is not None and math.isfinite(usage.cost_usd) else None
+    if cost is not None and cost < 0:
+        cost = None
+    return TrajectoryUsage(
+        model=model or _trajectory_identifier(usage.model, "model"),
+        provider=provider or _trajectory_identifier(usage.provider, "provider"),
+        request_id=_trajectory_identifier(usage.idempotency_key, "request"),
+        cost_usd=cost,
+        cost_provenance=(CostProvenance.REPORTED if cost is not None else CostProvenance.UNKNOWN),
+        **values,
+    )
+
+
+def _assistant_request_id(usage: TrajectoryUsage | None, message_id: str) -> str | None:
+    if usage is not None and usage.request_id is not None:
+        return usage.request_id
+    return _trajectory_identifier(f"opencode:{message_id}", "request") if message_id else None
+
+
+def _opencode_source_key(db: Path) -> str:
+    return hashlib.sha256(str(db.expanduser().resolve()).encode("utf-8")).hexdigest()[:32]
+
+
+class _OpenCodeHistoryPageError(ValueError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def _tool_output(state: dict) -> str:
@@ -526,6 +736,22 @@ class OpenCodeObserver(HarnessObserver):
     keyed by transcript path and there is no path. Surfacing them needs a
     lineage hook on `Source`.
     """
+
+    trajectory_capabilities = TrajectoryCapabilities(
+        supported=frozenset(
+            {
+                TrajectoryFeature.REQUESTS,
+                TrajectoryFeature.MODELS,
+                TrajectoryFeature.TOOLS,
+                TrajectoryFeature.USAGE,
+                TrajectoryFeature.TIMING,
+                TrajectoryFeature.REASONING,
+                TrajectoryFeature.CONTEXT,
+                TrajectoryFeature.LIVE_UPDATES,
+            }
+        ),
+        unsupported=frozenset({TrajectoryFeature.RETRIES}),
+    )
 
     def __init__(self, db: Path | None = None, correlation_dir: Path | None = None):
         #: Injectable so tests never touch the real database.
@@ -789,6 +1015,8 @@ class OpenCodeSource(Source):
         self._stamp: dict[str, float] = {}
         self._finished: set[str] = set()
         self._said: set[str] = set()
+        self._trajectory_revisions: dict[str, int] = {}
+        self._trajectory_signatures: dict[str, TrajectoryFact] = {}
 
     # ---- Source ---------------------------------------------------------
 
@@ -817,6 +1045,8 @@ class OpenCodeSource(Source):
         self._stamp.clear()
         self._finished.clear()
         self._said.clear()
+        self._trajectory_revisions.clear()
+        self._trajectory_signatures.clear()
 
     def discard_attachment(self) -> None:
         """Reject a session candidate without disturbing the accepted one."""
@@ -841,9 +1071,24 @@ class OpenCodeSource(Source):
         self._stamp.clear()
         self._finished.clear()
         self._said.clear()
+        self._trajectory_revisions.clear()
+        self._trajectory_signatures.clear()
 
     async def history(self, *, last_n: int) -> History:
         return await asyncio.to_thread(self._history, last_n)
+
+    async def history_page(
+        self,
+        *,
+        before: str | None = None,
+        limit: int = TRAJECTORY_PAGE_RECORD_LIMIT,
+    ) -> HistoryPage:
+        if type(limit) is not int or limit <= 0:
+            return HistoryPage(
+                error_code="invalid_limit", error="history page limit must be positive"
+            )
+        limit = min(limit, TRAJECTORY_PAGE_RECORD_LIMIT)
+        return await asyncio.to_thread(self._history_page, before, limit)
 
     async def aclose(self) -> None:
         conn, self._conn = self._conn, None
@@ -969,6 +1214,652 @@ class OpenCodeSource(Source):
             correlation=self._attachment_provenance(sid),
             pinned=pinned,
         )
+
+    def _history_page(self, before: str | None, limit: int) -> HistoryPage:
+        if not self._db.exists():
+            return HistoryPage(
+                error_code=TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
+                error="OpenCode database is unavailable",
+            )
+        try:
+            conn = sqlite3.connect(f"file:{self._db}?mode=ro", uri=True)
+        except sqlite3.Error as exc:
+            return HistoryPage(
+                error_code=TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
+                error=f"reading OpenCode database failed: {exc}",
+            )
+        try:
+            return self._history_page_with_connection(conn, before, limit)
+        except sqlite3.Error as exc:
+            logger.debug("reading opencode history page failed", exc_info=True)
+            return HistoryPage(
+                error_code=TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
+                error=f"reading OpenCode database failed: {exc}",
+            )
+        finally:
+            conn.close()
+
+    def _history_page_with_connection(  # noqa: PLR0912, PLR0915
+        self, conn: sqlite3.Connection, before: str | None, limit: int
+    ) -> HistoryPage:
+        sid = self._history_session(conn)
+        pinned = self._known_location is not None
+        if sid is None:
+            if before is not None:
+                return HistoryPage(
+                    error_code="history_cursor_invalid",
+                    error="history cursor session is unavailable",
+                    pinned=pinned,
+                )
+            return HistoryPage(pinned=pinned)
+        try:
+            stat = self._db.stat()
+        except OSError as exc:
+            return HistoryPage(
+                error_code=TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
+                error=f"OpenCode database is unavailable: {exc}",
+                pinned=pinned,
+            )
+        identity = {"dev": int(stat.st_dev), "ino": int(stat.st_ino), "size": int(stat.st_size)}
+        boundary: tuple[int | float, str, str] | None = None
+        if before is not None:
+            try:
+                cursor = self._decode_history_cursor(before)
+                boundary = self._validate_history_cursor(conn, cursor, sid, identity)
+            except _OpenCodeHistoryPageError as exc:
+                return HistoryPage(
+                    error_code=exc.code,
+                    error=str(exc),
+                    pinned=pinned,
+                )
+        params: list[object] = [sid]
+        sql = (
+            "SELECT id, time_created, time_updated, data FROM message "
+            "WHERE session_id = ? AND time_created IS NOT NULL"
+        )
+        if boundary is not None:
+            created, message_id, _fingerprint = boundary
+            sql += " AND (time_created < ? OR (time_created = ? AND id < ?))"
+            params.extend((created, created, message_id))
+        sql += " ORDER BY time_created DESC, id DESC LIMIT ?"
+        params.append(limit + 1)
+        rows = conn.execute(sql, params).fetchall()
+        selected: list[tuple[object, object, object, object]] = []
+        selected_output: list[tuple[tuple[Event, ...], tuple[TrajectoryFact, ...], int]] = []
+        event_count = 0
+        fact_count = 0
+        has_more = False
+        for row_index, row in enumerate(rows):
+            if row_index >= limit:
+                has_more = True
+                break
+            message_id, created, updated, raw = row
+            key = self._history_row_key(created, message_id)
+            if key is None:
+                continue
+            parts, parts_truncated = self._history_parts(conn, sid, str(message_id), limit)
+            if parts_truncated:
+                return HistoryPage(
+                    error_code="history_record_too_large",
+                    error="one OpenCode message has too many parts for the history page limit",
+                    pinned=pinned,
+                )
+            info = _loads(raw)
+            if not isinstance(info.get("id"), str):
+                info["id"] = str(message_id)
+            message_events = tuple(
+                event
+                for event in self._replay(info, [_loads(part[3]) for part in parts])
+                if not event.usage_only
+            )
+            message_facts = tuple(
+                self._stored_facts_for_message(
+                    info,
+                    parts,
+                    raw_index=self._history_coordinate(created),
+                    message_revision=self._stored_revision(info, updated, created),
+                )
+            )
+            if len(message_events) > limit or len(message_facts) > limit:
+                return HistoryPage(
+                    error_code="history_record_too_large",
+                    error="one OpenCode message exceeds the history page limit",
+                    pinned=pinned,
+                )
+            if event_count + len(message_events) > limit or fact_count + len(message_facts) > limit:
+                has_more = True
+                break
+            selected.append(row)
+            selected_output.append(
+                (message_events, message_facts, self._history_coordinate(created))
+            )
+            event_count += len(message_events)
+            fact_count += len(message_facts)
+        if not selected:
+            return HistoryPage(
+                location=f"opencode://{sid}",
+                pinned=pinned,
+                provenance=self._attachment_provenance(sid),
+            )
+        newest = selected[0]
+        oldest = selected[-1]
+        events: list[Event] = []
+        facts: list[TrajectoryFact] = []
+        for message_events, message_facts, coordinate in reversed(selected_output):
+            events.extend(replace(event, raw_index=coordinate) for event in message_events)
+            facts.extend(message_facts)
+        newest_cursor = self._encode_history_cursor(sid, identity, newest)
+        older_cursor = self._encode_history_cursor(sid, identity, oldest) if has_more else None
+        return HistoryPage(
+            location=f"opencode://{sid}",
+            events=events,
+            trajectory=facts,
+            trajectory_events=(),
+            cursor=newest_cursor,
+            older_cursor=older_cursor,
+            has_older=has_more,
+            provenance=self._attachment_provenance(sid),
+            pinned=pinned,
+        )
+
+    def _history_session(self, conn: sqlite3.Connection) -> str | None:
+        if self._session is not None:
+            return self._session if self._session_exists(conn, self._session) else None
+        if self._receipt is not None:
+            sid = self._read_receipt()
+            if sid is not None and self._session_exists(conn, sid):
+                return sid
+        pinned = self._pinned_sid()
+        if pinned is not None and self._trusted_known_location():
+            return pinned if self._session_exists(conn, pinned) else None
+        if self._session_id is not None and self._session_exists(conn, self._session_id):
+            return self._session_id
+        if not self._cwd:
+            return None
+        args: list[object] = [str(Path(self._cwd).resolve())]
+        sql = "SELECT id FROM session WHERE directory = ? AND parent_id IS NULL"
+        if self._after is not None:
+            sql += " AND time_created >= ?"
+            args.append(int(self._after * 1000))
+        row = conn.execute(sql + " ORDER BY time_created DESC LIMIT 1", args).fetchone()
+        return str(row[0]) if row is not None else None
+
+    @staticmethod
+    def _history_row_key(created, message_id) -> tuple[int | float, str, str] | None:
+        if isinstance(created, bool) or not isinstance(created, (int, float)):
+            return None
+        if not math.isfinite(created):
+            return None
+        if not isinstance(message_id, str) or not message_id:
+            return None
+        return created, message_id, ""
+
+    @staticmethod
+    def _history_revision(updated, created) -> int:
+        value = (
+            updated
+            if isinstance(updated, (int, float)) and not isinstance(updated, bool)
+            else created
+        )
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+        ):
+            return 0
+        return max(0, int(value))
+
+    @classmethod
+    def _history_coordinate(cls, created) -> int:
+        return cls._history_revision(created, 0)
+
+    @classmethod
+    def _stored_revision(cls, data: dict, updated, created) -> int:
+        persisted = cls._history_revision(updated, created)
+        revision = data.get("revision")
+        if isinstance(revision, int) and not isinstance(revision, bool) and revision >= 0:
+            return max(revision, persisted)
+        return persisted
+
+    @staticmethod
+    def _history_fingerprint(updated, raw) -> str:
+        if isinstance(raw, bytes):
+            encoded = raw
+        elif isinstance(raw, str):
+            encoded = raw.encode("utf-8", errors="replace")
+        else:
+            encoded = repr(raw).encode("utf-8", errors="replace")
+        return hashlib.sha256(str(updated).encode("utf-8") + b"\0" + encoded).hexdigest()
+
+    def _encode_history_cursor(
+        self, sid: str, identity: dict[str, int], row: Sequence[object]
+    ) -> str:
+        message_id, created, updated, raw = row
+        key = self._history_row_key(created, message_id)
+        if key is None:
+            raise ValueError("cannot encode an invalid OpenCode history boundary")
+        payload = {
+            "v": 1,
+            "source": "opencode",
+            "db": _opencode_source_key(self._db),
+            "session": sid,
+            "identity": identity,
+            "boundary": [key[0], key[1]],
+            "revision": self._history_revision(updated, created),
+            "fingerprint": self._history_fingerprint(updated, raw),
+        }
+        encoded = (
+            base64.urlsafe_b64encode(
+                json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+            )
+            .decode("ascii")
+            .rstrip("=")
+        )
+        cursor = "oc1." + encoded
+        if len(cursor.encode("utf-8")) > TRAJECTORY_CURSOR_MAX_BYTES:
+            raise ValueError("OpenCode history cursor exceeds its size limit")
+        return cursor
+
+    @staticmethod
+    def _decode_history_cursor(cursor: str) -> dict[str, object]:
+        if not isinstance(cursor, str) or not cursor.startswith("oc1."):
+            raise _OpenCodeHistoryPageError(
+                "history_cursor_invalid", "history cursor is not valid for OpenCode"
+            )
+        try:
+            encoded_length = len(cursor.encode("utf-8"))
+        except UnicodeEncodeError as exc:
+            raise _OpenCodeHistoryPageError(
+                "history_cursor_invalid", "history cursor is malformed"
+            ) from exc
+        if encoded_length > TRAJECTORY_CURSOR_MAX_BYTES:
+            raise _OpenCodeHistoryPageError("history_cursor_invalid", "history cursor is too large")
+        try:
+            raw = base64.urlsafe_b64decode(cursor[4:] + "=" * (-len(cursor[4:]) % 4))
+            payload = json.loads(raw.decode("utf-8"))
+        except _OpenCodeHistoryPageError:
+            raise
+        except (ValueError, UnicodeDecodeError, binascii.Error, json.JSONDecodeError) as exc:
+            raise _OpenCodeHistoryPageError(
+                "history_cursor_invalid", "history cursor is malformed"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise _OpenCodeHistoryPageError(
+                "history_cursor_invalid", "history cursor payload is malformed"
+            )
+        required = {
+            "v",
+            "source",
+            "db",
+            "session",
+            "identity",
+            "boundary",
+            "revision",
+            "fingerprint",
+        }
+        if set(payload) != required or payload.get("v") != 1 or payload.get("source") != "opencode":
+            raise _OpenCodeHistoryPageError(
+                "history_cursor_invalid", "history cursor does not belong to OpenCode"
+            )
+        return payload
+
+    def _validate_history_cursor(
+        self,
+        conn: sqlite3.Connection,
+        cursor: dict[str, object],
+        sid: str,
+        identity: dict[str, int],
+    ) -> tuple[int | float, str, str]:
+        if cursor.get("db") != _opencode_source_key(self._db) or cursor.get("session") != sid:
+            raise _OpenCodeHistoryPageError(
+                "history_cursor_invalid", "history cursor belongs to another source or session"
+            )
+        found_identity = cursor.get("identity")
+        valid_identity = False
+        if isinstance(found_identity, dict):
+            found_size = found_identity.get("size")
+            valid_identity = (
+                found_identity.get("dev") == identity["dev"]
+                and found_identity.get("ino") == identity["ino"]
+                and type(found_size) is int
+            )
+        if not valid_identity:
+            raise _OpenCodeHistoryPageError(
+                "history_cursor_invalid", "OpenCode database identity changed"
+            )
+        boundary = cursor.get("boundary")
+        if (
+            not isinstance(boundary, list)
+            or len(boundary) != 2
+            or isinstance(boundary[0], bool)
+            or not isinstance(boundary[0], (int, float))
+            or not math.isfinite(boundary[0])
+            or not isinstance(boundary[1], str)
+            or not boundary[1]
+        ):
+            raise _OpenCodeHistoryPageError(
+                "history_cursor_invalid", "history cursor boundary is malformed"
+            )
+        created, message_id = boundary
+        row = conn.execute(
+            "SELECT time_updated, data FROM message WHERE session_id = ? "
+            "AND time_created = ? AND id = ?",
+            (sid, created, message_id),
+        ).fetchone()
+        if row is None:
+            raise _OpenCodeHistoryPageError(
+                "history_cursor_invalid", "OpenCode history boundary no longer exists"
+            )
+        if cursor.get("revision") != self._history_revision(row[0], created):
+            raise _OpenCodeHistoryPageError(
+                "history_cursor_invalid", "OpenCode history boundary was updated"
+            )
+        if cursor.get("fingerprint") != self._history_fingerprint(row[0], row[1]):
+            raise _OpenCodeHistoryPageError(
+                "history_cursor_invalid", "OpenCode history boundary was updated"
+            )
+        return created, message_id, str(cursor["fingerprint"])
+
+    def _history_parts(
+        self, conn: sqlite3.Connection, sid: str, message_id: str, limit: int
+    ) -> tuple[list[tuple[object, object, object, object]], bool]:
+        rows = conn.execute(
+            "SELECT id, time_created, time_updated, data FROM part "
+            "WHERE message_id = ? AND session_id = ? "
+            "ORDER BY time_created, id LIMIT ?",
+            (message_id, sid, limit + 1),
+        )
+        found = list(rows)
+        truncated = len(found) > limit
+        found = found[:limit]
+        found.sort(
+            key=lambda row: (
+                row[1] if isinstance(row[1], (int, float)) and not isinstance(row[1], bool) else 0,
+                str(row[0]),
+            )
+        )
+        return found, truncated
+
+    def _stored_fact(
+        self,
+        *,
+        kind: TrajectoryKind,
+        summary: str,
+        status: TrajectoryStatus,
+        native_id: str | None,
+        fallback_id: str | None,
+        revision: int,
+        raw_index: int,
+        event_ordinal: int,
+        turn_id: str | None = None,
+        step_id: str | None = None,
+        request_id: str | None = None,
+        call_id: str | None = None,
+        parent_call_id: str | None = None,
+        mcp_server: str | None = None,
+        mcp_tool: str | None = None,
+        timing: Timing | None = None,
+        usage: TrajectoryUsage | None = None,
+        failure: TrajectoryFailure | None = None,
+        details: Sequence[DetailField] = (),
+    ) -> TrajectoryFact:
+        native = _trajectory_identifier(native_id, "native")
+        if native is None:
+            native = _trajectory_identifier(fallback_id, "fallback")
+        return TrajectoryFact(
+            kind=kind,
+            lane=_trajectory_lane(kind),
+            source="opencode",
+            summary=summary,
+            status=status,
+            native_id=native,
+            revision=max(0, revision),
+            raw_index=max(0, raw_index),
+            event_ordinal=max(0, event_ordinal),
+            turn_id=_trajectory_identifier(turn_id, "turn"),
+            step_id=_trajectory_identifier(step_id, "step"),
+            request_id=_trajectory_identifier(request_id, "request"),
+            call_id=_trajectory_identifier(call_id, "call"),
+            parent_call_id=_trajectory_identifier(parent_call_id, "parent-call"),
+            mcp_server=_trajectory_identifier(mcp_server, "mcp-server"),
+            mcp_tool=_trajectory_identifier(mcp_tool, "mcp-tool"),
+            timing=timing,
+            usage=usage,
+            failure=failure,
+            details=tuple(details),
+        )
+
+    def _stored_facts_for_message(
+        self,
+        info: dict,
+        parts: Sequence[tuple[object, object, object, object]],
+        *,
+        raw_index: int,
+        message_revision: int,
+    ) -> list[TrajectoryFact]:
+        facts: list[TrajectoryFact] = []
+        mid = _trajectory_string(info.get("id"))
+        role = info.get("role")
+        finish = info.get("finish")
+        timing = _message_timing(info)
+        usage = _trajectory_usage(info)
+        request_id = _assistant_request_id(usage, mid) if role == "assistant" else None
+        ordinal = 0
+        for part_id, created, updated, raw in parts:
+            part = _loads(raw)
+            if not isinstance(part.get("id"), str):
+                part["id"] = str(part_id)
+            part_facts = self._stored_facts_for_part(
+                info,
+                part,
+                revision=self._stored_revision(part, updated, created),
+                raw_index=raw_index,
+                ordinal_base=ordinal,
+                timing=timing,
+                usage=usage,
+                request_id=request_id,
+            )
+            facts.extend(part_facts)
+            ordinal += max(1, len(part_facts))
+        if not facts and role in ("user", "system", "developer"):
+            content = _trajectory_text(info.get("content"))
+            if content:
+                facts.append(
+                    self._stored_fact(
+                        kind=TrajectoryKind.USER if role == "user" else TrajectoryKind.SYSTEM,
+                        summary=content,
+                        status=TrajectoryStatus.COMPLETED,
+                        native_id=mid or None,
+                        fallback_id=None,
+                        revision=message_revision,
+                        raw_index=raw_index,
+                        event_ordinal=0,
+                        turn_id=mid or None,
+                        timing=timing,
+                    )
+                )
+        if not facts and role == "assistant" and (finish or usage is not None):
+            facts.append(
+                self._stored_fact(
+                    kind=TrajectoryKind.ASSISTANT,
+                    summary="",
+                    status=self._finish_status(finish),
+                    native_id=mid or None,
+                    fallback_id=None,
+                    revision=message_revision,
+                    raw_index=raw_index,
+                    event_ordinal=0,
+                    turn_id=mid or None,
+                    timing=timing,
+                    usage=usage,
+                    request_id=request_id,
+                )
+            )
+        return facts
+
+    def _stored_facts_for_part(
+        self,
+        info: dict,
+        part: dict,
+        *,
+        revision: int,
+        raw_index: int,
+        ordinal_base: int,
+        timing: Timing | None,
+        usage: TrajectoryUsage | None,
+        request_id: str | None,
+    ) -> list[TrajectoryFact]:
+        mid = _trajectory_string(info.get("id"))
+        role = info.get("role")
+        ptype = part.get("type")
+        part_id = part.get("id") if isinstance(part.get("id"), str) else None
+        fallback = part_id if isinstance(part_id, str) else None
+        if ptype == "text":
+            text = _trajectory_string(part.get("text"))
+            if role == "assistant":
+                kind = TrajectoryKind.ASSISTANT
+                status = self._finish_status(info.get("finish"))
+                fact_usage = usage
+                fact_timing = timing or _part_timing(part)
+            elif role == "user":
+                kind = TrajectoryKind.USER
+                status = TrajectoryStatus.COMPLETED
+                fact_usage = None
+                fact_timing = timing or _part_timing(part)
+            elif role in ("system", "developer"):
+                kind = TrajectoryKind.SYSTEM
+                status = TrajectoryStatus.COMPLETED
+                fact_usage = None
+                fact_timing = timing or _part_timing(part)
+            else:
+                return []
+            return [
+                self._stored_fact(
+                    kind=kind,
+                    summary=text,
+                    status=status,
+                    native_id=part_id,
+                    fallback_id=fallback,
+                    revision=revision,
+                    raw_index=raw_index,
+                    event_ordinal=ordinal_base,
+                    turn_id=mid or None,
+                    timing=fact_timing,
+                    usage=fact_usage,
+                    request_id=request_id if role == "assistant" else None,
+                )
+            ]
+        if ptype in ("reasoning", "thinking"):
+            text = _trajectory_string(part.get("text"))
+            part_timing = _part_timing(part)
+            status = (
+                TrajectoryStatus.COMPLETED
+                if part_timing is not None and part_timing.end is not None
+                else self._finish_status(info.get("finish"))
+            )
+            return [
+                self._stored_fact(
+                    kind=TrajectoryKind.REASONING,
+                    summary=text,
+                    status=status,
+                    native_id=part_id,
+                    fallback_id=fallback,
+                    revision=revision,
+                    raw_index=raw_index,
+                    event_ordinal=ordinal_base,
+                    turn_id=mid or None,
+                    timing=part_timing,
+                    request_id=request_id if role == "assistant" else None,
+                )
+            ]
+        if ptype in ("context", "system"):
+            text = _trajectory_text(part.get("text") or part.get("content"))
+            return [
+                self._stored_fact(
+                    kind=TrajectoryKind.SYSTEM if ptype == "system" else TrajectoryKind.CONTEXT,
+                    summary=text,
+                    status=TrajectoryStatus.COMPLETED,
+                    native_id=part_id,
+                    fallback_id=fallback,
+                    revision=revision,
+                    raw_index=raw_index,
+                    event_ordinal=ordinal_base,
+                    turn_id=mid or None,
+                    timing=_part_timing(part),
+                )
+            ]
+        if ptype != "tool":
+            return []
+        state = _table(part.get("state"))
+        state_status = state.get("status")
+        call = part.get("callID") or part.get("id")
+        call_id = call if isinstance(call, str) else None
+        tool_name = part.get("tool") if isinstance(part.get("tool"), str) else None
+        mcp_identity = _opencode_mcp_identity(tool_name)
+        mcp_server, mcp_tool = mcp_identity or (None, None)
+        parent = part.get("parentCallID") or state.get("parentCallID")
+        parent_id = parent if isinstance(parent, str) else None
+        details = [
+            value
+            for value in (
+                _trajectory_detail("tool", tool_name),
+                _trajectory_detail("arguments", state.get("input"), format=ContentFormat.JSON),
+            )
+            if value is not None
+        ]
+        facts = [
+            self._stored_fact(
+                kind=TrajectoryKind.TOOL_CALL,
+                summary=tool_name or "",
+                status=self._tool_status(state_status),
+                native_id=call_id,
+                fallback_id=fallback,
+                revision=revision,
+                raw_index=raw_index,
+                event_ordinal=ordinal_base,
+                turn_id=mid or None,
+                call_id=call_id,
+                parent_call_id=parent_id,
+                mcp_server=mcp_server,
+                mcp_tool=mcp_tool,
+                timing=_part_timing(part),
+                request_id=request_id if role == "assistant" else None,
+                details=details,
+            )
+        ]
+        if state_status in ("completed", "error"):
+            result = _tool_output(state)
+            result_detail = _trajectory_detail("result", result)
+            facts.append(
+                self._stored_fact(
+                    kind=TrajectoryKind.TOOL_RESULT,
+                    summary=result,
+                    status=(
+                        TrajectoryStatus.ERROR
+                        if state_status == "error"
+                        else TrajectoryStatus.COMPLETED
+                    ),
+                    native_id=f"{call_id}:result" if call_id else None,
+                    fallback_id=f"{fallback}:result" if fallback else None,
+                    revision=revision,
+                    raw_index=raw_index,
+                    event_ordinal=ordinal_base + 1,
+                    turn_id=mid or None,
+                    call_id=call_id,
+                    parent_call_id=parent_id,
+                    mcp_server=mcp_server,
+                    mcp_tool=mcp_tool,
+                    failure=(
+                        TrajectoryFailure(TrajectoryFailureCategory.TOOL, detail=result)
+                        if state_status == "error"
+                        else None
+                    ),
+                    timing=_part_timing(part),
+                    request_id=request_id if role == "assistant" else None,
+                    details=(result_detail,) if result_detail is not None else (),
+                )
+            )
+        return facts
 
     def _replay(self, info: dict, parts: list[dict]) -> list[Event]:
         """One stored message, as events. Text unclipped: this is history."""
@@ -1250,20 +2141,410 @@ class OpenCodeSource(Source):
         if not rows:
             return Batch()
         events: list[Event] = []
+        trajectory: list[TrajectoryFact] = []
         for seq, kind, raw in rows:
             self._cursor = seq
-            events.extend(self._translate(conn, kind, _loads(raw), seq))
+            translated, facts = self._translate_with_trajectory(conn, kind, _loads(raw), seq)
+            events.extend(translated)
+            trajectory.extend(facts)
         # Rows consumed is progress: session.updated through a turn, else rescue fires mid-turn.
-        return Batch(events=events, progressed=True)
+        return Batch(
+            events=events,
+            progressed=True,
+            trajectory=trajectory,
+            trajectory_events=(),
+        )
 
     def _translate(
         self, conn: sqlite3.Connection, kind: str, payload: dict, seq: int
     ) -> list[Event]:
+        return self._translate_with_trajectory(conn, kind, payload, seq)[0]
+
+    def _translate_with_trajectory(
+        self, conn: sqlite3.Connection, kind: str, payload: dict, seq: int
+    ) -> tuple[list[Event], list[TrajectoryFact]]:
         if kind == "message.part.updated.1":
-            return self._on_part(conn, payload, seq)
+            part = payload.get("part")
+            message_id = part.get("messageID") if isinstance(part, dict) else None
+            coordinate = self._message_coordinate(conn, message_id, seq)
+            events = self._on_part(conn, payload, seq)
+            return events, self._trajectory_for_part(conn, payload, seq, raw_index=coordinate)
         if kind == "message.updated.1":
-            return self._on_message(payload, seq)
+            info = payload.get("info")
+            message_id = info.get("id") if isinstance(info, dict) else None
+            coordinate = self._message_coordinate(conn, message_id, seq)
+            events = self._on_message(payload, seq)
+            facts = self._trajectory_for_message(conn, payload, seq, raw_index=coordinate)
+            if isinstance(info, dict):
+                finish = info.get("finish")
+                if finish and finish != STEP_FINISH and isinstance(message_id, str):
+                    self._text.pop(message_id, None)
+            return events, facts
         # session.created / session.updated: progress, not conversation.
+        return [], []
+
+    def _live_fact(
+        self,
+        *,
+        kind: TrajectoryKind,
+        summary: str,
+        status: TrajectoryStatus,
+        native_id: str | None,
+        fallback_id: str | None,
+        raw_index: int,
+        event_ordinal: int,
+        turn_id: str | None = None,
+        step_id: str | None = None,
+        request_id: str | None = None,
+        call_id: str | None = None,
+        parent_call_id: str | None = None,
+        mcp_server: str | None = None,
+        mcp_tool: str | None = None,
+        timing: Timing | None = None,
+        usage: TrajectoryUsage | None = None,
+        failure: TrajectoryFailure | None = None,
+        details: Sequence[DetailField] = (),
+        revision_hint: int | None = None,
+    ) -> TrajectoryFact | None:
+        native = _trajectory_identifier(native_id, "native")
+        if native is None:
+            native = _trajectory_identifier(fallback_id, "fallback")
+        candidate = TrajectoryFact(
+            kind=kind,
+            lane=_trajectory_lane(kind),
+            source="opencode",
+            summary=summary,
+            status=status,
+            native_id=native,
+            raw_index=max(0, raw_index),
+            event_ordinal=max(0, event_ordinal),
+            turn_id=_trajectory_identifier(turn_id, "turn"),
+            step_id=_trajectory_identifier(step_id, "step"),
+            request_id=_trajectory_identifier(request_id, "request"),
+            call_id=_trajectory_identifier(call_id, "call"),
+            parent_call_id=_trajectory_identifier(parent_call_id, "parent-call"),
+            mcp_server=_trajectory_identifier(mcp_server, "mcp-server"),
+            mcp_tool=_trajectory_identifier(mcp_tool, "mcp-tool"),
+            timing=timing,
+            usage=usage,
+            failure=failure,
+            details=tuple(details),
+        )
+        key = native or f"fallback:{candidate.raw_index}:{candidate.event_ordinal}:{kind.value}"
+        previous = self._trajectory_signatures.get(key)
+        if previous is not None:
+            comparable = replace(
+                candidate,
+                raw_index=previous.raw_index,
+                event_ordinal=previous.event_ordinal,
+            )
+            if previous == comparable:
+                return None
+        revision = max(self._trajectory_revisions.get(key, -1) + 1, revision_hint or 0)
+        self._trajectory_revisions[key] = revision
+        self._trajectory_signatures[key] = candidate
+        return replace(candidate, revision=revision)
+
+    def _live_revision(
+        self,
+        conn: sqlite3.Connection,
+        table: str,
+        record_id: str | None,
+        *fallbacks: object,
+    ) -> int:
+        values = list(fallbacks)
+        if table not in {"message", "part"}:
+            raise ValueError("unsupported OpenCode revision table")
+        if record_id:
+            query = (
+                "SELECT time_updated, time_created FROM message WHERE id = ?"
+                if table == "message"
+                else "SELECT time_updated, time_created FROM part WHERE id = ?"
+            )
+            row = conn.execute(
+                query,
+                (record_id,),
+            ).fetchone()
+            if row is not None:
+                values[:0] = row
+        revisions = [self._history_revision(value, 0) for value in values]
+        return max(revisions, default=0)
+
+    def _message_coordinate(
+        self, conn: sqlite3.Connection, message_id: object, fallback: int
+    ) -> int:
+        if isinstance(message_id, str) and message_id:
+            row = conn.execute(
+                "SELECT time_created FROM message WHERE id = ?", (message_id,)
+            ).fetchone()
+            if row is not None:
+                return self._history_coordinate(row[0])
+        return max(0, fallback)
+
+    @staticmethod
+    def _finish_status(finish: object) -> TrajectoryStatus:
+        if not finish:
+            return TrajectoryStatus.RUNNING
+        return TrajectoryStatus.PARTIAL if finish == STEP_FINISH else TrajectoryStatus.COMPLETED
+
+    @staticmethod
+    def _tool_status(status: object) -> TrajectoryStatus:
+        if status == "pending":
+            return TrajectoryStatus.PENDING
+        if status == "running":
+            return TrajectoryStatus.RUNNING
+        if status == "completed":
+            return TrajectoryStatus.COMPLETED
+        if status == "error":
+            return TrajectoryStatus.ERROR
+        return TrajectoryStatus.UNKNOWN
+
+    def _trajectory_for_part(  # noqa: PLR0912, PLR0915
+        self, conn: sqlite3.Connection, payload: dict, seq: int, *, raw_index: int
+    ) -> list[TrajectoryFact]:
+        part = payload.get("part")
+        if not isinstance(part, dict):
+            return []
+        mid = part.get("messageID")
+        message_id = mid if isinstance(mid, str) else ""
+        role = self._role(conn, message_id) if message_id else None
+        request_id = _assistant_request_id(None, message_id) if role == "assistant" else None
+        ptype = part.get("type")
+        timing = _part_timing(part)
+        part_id = part.get("id")
+        fallback = part_id if isinstance(part_id, str) else None
+        revision_hint = self._live_revision(
+            conn,
+            "part",
+            fallback,
+            payload.get("time"),
+            seq,
+        )
+        step_id = part.get("stepID") or part.get("stepId")
+        if ptype == "text":
+            if role == "assistant":
+                kind = TrajectoryKind.ASSISTANT
+                status = TrajectoryStatus.RUNNING
+            elif role == "user":
+                kind = TrajectoryKind.USER
+                status = TrajectoryStatus.COMPLETED
+            elif role in ("system", "developer"):
+                kind = TrajectoryKind.SYSTEM
+                status = TrajectoryStatus.COMPLETED
+            else:
+                return []
+            text = _trajectory_string(part.get("text"))
+            fact = self._live_fact(
+                kind=kind,
+                summary=text,
+                status=status,
+                native_id=part_id,
+                fallback_id=fallback,
+                raw_index=raw_index,
+                event_ordinal=0,
+                turn_id=message_id or None,
+                step_id=step_id if isinstance(step_id, str) else None,
+                request_id=request_id,
+                timing=timing,
+                revision_hint=revision_hint,
+            )
+            return [fact] if fact is not None else []
+        if ptype in ("reasoning", "thinking"):
+            text = _trajectory_string(part.get("text"))
+            status = (
+                TrajectoryStatus.COMPLETED
+                if timing is not None and timing.end is not None
+                else TrajectoryStatus.RUNNING
+            )
+            fact = self._live_fact(
+                kind=TrajectoryKind.REASONING,
+                summary=text,
+                status=status,
+                native_id=part_id,
+                fallback_id=fallback,
+                raw_index=raw_index,
+                event_ordinal=0,
+                turn_id=message_id or None,
+                step_id=step_id if isinstance(step_id, str) else None,
+                request_id=request_id,
+                timing=timing,
+                revision_hint=revision_hint,
+            )
+            return [fact] if fact is not None else []
+        if ptype in ("context", "system"):
+            text = _trajectory_text(part.get("text") or part.get("content"))
+            fact = self._live_fact(
+                kind=TrajectoryKind.SYSTEM if ptype == "system" else TrajectoryKind.CONTEXT,
+                summary=text,
+                status=TrajectoryStatus.COMPLETED,
+                native_id=part_id,
+                fallback_id=fallback,
+                raw_index=raw_index,
+                event_ordinal=0,
+                turn_id=message_id or None,
+                step_id=step_id if isinstance(step_id, str) else None,
+                timing=timing,
+                revision_hint=revision_hint,
+            )
+            return [fact] if fact is not None else []
+        if ptype != "tool":
+            return []
+        state = _table(part.get("state"))
+        state_status = state.get("status")
+        call = part.get("callID") or part.get("id")
+        call_id = call if isinstance(call, str) else None
+        tool_name = part.get("tool") if isinstance(part.get("tool"), str) else None
+        mcp_identity = _opencode_mcp_identity(tool_name)
+        mcp_server, mcp_tool = mcp_identity or (None, None)
+        parent = part.get("parentCallID") or state.get("parentCallID")
+        parent_id = parent if isinstance(parent, str) else None
+        details: list[DetailField] = []
+        tool_detail = _trajectory_detail("tool", tool_name)
+        if tool_detail is not None:
+            details.append(tool_detail)
+        input_detail = _trajectory_detail(
+            "arguments", state.get("input"), format=ContentFormat.JSON
+        )
+        if input_detail is not None:
+            details.append(input_detail)
+        call_fact = self._live_fact(
+            kind=TrajectoryKind.TOOL_CALL,
+            summary=tool_name or "",
+            status=self._tool_status(state_status),
+            native_id=call_id,
+            fallback_id=fallback,
+            raw_index=raw_index,
+            event_ordinal=0,
+            turn_id=message_id or None,
+            step_id=step_id if isinstance(step_id, str) else None,
+            request_id=request_id,
+            call_id=call_id,
+            parent_call_id=parent_id,
+            mcp_server=mcp_server,
+            mcp_tool=mcp_tool,
+            timing=timing,
+            details=details,
+            revision_hint=revision_hint,
+        )
+        facts = [call_fact] if call_fact is not None else []
+        if state_status in ("completed", "error"):
+            result = _tool_output(state)
+            result_details: list[DetailField] = []
+            result_detail = _trajectory_detail("result", result)
+            if result_detail is not None:
+                result_details.append(result_detail)
+            result_fact = self._live_fact(
+                kind=TrajectoryKind.TOOL_RESULT,
+                summary=result,
+                status=(
+                    TrajectoryStatus.ERROR
+                    if state_status == "error"
+                    else TrajectoryStatus.COMPLETED
+                ),
+                native_id=f"{call_id}:result" if call_id else None,
+                fallback_id=f"{fallback}:result" if fallback else None,
+                raw_index=raw_index,
+                event_ordinal=1,
+                turn_id=message_id or None,
+                step_id=step_id if isinstance(step_id, str) else None,
+                request_id=request_id,
+                call_id=call_id,
+                parent_call_id=parent_id,
+                mcp_server=mcp_server,
+                mcp_tool=mcp_tool,
+                failure=(
+                    TrajectoryFailure(TrajectoryFailureCategory.TOOL, detail=result)
+                    if state_status == "error"
+                    else None
+                ),
+                timing=timing,
+                details=result_details,
+                revision_hint=revision_hint,
+            )
+            if result_fact is not None:
+                facts.append(result_fact)
+        return facts
+
+    def _trajectory_for_message(
+        self, conn: sqlite3.Connection, payload: dict, seq: int, *, raw_index: int
+    ) -> list[TrajectoryFact]:
+        info = payload.get("info")
+        if not isinstance(info, dict):
+            return []
+        mid = _trajectory_string(info.get("id"))
+        role = info.get("role")
+        finish = info.get("finish")
+        timing = _message_timing(info)
+        usage = _trajectory_usage(info)
+        request_id = _assistant_request_id(usage, mid) if role == "assistant" else None
+        time_data = _table(info.get("time"))
+        revision_hint = self._live_revision(
+            conn,
+            "message",
+            mid or None,
+            time_data.get("updated"),
+            time_data.get("completed"),
+            time_data.get("created"),
+            seq,
+        )
+        if role == "assistant":
+            text_parts = self._text.get(mid, {})
+            if text_parts:
+                facts: list[TrajectoryFact] = []
+                status = self._finish_status(finish)
+                for ordinal, (part_id, part_text) in enumerate(text_parts.items()):
+                    fact = self._live_fact(
+                        kind=TrajectoryKind.ASSISTANT,
+                        summary=part_text,
+                        status=status,
+                        native_id=part_id,
+                        fallback_id=f"{mid}:text" if mid else None,
+                        raw_index=raw_index,
+                        event_ordinal=ordinal,
+                        turn_id=mid or None,
+                        timing=timing,
+                        usage=usage,
+                        request_id=request_id,
+                        revision_hint=revision_hint,
+                    )
+                    if fact is not None:
+                        facts.append(fact)
+                return facts
+            if finish or usage is not None:
+                fact = self._live_fact(
+                    kind=TrajectoryKind.ASSISTANT,
+                    summary="",
+                    status=self._finish_status(finish),
+                    native_id=mid or None,
+                    fallback_id=None,
+                    raw_index=raw_index,
+                    event_ordinal=0,
+                    turn_id=mid or None,
+                    timing=timing,
+                    usage=usage,
+                    request_id=request_id,
+                    revision_hint=revision_hint,
+                )
+                return [fact] if fact is not None else []
+            return []
+        if role in ("user", "system", "developer"):
+            content = _trajectory_text(info.get("content"))
+            if not content:
+                return []
+            kind = TrajectoryKind.USER if role == "user" else TrajectoryKind.SYSTEM
+            fact = self._live_fact(
+                kind=kind,
+                summary=content,
+                status=TrajectoryStatus.COMPLETED,
+                native_id=mid or None,
+                fallback_id=None,
+                raw_index=raw_index,
+                event_ordinal=0,
+                turn_id=mid or None,
+                timing=timing,
+                revision_hint=revision_hint,
+            )
+            return [fact] if fact is not None else []
         return []
 
     def _on_part(self, conn: sqlite3.Connection, payload: dict, seq: int) -> list[Event]:
@@ -1362,7 +2643,7 @@ class OpenCodeSource(Source):
             or self._stamp.pop(mid, None)
             or _seconds(time.get("created"))
         )
-        text = "".join(self._text.pop(mid, {}).values())
+        text = "".join(self._text.get(mid, {}).values())
         turn_end = finish != STEP_FINISH
         usage = _opencode_usage(info)
         if not text and not turn_end and usage is None:

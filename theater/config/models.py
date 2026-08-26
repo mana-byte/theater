@@ -32,6 +32,10 @@ from theater.constants.observability import (
     MIN_LOG_MAX_BYTES,
     OTLP_PROTOCOLS,
 )
+from theater.constants.trajectory import (
+    TRAJECTORY_LEDGER_PAGE_SIZE_DEFAULT,
+    TRAJECTORY_LEDGER_PAGE_SIZE_MAX,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,12 +127,25 @@ class RegieSection:
     dashboard_tip_hold_seconds: float = field(default=6.0, metadata={"min": MIN_INTERVAL})
     #: Seconds between characters while typing a dashboard tip in or out.
     dashboard_tip_char_interval: float = field(default=0.04, metadata={"min": MIN_INTERVAL})
+    #: Records shown on one trajectory ledger page.
+    trajectory_page_size: int = field(
+        default=TRAJECTORY_LEDGER_PAGE_SIZE_DEFAULT,
+        metadata={"min": 1, "max": TRAJECTORY_LEDGER_PAGE_SIZE_MAX},
+    )
 
 
 @dataclass(frozen=True, slots=True)
 class ObservabilitySection:
     #: Whether to export traces, metrics, and logs via OTLP. Off by default.
     otlp_enabled: bool = False
+    #: Whether agent telemetry metrics export when OTLP is enabled.
+    agent_metrics: bool = True
+    #: Whether agent telemetry logs export when OTLP is enabled.
+    agent_logs: bool = True
+    #: Whether agent telemetry spans export when OTLP is enabled.
+    agent_spans: bool = True
+    #: Include prompt and tool payload content in agent logs; opt-in only.
+    agent_log_content: bool = False
     #: OTLP transport protocol: "grpc" or "http".
     otlp_protocol: str = field(
         default=DEFAULT_OTLP_PROTOCOL,

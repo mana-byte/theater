@@ -1,4 +1,4 @@
-"""Owned log handlers, rotation, and stderr-generation pruning."""
+"""Owned log handlers, crash capture, rotation, and stderr-generation pruning."""
 
 from __future__ import annotations
 
@@ -8,12 +8,15 @@ import os
 import re
 import secrets
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from theater.constants.observability import (
     DEFAULT_LOG_BACKUP_COUNT,
     DEFAULT_LOG_MAX_BYTES,
+    MAX_ERROR_TYPE_LEN,
     STDERR_GENERATIONS,
     STDERR_TOKEN_BYTES,
     STDERR_TOKEN_HEX_LEN,
@@ -47,6 +50,27 @@ def make_stderr_handler() -> logging.StreamHandler:
     handler.setFormatter(make_formatter())
     handler.setLevel(logging.NOTSET)
     return handler
+
+
+def log_exception(target: logging.Logger, message: str, error: Exception) -> None:
+    """Record one exception without allowing telemetry failure to replace it."""
+    error_type = f"{type(error).__module__}.{type(error).__qualname__}"[:MAX_ERROR_TYPE_LEN]
+    with contextlib.suppress(Exception):
+        target.error(
+            message,
+            exc_info=(type(error), error, error.__traceback__),
+            extra={"error.type": error_type},
+        )
+
+
+@contextmanager
+def log_unhandled_exceptions(target: logging.Logger, process: str) -> Iterator[None]:
+    """Log ordinary unhandled failures and preserve their original traceback."""
+    try:
+        yield
+    except Exception as error:
+        log_exception(target, f"{process} crashed", error)
+        raise
 
 
 def validate_token(token: str) -> bool:

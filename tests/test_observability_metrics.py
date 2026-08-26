@@ -9,12 +9,45 @@ import pytest
 
 from theater.observability.catalog import OperationSpec
 from theater.observability.metrics import (
+    CounterRegistry,
     GaugeCache,
     GaugeSampler,
     HistogramRegistry,
     MetricBridge,
+    MetricKind,
+    MetricSpec,
     _InstrumentEntry,
 )
+
+
+class _Meter:
+    def __init__(self):
+        self.histograms = []
+        self.counters = []
+
+    def create_histogram(self, **kwargs):
+        instrument = _Instrument("record")
+        self.histograms.append((kwargs, instrument))
+        return instrument
+
+    def create_counter(self, **kwargs):
+        instrument = _Instrument("add")
+        self.counters.append((kwargs, instrument))
+        return instrument
+
+
+class _Instrument:
+    def __init__(self, method):
+        self.calls = []
+        self._method = method
+
+    def record(self, value, attributes=None):
+        assert self._method == "record"
+        self.calls.append((value, attributes))
+
+    def add(self, value, attributes=None):
+        assert self._method == "add"
+        self.calls.append((value, attributes))
 
 
 def test_registry_no_meter_noop():
@@ -49,6 +82,121 @@ def test_registry_lock_released_before_record():
 
     reg._entries["m"] = _InstrumentEntry(_Hist(), "d", "ms", "exp")
     reg.record("m", 1.0)
+
+
+def test_counter_registry_create_reuse_and_metadata_conflict():
+    meter = _Meter()
+    reg = CounterRegistry(meter)
+    first = reg.get_or_create("m", "d", "1")
+    assert reg.get_or_create("m", "d", "1") is first
+    assert len(meter.counters) == 1
+    with pytest.raises(ValueError, match="description mismatch"):
+        reg.get_or_create("m", "other", "1")
+    with pytest.raises(ValueError, match="unit mismatch"):
+        reg.get_or_create("m", "d", "ms")
+
+
+def test_counter_registry_add_rejects_negative_and_releases_lock():
+    meter = _Meter()
+    reg = CounterRegistry(meter)
+    counter = reg.get_or_create("m", "d", "1")
+    reg.add("m", 2, {"kind": "test"})
+    assert counter.calls == [(2, {"kind": "test"})]
+    with pytest.raises(ValueError, match="negative"):
+        reg.add("m", -1)
+
+
+def test_counter_registry_no_meter_noop():
+    reg = CounterRegistry(meter=None)
+    reg.get_or_create("m", "d", "1")
+    reg.add("m", 1)
+
+
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        ({"name": "", "description": "d", "unit": "1", "kind": MetricKind.COUNTER}, "name"),
+        ({"name": "m", "description": "", "unit": "1", "kind": MetricKind.COUNTER}, "description"),
+        ({"name": "m", "description": "d", "unit": "", "kind": MetricKind.COUNTER}, "unit"),
+        (
+            {
+                "name": "m",
+                "description": "d",
+                "unit": "1",
+                "kind": MetricKind.COUNTER,
+                "attribute_keys": ("x", "x"),
+            },
+            "unique",
+        ),
+    ],
+)
+def test_metric_spec_validation(kwargs, match):
+    with pytest.raises(ValueError, match=match):
+        MetricSpec(**kwargs)
+
+
+def test_metric_spec_copies_attribute_keys():
+    keys = ["kind"]
+    spec = MetricSpec("m", "d", "1", MetricKind.COUNTER, keys)  # type: ignore[arg-type]
+    keys.append("later")
+    assert spec.attribute_keys == ("kind",)
+
+
+def test_bridge_observe_requires_exact_schema_and_dispatches():
+    meter = _Meter()
+    bridge = MetricBridge(HistogramRegistry(meter), CounterRegistry(meter))
+    histogram = MetricSpec("h", "histogram", "ms", MetricKind.HISTOGRAM, ("kind",))
+    counter = MetricSpec("c", "counter", "1", MetricKind.COUNTER, ("kind",))
+    bridge.register_specs((histogram, counter))
+    bridge.observe(histogram, 3, {"kind": "x"})
+    bridge.observe(counter, 4, {"kind": "x"})
+    assert meter.histograms[0][1].calls == [(3, {"kind": "x"})]
+    assert meter.counters[0][1].calls == [(4, {"kind": "x"})]
+    with pytest.raises(ValueError, match="attribute key set mismatch"):
+        bridge.observe(counter, 1, {})
+
+
+def test_bridge_rejects_metric_name_kind_conflict():
+    bridge = MetricBridge(HistogramRegistry(), CounterRegistry())
+    bridge.register_histogram("m", "d", "ms")
+    with pytest.raises(ValueError, match="kind mismatch"):
+        bridge.register_counter("m", "d", "1")
+
+
+def test_bridge_rejects_duplicate_schema_and_preserves_registered_spec():
+    meter = _Meter()
+    bridge = MetricBridge(HistogramRegistry(meter))
+    registered = MetricSpec("m", "description", "ms", MetricKind.HISTOGRAM, ("kind",))
+    conflicting = MetricSpec("m", "description", "ms", MetricKind.HISTOGRAM, ("other",))
+    bridge.register_specs((registered,))
+    with pytest.raises(ValueError, match="specification mismatch"):
+        bridge.register_specs((conflicting,))
+    bridge.observe(registered, 1, {"kind": "x"})
+    assert meter.histograms[0][1].calls == [(1, {"kind": "x"})]
+
+
+def test_bridge_rejects_unregistered_and_mismatched_observe_specs():
+    bridge = MetricBridge(HistogramRegistry())
+    registered = MetricSpec("m", "description", "ms", MetricKind.HISTOGRAM)
+    equivalent = MetricSpec("m", "description", "ms", MetricKind.HISTOGRAM)
+    other = MetricSpec("m", "other", "ms", MetricKind.HISTOGRAM)
+    with pytest.raises(ValueError, match="not registered"):
+        bridge.observe(registered, 1)
+    bridge.register_specs((registered,))
+    bridge.observe(equivalent, 1)
+    with pytest.raises(ValueError, match="specification mismatch"):
+        bridge.observe(other, 1)
+
+
+def test_bridge_registry_failure_does_not_register_spec():
+    registry = HistogramRegistry()
+    registry.get_or_create("m", "existing", "ms")
+    bridge = MetricBridge(registry)
+    spec = MetricSpec("m", "new", "ms", MetricKind.HISTOGRAM)
+    with pytest.raises(ValueError, match="description mismatch"):
+        bridge.register_specs((spec,))
+    with pytest.raises(ValueError, match="not registered"):
+        bridge.observe(spec, 1)
 
 
 def test_bridge_inactive_noop():

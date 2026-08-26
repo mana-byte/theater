@@ -91,6 +91,102 @@ HISTOGRAM_MAX_SCALE = 20
 #: Maximum exported error.type attribute length.
 MAX_ERROR_TYPE_LEN = 128
 
+#: Agent request duration histogram name.
+AGENT_REQUEST_DURATION_METRIC = "theater.agent.request.duration"
+
+#: Agent request time-to-first-token histogram name.
+AGENT_REQUEST_TTFT_METRIC = "theater.agent.request.ttft"
+
+#: Agent token counter name.
+AGENT_TOKENS_METRIC = "theater.agent.tokens"
+
+#: Agent cost counter name.
+AGENT_COST_METRIC = "theater.agent.cost"
+
+#: Agent tool duration histogram name.
+AGENT_TOOL_DURATION_METRIC = "theater.agent.tool.duration"
+
+#: Agent failure counter name.
+AGENT_FAILURES_METRIC = "theater.agent.failures"
+
+#: Agent terminal request counter name.
+AGENT_REQUESTS_METRIC = "theater.agent.requests"
+
+#: Agent terminal tool-call counter name.
+AGENT_TOOL_CALLS_METRIC = "theater.agent.tool.calls"
+
+#: Structured log event name for canonical agent trajectory records.
+AGENT_TRAJECTORY_LOG_EVENT = "theater.agent.trajectory.record"
+
+#: Completed model request trace span name.
+AGENT_REQUEST_SPAN = "agent.request"
+
+#: Completed tool operation trace span name.
+AGENT_TOOL_SPAN = "agent.tool"
+
+#: Maximum UTF-8 bytes exported in an opt-in canonical agent log body.
+AGENT_LOG_BODY_MAX_BYTES = 16_384
+
+#: Maximum UTF-8 bytes retained in an agent metric label.
+AGENT_TELEMETRY_LABEL_MAX_BYTES = 120
+
+#: Maximum distinct model labels admitted in one process.
+AGENT_TELEMETRY_MODEL_CARDINALITY_LIMIT = 100
+
+#: Maximum distinct tool labels admitted in one process.
+AGENT_TELEMETRY_TOOL_CARDINALITY_LIMIT = 100
+
+#: Maximum participant deduplication states retained in one process.
+AGENT_TELEMETRY_PARTICIPANT_STATE_LIMIT = 128
+
+#: Maximum emitted signal keys retained for one participant source epoch.
+AGENT_TELEMETRY_EMITTED_SIGNAL_LIMIT = 256
+
+#: Maximum record revisions retained for agent trajectory log deduplication.
+AGENT_TELEMETRY_LOG_REVISION_LIMIT = 256
+
+#: Maximum canonical metadata records retained for one participant source epoch.
+AGENT_TELEMETRY_RECORD_SNAPSHOT_LIMIT = 256
+
+#: Maximum emitted request and tool contexts retained for one source epoch.
+AGENT_TELEMETRY_SPAN_CONTEXT_LIMIT = 256
+
+#: Label for an absent or invalid agent telemetry value.
+AGENT_TELEMETRY_UNKNOWN_LABEL = "unknown"
+
+#: Label for a value first seen after its cardinality limit.
+AGENT_TELEMETRY_OTHER_LABEL = "other"
+
+#: Token counter label for prompt input tokens.
+AGENT_TOKEN_KIND_INPUT = "input"
+
+#: Token counter label for generated output tokens.
+AGENT_TOKEN_KIND_OUTPUT = "output"
+
+#: Token counter label for reasoning output tokens.
+AGENT_TOKEN_KIND_REASONING = "reasoning"
+
+#: Token counter label for cache-read input tokens.
+AGENT_TOKEN_KIND_CACHE_READ = "cache_read"
+
+#: Token counter label for cache-write input tokens.
+AGENT_TOKEN_KIND_CACHE_WRITE = "cache_write"
+
+#: Request or tool result label for successful completion.
+AGENT_RESULT_SUCCESS = "success"
+
+#: Request or tool result label for an error terminal state.
+AGENT_RESULT_ERROR = "error"
+
+#: Request or tool result label for a timeout terminal state.
+AGENT_RESULT_TIMEOUT = "timeout"
+
+#: Request or tool result label for a cancelled terminal state.
+AGENT_RESULT_CANCELLED = "cancelled"
+
+#: Request or tool result label for an interrupted terminal state.
+AGENT_RESULT_INTERRUPTED = "interrupted"
+
 #: Observable gauge for non-dead participants.
 PARTICIPANTS_LIVE_GAUGE = "theater.participants.live"
 

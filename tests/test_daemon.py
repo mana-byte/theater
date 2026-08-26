@@ -854,7 +854,10 @@ async def test_await_records_active_wait_edges(client, fake_tmux, monkeypatch):
     assert start["payload"]["handle"] == child["handle"]
     assert end["from_id"] == parent["id"]
     assert end["to_id"] == child["id"]
-    assert end["payload"] == start["payload"]
+    assert end["payload"]["handle"] == start["payload"]["handle"]
+    assert end["payload"]["token"] == start["payload"]["token"]
+    assert end["payload"]["state"] == "timeout"
+    assert end["payload"]["elapsed_seconds"] >= 0
 
 
 async def test_await_records_one_pair_per_handle(client, fake_tmux, monkeypatch):
@@ -1111,7 +1114,10 @@ async def test_a_start_that_fails_halfway_still_closes_what_was_written(
     monkeypatch.setattr(daemon.store, "bus_append", real_append)
     await_events = await _await_events(client)
     assert [e["kind"] for e in await_events] == ["job.await.start", "job.await.end"]
-    assert await_events[0]["payload"] == await_events[1]["payload"]
+    assert await_events[0]["payload"]["handle"] == await_events[1]["payload"]["handle"]
+    assert await_events[0]["payload"]["token"] == await_events[1]["payload"]["token"]
+    assert await_events[1]["payload"]["state"] == "error"
+    assert await_events[1]["payload"]["elapsed_seconds"] >= 0
 
 
 # ---- harness name normalization ------------------------------------------

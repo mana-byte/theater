@@ -32,6 +32,7 @@ import logging
 import signal
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from theater import harness as harness_registry
 from theater import paths, protocol, timing  # noqa: F401 — compatibility imports
@@ -55,8 +56,14 @@ from theater.daemon.runtime.maintenance import REAP_INTERVAL
 from theater.daemon.runtime.socket import MAX_SOCKET_PATH
 from theater.daemon.spawning.service import Spawner
 from theater.daemon.store import Store
+from theater.daemon.trajectory import TrajectoryService
+from theater.daemon.trajectory.telemetry import AGENT_METRIC_SPECS, create_agent_telemetry
 from theater.harness import Harness
+from theater.observability import metric_bridge
 from theater.tmux import client as tmux  # noqa: F401 — monkeypatched via server_mod
+
+if TYPE_CHECKING:
+    from theater.observability import SignalBridge
 
 logger = logging.getLogger("theater.daemon")
 
@@ -89,6 +96,7 @@ class Daemon:
         harnesses: dict[str, Harness] | None = None,
         config: Config | None = None,
         lock: DaemonLock | None = None,
+        signal_bridge: SignalBridge | None = None,
     ):
         if lock is not None and not lock.held:
             raise ValueError("injected lock must already be held")
@@ -109,6 +117,15 @@ class Daemon:
             self.registry = Registry(self.store)
             self.spawner = Spawner(self.registry)
             self.jobs = JobManager(self.store)
+            agent_telemetry = create_agent_telemetry(
+                self.store,
+                metric_bridge(),
+                signal_bridge,
+                metrics_enabled=self.config.observability.agent_metrics,
+                logs_enabled=self.config.observability.agent_logs,
+                spans_enabled=self.config.observability.agent_spans,
+                include_log_content=self.config.observability.agent_log_content,
+            )
             # ``harnesses={}`` disables observation entirely.
             observer_cfg = self.config.observer
             self.observer = Observer(
@@ -122,7 +139,10 @@ class Daemon:
                 screen=observer_cfg.screen_interval,
                 rescue=observer_cfg.rescue_timeout,
                 jobs=self.jobs,
+                agent_telemetry=agent_telemetry,
             )
+            self.trajectory = TrajectoryService(self.store, self.registry, self.observer)
+            self.trajectory_service = self.trajectory
             self._server: asyncio.Server | None = None
             self._reaper: asyncio.Task | None = None
             self._gc: asyncio.Task | None = None
@@ -238,12 +258,17 @@ async def run(options: DaemonRunOptions | None = None) -> None:
             log_backup_count=obs.log_backup_count,
             log_path=paths.log_path(),
             foreground=options.stderr_token is None,
+            metric_specs=AGENT_METRIC_SPECS if obs.agent_metrics else (),
         )
         if options.timing:
             timing.enable_trace()
         lock_to_transfer = lock
         lock = None
-        daemon = Daemon(config=settings, lock=lock_to_transfer)
+        daemon = Daemon(
+            config=settings,
+            lock=lock_to_transfer,
+            signal_bridge=runtime_handle.signal_bridge,
+        )
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             with contextlib.suppress(NotImplementedError):

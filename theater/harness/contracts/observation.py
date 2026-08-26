@@ -54,6 +54,7 @@ from typing import TYPE_CHECKING
 from theater.harness.contracts.launch import NativeChild
 from theater.harness.contracts.source import StreamPoint, TranscriptCandidate
 from theater.provenance import TranscriptProvenance
+from theater.trajectory import TrajectoryCapabilities
 
 if TYPE_CHECKING:
     from theater.harness.contracts.source import Source
@@ -133,6 +134,7 @@ class HarnessObserver(ABC):
 
     #: True selects the transcript watch loop; False falls back to capture-pane.
     has_transcript: bool = True
+    trajectory_capabilities: TrajectoryCapabilities = TrajectoryCapabilities()
 
     def open_source(
         self,

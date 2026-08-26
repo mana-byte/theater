@@ -126,7 +126,7 @@ def event_summary(payload: dict | None) -> str:
     if payload.get("text"):
         bits.append(" ".join(str(payload["text"]).split()))
     if not bits:
-        known = {"ts", "turn_end", "index"}
+        known = {"ts", "turn_end", "index", "observed_at"}
         rest = {k: v for k, v in payload.items() if k not in known and v is not None}
         if rest:
             bits.append(json.dumps(rest, separators=(",", ":")))

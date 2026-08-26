@@ -11,20 +11,26 @@ import asyncio
 import errno
 import logging
 import os
+from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, BinaryIO
 
+from theater.constants.trajectory import TRAJECTORY_PAGE_RECORD_LIMIT
 from theater.harness.contracts.events import Event
 from theater.harness.contracts.source import (
     Attachment,
     Batch,
     History,
+    HistoryPage,
     IdentityLossEvidence,
     ReceiptAdmission,
     Source,
+    SourceContractError,
     StreamPoint,
 )
+from theater.harness.contracts.trajectory import ParsedRecord, TrajectoryFact
 from theater.harness.transcript.attachment import attach_point
+from theater.harness.transcript.history import HistoryPageError, HistoryReader
 from theater.provenance import (
     TranscriptProvenance,
     is_trusted_provenance,
@@ -273,6 +279,98 @@ class TranscriptSource(Source):
             pinned=pinned,
         )
 
+    async def history_page(
+        self, *, before: str | None = None, limit: int = TRAJECTORY_PAGE_RECORD_LIMIT
+    ) -> HistoryPage:
+        """Read a bounded JSONL window without touching the live tail cursor."""
+        if type(limit) is not int or limit <= 0:
+            return HistoryPage(
+                error_code="invalid_limit", error="history page limit must be positive"
+            )
+        limit = min(limit, TRAJECTORY_PAGE_RECORD_LIMIT)
+        pinned = self._known_location is not None
+        path = self.path
+        if path is None and self._known_location is not None:
+            if reason := self._trusted_known_location_unavailable_reason():
+                return HistoryPage(
+                    error_code=TRANSCRIPT_IDENTITY_LOST_CODE, error=reason, pinned=True
+                )
+            path = await self._upgraded(self._known_location)
+        if path is None:
+            path = await self._locate(session_id=self._session_id)
+        if path is None:
+            return HistoryPage(pinned=pinned)
+        if path_error := self._history_path_error(path, pinned=pinned):
+            if before is not None and path_error.error_code is None:
+                return HistoryPage(
+                    location=path_error.location,
+                    error_code="history_cursor_invalid",
+                    error="history cursor cannot be used because the transcript is unavailable",
+                    provenance=path_error.correlation,
+                    pinned=path_error.pinned,
+                )
+            return HistoryPage(
+                location=path_error.location,
+                error_code=path_error.error_code,
+                error=path_error.error,
+                provenance=path_error.correlation,
+                pinned=path_error.pinned,
+            )
+        try:
+            reader = self._history_reader()
+            end, end_index, cursor_identity = (
+                reader.decode_page_cursor(before, path)
+                if before is not None
+                else (None, None, None)
+            )
+            live_offset = self.offset if before is None and self.path == path else None
+            live_index = self.index if before is None and self.path == path else None
+            result = await asyncio.to_thread(
+                reader.read_page,
+                path,
+                end=end,
+                end_index=end_index if before is not None else live_index,
+                live_offset=live_offset,
+                limit=limit,
+                expected_identity=cursor_identity,
+            )
+        except HistoryPageError as exc:
+            return HistoryPage(error_code=exc.code, error=str(exc), pinned=pinned)
+        except ValueError as exc:
+            return HistoryPage(error_code="history_cursor_invalid", error=str(exc), pinned=pinned)
+        except OSError as exc:
+            if exc.errno == errno.ENOENT and self._path_is_trusted_pin(path):
+                return HistoryPage(
+                    error_code=TRANSCRIPT_IDENTITY_LOST_CODE,
+                    error=f"trusted transcript pin {str(path)!r} no longer exists on disk",
+                    pinned=True,
+                )
+            return HistoryPage(
+                error_code=TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
+                error=f"transcript source {str(path)!r} is unavailable: {exc}",
+                pinned=pinned,
+            )
+        session_id = self._observer.session_id(path)
+        return HistoryPage(
+            location=str(path),
+            events=result.events,
+            trajectory=result.facts,
+            trajectory_events=result.trajectory_events,
+            cursor=reader.encode_page_cursor(
+                path, result.page_end, result.page_end_index, result.identity
+            ),
+            older_cursor=(
+                reader.encode_page_cursor(
+                    path, result.start, result.start_index, result.older_identity
+                )
+                if 0 < result.start < result.page_end
+                else None
+            ),
+            has_older=0 < result.start < result.page_end,
+            provenance=self.correlation_for(path, session_id),
+            pinned=pinned,
+        )
+
     def _history_path_error(self, path: Path, *, pinned: bool) -> History | None:
         """Validate a history location without turning generic I/O into loss."""
         try:
@@ -356,17 +454,62 @@ class TranscriptSource(Source):
     def _read_all(self, path: Path, *, strict: bool = False) -> list[Event]:
         events: list[Event] = []
         try:
-            with path.open(encoding="utf-8", errors="replace") as fh:
+            with path.open("rb") as fh:
+                offset = 0
                 for index, raw in enumerate(fh):
-                    line = raw.strip()
+                    line = raw.decode("utf-8", errors="replace").strip()
                     if line:
-                        events.extend(self._observer.parse(line, index, clip_text=False))
+                        parsed = self._parse_record(line, index, clip_text=False)
+                        decorated = self._decorate_parsed(parsed, offset)
+                        events.extend(decorated.events)
+                    offset += len(raw)
         except OSError:
             if strict:
                 raise
             # A transcript that vanished mid-read is the same non-event here.
             return []
         return events
+
+    def _history_reader(self) -> HistoryReader:
+        return HistoryReader(
+            parse_record=lambda line, index: self._parse_record(line, index, clip_text=False),
+            decorate_parsed=self._decorate_parsed,
+            prepare_history_parse=self._prepare_history_parse,
+        )
+
+    def _prepare_history_parse(self, fh: BinaryIO, start: int) -> None:
+        """Let a stateful adapter seed bounded context before forward parsing."""
+
+    def _parse_record(self, line: str, index: int, *, clip_text: bool) -> ParsedRecord:
+        missing = object()
+        parser = getattr(self._observer, "parse_record", missing)
+        if parser is missing:
+            return ParsedRecord(
+                events=tuple(self._observer.parse(line, index, clip_text=clip_text))
+            )
+        if not callable(parser):
+            raise SourceContractError("TranscriptObserver.parse_record must be callable")
+        parsed = parser(line, index, clip_text=clip_text)
+        if not isinstance(parsed, ParsedRecord):
+            raise SourceContractError("TranscriptObserver.parse_record must return ParsedRecord")
+        return parsed
+
+    @staticmethod
+    def _decorate_parsed(parsed: ParsedRecord, source_offset: int) -> ParsedRecord:
+        return ParsedRecord(
+            events=tuple(replace(event, source_offset=source_offset) for event in parsed.events),
+            trajectory=tuple(
+                replace(fact, source_offset=source_offset) for fact in parsed.trajectory
+            ),
+            trajectory_events=(
+                None
+                if parsed.trajectory_events is None
+                else tuple(
+                    replace(event, source_offset=source_offset)
+                    for event in parsed.trajectory_events
+                )
+            ),
+        )
 
     # ---- internals ------------------------------------------------------
 
@@ -538,8 +681,8 @@ class TranscriptSource(Source):
         session_id = self._observer.session_id(path)
         last_event: Event | None = None
         if last_line is not None:
-            parsed = self._observer.parse(last_line, lines - 1)
-            semantic = [event for event in parsed if not event.usage_only]
+            parsed = self._parse_record(last_line, lines - 1, clip_text=True)
+            semantic = [event for event in parsed.events if not event.usage_only]
             last_event = semantic[-1] if semantic else None
         self._pending = (path, size, lines, mtime, session_id)
         return Attachment(
@@ -582,14 +725,27 @@ class TranscriptSource(Source):
             # A record is still being written; partial JSON is not parseable.
             self.mtime = mtime
             return Batch()
+        record_offset = offset
         offset += len(head) + 1
 
         events: list[Event] = []
+        trajectory: list[TrajectoryFact] = []
+        trajectory_events: list[Event] = []
         for raw in head.split(b"\n"):
             line = raw.decode("utf-8", errors="replace")
-            events.extend(self._observer.parse(line, index))
+            parsed = self._parse_record(line, index, clip_text=True)
+            decorated = self._decorate_parsed(parsed, record_offset)
+            events.extend(decorated.events)
+            trajectory.extend(decorated.trajectory)
+            trajectory_events.extend(decorated.baseline_events)
+            record_offset += len(raw) + 1
             index += 1
 
         progressed = offset != self.offset
         self.offset, self.index, self.mtime = offset, index, mtime
-        return Batch(events=events, progressed=progressed)
+        return Batch(
+            events=events,
+            progressed=progressed,
+            trajectory=trajectory,
+            trajectory_events=trajectory_events,
+        )

@@ -11,6 +11,7 @@ from theater.observability.logging import (
     create_generation_file,
     delete_generation_file,
     generate_token,
+    log_unhandled_exceptions,
     make_formatter,
     make_rotating_handler,
     prune_stderr_generations,
@@ -42,6 +43,37 @@ def test_rotating_handler(tmp_path):
     h.close()
     assert path.exists() and (tmp_path / "daemon.log.1").exists()
     assert not (tmp_path / "daemon.log.3").exists()
+
+
+def test_unhandled_exception_is_logged_and_reraised(caplog):
+    import logging
+
+    target = logging.getLogger("theater.test.crash")
+    with (
+        caplog.at_level(logging.ERROR, logger=target.name),
+        pytest.raises(ValueError, match="broken"),
+        log_unhandled_exceptions(target, "régie"),
+    ):
+        raise ValueError("broken")
+
+    record = caplog.records[-1]
+    assert record.message == "régie crashed"
+    assert record.exc_info is not None
+    assert getattr(record, "error.type") == "builtins.ValueError"
+
+
+def test_control_flow_exceptions_are_not_logged(caplog):
+    import logging
+
+    target = logging.getLogger("theater.test.interrupt")
+    with (
+        caplog.at_level(logging.ERROR, logger=target.name),
+        pytest.raises(KeyboardInterrupt),
+        log_unhandled_exceptions(target, "régie"),
+    ):
+        raise KeyboardInterrupt
+
+    assert caplog.records == []
 
 
 def test_create_gen_open_fd(tmp_path):
