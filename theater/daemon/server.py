@@ -32,6 +32,7 @@ import logging
 import signal
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from theater import harness as harness_registry
 from theater import paths, protocol, timing  # noqa: F401 — compatibility imports
@@ -60,6 +61,9 @@ from theater.daemon.trajectory.telemetry import AGENT_METRIC_SPECS, create_agent
 from theater.harness import Harness
 from theater.observability import metric_bridge
 from theater.tmux import client as tmux  # noqa: F401 — monkeypatched via server_mod
+
+if TYPE_CHECKING:
+    from theater.observability import SignalBridge
 
 logger = logging.getLogger("theater.daemon")
 
@@ -92,6 +96,7 @@ class Daemon:
         harnesses: dict[str, Harness] | None = None,
         config: Config | None = None,
         lock: DaemonLock | None = None,
+        signal_bridge: SignalBridge | None = None,
     ):
         if lock is not None and not lock.held:
             raise ValueError("injected lock must already be held")
@@ -115,7 +120,11 @@ class Daemon:
             agent_telemetry = create_agent_telemetry(
                 self.store,
                 metric_bridge(),
-                enabled=self.config.observability.agent_metrics,
+                signal_bridge,
+                metrics_enabled=self.config.observability.agent_metrics,
+                logs_enabled=self.config.observability.agent_logs,
+                spans_enabled=self.config.observability.agent_spans,
+                include_log_content=self.config.observability.agent_log_content,
             )
             # ``harnesses={}`` disables observation entirely.
             observer_cfg = self.config.observer
@@ -255,7 +264,11 @@ async def run(options: DaemonRunOptions | None = None) -> None:
             timing.enable_trace()
         lock_to_transfer = lock
         lock = None
-        daemon = Daemon(config=settings, lock=lock_to_transfer)
+        daemon = Daemon(
+            config=settings,
+            lock=lock_to_transfer,
+            signal_bridge=runtime_handle.signal_bridge,
+        )
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             with contextlib.suppress(NotImplementedError):

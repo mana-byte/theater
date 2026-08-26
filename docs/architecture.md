@@ -854,14 +854,19 @@ delegates all owned handler work to `observability/logging.py`.
 Export is off by default (`otlp_enabled = false`). When off, Theater starts no
 exporter thread and makes no network call; daemon log rotation still runs.
 
-When export is enabled, `agent_metrics = true` also projects accepted transcript
-batches into request, TTFT, tool-duration, token, cost, and failure metrics. This
-projection runs in the daemon observer independently of any open trajectory viewer;
-the bounded Régie cache is never a telemetry source. Token and cost increments are
-emitted only after the usage repository accepts the corresponding idempotency key.
-Only complete timing carried by the current batch is exported; cross-batch timing is
-not guessed. Model and tool labels, plus emitted-record deduplication state, have hard
-process bounds.
+Accepted observer batches can emit agent metrics, logs, and spans independently of
+any open trajectory viewer; the bounded Régie cache is never a telemetry source.
+Generic signal transport lives in `observability`; feature projection lives in
+`daemon/trajectory/telemetry`. `agent_metrics` projects request, TTFT, tool-duration,
+token, cost, and failure metrics. Token and cost increments emit only after the usage
+repository accepts the corresponding idempotency key. Model and tool labels, plus
+emitted-record deduplication state, have hard process bounds.
+
+`agent_logs` emits metadata only by default. `agent_log_content` is opt-in because
+bounded content can include prompts and tool payloads. `agent_spans` emits only honest
+absolute intervals carried by a batch; cross-batch timing is not guessed. It uses links
+and correlation attributes rather than invented cross-process parentage. Signal failures
+are contained and never affect observation.
 
 Enable it by installing the optional dependency and setting the config key:
 

@@ -12,6 +12,9 @@ def test_defaults():
     s = ObservabilitySection()
     assert s.otlp_enabled is False
     assert s.agent_metrics is True
+    assert s.agent_logs is True
+    assert s.agent_spans is True
+    assert s.agent_log_content is False
     assert s.otlp_protocol == "grpc"
     assert s.otlp_endpoint is None
     assert s.service_name == "theater"
@@ -73,17 +76,29 @@ def test_otlp_enabled(tmp_path, monkeypatch):
     )
 
 
-def test_agent_metrics(tmp_path, monkeypatch):
-    config = _load(tmp_path, monkeypatch, "[observability]\nagent_metrics = false\n")
-    assert config.observability.agent_metrics is False
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("agent_metrics", False),
+        ("agent_logs", False),
+        ("agent_spans", False),
+        ("agent_log_content", True),
+    ],
+)
+def test_agent_telemetry_options(tmp_path, monkeypatch, key, value):
+    config = _load(tmp_path, monkeypatch, f"[observability]\n{key} = {str(value).lower()}\n")
+    assert getattr(config.observability, key) is value
     rows = {k: (v, s) for k, v, s in cfg.describe(config)}
-    assert rows["observability.agent_metrics"] == ("False", "config.toml")
+    assert rows[f"observability.{key}"] == (str(value), "config.toml")
 
 
 def test_describe():
     rows = {k: (v, s) for k, v, s in cfg.describe(cfg.Config())}
     assert rows["observability.otlp_enabled"] == ("False", "default")
     assert rows["observability.agent_metrics"] == ("True", "default")
+    assert rows["observability.agent_logs"] == ("True", "default")
+    assert rows["observability.agent_spans"] == ("True", "default")
+    assert rows["observability.agent_log_content"] == ("False", "default")
     assert rows["observability.otlp_protocol"] == ("grpc", "default")
     assert rows["observability.otlp_endpoint"] == ("(unset)", "default")
 

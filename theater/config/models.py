@@ -140,6 +140,12 @@ class ObservabilitySection:
     otlp_enabled: bool = False
     #: Whether agent telemetry metrics export when OTLP is enabled.
     agent_metrics: bool = True
+    #: Whether agent telemetry logs export when OTLP is enabled.
+    agent_logs: bool = True
+    #: Whether agent telemetry spans export when OTLP is enabled.
+    agent_spans: bool = True
+    #: Include prompt and tool payload content in agent logs; opt-in only.
+    agent_log_content: bool = False
     #: OTLP transport protocol: "grpc" or "http".
     otlp_protocol: str = field(
         default=DEFAULT_OTLP_PROTOCOL,

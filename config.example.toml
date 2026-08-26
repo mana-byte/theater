@@ -334,6 +334,15 @@ otlp_enabled = false
 # Whether agent telemetry metrics export when OTLP is enabled.
 agent_metrics = true
 
+# Whether agent telemetry logs export when OTLP is enabled.
+agent_logs = true
+
+# Whether agent telemetry spans export when OTLP is enabled.
+agent_spans = true
+
+# Include prompt and tool payload content in agent logs. Opt-in only.
+agent_log_content = false
+
 # Transport protocol: "grpc" or "http".
 otlp_protocol = "grpc"
 
