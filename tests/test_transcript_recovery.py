@@ -536,6 +536,47 @@ def test_bind_applies_spawned_creation_floor(registry: Registry, tmp_path, monke
     assert stored.transcript_location is None
 
 
+def test_bind_reaffirms_spawned_trusted_transcript_before_creation_floor(
+    registry: Registry, tmp_path, monkeypatch
+):
+    root = tmp_path / "codex"
+    root.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    session_id = "019ff5c6-717c-7a70-9ec4-66dd1f4d173e"
+    transcript = _codex_rollout(root, session_id, project)
+    monkeypatch.setitem(
+        HARNESSES,
+        "codex",
+        SimpleNamespace(observer=CodexObserver(root=root)),
+    )
+    time.sleep(0.02)
+    participant = registry.create_spawned(harness="codex", cwd=str(project))
+    participant.transcript_location = str(transcript.resolve())
+    participant.transcript_domain = str(root.resolve())
+    participant.session_id = session_id
+    participant.session_correlation = "exact"
+    registry.store.upsert_participant(participant)
+    daemon = _daemon(registry)
+
+    result = asyncio.run(
+        methods._transcript_bind(
+            daemon,
+            {
+                "id": participant.id,
+                "candidate": str(transcript),
+                "confirm_id": participant.id,
+            },
+        )
+    )
+
+    assert result["location"] == str(transcript.resolve())
+    assert result["session_id"] == session_id
+    assert daemon.observer.reset == [participant.id]
+    stored = registry.store.get_participant(participant.id)
+    assert stored.session_correlation == "operator"
+
+
 def test_bind_rpc_requires_confirmation(registry: Registry, tmp_path, monkeypatch):
     root = tmp_path / "vibe"
     root.mkdir()
