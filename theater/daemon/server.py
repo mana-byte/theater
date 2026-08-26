@@ -56,7 +56,9 @@ from theater.daemon.runtime.socket import MAX_SOCKET_PATH
 from theater.daemon.spawning.service import Spawner
 from theater.daemon.store import Store
 from theater.daemon.trajectory import TrajectoryService
+from theater.daemon.trajectory.telemetry import AGENT_METRIC_SPECS, create_agent_telemetry
 from theater.harness import Harness
+from theater.observability import metric_bridge
 from theater.tmux import client as tmux  # noqa: F401 — monkeypatched via server_mod
 
 logger = logging.getLogger("theater.daemon")
@@ -110,6 +112,11 @@ class Daemon:
             self.registry = Registry(self.store)
             self.spawner = Spawner(self.registry)
             self.jobs = JobManager(self.store)
+            agent_telemetry = create_agent_telemetry(
+                self.store,
+                metric_bridge(),
+                enabled=self.config.observability.agent_metrics,
+            )
             # ``harnesses={}`` disables observation entirely.
             observer_cfg = self.config.observer
             self.observer = Observer(
@@ -123,6 +130,7 @@ class Daemon:
                 screen=observer_cfg.screen_interval,
                 rescue=observer_cfg.rescue_timeout,
                 jobs=self.jobs,
+                agent_telemetry=agent_telemetry,
             )
             self.trajectory = TrajectoryService(self.store, self.registry, self.observer)
             self.trajectory_service = self.trajectory
@@ -241,6 +249,7 @@ async def run(options: DaemonRunOptions | None = None) -> None:
             log_backup_count=obs.log_backup_count,
             log_path=paths.log_path(),
             foreground=options.stderr_token is None,
+            metric_specs=AGENT_METRIC_SPECS if obs.agent_metrics else (),
         )
         if options.timing:
             timing.enable_trace()
