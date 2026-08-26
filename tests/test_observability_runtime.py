@@ -142,6 +142,60 @@ def test_enabled_runtime_owns_then_removes_signal_bridge():
     """)
 
 
+def test_shutdown_flushes_queued_agent_logs_and_spans():
+    _run("""
+        from unittest.mock import patch
+        from opentelemetry.sdk._logs.export import InMemoryLogRecordExporter
+        from opentelemetry.sdk.metrics.export import MetricExporter, MetricExportResult
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+        from theater.observability import runtime
+
+        class Metrics(MetricExporter):
+            def export(self, metrics_data, timeout_millis=10_000, **kwargs):
+                return MetricExportResult.SUCCESS
+            def force_flush(self, timeout_millis=10_000):
+                return True
+            def shutdown(self, timeout_millis=30_000, **kwargs):
+                pass
+
+        spans = InMemorySpanExporter()
+        logs = InMemoryLogRecordExporter()
+        metrics = Metrics()
+
+        def exporters(protocol, endpoints, staged):
+            return spans, metrics, logs
+
+        with patch.object(runtime, "_build_exporters", exporters):
+            h = runtime.configure(
+                role="daemon", otlp_enabled=True, export_interval_ms=60_000
+            )
+            bridge = h.signal_bridge
+            assert bridge is not None
+            assert bridge.emit_span(
+                "agent.request", attributes={"agent.harness": "codex"},
+                start_time_ns=100, end_time_ns=200,
+            ) is not None
+            assert bridge.emit_log(
+                "agent.record", body="accepted", attributes={"agent.revision": 1}
+            )
+            assert spans.get_finished_spans() == ()
+            assert logs.get_finished_logs() == ()
+            h.shutdown()
+
+        assert [span.name for span in spans.get_finished_spans()] == ["agent.request"]
+        span = spans.get_finished_spans()[0]
+        assert span.resource.attributes["service.name"] == "theater"
+        assert span.resource.attributes["theater.process.role"] == "daemon"
+        exported = logs.get_finished_logs()
+        assert len(exported) == 1
+        assert exported[0].log_record.event_name == "agent.record"
+        assert exported[0].log_record.attributes["agent.revision"] == 1
+        assert exported[0].resource.attributes["service.name"] == "theater"
+        assert exported[0].resource.attributes["theater.process.role"] == "daemon"
+        print("OK")
+    """)
+
+
 def test_otel_rollback_does_not_store_signal_bridge():
     _run("""
         from unittest.mock import patch

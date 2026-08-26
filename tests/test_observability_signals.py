@@ -123,6 +123,85 @@ def test_completed_span_has_timestamps_error_and_parentable_context() -> None:
     provider.shutdown()
 
 
+def test_direct_log_exports_with_completed_span_correlation() -> None:
+    from opentelemetry.sdk._logs import LoggerProvider
+    from opentelemetry.sdk._logs.export import (
+        InMemoryLogRecordExporter,
+        SimpleLogRecordProcessor,
+    )
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from theater.observability.signals import SignalBridge
+
+    log_exporter = InMemoryLogRecordExporter()
+    logger_provider = LoggerProvider()
+    logger_provider.add_log_record_processor(SimpleLogRecordProcessor(log_exporter))
+    span_exporter = InMemorySpanExporter()
+    tracer_provider = TracerProvider()
+    tracer_provider.add_span_processor(SimpleSpanProcessor(span_exporter))
+    bridge = SignalBridge(
+        logger_provider.get_logger("test"),
+        tracer_provider.get_tracer("test"),
+    )
+
+    context = bridge.emit_span(
+        "agent.request",
+        attributes={"agent.harness": "codex"},
+        start_time_ns=100,
+        end_time_ns=200,
+    )
+    assert bridge.emit_log(
+        "agent.record",
+        body="accepted",
+        attributes={"agent.revision": 2},
+        timestamp_ns=150,
+        context=context,
+    )
+
+    span = span_exporter.get_finished_spans()[0]
+    log = log_exporter.get_finished_logs()[0].log_record
+    assert log.event_name == "agent.record"
+    assert log.timestamp == 150
+    assert log.attributes["agent.revision"] == 2
+    assert (log.trace_id, log.span_id) == (span.context.trace_id, span.context.span_id)
+    logger_provider.shutdown()
+    tracer_provider.shutdown()
+
+
+def test_completed_span_uses_links_without_parenting() -> None:
+    from opentelemetry.context import Context
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    from opentelemetry.trace import get_current_span
+
+    from theater.observability.signals import SignalBridge
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    bridge = SignalBridge(_Logger(), provider.get_tracer("test"))
+    request_context = bridge.emit_span(
+        "agent.request", attributes={}, start_time_ns=100, end_time_ns=200
+    )
+    request_span_context = get_current_span(request_context).get_span_context()
+    assert bridge.emit_span(
+        "agent.tool",
+        attributes={},
+        start_time_ns=300,
+        end_time_ns=400,
+        parent_context=Context(),
+        links=(request_span_context,),
+    ) is not None
+
+    request, tool = exporter.get_finished_spans()
+    assert tool.parent is None
+    assert tool.links[0].context == request.context
+    provider.shutdown()
+
+
 def test_emitter_and_span_failures_are_isolated() -> None:
     from opentelemetry.trace import INVALID_SPAN_CONTEXT
 
