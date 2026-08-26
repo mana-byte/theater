@@ -369,7 +369,7 @@ class MetricBridge:
         registered = self._specs.get(spec.name)
         if registered is None:
             raise ValueError(f"metric {spec.name}: specification is not registered")
-        if registered is not spec:
+        if registered != spec:
             raise ValueError(f"metric {spec.name}: specification mismatch")
         actual_keys = set(attributes) if attributes is not None else set()
         expected_keys = set(spec.attribute_keys)

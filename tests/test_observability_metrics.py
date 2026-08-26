@@ -183,8 +183,7 @@ def test_bridge_rejects_unregistered_and_mismatched_observe_specs():
     with pytest.raises(ValueError, match="not registered"):
         bridge.observe(registered, 1)
     bridge.register_specs((registered,))
-    with pytest.raises(ValueError, match="specification mismatch"):
-        bridge.observe(equivalent, 1)
+    bridge.observe(equivalent, 1)
     with pytest.raises(ValueError, match="specification mismatch"):
         bridge.observe(other, 1)
 
