@@ -10,6 +10,7 @@ import pytest
 import theater.harness.builtin.plugins.claude as claude_plugin
 import theater.harness.builtin.plugins.codex as codex_plugin
 import theater.harness.builtin.plugins.opencode as opencode_plugin
+from theater.daemon.trajectory.project import fact_to_record
 from theater.harness.builtin.plugins.claude import ClaudeCodeObserver
 from theater.harness.builtin.plugins.codex import CodexObserver
 from theater.harness.contracts.trajectory import ParsedRecord
@@ -21,7 +22,6 @@ from theater.trajectory.enums import (
     TrajectoryKind,
     TrajectoryStatus,
 )
-from theater.trajectory.projection import fact_to_record
 from theater.trajectory.records import Timing
 from theater.trajectory.requests import requests_for_records
 

@@ -11,6 +11,7 @@ from theater.constants.trajectory import (
     TRAJECTORY_SOURCE_MAX_BYTES,
     TRAJECTORY_TOOL_RECORD_LIMIT,
 )
+from theater.daemon.trajectory.project import fact_to_record
 from theater.harness.builtin.plugins.claude import ClaudeCodeObserver
 from theater.harness.builtin.plugins.codex import CodexObserver
 from theater.trajectory import (
@@ -25,7 +26,6 @@ from theater.trajectory import (
     TrajectoryToolIdentity,
     TrajectoryToolOperation,
     TrajectoryValidationError,
-    fact_to_record,
     tool_operations_for_records,
 )
 from theater.trajectory.enums import TrajectoryFailureCategory

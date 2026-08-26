@@ -12,6 +12,7 @@ from theater.constants.trajectory import (
     TRAJECTORY_REQUEST_RECORD_LIMIT,
 )
 from theater.daemon.trajectory.overview import capabilities_for, overview_for
+from theater.daemon.trajectory.project import event_to_fact, fact_to_record
 from theater.harness.builtin.plugins.claude import ClaudeCodeObserver
 from theater.harness.builtin.plugins.codex import CodexObserver
 from theater.harness.builtin.plugins.opencode import OpenCodeSource
@@ -31,8 +32,6 @@ from theater.trajectory import (
     TrajectoryStatus,
     TrajectoryUsage,
     TrajectoryValidationError,
-    event_to_fact,
-    fact_to_record,
     requests_for_records,
 )
 from theater.trajectory.enums import CostProvenance, TrajectoryFailureCategory

@@ -29,6 +29,18 @@ from theater.trajectory.enums import (
     TrajectoryStatus,
     TrajectoryValidationError,
 )
+from theater.trajectory.grouping import (
+    deduplicate_records,
+    deterministic_record_order,
+    group_records,
+    merge_records,
+    newer_record,
+)
+from theater.trajectory.identity import (
+    bounded_identity,
+    fallback_record_id,
+    namespaced_native_id,
+)
 from theater.trajectory.location import TrajectoryLocation, TrajectoryLocationResolution
 from theater.trajectory.overview import (
     TrajectoryCurrentOperation,
@@ -109,50 +121,20 @@ __all__ = [
     "TrajectoryUsage",
     "TrajectoryValidationError",
     "bound_detail_fields",
+    "bounded_identity",
     "bounded_preview",
     "clip_utf8",
     "deduplicate_records",
     "deterministic_record_order",
     "escape_rich_text",
-    "event_to_fact",
-    "event_to_record",
-    "fact_to_record",
     "fallback_record_id",
     "from_wire",
     "group_records",
     "merge_records",
+    "namespaced_native_id",
     "newer_record",
-    "project_events",
-    "project_facts",
-    "record_id_for_fact",
     "requests_for_records",
     "sanitize_text",
     "to_wire",
     "tool_operations_for_records",
 ]
-
-
-def __getattr__(name: str):
-    if name in {
-        "event_to_fact",
-        "event_to_record",
-        "fallback_record_id",
-        "fact_to_record",
-        "project_events",
-        "project_facts",
-        "record_id_for_fact",
-    }:
-        from theater.trajectory import projection
-
-        return getattr(projection, name)
-    if name in {
-        "deduplicate_records",
-        "deterministic_record_order",
-        "group_records",
-        "merge_records",
-        "newer_record",
-    }:
-        from theater.trajectory import grouping
-
-        return getattr(grouping, name)
-    raise AttributeError(name)

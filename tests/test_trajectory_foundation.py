@@ -19,6 +19,7 @@ from theater.constants.trajectory import (
     TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES,
     TRAJECTORY_TRANSCRIPT_HISTORY_WINDOW_BYTES,
 )
+from theater.daemon.trajectory.project import event_to_fact, event_to_record, fact_to_record
 from theater.harness.contracts.events import Event, EventKind, EventPath, TokenUsage
 from theater.harness.contracts.source import (
     Batch,
@@ -50,14 +51,11 @@ from theater.trajectory import (
     TrajectoryValidationError,
     bounded_preview,
     deterministic_record_order,
-    event_to_fact,
-    event_to_record,
-    fact_to_record,
-    fallback_record_id,
     group_records,
     merge_records,
 )
 from theater.trajectory.enums import CostProvenance, TrajectoryFailureCategory
+from theater.trajectory.identity import fallback_record_id
 from theater.trajectory.records import TrajectoryFailure, TrajectoryUsage
 
 
