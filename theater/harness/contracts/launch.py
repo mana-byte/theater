@@ -45,6 +45,15 @@ class NativeChild:
 
 
 @dataclass(frozen=True, slots=True)
+class HookCredential:
+    """Core-owned credential for one hook channel."""
+
+    channel_id: str
+    token: str
+    token_path: Path
+
+
+@dataclass(frozen=True, slots=True)
 class LaunchPlan:
     """Everything tmux needs to bring a participant up."""
 
@@ -62,6 +71,11 @@ class LaunchPlan:
     receipt_token_path: Path | None = None
     #: Resolved transcript namespace; persisted before launch so collision policy is stable.
     transcript_domain: str | None = None
+    #: Core-populated channel credentials; plugins never receive token bytes.
+    hook_credentials: tuple[HookCredential, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "hook_credentials", tuple(self.hook_credentials))
 
 
 @dataclass(frozen=True, slots=True)

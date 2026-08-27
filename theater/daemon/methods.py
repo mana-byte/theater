@@ -13,6 +13,7 @@ via the ``rpc`` package's ``__init__``.
 from __future__ import annotations
 
 from theater.daemon.rpc import METHODS
+from theater.daemon.rpc.hooks import HARNESS_EVENT_RPC, _harness_event
 from theater.daemon.rpc.jobs import (
     _JOB_ERROR_MESSAGES,
     AWAIT_ANNOUNCE_AFTER,
@@ -61,6 +62,7 @@ from theater.daemon.rpc.usage import _calendar_period_since, _retention_floor
 __all__ = [
     "AWAIT_ANNOUNCE_AFTER",
     "CLAUDE_RECEIPT_RPC",
+    "HARNESS_EVENT_RPC",
     "MAX_AWAIT",
     "METHODS",
     "SEND_CLAIM_TTL",
@@ -79,6 +81,7 @@ __all__ = [
     "_check_pane_identity",
     "_check_transcript_send_preflight",
     "_close_await",
+    "_harness_event",
     "_open_await",
     "_optional_string_param",
     "_prompt_with_response_format",

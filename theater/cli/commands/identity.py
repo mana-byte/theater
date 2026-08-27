@@ -4,11 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
 from theater.cli.render import _candidate_line
 from theater.client import DaemonClient, call_sync
+from theater.constants.harness import (
+    HARNESS_CHANNEL_DEFAULT_MAX_PAYLOAD_BYTES,
+    HARNESS_HOOK_TOKEN_MAX_CHARS,
+)
+from theater.harness.channels.hooks import (
+    HookIngressError,
+    validate_hook_identifier,
+    validate_hook_payload,
+)
 from theater.protocol import RemoteError
 
 
@@ -28,6 +38,55 @@ async def _send_transcript_receipt(args, *, token: str, payload: dict) -> None:
             token=token,
             payload=payload,
         )
+
+
+async def _send_harness_event(args, *, token: str, payload: dict) -> None:
+    async with DaemonClient(autostart=False) as client:
+        await client.call(
+            "harness.event",
+            id=args.id,
+            token=token,
+            channel=args.channel,
+            event=args.event,
+            delivery_id=args.delivery_id,
+            payload=payload,
+        )
+
+
+def cmd_harness_event(args) -> int:
+    """Forward one bounded generic hook payload without autostarting the daemon."""
+    strict = int(bool(getattr(args, "strict_exit", False)))
+    try:
+        stream = getattr(sys.stdin, "buffer", None)
+        raw = (
+            stream.read(HARNESS_CHANNEL_DEFAULT_MAX_PAYLOAD_BYTES + 1)
+            if stream is not None
+            else sys.stdin.read(HARNESS_CHANNEL_DEFAULT_MAX_PAYLOAD_BYTES + 1).encode("utf-8")
+        )
+        if len(raw) > HARNESS_CHANNEL_DEFAULT_MAX_PAYLOAD_BYTES:
+            return strict
+        payload = json.loads(raw.decode("utf-8"))
+        payload = validate_hook_payload(
+            payload, max_bytes=HARNESS_CHANNEL_DEFAULT_MAX_PAYLOAD_BYTES
+        )
+        validate_hook_identifier(args.event, "event")
+        validate_hook_identifier(args.channel, "channel")
+        if args.delivery_id is not None:
+            validate_hook_identifier(args.delivery_id, "delivery_id")
+        with Path(args.token_file).open("rb") as token_file:
+            if os.fstat(token_file.fileno()).st_size > HARNESS_HOOK_TOKEN_MAX_CHARS + 1:
+                return strict
+            token_raw = token_file.read(HARNESS_HOOK_TOKEN_MAX_CHARS + 1)
+        token = token_raw.decode("utf-8").strip()
+        if not token or len(token) > HARNESS_HOOK_TOKEN_MAX_CHARS:
+            return strict
+    except (OSError, UnicodeDecodeError, ValueError, HookIngressError):
+        return strict
+    try:
+        asyncio.run(_send_harness_event(args, token=token, payload=payload))
+    except Exception:
+        return strict
+    return 0
 
 
 def cmd_transcript_receipt(args) -> int:

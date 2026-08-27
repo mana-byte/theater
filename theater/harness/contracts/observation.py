@@ -58,6 +58,7 @@ from theater.provenance import TranscriptProvenance
 from theater.trajectory import TrajectoryCapabilities
 
 if TYPE_CHECKING:
+    from theater.harness.contracts.manifest import EnrichmentManifest
     from theater.harness.contracts.source import Source
 
 
@@ -136,6 +137,10 @@ class HarnessObserver(ABC):
     #: True selects the transcript watch loop; False falls back to capture-pane.
     has_transcript: bool = True
     trajectory_capabilities: TrajectoryCapabilities = TrajectoryCapabilities()
+
+    def enrichment_manifests(self) -> tuple[EnrichmentManifest, ...]:
+        """Return immutable declared enrichment manifests."""
+        return ()
 
     def open_source(
         self,

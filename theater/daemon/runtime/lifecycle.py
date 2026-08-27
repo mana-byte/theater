@@ -177,6 +177,7 @@ async def aclose(daemon, *, close_timeout: float, shutdown_workers) -> None:
             if inspect.isawaitable(result):
                 await result
     await daemon.observer.aclose()
+    await daemon.hook_runtime.aclose()
     if daemon._reaper:
         daemon._reaper.cancel()
         with contextlib.suppress(asyncio.CancelledError):

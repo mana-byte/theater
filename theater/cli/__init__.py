@@ -28,10 +28,12 @@ from theater.cli.commands.bus import (  # noqa: F401
 )
 from theater.cli.commands.identity import (  # noqa: F401
     _hook_string,
+    _send_harness_event,
     _send_transcript_receipt,
     cmd_bind,
     cmd_candidates,
     cmd_claude_receipt,
+    cmd_harness_event,
     cmd_transcript_receipt,
 )
 from theater.cli.commands.introspection import (  # noqa: F401
@@ -113,7 +115,10 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     paths.ensure_home()
     try:
-        if args.command not in _PROCESS_COMMANDS and args.command != "config":
+        if args.command not in _PROCESS_COMMANDS and args.command not in {
+            "config",
+            "harness-event",
+        }:
             harness_registry.install(config.load())
         return _COMMANDS[args.command](args)
     except (BadUsage, config.ConfigError, ObservabilityError) as exc:

@@ -38,6 +38,8 @@ from theater.harness import (
 from theater.harness import (
     normalize as normalize_harness,
 )
+from theater.harness.channels.composite import CompositeSource, EnrichmentBinding
+from theater.harness.channels.hooks import HookRuntime
 from theater.harness.source import (
     Attachment,
     Batch,
@@ -78,6 +80,7 @@ class Observer:
         rescue: float = RESCUE_TIMEOUT,
         jobs=None,
         agent_telemetry=None,
+        hook_runtime: HookRuntime | None = None,
     ):
         self.registry = registry
         self.store = registry.store
@@ -91,6 +94,7 @@ class Observer:
         self.rescue = rescue
         self.jobs = jobs
         self.agent_telemetry = agent_telemetry
+        self.hook_runtime = hook_runtime
         self._tasks: dict[str, asyncio.Task] = {}
         self._retired: set[str] = set()
         self._unobservable: set[str] = set()
@@ -276,17 +280,24 @@ class Observer:
                 self._warn_unobservable(pid, p)
                 continue
             observer = harness.observer
-            if observer.has_transcript and not p.cwd:
+            hook_active = self._has_active_hooks(p.id, observer)
+            durable_source = observer.has_transcript and p.cwd is not None
+            if observer.has_transcript and not p.cwd and not hook_active:
                 self._warn_unobservable(pid, p)
                 continue
             if p.tier is Tier.SPAWNED and p.tmux_pane is None:
                 continue
             self._unobservable.discard(pid)
-            watch = self._watch if observer.has_transcript else self._watch_screen
-            if observer.has_transcript:
+            watch = self._watch if durable_source or hook_active else self._watch_screen
+            if durable_source:
                 self._restore_transcript_identity_loss(pid)
             timing.ready_lag(OBSERVER_WATCH, pid, p.created_at, harness=p.harness)
             self._tasks[pid] = asyncio.create_task(watch(pid, normalize_harness(p.harness)))
+
+    def _has_active_hooks(self, participant_id: str, observer: HarnessObserver) -> bool:
+        if self.hook_runtime is None:
+            return False
+        return self.hook_runtime.has_active(participant_id, observer.enrichment_manifests())
 
     def _warn_unobservable(self, pid: str, p, *, reason: str | None = None) -> None:
         if pid in self._unobservable:
@@ -310,6 +321,10 @@ class Observer:
 
     async def _watch_source(self, pid: str, harness_name: str) -> None:  # noqa: PLR0912, PLR0915
         observer = self.harnesses[harness_name].observer
+        participant = self.store.get_participant(pid)
+        opened_durable = bool(
+            observer.has_transcript and participant is not None and participant.cwd is not None
+        )
         try:
             source = self._open_source(pid, observer)
         except Exception as exc:
@@ -324,22 +339,24 @@ class Observer:
             return
         if source is None:
             return
-        self._restore_transcript_identity_loss(pid)
+        if opened_durable:
+            self._restore_transcript_identity_loss(pid)
         clock = QuietClock()
         turns = TurnAccumulator()
         try:
-            try:
-                self._register_source(pid, source)
-            except SourceContractError:
-                logger.exception(SOURCE_CONTRACT_FAILED, pid)
-                return
+            if opened_durable:
+                try:
+                    self._register_source(pid, source)
+                except SourceContractError:
+                    logger.exception(SOURCE_CONTRACT_FAILED, pid)
+                    return
             while not self._stopping.is_set():
                 try:
                     if pid in self._attachments._reset_watch_state:
                         self._attachments._reset_watch_state.discard(pid)
                         clock = QuietClock()
                         turns = TurnAccumulator()
-                    if self.transcript_identity_lost(pid):
+                    if opened_durable and self.transcript_identity_lost(pid):
                         self._sweep_identity_lost_grace(pid)
                         await self._screen_only(pid, observer, clock)
                         await self._sleep(self.search)
@@ -353,6 +370,11 @@ class Observer:
                         await self._sleep(self.search)
                         continue
                     self._failures.report_source_error(pid, batch, finish_fn=self._finish)
+                    if not opened_durable:
+                        self._capture_trajectory(pid, batch)
+                        await self._screen_only(pid, observer, clock)
+                        await self._sleep(self.poll)
+                        continue
                     if not self._accept_attachment(pid, source, batch):
                         await self._screen_only(pid, observer, clock)
                         await self._sleep(self.search)
@@ -408,12 +430,13 @@ class Observer:
                     logger.exception("observing %s failed", pid)
                 await self._sleep(self.poll)
         finally:
-            self._failures.clear_source_errors(pid, include_identity_lost=True)
-            self._failures._identity_loss_replayed.discard(pid)
+            self._failures.clear_source_errors(pid, include_identity_lost=opened_durable)
             self._attachments._reset_watch_state.discard(pid)
-            self._attachments._receipt_candidates.pop(pid, None)
-            self._attachments._sources.pop(pid, None)
-            self._attachments.release_transcript(pid)
+            if opened_durable:
+                self._failures._identity_loss_replayed.discard(pid)
+                self._attachments._receipt_candidates.pop(pid, None)
+                self._attachments._sources.pop(pid, None)
+                self._attachments.release_transcript(pid)
             try:
                 await source.aclose()
             except (Exception, asyncio.CancelledError):
@@ -455,18 +478,29 @@ class Observer:
         p = self.store.get_participant(pid)
         if p is None:
             return None
-        after = p.created_at if p.tier is Tier.SPAWNED else None
-        source = self._open_participant_source(
-            observer,
-            participant_id=p.id,
-            cwd=p.cwd,
-            session_id=p.session_id,
-            after=after,
-            session_provenance=normalize_provenance(p.session_correlation),
-            known_location=p.transcript_location,
-            transcript_domain=p.transcript_domain,
-            pane_pid=p.live_pid,
-        )
+        source: Source | None = None
+        if observer.has_transcript and p.cwd is not None:
+            after = p.created_at if p.tier is Tier.SPAWNED else None
+            source = self._open_participant_source(
+                observer,
+                participant_id=p.id,
+                cwd=p.cwd,
+                session_id=p.session_id,
+                after=after,
+                session_provenance=normalize_provenance(p.session_correlation),
+                known_location=p.transcript_location,
+                transcript_domain=p.transcript_domain,
+                pane_pid=p.live_pid,
+            )
+        bindings: tuple[EnrichmentBinding, ...] = ()
+        if self.hook_runtime is not None:
+            bindings = self.hook_runtime.enrichment_bindings(p.id, observer.enrichment_manifests())
+        if source is None and not bindings:
+            return None
+        if bindings:
+            source = CompositeSource(primary=source, enrichments=bindings)
+        if source is None:
+            return None
         if source.collision_domain is not None and p.transcript_domain != source.collision_domain:
             p.transcript_domain = source.collision_domain
             self.store.upsert_participant(p)

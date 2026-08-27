@@ -15,6 +15,7 @@ physical fact: inbound delivery needs a pane to type into, and External has none
 from __future__ import annotations
 
 import builtins
+from collections.abc import Callable
 
 from theater import names
 from theater.daemon import lineage
@@ -37,6 +38,15 @@ class Registry:
         self.store = store
         # participant id -> runtime name; never persisted, only live participants.
         self._names: dict[str, str] = {}
+        self._participant_cleanup: list[Callable[[str], None]] = []
+
+    def add_participant_cleanup(self, callback: Callable[[str], None]) -> None:
+        """Register bounded runtime cleanup for a dead participant."""
+        self._participant_cleanup.append(callback)
+
+    def _cleanup_participant(self, participant_id: str) -> None:
+        for callback in tuple(self._participant_cleanup):
+            callback(participant_id)
 
     # ---- naming --------------------------------------------------------
 
@@ -389,9 +399,13 @@ class Registry:
             # Already dead or gone: still purge stale name entry so the mask can be reused.
             self._names.pop(pid, None)
             self.store.delete_receipt_token(pid)
+            self.store.delete_hook_credentials(pid)
+            self._cleanup_participant(pid)
             return
         self.store.set_status(pid, Status.DEAD)
         self.store.delete_receipt_token(pid)
+        self.store.delete_hook_credentials(pid)
+        self._cleanup_participant(pid)
         self._names.pop(pid, None)
         self.store.bus_append("participant.dead", to_id=pid)
 

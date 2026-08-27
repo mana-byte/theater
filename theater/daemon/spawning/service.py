@@ -24,6 +24,7 @@ from theater.daemon.registry import Registry
 from theater.daemon.spawning.models import Reservation, SpawnRequest
 from theater.daemon.spawning.planning import (
     build_plan,
+    install_hook_plan,
     record_launch_identity,
     validate_receipt_plan,
     write_plan_files,
@@ -94,6 +95,7 @@ class Spawner:
             minted_token = self._validate_receipt_plan(plan, participant)
             if minted_token is not None:
                 plan = replace(plan, receipt_token=minted_token)
+            plan = self._install_hook_plan(plan, participant, harness.observer)
             with timing.span(SPAWN_WORKTREE, id=participant.id, kind=req.worktree or None):
                 child_cwd = await self._prepare_worktree(req, participant)
             self._record_launch_identity(participant, plan)
@@ -218,6 +220,11 @@ class Spawner:
     ) -> LaunchPlan:
         """Launch plan construction via the planning module."""
         return build_plan(req, participant, overlay)
+
+    @staticmethod
+    def _install_hook_plan(plan: LaunchPlan, participant: Participant, observer) -> LaunchPlan:
+        """Apply generic launch-local hook installation."""
+        return install_hook_plan(plan, participant, observer)
 
     @staticmethod
     def _write_plan_files(plan: LaunchPlan) -> None:

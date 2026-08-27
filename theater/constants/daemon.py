@@ -24,6 +24,9 @@ SEND_SEQ_META_KEY = "send_seq"
 #: Meta key prefix for per-participant receipt tokens; the participant id is appended.
 RECEIPT_TOKEN_PREFIX = "receipt_token:"
 
+#: Meta key prefix for participant-scoped generic hook credentials.
+HOOK_CREDENTIAL_PREFIX = "hook_credential:"
+
 #: Default time budget for jobs.await when the caller does not specify one.
 RPC_DEFAULT_MAX_WAIT_SECONDS = 150.0
 
@@ -72,6 +75,9 @@ AGENT_OBSERVATION_KINDS = frozenset(
 
 #: Bus kind for agent transcript receipts in the audit stream.
 BUS_KIND_AGENT_TRANSCRIPT_RECEIPT = "agent.transcript_receipt"
+
+#: Bus kind for accepted generic hook envelopes without native payload content.
+BUS_KIND_AGENT_HARNESS_EVENT = "agent.harness_event"
 
 #: Bus kind for operator transcript bind events in the audit stream.
 BUS_KIND_OPERATOR_TRANSCRIPT_BIND = "operator.transcript_bind"

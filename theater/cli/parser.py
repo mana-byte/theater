@@ -110,6 +110,14 @@ def _add_receipt_parser(sub) -> None:
     alias.add_argument("--id", required=True)
     alias.add_argument("--token-file", required=True)
 
+    event = sub.add_parser("harness-event", help=argparse.SUPPRESS)
+    event.add_argument("event")
+    event.add_argument("--id", required=True)
+    event.add_argument("--channel", required=True)
+    event.add_argument("--token-file", required=True)
+    event.add_argument("--delivery-id", default=None)
+    event.add_argument("--strict-exit", action="store_true", help=argparse.SUPPRESS)
+
 
 def _add_process_parsers(sub) -> None:
     """Register daemon-side process entry points."""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from typing import NoReturn
 
@@ -9,6 +10,9 @@ from theater.constants.core import HARNESS_NAME
 from theater.constants.harness import (
     HARNESS_APPROVAL_POLICIES,
     HARNESS_CHANNEL_ID_MAX_CHARS,
+    HARNESS_HOOK_IDENTIFIER_MAX_CHARS,
+    HARNESS_HOOK_MAX_PAYLOAD_BYTES,
+    HARNESS_HOOK_MAX_QUEUE,
     HARNESS_MANIFEST_API_VERSION,
 )
 from theater.formatting import display_width
@@ -17,6 +21,8 @@ from theater.harness.contracts.channels import (
     ChannelCapability,
     ChannelDeclaration,
     ChannelKind,
+    HookBinding,
+    HookDeliveryMode,
     SignalKind,
     SignalOwnership,
 )
@@ -36,6 +42,7 @@ from theater.harness.contracts.manifest import (
 from theater.trajectory import TrajectoryCapabilities
 
 _DURABLE_KINDS = frozenset({ChannelKind.TRANSCRIPT, ChannelKind.DATABASE})
+_HOOK_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
 
 
 class ManifestValidationError(ValueError):
@@ -249,7 +256,7 @@ def _validate_enrichment(name: str, path: str, enrichment: object) -> ChannelDec
         _validate_channel(name, f"{path}.declaration", enrichment.declaration)
         if enrichment.declaration.kind is not ChannelKind.HOOK:
             _fail(name, f"{path}.declaration.kind", "must be hook")
-        _validate_optional_reason(name, f"{path}.unavailable_reason", enrichment.unavailable_reason)
+        _validate_hook_channel(name, path, enrichment)
         return enrichment.declaration
     if isinstance(enrichment, OtelChannelManifest):
         _validate_channel(name, f"{path}.declaration", enrichment.declaration)
@@ -267,6 +274,84 @@ def _validate_enrichment(name: str, path: str, enrichment: object) -> ChannelDec
 def _validate_optional_reason(name: str, path: str, reason: object) -> None:
     if reason is not None:
         _validate_text(name, path, reason)
+
+
+def _validate_hook_channel(name: str, path: str, channel: HookChannelManifest) -> None:
+    _validate_optional_reason(name, f"{path}.unavailable_reason", channel.unavailable_reason)
+    for index, capability in enumerate(channel.declaration.capabilities):
+        if capability.ownership is SignalOwnership.PRIMARY:
+            _fail(
+                name,
+                f"{path}.declaration.capabilities[{index}].ownership",
+                "hook channels cannot claim primary ownership",
+            )
+    if channel.declaration.bounds.max_queue > HARNESS_HOOK_MAX_QUEUE:
+        _fail(
+            name,
+            f"{path}.declaration.bounds.max_queue",
+            f"must not exceed {HARNESS_HOOK_MAX_QUEUE}",
+        )
+    if channel.declaration.bounds.max_payload_bytes > HARNESS_HOOK_MAX_PAYLOAD_BYTES:
+        _fail(
+            name,
+            f"{path}.declaration.bounds.max_payload_bytes",
+            f"must not exceed {HARNESS_HOOK_MAX_PAYLOAD_BYTES}",
+        )
+    if not isinstance(channel.bindings, tuple):
+        _fail(name, f"{path}.bindings", "must be a tuple of HookBinding values")
+    if channel.unavailable_reason is not None:
+        if channel.bindings:
+            _fail(name, f"{path}.bindings", "must be empty when unavailable_reason is set")
+        if channel.installer is not None:
+            _fail(name, f"{path}.installer", "must be null when unavailable_reason is set")
+        return
+    if channel.bindings and not callable(channel.installer):
+        _fail(name, f"{path}.installer", "must be callable when bindings are declared")
+    if not channel.bindings:
+        _fail(name, f"{path}.bindings", "must be non-empty when available")
+    declared = {capability.signal for capability in channel.declaration.capabilities}
+    seen: set[str] = set()
+    for index, binding in enumerate(channel.bindings):
+        binding_path = f"{path}.bindings[{index}]"
+        if not isinstance(binding, HookBinding):
+            _fail(name, binding_path, f"expected HookBinding, got {type(binding).__name__}")
+        _validate_hook_binding(name, binding_path, binding, declared, seen)
+
+
+def _validate_hook_binding(
+    name: str,
+    path: str,
+    binding: HookBinding,
+    declared: set[SignalKind],
+    seen: set[str],
+) -> None:
+    if (
+        not isinstance(binding.event, str)
+        or len(binding.event) > HARNESS_HOOK_IDENTIFIER_MAX_CHARS
+        or not _HOOK_IDENTIFIER.fullmatch(binding.event)
+    ):
+        _fail(name, f"{path}.event", "must be a bounded native event identifier")
+    if binding.event in seen:
+        _fail(name, f"{path}.event", f"duplicates hook event {binding.event!r}")
+    seen.add(binding.event)
+    if not isinstance(binding.signals, tuple) or not binding.signals:
+        _fail(name, f"{path}.signals", "must be a non-empty tuple of SignalKind values")
+    signal_seen: set[SignalKind] = set()
+    for index, signal in enumerate(binding.signals):
+        signal_path = f"{path}.signals[{index}]"
+        if not isinstance(signal, SignalKind):
+            _fail(name, signal_path, "must be a SignalKind")
+        if signal in signal_seen:
+            _fail(name, signal_path, "must not repeat a signal")
+        if signal not in declared:
+            _fail(name, signal_path, "must be declared by the channel capabilities")
+        signal_seen.add(signal)
+    if not callable(binding.decoder):
+        _fail(name, f"{path}.decoder", "must be callable")
+    if not callable(binding.correlation):
+        _fail(name, f"{path}.correlation", "must be callable")
+    if not isinstance(binding.delivery, HookDeliveryMode):
+        _fail(name, f"{path}.delivery", "must be a HookDeliveryMode")
 
 
 def _validate_channel(name: str, path: str, channel: object) -> None:

@@ -8,6 +8,13 @@ backward compatibility.
 from __future__ import annotations
 
 from theater.harness.contracts.callbacks import (
+    HookCorrelationContext,
+    HookCorrelationExtractor,
+    HookDecodeContext,
+    HookDecoder,
+    HookInstallContext,
+    HookInstaller,
+    HookInstallOverlay,
     LaunchContext,
     LaunchPlanner,
     ModelDiscoverer,
@@ -32,9 +39,12 @@ from theater.harness.contracts.channels import (
     ChannelBounds,
     ChannelCapability,
     ChannelDeclaration,
+    ChannelFact,
     ChannelHealth,
     ChannelHealthState,
     ChannelKind,
+    HookBinding,
+    HookDeliveryMode,
     SignalKind,
     SignalOwnership,
 )
@@ -52,6 +62,7 @@ from theater.harness.contracts.events import (
 )
 from theater.harness.contracts.harness import APPROVALS, Harness, LaunchParameterSupport
 from theater.harness.contracts.launch import (
+    HookCredential,
     LaunchPlan,
     NativeChild,
     ResumeLaunchOverlay,
@@ -87,6 +98,7 @@ from theater.harness.contracts.source import (
     TrajectoryHistoryPage,
 )
 from theater.harness.contracts.trajectory import FactLink, ParsedRecord, TrajectoryFact
+from theater.harness.contracts.values import freeze_json_mapping
 
 __all__ = [
     "APPROVALS",
@@ -96,6 +108,7 @@ __all__ = [
     "ChannelBounds",
     "ChannelCapability",
     "ChannelDeclaration",
+    "ChannelFact",
     "ChannelHealth",
     "ChannelHealthState",
     "ChannelKind",
@@ -108,7 +121,17 @@ __all__ = [
     "HarnessObserver",
     "History",
     "HistoryPage",
+    "HookBinding",
     "HookChannelManifest",
+    "HookCorrelationContext",
+    "HookCorrelationExtractor",
+    "HookCredential",
+    "HookDecodeContext",
+    "HookDecoder",
+    "HookDeliveryMode",
+    "HookInstallContext",
+    "HookInstallOverlay",
+    "HookInstaller",
     "IdentityManifest",
     "LaunchContext",
     "LaunchManifest",
@@ -155,6 +178,7 @@ __all__ = [
     "UnavailableChannelManifest",
     "clip",
     "clipper",
+    "freeze_json_mapping",
     "last_screen_line",
     "status_after",
     "theater_binary",

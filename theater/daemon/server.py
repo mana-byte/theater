@@ -59,6 +59,7 @@ from theater.daemon.store import Store
 from theater.daemon.trajectory import TrajectoryService
 from theater.daemon.trajectory.telemetry import AGENT_METRIC_SPECS, create_agent_telemetry
 from theater.harness import Harness
+from theater.harness.channels.hooks import HookRuntime
 from theater.observability import metric_bridge
 from theater.tmux import client as tmux  # noqa: F401 — monkeypatched via server_mod
 
@@ -115,6 +116,8 @@ class Daemon:
                 _owned_store = Store(paths.db_path())
                 self.store = _owned_store
             self.registry = Registry(self.store)
+            self.hook_runtime = HookRuntime(self._hook_credential_active)
+            self.registry.add_participant_cleanup(self.hook_runtime.drop_participant)
             self.spawner = Spawner(self.registry)
             self.jobs = JobManager(self.store)
             agent_telemetry = create_agent_telemetry(
@@ -140,6 +143,7 @@ class Daemon:
                 rescue=observer_cfg.rescue_timeout,
                 jobs=self.jobs,
                 agent_telemetry=agent_telemetry,
+                hook_runtime=self.hook_runtime,
             )
             self.trajectory = TrajectoryService(self.store, self.registry, self.observer)
             self.trajectory_service = self.trajectory
@@ -159,6 +163,9 @@ class Daemon:
                     _owned_store.close()
             self._lock.release()
             raise
+
+    def _hook_credential_active(self, participant_id: str, channel_id: str) -> bool:
+        return self.store.get_hook_credential(participant_id, channel_id) is not None
 
     def _next_send_seq(self) -> int:
         return lifecycle.next_send_seq(self)

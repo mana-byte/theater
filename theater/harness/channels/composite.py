@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from theater.constants.harness import (
+    HARNESS_CHANNEL_HEALTH_MAX_DIAGNOSTICS,
     HARNESS_DEDUPE_MAX_FACTS,
     HARNESS_ENRICHMENT_READ_TIMEOUT_SECONDS,
 )
@@ -16,6 +17,7 @@ from theater.harness.channels.health import ChannelHealthTracker
 from theater.harness.contracts.channels import (
     ChannelDeclaration,
     ChannelHealth,
+    ChannelHealthState,
     ChannelKind,
     SignalKind,
     SignalOwnership,
@@ -169,8 +171,29 @@ class CompositeSource(Source):
                 )
 
     def channel_health(self) -> tuple[ChannelHealth, ...]:
-        return tuple(
-            self._health[binding.declaration.id].snapshot() for binding in self._enrichments
+        return tuple(self._channel_health(binding) for binding in self._enrichments)
+
+    def _channel_health(self, binding: EnrichmentBinding) -> ChannelHealth:
+        composite = self._health[binding.declaration.id].snapshot()
+        snapshot = getattr(binding.source, "channel_health", None)
+        source = snapshot() if callable(snapshot) else None
+        if not isinstance(source, ChannelHealth):
+            return composite
+        states = {
+            ChannelHealthState.INACTIVE: 0,
+            ChannelHealthState.HEALTHY: 1,
+            ChannelHealthState.STARTING: 2,
+            ChannelHealthState.DEGRADED: 3,
+            ChannelHealthState.FAILED: 4,
+        }
+        state = source.state if states[source.state] >= states[composite.state] else composite.state
+        return ChannelHealth(
+            channel_id=composite.channel_id,
+            state=state,
+            diagnostics=(composite.diagnostics + source.diagnostics)[
+                -HARNESS_CHANNEL_HEALTH_MAX_DIAGNOSTICS:
+            ],
+            dropped=composite.dropped + source.dropped,
         )
 
     def primary_health(self) -> ChannelHealth | None:

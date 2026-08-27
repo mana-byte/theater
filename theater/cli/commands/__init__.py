@@ -7,6 +7,7 @@ from theater.cli.commands.identity import (
     cmd_bind,
     cmd_candidates,
     cmd_claude_receipt,
+    cmd_harness_event,
     cmd_transcript_receipt,
 )
 from theater.cli.commands.introspection import (
@@ -43,6 +44,7 @@ COMMANDS = {
     "mcp": cmd_mcp,
     "transcript-receipt": cmd_transcript_receipt,
     "claude-receipt": cmd_claude_receipt,
+    "harness-event": cmd_harness_event,
     "ls": cmd_ls,
     "bus": cmd_bus,
     "spawn": cmd_spawn,

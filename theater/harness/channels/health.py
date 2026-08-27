@@ -50,8 +50,10 @@ class ChannelHealthTracker:
     def mark_inactive(self) -> None:
         self._state = ChannelHealthState.INACTIVE
 
-    def drop(self) -> None:
-        self._dropped += 1
+    def drop(self, count: int = 1) -> None:
+        if type(count) is not int or count <= 0:
+            raise ValueError("channel drop count must be a positive integer")
+        self._dropped += count
 
     def snapshot(self) -> ChannelHealth:
         return ChannelHealth(

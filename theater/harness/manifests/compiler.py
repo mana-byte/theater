@@ -19,7 +19,11 @@ from theater.harness.contracts.callbacks import (
 from theater.harness.contracts.context import ParticipantObservationContext
 from theater.harness.contracts.harness import Harness, LaunchParameterSupport
 from theater.harness.contracts.launch import LaunchPlan, NativeChild, ResumeLaunchOverlay
-from theater.harness.contracts.manifest import HarnessManifest, ObservationManifest
+from theater.harness.contracts.manifest import (
+    EnrichmentManifest,
+    HarnessManifest,
+    ObservationManifest,
+)
 from theater.harness.contracts.observation import HarnessObserver, ScreenKind, ScreenReading
 from theater.harness.contracts.source import Source, StreamPoint, TranscriptCandidate
 from theater.harness.manifests.validation import validate_manifest
@@ -42,9 +46,14 @@ class ManifestHarnessObserver(HarnessObserver):
         self._screen = observation.screen
         self._identity = observation.identity
         self._lineage = observation.lineage
+        self._enrichments = observation.enrichments
         self._harness_name = harness_name
         self.has_transcript = self._primary is not None
         self.trajectory_capabilities = observation.trajectory_capabilities
+
+    def enrichment_manifests(self) -> tuple[EnrichmentManifest, ...]:
+        """Expose validated enrichment declarations without plugin inspection."""
+        return self._enrichments
 
     def open_source(
         self,

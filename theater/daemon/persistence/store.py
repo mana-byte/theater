@@ -29,6 +29,7 @@ from theater.constants.daemon import (
 )
 from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories.bus import BusRepository
+from theater.daemon.persistence.repositories.hooks import HookCredentialRepository
 from theater.daemon.persistence.repositories.jobs import JobRepository
 from theater.daemon.persistence.repositories.metadata import MetadataRepository
 from theater.daemon.persistence.repositories.participants import ParticipantRepository
@@ -63,6 +64,7 @@ class Store:
         self._bus = BusRepository(self._db)
         self._meta = MetadataRepository(self._db)
         self._receipts = ReceiptRepository(self._db, self._meta, self._participants)
+        self._hooks = HookCredentialRepository(self._db, self._meta, self._participants)
         self._scratchpad = ScratchpadRepository(self._db)
         self._worktrees = WorktreeRepository(self._db)
         self._usage = UsageRepository(self._db)
@@ -300,6 +302,34 @@ class Store:
 
     def cleanup_receipt_tokens(self) -> int:
         return self._receipts.cleanup_tokens()
+
+    # ---- hook credentials ---------------------------------------------
+
+    def set_hook_credential(
+        self,
+        participant_id: str,
+        *,
+        harness: str,
+        channel_id: str,
+        token: str,
+        token_path: str,
+    ) -> None:
+        self._hooks.set(
+            participant_id,
+            harness=harness,
+            channel_id=channel_id,
+            token=token,
+            token_path=token_path,
+        )
+
+    def get_hook_credential(self, participant_id: str, channel_id: str):
+        return self._hooks.get(participant_id, channel_id)
+
+    def delete_hook_credentials(self, participant_id: str) -> None:
+        self._hooks.delete_participant(participant_id)
+
+    def cleanup_hook_credentials(self) -> int:
+        return self._hooks.cleanup()
 
     def record_transcript_receipt(
         self,

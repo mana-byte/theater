@@ -11,6 +11,7 @@ from theater.constants.harness import (
     HARNESS_PLUGIN_API_VERSION as PLUGIN_API_VERSION,
 )
 from theater.harness.contracts.callbacks import (
+    HookInstaller,
     LaunchPlanner,
     ModelDiscoverer,
     NativeChildrenReader,
@@ -24,6 +25,7 @@ from theater.harness.contracts.callbacks import (
 )
 from theater.harness.contracts.channels import (
     ChannelDeclaration,
+    HookBinding,
     SignalKind,
 )
 from theater.harness.contracts.harness import ResumeStrategy
@@ -91,10 +93,15 @@ class LineageManifest:
 
 @dataclass(frozen=True, slots=True)
 class HookChannelManifest:
-    """A future hook channel declaration with no transport implementation."""
+    """A generic hook channel with explicit native bindings."""
 
     declaration: ChannelDeclaration
+    bindings: tuple[HookBinding, ...] = ()
+    installer: HookInstaller | None = None
     unavailable_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "bindings", tuple(self.bindings))
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +151,11 @@ class ObservationManifest:
         return frozenset(
             capability.signal for channel in self.channels for capability in channel.capabilities
         )
+
+    @property
+    def hook_channels(self) -> tuple[HookChannelManifest, ...]:
+        """Declared hook channels in manifest order."""
+        return tuple(item for item in self.enrichments if isinstance(item, HookChannelManifest))
 
 
 def _channel_declaration(manifest: EnrichmentManifest) -> ChannelDeclaration:

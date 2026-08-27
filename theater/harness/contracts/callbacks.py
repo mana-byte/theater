@@ -9,8 +9,10 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol
 
 from theater.harness.contracts.context import ParticipantObservationContext
+from theater.harness.contracts.values import freeze_json_mapping
 
 if TYPE_CHECKING:
+    from theater.harness.contracts.channels import ChannelFact
     from theater.harness.contracts.launch import LaunchPlan, NativeChild, ResumeLaunchOverlay
     from theater.harness.contracts.observation import ScreenReading
     from theater.harness.contracts.source import Source, StreamPoint, TranscriptCandidate
@@ -101,6 +103,67 @@ class OperatorCandidateContext:
     after: float | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class HookCorrelationContext:
+    """One bounded native envelope awaiting correlation."""
+
+    participant_id: str
+    channel_id: str
+    event: str
+    payload: Mapping[str, object]
+    delivery_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.payload, Mapping):
+            raise TypeError("hook payload must be a mapping")
+        object.__setattr__(
+            self,
+            "payload",
+            freeze_json_mapping(self.payload),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class HookDecodeContext:
+    """One bounded native envelope with accepted correlation."""
+
+    participant_id: str
+    channel_id: str
+    event: str
+    payload: Mapping[str, object]
+    native_id: str
+    delivery_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.payload, Mapping):
+            raise TypeError("hook payload must be a mapping")
+        if not isinstance(self.native_id, str) or not self.native_id.strip():
+            raise TypeError("hook native_id must be a non-blank string")
+        object.__setattr__(self, "payload", freeze_json_mapping(self.payload))
+
+
+@dataclass(frozen=True, slots=True)
+class HookInstallContext:
+    """Launch-local facts exposed to a hook installer."""
+
+    participant_id: str
+    channel_id: str
+    token_file: Path
+    theater_executable: str
+
+
+@dataclass(frozen=True, slots=True)
+class HookInstallOverlay:
+    """Public files and environment from one hook installer."""
+
+    env: Mapping[str, str] = MappingProxyType({})
+    files: Mapping[Path, str] = MappingProxyType({})
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
+        object.__setattr__(self, "files", MappingProxyType(dict(self.files)))
+
+
 class LaunchPlanner(Protocol):
     """Build the pure launch plan for one requested participant."""
 
@@ -161,7 +224,32 @@ class OperatorCandidateAdmitter(Protocol):
     def __call__(self, context: OperatorCandidateContext) -> TranscriptCandidate: ...
 
 
+class HookDecoder(Protocol):
+    """Decode one declared hook payload into normalized facts."""
+
+    def __call__(self, context: HookDecodeContext) -> Sequence[ChannelFact]: ...
+
+
+class HookCorrelationExtractor(Protocol):
+    """Extract one exact native correlation identity."""
+
+    def __call__(self, context: HookCorrelationContext) -> str: ...
+
+
+class HookInstaller(Protocol):
+    """Build launch-local hook configuration without secret bytes."""
+
+    def __call__(self, context: HookInstallContext) -> HookInstallOverlay: ...
+
+
 __all__ = [
+    "HookCorrelationContext",
+    "HookCorrelationExtractor",
+    "HookDecodeContext",
+    "HookDecoder",
+    "HookInstallContext",
+    "HookInstallOverlay",
+    "HookInstaller",
     "LaunchContext",
     "LaunchPlanner",
     "ModelDiscoverer",

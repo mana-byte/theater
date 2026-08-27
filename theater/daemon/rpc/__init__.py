@@ -10,6 +10,7 @@ from __future__ import annotations
 # Handler modules — importing each registers its @method handlers.
 from theater.daemon.rpc import (  # noqa: F401
     admin,
+    hooks,
     jobs,
     participants,
     recall,

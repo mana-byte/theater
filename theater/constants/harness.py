@@ -46,6 +46,36 @@ HARNESS_CHANNEL_DEFAULT_MAX_PAYLOAD_BYTES = 65_536
 #: Longest stable channel identifier accepted by the generic contracts.
 HARNESS_CHANNEL_ID_MAX_CHARS = 64
 
+#: Longest native event or delivery identifier accepted by hook ingress.
+HARNESS_HOOK_IDENTIFIER_MAX_CHARS = 128
+
+#: Maximum participant-scoped hook credential length, excluding its trailing newline.
+HARNESS_HOOK_TOKEN_MAX_CHARS = 128
+
+#: Maximum JSON object depth accepted from a native hook.
+HARNESS_HOOK_MAX_JSON_DEPTH = 8
+
+#: Maximum object attributes accepted from a native hook.
+HARNESS_HOOK_MAX_JSON_ATTRIBUTES = 64
+
+#: Maximum queue capacity a manifest may request for one hook channel.
+HARNESS_HOOK_MAX_QUEUE = 4096
+
+#: Maximum native hook JSON body a manifest may request.
+HARNESS_HOOK_MAX_PAYLOAD_BYTES = HARNESS_CHANNEL_DEFAULT_MAX_PAYLOAD_BYTES
+
+#: Maximum bounded delivery identities retained per hook inbox.
+HARNESS_HOOK_DEDUPE_MAX_DELIVERIES = 4096
+
+#: Maximum simultaneous synchronous callback executions per hook runtime.
+HARNESS_HOOK_CALLBACK_MAX_IN_FLIGHT = 8
+
+#: Bound on one synchronous native correlation callback.
+HARNESS_HOOK_CORRELATION_TIMEOUT_SECONDS = 1.0
+
+#: Bound on one synchronous native decoder callback.
+HARNESS_HOOK_DECODER_TIMEOUT_SECONDS = 1.0
+
 #: Runtime health retains only this many recent diagnostics per channel.
 HARNESS_CHANNEL_HEALTH_MAX_DIAGNOSTICS = 8
 

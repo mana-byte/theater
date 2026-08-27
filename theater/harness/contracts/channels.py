@@ -13,6 +13,8 @@ from theater.constants.harness import (
     HARNESS_CHANNEL_HEALTH_MAX_DIAGNOSTICS,
     HARNESS_CHANNEL_ID_MAX_CHARS,
 )
+from theater.harness.contracts.callbacks import HookCorrelationExtractor, HookDecoder
+from theater.harness.contracts.trajectory import TrajectoryFact
 
 
 class ChannelKind(StrEnum):
@@ -40,6 +42,20 @@ class SignalKind(StrEnum):
     LINEAGE = "lineage"
 
 
+@dataclass(frozen=True, slots=True)
+class ChannelFact:
+    """One normalized fact tagged with its declared signal."""
+
+    signal: SignalKind
+    fact: TrajectoryFact
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.signal, SignalKind):
+            raise TypeError("channel fact signal must be a SignalKind")
+        if not isinstance(self.fact, TrajectoryFact):
+            raise TypeError("channel fact fact must be a TrajectoryFact")
+
+
 class SignalOwnership(StrEnum):
     """The authority a channel claims for one signal category."""
 
@@ -56,6 +72,14 @@ class ChannelHealthState(StrEnum):
     HEALTHY = "healthy"
     DEGRADED = "degraded"
     FAILED = "failed"
+
+
+class HookDeliveryMode(StrEnum):
+    """A native hook's documented delivery behaviour."""
+
+    ORDERED = "ordered"
+    RETRIED = "retried"
+    BEST_EFFORT = "best_effort"
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +109,20 @@ class ChannelDeclaration:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "capabilities", tuple(self.capabilities))
+
+
+@dataclass(frozen=True, slots=True)
+class HookBinding:
+    """One native event wired to explicit normalized callbacks."""
+
+    event: str
+    signals: tuple[SignalKind, ...]
+    decoder: HookDecoder
+    correlation: HookCorrelationExtractor
+    delivery: HookDeliveryMode = HookDeliveryMode.BEST_EFFORT
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "signals", tuple(self.signals))
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,9 +165,12 @@ __all__ = [
     "ChannelBounds",
     "ChannelCapability",
     "ChannelDeclaration",
+    "ChannelFact",
     "ChannelHealth",
     "ChannelHealthState",
     "ChannelKind",
+    "HookBinding",
+    "HookDeliveryMode",
     "SignalKind",
     "SignalOwnership",
 ]
