@@ -8,6 +8,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from theater.harness.contracts.trajectory import TrajectoryFact
+from theater.harness.normalization.facts import tool_failure
 from theater.trajectory.content import ContentFormat, DetailField
 from theater.trajectory.enums import TrajectoryFailureCategory, TrajectoryKind, TrajectoryStatus
 from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryUsage
@@ -268,10 +269,11 @@ class OpenCodeTrajectory:
                     parent_call_id=parent_id,
                     mcp_server=mcp_server,
                     mcp_tool=mcp_tool,
-                    failure=(
-                        TrajectoryFailure(TrajectoryFailureCategory.TOOL, detail=result)
+                    failure=tool_failure(
+                        TrajectoryStatus.ERROR
                         if state_status == "error"
-                        else None
+                        else TrajectoryStatus.COMPLETED,
+                        result,
                     ),
                     timing=_part_timing(part),
                     request_id=request_id if role == "assistant" else None,

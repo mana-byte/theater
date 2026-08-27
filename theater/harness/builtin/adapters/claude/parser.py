@@ -8,9 +8,10 @@ from typing import Literal
 
 from theater.harness.base import Event, EventKind, EventPath, clipper
 from theater.harness.contracts.trajectory import ParsedRecord
+from theater.harness.normalization.timing import iso_epoch as _epoch
+from theater.harness.normalization.values import decode_json_record
 
 from .constants import _READ_TOOLS, _WRITE_TOOLS
-from .timing import _epoch
 from .usage import _token_usage
 from .values import _relativise
 
@@ -24,14 +25,7 @@ class ClaudeParser:
 
     @staticmethod
     def _decode(line: str) -> dict | None:
-        line = line.strip()
-        if not line:
-            return None
-        try:
-            record = json.loads(line)
-        except ValueError:
-            return None
-        return record if isinstance(record, dict) else None
+        return decode_json_record(line)
 
     def parse_record(self, line: str, index: int, *, clip_text: bool = True) -> ParsedRecord:
         record = self._decode(line)

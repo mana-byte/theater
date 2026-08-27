@@ -7,6 +7,23 @@ from typing import TYPE_CHECKING
 
 from theater.harness.base import NativeChild
 from theater.harness.contracts.trajectory import TrajectoryFact
+from theater.harness.normalization.facts import fact_builder, path_details, tool_failure
+from theater.harness.normalization.timing import iso_epoch as _epoch
+from theater.harness.normalization.values import (
+    content_blocks_text as _codex_content_text,
+)
+from theater.harness.normalization.values import (
+    safe_trajectory_text as _safe_trajectory_text,
+)
+from theater.harness.normalization.values import (
+    trajectory_detail as _trajectory_detail,
+)
+from theater.harness.normalization.values import (
+    trajectory_identifier as _trajectory_id,
+)
+from theater.harness.normalization.values import (
+    trajectory_status as _trajectory_status,
+)
 from theater.trajectory.content import ContentFormat, DetailField
 from theater.trajectory.enums import (
     TimingProvenance,
@@ -24,20 +41,16 @@ from .constants import (
 from .paths import _patch_change_paths
 from .values import (
     _codex_block_id,
-    _codex_content_text,
     _codex_mcp_identity,
     _codex_revision,
     _codex_scoped_id,
     _codex_timing,
     _codex_trajectory_turn_id,
     _codex_usage,
-    _epoch,
-    _safe_trajectory_text,
-    _trajectory_detail,
-    _trajectory_id,
-    _trajectory_status,
     _turn_id,
 )
+
+_codex_build = fact_builder(source="codex", identifier=_trajectory_id)
 
 
 class CodexTrajectoryMixin:
@@ -85,29 +98,28 @@ class CodexTrajectoryMixin:
             failure: TrajectoryFailure | None = None,
             details: tuple[DetailField, ...] = (),
         ) -> None:
-            clean_id = _trajectory_id(native_id)
+            request_value = (
+                (request if request is not None else source_request_id or turn)
+                if request_from_turn
+                else None
+            )
             facts.append(
-                TrajectoryFact(
+                _codex_build(
                     kind=kind,
-                    lane=lane,
-                    source="codex",
                     summary=_safe_trajectory_text(summary),
                     status=status,
-                    native_id=clean_id,
+                    lane_override=lane,
+                    native_id=native_id,
                     revision=_codex_revision(record, payload),
                     raw_index=index,
                     event_ordinal=len(facts),
                     turn_id=turn,
                     step_id=step,
-                    request_id=_trajectory_id(
-                        request if request is not None else source_request_id or turn
-                    )
-                    if request_from_turn
-                    else None,
-                    call_id=_trajectory_id(call_id),
-                    parent_call_id=_trajectory_id(parent_call_id),
-                    mcp_server=_trajectory_id(mcp_server),
-                    mcp_tool=_trajectory_id(mcp_tool),
+                    request_id=request_value,
+                    call_id=call_id,
+                    parent_call_id=parent_call_id,
+                    mcp_server=mcp_server,
+                    mcp_tool=mcp_tool,
                     timing=fact_timing,
                     usage=usage,
                     failure=failure,
@@ -210,10 +222,7 @@ class CodexTrajectoryMixin:
                     if payload.get("success") is True or status_name == "completed"
                     else TrajectoryStatus.ERROR
                 )
-                path_details = tuple(
-                    _trajectory_detail(f"path.{path.mode}", path.path, format=ContentFormat.PATH)
-                    for path in paths
-                )
+                path_detail_fields = path_details(paths)
                 call_timing = result_timing = timing
                 if self._pending_patch_exec is not None and timestamp is not None:
                     started_at = self._pending_patch_exec[1]
@@ -240,7 +249,7 @@ class CodexTrajectoryMixin:
                             {"files": [path.path for path in paths]},
                             format=ContentFormat.JSON,
                         ),
-                        *path_details,
+                        *path_detail_fields,
                     ),
                 )
                 patch_result = {
@@ -327,10 +336,9 @@ class CodexTrajectoryMixin:
                         or call_id,
                         mcp_server=mcp_server,
                         mcp_tool=mcp_tool,
-                        failure=(
-                            TrajectoryFailure(TrajectoryFailureCategory.TOOL, detail=raw)
-                            if result_error
-                            else None
+                        failure=tool_failure(
+                            TrajectoryStatus.ERROR if result_error else TrajectoryStatus.COMPLETED,
+                            raw,
                         ),
                         details=(
                             (_trajectory_detail("result", result, format=ContentFormat.JSON),)

@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 from theater.harness.base import TokenUsage
+from theater.harness.normalization.usage import reported_cost
+from theater.harness.normalization.values import (
+    finite_float as _trajectory_float,
+)
+from theater.harness.normalization.values import (
+    nonnegative_int as _trajectory_int,
+)
+from theater.harness.normalization.values import (
+    trajectory_identifier as _trajectory_id,
+)
 from theater.trajectory.enums import CostProvenance
 from theater.trajectory.records import TrajectoryUsage
 
 from .timing import _claude_request_id
-from .values import _trajectory_float, _trajectory_id, _trajectory_int
 
 
 def _token_usage(message: dict, record: dict) -> TokenUsage | None:
@@ -17,8 +26,7 @@ def _token_usage(message: dict, record: dict) -> TokenUsage | None:
     model = message.get("model")
     if not isinstance(model, str) or not model:
         model = None
-    cost = record.get("costUSD")
-    cost = float(cost) if isinstance(cost, (int, float)) and cost > 0 else None
+    cost, cost_provenance = reported_cost(record.get("costUSD"), strict_positive=True)
     provider = message.get("provider") or record.get("provider")
     native_id = message.get("id") or record.get("requestId")
     usage_key = f"claude:{native_id}" if isinstance(native_id, str) and native_id else None
@@ -30,7 +38,7 @@ def _token_usage(message: dict, record: dict) -> TokenUsage | None:
         cache_creation_input_tokens=int(raw.get("cache_creation_input_tokens") or 0),
         cache_read_input_tokens=int(raw.get("cache_read_input_tokens") or 0),
         cost_usd=cost,
-        cost_provenance=(CostProvenance.REPORTED if cost is not None else CostProvenance.UNKNOWN),
+        cost_provenance=cost_provenance,
         idempotency_key=usage_key,
     )
 

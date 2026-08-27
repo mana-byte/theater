@@ -11,7 +11,14 @@ from theater.constants.trajectory import (
 )
 from theater.harness.base import Event, EventKind, EventPath, TokenUsage, clipper
 from theater.harness.contracts.trajectory import ParsedRecord
-from theater.trajectory.enums import CostProvenance
+from theater.harness.normalization.timing import iso_epoch as _epoch
+from theater.harness.normalization.usage import reported_cost
+from theater.harness.normalization.values import (
+    decode_json_record,
+)
+from theater.harness.normalization.values import (
+    finite_float as _trajectory_float,
+)
 
 from .constants import (
     _CWD_PROBE_BYTES,
@@ -25,9 +32,7 @@ from .values import (
     _codex_mcp_identity,
     _codex_timing,
     _codex_trajectory_turn_id,
-    _epoch,
     _flatten,
-    _trajectory_float,
     _trajectory_id,
     _turn_id,
 )
@@ -55,16 +60,7 @@ class CodexParserMixin:
 
     @staticmethod
     def _decode(line: str) -> dict | None:
-        line = line.strip()
-        if not line:
-            return None
-        try:
-            record = json.loads(line)
-        except ValueError:
-            return None
-        if not isinstance(record, dict):
-            return None
-        return record
+        return decode_json_record(line)
 
     def parse_record(self, line: str, index: int, *, clip_text: bool = True) -> ParsedRecord:
         record = self._decode(line)
@@ -347,7 +343,7 @@ class CodexParserMixin:
         cost = _trajectory_float(
             last.get("cost_usd") if "cost_usd" in last else last.get("costUSD")
         )
-        cost = cost if cost is None or cost >= 0 else None
+        cost, cost_provenance = reported_cost(cost, strict_positive=False)
         usage = TokenUsage(
             model=model,
             provider=self._last_provider,
@@ -357,9 +353,7 @@ class CodexParserMixin:
             cache_read_input_tokens=cache_read,
             reasoning_output_tokens=reasoning,
             cost_usd=cost,
-            cost_provenance=(
-                CostProvenance.REPORTED if cost is not None else CostProvenance.UNKNOWN
-            ),
+            cost_provenance=cost_provenance,
             idempotency_key="codex:" + ":".join(str(value) for value in totals + latest),
         )
         if (

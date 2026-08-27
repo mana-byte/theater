@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from theater.harness.normalization.timing import iso_epoch as _epoch
+from theater.harness.normalization.timing import epoch_or_number as _trajectory_time
+from theater.harness.normalization.values import finite_float as _trajectory_float
+from theater.harness.normalization.values import trajectory_identifier as _trajectory_id
 from theater.trajectory.enums import TimingProvenance
 from theater.trajectory.records import Timing
-
-from .values import _trajectory_float, _trajectory_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,10 +28,6 @@ class _ClaudeTimingProjection:
     record: Timing | None
     request: Timing | None
     turn_id: str | None
-
-
-def _trajectory_time(value: object) -> float | None:
-    return _epoch(value) if isinstance(value, str) else _trajectory_float(value)
 
 
 def _trajectory_duration(record: dict) -> float | None:

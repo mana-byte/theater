@@ -9,6 +9,8 @@ from theater.daemon.trajectory.mcp_projection import classify_mcp_fact
 from theater.harness.contracts.events import Event, EventKind
 from theater.harness.contracts.source import Batch, HistoryPage
 from theater.harness.contracts.trajectory import TrajectoryFact
+from theater.harness.normalization.facts import lane_for_kind
+from theater.harness.normalization.usage import trajectory_usage_from_token_usage
 from theater.pricing import estimate_cost_usd
 from theater.trajectory import (
     ContentFormat,
@@ -154,7 +156,7 @@ def fact_to_record(
 ) -> TrajectoryRecord:
     """Add daemon-supplied participant identity to a source-local fact."""
     fact = classify_mcp_fact(fact)
-    lane = fact.lane or _lane_for_kind(fact.kind)
+    lane = fact.lane or lane_for_kind(fact.kind)
     return TrajectoryRecord(
         record_id=record_id_for_fact(fact, source_epoch),
         revision=fact.revision,
@@ -327,37 +329,10 @@ def _kind_and_lane(kind: EventKind) -> tuple[TrajectoryKind, TrajectoryLane]:
     return mapping[kind]
 
 
-def _lane_for_kind(kind: TrajectoryKind) -> TrajectoryLane:
-    if kind is TrajectoryKind.USER:
-        return TrajectoryLane.INPUT
-    if kind in (
-        TrajectoryKind.ASSISTANT,
-        TrajectoryKind.REASONING,
-        TrajectoryKind.USAGE,
-        TrajectoryKind.SYSTEM,
-        TrajectoryKind.CONTEXT,
-    ):
-        return TrajectoryLane.MODEL
-    if kind in (TrajectoryKind.TOOL_CALL, TrajectoryKind.TOOL_RESULT):
-        return TrajectoryLane.TOOLS
-    return TrajectoryLane.THEATER
-
-
 def _usage(event: Event) -> TrajectoryUsage | None:
     if event.usage is None:
         return None
-    return TrajectoryUsage(
-        model=event.usage.model,
-        provider=event.usage.provider,
-        request_id=event.usage.idempotency_key,
-        input_tokens=event.usage.input_tokens,
-        output_tokens=event.usage.output_tokens,
-        reasoning_tokens=event.usage.reasoning_output_tokens,
-        cache_read_tokens=event.usage.cache_read_input_tokens,
-        cache_write_tokens=event.usage.cache_creation_input_tokens,
-        cost_usd=event.usage.cost_usd,
-        cost_provenance=event.usage.cost_provenance,
-    )
+    return trajectory_usage_from_token_usage(event.usage)
 
 
 def _priced_usage(usage: TrajectoryUsage | None) -> TrajectoryUsage | None:

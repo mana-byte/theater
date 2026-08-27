@@ -6,17 +6,27 @@ import hashlib
 import json
 import math
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
-from theater.constants.trajectory import TRAJECTORY_IDENTIFIER_MAX_BYTES
 from theater.harness.base import SERVER_NAME, TokenUsage
 from theater.harness.contracts.trajectory import TrajectoryFact
+from theater.harness.normalization.facts import lane_for_kind
+from theater.harness.normalization.usage import (
+    qualified_model,
+    reported_cost,
+    trajectory_usage_from_token_usage,
+)
+from theater.harness.normalization.values import (
+    decode_json_record,
+    loose_trajectory_text,
+    optional_trajectory_detail,
+    trajectory_identifier,
+)
 from theater.trajectory.content import ContentFormat, DetailField
 from theater.trajectory.enums import (
-    CostProvenance,
     TimingProvenance,
     TrajectoryKind,
-    TrajectoryLane,
     TrajectoryStatus,
 )
 from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryUsage
@@ -33,13 +43,7 @@ def _seconds(ms) -> float | None:
 
 def load_json_object(raw: object) -> dict:
     """Decode a live JSON row to an object, failing open on malformed data."""
-    if not isinstance(raw, (str, bytes)):
-        return {}
-    try:
-        found = json.loads(raw)
-    except ValueError:
-        return {}
-    return found if isinstance(found, dict) else {}
+    return decode_json_record(raw) or {}
 
 
 def _opencode_usage(info: dict) -> TokenUsage | None:
@@ -48,17 +52,10 @@ def _opencode_usage(info: dict) -> TokenUsage | None:
     if not isinstance(tokens, dict):
         return None
     cache = tokens.get("cache") or {}
-    cost = info.get("cost")
-    # OpenCode uses zero when it has no per-turn price; zero falls through to model pricing.
-    cost = float(cost) if isinstance(cost, (int, float)) and cost > 0 else None
+    cost, cost_provenance = reported_cost(info.get("cost"), strict_positive=True)
     provider = info.get(OPENCODE_PROVIDER_ID_KEY)
     model_id = info.get(OPENCODE_MODEL_ID_KEY)
-    if isinstance(provider, str) and isinstance(model_id, str) and provider and model_id:
-        model = f"{provider}/{model_id}"
-    elif isinstance(model_id, str) and model_id:
-        model = model_id
-    else:
-        model = None
+    model = qualified_model(provider, model_id)
     native_id = info.get("id")
     usage_key = f"opencode:{native_id}" if isinstance(native_id, str) and native_id else None
     return TokenUsage(
@@ -70,7 +67,7 @@ def _opencode_usage(info: dict) -> TokenUsage | None:
         cache_read_input_tokens=int(cache.get("read") or 0),
         reasoning_output_tokens=int(tokens.get("reasoning") or 0),
         cost_usd=cost,
-        cost_provenance=(CostProvenance.REPORTED if cost is not None else CostProvenance.UNKNOWN),
+        cost_provenance=cost_provenance,
         idempotency_key=usage_key,
     )
 
@@ -83,11 +80,7 @@ def _opencode_model(info: dict) -> str | None:
         or model_data.get(OPENCODE_MODEL_ID_KEY)
         or model_data.get("id")
     )
-    if isinstance(provider, str) and isinstance(model_id, str) and provider and model_id:
-        return f"{provider}/{model_id}"
-    if isinstance(model_id, str) and model_id:
-        return model_id
-    return None
+    return qualified_model(provider, model_id)
 
 
 def _table(value) -> dict:
@@ -96,32 +89,11 @@ def _table(value) -> dict:
 
 
 def _trajectory_identifier(value, prefix: str = "id") -> str | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        encoded = value.encode("utf-8")
-    except UnicodeEncodeError:
-        return None
-    if any(ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in value):
-        return None
-    if len(encoded) <= TRAJECTORY_IDENTIFIER_MAX_BYTES:
-        return value
-    return f"{prefix}:{hashlib.sha256(encoded).hexdigest()}"
+    return trajectory_identifier(value, overflow_prefix=prefix)
 
 
 def _trajectory_text(value) -> str:
-    if isinstance(value, str):
-        try:
-            value.encode("utf-8")
-        except UnicodeEncodeError:
-            return value.encode("utf-8", errors="replace").decode("utf-8")
-        return value
-    if isinstance(value, (dict, list, tuple)):
-        try:
-            return json.dumps(value, default=str, sort_keys=True)
-        except (TypeError, ValueError):
-            return ""
-    return ""
+    return loose_trajectory_text(value)
 
 
 def _trajectory_string(value) -> str:
@@ -136,28 +108,14 @@ def _opencode_mcp_identity(value: object) -> tuple[str, str] | None:
     return (SERVER_NAME, tool) if tool is not None else None
 
 
-def _trajectory_lane(kind: TrajectoryKind) -> TrajectoryLane:
-    if kind is TrajectoryKind.USER:
-        return TrajectoryLane.INPUT
-    if kind in (TrajectoryKind.TOOL_CALL, TrajectoryKind.TOOL_RESULT):
-        return TrajectoryLane.TOOLS
-    return TrajectoryLane.MODEL
+def _trajectory_lane(kind: TrajectoryKind):
+    return lane_for_kind(kind)
 
 
 def _trajectory_detail(
     name: str, value, *, format: ContentFormat = ContentFormat.TEXT
 ) -> DetailField | None:
-    if value is None:
-        return None
-    text = _trajectory_text(value)
-    if not text and isinstance(value, (int, float, bool)):
-        text = json.dumps(value)
-    if not text:
-        return None
-    try:
-        return DetailField.from_text(name, text, format=format)
-    except ValueError:
-        return None
+    return optional_trajectory_detail(name, value, format=format)
 
 
 def _trajectory_seconds(value) -> float | None:
@@ -218,26 +176,13 @@ def _trajectory_usage(info: dict) -> TrajectoryUsage | None:
         return TrajectoryUsage(model=model, provider=provider) if model or provider else None
     if usage is None:
         return TrajectoryUsage(model=model, provider=provider) if model or provider else None
-    values = {
-        name: max(0, value) if isinstance(value, int) else 0
-        for name, value in (
-            ("input_tokens", usage.input_tokens),
-            ("output_tokens", usage.output_tokens),
-            ("reasoning_tokens", usage.reasoning_output_tokens),
-            ("cache_read_tokens", usage.cache_read_input_tokens),
-            ("cache_write_tokens", usage.cache_creation_input_tokens),
-        )
-    }
-    cost = usage.cost_usd if usage.cost_usd is not None and math.isfinite(usage.cost_usd) else None
-    if cost is not None and cost < 0:
-        cost = None
-    return TrajectoryUsage(
+    return replace(
+        trajectory_usage_from_token_usage(
+            usage, validate_cost=True, clamp_tokens=True, force_unknown_cost=True
+        ),
         model=model or _trajectory_identifier(usage.model, "model"),
         provider=provider or _trajectory_identifier(usage.provider, "provider"),
         request_id=_trajectory_identifier(usage.idempotency_key, "request"),
-        cost_usd=cost,
-        cost_provenance=(CostProvenance.REPORTED if cost is not None else CostProvenance.UNKNOWN),
-        **values,
     )
 
 

@@ -2,21 +2,28 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from theater.constants.trajectory import TRAJECTORY_IDENTIFIER_MAX_BYTES
 from theater.harness.base import SERVER_NAME, Event, EventPath, NativeChild
 from theater.harness.contracts.trajectory import TrajectoryFact
+from theater.harness.normalization.facts import (
+    fact_builder,
+    path_details,
+    tool_failure,
+)
+from theater.harness.normalization.usage import trajectory_usage_from_token_usage
+from theater.harness.normalization.values import (
+    loose_trajectory_text,
+    optional_trajectory_detail,
+    trajectory_identifier,
+)
 from theater.trajectory.content import ContentFormat, DetailField
 from theater.trajectory.enums import (
     TimingProvenance,
-    TrajectoryFailureCategory,
     TrajectoryKind,
-    TrajectoryLane,
     TrajectoryStatus,
 )
 from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryUsage
@@ -55,48 +62,17 @@ def _extract_paths(
 
 
 def _vibe_identifier(value) -> str | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        encoded = value.encode("utf-8")
-    except UnicodeEncodeError:
-        return None
-    if any(ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in value):
-        return None
-    if len(encoded) <= TRAJECTORY_IDENTIFIER_MAX_BYTES:
-        return value
-    return f"vibe:{hashlib.sha256(encoded).hexdigest()}"
+    return trajectory_identifier(value, overflow_prefix="vibe")
 
 
 def _vibe_text(value) -> str:
-    if isinstance(value, str):
-        try:
-            value.encode("utf-8")
-        except UnicodeEncodeError:
-            return value.encode("utf-8", errors="replace").decode("utf-8")
-        return value
-    if isinstance(value, (dict, list, tuple)):
-        try:
-            return json.dumps(value, default=str, sort_keys=True)
-        except (TypeError, ValueError):
-            return ""
-    return ""
+    return loose_trajectory_text(value)
 
 
 def _vibe_detail(
     name: str, value, *, format: ContentFormat = ContentFormat.TEXT
 ) -> DetailField | None:
-    if value is None:
-        return None
-    text = _vibe_text(value)
-    if not text and isinstance(value, (int, float, bool)):
-        text = json.dumps(value)
-    if not text:
-        return None
-    try:
-        return DetailField.from_text(name, text, format=format)
-    except ValueError:
-        return None
+    return optional_trajectory_detail(name, value, format=format)
 
 
 def _vibe_mcp_identity(value: object) -> tuple[str, str] | None:
@@ -166,10 +142,10 @@ def _vibe_presentation(value: object) -> tuple[str | None, str | None, bool | No
 
 
 def _vibe_path_details(paths: tuple[EventPath, ...]) -> tuple[DetailField, ...]:
-    return tuple(
-        DetailField.from_text(f"path.{path.mode}", path.path, format=ContentFormat.PATH)
-        for path in paths
-    )
+    return path_details(paths)
+
+
+_vibe_build = fact_builder(source="vibe", identifier=_vibe_identifier)
 
 
 def _vibe_fact(
@@ -191,28 +167,19 @@ def _vibe_fact(
     failure: TrajectoryFailure | None = None,
     details: tuple[DetailField, ...] = (),
 ) -> TrajectoryFact:
-    lane = (
-        TrajectoryLane.INPUT
-        if kind is TrajectoryKind.USER
-        else TrajectoryLane.TOOLS
-        if kind in (TrajectoryKind.TOOL_CALL, TrajectoryKind.TOOL_RESULT)
-        else TrajectoryLane.MODEL
-    )
-    return TrajectoryFact(
+    return _vibe_build(
         kind=kind,
-        lane=lane,
-        source="vibe",
         summary=summary,
         status=status,
-        native_id=_vibe_identifier(native_id),
-        raw_index=max(0, raw_index),
-        event_ordinal=max(0, event_ordinal),
-        turn_id=_vibe_identifier(turn_id),
-        request_id=_vibe_identifier(request_id),
-        call_id=_vibe_identifier(call_id),
-        parent_call_id=_vibe_identifier(parent_call_id),
-        mcp_server=_vibe_identifier(mcp_server),
-        mcp_tool=_vibe_identifier(mcp_tool),
+        native_id=native_id,
+        raw_index=raw_index,
+        event_ordinal=event_ordinal,
+        turn_id=turn_id,
+        call_id=call_id,
+        parent_call_id=parent_call_id,
+        mcp_server=mcp_server,
+        mcp_tool=mcp_tool,
+        request_id=request_id,
         timing=timing,
         usage=usage,
         failure=failure,
@@ -245,18 +212,7 @@ def usage_fact(event: Event, turn_id: str | None) -> TrajectoryFact | None:
         raw_index=0,
         event_ordinal=0,
         turn_id=turn_id,
-        usage=TrajectoryUsage(
-            model=usage.model,
-            provider=usage.provider,
-            request_id=usage.idempotency_key,
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            reasoning_tokens=usage.reasoning_output_tokens,
-            cache_read_tokens=usage.cache_read_input_tokens,
-            cache_write_tokens=usage.cache_creation_input_tokens,
-            cost_usd=usage.cost_usd,
-            cost_provenance=usage.cost_provenance,
-        ),
+        usage=trajectory_usage_from_token_usage(usage),
     )
 
 
@@ -438,14 +394,7 @@ class VibeTrajectoryMixin:
             mcp_server=mcp_server,
             mcp_tool=mcp_tool,
             timing=_vibe_duration(result),
-            failure=(
-                TrajectoryFailure(
-                    TrajectoryFailureCategory.TOOL,
-                    detail=failure_detail or "tool failed",
-                )
-                if status is TrajectoryStatus.ERROR
-                else None
-            ),
+            failure=tool_failure(status, failure_detail or "tool failed"),
             details=details,
         )
 

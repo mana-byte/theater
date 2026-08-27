@@ -5,19 +5,15 @@ from __future__ import annotations
 import json
 import math
 
-from theater.harness.normalization.timing import iso_epoch as _epoch
+from theater.harness.normalization.timing import epoch_or_number as _trajectory_time
+from theater.harness.normalization.usage import reported_cost
 from theater.harness.normalization.values import finite_float as _trajectory_float
 from theater.harness.normalization.values import nonnegative_int as _trajectory_int
-from theater.harness.normalization.values import safe_trajectory_text as _safe_trajectory_text
-from theater.harness.normalization.values import stable_json as _stable_json
+from theater.harness.normalization.values import revision_from
 from theater.harness.normalization.values import (
-    trajectory_detail as _trajectory_detail,  # noqa: F401
+    trajectory_identifier as _trajectory_id,
 )
-from theater.harness.normalization.values import trajectory_identifier as _trajectory_id
-from theater.harness.normalization.values import (
-    trajectory_status as _trajectory_status,  # noqa: F401
-)
-from theater.trajectory.enums import CostProvenance, TimingProvenance
+from theater.trajectory.enums import TimingProvenance
 from theater.trajectory.records import Timing, TrajectoryUsage
 
 from .constants import CODEX_MODEL_PROVIDER_ID_KEY, CODEX_MODEL_PROVIDER_KEY
@@ -52,12 +48,6 @@ def _codex_mcp_identity(value: object) -> tuple[str, str] | None:
     server = _trajectory_id(value.get("server"))
     tool = _trajectory_id(value.get("tool"))
     return (server, tool) if server is not None and tool is not None else None
-
-
-def _trajectory_time(value: object) -> float | None:
-    if isinstance(value, str):
-        return _epoch(value)
-    return _trajectory_float(value)
 
 
 def _codex_duration(value: object) -> float | None:
@@ -131,12 +121,7 @@ def _codex_timing(record: dict, payload: dict, timestamp: float | None) -> Timin
 
 
 def _codex_revision(record: dict, payload: dict) -> int:
-    for value in (payload, record):
-        for key in ("revision", "version"):
-            candidate = _trajectory_int(value.get(key))
-            if candidate or value.get(key) in (0, 0.0):
-                return candidate
-    return 0
+    return revision_from(payload, record)
 
 
 def _codex_block_id(item_id: str | None, block: dict, ordinal: int) -> str | None:
@@ -150,20 +135,6 @@ def _codex_block_id(item_id: str | None, block: dict, ordinal: int) -> str | Non
 
 def _codex_scoped_id(value: str | None, suffix: str) -> str | None:
     return _trajectory_id(f"{value}:{suffix}") if value is not None else None
-
-
-def _codex_content_text(value: object) -> str:
-    if isinstance(value, str):
-        return _safe_trajectory_text(value)
-    if isinstance(value, list):
-        text = "".join(
-            _safe_trajectory_text(item.get("text"))
-            for item in value
-            if isinstance(item, dict) and isinstance(item.get("text"), str)
-        )
-        if text:
-            return text
-    return _safe_trajectory_text(_stable_json(value)) if value is not None else ""
 
 
 def _codex_trajectory_turn_id(payload: dict) -> str | None:
@@ -214,6 +185,7 @@ def _codex_usage(
         payload.get("request_id") or payload.get("requestId") or payload.get("turn_id")
     ) or _trajectory_id(request_id)
     cost = _trajectory_float(raw.get("cost_usd") if "cost_usd" in raw else raw.get("costUSD"))
+    cost_usd, cost_provenance = reported_cost(cost, strict_positive=False)
     return TrajectoryUsage(
         model=_trajectory_id(model_value),
         provider=_trajectory_id(
@@ -228,8 +200,6 @@ def _codex_usage(
         reasoning_tokens=reasoning,
         cache_read_tokens=cache_read,
         cache_write_tokens=cache_write,
-        cost_usd=cost if cost is None or cost >= 0 else None,
-        cost_provenance=(
-            CostProvenance.REPORTED if cost is not None and cost >= 0 else CostProvenance.UNKNOWN
-        ),
+        cost_usd=cost_usd,
+        cost_provenance=cost_provenance,
     )

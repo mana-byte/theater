@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, BinaryIO
 
 from theater.constants.trajectory import TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES
 from theater.harness.base import Event, EventKind, clipper
 from theater.harness.contracts.trajectory import ParsedRecord
+from theater.harness.normalization.values import decode_json_record
 
 from .trajectory import _extract_paths, _vibe_message_id
 
@@ -78,10 +78,7 @@ class VibeParserMixin:
             if not separator:
                 return
         for index, raw in enumerate(context.splitlines()):
-            try:
-                record = json.loads(raw.decode("utf-8", errors="replace"))
-            except ValueError:
-                continue
+            record = decode_json_record(raw.decode("utf-8", errors="replace"))
             if isinstance(record, dict):
                 self._advance_turn(record, index)
 
@@ -89,14 +86,8 @@ class VibeParserMixin:
         return list(self.parse_record(line, index, clip_text=clip_text).events)
 
     def parse_record(self, line: str, index: int, *, clip_text: bool = True) -> ParsedRecord:
-        line = line.strip()
-        if not line:
-            return ParsedRecord()
-        try:
-            record = json.loads(line)
-        except ValueError:
-            return ParsedRecord()
-        if not isinstance(record, dict):
+        record = decode_json_record(line)
+        if record is None:
             return ParsedRecord()
         turn_id, turn_end = self._advance_turn(record, index)
         return ParsedRecord(

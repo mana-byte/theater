@@ -12,6 +12,23 @@ from theater.constants.trajectory import (
 )
 from theater.harness.base import NativeChild
 from theater.harness.contracts.trajectory import TrajectoryFact
+from theater.harness.normalization.facts import fact_builder, tool_failure
+from theater.harness.normalization.timing import iso_epoch as _epoch
+from theater.harness.normalization.values import (
+    content_blocks_text as _claude_content_text,
+)
+from theater.harness.normalization.values import (
+    safe_trajectory_text as _safe_trajectory_text,
+)
+from theater.harness.normalization.values import (
+    trajectory_detail as _trajectory_detail,
+)
+from theater.harness.normalization.values import (
+    trajectory_identifier as _trajectory_id,
+)
+from theater.harness.normalization.values import (
+    trajectory_status as _trajectory_status,
+)
 from theater.trajectory.content import ContentFormat, DetailField
 from theater.trajectory.enums import (
     TrajectoryFailureCategory,
@@ -31,19 +48,15 @@ from .timing import (
     _ClaudeCausalRecord,
     _ClaudeRequestClock,
     _ClaudeTimingProjection,
-    _epoch,
 )
 from .usage import _claude_trajectory_usage
 from .values import (
     _claude_block_native_id,
-    _claude_content_text,
     _claude_mcp_identity,
     _claude_revision,
-    _safe_trajectory_text,
-    _trajectory_detail,
-    _trajectory_id,
-    _trajectory_status,
 )
+
+_claude_build = fact_builder(source="claude", identifier=_trajectory_id)
 
 
 def _remember_bounded[ContextValue](
@@ -198,25 +211,23 @@ class ClaudeTrajectory:
             failure: TrajectoryFailure | None = None,
             details: tuple[DetailField, ...] = (),
         ) -> None:
-            clean_id = _trajectory_id(native_id)
             facts.append(
-                TrajectoryFact(
+                _claude_build(
                     kind=kind,
-                    lane=lane,
-                    source="claude",
                     summary=_safe_trajectory_text(summary),
                     status=status,
-                    native_id=clean_id,
+                    lane_override=lane,
+                    native_id=native_id,
                     revision=_claude_revision(record),
                     raw_index=index,
                     event_ordinal=len(facts),
                     turn_id=turn,
                     step_id=step,
-                    request_id=_trajectory_id(request),
-                    call_id=_trajectory_id(call_id),
-                    parent_call_id=_trajectory_id(parent_call_id),
-                    mcp_server=_trajectory_id(mcp_server),
-                    mcp_tool=_trajectory_id(mcp_tool),
+                    request_id=request,
+                    call_id=call_id,
+                    parent_call_id=parent_call_id,
+                    mcp_server=mcp_server,
+                    mcp_tool=mcp_tool,
                     timing=fact_timing,
                     usage=usage,
                     failure=failure,
@@ -341,10 +352,11 @@ class ClaudeTrajectory:
                         parent_call_id=parent_call_id or call_id,
                         mcp_server=mcp_server,
                         mcp_tool=mcp_tool,
-                        failure=(
-                            TrajectoryFailure(TrajectoryFailureCategory.TOOL, detail=raw)
+                        failure=tool_failure(
+                            TrajectoryStatus.ERROR
                             if block.get("is_error") is True
-                            else None
+                            else TrajectoryStatus.COMPLETED,
+                            raw,
                         ),
                         details=result_details,
                     )
@@ -440,10 +452,11 @@ class ClaudeTrajectory:
                         parent_call_id=parent_call_id or call_id,
                         mcp_server=mcp_server,
                         mcp_tool=mcp_tool,
-                        failure=(
-                            TrajectoryFailure(TrajectoryFailureCategory.TOOL, detail=raw)
+                        failure=tool_failure(
+                            TrajectoryStatus.ERROR
                             if block.get("is_error") is True
-                            else None
+                            else TrajectoryStatus.COMPLETED,
+                            raw,
                         ),
                         details=details,
                     )
