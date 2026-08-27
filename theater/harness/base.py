@@ -33,7 +33,7 @@ from theater.harness.contracts.events import (
     status_after,
     whole,
 )
-from theater.harness.contracts.harness import Harness
+from theater.harness.contracts.harness import Harness, LaunchParameterSupport
 from theater.harness.contracts.launch import (
     LaunchPlan,
     NativeChild,
@@ -50,6 +50,7 @@ __all__ = [
     "EventKind",
     "EventPath",
     "Harness",
+    "LaunchParameterSupport",
     "LaunchPlan",
     "NativeChild",
     "ResumeLaunchOverlay",

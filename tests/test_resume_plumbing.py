@@ -19,8 +19,11 @@ from theater.harness import (
     LaunchPlan,
     check_resume,
     plan_launch,
+    supports_model,
+    supports_reasoning,
     supports_resume,
 )
+from theater.harness.contracts.harness import LaunchParameterSupport
 from theater.models import BadRequest
 
 
@@ -125,6 +128,26 @@ def test_supports_resume_reads_the_signature(resume_harness):
 
 def test_supports_resume_false_when_parameter_absent(no_resume_harness):
     assert supports_resume(no_resume_harness) is False
+
+
+def test_explicit_launch_parameter_support_overrides_legacy_signature(no_resume_harness):
+    no_resume_harness.launch_parameter_support = LaunchParameterSupport(
+        model=True,
+        reasoning_effort=True,
+        resume=True,
+    )
+
+    assert supports_model(no_resume_harness) is True
+    assert supports_reasoning(no_resume_harness) is True
+    assert supports_resume(no_resume_harness) is True
+
+
+def test_explicit_launch_parameter_support_can_disable_signature_parameters(resume_harness):
+    resume_harness.launch_parameter_support = LaunchParameterSupport()
+
+    assert supports_model(resume_harness) is False
+    assert supports_reasoning(resume_harness) is False
+    assert supports_resume(resume_harness) is False
 
 
 def test_check_resume_refuses_a_harness_without_the_parameter(no_resume_harness):

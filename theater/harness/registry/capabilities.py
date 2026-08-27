@@ -1,11 +1,4 @@
-"""Capability checks and the plan_launch compat funnel.
-
-``supports_*`` are read off the signature rather than declared as class
-attributes, because the signature is the thing that is actually true.
-``plan_launch`` forwards ``model``, ``reasoning_effort``, and ``resume`` only
-when the caller named one, so a third-party adapter written against the older
-signature is never called with a keyword it does not accept.
-"""
+"""Capability checks and the plan_launch compatibility funnel."""
 
 from __future__ import annotations
 
@@ -20,8 +13,13 @@ from theater.models import BadRequest
 
 
 def supports_model(harness: Harness) -> bool:
-    """Whether this adapter accepts a ``model`` in ``plan_launch``."""
-    return "model" in inspect.signature(harness.plan_launch).parameters
+    """Whether this adapter can honour a ``model`` request."""
+    support = harness.launch_parameter_support
+    return (
+        support.model
+        if support is not None
+        else "model" in inspect.signature(harness.plan_launch).parameters
+    )
 
 
 def check_model(harness: str, model: str | None) -> None:
@@ -31,8 +29,13 @@ def check_model(harness: str, model: str | None) -> None:
 
 
 def supports_reasoning(harness: Harness) -> bool:
-    """Whether this adapter accepts ``reasoning_effort`` in ``plan_launch``."""
-    return "reasoning_effort" in inspect.signature(harness.plan_launch).parameters
+    """Whether this adapter can honour a reasoning-effort request."""
+    support = harness.launch_parameter_support
+    return (
+        support.reasoning_effort
+        if support is not None
+        else "reasoning_effort" in inspect.signature(harness.plan_launch).parameters
+    )
 
 
 def check_reasoning(harness: str, reasoning_effort: str | None) -> None:
@@ -42,8 +45,13 @@ def check_reasoning(harness: str, reasoning_effort: str | None) -> None:
 
 
 def supports_resume(harness: Harness) -> bool:
-    """Whether this adapter accepts a ``resume`` in ``plan_launch``."""
-    return "resume" in inspect.signature(harness.plan_launch).parameters
+    """Whether this adapter can honour a ``resume`` request."""
+    support = harness.launch_parameter_support
+    return (
+        support.resume
+        if support is not None
+        else "resume" in inspect.signature(harness.plan_launch).parameters
+    )
 
 
 def check_resume(harness: str, resume: str | None) -> None:

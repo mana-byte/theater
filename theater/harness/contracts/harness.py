@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -46,6 +47,15 @@ if TYPE_CHECKING:
 APPROVALS = HARNESS_APPROVAL_POLICIES
 
 ResumeStrategy = Literal["continue", "fork"]
+
+
+@dataclass(frozen=True, slots=True)
+class LaunchParameterSupport:
+    """Named optional launch parameters an adapter can honour."""
+
+    model: bool = False
+    reasoning_effort: bool = False
+    resume: bool = False
 
 
 class Harness(ABC):
@@ -65,6 +75,8 @@ class Harness(ABC):
     resume_takes_prompt: bool = True
     #: Native resume behaviour. Forking keeps context while minting a new transcript identity.
     resume_strategy: ResumeStrategy = "continue"
+    #: Explicit optional launch support; legacy adapters retain signature detection.
+    launch_parameter_support: LaunchParameterSupport | None = None
 
     # ---- launching ------------------------------------------------------
 
