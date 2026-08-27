@@ -89,7 +89,7 @@ class OpenCodeObserver:
         )
 
     def open_source_context(self, context: ParticipantObservationContext) -> Source:
-        if context.participant_id == "unbound":
+        if not context.participant_scoped:
             return self.open_source(
                 cwd=context.cwd,
                 session_id=context.session_id,

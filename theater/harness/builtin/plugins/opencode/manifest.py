@@ -84,7 +84,8 @@ def manifest_for_paths(
         return MANIFEST
     observation = MANIFEST.observation
     primary = observation.primary
-    assert primary is not None
+    if primary is None:
+        raise RuntimeError("OpenCode manifest has no primary source")
     return replace(
         MANIFEST,
         launch=replace(

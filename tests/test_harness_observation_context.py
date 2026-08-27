@@ -122,6 +122,7 @@ def test_context_is_frozen_and_normalizes_provenance() -> None:
         ("pane_pid", "42", TypeError),
         ("pane_pid", 0, ValueError),
         ("pane_pid", -1, ValueError),
+        ("participant_scoped", 1, TypeError),
         ("session_provenance", 1, TypeError),
     ],
 )

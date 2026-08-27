@@ -15,7 +15,6 @@ from theater.daemon.spawning.models import SpawnRequest
 from theater.harness import get as get_harness
 from theater.harness import plan_launch
 from theater.harness.base import LaunchPlan, ResumeLaunchOverlay
-from theater.harness.contracts.observation import HarnessObserver
 from theater.models import BadRequest, Participant
 from theater.provenance import TranscriptProvenance
 
@@ -75,7 +74,7 @@ def validate_receipt_plan(plan: LaunchPlan, participant: Participant) -> str | N
         raise BadRequest(
             f"harness {participant.harness!r} has no observer; cannot use transcript receipts"
         )
-    if type(observer).validate_transcript_receipt is HarnessObserver.validate_transcript_receipt:
+    if not observer.supports_transcript_receipts:
         raise BadRequest(
             f"harness {participant.harness!r} observer does not implement "
             "validate_transcript_receipt; a plugin must implement this hook "

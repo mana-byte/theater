@@ -32,11 +32,17 @@ _UNBOUND_PARTICIPANT_ID = "unbound"
 class ManifestHarnessObserver(HarnessObserver):
     """A generic observer that forwards only typed manifest callbacks."""
 
-    def __init__(self, observation: ObservationManifest) -> None:
+    def __init__(
+        self,
+        observation: ObservationManifest,
+        *,
+        harness_name: str | None = None,
+    ) -> None:
         self._primary = observation.primary
         self._screen = observation.screen
         self._identity = observation.identity
         self._lineage = observation.lineage
+        self._harness_name = harness_name
         self.has_transcript = self._primary is not None
         self.trajectory_capabilities = observation.trajectory_capabilities
 
@@ -53,6 +59,7 @@ class ManifestHarnessObserver(HarnessObserver):
                 cwd=cwd,
                 session_id=session_id,
                 after=after,
+                participant_scoped=False,
             )
         )
 
@@ -144,6 +151,12 @@ class ManifestHarnessObserver(HarnessObserver):
     ) -> TranscriptCandidate:
         callback = self._identity.receipt_validator
         if callback is None:
+            if self._harness_name is not None:
+                raise ValueError(
+                    f"harness {self._harness_name!r} does not implement "
+                    "validate_transcript_receipt; a plugin must implement this hook "
+                    "to use transcript receipts. See docs/harness-plugins.md"
+                )
             return super().validate_transcript_receipt(
                 payload=payload,
                 cwd=cwd,
@@ -157,6 +170,10 @@ class ManifestHarnessObserver(HarnessObserver):
             )
         )
         return _checked_value(candidate, TranscriptCandidate, "receipt validator")
+
+    @property
+    def supports_transcript_receipts(self) -> bool:
+        return self._identity.receipt_validator is not None
 
     def admit_operator_candidate(
         self,
@@ -196,7 +213,7 @@ class _CompiledHarness(Harness):
         self.binaries = manifest.binaries
         self.icon = manifest.icon
         self.aliases = manifest.aliases
-        self.observer = ManifestHarnessObserver(manifest.observation)
+        self.observer = ManifestHarnessObserver(manifest.observation, harness_name=name)
         self._launch = manifest.launch
         self._models = manifest.models
         self.resume_takes_prompt = manifest.launch.resume_takes_prompt

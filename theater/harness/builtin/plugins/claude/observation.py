@@ -64,7 +64,8 @@ OBSERVATION = ObservationManifest(
 def observation_for(root: Path) -> ObservationManifest:
     """Build the same observation manifest against an explicit transcript root."""
     primary = OBSERVATION.primary
-    assert primary is not None
+    if primary is None:
+        raise RuntimeError("Claude manifest has no primary source")
     return replace(
         OBSERVATION,
         primary=replace(primary, factory=partial(source_factory, root=root)),

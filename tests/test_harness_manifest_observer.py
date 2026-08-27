@@ -63,7 +63,8 @@ def _observer(
     identity: IdentityManifest | None = None,
     lineage: LineageManifest | None = None,
     trajectory_capabilities: TrajectoryCapabilities | None = None,
-    primary: SourceManifest | None | None = ...,
+    primary: SourceManifest | None = ...,
+    harness_name: str | None = None,
 ) -> ManifestHarnessObserver:
     kwargs: dict = {}
     if identity is not None:
@@ -78,7 +79,7 @@ def _observer(
         screen=ScreenManifest(classifier=_screen),
         **kwargs,
     )
-    return ManifestHarnessObserver(observation)
+    return ManifestHarnessObserver(observation, harness_name=harness_name)
 
 
 # --- native_children --------------------------------------------------------
@@ -259,9 +260,22 @@ def test_receipt_validation_context_payload_is_immutable_copy() -> None:
 def test_receipt_validator_absent_returns_superclass_refusal() -> None:
     observer = _observer(
         primary=SourceManifest(factory=_source, channel=_primary_channel()),
+        harness_name="acme",
     )
-    with pytest.raises(ValueError, match="does not implement"):
+    with pytest.raises(ValueError, match=r"harness 'acme'.*does not implement"):
         observer.validate_transcript_receipt(payload={}, cwd="/work", expected_session_id=None)
+    assert observer.supports_transcript_receipts is False
+
+
+def test_receipt_validator_declares_support() -> None:
+    observer = _observer(
+        primary=SourceManifest(factory=_source, channel=_primary_channel()),
+        identity=IdentityManifest(
+            receipt_validator=lambda _context: TranscriptCandidate(location="/work/t.jsonl")
+        ),
+    )
+
+    assert observer.supports_transcript_receipts is True
 
 
 def test_receipt_validator_wrong_result_type_raises_type_error() -> None:

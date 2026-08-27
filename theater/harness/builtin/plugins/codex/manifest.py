@@ -52,7 +52,6 @@ MANIFEST = HarnessManifest(
                 kind=ChannelKind.TRANSCRIPT,
                 capabilities=(
                     ChannelCapability(SignalKind.IDENTITY, SignalOwnership.PRIMARY),
-                    ChannelCapability(SignalKind.LIFECYCLE, SignalOwnership.PRIMARY),
                     ChannelCapability(SignalKind.CONTENT, SignalOwnership.PRIMARY),
                     ChannelCapability(SignalKind.TURN, SignalOwnership.PRIMARY),
                     ChannelCapability(SignalKind.MODEL, SignalOwnership.PRIMARY),
@@ -76,7 +75,8 @@ MANIFEST = HarnessManifest(
 def manifest_for_root(root: Path) -> HarnessManifest:
     """Bind test-only transcript-root configuration into Codex callbacks."""
     primary = MANIFEST.observation.primary
-    assert primary is not None
+    if primary is None:
+        raise RuntimeError("Codex manifest has no primary source")
     return replace(
         MANIFEST,
         launch=replace(

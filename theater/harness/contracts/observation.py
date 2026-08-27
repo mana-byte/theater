@@ -334,6 +334,14 @@ class HarnessObserver(ABC):
             "to use transcript receipts. See docs/harness-plugins.md"
         )
 
+    @property
+    def supports_transcript_receipts(self) -> bool:
+        """Whether this observer accepts the generic transcript receipt RPC."""
+        return (
+            type(self).validate_transcript_receipt
+            is not HarnessObserver.validate_transcript_receipt
+        )
+
     def admit_operator_candidate(
         self,
         *,

@@ -413,6 +413,9 @@ def test_compilation_forwards_typed_callbacks_and_runtime_contracts(tmp_path: Pa
         )
     ]
     assert seen_source == [context]
+
+    harness.observer.open_source(cwd="/work")
+    assert seen_source[-1].participant_scoped is False
     assert seen_screen == [ScreenContext(capture="ready> ")]
     assert seen_models == [ModelDiscoveryContext(name="acme", binary="acme")]
     assert seen_resume == [

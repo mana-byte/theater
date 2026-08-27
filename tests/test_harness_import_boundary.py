@@ -29,7 +29,7 @@ def _harness_of(path: Path) -> str | None:
 def _dotted_package(path: Path) -> str:
     rel = path.relative_to(_THEATER).with_suffix("")
     parts = list(rel.parts)
-    if (parts and parts[-1] == "__init__") or parts:
+    if parts:
         parts.pop()
     return "theater." + ".".join(parts) if parts else "theater"
 
