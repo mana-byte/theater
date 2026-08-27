@@ -39,8 +39,14 @@ from theater.harness import (
     normalize as normalize_harness,
 )
 from theater.harness.channels.composite import CompositeSource, EnrichmentBinding
+from theater.harness.channels.health import (
+    ChannelHealthTracker,
+    read_error_diagnostic,
+    read_exception_diagnostic,
+)
 from theater.harness.channels.hooks import HookRuntime
 from theater.harness.channels.otel import NativeOtelRuntime
+from theater.harness.contracts.channels import ChannelHealth
 from theater.harness.source import (
     Attachment,
     Batch,
@@ -101,6 +107,8 @@ class Observer:
         self._tasks: dict[str, asyncio.Task] = {}
         self._retired: set[str] = set()
         self._unobservable: set[str] = set()
+        self._channel_health: dict[str, tuple[ChannelHealth, ...]] = {}
+        self._primary_channel_health: dict[tuple[str, str], ChannelHealthTracker] = {}
         self._supervisor: asyncio.Task | None = None
         self._stopping = asyncio.Event()
         self._trajectory_capture = None
@@ -215,6 +223,8 @@ class Observer:
     async def reset_for_operator_bind(self, pid: str) -> None:
         task = self._tasks.pop(pid, None)
         self._retired.discard(pid)
+        self._channel_health.pop(pid, None)
+        self._clear_primary_channel_health(pid)
         self._attachments._reset_watch_state.discard(pid)
         self._failures.clear_source_errors(pid, include_identity_lost=True)
         self._failures._identity_loss_replayed.discard(pid)
@@ -241,6 +251,9 @@ class Observer:
 
     def transcript_identity_lost(self, pid: str) -> bool:
         return self._failures.transcript_identity_lost(pid)
+
+    def channel_health_snapshot(self, participant_id: str) -> tuple[ChannelHealth, ...]:
+        return self._channel_health.get(participant_id, ())
 
     def _restore_transcript_identity_loss(self, pid: str) -> None:
         self._failures.restore_transcript_identity_loss(pid, finish_fn=self._finish)
@@ -349,6 +362,7 @@ class Observer:
             return
         if source is None:
             return
+        self._record_channel_health(pid, source)
         if opened_durable:
             self._restore_transcript_identity_loss(pid)
         clock = QuietClock()
@@ -371,7 +385,7 @@ class Observer:
                         await self._screen_only(pid, observer, clock)
                         await self._sleep(self.search)
                         continue
-                    batch = await source.read()
+                    batch = await self._read_source(pid, source)
                     self._validate_batch(source, batch)
                     if batch.waiting:
                         self._capture_trajectory(pid, batch)
@@ -440,6 +454,8 @@ class Observer:
                     logger.exception("observing %s failed", pid)
                 await self._sleep(self.poll)
         finally:
+            self._channel_health.pop(pid, None)
+            self._clear_primary_channel_health(pid)
             self._failures.clear_source_errors(pid, include_identity_lost=opened_durable)
             self._attachments._reset_watch_state.discard(pid)
             if opened_durable:
@@ -513,16 +529,93 @@ class Observer:
                 observer.enrichment_manifests(),
             )
         bindings = bindings + otel_bindings
+        primary_method = getattr(observer, "primary_channel_declaration", None)
+        primary = primary_method() if callable(primary_method) else None
         if source is None and not bindings:
+            self._clear_primary_channel_health(pid)
             return None
         if bindings:
-            source = CompositeSource(primary=source, enrichments=bindings)
+            self._clear_primary_channel_health(pid)
+            source = CompositeSource(
+                primary=source,
+                primary_channel_id=primary.id if primary is not None else "primary",
+                enrichments=bindings,
+            )
+        elif source is not None and primary is not None:
+            tracker = ChannelHealthTracker(primary.id)
+            tracker.mark_starting()
+            self._clear_primary_channel_health(pid)
+            self._primary_channel_health[(pid, primary.id)] = tracker
+        else:
+            self._clear_primary_channel_health(pid)
         if source is None:
             return None
         if source.collision_domain is not None and p.transcript_domain != source.collision_domain:
             p.transcript_domain = source.collision_domain
             self.store.upsert_participant(p)
         return source
+
+    def _record_channel_health(self, participant_id: str, source: Source) -> None:
+        health: tuple[ChannelHealth, ...] = ()
+        try:
+            snapshot = source.health_snapshot()
+        except BaseException:
+            snapshot = ()
+        if isinstance(snapshot, tuple) and all(
+            isinstance(item, ChannelHealth) for item in snapshot
+        ):
+            health = snapshot
+        primary = self._primary_health_tracker(participant_id)
+        if primary is not None:
+            primary_health = primary.snapshot()
+            health = (
+                primary_health,
+                *(item for item in health if item.channel_id != primary_health.channel_id),
+            )
+        if health:
+            self._channel_health[participant_id] = health
+
+    async def _read_source(self, participant_id: str, source: Source) -> Batch:
+        try:
+            batch = await source.read()
+        except BaseException as exc:
+            self._record_primary_failure(participant_id, exc)
+            raise
+        else:
+            self._record_primary_batch(participant_id, batch)
+            return batch
+        finally:
+            self._record_channel_health(participant_id, source)
+
+    def _record_primary_batch(self, participant_id: str, batch: Batch) -> None:
+        tracker = self._primary_health_tracker(participant_id)
+        if tracker is None:
+            return
+        if batch.error_code is not None:
+            tracker.mark_degraded(read_error_diagnostic("primary", batch.error_code))
+            return
+        tracker.record_success()
+        tracker.mark_healthy()
+
+    def _record_primary_failure(self, participant_id: str, exc: BaseException) -> None:
+        tracker = self._primary_health_tracker(participant_id)
+        if tracker is not None:
+            tracker.mark_failed(read_exception_diagnostic("primary read failed", exc))
+
+    def _primary_health_tracker(self, participant_id: str) -> ChannelHealthTracker | None:
+        return next(
+            (
+                tracker
+                for (current_id, _channel_id), tracker in self._primary_channel_health.items()
+                if current_id == participant_id
+            ),
+            None,
+        )
+
+    def _clear_primary_channel_health(self, participant_id: str) -> None:
+        for key in tuple(self._primary_channel_health):
+            if key[0] == participant_id:
+                self._primary_channel_health.pop(key, None)
 
     def _register_source(self, pid: str, source: Source) -> None:
         self._attachments.register_source(

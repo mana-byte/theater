@@ -16,6 +16,7 @@ from theater.harness.contracts.callbacks import (
     StreamFloorContext,
     TranscriptCandidatesContext,
 )
+from theater.harness.contracts.channels import ChannelDeclaration
 from theater.harness.contracts.context import ParticipantObservationContext
 from theater.harness.contracts.harness import Harness, LaunchParameterSupport
 from theater.harness.contracts.launch import LaunchPlan, NativeChild, ResumeLaunchOverlay
@@ -54,6 +55,10 @@ class ManifestHarnessObserver(HarnessObserver):
     def enrichment_manifests(self) -> tuple[EnrichmentManifest, ...]:
         """Expose validated enrichment declarations without plugin inspection."""
         return self._enrichments
+
+    def primary_channel_declaration(self) -> ChannelDeclaration | None:
+        """Expose the validated primary declaration without plugin inspection."""
+        return None if self._primary is None else self._primary.channel
 
     def open_source(
         self,

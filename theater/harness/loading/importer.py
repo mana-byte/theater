@@ -122,6 +122,7 @@ def load_plugin(plugin: LoadedPlugin) -> LoadedPlugin:
         source=plugin.source,
         name=name,
         harness=harness,
+        manifest=manifest,
     )
 
 

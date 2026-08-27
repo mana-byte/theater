@@ -8,7 +8,12 @@ from typing import cast
 
 from theater.constants.harness import HARNESS_DEDUPE_MAX_FACTS, HARNESS_OTEL_DEDUPE_MAX_DELIVERIES
 from theater.harness.channels.health import ChannelHealthTracker
-from theater.harness.contracts.channels import ChannelDeclaration, OtelRecord, OtelSignal
+from theater.harness.contracts.channels import (
+    ChannelDeclaration,
+    ChannelHealth,
+    OtelRecord,
+    OtelSignal,
+)
 from theater.harness.contracts.trajectory import TrajectoryFact
 
 
@@ -76,6 +81,7 @@ class OtelInbox:
             state.health.mark_degraded("native OTel inbox overflow")
             return OtelEnqueueResult(accepted=True, dropped=True)
         state.deliveries.append(delivery)
+        state.health.record_accepted()
         state.health.mark_healthy()
         return OtelEnqueueResult(accepted=True)
 
@@ -139,6 +145,13 @@ class OtelInbox:
     def health(self, participant_id: str, channel_id: str) -> ChannelHealthTracker | None:
         state = self._states.get((participant_id, channel_id))
         return state.health if state is not None else None
+
+    def health_snapshot(self, participant_id: str) -> tuple[ChannelHealth, ...]:
+        return tuple(
+            state.health.snapshot()
+            for (current_id, _), state in sorted(self._states.items())
+            if current_id == participant_id
+        )
 
     def drop_participant(self, participant_id: str) -> None:
         for key in tuple(self._states):

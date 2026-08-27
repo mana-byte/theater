@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import sys
 import time
 
@@ -12,6 +13,7 @@ from theater import harness as harness_registry
 from theater.cli.errors import BadUsage
 from theater.cli.render import _format_floor, _models_block
 from theater.client import DaemonClient, call_sync
+from theater.constants.harness import HARNESS_CHANNEL_HEALTH_DIAGNOSTIC_MAX_CHARS
 from theater.formatting import clip_harness, pad_to_width, tilde
 from theater.harness import HARNESSES, describe
 from theater.protocol import RemoteError
@@ -60,6 +62,8 @@ def cmd_harnesses(args) -> int:
             f"{r['binary'] or '-':<10} {mark:<10} "
             f"{tilde(r['path']) if r['path'] else '-'}"
         )
+        for detail in _harness_diagnostics(r):
+            print(f"   {detail}")
     missing = [r["name"] for r in rows if not r["installed"] and not r.get("error")]
     if missing:
         print(f"\nnot on PATH: {', '.join(missing)} — spawn will refuse these")
@@ -70,6 +74,115 @@ def cmd_harnesses(args) -> int:
         # Worth saying which list this is: a daemon already up may hold a different one.
         print(f"\n{fallback} — read from this process's registry")
     return 0
+
+
+def _harness_diagnostics(row: dict) -> list[str]:
+    if "manifest_api_version" not in row:
+        return []
+    lines = [
+        f"manifest API v{row['manifest_api_version']} · {tilde(row['manifest_path'])}",
+    ]
+    primary = row.get("primary_channel")
+    if isinstance(primary, dict):
+        lines.append(_channel_diagnostic("primary", primary))
+    primary_id = primary.get("id") if isinstance(primary, dict) else None
+    for channel in row.get("channels", []):
+        if not isinstance(channel, dict):
+            continue
+        if channel == primary or (isinstance(primary_id, str) and channel.get("id") == primary_id):
+            continue
+        lines.append(_channel_diagnostic("channel", channel))
+    if isinstance(row.get("channels_omitted"), int) and row["channels_omitted"] > 0:
+        lines.append(f"{row['channels_omitted']} additional channels omitted")
+    runtime = row.get("runtime")
+    if not isinstance(runtime, dict) or runtime.get("state") != "active":
+        return lines
+    lines.extend(_runtime_diagnostics(runtime))
+    return lines
+
+
+def _runtime_diagnostics(runtime: dict) -> list[str]:
+    lines = []
+    for participant in runtime.get("participants", []):
+        if not isinstance(participant, dict):
+            continue
+        channel_states = []
+        for channel in participant.get("channels", []):
+            if not isinstance(channel, dict):
+                continue
+            channel_states.append(_runtime_channel_diagnostic(channel))
+        if channel_states:
+            participant_id = participant.get("participant_id", "?")
+            lines.append(f"runtime {participant_id}: {', '.join(channel_states)}")
+        channels_omitted = participant.get("channels_omitted")
+        if isinstance(channels_omitted, int) and channels_omitted > 0:
+            lines.append(
+                f"runtime {participant.get('participant_id', '?')}: "
+                f"{channels_omitted} channels omitted"
+            )
+    participants_omitted = runtime.get("participants_omitted")
+    if isinstance(participants_omitted, int) and participants_omitted > 0:
+        lines.append(f"runtime {participants_omitted} additional participants omitted")
+    return lines
+
+
+def _runtime_channel_diagnostic(channel: dict) -> str:
+    summary = f"{channel.get('id', '?')} {channel.get('state', 'inactive')}"
+    if channel.get("dropped"):
+        summary += f" dropped={channel['dropped']}"
+    if channel.get("accepted"):
+        summary += f" accepted={channel['accepted']}"
+    success_at = channel.get("last_success_at")
+    if (
+        isinstance(success_at, (int, float))
+        and not isinstance(success_at, bool)
+        and math.isfinite(success_at)
+        and success_at >= 0
+    ):
+        summary += f" last_success_at={success_at:.3f}"
+    diagnostics = channel.get("diagnostics")
+    if isinstance(diagnostics, list):
+        latest = next((item for item in reversed(diagnostics) if isinstance(item, str)), None)
+        if latest is not None:
+            summary += f" diagnostic={_compact_diagnostic(latest)}"
+    return summary
+
+
+def _compact_diagnostic(diagnostic: str) -> str:
+    text = " ".join("".join(char if char.isprintable() else " " for char in diagnostic).split())
+    if not text:
+        return "channel diagnostic unavailable"
+    if len(text) <= HARNESS_CHANNEL_HEALTH_DIAGNOSTIC_MAX_CHARS:
+        return text
+    return f"{text[: HARNESS_CHANNEL_HEALTH_DIAGNOSTIC_MAX_CHARS - 1]}…"
+
+
+def _channel_diagnostic(label: str, channel: dict) -> str:
+    capabilities = channel.get("capabilities", [])
+    signals = ",".join(
+        f"{item.get('signal')}:{item.get('ownership')}"
+        for item in capabilities
+        if isinstance(item, dict)
+    )
+    result = f"{label} {channel.get('id', '?')}/{channel.get('kind', '?')}"
+    if signals:
+        result += f" [{signals}]"
+    bindings = channel.get("bindings", [])
+    if bindings:
+        names = []
+        for binding in bindings:
+            if not isinstance(binding, dict):
+                continue
+            name = binding.get("event", binding.get("name", "?"))
+            names.append(str(name))
+        if names:
+            result += f" ({', '.join(names)})"
+    if isinstance(channel.get("bindings_omitted"), int) and channel["bindings_omitted"] > 0:
+        result += f" (+{channel['bindings_omitted']} bindings omitted)"
+    reason = channel.get("unavailable_reason")
+    if isinstance(reason, str):
+        result += f" unavailable — {reason}"
+    return result
 
 
 def cmd_config(args) -> int:

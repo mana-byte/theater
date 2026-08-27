@@ -122,6 +122,20 @@ def test_supplied_rows_are_used_instead_of_the_registry():
     assert [name for _, name, _ in entries(rows)] == ["codex", "opencode"]
 
 
+def test_supplied_diagnostics_do_not_change_palette_entries():
+    rows = [
+        {
+            "name": "codex",
+            "icon": "◇",
+            "binary": "codex",
+            "installed": True,
+            "runtime": {"state": "active", "participants": []},
+            "channels": [{"id": "native-hooks", "availability": "unavailable"}],
+        }
+    ]
+    assert [name for _, name, _ in entries(rows)] == ["codex"]
+
+
 def test_supplied_rows_keep_their_order_behind_the_favourite():
     """The daemon sorted them; re-sorting here would fight it."""
     rows = [

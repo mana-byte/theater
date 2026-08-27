@@ -36,7 +36,13 @@ from theater.harness.channels.otel.receiver import (
 )
 from theater.harness.channels.otel.source import OtelSource
 from theater.harness.contracts.callbacks import OtelCorrelationContext
-from theater.harness.contracts.channels import ChannelKind, OtelBinding, OtelProtocol, OtelRecord
+from theater.harness.contracts.channels import (
+    ChannelHealth,
+    ChannelKind,
+    OtelBinding,
+    OtelProtocol,
+    OtelRecord,
+)
 from theater.harness.contracts.launch import ChannelCredential
 from theater.harness.contracts.manifest import EnrichmentManifest, OtelChannelManifest
 
@@ -255,6 +261,9 @@ class NativeOtelRuntime:
         for key in tuple(self._active):
             if key[0] == participant_id:
                 self._active.pop(key, None)
+
+    def health_snapshot(self, participant_id: str) -> tuple[ChannelHealth, ...]:
+        return self._inbox.health_snapshot(participant_id)
 
     async def ingest_http(  # noqa: PLR0912
         self,

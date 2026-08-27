@@ -4,16 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from theater.constants.core import HARNESS_NAME
 from theater.constants.harness import (
     HARNESS_CHANNEL_HEALTH_MAX_DIAGNOSTICS,
+    HARNESS_CHANNEL_ID_MAX_CHARS,
     HARNESS_DEDUPE_MAX_FACTS,
     HARNESS_ENRICHMENT_READ_TIMEOUT_SECONDS,
 )
 from theater.constants.trajectory import TRAJECTORY_PAGE_RECORD_LIMIT
-from theater.harness.channels.health import ChannelHealthTracker
+from theater.harness.channels.health import (
+    ChannelHealthTracker,
+    read_error_diagnostic,
+    read_exception_diagnostic,
+)
 from theater.harness.contracts.channels import (
     ChannelDeclaration,
     ChannelHealth,
@@ -37,6 +44,7 @@ _DURABLE_KINDS = frozenset({ChannelKind.TRANSCRIPT, ChannelKind.DATABASE})
 _DEFAULT_TIMEOUT = HARNESS_ENRICHMENT_READ_TIMEOUT_SECONDS
 _DEDUPE_MAX = HARNESS_DEDUPE_MAX_FACTS
 _PRIMARY_ID = "primary"
+_SAFE_TYPE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
 
 class CompositeSourceError(ValueError):
@@ -91,19 +99,21 @@ class CompositeSource(Source):
         self,
         *,
         primary: Source | None = None,
+        primary_channel_id: str = _PRIMARY_ID,
         enrichments: Sequence[EnrichmentBinding] = (),
         enrichment_timeout: float = _DEFAULT_TIMEOUT,
     ) -> None:
         self._validate_timeout(enrichment_timeout)
-        self._validate_construction(primary, enrichments)
+        self._validate_construction(primary, primary_channel_id, enrichments)
         self._primary = primary
+        self._primary_channel_id = primary_channel_id
         self._enrichments = tuple(enrichments)
         self._enrichment_timeout = enrichment_timeout
         self._health: dict[str, ChannelHealthTracker] = {}
         if primary is not None:
-            tracker = ChannelHealthTracker(_PRIMARY_ID)
+            tracker = ChannelHealthTracker(primary_channel_id)
             tracker.mark_starting()
-            self._health[_PRIMARY_ID] = tracker
+            self._health[primary_channel_id] = tracker
         for binding in self._enrichments:
             tracker = ChannelHealthTracker(binding.declaration.id)
             tracker.mark_starting()
@@ -125,10 +135,18 @@ class CompositeSource(Source):
     @staticmethod
     def _validate_construction(
         primary: Source | None,
+        primary_channel_id: str,
         enrichments: Sequence[EnrichmentBinding],
     ) -> None:
         if primary is not None and not isinstance(primary, Source):
             raise CompositeSourceError("primary must implement Source or be None")
+        if (
+            not isinstance(primary_channel_id, str)
+            or not primary_channel_id.strip()
+            or len(primary_channel_id) > HARNESS_CHANNEL_ID_MAX_CHARS
+            or not HARNESS_NAME.fullmatch(primary_channel_id)
+        ):
+            raise CompositeSourceError("primary_channel_id must be a bounded canonical channel id")
         if not isinstance(enrichments, Sequence):
             raise CompositeSourceError("enrichments must be a sequence")
         bindings = tuple(enrichments)
@@ -139,7 +157,7 @@ class CompositeSource(Source):
                 raise CompositeSourceError(f"enrichments[{i}].source must implement Source")
         ids: set[str] = set()
         if primary is not None:
-            ids.add(_PRIMARY_ID)
+            ids.add(primary_channel_id)
         for i, binding in enumerate(bindings):
             bid = binding.declaration.id
             if bid in ids:
@@ -173,6 +191,10 @@ class CompositeSource(Source):
     def channel_health(self) -> tuple[ChannelHealth, ...]:
         return tuple(self._channel_health(binding) for binding in self._enrichments)
 
+    def health_snapshot(self) -> tuple[ChannelHealth, ...]:
+        primary = () if self._primary is None else (self.primary_health(),)
+        return tuple(health for health in (*primary, *self.channel_health()) if health is not None)
+
     def _channel_health(self, binding: EnrichmentBinding) -> ChannelHealth:
         composite = self._health[binding.declaration.id].snapshot()
         snapshot = getattr(binding.source, "channel_health", None)
@@ -187,6 +209,12 @@ class CompositeSource(Source):
             ChannelHealthState.FAILED: 4,
         }
         state = source.state if states[source.state] >= states[composite.state] else composite.state
+        success_values = tuple(
+            value
+            for value in (composite.last_success_at, source.last_success_at)
+            if value is not None
+        )
+        success_at = max(success_values) if success_values else None
         return ChannelHealth(
             channel_id=composite.channel_id,
             state=state,
@@ -194,12 +222,14 @@ class CompositeSource(Source):
                 -HARNESS_CHANNEL_HEALTH_MAX_DIAGNOSTICS:
             ],
             dropped=composite.dropped + source.dropped,
+            accepted=composite.accepted + source.accepted,
+            last_success_at=success_at,
         )
 
     def primary_health(self) -> ChannelHealth | None:
         if self._primary is None:
             return None
-        return self._health[_PRIMARY_ID].snapshot()
+        return self._health[self._primary_channel_id].snapshot()
 
     async def read(self) -> Batch:
         if self._primary is None:
@@ -207,11 +237,19 @@ class CompositeSource(Source):
             return Batch(
                 trajectory=tuple(enrichment_facts) if enrichment_facts else (),
             )
-        batch = await self._primary.read()
-        tracker = self._health[_PRIMARY_ID]
+        tracker = self._health[self._primary_channel_id]
+        try:
+            batch = await self._primary.read()
+        except asyncio.CancelledError as exc:
+            tracker.mark_failed(_exception_diagnostic("primary read failed", exc))
+            raise
+        except Exception as exc:
+            tracker.mark_failed(_exception_diagnostic("primary read failed", exc))
+            raise
         if batch.error_code is not None:
-            tracker.mark_degraded(batch.error or batch.error_code)
+            tracker.mark_degraded(_batch_error_diagnostic("primary", batch.error_code))
         else:
+            tracker.record_success()
             tracker.mark_healthy()
         enrichment_facts = await self._read_enrichments()
         all_facts = list(batch.trajectory)
@@ -271,13 +309,13 @@ class CompositeSource(Source):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            tracker.mark_failed(str(exc) or type(exc).__name__)
-            return Batch(error_code="enrichment_error", error=str(exc) or type(exc).__name__)
+            tracker.mark_failed(_exception_diagnostic("enrichment read failed", exc))
+            return Batch(error_code="enrichment_error", error="enrichment read failed")
         if not isinstance(batch, Batch):
-            tracker.mark_failed(f"enrichment returned {type(batch).__name__}, not Batch")
+            tracker.mark_failed(f"enrichment returned non-Batch ({_type_name(batch, 'object')})")
             return Batch(error_code="enrichment_malformed", error="enrichment returned non-Batch")
         if batch.error_code is not None:
-            tracker.mark_degraded(batch.error or batch.error_code)
+            tracker.mark_degraded(_batch_error_diagnostic("enrichment", batch.error_code))
             return batch
         tracker.mark_healthy()
         return batch
@@ -291,7 +329,7 @@ class CompositeSource(Source):
 
     def _handle_enrichment_failure(self, binding: EnrichmentBinding, exc: BaseException) -> None:
         tracker = self._health[binding.declaration.id]
-        tracker.mark_failed(str(exc) or type(exc).__name__)
+        tracker.mark_failed(_exception_diagnostic("enrichment read failed", exc))
 
     async def refresh(self) -> Batch:
         if self._primary is None:
@@ -368,6 +406,19 @@ class CompositeSource(Source):
 
 def _source_contract_error(method: str) -> SourceContractError:
     return SourceContractError(f"CompositeSource has no primary and cannot delegate {method}()")
+
+
+def _batch_error_diagnostic(channel: str, error_code: object) -> str:
+    return read_error_diagnostic(channel, error_code)
+
+
+def _exception_diagnostic(prefix: str, exc: BaseException) -> str:
+    return read_exception_diagnostic(prefix, exc)
+
+
+def _type_name(value: object, fallback: str) -> str:
+    name = type(value).__name__
+    return name if _SAFE_TYPE_NAME.fullmatch(name) else fallback
 
 
 __all__ = ["CompositeSource", "CompositeSourceError", "EnrichmentBinding"]

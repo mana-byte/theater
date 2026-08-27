@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -10,6 +11,7 @@ from theater.constants.core import HARNESS_NAME
 from theater.constants.harness import (
     HARNESS_CHANNEL_DEFAULT_MAX_PAYLOAD_BYTES,
     HARNESS_CHANNEL_DEFAULT_MAX_QUEUE,
+    HARNESS_CHANNEL_HEALTH_COUNTER_MAX,
     HARNESS_CHANNEL_HEALTH_DIAGNOSTIC_MAX_CHARS,
     HARNESS_CHANNEL_HEALTH_MAX_DIAGNOSTICS,
     HARNESS_CHANNEL_ID_MAX_CHARS,
@@ -230,6 +232,8 @@ class ChannelHealth:
     state: ChannelHealthState = ChannelHealthState.INACTIVE
     diagnostics: tuple[str, ...] = ()
     dropped: int = 0
+    accepted: int = 0
+    last_success_at: float | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -253,8 +257,24 @@ class ChannelHealth:
             for item in diagnostics
         ):
             raise ValueError("channel health diagnostics must be bounded non-blank strings")
-        if type(self.dropped) is not int or self.dropped < 0:
-            raise ValueError("channel health dropped must be a non-negative integer")
+        if (
+            type(self.dropped) is not int
+            or self.dropped < 0
+            or self.dropped > HARNESS_CHANNEL_HEALTH_COUNTER_MAX
+        ):
+            raise ValueError("channel health dropped must be a bounded non-negative integer")
+        if (
+            type(self.accepted) is not int
+            or self.accepted < 0
+            or self.accepted > HARNESS_CHANNEL_HEALTH_COUNTER_MAX
+        ):
+            raise ValueError("channel health accepted must be a bounded non-negative integer")
+        if self.last_success_at is not None and (
+            type(self.last_success_at) not in (int, float)
+            or not math.isfinite(self.last_success_at)
+            or self.last_success_at < 0
+        ):
+            raise ValueError("channel health last_success_at must be a non-negative finite number")
         object.__setattr__(self, "diagnostics", diagnostics)
 
 

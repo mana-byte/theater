@@ -15,8 +15,30 @@ import pytest
 from theater import cli, paths
 from theater import config as cfg
 from theater import harness as harness_registry
+from theater.constants.harness import (
+    HARNESS_DIAGNOSTICS_MAX_BINDINGS,
+    HARNESS_DIAGNOSTICS_MAX_CHANNELS,
+    HARNESS_DIAGNOSTICS_MAX_PARTICIPANTS,
+    HARNESS_DIAGNOSTICS_UNAVAILABLE_REASON_MAX_CHARS,
+)
+from theater.harness.contracts.channels import (
+    ChannelDeclaration,
+    ChannelHealth,
+    ChannelKind,
+    HookBinding,
+)
+from theater.harness.contracts.manifest import (
+    HarnessManifest,
+    HookChannelManifest,
+    LaunchManifest,
+    ObservationManifest,
+    ScreenManifest,
+    SourceManifest,
+    UnavailableChannelManifest,
+)
 from theater.harness.loading.discovery import MANIFEST_FILENAME
-from theater.harness.loading.models import PluginError
+from theater.harness.loading.models import LoadedPlugin, PluginError
+from theater.harness.registry.diagnostics import project_plugin
 
 MANIFEST_BODY = """
 from theater.harness.contracts.callbacks import LaunchContext, ScreenContext
@@ -461,6 +483,132 @@ def test_a_plugin_shows_up_in_describe(local_dir):
     assert rows["acme"]["binary"] == "acme"
     assert rows["acme"]["source"] == "local"
     assert rows["acme"]["error"] is None
+    assert rows["acme"]["manifest_api_version"] == 1
+    assert rows["acme"]["package_path"] == str(local_dir / "acme")
+    assert rows["acme"]["primary_channel"] is None
+    assert rows["acme"]["runtime"] == {"state": "inactive", "participants": []}
+
+
+def test_describe_projects_validated_manifest_channels_and_unavailability(local_dir):
+    install(local_dir)
+    row = {row["name"]: row for row in harness_registry.describe()}["vibe"]
+
+    assert row["manifest_path"].endswith("vibe/manifest.py")
+    assert row["primary_channel"] == {
+        "id": "transcript",
+        "kind": "transcript",
+        "availability": "declared",
+        "capabilities": [
+            {"signal": "identity", "ownership": "primary"},
+            {"signal": "content", "ownership": "primary"},
+            {"signal": "turn", "ownership": "primary"},
+            {"signal": "model", "ownership": "primary"},
+            {"signal": "tool", "ownership": "primary"},
+            {"signal": "timing", "ownership": "primary"},
+            {"signal": "usage", "ownership": "primary"},
+            {"signal": "lineage", "ownership": "primary"},
+        ],
+    }
+    unavailable = {
+        channel["id"]: channel for channel in row["channels"] if "unavailable_reason" in channel
+    }
+    assert unavailable["native-hooks"]["kind"] == "hook"
+    assert unavailable["native-hooks"]["unavailable_reason"]
+    assert unavailable["native-otel"]["protocol"] == "otlp_http_json"
+    assert unavailable["native-otel"]["unavailable_reason"]
+
+
+def test_diagnostics_projection_bounds_untrusted_manifest_output(tmp_path):
+    bindings = tuple(
+        HookBinding(
+            event=f"event-{index}",
+            signals=(),
+            decoder=lambda _context: (),
+            correlation=lambda _context: "native",
+        )
+        for index in range(HARNESS_DIAGNOSTICS_MAX_BINDINGS + 1)
+    )
+    hook = HookChannelManifest(
+        declaration=ChannelDeclaration(id="hooks", kind=ChannelKind.HOOK),
+        bindings=bindings,
+    )
+    unavailable = UnavailableChannelManifest(
+        declaration=ChannelDeclaration(id="unavailable", kind=ChannelKind.OTEL),
+        reason="unavailable " * (HARNESS_DIAGNOSTICS_UNAVAILABLE_REASON_MAX_CHARS + 1),
+    )
+    manifest = HarnessManifest(
+        api_version=1,
+        binary="acme",
+        icon="@",
+        launch=LaunchManifest(planner=lambda _context: None, approvals=()),
+        observation=ObservationManifest(
+            primary=SourceManifest(
+                factory=lambda _context: None,
+                channel=ChannelDeclaration(id="primary", kind=ChannelKind.TRANSCRIPT),
+            ),
+            screen=ScreenManifest(classifier=lambda _context: None),
+            enrichments=(
+                hook,
+                unavailable,
+                *tuple(
+                    ChannelDeclaration(id=f"channel-{index}", kind=ChannelKind.HOOK)
+                    for index in range(HARNESS_DIAGNOSTICS_MAX_CHANNELS)
+                ),
+            ),
+        ),
+    )
+    runtime_channel_ids = (
+        "primary",
+        "hooks",
+        *(f"channel-{index}" for index in range(HARNESS_DIAGNOSTICS_MAX_CHANNELS - 1)),
+        "foreign-channel",
+    )
+    runtime = {
+        "acme": {
+            f"participant-{index}": tuple(
+                ChannelHealth(channel_id=channel_id) for channel_id in runtime_channel_ids
+            )
+            for index in range(HARNESS_DIAGNOSTICS_MAX_PARTICIPANTS + 1)
+        }
+    }
+
+    row = project_plugin(
+        {"name": "acme"},
+        LoadedPlugin(path=tmp_path / "acme", source="local", name="acme", manifest=manifest),
+        runtime,
+    )
+
+    assert len(row["channels"]) == HARNESS_DIAGNOSTICS_MAX_CHANNELS
+    assert row["channels_omitted"] == 3
+    projected_hook = next(channel for channel in row["channels"] if channel["id"] == "hooks")
+    assert len(projected_hook["bindings"]) == HARNESS_DIAGNOSTICS_MAX_BINDINGS
+    assert projected_hook["bindings_omitted"] == 1
+    projected_unavailable = next(
+        channel for channel in row["channels"] if channel["id"] == "unavailable"
+    )
+    assert len(projected_unavailable["unavailable_reason"]) <= (
+        HARNESS_DIAGNOSTICS_UNAVAILABLE_REASON_MAX_CHARS
+    )
+    assert "chars omitted" in projected_unavailable["unavailable_reason"]
+    runtime_row = row["runtime"]
+    assert len(runtime_row["participants"]) == HARNESS_DIAGNOSTICS_MAX_PARTICIPANTS
+    assert runtime_row["participants_omitted"] == 1
+    assert len(runtime_row["participants"][0]["channels"]) == HARNESS_DIAGNOSTICS_MAX_CHANNELS
+    assert runtime_row["participants"][0]["channels_omitted"] == 1
+    assert all(
+        channel["id"] != "foreign-channel" for channel in runtime_row["participants"][0]["channels"]
+    )
+
+
+def test_broken_plugin_has_no_fake_manifest_diagnostics(local_dir):
+    package = local_dir / "broken"
+    package.mkdir()
+    (package / MANIFEST_FILENAME).write_text("raise ValueError('boom')")
+    install(local_dir)
+
+    row = {row["name"]: row for row in harness_registry.describe()}["broken"]
+    assert row["error"] is not None
+    assert not {"manifest_api_version", "package_path", "channels", "runtime"} & row.keys()
 
 
 # ---- legacy file migration diagnostic ------------------------------------

@@ -145,6 +145,21 @@ HARNESS_CHANNEL_HEALTH_MAX_DIAGNOSTICS = 8
 #: Individual runtime channel diagnostics remain bounded and display-safe.
 HARNESS_CHANNEL_HEALTH_DIAGNOSTIC_MAX_CHARS = 240
 
+#: Maximum accepted or dropped items represented in channel health.
+HARNESS_CHANNEL_HEALTH_COUNTER_MAX = 1_000_000_000
+
+#: Maximum manifest channels included in one diagnostics row.
+HARNESS_DIAGNOSTICS_MAX_CHANNELS = 32
+
+#: Maximum participants included in one harness diagnostics runtime projection.
+HARNESS_DIAGNOSTICS_MAX_PARTICIPANTS = 64
+
+#: Maximum native bindings included for one channel diagnostics declaration.
+HARNESS_DIAGNOSTICS_MAX_BINDINGS = 32
+
+#: Maximum normalized unavailable-reason text exposed in diagnostics.
+HARNESS_DIAGNOSTICS_UNAVAILABLE_REASON_MAX_CHARS = 240
+
 #: Default timeout for bounded enrichment source reads.
 HARNESS_ENRICHMENT_READ_TIMEOUT_SECONDS = 5.0
 

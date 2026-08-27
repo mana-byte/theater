@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from theater.config import ConfigError
 from theater.harness.contracts.harness import Harness
+
+if TYPE_CHECKING:
+    from theater.harness.contracts.manifest import HarnessManifest
 
 #: Where a plugin came from.
 SHIPPED = "shipped"
@@ -35,6 +39,7 @@ class LoadedPlugin:
     name: str
     harness: Harness | None = None
     error: str | None = None
+    manifest: HarnessManifest | None = None
 
 
 __all__ = ["LOCAL", "SHIPPED", "LoadedPlugin", "PluginError"]

@@ -9,6 +9,7 @@ import stat
 import threading
 import time
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -78,8 +79,10 @@ from theater.harness.contracts.manifest import (
 from theater.harness.contracts.observation import ScreenConfidence, ScreenKind, ScreenReading
 from theater.harness.contracts.source import Batch, Source
 from theater.harness.contracts.trajectory import TrajectoryFact
+from theater.harness.loading.models import LoadedPlugin
 from theater.harness.manifests.compiler import compile_manifest
 from theater.harness.manifests.validation import ManifestValidationError
+from theater.harness.registry.diagnostics import project_plugin
 from theater.models import BadRequest
 from theater.trajectory.enums import TrajectoryKind
 
@@ -195,6 +198,47 @@ def _manifest(*, primary: bool = True, **kwargs) -> HarnessManifest:
             enrichments=(_channel(**kwargs),),
         ),
     )
+
+
+def test_manifest_projection_includes_hook_and_otel_native_bindings() -> None:
+    manifest = _manifest()
+    hook = _hook_channel()
+    manifest = replace(
+        manifest,
+        observation=replace(
+            manifest.observation,
+            enrichments=(hook, *manifest.observation.enrichments),
+        ),
+    )
+    compiled = compile_manifest("acme", manifest)
+    row = project_plugin(
+        {
+            "name": "acme",
+            "icon": "A",
+            "binary": "acme",
+            "installed": True,
+            "path": "/usr/bin/acme",
+            "source": "local",
+            "error": None,
+        },
+        LoadedPlugin(
+            path=Path("/tmp/acme"),
+            source="local",
+            name="acme",
+            harness=compiled,
+            manifest=manifest,
+        ),
+        None,
+    )
+
+    channels = {channel["id"]: channel for channel in row["channels"]}
+    assert channels["native-hook"]["bindings"] == [
+        {"event": "tool.finished", "delivery": "best_effort", "signals": ["lifecycle"]}
+    ]
+    assert channels["native-otel"]["protocol"] == "otlp_http_json"
+    assert channels["native-otel"]["bindings"] == [
+        {"name": "tool.finished", "signal": "logs", "signals": ["tool"]}
+    ]
 
 
 def _value(key: str, value: object) -> dict[str, object]:
@@ -411,6 +455,11 @@ async def test_native_otel_loopback_ingests_multiple_records_and_retries(
             daemon.otel_runtime.endpoint, payload, token=credential.token
         )
         assert (status, headers["content-type"], body) == (200, "application/json", b"{}")
+        (health,) = daemon.otel_runtime.health_snapshot(participant.id)
+        assert health.channel_id == "native-otel"
+        assert health.accepted == 2
+        assert health.last_success_at is not None
+        assert credential.token not in str(health)
         source = daemon.observer._open_source(participant.id, harness.observer)
         assert isinstance(source, CompositeSource)
         batch = await source.read()
@@ -739,9 +788,12 @@ async def test_native_otel_receiver_failure_degrades_closed_and_retries(
             LaunchPlan(argv=["acme"]), participant, harness.observer, daemon.otel_runtime
         )
         assert plan.channel_credentials == ()
-        assert daemon.otel_runtime.active_channels(
-            participant.id, harness.observer.enrichment_manifests()
-        ) == ()
+        assert (
+            daemon.otel_runtime.active_channels(
+                participant.id, harness.observer.enrichment_manifests()
+            )
+            == ()
+        )
         source = daemon.observer._open_source(participant.id, harness.observer)
         assert isinstance(source, _Primary)
         assert await source.read() == Batch()
@@ -856,16 +908,16 @@ async def test_native_otel_record_keys_accept_maximum_export_identity(
                 _record(native_id="maximum-two", export_id=export_id),
             ],
         )
-        assert (
-            await _post(daemon.otel_runtime.endpoint, payload, token=credential.token)
-        )[0] == 200
+        assert (await _post(daemon.otel_runtime.endpoint, payload, token=credential.token))[
+            0
+        ] == 200
         assert [fact.native_id for fact in (await source.read()).trajectory] == [
             "maximum-one",
             "maximum-two",
         ]
-        assert (
-            await _post(daemon.otel_runtime.endpoint, payload, token=credential.token)
-        )[0] == 200
+        assert (await _post(daemon.otel_runtime.endpoint, payload, token=credential.token))[
+            0
+        ] == 200
         assert (await source.read()).trajectory == ()
     finally:
         await source.aclose()
@@ -1038,9 +1090,9 @@ async def test_native_otel_only_source_emits_facts_without_identity_state(
     assert source._primary is None
     try:
         payload = _payload(participant, [_record(native_id="otel-only", export_id="otel-only")])
-        assert (
-            await _post(daemon.otel_runtime.endpoint, payload, token=credential.token)
-        )[0] == 200
+        assert (await _post(daemon.otel_runtime.endpoint, payload, token=credential.token))[
+            0
+        ] == 200
         batch = await source.read()
         assert [fact.native_id for fact in batch.trajectory] == ["otel-only"]
         assert batch.progressed is False
@@ -1074,9 +1126,7 @@ def test_native_otel_decoder_enforces_text_and_nesting_bounds() -> None:
             ),
         )
 
-    integer_payload = json.loads(
-        _payload(participant, [_record(native_id="one", export_id="one")])
-    )
+    integer_payload = json.loads(_payload(participant, [_record(native_id="one", export_id="one")]))
     integer_payload["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"].append(
         {"key": "fixture.integer", "value": {"intValue": str(1 << 63)}}
     )

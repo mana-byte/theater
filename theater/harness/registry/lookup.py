@@ -12,6 +12,7 @@ from theater.harness.registry import (
     _PLUGINS,
     HARNESSES,
 )
+from theater.harness.registry.diagnostics import HarnessRuntimeHealth, project_plugin
 from theater.models import BadRequest
 
 #: Shown for a participant whose harness has no adapter.
@@ -57,7 +58,7 @@ def harness_icon(name: str | None) -> str:
     return harness.icon if harness else UNKNOWN_ICON
 
 
-def describe() -> list[dict]:
+def describe(*, runtime: HarnessRuntimeHealth | None = None) -> list[dict]:
     """Every registered harness as plain data, sorted by name.
 
     One builder for three consumers — the ``harnesses`` RPC, ``theater
@@ -70,15 +71,19 @@ def describe() -> list[dict]:
         harness = HARNESSES[name]
         path = shutil.which(harness.binary)
         rows.append(
-            {
-                "name": name,
-                "icon": harness.icon,
-                "binary": harness.binary,
-                "installed": path is not None,
-                "path": path,
-                "source": _PLUGINS[name].source,
-                "error": None,
-            }
+            project_plugin(
+                {
+                    "name": name,
+                    "icon": harness.icon,
+                    "binary": harness.binary,
+                    "installed": path is not None,
+                    "path": path,
+                    "source": _PLUGINS[name].source,
+                    "error": None,
+                },
+                _PLUGINS[name],
+                runtime,
+            )
         )
     for found in sorted(_BROKEN, key=lambda p: p.name):
         rows.append(

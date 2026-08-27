@@ -33,6 +33,7 @@ from theater.daemon.schema import jobs as jobs_table
 from theater.daemon.schema import participants as participants_table
 from theater.daemon.schema import usage as usage_table
 from theater.harness.base import Event, EventKind, TokenUsage
+from theater.harness.contracts.channels import ChannelDeclaration, ChannelHealthState, ChannelKind
 from theater.harness.observation import (
     HarnessObserver,
     ScreenConfidence,
@@ -1251,6 +1252,73 @@ async def test_source_construction_failure_uses_cannot_observe_diagnostic(regist
 
     assert "cannot observe" in caplog.text
     assert "invalid participant observation context" in caplog.text
+
+
+async def test_raising_primary_read_updates_cached_health(registry):
+    class RaisingSource(Source):
+        async def read(self) -> Batch:
+            raise ValueError("secret primary detail")
+
+    class RaisingObserver(ScriptedObserver):
+        def __init__(self) -> None:
+            self.source = RaisingSource()
+
+        def primary_channel_declaration(self) -> ChannelDeclaration:
+            return ChannelDeclaration(id="primary", kind=ChannelKind.TRANSCRIPT)
+
+    harness = SourceHarness()
+    harness.observer = RaisingObserver()
+    observer = await watching(registry, harness)
+    participant = registry.register(harness="scripted", pane=None, cwd="/tmp")
+    try:
+        assert await until(
+            lambda: (
+                bool(observer.channel_health_snapshot(participant.id))
+                and observer.channel_health_snapshot(participant.id)[0].state
+                is ChannelHealthState.FAILED
+            )
+        )
+        (health,) = observer.channel_health_snapshot(participant.id)
+        assert health.diagnostics == ("primary read failed (ValueError)",)
+        assert "secret primary detail" not in str(health)
+    finally:
+        await observer.aclose()
+    assert observer.channel_health_snapshot(participant.id) == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result", ["raises", "list", "items"])
+async def test_untrusted_health_snapshot_does_not_stop_observation(registry, result):
+    class UntrustedHealthSource(Source):
+        def __init__(self) -> None:
+            self.reads = 0
+            self.closed = False
+
+        async def read(self) -> Batch:
+            self.reads += 1
+            return Batch(progressed=True)
+
+        def health_snapshot(self):
+            if result == "raises":
+                raise RuntimeError("secret health detail")
+            if result == "list":
+                return []
+            return ("not-health",)
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    harness = SourceHarness()
+    source = UntrustedHealthSource()
+    harness.observer.source = source
+    observer = await watching(registry, harness)
+    participant = registry.register(harness="scripted", pane=None, cwd="/tmp")
+    try:
+        assert await until(lambda: source.reads > 0)
+        assert observer.channel_health_snapshot(participant.id) == ()
+    finally:
+        await observer.aclose()
+    assert source.closed
 
 
 def test_consumed_input_counts_as_activity_even_with_no_events(registry):

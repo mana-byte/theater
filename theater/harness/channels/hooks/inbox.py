@@ -9,7 +9,7 @@ from typing import cast
 
 from theater.constants.harness import HARNESS_DEDUPE_MAX_FACTS, HARNESS_HOOK_DEDUPE_MAX_DELIVERIES
 from theater.harness.channels.health import ChannelHealthTracker
-from theater.harness.contracts.channels import ChannelDeclaration
+from theater.harness.contracts.channels import ChannelDeclaration, ChannelHealth
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.contracts.values import freeze_json_mapping
 
@@ -91,6 +91,7 @@ class HookInbox:
             state.health.mark_degraded("hook inbox overflow")
             return HookEnqueueResult(accepted=True, dropped=True)
         state.deliveries.append(delivery)
+        state.health.record_accepted()
         state.health.mark_healthy()
         return HookEnqueueResult(accepted=True)
 
@@ -151,6 +152,13 @@ class HookInbox:
     def health(self, participant_id: str, channel_id: str) -> ChannelHealthTracker | None:
         state = self._states.get((participant_id, channel_id))
         return state.health if state is not None else None
+
+    def health_snapshot(self, participant_id: str) -> tuple[ChannelHealth, ...]:
+        return tuple(
+            state.health.snapshot()
+            for (current_id, _), state in sorted(self._states.items())
+            if current_id == participant_id
+        )
 
     def drop_participant(self, participant_id: str) -> None:
         for key in tuple(self._states):

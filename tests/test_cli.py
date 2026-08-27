@@ -327,6 +327,67 @@ def test_harnesses_json_reports_install_state(monkeypatch, capsys):
     assert {r["name"] for r in rows} == set(cli.HARNESSES)
     assert all(r["installed"] is False and r["path"] is None for r in rows)
     assert all(r["icon"] for r in rows)
+    assert all(r["runtime"] == {"state": "inactive", "participants": []} for r in rows)
+    assert all("manifest_path" in r and "channels" in r for r in rows)
+
+
+def test_harness_diagnostics_prints_primary_once_after_json_round_trip():
+    primary = {
+        "id": "transcript",
+        "kind": "transcript",
+        "availability": "declared",
+        "capabilities": [],
+    }
+    row = json.loads(
+        json.dumps(
+            {
+                "manifest_api_version": 1,
+                "manifest_path": "/tmp/acme/manifest.py",
+                "primary_channel": primary,
+                "channels": [primary],
+            }
+        )
+    )
+
+    lines = introspection_mod._harness_diagnostics(row)
+
+    assert lines.count("primary transcript/transcript") == 1
+    assert not any(line.startswith("channel transcript/transcript") for line in lines)
+
+
+def test_harness_diagnostics_prints_runtime_success_and_latest_diagnostic():
+    lines = introspection_mod._harness_diagnostics(
+        {
+            "manifest_api_version": 1,
+            "manifest_path": "/tmp/acme/manifest.py",
+            "runtime": {
+                "state": "active",
+                "participants": [
+                    {
+                        "participant_id": "p1",
+                        "channels": [
+                            {
+                                "id": "primary",
+                                "state": "failed",
+                                "diagnostics": [
+                                    "older diagnostic",
+                                    "primary read failed (ValueError)",
+                                ],
+                                "dropped": 2,
+                                "accepted": 3,
+                                "last_success_at": 1.25,
+                            }
+                        ],
+                    }
+                ],
+            },
+        }
+    )
+
+    assert lines[-1] == (
+        "runtime p1: primary failed dropped=2 accepted=3 last_success_at=1.250 "
+        "diagnostic=primary read failed (ValueError)"
+    )
 
 
 def test_harnesses_never_starts_a_daemon(monkeypatch, capsys):

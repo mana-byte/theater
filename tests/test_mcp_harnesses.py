@@ -112,6 +112,7 @@ async def test_list_harnesses_returns_the_shipped_set(daemon, all_installed):
     rows = _payload(await build("p1", "vibe").call_tool("list_harnesses", {}))
     assert {r["name"] for r in rows} >= SHIPPED
     assert all(r["icon"] and r["binary"] for r in rows)
+    assert all(set(row) == {"name", "icon", "binary"} for row in rows)
 
 
 async def test_list_harnesses_omits_what_is_not_installed(daemon, monkeypatch):

@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 
 from theater.constants.harness import (
+    HARNESS_CHANNEL_HEALTH_COUNTER_MAX,
+    HARNESS_CHANNEL_ID_MAX_CHARS,
     HARNESS_DEDUPE_MAX_FACTS,
     HARNESS_ENRICHMENT_READ_TIMEOUT_SECONDS,
 )
@@ -93,7 +95,7 @@ class _RecordingSource(Source):
 
 class _BoomSource(Source):
     async def read(self) -> Batch:
-        raise RuntimeError("boom")
+        raise ValueError("secret-enrichment-value")
 
 
 class _SlowSource(Source):
@@ -112,7 +114,7 @@ class _BadReturnTypeSource(Source):
 
 class _ErrorBatchSource(Source):
     async def read(self) -> Batch:
-        return Batch(error_code="enrichment_error", error="something broke")
+        return Batch(error_code="enrichment_error", error="secret-enrichment-error")
 
 
 class _PrimaryWithAttachment(Source):
@@ -166,7 +168,12 @@ class _PrimaryWithStatus(Source):
 
 class _PrimaryWithError(Source):
     async def read(self) -> Batch:
-        return Batch(error_code="primary_err", error="primary broke")
+        return Batch(error_code="primary_err", error="secret-primary-error")
+
+
+class _PrimaryRaises(Source):
+    async def read(self) -> Batch:
+        raise ValueError("secret-primary-value")
 
 
 class _CancelCloseSource(Source):
@@ -183,6 +190,17 @@ class _CancelCloseSource(Source):
 def test_primary_must_be_source_or_none() -> None:
     with pytest.raises(CompositeSourceError, match="primary must implement Source"):
         CompositeSource(primary="not-a-source")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "channel_id", ["", "Primary", "bad id", "a" * (HARNESS_CHANNEL_ID_MAX_CHARS + 1), None]
+)
+def test_primary_channel_id_must_be_bounded_and_canonical(channel_id: object) -> None:
+    with pytest.raises(CompositeSourceError, match="primary_channel_id"):
+        CompositeSource(
+            primary=_ControlledSource(),
+            primary_channel_id=channel_id,  # type: ignore[arg-type]
+        )
 
 
 def test_enrichment_must_be_binding() -> None:
@@ -561,6 +579,8 @@ async def test_enrichment_error_batch_updates_only_that_health() -> None:
     assert health[0].state is ChannelHealthState.HEALTHY
     assert health[1].state is ChannelHealthState.DEGRADED
     assert health[1].dropped == 0
+    assert health[1].diagnostics == ("enrichment read returned error (enrichment_error)",)
+    assert "secret-enrichment-error" not in str(health[1])
     await composite.aclose()
 
 
@@ -925,7 +945,10 @@ async def test_primary_health_transitions_to_healthy_after_clean_read() -> None:
     primary.set_batch(Batch(progressed=True))
     composite = CompositeSource(primary=primary)
     await composite.read()
-    assert composite.primary_health().state is ChannelHealthState.HEALTHY
+    health = composite.primary_health()
+    assert health.state is ChannelHealthState.HEALTHY
+    assert health.accepted == 0
+    assert health.last_success_at is not None
 
 
 @pytest.mark.asyncio
@@ -935,7 +958,21 @@ async def test_primary_health_transitions_to_degraded_on_error() -> None:
     await composite.read()
     health = composite.primary_health()
     assert health.state is ChannelHealthState.DEGRADED
-    assert "primary broke" in health.diagnostics[0]
+    assert health.diagnostics == ("primary read returned error (primary_err)",)
+    assert "secret-primary-error" not in str(health)
+
+
+@pytest.mark.asyncio
+async def test_primary_exception_is_recorded_without_changing_the_exception() -> None:
+    composite = CompositeSource(primary=_PrimaryRaises())
+
+    with pytest.raises(ValueError, match="secret-primary-value"):
+        await composite.read()
+
+    health = composite.primary_health()
+    assert health.state is ChannelHealthState.FAILED
+    assert health.diagnostics == ("primary read failed (ValueError)",)
+    assert "secret-primary-value" not in str(health)
 
 
 @pytest.mark.asyncio
@@ -1007,7 +1044,10 @@ async def test_health_transitions_to_failed_on_exception() -> None:
         enrichments=[EnrichmentBinding(source=_BoomSource(), declaration=_decl("h"))],
     )
     await composite.read()
-    assert composite.channel_health()[0].state is ChannelHealthState.FAILED
+    health = composite.channel_health()[0]
+    assert health.state is ChannelHealthState.FAILED
+    assert health.diagnostics == ("enrichment read failed (ValueError)",)
+    assert "secret-enrichment-value" not in str(health)
 
 
 @pytest.mark.asyncio
@@ -1061,12 +1101,47 @@ def test_health_tracker_diagnostics_bounded_and_sanitized() -> None:
         assert len(d) <= 240
 
 
+def test_health_tracker_diagnostics_are_terminal_safe() -> None:
+    tracker = ChannelHealthTracker("h")
+    tracker.mark_failed("\n\t\x00")
+    tracker.mark_failed("first\nsecond\tthird")
+
+    assert tracker.snapshot().diagnostics == (
+        "channel diagnostic unavailable",
+        "first second third",
+    )
+
+
 def test_health_tracker_dropped_counter() -> None:
     tracker = ChannelHealthTracker("h")
     tracker.drop()
     tracker.drop()
     snap = tracker.snapshot()
     assert snap.dropped == 2
+
+
+def test_health_tracker_counters_saturate() -> None:
+    tracker = ChannelHealthTracker("h")
+    tracker.record_accepted(HARNESS_CHANNEL_HEALTH_COUNTER_MAX)
+    tracker.record_accepted()
+    tracker.drop(HARNESS_CHANNEL_HEALTH_COUNTER_MAX)
+    tracker.drop()
+
+    snap = tracker.snapshot()
+    assert snap.accepted == HARNESS_CHANNEL_HEALTH_COUNTER_MAX
+    assert snap.dropped == HARNESS_CHANNEL_HEALTH_COUNTER_MAX
+
+
+@pytest.mark.parametrize("field", ["accepted", "dropped"])
+def test_channel_health_rejects_unbounded_counters(field: str) -> None:
+    with pytest.raises(ValueError, match="bounded"):
+        ChannelHealth(channel_id="h", **{field: HARNESS_CHANNEL_HEALTH_COUNTER_MAX + 1})
+
+
+@pytest.mark.parametrize("at", [True, float("nan"), float("inf"), float("-inf"), -1])
+def test_health_tracker_rejects_invalid_success_times(at: object) -> None:
+    with pytest.raises(ValueError, match="success time"):
+        ChannelHealthTracker("h").record_success(at=at)  # type: ignore[arg-type]
 
 
 def test_health_snapshot_is_immutable() -> None:

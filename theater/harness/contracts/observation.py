@@ -59,6 +59,7 @@ from theater.provenance import TranscriptProvenance
 from theater.trajectory import TrajectoryCapabilities
 
 if TYPE_CHECKING:
+    from theater.harness.contracts.channels import ChannelDeclaration
     from theater.harness.contracts.manifest import EnrichmentManifest
     from theater.harness.contracts.source import Source
 
@@ -142,6 +143,10 @@ class HarnessObserver(ABC):
     def enrichment_manifests(self) -> tuple[EnrichmentManifest, ...]:
         """Return immutable declared enrichment manifests."""
         return ()
+
+    def primary_channel_declaration(self) -> ChannelDeclaration | None:
+        """Return the declared durable channel when one exists."""
+        return None
 
     def open_source(
         self,

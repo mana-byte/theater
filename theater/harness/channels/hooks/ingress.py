@@ -15,7 +15,7 @@ from theater.harness.channels.hooks.callbacks import HookCallbackRunner
 from theater.harness.channels.hooks.inbox import HookDelivery, HookEnqueueResult, HookInbox
 from theater.harness.channels.hooks.source import HookSource
 from theater.harness.contracts.callbacks import HookCorrelationContext
-from theater.harness.contracts.channels import HookBinding
+from theater.harness.contracts.channels import ChannelHealth, HookBinding
 from theater.harness.contracts.manifest import EnrichmentManifest, HookChannelManifest
 
 if TYPE_CHECKING:
@@ -194,6 +194,9 @@ class HookRuntime:
 
     def drop_participant(self, participant_id: str) -> None:
         self._inbox.drop_participant(participant_id)
+
+    def health_snapshot(self, participant_id: str) -> tuple[ChannelHealth, ...]:
+        return self._inbox.health_snapshot(participant_id)
 
     async def aclose(self) -> None:
         if self._closed:

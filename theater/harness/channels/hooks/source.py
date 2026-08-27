@@ -154,6 +154,10 @@ class HookSource(Source):
         tracker = self._inbox.health(self._participant_id, self._channel.declaration.id)
         return tracker.snapshot() if tracker is not None else None
 
+    def health_snapshot(self) -> tuple[ChannelHealth, ...]:
+        health = self.channel_health()
+        return () if health is None else (health,)
+
     async def aclose(self) -> None:
         self._closed = True
 

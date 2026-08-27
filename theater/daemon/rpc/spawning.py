@@ -20,6 +20,7 @@ from theater.daemon.spawning.models import SpawnRequest
 from theater.harness import (
     HARNESSES,
     describe,
+    normalize,
     supports_model,
     supports_reasoning,
 )
@@ -105,7 +106,18 @@ async def _harnesses(daemon, params: dict) -> list[dict]:
     failure this method exists to prevent, and it becomes real the moment the
     set stops being a hardcoded literal.
     """
-    return describe()
+    runtime: dict[str, dict[str, tuple]] = {}
+    for participant in daemon.registry.list():
+        snapshot = daemon.observer.channel_health_snapshot(participant.id)
+        seen = {health.channel_id for health in snapshot}
+        supplemental = (
+            *daemon.hook_runtime.health_snapshot(participant.id),
+            *daemon.otel_runtime.health_snapshot(participant.id),
+        )
+        health = (*snapshot, *(item for item in supplemental if item.channel_id not in seen))
+        if health:
+            runtime.setdefault(normalize(participant.harness), {})[participant.id] = health
+    return describe(runtime=runtime)
 
 
 @method("models")

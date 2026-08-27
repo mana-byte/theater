@@ -57,8 +57,10 @@ from theater.harness.contracts.manifest import (
 from theater.harness.contracts.observation import ScreenConfidence, ScreenKind, ScreenReading
 from theater.harness.contracts.source import Batch, Source
 from theater.harness.contracts.trajectory import TrajectoryFact
+from theater.harness.loading.models import LoadedPlugin
 from theater.harness.manifests.compiler import compile_manifest
 from theater.harness.manifests.validation import ManifestValidationError
+from theater.harness.registry import _PLUGINS, HARNESSES
 from theater.protocol import RemoteError
 from theater.trajectory.enums import TrajectoryKind
 
@@ -152,6 +154,27 @@ def _manifest(
             ),
             screen=ScreenManifest(classifier=_screen),
             enrichments=(channel,),
+        ),
+    )
+
+
+def _manifest_with_unavailable_hook() -> HarnessManifest:
+    built = _manifest()
+    channel = built.observation.hook_channels[0]
+    return HarnessManifest(
+        api_version=built.api_version,
+        binary=built.binary,
+        icon=built.icon,
+        launch=built.launch,
+        observation=ObservationManifest(
+            primary=built.observation.primary,
+            screen=built.observation.screen,
+            enrichments=(
+                HookChannelManifest(
+                    declaration=channel.declaration,
+                    unavailable_reason="native hooks are unavailable",
+                ),
+            ),
         ),
     )
 
@@ -283,6 +306,35 @@ def test_hook_inbox_transport_dedupes_only_delivery_id() -> None:
     ]
 
 
+def test_hook_runtime_health_snapshot_is_read_only_and_bounded() -> None:
+    channel = _manifest(max_queue=1).observation.hook_channels[0]
+    runtime = HookRuntime(lambda _participant_id, _channel_id: True)
+
+    runtime.enqueue(
+        participant_id="participant",
+        channel=channel,
+        event="tool.finished",
+        payload={"native_id": "one", "secret": "do not expose"},
+        delivery_id="one",
+        native_id="one",
+    )
+    runtime.enqueue(
+        participant_id="participant",
+        channel=channel,
+        event="tool.finished",
+        payload={"native_id": "two"},
+        delivery_id="two",
+        native_id="two",
+    )
+
+    (health,) = runtime.health_snapshot("participant")
+    assert health.channel_id == "native-hooks"
+    assert health.accepted == 1
+    assert health.dropped == 1
+    assert health.last_success_at is not None
+    assert health.diagnostics == ("hook inbox overflow",)
+
+
 @pytest.mark.asyncio
 async def test_hook_source_rejects_undeclared_signal_and_malformed_output() -> None:
     def undeclared(context: HookDecodeContext) -> tuple[ChannelFact, ...]:
@@ -350,10 +402,23 @@ async def _event(client: DaemonClient, *, pid: str, token: str, native_id: str, 
 
 @pytest.mark.asyncio
 async def test_hook_transport_credentials_bounds_decode_and_cleanup(  # noqa: PLR0915
-    theater_home, tmp_path
+    theater_home, tmp_path, monkeypatch
 ) -> None:
-    harness = compile_manifest("acme", _manifest(max_queue=2))
+    manifest = _manifest(max_queue=2)
+    harness = compile_manifest("acme", manifest)
     daemon = Daemon(harnesses={"acme": harness})
+    monkeypatch.setitem(HARNESSES, "acme", harness)
+    monkeypatch.setitem(
+        _PLUGINS,
+        "acme",
+        LoadedPlugin(
+            path=tmp_path / "acme",
+            source="local",
+            name="acme",
+            harness=harness,
+            manifest=manifest,
+        ),
+    )
     await daemon.start()
     participant = daemon.registry.create_spawned(harness="acme", cwd=str(tmp_path), pid="p-hook")
     plan = install_hook_plan(LaunchPlan(argv=["acme"]), participant, harness.observer)
@@ -398,6 +463,24 @@ async def test_hook_transport_credentials_bounds_decode_and_cleanup(  # noqa: PL
         assert duplicate == {"ok": True, "duplicate": True, "dropped": False}
         assert native_duplicate == {"ok": True, "duplicate": False, "dropped": False}
         assert overflow == {"ok": True, "duplicate": False, "dropped": True}
+        rows = await client.call("harnesses")
+        row = next(row for row in rows if row["name"] == "acme")
+        runtime = row["runtime"]
+        assert runtime["state"] == "active"
+        participant_runtime = runtime["participants"][0]
+        assert participant_runtime["participant_id"] == participant.id
+        assert participant_runtime["channels"] == [
+            {
+                "id": "native-hooks",
+                "state": "degraded",
+                "diagnostics": ["hook inbox overflow"],
+                "dropped": 1,
+                "accepted": 2,
+                "last_success_at": pytest.approx(time.time(), abs=2),
+            }
+        ]
+        assert credential.token not in str(runtime)
+        assert "native_id" not in str(runtime)
         assert await _event(
             client,
             pid=participant.id,
@@ -927,6 +1010,57 @@ async def test_hook_source_requires_credential_and_allows_hook_only_manifest(
     assert [fact.native_id for fact in (await source.read()).trajectory] == ["hook-only"]
     await source.aclose()
     await daemon.aclose()
+
+
+@pytest.mark.asyncio
+async def test_primary_manifest_health_is_reported_without_active_enrichments(
+    theater_home, tmp_path, monkeypatch
+) -> None:
+    manifest = _manifest_with_unavailable_hook()
+    harness = compile_manifest("acme", manifest)
+    daemon = Daemon(harnesses={"acme": harness})
+    monkeypatch.setitem(HARNESSES, "acme", harness)
+    monkeypatch.setitem(
+        _PLUGINS,
+        "acme",
+        LoadedPlugin(
+            path=tmp_path / "acme",
+            source="local",
+            name="acme",
+            harness=harness,
+            manifest=manifest,
+        ),
+    )
+    await daemon.start()
+    client = await _client(daemon)
+    source = None
+    try:
+        participant = daemon.registry.create_spawned(
+            harness="acme", cwd=str(tmp_path), pid="p-primary-health"
+        )
+        source = daemon.observer._open_source(participant.id, harness.observer)
+        assert isinstance(source, _Primary)
+        daemon.observer._record_channel_health(participant.id, source)
+
+        rows = await client.call("harnesses")
+        row = next(row for row in rows if row["name"] == "acme")
+        [starting] = row["runtime"]["participants"][0]["channels"]
+        assert starting["id"] == "primary"
+        assert starting["state"] == "starting"
+        assert starting["last_success_at"] is None
+
+        await daemon.observer._read_source(participant.id, source)
+        rows = await client.call("harnesses")
+        row = next(row for row in rows if row["name"] == "acme")
+        [healthy] = row["runtime"]["participants"][0]["channels"]
+        assert healthy["state"] == "healthy"
+        assert healthy["accepted"] == 0
+        assert healthy["last_success_at"] is not None
+    finally:
+        if source is not None:
+            await source.aclose()
+        await client.aclose()
+        await daemon.aclose()
 
 
 @pytest.mark.asyncio

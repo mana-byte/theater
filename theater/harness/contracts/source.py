@@ -40,6 +40,7 @@ from theater.constants.trajectory import (
     TRAJECTORY_CURSOR_MAX_BYTES,
     TRAJECTORY_PAGE_RECORD_LIMIT,
 )
+from theater.harness.contracts.channels import ChannelHealth
 from theater.harness.contracts.events import Event
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.models import Status
@@ -335,6 +336,10 @@ class Source(ABC):
     async def probe_identity_loss(self) -> IdentityLossEvidence | None:
         """Return bounded heuristic rotation evidence, never a new binding."""
         return None
+
+    def health_snapshot(self) -> tuple[ChannelHealth, ...]:
+        """Return immutable participant-scoped channel health."""
+        return ()
 
     def commit_attachment(self) -> None:
         """Adopt the attachment most recently returned by ``read``/``refresh``.
