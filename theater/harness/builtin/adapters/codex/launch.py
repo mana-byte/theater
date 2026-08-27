@@ -15,26 +15,23 @@ from theater.harness.base import (
 )
 from theater.models import BadRequest
 
+from .constants import CODEX_BINARY
+
 if TYPE_CHECKING:
     from theater.models import Participant
 
 
 class CodexHarness(Harness):
     name = "codex"
-    binary = "codex"
-    #: A filled ring. Not another asterisk-family glyph: `✻` is taken by Claude Code.
+    binary = CODEX_BINARY
     icon = "\u25c9"
-    #: A spelling that does not normalize is observed as nothing at all, so these are not cosmetic.
     aliases = ("codex-cli", "codex_cli", "openai-codex", "Codex")
     resume_strategy = "fork"
 
     def __init__(self, root: Path | None = None):
         from .observer import CodexObserver
 
-        #: The observer's business alone; nothing about launching depends on it.
         self.observer = CodexObserver(root=root)
-
-    # ---- launching ------------------------------------------------------
 
     def plan_launch(
         self,
@@ -51,7 +48,6 @@ class CodexHarness(Harness):
             raise BadRequest(f"approval must be one of {', '.join(APPROVALS)}, got {approval!r}")
         command = json.dumps(theater_binary())
         args = json.dumps(["mcp", "--id", participant_id])
-        # `codex fork <SESSION_ID>` preserves context under a fresh native session identity.
         argv = [
             "codex",
         ]
@@ -84,13 +80,6 @@ class CodexHarness(Harness):
         predecessor: Participant,
         trusted_session_owners: Sequence[Participant],
     ) -> ResumeLaunchOverlay:
-        """Validate a predecessor's transcript domain against the observer root.
-
-        Conditional: a predecessor with no domain is the normal case for Codex
-        and returns an empty overlay. A predecessor with a domain is a new
-        explicit constraint — Codex does not enforce this at bind time, so
-        this is a new check, not a reuse of an existing one.
-        """
         if predecessor.transcript_domain is None:
             return ResumeLaunchOverlay()
         root = self.observer.root.resolve()  # type: ignore[attr-defined]

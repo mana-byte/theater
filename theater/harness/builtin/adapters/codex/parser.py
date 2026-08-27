@@ -18,14 +18,13 @@ from .constants import (
     CODEX_SESSION_META_RECORD_TYPE,
     CODEX_THREAD_SETTINGS_EVENT_TYPE,
 )
-from .trajectory import (
-    _apply_patch_paths,
+from .paths import _apply_patch_paths, _patch_change_paths
+from .values import (
     _codex_mcp_identity,
     _codex_timing,
     _codex_trajectory_turn_id,
     _epoch,
     _flatten,
-    _patch_change_paths,
     _trajectory_float,
     _trajectory_id,
     _turn_id,
@@ -94,7 +93,6 @@ class CodexParserMixin:
             return self._event(payload, ts, index, clip_text=clip_text)
         if kind == "response_item":
             return self._item(payload, ts, index, clip_text=clip_text)
-        # session_meta, turn_context, world_state: bookkeeping.
         return []
 
     def _remember_context(self, record: dict, payload: dict) -> None:
@@ -227,7 +225,6 @@ class CodexParserMixin:
             ]
         if ptype == "agent_message":
             if payload.get("phase") == "final_answer":
-                # Repeated by the task_complete that follows; emitting both doubles each reply.
                 return []
             raw = payload.get("message") if isinstance(payload.get("message"), str) else ""
             return [
@@ -283,7 +280,6 @@ class CodexParserMixin:
                 )
             ]
         if ptype in ("mcp_tool_call_begin", "mcp_tool_call_end"):
-            # Only visibility into MCP use, Theater tools included: never in response_items.
             invocation = payload.get("invocation")
             invocation = invocation if isinstance(invocation, dict) else {}
             tool_name = ".".join(
@@ -314,7 +310,6 @@ class CodexParserMixin:
         return []
 
     def _mcp_result(self, result) -> str:
-        """Unwrap the Rust-style `{"Ok"|"Err": …}` an MCP call comes back as."""
         if not isinstance(result, dict):
             return "" if result is None else json.dumps(result, default=str)
         ok = result.get("Ok")
@@ -326,7 +321,6 @@ class CodexParserMixin:
         return json.dumps(result, default=str)
 
     def _token_count(self, payload: dict, ts: float | None, index: int) -> list[Event]:
-        """Extract per-turn usage from a token_count event_msg."""
         info = payload.get("info")
         if not isinstance(info, dict):
             return []
@@ -384,7 +378,6 @@ class CodexParserMixin:
             name = payload.get("name")
             paths: tuple[EventPath, ...] = ()
             if name == "apply_patch":
-                # Patch markers are structured, not prose — path extraction reads a field.
                 raw_input = payload.get("input")
                 paths = _apply_patch_paths(
                     raw_input if isinstance(raw_input, str) else "",
@@ -400,7 +393,6 @@ class CodexParserMixin:
                 )
             ]
         if ptype in ("custom_tool_call_output", "function_call_output"):
-            # No tool name: record carries only `call_id`; resolving needs state across lines.
             raw = _flatten(payload.get("output"))
             return [
                 Event(
@@ -411,5 +403,4 @@ class CodexParserMixin:
                     raw_index=index,
                 )
             ]
-        # `message` duplicates event_msg and `reasoning` is private thinking; both dropped.
         return []
