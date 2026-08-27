@@ -1,6 +1,27 @@
 # RC3 plugin rework
 
-Status: implementation plan for `mana/rc3-plugin-rework`.
+Status: implemented structural scope on `mana/rc3-plugin-rework`; native enrichment deferred.
+
+## RC3 implementation outcome
+
+The evidence audit in `docs/rc3_upstream_signals.md` narrowed this plan before transport work began.
+The branch implements the durable, testable portion:
+
+- all four built-in entrypoints are thin scanner modules backed by responsibility-scoped adapter
+  packages;
+- `ParticipantObservationContext` gives shipped observers one typed source-opening boundary while
+  retaining signature-based compatibility for existing local plugins;
+- duplicated Claude/Codex value and timestamp normalization has one shared implementation;
+- OpenCode's launch-local session receipt now uses the existing authenticated generic transcript
+  receipt transport and supports exact root-session changes;
+- characterization and contract tests pin launch, observation, history, trajectory, compatibility,
+  and receipt behavior.
+
+`CompositeSource`, a generic live-event inbox, native harness OTel ingestion, and richer hook
+decoders are deliberately not implemented in RC3. No verified integration currently satisfies the
+identity, boundedness, live-fixture, and exporter-fan-out requirements below. Adding unused channel
+machinery would create an untested second observation architecture. The design sections remain the
+criteria for a future evidence-backed implementation, not claims about current code.
 
 ## Goal
 

@@ -333,13 +333,16 @@ So job 1 is a replaceable seam and job 2 is not. Job 1 belongs to a
 `HarnessObserver` (`theater/harness/contracts/observation.py`, re-exported by
 the `harness/observation.py` facade) which every harness carries
 as `harness.observer`, and which the reducer holds *instead of* the harness — so
-the launch path and the observe path share no object. `observer.open_source()`
+the launch path and the observe path share no object. The reducer passes a frozen
+`ParticipantObservationContext` to `observer.open_source_context()`. Shipped adapters consume that
+typed context directly; the dispatcher still adapts it to `open_source_for()` or `open_source()`
+for existing third-party plugins. `observer.open_source()`
 returns a `Source` (`theater/harness/contracts/source.py`, re-exported by
 `harness/source.py`); the default, inherited from
 `TranscriptObserver`, is `TranscriptSource`, the file tailing that used to live
 inline in the observer. An observer that replaces it returns `Batch(events,
 progressed, status, attached, waiting)` from `read()` and the reducer's policy
-runs unchanged on top. `opencode.py` is the one shipped adapter that does, and
+runs unchanged on top. The OpenCode adapter is the one shipped adapter that does, and
 its source keys off `event.seq` in the database instead of a file position.
 
 Three fields in that contract are load-bearing:
@@ -374,7 +377,7 @@ skipped. A session that has been running for an hour before adoption does not
 replay an hour of history onto the bus. `skipped_records` appears in the
 `agent.transcript` bus event so the gap is explicit rather than silent.
 
-Spawned sessions get launch-local `SessionStart` and `PreCompact` hooks
+Spawned Claude sessions get launch-local `SessionStart` and `PreCompact` hooks
 that call `theater transcript-receipt` (the generic entry point) with a
 private token file. The token is valid for the lifetime of the live
 participant, not for a wall-clock TTL; death and GC delete the token and
@@ -384,6 +387,11 @@ harness rotates. Live Claude sessions shipped in v3.2.0 have
 `settings.json` files on disk that invoke `theater claude-receipt` by that
 exact name; the old command name and `claude.receipt` RPC are kept as
 forwarding aliases so those sessions keep working.
+
+Spawned OpenCode sessions use the same authenticated receipt transport. Their launch-local plugin
+publishes each root `session.created` ID, and the database source waits for the matching row before
+committing `opencode://<session-id>`. A later root session receipt stages a session switch without
+falling back to another same-cwd row.
 
 Vibe cold spawns get a Theater-owned isolated transcript save directory with a
 signed marker naming the original participant. Resumes may re-enter that domain
@@ -586,6 +594,7 @@ one. A harness constructs its observer and carries it as `harness.observer`.
 | `native_children` | observer | does it spawn its own subagents we should show |
 | `is_idle_screen` | observer | does this rendered screen mean "waiting for a human" |
 | `open_source` | observer | where to read from, when it is not a transcript file |
+| `open_source_context` | observer | open from typed participant identity/location facts |
 
 The three transcript methods are abstract on `TranscriptObserver` and absent
 from `HarnessObserver`, which is the point of the split. `OpenCodeHarness` used
@@ -594,9 +603,10 @@ output is a shared SQLite database and none of those questions has an answer for
 it — four stubs to say "not applicable" meant the interface was describing one
 particular way of observing rather than observation itself.
 
-Every adapter is a plugin file, loaded by `harness/plugins.py` under one
-contract. The four that ship — `claude`, `codex`, `opencode`, `vibe` — live in
-`builtin/plugins/` and are read by the same scanner as anything in
+Every adapter has a plugin entrypoint loaded by `harness/plugins.py` under one
+contract. The four that ship — `claude`, `codex`, `opencode`, `vibe` — have thin files in
+`builtin/plugins/`; their implementations are responsibility-scoped packages under
+`builtin/adapters/`. The entrypoints are read by the same scanner as anything in
 `$THEATER_HOME/harnesses/`. There is no built-in tier. The only asymmetry is
 what happens when one will not import: a shipped plugin failing is fatal (the
 install is broken and hiding it makes the bug report unreadable), a local one
@@ -608,7 +618,7 @@ harness without a parser. A config schema can only express the shallow half of
 an adapter, so the deep half was untested-by-construction: nothing that shipped
 used the extension point. Now the shipped adapters exercise it on every run.
 
-The three are genuinely different, which is the interface's real test. Claude
+The four are genuinely different, which is the interface's real test. Claude
 Code writes one JSONL per project directory. Vibe rotates its session directory
 per turn, which is the entire reason `RELOCATE_TIMEOUT` exists. Codex writes
 date-sharded rollout files and marks a turn end with an explicit
@@ -722,10 +732,12 @@ theater/
 │   ├── schema.py       table metadata, the one place columns are declared
 │   └── migrations/     alembic env + versions/
 ├── harness/
-│   ├── contracts/      harness, source, observation, events, and trajectory facts
+│   ├── contracts/      harness, source, typed observation context, events, trajectory facts
+│   ├── normalization/  bounded cross-harness value and timestamp conversion
 │   ├── registry/       lookup, install, capabilities, claims
 │   ├── transcript/     source, observer, attachment, bounded history reader
-│   ├── builtin/plugins/  monolithic Claude, Codex, opencode, and Vibe adapters
+│   ├── builtin/adapters/  responsibility-scoped implementations for four shipped adapters
+│   ├── builtin/plugins/   thin scanner entrypoints and compatibility exports
 │   ├── base.py · observation.py · source.py   compatibility facades
 │   └── plugins.py      plugin loader
 ├── mcp/                server composition, session, toolsets, compatibility facade
@@ -746,7 +758,8 @@ theater/
 The modular refactor decomposed the daemon's monolithic observer, methods,
 store, and server into packages (`observation/`, `rpc/`, `persistence/`,
 `runtime/`, `spawning/`, `worktrees/`, `trajectory/`), split the harness
-contracts and transcript into sub-packages, moved MCP tool bodies into
+contracts, transcript mechanics, normalization, and built-in adapters into sub-packages, moved MCP
+tool bodies into
 `toolsets/`, and broke the régie into controllers, projections, render helpers,
 and widgets. Compatibility facades remain only for established import paths.
 

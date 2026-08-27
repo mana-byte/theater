@@ -36,7 +36,7 @@ is known. It does not exist today and is deferred below; do not conflate it with
 
 The checked-out Claude repository is documentation/plugins, not the CLI runtime: no upstream
 transcript writer or OTel exporter implementation is present. Theater's existing durable contract is
-`theater/harness/builtin/plugins/claude.py:ClaudeCodeObserver`: it reads
+`theater/harness/builtin/adapters/claude/observer.py:ClaudeCodeObserver`: it reads
 `~/.claude/projects/<slugged-cwd>/<sessionId>.jsonl`. Its
 `validate_transcript_receipt` requires `session_id`/ `sessionId` and
 `transcript_path`/ `transcriptPath`, validates JSONL location/stem/cwd and checks transcript
@@ -79,7 +79,7 @@ or a stable turn/request join. Treat all OTel claims as unverified and never rep
 
 ## Codex
 
-`theater/harness/builtin/plugins/codex.py:CodexObserver` consumes
+`theater/harness/builtin/adapters/codex/observer.py:CodexObserver` consumes
 `~/.codex/sessions/YYYY/MM/DD/rollout-<local-ISO>-<session_id>.jsonl`.
 `session_meta.payload.session_id` names the rollout; an originating pane process holding the file
 open is exact live proof. Same-cwd discovery is intentionally heuristic.
@@ -128,7 +128,8 @@ redaction, or rollout-ID mapping is proven. Defer OTel.
 
 ## OpenCode
 
-`theater/harness/builtin/plugins/opencode.py:OpenCodeSource` opens the shared database read-only.
+`theater/harness/builtin/adapters/opencode/source.py:OpenCodeSource` opens the shared database
+read-only.
 It consumes `event(aggregate_id, seq, type, data)` as a monotonic live feed and `message`/`part`
 for history, excluding child sessions via `parent_id IS NULL`. Upstream confirms the durable shape
 in `packages/core/src/event/sql.ts:EventTable` and
@@ -139,18 +140,17 @@ does not promise legacy SQLite spellings consumed by Theater.
 
 ### Plugin receipt and richer events
 
-The existing OpenCode receipt is launch-local but local-only: `OpenCodeHarness.plan_launch` writes a
-generated config and `TheaterSessionReceipt` plugin, launching with
-`OPENCODE_CONFIG=<generated path>`. The plugin atomically writes a local receipt file rather than
-invoking Theater's shipped `transcript-receipt` command. Upstream
+RC3 migrated the OpenCode receipt to the shared authenticated transport.
+`OpenCodeHarness.plan_launch` writes a generated config and `TheaterSessionReceipt` plugin,
+launching with `OPENCODE_CONFIG=<generated path>`. The plugin invokes Theater's shipped
+`transcript-receipt` command with the core-owned token file and remains fail-open. Upstream
 `packages/opencode/src/config/config.ts` merges `OPENCODE_CONFIG` after global config;
 `packages/web/src/content/docs/plugins.mdx` documents configured file plugins.
 `packages/sdk/js/src/gen/types.gen.ts:EventSessionCreated` and
 `packages/schema/src/v1/session.ts:SessionInfo` prove the receipt's
-`event.properties.info.id` and `parentID` fields. The receipt ignores children and atomically
-writes the exact root session ID, which Theater then verifies in the database. Its RC3 migration
-candidate is that same launch-local plugin calling `theater transcript-receipt` with the existing
-private token, only if hook failure remains fail-open.
+`event.properties.info.id` and `parentID` fields. The receipt ignores children and submits the exact
+root session ID; the source waits for that database row before committing the attachment. A later
+root receipt can move the same live process to a new session without cwd fallback.
 
 The documented v1 `packages/plugin/src/index.ts:Hooks` API has an async `event` callback plus
 typed `chat.message`, `tool.execute.before`, and `tool.execute.after` callbacks. It documents
@@ -174,7 +174,7 @@ the endpoint; defer native OTel.
 
 ## Mistral Vibe
 
-`theater/harness/builtin/plugins/vibe.py:VibeObserver` reads
+`theater/harness/builtin/adapters/vibe/observer.py:VibeObserver` reads
 `~/.vibe/logs/session/session_*/messages.jsonl` and `meta.json` (authoritative session ID, cwd,
 child sessions, cumulative usage). Theater's signed isolated
 `VIBE_SESSION_LOGGING__SAVE_DIR` domain is exact attachment evidence. Vibe transcript records lack
@@ -224,7 +224,7 @@ overflow are channel health, never completion authority.
 |---|---|---|
 | Generic transcript receipt transport | already implemented; retain/test | `transcript.receipt`, token lifecycle, and generic end-to-end tests already exist; no new transport implementation. |
 | Claude receipt migration | already implemented; retain compatibility alias | Claude already reaches the generic transport through `claude-receipt`; retain the legacy CLI/RPC aliases. |
-| OpenCode receipt migration | implement now | Migrate its launch-local plugin from local-file receipt to `transcript-receipt` only if asynchronous plugin failure remains fail-open. |
+| OpenCode receipt migration | implemented in RC3 | Generic receipt; asynchronous failure remains fail-open. |
 | Generic richer hook/event inbox | defer | It is new unused infrastructure while every richer harness decoder remains deferred; that violates the RC3 no-speculative-mechanics rule. |
 | Claude richer hooks | defer | Documentation-only payloads; no captured installed payload, turn key, or retry contract. |
 | Codex richer hooks | defer | Exact schemas and bounds exist, but launch-only config/trust and installed-version capture are unverified. |
@@ -235,6 +235,6 @@ overflow are channel health, never completion authority.
 | OpenCode native OTel | defer | OTLP source exists, but one endpoint and no stable session/turn contract or fan-out evidence. |
 | Vibe native OTel | unsupported | One global provider/exporter is installed; cannot satisfy no-exporter-theft in RC3. |
 
-No `implement now` row is a claim of `SUPPORTED`: source/documentation evidence alone cannot mark a
-capability supported. Before any native OTel receiver, capture actual installed harness sessions with
-an exact participant token and an independently configured user exporter present.
+The implemented receipt row is an identity improvement, not a new trajectory capability. Before
+any native OTel receiver, capture actual installed harness sessions with an exact participant token
+and an independently configured user exporter present.

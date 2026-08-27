@@ -109,9 +109,11 @@ theater/
 │   └── migrations/     alembic env + versions/
 ├── harness/            plugin loader + adapters (no privileged built-in tier)
 │   ├── contracts/       Harness, Source, HarnessObserver, launch, events, trajectory facts
+│   ├── normalization/   shared bounded value and timestamp conversion
 │   ├── registry/       plugin lookup, install, capabilities, claims
 │   ├── transcript/     transcript-file source, observer, attachment, bounded history
-│   ├── builtin/plugins/  claude.py · codex.py · opencode.py · vibe.py
+│   ├── builtin/adapters/  modular Claude, Codex, OpenCode, and Vibe implementations
+│   ├── builtin/plugins/   thin scanner entrypoints and compatibility exports
 │   ├── base.py         compatibility facade — re-exports contracts
 │   ├── observation.py  compatibility facade — re-exports contracts + transcript
 │   ├── source.py       compatibility facade — re-exports contracts + transcript

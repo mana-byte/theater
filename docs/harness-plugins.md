@@ -10,8 +10,10 @@ régie palette.
 
 Every adapter Theater can drive is a plugin, including the four it ships:
 `claude`, `codex`, `opencode` and `vibe` live in
-`theater/harness/builtin/plugins/` and are loaded by the same scanner that reads
-yours. There is no built-in tier and no
+`theater/harness/builtin/plugins/` as thin scanner entrypoints and are loaded by the same scanner
+that reads yours. Their implementation packages live under
+`theater/harness/builtin/adapters/`; local plugins may remain one file. There is no built-in tier
+and no
 lighter-weight way to declare a harness in TOML.
 
 There used to be. A `[harness.<name>]` table could describe how to launch a CLI
@@ -37,11 +39,10 @@ A harness with no machine-readable transcript is still supported — its observe
 sets `has_transcript = False` and the daemon falls back to the screen for turn
 boundaries. That is a property of the adapter, not a second kind of adapter.
 
-The four shipped plugins are the best worked examples available. `vibe.py` is
-the shortest, `codex.py` shows a harness whose MCP wiring goes on the command
-line, `claude.py` shows one that needs a config file written first, and
-`opencode.py` shows one that writes no transcript file at all and reads its own
-SQLite event log instead.
+The four shipped adapter packages are the best worked examples available. Their `launch.py`,
+`observer.py`, `source.py`, `parser.py`, `trajectory.py`, and `screen.py` modules show each
+responsibility without requiring one giant plugin file. OpenCode is the database-backed example;
+Claude, Codex, and Vibe are transcript-backed examples.
 
 ## Where plugins live, and how they load
 
@@ -113,7 +114,7 @@ class NovaObserver(TranscriptObserver):
 HARNESS = NovaHarness()
 ```
 
-The split is not bookkeeping. `opencode.py` used to implement `find_transcript`,
+The split is not bookkeeping. The old OpenCode adapter implemented `find_transcript`,
 `session_id`, `parse` and `native_children` purely to return nothing, because
 its output is a shared SQLite database and none of those questions has an answer
 for it — a plugin that must write four stubs to say "not applicable" is being
@@ -829,9 +830,9 @@ launch; the field alone is necessary but not sufficient — the match is
 what makes the attachment trusted. **`proves_ownership` /
 `proven_transcript`** is another: a `TranscriptObserver` that can show
 a transcript is its own process's overrides both, and the source records
-the result as `proven` — trusted. The codex adapter uses this channel;
-see `proven_transcript` in `codex.py` and `correlation_for` in
-`source.py`. **Transcript receipts** are the third: a lifecycle hook
+the result as `proven` — trusted. The Codex adapter uses this channel; see
+`builtin/adapters/codex/identity.py` and `source.py`. **Transcript receipts** are the third: a
+lifecycle hook
 calls back into Theater with an opaque JSON payload, and the plugin's
 `validate_transcript_receipt` turns it into trusted transcript identity.
 See the section below.
@@ -894,6 +895,12 @@ The path must resolve under `paths.observation_dir(harness,
 participant_id)`. An existing symlink at the path is refused before
 writing, because the writer uses `O_TRUNC` which follows symlinks.
 
+The shipped OpenCode adapter uses this generic mechanism too. Its launch-local plugin submits the
+native root session ID from `session.created`; the validator returns an
+`opencode://<session-id>` candidate, and the source waits for that exact database row. Later root
+receipts may switch the same live process to a new session. Core still enforces token, participant,
+and ownership checks.
+
 ### Pre-flight
 
 The pre-flight check runs at spawn time, after `_build_plan` returns and
@@ -906,7 +913,7 @@ If your harness writes no transcript file, you have two options, and both
 change only the observer — `NovaHarness` above is already finished either
 way. If it keeps its history somewhere else — a database, a socket —
 subclass `HarnessObserver`, implement `open_source`, and keep
-`has_transcript = True`; `opencode.py` is the worked example. If it keeps no
+`has_transcript = True`; `builtin/adapters/opencode/` is the worked example. If it keeps no
 history at all, subclass `HarnessObserver`, set `has_transcript = False`, and
 the entire observer is `is_idle_screen`: the daemon stops looking for a file
 and reads the screen instead, and that method becomes the signal that a turn
@@ -1084,11 +1091,13 @@ they are not a promise that your plugin can answer them.
 
 These have safe defaults and do not need attention from a simple plugin:
 
-- `open_source_for` — the participant-aware variant of `open_source` that
-  receives Theater identity (participant id, session provenance, known
-  location, transcript domain, pane pid). The default forwards to
-  `open_source`; a harness with a process-local correlation channel
-  overrides it.
+- `open_source_context` — the typed source factory. It receives an immutable
+  `ParticipantObservationContext` containing participant id, cwd, session provenance, known
+  location/domain, creation floor, and pane pid. New adapters that need participant-specific facts
+  should override this method.
+- `open_source_for` — the legacy participant-aware factory. The compatibility dispatcher offers
+  only arguments named by its signature, so existing one-file plugins keep working. The default
+  forwards to `open_source`.
 - `screen_reading` — the structured replacement for `is_idle_screen` that
   distinguishes a prompt from an approval modal. The default derives a
   `ScreenReading` from the boolean, so a plugin that only implements
