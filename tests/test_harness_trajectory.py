@@ -7,11 +7,12 @@ from pathlib import Path
 
 import pytest
 
-import theater.harness.builtin.plugins.claude as claude_plugin
+import theater.harness.builtin.plugins.claude.parser as claude_parser
+import theater.harness.builtin.plugins.claude.usage as claude_plugin
 import theater.harness.builtin.plugins.codex as codex_plugin
 import theater.harness.builtin.plugins.opencode as opencode_plugin
 from theater.daemon.trajectory.project import fact_to_record
-from theater.harness.builtin.plugins.claude import ClaudeCodeObserver
+from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
 from theater.harness.builtin.plugins.codex import CodexObserver
 from theater.harness.contracts.trajectory import ParsedRecord
 from theater.provenance import TranscriptProvenance
@@ -43,7 +44,7 @@ def _facts(observer, lines: list[str]):
 
 @pytest.mark.parametrize(
     ("module", "observer"),
-    [(claude_plugin, ClaudeCodeObserver()), (codex_plugin, CodexObserver())],
+    [(claude_parser, ClaudeCodeObserver()), (codex_plugin, CodexObserver())],
 )
 def test_parse_record_decodes_each_line_once(module, observer, monkeypatch):
     original = module.json.loads

@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import pytest
+from shipped import ClaudeCodeHarness
 
 from theater import cli, paths
 from theater.cli.commands import identity as identity_mod
@@ -15,7 +16,7 @@ from theater.client import DaemonClient
 from theater.daemon.server import Daemon
 from theater.daemon.store import Store
 from theater.harness.base import Event, EventKind
-from theater.harness.builtin.plugins.claude import ClaudeCodeHarness, ClaudeCodeObserver
+from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
 from theater.harness.source import Batch, TranscriptSource
 from theater.protocol import RemoteError
 from theater.provenance import TranscriptProvenance

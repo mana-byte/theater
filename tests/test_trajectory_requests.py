@@ -13,7 +13,7 @@ from theater.constants.trajectory import (
 )
 from theater.daemon.trajectory.aggregation import capabilities_for, overview_for
 from theater.daemon.trajectory.project import event_to_fact, fact_to_record
-from theater.harness.builtin.plugins.claude import ClaudeCodeObserver
+from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
 from theater.harness.builtin.plugins.codex import CodexObserver
 from theater.harness.builtin.plugins.opencode import OpenCodeSource
 from theater.harness.builtin.plugins.vibe import VibeObserver

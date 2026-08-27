@@ -1,4 +1,4 @@
-"""The shipped adapters, as classes, for tests that need their own instance.
+"""The shipped adapters, as constructors, for tests that need their own instance.
 
 The adapters live in plugin files loaded by path rather than importable modules
 — that is the point of shipping them through the extension point (see
@@ -16,6 +16,11 @@ the registry's internals.
 from __future__ import annotations
 
 from theater.harness import builtin, plugins
+from theater.harness.builtin.plugins.claude.manifest import MANIFEST, manifest_for_root
+from theater.harness.builtin.plugins.claude.observer import (
+    ClaudeCodeObserver as _ClaudeCodeObserver,
+)
+from theater.harness.manifests.compiler import compile_manifest
 
 
 def harness_class(stem: str) -> type:
@@ -40,12 +45,16 @@ def observer_class(stem: str) -> type:
     return type(harness_class(stem)().observer)
 
 
-ClaudeCodeHarness = harness_class("claude")
+def _claude_harness(root=None):
+    return compile_manifest("claude", manifest_for_root(root) if root is not None else MANIFEST)
+
+
 CodexHarness = harness_class("codex")
 OpenCodeHarness = harness_class("opencode")
 VibeHarness = harness_class("vibe")
 
-ClaudeCodeObserver = observer_class("claude")
+ClaudeCodeHarness = _claude_harness
+ClaudeCodeObserver = _ClaudeCodeObserver
 CodexObserver = observer_class("codex")
 OpenCodeObserver = observer_class("opencode")
 VibeObserver = observer_class("vibe")
