@@ -15,6 +15,7 @@ forward attribute writes.
 
 from __future__ import annotations
 
+from theater.harness.contracts.context import ParticipantObservationContext
 from theater.harness.contracts.observation import (
     HarnessObserver,
     ScreenConfidence,
@@ -29,6 +30,7 @@ from theater.harness.transcript.observer import (
 
 __all__ = [
     "HarnessObserver",
+    "ParticipantObservationContext",
     "ScreenConfidence",
     "ScreenKind",
     "ScreenReading",

@@ -7,6 +7,7 @@ backward compatibility.
 
 from __future__ import annotations
 
+from theater.harness.contracts.context import ParticipantObservationContext
 from theater.harness.contracts.events import (
     Event,
     EventKind,
@@ -55,6 +56,7 @@ __all__ = [
     "LaunchPlan",
     "NativeChild",
     "ParsedRecord",
+    "ParticipantObservationContext",
     "ResumeLaunchOverlay",
     "ScreenConfidence",
     "ScreenKind",

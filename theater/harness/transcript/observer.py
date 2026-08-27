@@ -12,17 +12,29 @@ from __future__ import annotations
 
 import inspect
 from abc import abstractmethod
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Protocol, cast
 
+from theater.harness.contracts.context import ParticipantObservationContext
 from theater.harness.contracts.events import Event
 from theater.harness.contracts.observation import HarnessObserver
 from theater.harness.contracts.source import StreamPoint, TranscriptCandidate
 from theater.harness.contracts.trajectory import ParsedRecord
-from theater.provenance import TranscriptProvenance, normalize_provenance
+from theater.provenance import TranscriptProvenance
 
 if TYPE_CHECKING:
     from theater.harness.contracts.source import Source
+
+
+class _SourceObserver(Protocol):
+    def open_source(
+        self,
+        *,
+        cwd: str | None,
+        session_id: str | None = None,
+        after: float | None = None,
+    ) -> Source: ...
 
 
 def enumerate_transcript_candidates(
@@ -34,10 +46,57 @@ def enumerate_transcript_candidates(
 ) -> list[TranscriptCandidate]:
     """Compatibility dispatch for operator transcript candidate enumeration."""
     accepted = inspect.signature(observer.transcript_candidates).parameters
-    extra: dict[str, Any] = {}
     if "domain" in accepted:
-        extra["domain"] = domain
-    return observer.transcript_candidates(cwd=cwd, after=after, **extra)
+        return observer.transcript_candidates(cwd=cwd, domain=domain, after=after)
+    return observer.transcript_candidates(cwd=cwd, after=after)
+
+
+def _open_source_legacy(observer: object, context: ParticipantObservationContext) -> Source:
+    """Offer only the optional source-factory arguments an observer names."""
+    factory = getattr(observer, "open_source_for", None)
+    if callable(factory):
+        accepted = inspect.signature(factory).parameters
+        extra: dict[str, object] = {}
+        if "session_provenance" in accepted:
+            extra["session_provenance"] = context.session_provenance
+        elif "session_exact" in accepted:
+            extra["session_exact"] = context.session_provenance is TranscriptProvenance.EXACT
+        if "known_location" in accepted:
+            extra["known_location"] = context.known_location
+        if "transcript_domain" in accepted:
+            extra["transcript_domain"] = context.transcript_domain
+        if "pane_pid" in accepted:
+            extra["pane_pid"] = context.pane_pid
+        return factory(
+            participant_id=context.participant_id,
+            cwd=context.cwd,
+            session_id=context.session_id,
+            after=context.after,
+            **extra,
+        )
+    source_observer = cast(_SourceObserver, observer)
+    return source_observer.open_source(
+        cwd=context.cwd,
+        session_id=context.session_id,
+        after=context.after,
+    )
+
+
+def _explicit_context_factory(
+    observer: object,
+) -> Callable[[ParticipantObservationContext], Source] | None:
+    candidate = getattr(observer, "open_source_context", None)
+    if not callable(candidate):
+        return None
+    if isinstance(observer, HarnessObserver):
+        implementation = getattr(type(observer), "open_source_context", None)
+        instance_values = getattr(observer, "__dict__", {})
+        if (
+            implementation is HarnessObserver.open_source_context
+            and "open_source_context" not in instance_values
+        ):
+            return None
+    return candidate
 
 
 def open_participant_source(
@@ -73,29 +132,19 @@ def open_participant_source(
     dead one, whose pid the operating system is free to have reused —
     see :attr:`theater.models.Participant.live_pid`.
     """
-    factory = getattr(observer, "open_source_for", None)
-    if callable(factory):
-        accepted = inspect.signature(factory).parameters
-        extra: dict[str, Any] = {}
-        provenance = normalize_provenance(session_provenance)
-        if "session_provenance" in accepted:
-            extra["session_provenance"] = provenance
-        elif "session_exact" in accepted:
-            extra["session_exact"] = provenance is TranscriptProvenance.EXACT
-        if "known_location" in accepted:
-            extra["known_location"] = known_location
-        if "transcript_domain" in accepted:
-            extra["transcript_domain"] = transcript_domain
-        if "pane_pid" in accepted:
-            extra["pane_pid"] = pane_pid
-        return factory(
-            participant_id=participant_id,
-            cwd=cwd,
-            session_id=session_id,
-            after=after,
-            **extra,
-        )
-    return observer.open_source(cwd=cwd, session_id=session_id, after=after)
+    context = ParticipantObservationContext(
+        participant_id=participant_id,
+        cwd=cwd,
+        session_id=session_id,
+        after=after,
+        session_provenance=session_provenance,
+        known_location=known_location,
+        transcript_domain=transcript_domain,
+        pane_pid=pane_pid,
+    )
+    if factory := _explicit_context_factory(observer):
+        return factory(context)
+    return _open_source_legacy(observer, context)
 
 
 class TranscriptObserver(HarnessObserver):

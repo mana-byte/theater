@@ -51,6 +51,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from theater.harness.contracts.context import ParticipantObservationContext
 from theater.harness.contracts.launch import NativeChild
 from theater.harness.contracts.source import StreamPoint, TranscriptCandidate
 from theater.provenance import TranscriptProvenance
@@ -184,6 +185,17 @@ class HarnessObserver(ABC):
         What an override must not do is accept less.
         """
         return self.open_source(cwd=cwd, session_id=session_id, after=after)
+
+    def open_source_context(self, context: ParticipantObservationContext) -> Source:
+        """Open a source from the complete participant context."""
+        return self.open_source_for(
+            participant_id=context.participant_id,
+            cwd=context.cwd,
+            session_id=context.session_id,
+            after=context.after,
+            session_provenance=context.session_provenance,
+            known_location=context.known_location,
+        )
 
     @abstractmethod
     def is_idle_screen(self, capture: str) -> bool:

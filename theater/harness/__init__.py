@@ -44,6 +44,7 @@ from theater.harness.base import (
     status_after,
     theater_binary,
 )
+from theater.harness.contracts.context import ParticipantObservationContext
 from theater.harness.contracts.observation import (
     HarnessObserver,
     ScreenConfidence,
@@ -133,6 +134,7 @@ __all__ = [
     "History",
     "LaunchPlan",
     "NativeChild",
+    "ParticipantObservationContext",
     "Plugin",
     "PluginError",
     "ResumeLaunchOverlay",
