@@ -11,6 +11,8 @@ from theater.harness.builtin.adapters.claude.observer import ClaudeCodeObserver
 from theater.harness.builtin.adapters.claude.source import _ClaudeSource
 from theater.harness.builtin.adapters.codex.observer import CodexObserver
 from theater.harness.builtin.adapters.codex.source import _CodexSource
+from theater.harness.builtin.adapters.opencode.observer import OpenCodeObserver
+from theater.harness.builtin.adapters.opencode.source import OpenCodeSource
 from theater.harness.builtin.adapters.vibe.observer import VibeObserver
 from theater.harness.builtin.adapters.vibe.source import _VibeSource
 from theater.harness.contracts.context import ParticipantObservationContext
@@ -259,6 +261,8 @@ def _shipped_observer(name: str, tmp_path):
         return ClaudeCodeObserver(root=tmp_path)
     if name == "codex":
         return CodexObserver(root=tmp_path)
+    if name == "opencode":
+        return OpenCodeObserver(db=tmp_path / "opencode.db")
     return VibeObserver(root=tmp_path, correlation_root=tmp_path)
 
 
@@ -267,6 +271,7 @@ def _shipped_observer(name: str, tmp_path):
     [
         pytest.param("claude", _ClaudeSource, {}, id="claude"),
         pytest.param("codex", _CodexSource, {"pane_pid": 42}, id="codex"),
+        pytest.param("opencode", OpenCodeSource, {}, id="opencode"),
         pytest.param("vibe", _VibeSource, {"transcript_domain": "/logs"}, id="vibe"),
     ],
 )

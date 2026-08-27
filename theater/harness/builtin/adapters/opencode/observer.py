@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from theater import paths
+from theater.harness.contracts.context import ParticipantObservationContext
 from theater.harness.observation import HarnessObserver, ScreenReading
 from theater.harness.source import Source, TranscriptCandidate
 from theater.provenance import TranscriptProvenance
@@ -78,6 +79,16 @@ class OpenCodeObserver(HarnessObserver):
             receipt_expected=plugin_path.exists(),
             session_provenance=session_provenance,
             known_location=known_location,
+        )
+
+    def open_source_context(self, context: ParticipantObservationContext) -> Source:
+        return self.open_source_for(
+            participant_id=context.participant_id,
+            cwd=context.cwd,
+            session_id=context.session_id,
+            after=context.after,
+            session_provenance=context.session_provenance,
+            known_location=context.known_location,
         )
 
     def is_idle_screen(self, capture: str) -> bool:
