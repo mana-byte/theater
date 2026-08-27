@@ -71,7 +71,7 @@ class Harness(ABC):
     aliases: tuple[str, ...] = ()
     #: Set in __init__; an annotation, not abstract — manifest validation rejects omissions.
     observer: HarnessObserver
-    #: Class attribute, not signature introspection — opencode's -s drops --prompt.
+    #: Whether the native resume command can also receive a prompt.
     resume_takes_prompt: bool = True
     #: Native resume behaviour. Forking keeps context while minting a new transcript identity.
     resume_strategy: ResumeStrategy = "continue"
@@ -142,9 +142,9 @@ class Harness(ABC):
 
         ``trusted_session_owners`` is the complete trusted matching set
         (same canonical harness, same requested native session id, trusted
-        provenance), **including** the selected predecessor itself. The Vibe
-        marker commonly names that very row, so excluding it would break the
-        lineage check. These owners are normally dead:
+        provenance), **including** the selected predecessor itself. An isolation
+        marker may name that row, so excluding it would break the lineage check.
+        These owners are normally dead:
         ``_validate_resume_identity`` refuses live trusted matches before
         the hook runs.
         """
@@ -162,9 +162,8 @@ class Harness(ABC):
         """Model names this CLI reports it can run, for `theater models`.
 
         Optional, and concrete rather than abstract so that not implementing it
-        costs a plugin nothing. Two of the four shipped adapters cannot answer:
-        `claude` and `codex` offer no listing of any kind, and guessing on their
-        behalf would produce a catalogue that goes stale silently.
+        costs a plugin nothing. Guessing for a CLI that exposes no listing would
+        produce a catalogue that goes stale silently.
 
         This is an authoring aid, never a gate. What a spawn may use is the
         `[models]` allowlist in Theater's own config, which the user writes; the

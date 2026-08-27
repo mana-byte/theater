@@ -103,7 +103,7 @@ def trajectory_status(value: object, default: TrajectoryStatus) -> TrajectorySta
 
 
 def content_blocks_text(value: object) -> str:
-    """Flatten Claude/Codex content-block lists into trajectory text."""
+    """Flatten common content-block lists into trajectory text."""
     if isinstance(value, str):
         return safe_trajectory_text(value)
     if isinstance(value, list):

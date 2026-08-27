@@ -1,14 +1,4 @@
-"""The harnesses Theater ships with.
-
-`plugins/` holds them, and it is a directory of plugin *files* rather than a
-package of imported modules on purpose: they are loaded by the same loader,
-through the same `HARNESS = ...()` contract and the same validation, as
-anything a user drops in `$THEATER_HOME/harnesses`. Shipping them any other way
-would leave the extension point untested by everything except the extensions.
-
-So there is no "built-in tier". The only distinction the system still draws
-between adapters is `HarnessObserver.has_transcript`.
-"""
+"""Shipped package-manifest harnesses loaded through the public plugin path."""
 
 from __future__ import annotations
 

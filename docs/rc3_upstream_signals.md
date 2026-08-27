@@ -38,7 +38,7 @@ native integration satisfies the evidence and safety gates below. Do not conflat
 
 The checked-out Claude repository is documentation/plugins, not the CLI runtime: no upstream
 transcript writer or OTel exporter implementation is present. Theater's existing durable contract is
-`theater/harness/builtin/adapters/claude/observer.py:ClaudeCodeObserver`: it reads
+`theater/harness/builtin/plugins/claude/observer.py:ClaudeCodeObserver`: it reads
 `~/.claude/projects/<slugged-cwd>/<sessionId>.jsonl`. Its
 `validate_transcript_receipt` requires `session_id`/ `sessionId` and
 `transcript_path`/ `transcriptPath`, validates JSONL location/stem/cwd and checks transcript
@@ -81,7 +81,7 @@ or a stable turn/request join. Treat all OTel claims as unverified and never rep
 
 ## Codex
 
-`theater/harness/builtin/adapters/codex/observer.py:CodexObserver` consumes
+`theater/harness/builtin/plugins/codex/observer.py:CodexObserver` consumes
 `~/.codex/sessions/YYYY/MM/DD/rollout-<local-ISO>-<session_id>.jsonl`.
 `session_meta.payload.session_id` names the rollout; an originating pane process holding the file
 open is exact live proof. Same-cwd discovery is intentionally heuristic.
@@ -130,7 +130,7 @@ redaction, or rollout-ID mapping is proven. Defer OTel.
 
 ## OpenCode
 
-`theater/harness/builtin/adapters/opencode/source.py:OpenCodeSource` opens the shared database
+`theater/harness/builtin/plugins/opencode/source.py:OpenCodeSource` opens the shared database
 read-only.
 It consumes `event(aggregate_id, seq, type, data)` as a monotonic live feed and `message`/`part`
 for history, excluding child sessions via `parent_id IS NULL`. Upstream confirms the durable shape
@@ -177,7 +177,7 @@ the endpoint; defer native OTel.
 
 ## Mistral Vibe
 
-`theater/harness/builtin/adapters/vibe/observer.py:VibeObserver` reads
+`theater/harness/builtin/plugins/vibe/observer.py:VibeObserver` reads
 `~/.vibe/logs/session/session_*/messages.jsonl` and `meta.json` (authoritative session ID, cwd,
 child sessions, cumulative usage). Theater's signed isolated
 `VIBE_SESSION_LOGGING__SAVE_DIR` domain is exact attachment evidence. Vibe transcript records lack

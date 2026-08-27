@@ -22,7 +22,7 @@ class LoadedPlugin:
     """One discovered plugin, loaded or not.
 
     The path travels with the harness because the registry needs it for the
-    collision messages: "two definitions of `codex`" is only actionable if it
+    collision messages: "two definitions of `acme`" is only actionable if it
     says which two. `source` travels with it for the same reason.
 
     `name` is the canonical directory name, which is also the harness name. A

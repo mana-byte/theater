@@ -50,8 +50,8 @@ def observation_lookup(key: str) -> str | None:
 def harness_icon(name: str | None) -> str:
     """The one-character mark for a harness name.
 
-    Normalizes first, so an agent that registered as ``claude-code`` still
-    gets the Claude glyph. Unknown names are not an error here.
+    Normalizes first so aliases receive their canonical glyph. Unknown names
+    are not an error here.
     """
     harness = HARNESSES.get(normalize(name or ""))
     return harness.icon if harness else UNKNOWN_ICON

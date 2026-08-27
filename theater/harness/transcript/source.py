@@ -137,9 +137,8 @@ class TranscriptSource(Source):
     async def refresh(self) -> Batch:
         """Propose the newest transcript if the harness started a new one.
 
-        Located by cwd alone, ignoring the session id: vibe opens a new session
-        directory every turn, and the id we stored pins `find_transcript` to
-        the first one, which never grows again.
+        Located by cwd alone, ignoring the session id: a harness may rotate to
+        a new stream while its initially discovered stream remains unchanged.
 
         The same path back means the agent is idle rather than rotated, and
         returns an empty batch so the screen and rescue timers keep counting.

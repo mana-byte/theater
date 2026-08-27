@@ -99,13 +99,13 @@ class Event:
     #: Text suitable for the bus: clipped to MAX_TEXT by live parsers.
     text: str = ""
     tool_name: str | None = None
-    #: Wall clock from the transcript; vibe writes none, so the observer stamps its own.
+    #: Wall clock from the source; the observer stamps one when absent.
     ts: float | None = None
     #: Computed during parse() — a property of the raw record, not a separate is_turn_end.
     turn_end: bool = False
     #: Harness's own turn name. None means "no claim", never "a different turn".
     turn_id: str | None = None
-    #: Source record index; several events can share one (vibe tool-call turns).
+    #: Source record index; several events may share one.
     raw_index: int = 0
     #: Files touched; empty tuple is honest until the plugin reports paths.
     paths: tuple[EventPath, ...] = ()

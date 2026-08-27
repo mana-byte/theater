@@ -3,14 +3,13 @@
 The observer does two jobs. It *gets* what an agent said, and it *decides* what
 that means — idle or working, turn over, job finished, participant dead. The
 second job is identical for every harness and is where every observation bug in
-this project has been. The first job is different for every harness: vibe and
-claude append JSONL, opencode writes a shared SQLite database, and a future one
-may only offer an HTTP event stream.
+this project has been. The first job varies: a harness may append a transcript,
+write a mutable database, or expose an event stream.
 
 So the first job is the seam. A ``Source`` produces ``Batch``es; the observer
 owns everything that happens to them. An adapter that writes a transcript gets
 ``TranscriptSource`` for free by subclassing ``TranscriptObserver``, which is
-why three of the four shipped adapters do not mention any of this.
+why file-backed adapters need little custom source machinery.
 
 What a source may and may not do
 --------------------------------
@@ -130,7 +129,7 @@ class Attachment:
     point: StreamPoint | None = None
     #: See :mod:`theater.provenance`; ``heuristic`` means cwd/time only.
     correlation: str = str(TranscriptProvenance.HEURISTIC)
-    #: Heuristic collision namespace; vibe uses the save-dir root to isolate siblings.
+    #: Heuristic collision namespace used to isolate competing source domains.
     collision_domain: str | None = None
 
 

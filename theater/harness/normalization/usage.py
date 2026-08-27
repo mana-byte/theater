@@ -24,9 +24,8 @@ def trajectory_usage_from_token_usage(
 ) -> TrajectoryUsage:
     """Convert a TokenUsage to a TrajectoryUsage.
 
-    Defaults preserve the pre-existing daemon and vibe behavior: no
-    token clamping, cost provenance passed through as given. Opencode
-    opts into *validate_cost*, *clamp_tokens*, and *force_unknown_cost*.
+    Defaults preserve values as reported. Callers opt into cost validation,
+    token clamping, and unknown-cost provenance explicitly.
     """
     model = usage.model
     provider = usage.provider
@@ -78,9 +77,8 @@ def trajectory_usage_from_token_usage(
 def reported_cost(value: object, *, strict_positive: bool) -> tuple[float | None, CostProvenance]:
     """Extract a reported cost and its provenance.
 
-    When *strict_positive* is True (claude, opencode), a cost of exactly 0
-    means "no price given" and is dropped. When False (codex), exact zero
-    is accepted.
+    When *strict_positive* is true, zero means "no price given" and is dropped.
+    Otherwise exact zero is accepted.
     """
     if not isinstance(value, (int, float)):
         return None, CostProvenance.UNKNOWN

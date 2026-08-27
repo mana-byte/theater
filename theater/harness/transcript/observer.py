@@ -125,12 +125,9 @@ def open_participant_source(
     any past release keeps working without knowing which release it was.
 
     ``pane_pid`` is the participant's launch process — tmux's ``#{pane_pid}``.
-    It is the correlation channel of last resort for a CLI that mints its own
-    session id and shares a transcript root with its siblings: the files that
-    process holds open say which transcript is its own. Only ``codex`` asks
-    for it today. It is ``None`` for a participant with no pane, and for a
-    dead one, whose pid the operating system is free to have reused —
-    see :attr:`theater.models.Participant.live_pid`.
+    It can prove ownership when a CLI mints its own session id and shares a
+    transcript root. It is ``None`` without a live pane because the operating
+    system may reuse a dead process id.
     """
     context = ParticipantObservationContext(
         participant_id=participant_id,

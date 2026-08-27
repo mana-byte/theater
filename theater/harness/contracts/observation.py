@@ -39,7 +39,8 @@ Which base class to subclass
 four shipped adapters do, and it wants three methods: where the file is, what
 the session is called, and how to read one line of it. ``HarnessObserver``
 directly if the output lives anywhere else, in which case write a ``Source``
-and return it from ``open_source``; ``opencode.py`` is the worked example.
+and return it from ``open_source``; ``builtin/plugins/opencode/source.py`` is
+the shipped example.
 """
 
 from __future__ import annotations
@@ -220,14 +221,8 @@ class HarnessObserver(ABC):
         looks idle before it rescues a job whose turn end was never seen.
 
         Of those two promises, the rescue guard is the one this method actually
-        delivers: every shipped adapter treats a bare last line as idle. The
-        distinction between a permission prompt and ordinary thinking is the
-        one the docstring has always claimed but that ``ScreenReading`` — not a
-        boolean — is the type that can actually make. Two of the four shipped
-        adapters (``claude``, ``vibe``) match a bare last line positively;
-        the other two (``codex``, ``opencode``) test for the absence of a
-        working marker. Neither shape can tell an approval modal from a prompt,
-        and that gap is the reason ``screen_reading`` exists.
+        delivers. A boolean classifier cannot reliably distinguish a permission
+        modal from an ordinary prompt, which is why ``screen_reading`` exists.
         """
 
     def screen_reading(self, capture: str) -> ScreenReading:
@@ -317,10 +312,8 @@ class HarnessObserver(ABC):
 
         ``payload`` is the decoded JSON object the harness's lifecycle hook
         sent. Core never inspects it — the plugin owns every field name,
-        path rule, and record-format check. A Claude receipt carries
-        ``session_id``/``sessionId`` and ``transcript_path``/``transcriptPath``;
-        a different harness may carry anything at all, and core treats it
-        as an opaque blob so the mechanism is generic.
+        path rule, and record-format check. Core treats the payload as an opaque
+        blob so the mechanism remains generic.
 
         The return value must carry a non-empty ``location`` and a non-empty
         ``session_id``; core rejects a candidate that does not. Rejection is
