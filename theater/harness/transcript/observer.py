@@ -189,14 +189,10 @@ class TranscriptObserver(HarnessObserver):
         present-but-unknown floor instead of one that could be confused with
         a cold spawn.
         """
-        from theater.harness.transcript.attachment import attach_point
+        from theater.harness.contracts.callbacks import StreamFloorContext
+        from theater.harness.transcript.identity import file_stream_floor
 
-        try:
-            path = Path(location)
-            size, lines, _mtime, _last_line, dev, ino = attach_point(path)
-        except OSError:
-            return None
-        return StreamPoint(records=lines, size=size, dev=dev, ino=ino)
+        return file_stream_floor(StreamFloorContext(location=location))
 
     def open_source(
         self,
