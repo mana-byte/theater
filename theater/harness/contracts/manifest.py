@@ -35,7 +35,8 @@ class LaunchManifest:
     """Explicit launch and resume capabilities for one harness."""
 
     planner: LaunchPlanner
-    approvals: frozenset[str]
+    #: Declared order is user-visible: it is the order the refusal message lists.
+    approvals: tuple[str, ...]
     supports_model: bool = False
     supports_reasoning_effort: bool = False
     supports_resume: bool = False
@@ -44,7 +45,9 @@ class LaunchManifest:
     resume_strategy: ResumeStrategy = "continue"
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "approvals", frozenset(self.approvals))
+        if isinstance(self.approvals, (str, bytes)):
+            raise TypeError("launch.approvals must be a sequence of approval policies")
+        object.__setattr__(self, "approvals", tuple(self.approvals))
 
 
 @dataclass(frozen=True, slots=True)

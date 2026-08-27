@@ -108,7 +108,7 @@ def manifest(
         launch=launch
         or LaunchManifest(
             planner=plan,
-            approvals=frozenset({"manual", "edits", "yolo"}),
+            approvals=("manual", "edits", "yolo"),
         ),
         observation=observation
         or ObservationManifest(
@@ -232,7 +232,7 @@ def test_unsupported_api_version_is_rejected() -> None:
         (
             lambda built: replace(
                 built,
-                launch=LaunchManifest(planner=None, approvals=frozenset({"manual"})),  # type: ignore[arg-type]
+                launch=LaunchManifest(planner=None, approvals=("manual",)),  # type: ignore[arg-type]
             ),
             "launch.planner",
         ),
@@ -274,7 +274,7 @@ def test_missing_or_wrong_callback_diagnostics(changed, path: str) -> None:
         (
             LaunchManifest(
                 planner=plan,
-                approvals=frozenset({"manual"}),
+                approvals=("manual",),
                 resume_planner=lambda _context: ResumeLaunchOverlay(),
             ),
             "launch.resume_planner",
@@ -282,7 +282,7 @@ def test_missing_or_wrong_callback_diagnostics(changed, path: str) -> None:
         (
             LaunchManifest(
                 planner=plan,
-                approvals=frozenset({"manual"}),
+                approvals=("manual",),
                 resume_takes_prompt=False,
             ),
             "launch.resume_takes_prompt",
@@ -290,7 +290,7 @@ def test_missing_or_wrong_callback_diagnostics(changed, path: str) -> None:
         (
             LaunchManifest(
                 planner=plan,
-                approvals=frozenset({"manual"}),
+                approvals=("manual",),
                 resume_strategy="fork",
             ),
             "launch.resume_strategy",
@@ -335,7 +335,7 @@ def test_compilation_forwards_typed_callbacks_and_runtime_contracts(tmp_path: Pa
     built = manifest(
         launch=LaunchManifest(
             planner=launch_callback,
-            approvals=frozenset({"manual", "edits"}),
+            approvals=("manual", "edits"),
             supports_model=True,
             supports_reasoning_effort=True,
             supports_resume=True,
@@ -430,7 +430,7 @@ def test_compiled_launch_capabilities_match_the_declaration(
         manifest(
             launch=LaunchManifest(
                 planner=callback,
-                approvals=frozenset({"manual"}),
+                approvals=("manual",),
                 supports_model=model,
                 supports_reasoning_effort=reasoning,
                 supports_resume=resume,
@@ -516,7 +516,7 @@ def test_callback_exceptions_propagate_without_masking(callback: str) -> None:
     built = manifest(
         launch=LaunchManifest(
             planner=boom_launch if callback == "launch" else plan,
-            approvals=frozenset({"manual"}),
+            approvals=("manual",),
             supports_resume=callback == "resume",
             resume_planner=boom_resume if callback == "resume" else None,
         ),

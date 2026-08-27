@@ -125,11 +125,13 @@ def _validate_launch(name: str, launch: object) -> None:
         _fail(name, "launch", f"expected LaunchManifest, got {type(launch).__name__}")
     if not callable(launch.planner):
         _fail(name, "launch.planner", "must be callable")
-    if not isinstance(launch.approvals, frozenset):
-        _fail(name, "launch.approvals", "must be a frozen set of approval policies")
+    if not isinstance(launch.approvals, tuple):
+        _fail(name, "launch.approvals", "must be an ordered sequence of approval policies")
     if not launch.approvals:
         _fail(name, "launch.approvals", "must declare at least one supported approval policy")
-    for approval in sorted(launch.approvals, key=repr):
+    if len(set(launch.approvals)) != len(launch.approvals):
+        _fail(name, "launch.approvals", "must not repeat an approval policy")
+    for approval in launch.approvals:
         if not isinstance(approval, str) or approval not in HARNESS_APPROVAL_POLICIES:
             _fail(
                 name,

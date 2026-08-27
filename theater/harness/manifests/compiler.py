@@ -219,11 +219,8 @@ class _CompiledHarness(Harness):
         resume: str | None = None,
     ) -> LaunchPlan:
         if approval not in self._launch.approvals:
-            choices = ", ".join(sorted(self._launch.approvals))
-            raise BadRequest(
-                f"harness {self.name!r} does not support approval {approval!r}; "
-                f"its manifest declares {choices}"
-            )
+            choices = ", ".join(self._launch.approvals)
+            raise BadRequest(f"approval must be one of {choices}, got {approval!r}")
         support = self.launch_parameter_support
         if model is not None and not support.model:
             raise BadRequest(f"harness {self.name!r} does not support model selection")

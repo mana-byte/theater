@@ -352,7 +352,7 @@ def test_trajectory_capabilities_survive_compilation() -> None:
             api_version=MANIFEST_API_VERSION,
             binary="acme",
             icon="@",
-            launch=LaunchManifest(planner=_plan, approvals=frozenset({"manual"})),
+            launch=LaunchManifest(planner=_plan, approvals=("manual",)),
             observation=observation,
         ),
     )
