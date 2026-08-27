@@ -68,6 +68,7 @@ class ParticipantRepository:
         *,
         include_dead: bool = False,
         ids: Sequence[str] | None = None,
+        parent_id: str | None = None,
     ) -> list[Participant]:
         stmt = select(participants)
         if not include_dead:
@@ -76,6 +77,8 @@ class ParticipantRepository:
             if not ids:
                 return []
             stmt = stmt.where(participants.c.id.in_(ids))
+        if parent_id is not None:
+            stmt = stmt.where(participants.c.parent_id == parent_id)
         stmt = stmt.order_by(participants.c.created_at.asc())
         return [Participant.from_row(r._mapping) for r in self._db.conn.execute(stmt)]
 

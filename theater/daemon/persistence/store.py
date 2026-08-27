@@ -92,8 +92,13 @@ class Store:
         *,
         include_dead: bool = False,
         ids: Sequence[str] | None = None,
+        parent_id: str | None = None,
     ) -> list[Participant]:
-        return self._participants.list_all(include_dead=include_dead, ids=ids)
+        return self._participants.list_all(
+            include_dead=include_dead,
+            ids=ids,
+            parent_id=parent_id,
+        )
 
     def list_recent_dead(
         self, *, limit: int = 20, exclude_session_ids: set[str] | None = None

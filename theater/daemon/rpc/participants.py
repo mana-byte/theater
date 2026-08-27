@@ -98,6 +98,10 @@ async def _hello(daemon, params: dict) -> dict:
 async def _list(daemon, params: dict) -> list[dict]:
     include_dead = bool(params.get("include_dead"))
 
+    parent_id = params.get("parent_id")
+    if parent_id is not None and (not isinstance(parent_id, str) or not parent_id):
+        raise BadRequest("parent_id must be a non-empty participant id, or absent")
+
     raw_ids = params.get("ids")
     if raw_ids is None:
         ids: list[str] | None = None
@@ -114,7 +118,7 @@ async def _list(daemon, params: dict) -> list[dict]:
             raise BadRequest("ids list is capped at 200 entries")
         ids = raw_ids
 
-    page = daemon.registry.list(include_dead=include_dead, ids=ids)
+    page = daemon.registry.list(include_dead=include_dead, ids=ids, parent_id=parent_id)
 
     live_peers = daemon.registry.list(include_dead=False) if include_dead else []
 

@@ -86,9 +86,15 @@ class Registry:
         *,
         include_dead: bool = False,
         ids: builtins.list[str] | None = None,
+        parent_id: str | None = None,
     ) -> builtins.list[Participant]:
         return [
-            self._named(p) for p in self.store.list_participants(include_dead=include_dead, ids=ids)
+            self._named(p)
+            for p in self.store.list_participants(
+                include_dead=include_dead,
+                ids=ids,
+                parent_id=parent_id,
+            )
         ]
 
     def tree(self) -> builtins.list[dict]:

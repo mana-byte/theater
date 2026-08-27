@@ -392,6 +392,13 @@ async def test_list_participants_docstring_describes_ids_semantics(daemon):
     assert "unknown" in desc or "absent" in desc or "omit" in desc
 
 
+async def test_list_participants_docstring_describes_children_only(daemon):
+    tools = {t.name: t.description or "" for t in await build("p1", "vibe").list_tools()}
+    desc = tools["list_participants"].lower()
+    assert "children_only" in desc
+    assert "direct" in desc
+
+
 # ---- list_participants: resume_state pinned to spawner (test 15) ----------
 #
 # Each case asserts the resume_state value and then calls spawn(resume=...)

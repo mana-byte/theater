@@ -2002,6 +2002,74 @@ async def test_list_ids_dead_returned_with_include_dead(client, fake_tmux):
     assert rows[0]["status"] == "dead"
 
 
+async def test_list_parent_filter_returns_direct_children_only(client, fake_tmux):
+    parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
+    child = await client.call(
+        "spawn",
+        harness="vibe",
+        prompt="child",
+        approval="manual",
+        cwd="/tmp",
+        parent_id=parent["id"],
+    )
+    grandchild = await client.call(
+        "spawn",
+        harness="vibe",
+        prompt="grandchild",
+        approval="manual",
+        cwd="/tmp",
+        parent_id=child["id"],
+    )
+    await client.call("hello", harness="vibe", pane="%81", cwd="/tmp")
+
+    rows = await client.call("participants.list", parent_id=parent["id"])
+    assert [row["id"] for row in rows] == [child["id"]]
+    assert grandchild["id"] not in {row["id"] for row in rows}
+
+
+async def test_list_parent_filter_composes_with_ids_and_include_dead(client, fake_tmux):
+    parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
+    child = await client.call(
+        "spawn",
+        harness="vibe",
+        prompt="child",
+        approval="manual",
+        cwd="/tmp",
+        parent_id=parent["id"],
+    )
+    sibling = await client.call(
+        "spawn",
+        harness="vibe",
+        prompt="sibling",
+        approval="manual",
+        cwd="/tmp",
+        parent_id=parent["id"],
+    )
+    outsider = await client.call(
+        "spawn",
+        harness="vibe",
+        prompt="outsider",
+        approval="manual",
+        cwd="/tmp",
+    )
+    await client.call("participant.kill", id=child["id"])
+
+    live_rows = await client.call(
+        "participants.list",
+        parent_id=parent["id"],
+        ids=[child["id"], sibling["id"], outsider["id"]],
+    )
+    assert [row["id"] for row in live_rows] == [sibling["id"]]
+
+    all_rows = await client.call(
+        "participants.list",
+        parent_id=parent["id"],
+        ids=[child["id"], sibling["id"], outsider["id"]],
+        include_dead=True,
+    )
+    assert [row["id"] for row in all_rows] == [child["id"], sibling["id"]]
+
+
 # ---- participants.list: resume_state (RPC level) --------------------------
 
 
