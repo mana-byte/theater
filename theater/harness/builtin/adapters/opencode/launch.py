@@ -1,7 +1,5 @@
 """OpenCode launch, resume, and model discovery."""
 
-# mypy: disable-error-code=attr-defined
-
 from __future__ import annotations
 
 import json
@@ -80,6 +78,7 @@ class OpenCodeHarness(Harness):
     aliases = ("open-code", "open_code", "OpenCode", "opencode-ai")
     resume_strategy = "fork"
     resume_takes_prompt: bool = False
+    observer: OpenCodeObserver
 
     def __init__(self, db: Path | None = None, correlation_dir: Path | None = None):
         self.observer = OpenCodeObserver(db=db, correlation_dir=correlation_dir)

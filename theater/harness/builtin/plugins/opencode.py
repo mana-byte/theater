@@ -1,105 +1,26 @@
 """OpenCode built-in harness entrypoint."""
 
-from theater.harness.builtin.adapters.opencode.constants import (
-    _READ_TOOLS,
-    _SCREEN_TAIL_LINES,
-    _WRITE_TOOLS,
-    APPROVAL_MARKER,
-    CORRELATION_PLUGIN_SUFFIX,
-    CORRELATION_READY_TIMEOUT,
-    CORRELATION_RECEIPT_SUFFIX,
-    DB_NAME,
-    DRAIN_LIMIT,
-    FOOTER_MARKER,
-    MODELS_TIMEOUT,
-    OPENCODE_MODEL_ID_KEY,
-    OPENCODE_PROVIDER_ID_KEY,
-    QUESTION_MARKER,
-    STEP_FINISH,
-    WORKING_MARKERS,
-)
-from theater.harness.builtin.adapters.opencode.history import _OpenCodeHistoryPageError
-from theater.harness.builtin.adapters.opencode.launch import (
-    OpenCodeHarness,
-    _correlation_plugin,
-    _plugin_path,
-    _receipt_path,
-)
-from theater.harness.builtin.adapters.opencode.observer import OpenCodeObserver, data_dir
-from theater.harness.builtin.adapters.opencode.screen import _in_screen_tail
-from theater.harness.builtin.adapters.opencode.source import OpenCodeSource
-from theater.harness.builtin.adapters.opencode.trajectory import (
-    _assistant_request_id,
-    _loads,
-    _message_timing,
-    _opencode_mcp_identity,
-    _opencode_model,
-    _opencode_source_key,
-    _opencode_usage,
-    _part_timing,
+from theater.harness.builtin.adapters.opencode.launch import OpenCodeHarness
+from theater.harness.builtin.adapters.opencode.observer import OpenCodeObserver
+from theater.harness.builtin.adapters.opencode.paths import (
     _paths_from_tool,
     _relativise,
-    _seconds,
-    _table,
-    _tool_output,
-    _trajectory_detail,
-    _trajectory_identifier,
-    _trajectory_lane,
-    _trajectory_seconds,
-    _trajectory_string,
-    _trajectory_text,
-    _trajectory_timing,
+)
+from theater.harness.builtin.adapters.opencode.source import OpenCodeSource
+from theater.harness.builtin.adapters.opencode.values import (
+    _opencode_usage,
     _trajectory_usage,
 )
 
 HARNESS = OpenCodeHarness()
 
 __all__ = (
-    "APPROVAL_MARKER",
-    "CORRELATION_PLUGIN_SUFFIX",
-    "CORRELATION_READY_TIMEOUT",
-    "CORRELATION_RECEIPT_SUFFIX",
-    "DB_NAME",
-    "DRAIN_LIMIT",
-    "FOOTER_MARKER",
     "HARNESS",
-    "MODELS_TIMEOUT",
-    "OPENCODE_MODEL_ID_KEY",
-    "OPENCODE_PROVIDER_ID_KEY",
-    "QUESTION_MARKER",
-    "STEP_FINISH",
-    "WORKING_MARKERS",
-    "_READ_TOOLS",
-    "_SCREEN_TAIL_LINES",
-    "_WRITE_TOOLS",
     "OpenCodeHarness",
     "OpenCodeObserver",
     "OpenCodeSource",
-    "_OpenCodeHistoryPageError",
-    "_assistant_request_id",
-    "_correlation_plugin",
-    "_in_screen_tail",
-    "_loads",
-    "_message_timing",
-    "_opencode_mcp_identity",
-    "_opencode_model",
-    "_opencode_source_key",
     "_opencode_usage",
-    "_part_timing",
     "_paths_from_tool",
-    "_plugin_path",
-    "_receipt_path",
     "_relativise",
-    "_seconds",
-    "_table",
-    "_tool_output",
-    "_trajectory_detail",
-    "_trajectory_identifier",
-    "_trajectory_lane",
-    "_trajectory_seconds",
-    "_trajectory_string",
-    "_trajectory_text",
-    "_trajectory_timing",
     "_trajectory_usage",
-    "data_dir",
 )

@@ -3,22 +3,46 @@
 Text parts are mutable replacements, so assistant output waits for its finish.
 """
 
-# mypy: disable-error-code="attr-defined,has-type"
-
 from __future__ import annotations
 
 import sqlite3
+from typing import TYPE_CHECKING
 
 from theater.harness.base import Event, EventKind, clip, whole
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.source import Batch
 
 from .constants import DRAIN_LIMIT, STEP_FINISH
+from .paths import _paths_from_tool
 from .store import event_rows, message_role
-from .trajectory import _loads, _opencode_usage, _paths_from_tool, _seconds, _table, _tool_output
+from .values import _opencode_usage, _seconds, _table, _tool_output, load_json_object
 
 
 class OpenCodeParser:
+    _cursor: int
+    _cwd: str | None
+    _finished: set[str]
+    _roles: dict[str, str]
+    _said: set[str]
+    _session: str | None
+    _stamp: dict[str, float]
+    _text: dict[str, dict[str, str]]
+    _tools: dict[str, str]
+
+    if TYPE_CHECKING:
+
+        def _message_coordinate(
+            self, conn: sqlite3.Connection, message_id: object, fallback: int
+        ) -> int: ...
+
+        def _trajectory_for_part(
+            self, conn: sqlite3.Connection, payload: dict, seq: int, *, raw_index: int
+        ) -> list[TrajectoryFact]: ...
+
+        def _trajectory_for_message(
+            self, conn: sqlite3.Connection, payload: dict, seq: int, *, raw_index: int
+        ) -> list[TrajectoryFact]: ...
+
     def _replay(self, info: dict, parts: list[dict]) -> list[Event]:
         """One stored message, as events. Text unclipped: this is history."""
         time = _table(info.get("time"))
@@ -80,7 +104,9 @@ class OpenCodeParser:
         trajectory: list[TrajectoryFact] = []
         for seq, kind, raw in rows:
             self._cursor = seq
-            translated, facts = self._translate_with_trajectory(conn, kind, _loads(raw), seq)
+            translated, facts = self._translate_with_trajectory(
+                conn, kind, load_json_object(raw), seq
+            )
             events.extend(translated)
             trajectory.extend(facts)
         # Rows consumed is progress: session.updated through a turn, else rescue fires mid-turn.
@@ -234,17 +260,12 @@ class OpenCodeParser:
         ]
 
     def _role(self, conn: sqlite3.Connection, mid: str) -> str | None:
-        """The role of a message, from the stream or from the table.
-
-        The fallback exists for the message whose creation event was skipped at
-        attach: its parts keep arriving, and without a role they would be
-        attributed to whichever branch guessed.
-        """
+        """Resolve a skipped attachment event from current message state."""
         role = self._roles.get(mid)
         if role is not None:
             return role
         row = message_role(conn, mid)
-        found = _loads(row[0]).get("role") if row is not None else None
+        found = load_json_object(row[0]).get("role") if row is not None else None
         if isinstance(found, str):
             self._roles[mid] = found
             return found

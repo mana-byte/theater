@@ -1,7 +1,5 @@
 """Bounded OpenCode history replay and cursor validation."""
 
-# mypy: disable-error-code=attr-defined
-
 from __future__ import annotations
 
 import asyncio
@@ -15,6 +13,7 @@ import sqlite3
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from theater.constants.trajectory import (
     TRAJECTORY_CURSOR_MAX_BYTES,
@@ -23,7 +22,7 @@ from theater.constants.trajectory import (
 from theater.harness.base import Event
 from theater.harness.contracts.source import HistoryPage
 from theater.harness.contracts.trajectory import TrajectoryFact
-from theater.harness.source import History
+from theater.harness.source import Batch, History
 from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
     TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
@@ -37,10 +36,7 @@ from .store import (
     paged_parts,
     session_for_history,
 )
-from .store import (
-    loads as _loads,
-)
-from .trajectory import _opencode_source_key
+from .values import _opencode_source_key, load_json_object
 
 logger = logging.getLogger("theater.harness.opencode")
 
@@ -52,6 +48,43 @@ class _OpenCodeHistoryPageError(ValueError):
 
 
 class OpenCodeHistory:
+    _after: float | None
+    _cwd: str | None
+    _db: Path
+    _known_location: str | None
+    _receipt: Path | None
+    _session: str | None
+    _session_id: str | None
+
+    if TYPE_CHECKING:
+
+        def _attachment_provenance(self, sid: str) -> str: ...
+
+        def _correlation_problem(self, conn: sqlite3.Connection) -> Batch | None: ...
+
+        def _locate(self, conn: sqlite3.Connection, *, pinned: bool) -> str | None: ...
+
+        def _open(self) -> sqlite3.Connection | None: ...
+
+        def _pinned_sid(self) -> str | None: ...
+
+        def _read_receipt(self) -> str | None: ...
+
+        def _replay(self, info: dict, parts: list[dict]) -> list[Event]: ...
+
+        def _session_exists(self, conn: sqlite3.Connection, sid: str) -> bool: ...
+
+        def _stored_facts_for_message(
+            self,
+            info: dict,
+            parts: Sequence[tuple[object, object, object, object]],
+            *,
+            raw_index: int,
+            message_revision: int,
+        ) -> list[TrajectoryFact]: ...
+
+        def _trusted_known_location(self) -> bool: ...
+
     async def history(self, *, last_n: int) -> History:
         return await asyncio.to_thread(self._history, last_n)
 
@@ -69,12 +102,7 @@ class OpenCodeHistory:
         return await asyncio.to_thread(self._history_page, before, limit)
 
     def _history(self, last_n: int) -> History:
-        """Rebuild the conversation from `message` and `part`.
-
-        Those tables hold current state, so this never sees the empty-then-full
-        intermediates the event stream carries. Read independently of the poll
-        cursor: the caller is usually a short-lived source of its own.
-        """
+        """Replay current message and part rows independently of the live cursor."""
         conn = self._open()
         if conn is None:
             return History(
@@ -108,11 +136,11 @@ class OpenCodeHistory:
             parts: dict[str, list[dict]] = {}
             rows = history_parts_by_session(conn, sid)
             for mid, raw in rows:
-                parts.setdefault(mid, []).append(_loads(raw))
+                parts.setdefault(mid, []).append(load_json_object(raw))
             events: list[Event] = []
             rows = history_messages(conn, sid)
             for mid, raw in rows:
-                events.extend(self._replay(_loads(raw), parts.get(mid, [])))
+                events.extend(self._replay(load_json_object(raw), parts.get(mid, [])))
         except sqlite3.Error as exc:
             logger.debug("reading opencode history failed", exc_info=True)
             return History(
@@ -210,12 +238,12 @@ class OpenCodeHistory:
                     error="one OpenCode message has too many parts for the history page limit",
                     pinned=pinned,
                 )
-            info = _loads(raw)
+            info = load_json_object(raw)
             if not isinstance(info.get("id"), str):
                 info["id"] = str(message_id)
             message_events = tuple(
                 event
-                for event in self._replay(info, [_loads(part[3]) for part in parts])
+                for event in self._replay(info, [load_json_object(part[3]) for part in parts])
                 if not event.usage_only
             )
             message_facts = tuple(

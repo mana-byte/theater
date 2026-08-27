@@ -3,8 +3,6 @@
 The shared live database stays read-only and non-immutable for the source lifetime.
 """
 
-# mypy: disable-error-code="arg-type,assignment"
-
 from __future__ import annotations
 
 import asyncio
@@ -22,8 +20,9 @@ from .constants import STEP_FINISH
 from .history import OpenCodeHistory
 from .identity import OpenCodeIdentity
 from .parser import OpenCodeParser
-from .store import event_head, latest_message, loads, open_readonly
-from .trajectory import OpenCodeTrajectory, _table
+from .store import event_head, latest_message, open_readonly
+from .trajectory import OpenCodeTrajectory
+from .values import _table, load_json_object
 
 logger = logging.getLogger("theater.harness.opencode")
 
@@ -190,7 +189,7 @@ class OpenCodeSource(OpenCodeHistory, OpenCodeParser, OpenCodeTrajectory, OpenCo
         row = latest_message(conn, sid)
         if row is None:
             return Status.IDLE
-        info = loads(row[0])
+        info = load_json_object(row[0])
         if info.get("role") != "assistant":
             return Status.WORKING
         time_data = _table(info.get("time"))

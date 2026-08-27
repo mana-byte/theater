@@ -1,7 +1,5 @@
 """OpenCode session correlation and discovery."""
 
-# mypy: disable-error-code="attr-defined,operator,return-value"
-
 from __future__ import annotations
 
 import json
@@ -123,7 +121,20 @@ def admit_operator_candidate(
 
 
 class OpenCodeIdentity:
-    def _locate(self, conn, *, pinned: bool) -> str | None:
+    _after: float | None
+    _cwd: str | None
+    _known_location: str | None
+    _known_location_provenance: TranscriptProvenance
+    _located_exact: bool
+    _located_receipt_sid: str | None
+    _participant_id: str | None
+    _pending: tuple[str, int] | None
+    _receipt: Path | None
+    _receipt_started: float
+    _session_exact: bool
+    _session_id: str | None
+
+    def _locate(self, conn: sqlite3.Connection, *, pinned: bool) -> str | None:
         if self._receipt is not None:
             sid = self._read_receipt()
             if sid is None:
@@ -177,7 +188,7 @@ class OpenCodeIdentity:
         sid = found.get("session_id")
         return sid if isinstance(sid, str) and sid else None
 
-    def _correlation_problem(self, conn) -> Batch | None:
+    def _correlation_problem(self, conn: sqlite3.Connection) -> Batch | None:
         """Surface a missing exact channel after bounded startup."""
         if self._receipt is None or self._participant_id is None:
             return None
@@ -222,7 +233,7 @@ class OpenCodeIdentity:
         return Batch(waiting=True, error_code=TRANSCRIPT_SOURCE_UNAVAILABLE_CODE, error=reason)
 
     @staticmethod
-    def _session_exists(conn, sid: str) -> bool:
+    def _session_exists(conn: sqlite3.Connection, sid: str) -> bool:
         return root_session(conn, sid) is not None
 
     def _attachment_provenance(self, sid: str) -> str:

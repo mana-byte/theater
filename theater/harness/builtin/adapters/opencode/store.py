@@ -2,23 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
 from pathlib import Path
+from typing import Literal, cast, overload
 
 logger = logging.getLogger("theater.harness.opencode")
-
-
-def loads(raw) -> dict:
-    """A JSON column as a dict; live rows can be incomplete."""
-    if not isinstance(raw, (str, bytes)):
-        return {}
-    try:
-        found = json.loads(raw)
-    except ValueError:
-        return {}
-    return found if isinstance(found, dict) else {}
 
 
 def open_readonly(db: Path, *, persistent: bool = False) -> sqlite3.Connection | None:
@@ -31,14 +20,19 @@ def open_readonly(db: Path, *, persistent: bool = False) -> sqlite3.Connection |
         return None
 
 
-def root_session(conn: sqlite3.Connection, sid: str) -> tuple[object, ...] | None:
-    return conn.execute(
-        "SELECT id FROM session WHERE id = ? AND parent_id IS NULL", (sid,)
-    ).fetchone()
+def root_session(conn: sqlite3.Connection, sid: str) -> tuple[str] | None:
+    return cast(
+        tuple[str] | None,
+        conn.execute(
+            "SELECT id FROM session WHERE id = ? AND parent_id IS NULL", (sid,)
+        ).fetchone(),
+    )
 
 
-def session(conn: sqlite3.Connection, sid: str) -> tuple[object, ...] | None:
-    return conn.execute("SELECT id FROM session WHERE id = ?", (sid,)).fetchone()
+def session(conn: sqlite3.Connection, sid: str) -> tuple[str] | None:
+    return cast(
+        tuple[str] | None, conn.execute("SELECT id FROM session WHERE id = ?", (sid,)).fetchone()
+    )
 
 
 def candidate_sessions(conn: sqlite3.Connection):
@@ -48,16 +42,31 @@ def candidate_sessions(conn: sqlite3.Connection):
     )
 
 
-def candidate_session(conn: sqlite3.Connection, sid: str) -> tuple[object, ...] | None:
-    return conn.execute(
-        "SELECT id, directory, time_created FROM session WHERE id = ? AND parent_id IS NULL",
-        (sid,),
-    ).fetchone()
+def candidate_session(conn: sqlite3.Connection, sid: str) -> tuple[str, str, int | float] | None:
+    return cast(
+        tuple[str, str, int | float] | None,
+        conn.execute(
+            "SELECT id, directory, time_created FROM session WHERE id = ? AND parent_id IS NULL",
+            (sid,),
+        ).fetchone(),
+    )
+
+
+@overload
+def located_sessions(
+    conn: sqlite3.Connection, directory: str, after: float | None, *, count: Literal[True]
+) -> tuple[int] | None: ...
+
+
+@overload
+def located_sessions(
+    conn: sqlite3.Connection, directory: str, after: float | None, *, count: Literal[False] = False
+) -> tuple[str] | None: ...
 
 
 def located_sessions(
     conn: sqlite3.Connection, directory: str, after: float | None, *, count: bool = False
-) -> tuple[object, ...] | None:
+) -> tuple[int] | tuple[str] | None:
     select = "SELECT COUNT(*)" if count else "SELECT id"
     sql = f"{select} FROM session WHERE directory = ? AND parent_id IS NULL"
     args: list[object] = [directory]
@@ -66,12 +75,12 @@ def located_sessions(
         args.append(int(after * 1000))
     if not count:
         sql += " ORDER BY time_created DESC LIMIT 1"
-    return conn.execute(sql, args).fetchone()
+    return cast(tuple[int] | tuple[str] | None, conn.execute(sql, args).fetchone())
 
 
 def session_for_history(
     conn: sqlite3.Connection, directory: str, after: float | None
-) -> tuple[object, ...] | None:
+) -> tuple[str] | None:
     return located_sessions(conn, directory, after)
 
 
@@ -84,10 +93,13 @@ def has_root_session(conn: sqlite3.Connection, directory: str, after: float | No
     return conn.execute(sql + " LIMIT 1", args).fetchone() is not None
 
 
-def event_head(conn: sqlite3.Connection, sid: str) -> tuple[object, ...]:
-    return conn.execute(
-        "SELECT COALESCE(MAX(seq), -1), COUNT(*) FROM event WHERE aggregate_id = ?", (sid,)
-    ).fetchone()
+def event_head(conn: sqlite3.Connection, sid: str) -> tuple[int, int]:
+    return cast(
+        tuple[int, int],
+        conn.execute(
+            "SELECT COALESCE(MAX(seq), -1), COUNT(*) FROM event WHERE aggregate_id = ?", (sid,)
+        ).fetchone(),
+    )
 
 
 def event_rows(conn: sqlite3.Connection, sid: str | None, cursor: int, limit: int):
