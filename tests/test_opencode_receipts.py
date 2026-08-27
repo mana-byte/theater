@@ -58,6 +58,20 @@ def _attach(source):
     return batch
 
 
+async def _wait_for_exact_attachment(daemon: Daemon, participant_id: str, session_id: str) -> None:
+    deadline = asyncio.get_running_loop().time() + 3.0
+    while asyncio.get_running_loop().time() < deadline:
+        participant = daemon.store.get_participant(participant_id)
+        if (
+            participant is not None
+            and participant.session_id == session_id
+            and participant.transcript_location == f"opencode://{session_id}"
+        ):
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"{participant_id} did not attach opencode://{session_id}")
+
+
 def test_launch_uses_a_core_owned_generic_receipt_token(tmp_path, monkeypatch):
     monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
     config = tmp_path / "opencode.json"
@@ -113,7 +127,7 @@ def test_validator_rejects_invalid_session_ids(tmp_path, payload):
         )
 
 
-def test_validator_rejects_locations_and_expected_id_mismatches(tmp_path):
+def test_validator_rejects_locations_and_accepts_new_root_ids(tmp_path):
     observer = OpenCodeObserver(db=tmp_path / "opencode.db")
 
     with pytest.raises(ValueError, match="native session id"):
@@ -122,12 +136,13 @@ def test_validator_rejects_locations_and_expected_id_mismatches(tmp_path):
             cwd=None,
             expected_session_id=None,
         )
-    with pytest.raises(ValueError, match="does not match expected"):
-        observer.validate_transcript_receipt(
-            payload={"session_id": "ses-root"},
-            cwd=None,
-            expected_session_id="ses-other",
-        )
+    candidate = observer.validate_transcript_receipt(
+        payload={"session_id": "ses-root"},
+        cwd=None,
+        expected_session_id="ses-other",
+    )
+    assert candidate.location == "opencode://ses-root"
+    assert candidate.session_id == "ses-root"
 
 
 def test_exact_admission_waits_for_its_root_row_without_cwd_fallback(tmp_path):
@@ -246,7 +261,7 @@ def test_observer_without_a_marker_keeps_heuristic_discovery(tmp_path):
     conn.close()
 
 
-def test_generic_receipt_authenticates_and_persists_after_exact_attachment(theater_home, tmp_path):
+def test_generic_receipt_switches_to_a_new_root_session(theater_home, tmp_path):
     async def exercise() -> None:
         cwd = tmp_path / "work"
         cwd.mkdir()
@@ -262,20 +277,19 @@ def test_generic_receipt_authenticates_and_persists_after_exact_attachment(theat
             )
             daemon.registry.attach_pane(participant.id, "%1", pane_pid=10001)
             daemon.store.set_receipt_token(participant.id, "secret")
-            payload = {"session_id": "ses-target"}
             with pytest.raises(RemoteError, match="token is invalid"):
                 await client.call(
                     "transcript.receipt",
                     id=participant.id,
                     token="wrong",
-                    payload=payload,
+                    payload={"session_id": "ses-one"},
                 )
 
             receipt = await client.call(
                 "transcript.receipt",
                 id=participant.id,
                 token="secret",
-                payload=payload,
+                payload={"session_id": "ses-one"},
             )
             assert receipt["admission"] == "staged"
             staged = daemon.store.get_participant(participant.id)
@@ -283,17 +297,31 @@ def test_generic_receipt_authenticates_and_persists_after_exact_attachment(theat
             assert staged.session_id is None
             assert staged.transcript_location is None
 
-            _root_session(conn, "ses-target", cwd, 1000)
-            deadline = asyncio.get_running_loop().time() + 3.0
-            while asyncio.get_running_loop().time() < deadline:
-                current = daemon.store.get_participant(participant.id)
-                if current is not None and current.transcript_location == "opencode://ses-target":
-                    break
-                await asyncio.sleep(0.01)
+            _root_session(conn, "ses-one", cwd, 1000)
+            await _wait_for_exact_attachment(daemon, participant.id, "ses-one")
             current = daemon.store.get_participant(participant.id)
             assert current is not None
-            assert current.session_id == "ses-target"
-            assert current.transcript_location == "opencode://ses-target"
+            assert current.session_id == "ses-one"
+            assert current.transcript_location == "opencode://ses-one"
+
+            receipt = await client.call(
+                "transcript.receipt",
+                id=participant.id,
+                token="secret",
+                payload={"session_id": "ses-two"},
+            )
+            assert receipt["admission"] == "staged"
+            current = daemon.store.get_participant(participant.id)
+            assert current is not None
+            assert current.session_id == "ses-one"
+            assert current.transcript_location == "opencode://ses-one"
+
+            _root_session(conn, "ses-two", cwd, 2000)
+            await _wait_for_exact_attachment(daemon, participant.id, "ses-two")
+            current = daemon.store.get_participant(participant.id)
+            assert current is not None
+            assert current.session_id == "ses-two"
+            assert current.transcript_location == "opencode://ses-two"
         finally:
             await client.aclose()
             await daemon.aclose()

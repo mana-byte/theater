@@ -125,11 +125,6 @@ class OpenCodeObserver(HarnessObserver):
             raise ValueError(
                 "opencode receipt session_id must be a native session id, not a location"
             )
-        if expected_session_id is not None and session_id != expected_session_id:
-            raise ValueError(
-                f"opencode receipt session_id {session_id!r} does not match expected "
-                f"session {expected_session_id!r}"
-            )
         return TranscriptCandidate(
             location=f"opencode://{session_id}",
             session_id=session_id,
