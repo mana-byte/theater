@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, cast
 
 from theater import proc
 from theater.harness.source import Source, TranscriptCandidate
+from theater.harness.transcript.discovery import GlobDiscovery, stat_birthtime
 from theater.provenance import TranscriptProvenance, normalize_provenance
 
 from .constants import (
@@ -40,6 +41,22 @@ class CodexIdentityMixin:
         pane_pid: int | None
         _proved: set[Path]
         _session_exact: bool
+
+    @property
+    def _discovery(self) -> GlobDiscovery:
+        return GlobDiscovery(
+            root=self.root,
+            glob_pattern="*/*/*/rollout-*.jsonl",
+            session_id_of=self.session_id,
+            cwd_of=self._transcript_cwd,
+            is_shape=self._is_rollout_shape,
+            birthtime_of=stat_birthtime,
+            loss_probes=_LOSS_CANDIDATE_PROBES,
+            collision_warning=(
+                "codex find_transcript: %d transcripts match cwd %s; "
+                "returning the newest — the observer will refuse a collision"
+            ),
+        )
 
     def open_source(
         self,
@@ -116,7 +133,7 @@ class CodexIdentityMixin:
             hit = self._by_session_id(session_id)
             if hit is not None:
                 return hit
-        return self._scan_by_cwd(cwd, after)
+        return self._discovery.find_transcript(cwd=cwd, after=after)
 
     def _by_session_id(self, session_id: str) -> Path | None:
         return next(self.root.glob(f"*/*/*/rollout-*-{session_id}.jsonl"), None)
@@ -128,36 +145,6 @@ class CodexIdentityMixin:
             self._proved.add(held)
         return held
 
-    def _scan_by_cwd(self, cwd: str, after: float | None) -> Path | None:
-        want = str(Path(cwd).resolve()) if cwd else None
-        if want is None:
-            return None
-        candidates = []
-        for path in self.root.glob("*/*/*/rollout-*.jsonl"):
-            try:
-                st = path.stat()
-            except OSError:
-                continue
-            if after is not None:
-                born = getattr(st, "st_birthtime", st.st_ctime)
-                if born < after:
-                    continue
-            candidates.append((st.st_mtime, path))
-        matches: list[Path] = []
-        for _, path in sorted(candidates, reverse=True):
-            if self._transcript_cwd(path) == want:
-                matches.append(path)
-        if not matches:
-            return None
-        if len(matches) > 1:
-            logger.warning(
-                "codex find_transcript: %d transcripts match cwd %s; "
-                "returning the newest — the observer will refuse a collision",
-                len(matches),
-                cwd,
-            )
-        return matches[0]
-
     def transcript_candidates(
         self,
         *,
@@ -165,16 +152,7 @@ class CodexIdentityMixin:
         domain: str | None = None,
         after: float | None = None,
     ) -> list[TranscriptCandidate]:
-        root = Path(domain).resolve() if domain else self.root.resolve()
-        if not root.is_dir():
-            return []
-        want = str(Path(cwd).resolve()) if cwd else None
-        resolved_domain = str(root)
-        rows = [
-            self._candidate_row(path, want=want, after=after, domain=resolved_domain)
-            for path in root.glob("*/*/*/rollout-*.jsonl")
-        ]
-        return sorted(rows, key=lambda c: (c.mtime or 0, c.location), reverse=True)
+        return self._discovery.transcript_candidates(cwd=cwd, domain=domain, after=after)
 
     def identity_loss_candidate(
         self,
@@ -184,26 +162,9 @@ class CodexIdentityMixin:
         current_mtime_ns: int,
         after: float | None = None,
     ) -> Path | None:
-        if not self.root.is_dir() or not cwd:
-            return None
-        want = str(Path(cwd).resolve())
-        candidates: list[tuple[int, Path]] = []
-        for path in self.root.glob("*/*/*/rollout-*.jsonl"):
-            if path == current or path.is_symlink():
-                continue
-            try:
-                st = path.stat()
-            except OSError:
-                continue
-            if st.st_mtime_ns <= current_mtime_ns:
-                continue
-            if after is not None and getattr(st, "st_birthtime", st.st_ctime) < after:
-                continue
-            candidates.append((st.st_mtime_ns, path))
-        for _mtime, path in sorted(candidates, reverse=True)[:_LOSS_CANDIDATE_PROBES]:
-            if self._transcript_cwd(path) == want:
-                return path
-        return None
+        return self._discovery.identity_loss_candidate(
+            cwd=cwd, current=current, current_mtime_ns=current_mtime_ns, after=after
+        )
 
     def admit_operator_candidate(
         self,
@@ -213,54 +174,8 @@ class CodexIdentityMixin:
         domain: str | None = None,
         after: float | None = None,
     ) -> TranscriptCandidate:
-        want = str(Path(cwd).resolve()) if cwd else None
-        root = Path(domain).resolve() if domain else self.root.resolve()
-        path = Path(candidate).expanduser()
-        if path.is_symlink():
-            raise ValueError("candidate path is a symlink")
-        real = path.resolve()
-        if not real.is_relative_to(root):
-            raise ValueError("candidate path is outside this harness transcript domain")
-        row = self._candidate_row(real, want=want, after=after, domain=str(root))
-        if row.rejection_reason:
-            raise ValueError(row.rejection_reason)
-        return row
-
-    def _candidate_row(
-        self,
-        path: Path,
-        *,
-        want: str | None,
-        after: float | None,
-        domain: str,
-    ) -> TranscriptCandidate:
-        reason = None
-        session_id = self.session_id(path)
-        try:
-            st = path.stat()
-        except OSError:
-            return TranscriptCandidate(
-                location=str(path), rejection_reason="not readable", domain=domain
-            )
-        if after is not None and getattr(st, "st_birthtime", st.st_ctime) < after:
-            reason = "created before participant floor"
-        elif not self._is_rollout_shape(path, root=Path(domain)):
-            reason = "harness shape mismatch"
-        elif session_id is None:
-            reason = "unextractable session id"
-        else:
-            found_cwd = self._transcript_cwd(path)
-            if found_cwd is None:
-                reason = "harness mismatch or unextractable cwd"
-            elif want is not None and found_cwd != want:
-                reason = "cwd mismatch"
-        return TranscriptCandidate(
-            location=str(path),
-            session_id=session_id,
-            mtime=st.st_mtime,
-            size=st.st_size,
-            rejection_reason=reason,
-            domain=domain,
+        return self._discovery.admit_operator_candidate(
+            cwd=cwd, candidate=candidate, domain=domain, after=after
         )
 
     def _is_rollout_shape(self, path: Path, *, root: Path | None = None) -> bool:

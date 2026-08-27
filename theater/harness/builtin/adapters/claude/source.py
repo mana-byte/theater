@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from theater.harness.source import Batch, ReceiptAdmission, TranscriptSource
-from theater.harness.transcript.history import HistoryReader
+from theater.harness.transcript.discovery import stateful_history_reader
 from theater.provenance import TranscriptProvenance
 
 if TYPE_CHECKING:
@@ -42,19 +42,20 @@ class _ClaudeSource(TranscriptSource):
     A receipt path is not identity loss until the file has existed.
     """
 
+    if TYPE_CHECKING:
+        _observer: ClaudeCodeObserver
+
     def __init__(self, observer: ClaudeCodeObserver, **kwargs) -> None:
         super().__init__(observer, **kwargs)
-        self._claude = observer
         self._expected_location: Path | None = None
 
-    def _history_reader(self) -> HistoryReader:
+    def _history_reader(self):
         from .observer import ClaudeCodeObserver
 
-        reader = ClaudeCodeObserver(root=self._claude.root)
-        return HistoryReader(
-            parse_record=lambda line, index: reader.parse_record(line, index, clip_text=False),
-            decorate_parsed=self._decorate_parsed,
-            prepare_history_parse=reader._seed_mcp_context,
+        return stateful_history_reader(
+            clone=lambda: ClaudeCodeObserver(root=self._observer.root),
+            seed_of=lambda r: r._seed_mcp_context,
+            decorate=self._decorate_parsed,
         )
 
     async def read(self) -> Batch:

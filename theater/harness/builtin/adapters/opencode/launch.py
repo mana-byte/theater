@@ -17,6 +17,7 @@ from theater.harness.base import (
     ResumeLaunchOverlay,
     theater_binary,
 )
+from theater.harness.transcript.discovery import root_domain_overlay
 from theater.models import BadRequest
 
 from .constants import CORRELATION_PLUGIN_SUFFIX, MODELS_TIMEOUT, RECEIPT_RETRY_DELAYS_MS
@@ -183,13 +184,7 @@ class OpenCodeHarness(Harness):
         if predecessor.transcript_domain is None:
             return ResumeLaunchOverlay()
         expected = f"opencode://{self.observer.db.resolve()}"
-        if predecessor.transcript_domain != expected:
-            raise BadRequest(
-                f"cannot resume OpenCode session: predecessor transcript domain "
-                f"{predecessor.transcript_domain!r} does not match the OpenCode "
-                f"observation domain {expected!r}"
-            )
-        return ResumeLaunchOverlay(transcript_domain=expected)
+        return root_domain_overlay(predecessor, expected, "OpenCode")
 
     def discover_models(self) -> list[str]:
         try:

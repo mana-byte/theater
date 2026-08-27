@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from theater.harness.observation import ScreenConfidence, ScreenKind, ScreenReading
+from theater.harness.transcript.discovery import screen_tail
 
 from .constants import (
     _SCREEN_TAIL_LINES,
@@ -15,16 +16,16 @@ from .constants import (
 
 def _in_screen_tail(capture: str, marker: str) -> bool:
     """Match footer markers only in the recent screen tail."""
-    lines = [line.strip() for line in capture.splitlines() if line.strip()]
-    return any(line.endswith(marker) for line in lines[-_SCREEN_TAIL_LINES:])
+    lines = [line.strip() for line in screen_tail(capture, _SCREEN_TAIL_LINES)]
+    return any(line.endswith(marker) for line in lines)
 
 
 class CodexScreenMixin:
     def is_idle_screen(self, capture: str) -> bool:
         if WORKING_MARKER in capture:
             return False
-        lines = [line.strip() for line in capture.splitlines() if line.strip()]
-        return any(line.startswith(PROMPT) for line in lines[-_SCREEN_TAIL_LINES:])
+        lines = [line.strip() for line in screen_tail(capture, _SCREEN_TAIL_LINES)]
+        return any(line.startswith(PROMPT) for line in lines)
 
     def screen_reading(self, capture: str) -> ScreenReading:
         """Classify modal states before prompt rows."""

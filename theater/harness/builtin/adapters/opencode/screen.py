@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from theater.harness.observation import ScreenConfidence, ScreenKind, ScreenReading
+from theater.harness.transcript.discovery import screen_tail
 
 from .constants import (
     _SCREEN_TAIL_LINES,
@@ -15,8 +16,8 @@ from .constants import (
 
 def _in_screen_tail(capture: str, marker: str) -> bool:
     """Match footer chrome only, not similarly worded agent output."""
-    lines = [line for line in capture.splitlines() if line.strip()]
-    return any(marker in line and FOOTER_MARKER in line for line in lines[-_SCREEN_TAIL_LINES:])
+    lines = screen_tail(capture, _SCREEN_TAIL_LINES)
+    return any(marker in line and FOOTER_MARKER in line for line in lines)
 
 
 def is_idle_screen(capture: str) -> bool:

@@ -23,6 +23,7 @@ from theater.harness.base import Event
 from theater.harness.contracts.source import HistoryPage
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.source import Batch, History
+from theater.harness.transcript.history import HistoryPageError
 from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
     TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
@@ -39,12 +40,6 @@ from .store import (
 from .values import _opencode_source_key, load_json_object
 
 logger = logging.getLogger("theater.harness.opencode")
-
-
-class _OpenCodeHistoryPageError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
-        self.code = code
 
 
 class OpenCodeHistory:
@@ -219,7 +214,7 @@ class OpenCodeHistory:
             try:
                 cursor = self._decode_history_cursor(before)
                 boundary = self._validate_history_cursor(conn, cursor, sid, identity)
-            except _OpenCodeHistoryPageError as exc:
+            except HistoryPageError as exc:
                 return HistoryPage(
                     error_code=exc.code,
                     error=str(exc),
@@ -404,30 +399,24 @@ class OpenCodeHistory:
     @staticmethod
     def _decode_history_cursor(cursor: str) -> dict[str, object]:
         if not isinstance(cursor, str) or not cursor.startswith("oc1."):
-            raise _OpenCodeHistoryPageError(
+            raise HistoryPageError(
                 "history_cursor_invalid", "history cursor is not valid for OpenCode"
             )
         try:
             encoded_length = len(cursor.encode("utf-8"))
         except UnicodeEncodeError as exc:
-            raise _OpenCodeHistoryPageError(
-                "history_cursor_invalid", "history cursor is malformed"
-            ) from exc
+            raise HistoryPageError("history_cursor_invalid", "history cursor is malformed") from exc
         if encoded_length > TRAJECTORY_CURSOR_MAX_BYTES:
-            raise _OpenCodeHistoryPageError("history_cursor_invalid", "history cursor is too large")
+            raise HistoryPageError("history_cursor_invalid", "history cursor is too large")
         try:
             raw = base64.urlsafe_b64decode(cursor[4:] + "=" * (-len(cursor[4:]) % 4))
             payload = json.loads(raw.decode("utf-8"))
-        except _OpenCodeHistoryPageError:
+        except HistoryPageError:
             raise
         except (ValueError, UnicodeDecodeError, binascii.Error, json.JSONDecodeError) as exc:
-            raise _OpenCodeHistoryPageError(
-                "history_cursor_invalid", "history cursor is malformed"
-            ) from exc
+            raise HistoryPageError("history_cursor_invalid", "history cursor is malformed") from exc
         if not isinstance(payload, dict):
-            raise _OpenCodeHistoryPageError(
-                "history_cursor_invalid", "history cursor payload is malformed"
-            )
+            raise HistoryPageError("history_cursor_invalid", "history cursor payload is malformed")
         required = {
             "v",
             "source",
@@ -439,7 +428,7 @@ class OpenCodeHistory:
             "fingerprint",
         }
         if set(payload) != required or payload.get("v") != 1 or payload.get("source") != "opencode":
-            raise _OpenCodeHistoryPageError(
+            raise HistoryPageError(
                 "history_cursor_invalid", "history cursor does not belong to OpenCode"
             )
         return payload
@@ -452,7 +441,7 @@ class OpenCodeHistory:
         identity: dict[str, int],
     ) -> tuple[int | float, str, str]:
         if cursor.get("db") != _opencode_source_key(self._db) or cursor.get("session") != sid:
-            raise _OpenCodeHistoryPageError(
+            raise HistoryPageError(
                 "history_cursor_invalid", "history cursor belongs to another source or session"
             )
         found_identity = cursor.get("identity")
@@ -465,9 +454,7 @@ class OpenCodeHistory:
                 and type(found_size) is int
             )
         if not valid_identity:
-            raise _OpenCodeHistoryPageError(
-                "history_cursor_invalid", "OpenCode database identity changed"
-            )
+            raise HistoryPageError("history_cursor_invalid", "OpenCode database identity changed")
         boundary = cursor.get("boundary")
         if (
             not isinstance(boundary, list)
@@ -478,21 +465,19 @@ class OpenCodeHistory:
             or not isinstance(boundary[1], str)
             or not boundary[1]
         ):
-            raise _OpenCodeHistoryPageError(
-                "history_cursor_invalid", "history cursor boundary is malformed"
-            )
+            raise HistoryPageError("history_cursor_invalid", "history cursor boundary is malformed")
         created, message_id = boundary
         row = history_boundary(conn, sid, created, message_id)
         if row is None:
-            raise _OpenCodeHistoryPageError(
+            raise HistoryPageError(
                 "history_cursor_invalid", "OpenCode history boundary no longer exists"
             )
         if cursor.get("revision") != self._history_revision(row[0], created):
-            raise _OpenCodeHistoryPageError(
+            raise HistoryPageError(
                 "history_cursor_invalid", "OpenCode history boundary was updated"
             )
         if cursor.get("fingerprint") != self._history_fingerprint(row[0], row[1]):
-            raise _OpenCodeHistoryPageError(
+            raise HistoryPageError(
                 "history_cursor_invalid", "OpenCode history boundary was updated"
             )
         return created, message_id, str(cursor["fingerprint"])

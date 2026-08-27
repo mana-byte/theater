@@ -21,6 +21,7 @@ from theater.harness.base import (
     ResumeLaunchOverlay,
     theater_binary,
 )
+from theater.harness.transcript.discovery import root_domain_overlay
 from theater.models import BadRequest
 
 from .constants import CLAUDE_RECEIPT_COMMAND, CLAUDE_RECEIPT_EVENTS
@@ -145,12 +146,5 @@ class ClaudeCodeHarness(Harness):
     ) -> ResumeLaunchOverlay:
         if predecessor.transcript_domain is None:
             return ResumeLaunchOverlay()
-        observer = cast("ClaudeCodeObserver", self.observer)
-        root = observer.root.resolve()
-        declared = Path(predecessor.transcript_domain).resolve(strict=False)
-        if declared != root:
-            raise BadRequest(
-                f"cannot resume Claude session: predecessor transcript domain "
-                f"{declared!r} does not match the Claude observation root {root!r}"
-            )
-        return ResumeLaunchOverlay(transcript_domain=str(root))
+        root = cast("ClaudeCodeObserver", self.observer).root.resolve()
+        return root_domain_overlay(predecessor, str(root), "Claude")

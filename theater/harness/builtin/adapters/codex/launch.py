@@ -15,6 +15,7 @@ from theater.harness.base import (
     ResumeLaunchOverlay,
     theater_binary,
 )
+from theater.harness.transcript.discovery import root_domain_overlay
 from theater.models import BadRequest
 
 from .constants import CODEX_BINARY
@@ -85,10 +86,4 @@ class CodexHarness(Harness):
         if predecessor.transcript_domain is None:
             return ResumeLaunchOverlay()
         root = self.observer.root.resolve()  # type: ignore[attr-defined]
-        declared = Path(predecessor.transcript_domain).resolve(strict=False)
-        if declared != root:
-            raise BadRequest(
-                f"cannot resume Codex session: predecessor transcript domain "
-                f"{declared!r} does not match the Codex observation root {root!r}"
-            )
-        return ResumeLaunchOverlay(transcript_domain=str(root))
+        return root_domain_overlay(predecessor, str(root), "Codex")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from theater.harness.base import last_screen_line
 from theater.harness.observation import ScreenConfidence, ScreenKind, ScreenReading
+from theater.harness.transcript.discovery import screen_tail
 
 from .constants import (
     _SCREEN_TAIL_LINES,
@@ -31,8 +32,7 @@ class ClaudeScreen:
             return ScreenReading(kind=ScreenKind.TRUST, confidence=ScreenConfidence.HIGH)
         if APPROVAL_MARKER in capture:
             return ScreenReading(kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH)
-        lines = [line for line in capture.splitlines() if line.strip()]
-        tail = lines[-_SCREEN_TAIL_LINES:]
+        tail = screen_tail(capture, _SCREEN_TAIL_LINES)
         if any(WORKING_MARKER in line for line in tail):
             return ScreenReading(kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH)
         if any(IDLE_FOOTER in line for line in tail):

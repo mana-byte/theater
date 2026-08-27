@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from theater.constants.trajectory import TRAJECTORY_PAGE_RECORD_LIMIT
 from theater.harness.base import Event
 from theater.harness.source import Batch, Source, TranscriptSource
-from theater.harness.transcript.history import HistoryReader
+from theater.harness.transcript.discovery import stateful_history_reader
 from theater.provenance import TranscriptProvenance
 
 from .trajectory import usage_fact
@@ -57,23 +57,25 @@ def _open_vibe_source(
 
 
 class _VibeTranscriptSource(TranscriptSource):
-    def __init__(self, observer: VibeObserver, **kwargs) -> None:
-        super().__init__(observer, **kwargs)
-        self._vibe = observer
+    if TYPE_CHECKING:
+        _observer: VibeObserver
 
-    def _history_reader(self) -> HistoryReader:
+    def _history_reader(self):
         from .observer import VibeObserver
 
-        reader = VibeObserver(
-            root=self._vibe.root,
-            correlation_root=self._vibe.correlation_root,
-            isolated=self._vibe.isolated,
-        )
-        reader._cwd = self._vibe._cwd
-        return HistoryReader(
-            parse_record=lambda line, index: reader.parse_record(line, index, clip_text=False),
-            decorate_parsed=self._decorate_parsed,
-            prepare_history_parse=reader._seed_history_context,
+        def _clone():
+            reader = VibeObserver(
+                root=self._observer.root,
+                correlation_root=self._observer.correlation_root,
+                isolated=self._observer.isolated,
+            )
+            reader._cwd = self._observer._cwd
+            return reader
+
+        return stateful_history_reader(
+            clone=_clone,
+            seed_of=lambda r: r._seed_history_context,
+            decorate=self._decorate_parsed,
         )
 
     def commit_attachment(self) -> None:
@@ -86,22 +88,22 @@ class _VibeTranscriptSource(TranscriptSource):
 
     def revoke_attachment(self) -> None:
         super().revoke_attachment()
-        self._vibe._reset_turn_context()
+        self._observer._reset_turn_context()
 
     def _detach(self) -> None:
         super()._detach()
-        self._vibe._reset_turn_context()
+        self._observer._reset_turn_context()
 
     def _seed_live_context(self) -> None:
         path = self.path
         if path is None:
-            self._vibe._reset_turn_context()
+            self._observer._reset_turn_context()
             return
         try:
             with path.open("rb") as fh:
-                self._vibe._seed_history_context(fh, self.offset)
+                self._observer._seed_history_context(fh, self.offset)
         except OSError:
-            self._vibe._reset_turn_context()
+            self._observer._reset_turn_context()
 
 
 class _VibeSource(VibeUsageMixin, Source):

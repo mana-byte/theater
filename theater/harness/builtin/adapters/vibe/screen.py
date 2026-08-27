@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from theater.harness.base import last_screen_line
 from theater.harness.observation import ScreenConfidence, ScreenKind, ScreenReading
+from theater.harness.transcript.discovery import screen_tail
 
 from .constants import (
     _SCREEN_IDLE_PROMPTS,
@@ -19,8 +20,8 @@ from .constants import (
 
 def _in_screen_tail(capture: str, markers: tuple[str, ...], limit: int) -> bool:
     """Match tail chrome without treating agent output as a spinner."""
-    lines = capture.splitlines()
-    return any(all(m in line for m in markers) for line in lines[-limit:] if line)
+    lines = screen_tail(capture, limit, skip_blank=False)
+    return any(all(m in line for m in markers) for line in lines if line)
 
 
 class VibeScreenMixin:
@@ -36,7 +37,7 @@ class VibeScreenMixin:
             return ScreenReading(kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH)
         if _in_screen_tail(capture, (WORKING_MARKER, WORKING_MARKER_KEY), _SPINNER_TAIL_LINES):
             return ScreenReading(kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH)
-        lines = [line.strip() for line in capture.splitlines() if line.strip()]
-        if any(line in _SCREEN_IDLE_PROMPTS for line in lines[-_SCREEN_TAIL_LINES:]):
+        lines = [line.strip() for line in screen_tail(capture, _SCREEN_TAIL_LINES)]
+        if any(line in _SCREEN_IDLE_PROMPTS for line in lines):
             return ScreenReading(kind=ScreenKind.PROMPT, confidence=ScreenConfidence.HIGH)
         return ScreenReading(kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW)

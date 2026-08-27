@@ -34,18 +34,17 @@ def _open_codex_source(
 class _CodexSource(TranscriptSource):
     """Report per-location process proof for Codex rollouts."""
 
-    def __init__(self, observer: CodexObserver, **kwargs) -> None:
-        super().__init__(observer, **kwargs)
-        self._codex = observer
+    if TYPE_CHECKING:
+        _observer: CodexObserver
 
     def correlation_for(self, path: Path, session_id: str | None) -> str:
-        if self._codex.proved(path):
+        if self._observer.proved(path):
             return str(TranscriptProvenance.PROVEN)
         return super().correlation_for(path, session_id)
 
     def commit_attachment(self) -> None:
         super().commit_attachment()
-        self._codex._session_exact = self._session_provenance is TranscriptProvenance.EXACT
+        self._observer._session_exact = self._session_provenance is TranscriptProvenance.EXACT
 
     def _prepare_history_parse(self, fh: BinaryIO, start: int) -> None:
-        self._codex._seed_history_context(fh, start)
+        self._observer._seed_history_context(fh, start)
