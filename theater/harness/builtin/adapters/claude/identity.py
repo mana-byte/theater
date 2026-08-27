@@ -1,8 +1,6 @@
 """Claude transcript discovery and lifecycle receipt validation.
 
-Claude stores transcripts at ``~/.claude/projects/<slugged-cwd>/<session>.jsonl``.
-The lossy directory slug is never reconstructed: records carry the verbatim
-``cwd`` used for discovery, while the filename stem is the verified session id.
+The lossy directory slug is never reconstructed; records provide the trusted cwd.
 """
 
 from __future__ import annotations

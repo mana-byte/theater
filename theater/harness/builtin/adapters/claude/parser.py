@@ -1,9 +1,4 @@
-"""Claude JSONL decoding and normalized control-event parsing.
-
-One content block is written per record, so one assistant message can yield
-multiple turn boundaries. Its native message id remains the event ``turn_id``
-so the reducer can answer that turn only once.
-"""
+"""Claude JSONL decoding and normalized control-event parsing."""
 
 from __future__ import annotations
 
@@ -15,12 +10,12 @@ from theater.harness.base import Event, EventKind, EventPath, clipper
 from theater.harness.contracts.trajectory import ParsedRecord
 
 from .constants import _READ_TOOLS, _WRITE_TOOLS
-from .trajectory import _epoch, _relativise, _token_usage
+from .timing import _epoch
+from .usage import _token_usage
+from .values import _relativise
 
 
 class ClaudeParser:
-    """One Claude assistant message can occupy several records with one turn id."""
-
     def parse(self, line: str, index: int, *, clip_text: bool = True) -> list[Event]:
         record = self._decode(line)
         if record is None:

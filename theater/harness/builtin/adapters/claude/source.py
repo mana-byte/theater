@@ -14,11 +14,9 @@ if TYPE_CHECKING:
 
 
 class _ClaudeSource(TranscriptSource):
-    """Keep a SessionStart receipt pending until Claude creates its JSONL.
+    """Keep a receipt pending until its JSONL materializes.
 
-    Claude announces the exact path before the first user message materializes
-    it. Generic trusted-pin handling would treat two absent reads as identity
-    loss. After one successful stat, the ordinary trusted-pin policy resumes.
+    A receipt path is not identity loss until the file has existed.
     """
 
     def __init__(self, observer: ClaudeCodeObserver, **kwargs) -> None:

@@ -1,7 +1,6 @@
 """Claude Code launch and receipt-hook settings.
 
-``--mcp-config FILE`` is how the participant id reaches the MCP server argv.
-Do not use ``--strict-mcp-config``: the user's own servers must keep working.
+MCP config carries the participant id without excluding user servers.
 """
 
 from __future__ import annotations

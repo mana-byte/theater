@@ -1,25 +1,19 @@
-"""Claude timing, usage, and trajectory projection."""
+"""Claude trajectory fact projection and bounded state."""
 
 from __future__ import annotations
 
 import json
-import math
-from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import BinaryIO
 
 from theater.constants.trajectory import (
-    TRAJECTORY_IDENTIFIER_MAX_BYTES,
     TRAJECTORY_MCP_CALL_CONTEXT_LIMIT,
     TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES,
 )
-from theater.harness.base import NativeChild, TokenUsage
+from theater.harness.base import NativeChild
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.trajectory.content import ContentFormat, DetailField
 from theater.trajectory.enums import (
-    CostProvenance,
-    TimingProvenance,
     TrajectoryFailureCategory,
     TrajectoryKind,
     TrajectoryLane,
@@ -27,203 +21,29 @@ from theater.trajectory.enums import (
 )
 from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryUsage
 
-
-@dataclass(frozen=True, slots=True)
-class _ClaudeCausalRecord:
-    timestamp: float | None
-    turn_id: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class _ClaudeRequestClock:
-    start: float | None
-    first_token: float | None
-
-
-@dataclass(frozen=True, slots=True)
-class _ClaudeTimingProjection:
-    record: Timing | None
-    request: Timing | None
-    turn_id: str | None
-
-
-def _epoch(value) -> float | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return None
-
-
-def _token_usage(message: dict, record: dict) -> TokenUsage | None:
-    raw = message.get("usage")
-    if not isinstance(raw, dict):
-        return None
-    model = message.get("model")
-    if not isinstance(model, str) or not model:
-        model = None
-    cost = record.get("costUSD")
-    cost = float(cost) if isinstance(cost, (int, float)) and cost > 0 else None
-    provider = message.get("provider") or record.get("provider")
-    native_id = message.get("id") or record.get("requestId")
-    usage_key = f"claude:{native_id}" if isinstance(native_id, str) and native_id else None
-    return TokenUsage(
-        model=model,
-        provider=provider if isinstance(provider, str) and provider else None,
-        input_tokens=int(raw.get("input_tokens") or 0),
-        output_tokens=int(raw.get("output_tokens") or 0),
-        cache_creation_input_tokens=int(raw.get("cache_creation_input_tokens") or 0),
-        cache_read_input_tokens=int(raw.get("cache_read_input_tokens") or 0),
-        cost_usd=cost,
-        cost_provenance=(CostProvenance.REPORTED if cost is not None else CostProvenance.UNKNOWN),
-        idempotency_key=usage_key,
-    )
-
-
-def _safe_trajectory_text(value: object) -> str:
-    if not isinstance(value, str):
-        return ""
-    try:
-        value.encode("utf-8")
-    except UnicodeEncodeError:
-        return value.encode("utf-8", "replace").decode("utf-8")
-    return value
-
-
-def _trajectory_id(value: object) -> str | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        value.encode("utf-8")
-    except UnicodeEncodeError:
-        return None
-    if any(ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in value):
-        return None
-    if len(value.encode("utf-8")) > TRAJECTORY_IDENTIFIER_MAX_BYTES:
-        return None
-    return value
-
-
-def _claude_mcp_identity(value: object) -> tuple[str, str] | None:
-    if not isinstance(value, str) or not value.startswith("mcp__"):
-        return None
-    server, separator, tool = value.removeprefix("mcp__").partition("__")
-    if not separator:
-        return None
-    server_id = _trajectory_id(server)
-    tool_id = _trajectory_id(tool)
-    return (server_id, tool_id) if server_id is not None and tool_id is not None else None
-
-
-def _stable_json(value: object) -> str:
-    try:
-        return json.dumps(
-            value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
-        )
-    except (TypeError, ValueError, UnicodeError):
-        return json.dumps(str(value), ensure_ascii=True)
-
-
-def _trajectory_detail(name: str, value: object, *, format: ContentFormat) -> DetailField:
-    text = value if isinstance(value, str) else _stable_json(value)
-    return DetailField.from_text(name, _safe_trajectory_text(text), format=format)
-
-
-def _trajectory_int(value: object) -> int:
-    if type(value) is int and value >= 0:
-        return value
-    if type(value) is float and math.isfinite(value) and value >= 0 and value.is_integer():
-        return int(value)
-    return 0
-
-
-def _trajectory_float(value: object) -> float | None:
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return None
-    try:
-        number = float(value)
-    except OverflowError:
-        return None
-    return number if math.isfinite(number) else None
-
-
-def _trajectory_time(value: object) -> float | None:
-    return _epoch(value) if isinstance(value, str) else _trajectory_float(value)
-
-
-def _trajectory_duration(record: dict) -> float | None:
-    for key in ("durationMs", "duration_ms"):
-        value = _trajectory_float(record.get(key))
-        if value is not None and value >= 0:
-            return value
-    return None
-
-
-def _claude_timing(record: dict, timestamp: float | None) -> Timing | None:
-    start = next(
-        (
-            _trajectory_time(record.get(key))
-            for key in ("startTimestamp", "start_timestamp", "startedAt", "started_at")
-            if _trajectory_time(record.get(key)) is not None
-        ),
-        None,
-    )
-    end = next(
-        (
-            _trajectory_time(record.get(key))
-            for key in ("endTimestamp", "end_timestamp", "completedAt", "completed_at")
-            if _trajectory_time(record.get(key)) is not None
-        ),
-        None,
-    )
-    if start is None and timestamp is not None:
-        start = timestamp
-    duration = _trajectory_duration(record)
-    if start is None and end is None and duration is None:
-        return None
-    if start is not None and end is not None and end < start:
-        end = None
-    return Timing(start=start, end=end, duration_ms=duration, provenance=TimingProvenance.SOURCE)
-
-
-def _claude_turn_timing(record: dict, timestamp: float | None) -> Timing | None:
-    explicit = _claude_timing(record, None)
-    start = explicit.start if explicit is not None else None
-    end = explicit.end if explicit is not None else None
-    duration = explicit.duration_ms if explicit is not None else None
-    end = end if end is not None else timestamp
-    derived = False
-    if duration is not None:
-        if start is None and end is not None:
-            start = end - duration / 1_000
-            derived = True
-        elif end is None and start is not None:
-            end = start + duration / 1_000
-            derived = True
-    elif start is not None and end is not None:
-        duration = (end - start) * 1_000
-        derived = True
-    if start is not None and end is not None and end < start:
-        start = None
-    if start is None and end is None and duration is None:
-        return None
-    return Timing(
-        start=start,
-        end=end,
-        duration_ms=duration,
-        provenance=TimingProvenance.DERIVED if derived else TimingProvenance.SOURCE,
-    )
-
-
-def _claude_request_id(message: dict, record: dict) -> str | None:
-    return _trajectory_id(
-        record.get("requestId")
-        or record.get("request_id")
-        or message.get("requestId")
-        or message.get("request_id")
-        or message.get("id")
-    )
+from .timing import (
+    _claude_first_token,
+    _claude_request_bounds,
+    _claude_request_id,
+    _claude_request_timing_value,
+    _claude_timing,
+    _claude_turn_timing,
+    _ClaudeCausalRecord,
+    _ClaudeRequestClock,
+    _ClaudeTimingProjection,
+    _epoch,
+)
+from .usage import _claude_trajectory_usage
+from .values import (
+    _claude_block_native_id,
+    _claude_content_text,
+    _claude_mcp_identity,
+    _claude_revision,
+    _safe_trajectory_text,
+    _trajectory_detail,
+    _trajectory_id,
+    _trajectory_status,
+)
 
 
 def _remember_bounded[ContextValue](
@@ -233,182 +53,6 @@ def _remember_bounded[ContextValue](
     mapping[key] = value
     while len(mapping) > TRAJECTORY_MCP_CALL_CONTEXT_LIMIT:
         mapping.pop(next(iter(mapping)))
-
-
-def _claude_request_bounds(
-    explicit: Timing | None,
-    prior: _ClaudeRequestClock | None,
-    timestamp: float | None,
-    parent_timestamp: float | None,
-) -> tuple[float | None, float | None, float | None]:
-    start = explicit.start if explicit is not None else None
-    end = explicit.end if explicit is not None else None
-    duration = explicit.duration_ms if explicit is not None else None
-    if duration is not None:
-        if start is not None and end is None:
-            end = start + duration / 1_000
-        elif end is not None and start is None:
-            start = end - duration / 1_000
-        elif start is None and end is None and timestamp is not None:
-            end = timestamp
-            start = end - duration / 1_000
-    if start is None and prior is not None:
-        start = prior.start
-    if start is None:
-        start = parent_timestamp
-    if end is None:
-        end = timestamp
-    if start is not None and end is not None and end < start:
-        start = end = None
-    return start, end, duration
-
-
-def _claude_first_token(
-    prior: _ClaudeRequestClock | None,
-    timestamp: float | None,
-    start: float | None,
-    end: float | None,
-) -> float | None:
-    first_token = prior.first_token if prior is not None else timestamp
-    if first_token is not None and start is not None and first_token < start:
-        return None
-    if first_token is not None and end is not None and first_token > end:
-        return None
-    return first_token
-
-
-def _claude_request_timing_value(
-    explicit: Timing | None,
-    fallback: Timing | None,
-    start: float | None,
-    end: float | None,
-    duration: float | None,
-    first_token: float | None,
-) -> Timing | None:
-    if start is not None and end is not None:
-        complete_source = (
-            explicit is not None
-            and explicit.start is not None
-            and explicit.end is not None
-            and explicit.duration_ms is not None
-        )
-        return Timing(
-            start=start,
-            end=end,
-            duration_ms=duration if duration is not None else (end - start) * 1_000,
-            provenance=(TimingProvenance.SOURCE if complete_source else TimingProvenance.DERIVED),
-            first_token=first_token,
-        )
-    if duration is None:
-        return fallback
-    return Timing(
-        start=start,
-        end=end,
-        duration_ms=duration,
-        provenance=explicit.provenance if explicit is not None else TimingProvenance.SOURCE,
-        first_token=first_token,
-    )
-
-
-def _trajectory_status(value: object, default: TrajectoryStatus) -> TrajectoryStatus:
-    if isinstance(value, TrajectoryStatus):
-        return value
-    if not isinstance(value, str):
-        return default
-    normalized = value.lower().replace("-", "_")
-    aliases = {
-        "complete": TrajectoryStatus.COMPLETED,
-        "completed": TrajectoryStatus.COMPLETED,
-        "done": TrajectoryStatus.COMPLETED,
-        "success": TrajectoryStatus.COMPLETED,
-        "failed": TrajectoryStatus.ERROR,
-        "failure": TrajectoryStatus.ERROR,
-        "error": TrajectoryStatus.ERROR,
-        "cancelled": TrajectoryStatus.CANCELLED,
-        "canceled": TrajectoryStatus.CANCELLED,
-        "aborted": TrajectoryStatus.INTERRUPTED,
-        "in_progress": TrajectoryStatus.RUNNING,
-        "running": TrajectoryStatus.RUNNING,
-        "partial": TrajectoryStatus.PARTIAL,
-        "interrupted": TrajectoryStatus.INTERRUPTED,
-        "pending": TrajectoryStatus.PENDING,
-    }
-    return aliases.get(normalized, default)
-
-
-def _claude_trajectory_usage(message: dict, record: dict) -> TrajectoryUsage | None:
-    raw = message.get("usage")
-    if not isinstance(raw, dict):
-        return None
-    model = _trajectory_id(message.get("model"))
-    provider = _trajectory_id(message.get("provider") or record.get("provider"))
-    request_id = _claude_request_id(message, record)
-    cost = _trajectory_float(record.get("costUSD"))
-    return TrajectoryUsage(
-        model=model,
-        provider=provider,
-        request_id=request_id,
-        input_tokens=_trajectory_int(raw.get("input_tokens")),
-        output_tokens=_trajectory_int(raw.get("output_tokens")),
-        reasoning_tokens=_trajectory_int(raw.get("reasoning_output_tokens")),
-        cache_read_tokens=_trajectory_int(raw.get("cache_read_input_tokens")),
-        cache_write_tokens=_trajectory_int(raw.get("cache_creation_input_tokens")),
-        cost_usd=cost if cost is None or cost >= 0 else None,
-        cost_provenance=(
-            CostProvenance.REPORTED if cost is not None and cost >= 0 else CostProvenance.UNKNOWN
-        ),
-    )
-
-
-def _claude_revision(record: dict) -> int:
-    message = record.get("message")
-    values = [record, message] if isinstance(message, dict) else [record]
-    for value in values:
-        for key in ("revision", "version"):
-            candidate = _trajectory_int(value.get(key))
-            if candidate or value.get(key) in (0, 0.0):
-                return candidate
-    return 0
-
-
-def _claude_block_native_id(
-    block: dict, base_id: str | None, record_id: str | None, ordinal: int
-) -> str | None:
-    explicit = _trajectory_id(block.get("id"))
-    if explicit is not None:
-        return explicit
-    if record_id is not None:
-        return record_id if ordinal == 0 else f"{record_id}:block:{ordinal}"
-    if base_id is not None:
-        return base_id if ordinal == 0 else f"{base_id}:block:{ordinal}"
-    return None
-
-
-def _claude_content_text(value: object) -> str:
-    if isinstance(value, str):
-        return _safe_trajectory_text(value)
-    if isinstance(value, list):
-        text = "".join(
-            _safe_trajectory_text(item.get("text"))
-            for item in value
-            if isinstance(item, dict) and isinstance(item.get("text"), str)
-        )
-        if text:
-            return text
-    return _safe_trajectory_text(_stable_json(value)) if value is not None else ""
-
-
-def _relativise(path: str, cwd: str | None) -> str | None:
-    if not path:
-        return None
-    if not path.startswith("/"):
-        return path
-    if cwd is None:
-        return None
-    c = cwd.rstrip("/") + "/"
-    if not (path == cwd or path.startswith(c)):
-        return None
-    return "." if path == cwd else path[len(c) :]
 
 
 class ClaudeTrajectory:
@@ -873,7 +517,6 @@ class ClaudeTrajectory:
         return facts
 
     def native_children(self, transcript: Path) -> list[NativeChild]:
-        """Sidechain records, deduplicated by the uuid that roots each one."""
         seen: set[str] = set()
         out: list[NativeChild] = []
         try:

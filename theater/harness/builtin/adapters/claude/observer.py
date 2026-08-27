@@ -10,7 +10,8 @@ from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFe
 from .identity import ClaudeIdentity
 from .parser import ClaudeParser
 from .screen import ClaudeScreen
-from .trajectory import ClaudeTrajectory, _ClaudeCausalRecord, _ClaudeRequestClock
+from .timing import _ClaudeCausalRecord, _ClaudeRequestClock
+from .trajectory import ClaudeTrajectory
 
 
 class ClaudeCodeObserver(
