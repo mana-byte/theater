@@ -49,12 +49,13 @@ import tomllib
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, BinaryIO, Literal
 
 from theater import paths
 from theater.constants.trajectory import (
     TRAJECTORY_IDENTIFIER_MAX_BYTES,
     TRAJECTORY_PAGE_RECORD_LIMIT,
+    TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES,
 )
 from theater.harness.base import (
     APPROVALS,
@@ -80,18 +81,20 @@ from theater.harness.observation import (
     TranscriptObserver,
 )
 from theater.harness.source import Batch, Source, TranscriptCandidate, TranscriptSource
+from theater.harness.transcript.history import HistoryReader
 from theater.models import BadRequest
 from theater.provenance import TranscriptProvenance
 from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFeature
 from theater.trajectory.content import ContentFormat, DetailField
 from theater.trajectory.enums import (
     CostProvenance,
+    TimingProvenance,
     TrajectoryFailureCategory,
     TrajectoryKind,
     TrajectoryLane,
     TrajectoryStatus,
 )
-from theater.trajectory.records import TrajectoryFailure
+from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryUsage
 
 if TYPE_CHECKING:
     from theater.models import Participant
@@ -259,7 +262,7 @@ def validate_isolated_domain(
 
 
 def _extract_paths(
-    tool_name: str | None, arguments: str | None, cwd: str | None
+    tool_name: str | None, arguments: object, cwd: str | None
 ) -> tuple[EventPath, ...]:
     """Pull file paths from a vibe tool call's structured arguments.
 
@@ -277,9 +280,14 @@ def _extract_paths(
     if key is None:
         return ()
     mode: Literal["read", "write"] = "write" if tool_name in _WRITE_TOOLS else "read"
-    try:
-        parsed = json.loads(arguments)
-    except (ValueError, TypeError):
+    if isinstance(arguments, dict):
+        parsed = arguments
+    elif isinstance(arguments, (str, bytes, bytearray)):
+        try:
+            parsed = json.loads(arguments)
+        except (ValueError, TypeError):
+            return ()
+    else:
         return ()
     if not isinstance(parsed, dict):
         return ()
@@ -345,6 +353,71 @@ def _vibe_mcp_identity(value: object) -> tuple[str, str] | None:
     return (SERVER_NAME, tool) if tool is not None else None
 
 
+def _vibe_message_id(record: dict) -> str | None:
+    return next(
+        (
+            value
+            for key in ("message_id", "messageId", "id", "uuid")
+            if isinstance((value := record.get(key)), str) and value
+        ),
+        None,
+    )
+
+
+def _vibe_duration(result: object) -> Timing | None:
+    if not isinstance(result, dict):
+        return None
+    duration_ms = result.get("duration_ms")
+    if isinstance(duration_ms, bool) or not isinstance(duration_ms, (int, float)):
+        duration = result.get("duration")
+        if isinstance(duration, bool) or not isinstance(duration, (int, float)):
+            return None
+        duration_ms = float(duration) * 1000
+    value = float(duration_ms)
+    if not math.isfinite(value) or value < 0:
+        return None
+    return Timing(duration_ms=value, provenance=TimingProvenance.SOURCE)
+
+
+def _vibe_tagged_text(content: str, tag: str) -> str | None:
+    stripped = content.strip()
+    prefix = f"<{tag}>"
+    suffix = f"</{tag}>"
+    if not stripped.startswith(prefix):
+        return None
+    body = stripped[len(prefix) :]
+    if body.endswith(suffix):
+        body = body[: -len(suffix)]
+    return body.strip()
+
+
+def _vibe_presentation(value: object) -> tuple[str | None, str | None, bool | None]:
+    if not isinstance(value, dict):
+        return None, None, None
+    kind = value.get("kind")
+    kind = kind if isinstance(kind, str) and kind else None
+    display = value.get("display")
+    if not isinstance(display, dict):
+        return kind, None, None
+    message = next(
+        (
+            display.get(key)
+            for key in ("message", "settledMessage", "summary", "statusText")
+            if isinstance(display.get(key), str) and display.get(key)
+        ),
+        None,
+    )
+    success = display.get("success")
+    return kind, message, success if isinstance(success, bool) else None
+
+
+def _vibe_path_details(paths: tuple[EventPath, ...]) -> tuple[DetailField, ...]:
+    return tuple(
+        DetailField.from_text(f"path.{path.mode}", path.path, format=ContentFormat.PATH)
+        for path in paths
+    )
+
+
 def _vibe_fact(
     *,
     kind: TrajectoryKind,
@@ -358,6 +431,9 @@ def _vibe_fact(
     parent_call_id: str | None = None,
     mcp_server: str | None = None,
     mcp_tool: str | None = None,
+    request_id: str | None = None,
+    timing: Timing | None = None,
+    usage: TrajectoryUsage | None = None,
     failure: TrajectoryFailure | None = None,
     details: tuple[DetailField, ...] = (),
 ) -> TrajectoryFact:
@@ -378,10 +454,13 @@ def _vibe_fact(
         raw_index=max(0, raw_index),
         event_ordinal=max(0, event_ordinal),
         turn_id=_vibe_identifier(turn_id),
+        request_id=_vibe_identifier(request_id),
         call_id=_vibe_identifier(call_id),
         parent_call_id=_vibe_identifier(parent_call_id),
         mcp_server=_vibe_identifier(mcp_server),
         mcp_tool=_vibe_identifier(mcp_tool),
+        timing=timing,
+        usage=usage,
         failure=failure,
         details=details,
     )
@@ -608,8 +687,54 @@ class VibeHarness(Harness):
         return base / "config.toml"
 
 
+class _VibeTranscriptSource(TranscriptSource):
+    def __init__(self, observer: VibeObserver, **kwargs) -> None:
+        super().__init__(observer, **kwargs)
+        self._vibe = observer
+
+    def _history_reader(self) -> HistoryReader:
+        reader = VibeObserver(
+            root=self._vibe.root,
+            correlation_root=self._vibe.correlation_root,
+            isolated=self._vibe.isolated,
+        )
+        reader._cwd = self._vibe._cwd
+        return HistoryReader(
+            parse_record=lambda line, index: reader.parse_record(line, index, clip_text=False),
+            decorate_parsed=self._decorate_parsed,
+            prepare_history_parse=reader._seed_history_context,
+        )
+
+    def commit_attachment(self) -> None:
+        super().commit_attachment()
+        self._seed_live_context()
+
+    def discard_attachment(self) -> None:
+        super().discard_attachment()
+        self._seed_live_context()
+
+    def revoke_attachment(self) -> None:
+        super().revoke_attachment()
+        self._vibe._reset_turn_context()
+
+    def _detach(self) -> None:
+        super()._detach()
+        self._vibe._reset_turn_context()
+
+    def _seed_live_context(self) -> None:
+        path = self.path
+        if path is None:
+            self._vibe._reset_turn_context()
+            return
+        try:
+            with path.open("rb") as fh:
+                self._vibe._seed_history_context(fh, self.offset)
+        except OSError:
+            self._vibe._reset_turn_context()
+
+
 class _VibeSource(Source):
-    """Wraps TranscriptSource to emit usage events from meta.json.
+    """Wraps TranscriptSource to emit usage events and trajectory facts from meta.json.
 
     Vibe stores cumulative token totals in meta.json, not per-message in
     messages.jsonl. This wrapper reads meta.json on every poll, computes
@@ -624,8 +749,10 @@ class _VibeSource(Source):
         after: float | None,
         session_id: str | None,
         known_location: str | None,
+        observer: VibeObserver | None = None,
     ) -> None:
         self._inner = inner
+        self._observer = observer
         self.collision_domain = inner.collision_domain
         self._baseline: tuple[int, int, int] | None = None
         self._meta_fingerprint: tuple[int, int, int, int] | None = None
@@ -688,12 +815,42 @@ class _VibeSource(Source):
             return batch
         usage_events = self._check_usage()
         if usage_events:
+            usage_facts = tuple(
+                fact for event in usage_events if (fact := self._usage_fact(event)) is not None
+            )
             return replace(
                 batch,
                 events=[*batch.events, *usage_events],
+                trajectory=(*batch.trajectory, *usage_facts),
                 progressed=True,
             )
         return batch
+
+    def _usage_fact(self, event: Event) -> TrajectoryFact | None:
+        usage = event.usage
+        if usage is None or usage.idempotency_key is None:
+            return None
+        turn_id = self._observer.current_turn_id if self._observer is not None else None
+        return _vibe_fact(
+            kind=TrajectoryKind.USAGE,
+            summary=usage.model or "model usage",
+            native_id=usage.idempotency_key,
+            raw_index=0,
+            event_ordinal=0,
+            turn_id=turn_id,
+            usage=TrajectoryUsage(
+                model=usage.model,
+                provider=usage.provider,
+                request_id=usage.idempotency_key,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                reasoning_tokens=usage.reasoning_output_tokens,
+                cache_read_tokens=usage.cache_read_input_tokens,
+                cache_write_tokens=usage.cache_creation_input_tokens,
+                cost_usd=usage.cost_usd,
+                cost_provenance=usage.cost_provenance,
+            ),
+        )
 
     def _read_meta(self) -> dict | None:
         path = self.path
@@ -876,18 +1033,18 @@ class VibeObserver(TranscriptObserver):
     trajectory_capabilities = TrajectoryCapabilities(
         supported=frozenset(
             {
+                TrajectoryFeature.MODELS,
                 TrajectoryFeature.TOOLS,
+                TrajectoryFeature.USAGE,
+                TrajectoryFeature.TIMING,
                 TrajectoryFeature.REASONING,
+                TrajectoryFeature.CONTEXT,
                 TrajectoryFeature.LIVE_UPDATES,
             }
         ),
         unsupported=frozenset(
             {
                 TrajectoryFeature.REQUESTS,
-                TrajectoryFeature.MODELS,
-                TrajectoryFeature.USAGE,
-                TrajectoryFeature.TIMING,
-                TrajectoryFeature.CONTEXT,
                 TrajectoryFeature.RETRIES,
             }
         ),
@@ -907,6 +1064,8 @@ class VibeObserver(TranscriptObserver):
         self.relocate_by_cwd = True
         #: Set in `find_transcript` so `parse` can relativise absolute paths vibe's tool args carry.
         self._cwd: str | None = None
+        self._active_turn_id: str | None = None
+        self._last_turn_id: str | None = None
 
     def participant_root(self, participant_id: str) -> Path:
         base = self.correlation_root or paths.home() / "observations" / "vibe"
@@ -929,14 +1088,13 @@ class VibeObserver(TranscriptObserver):
         known_location: str | None = None,
     ):
         """Give every source its own parser state, including its cwd."""
-        from theater.harness.source import TranscriptSource
-
         reader = VibeObserver(
             root=self.root,
             correlation_root=self.correlation_root,
             isolated=self.isolated,
         )
-        inner = TranscriptSource(
+        reader._cwd = cwd
+        inner = _VibeTranscriptSource(
             reader,
             cwd=cwd,
             session_id=session_id,
@@ -952,6 +1110,7 @@ class VibeObserver(TranscriptObserver):
             after=after,
             session_id=session_id,
             known_location=known_location,
+            observer=reader,
         )
 
     def open_source_for(
@@ -1204,17 +1363,67 @@ class VibeObserver(TranscriptObserver):
         name = transcript.parent.name
         return name.rsplit("_", 1)[-1] if name.startswith("session_") else None
 
+    @property
+    def current_turn_id(self) -> str | None:
+        return self._active_turn_id or self._last_turn_id
+
+    def _reset_turn_context(self) -> None:
+        self._active_turn_id = None
+        self._last_turn_id = None
+
+    def _advance_turn(self, record: dict, index: int) -> tuple[str | None, bool]:
+        explicit = next(
+            (
+                value
+                for key in ("turn_id", "turnId")
+                if isinstance((value := record.get(key)), str) and value
+            ),
+            None,
+        )
+        role = record.get("role")
+        turn_id: str | None
+        if role == "user":
+            if explicit is not None:
+                turn_id = explicit
+            elif record.get("injected") is True and self.current_turn_id is not None:
+                turn_id = self.current_turn_id
+            else:
+                turn_id = _vibe_message_id(record) or f"vibe-turn:{max(0, index)}"
+            self._active_turn_id = turn_id
+        else:
+            turn_id = explicit or self.current_turn_id
+            if explicit is not None:
+                self._active_turn_id = explicit
+
+        turn_end = role == "assistant" and not (record.get("tool_calls") or [])
+        if turn_end:
+            self._last_turn_id = turn_id
+            self._active_turn_id = None
+        return turn_id, turn_end
+
+    def _seed_history_context(self, fh: BinaryIO, start: int) -> None:
+        self._reset_turn_context()
+        scan_start = max(0, start - TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES)
+        at_boundary = scan_start == 0
+        if scan_start:
+            fh.seek(scan_start - 1)
+            at_boundary = fh.read(1) == b"\n"
+        fh.seek(scan_start)
+        context = fh.read(start - scan_start)
+        if not at_boundary:
+            _, separator, context = context.partition(b"\n")
+            if not separator:
+                return
+        for index, raw in enumerate(context.splitlines()):
+            try:
+                record = json.loads(raw.decode("utf-8", errors="replace"))
+            except ValueError:
+                continue
+            if isinstance(record, dict):
+                self._advance_turn(record, index)
+
     def parse(self, line: str, index: int, *, clip_text: bool = True) -> list[Event]:
-        line = line.strip()
-        if not line:
-            return []
-        try:
-            record = json.loads(line)
-        except ValueError:
-            return []
-        if not isinstance(record, dict):
-            return []
-        return self._events_for_record(record, index, clip_text=clip_text)
+        return list(self.parse_record(line, index, clip_text=clip_text).events)
 
     def parse_record(self, line: str, index: int, *, clip_text: bool = True) -> ParsedRecord:
         line = line.strip()
@@ -1226,15 +1435,30 @@ class VibeObserver(TranscriptObserver):
             return ParsedRecord()
         if not isinstance(record, dict):
             return ParsedRecord()
+        turn_id, turn_end = self._advance_turn(record, index)
         return ParsedRecord(
-            events=tuple(self._events_for_record(record, index, clip_text=clip_text)),
-            trajectory=tuple(self._facts_for_record(record, index)),
+            events=tuple(
+                self._events_for_record(
+                    record,
+                    index,
+                    clip_text=clip_text,
+                    turn_id=turn_id,
+                    turn_end=turn_end,
+                )
+            ),
+            trajectory=tuple(self._facts_for_record(record, index, turn_id=turn_id)),
+            trajectory_events=(),
         )
 
     def _events_for_record(
-        self, record: dict, index: int, *, clip_text: bool = True
+        self,
+        record: dict,
+        index: int,
+        *,
+        clip_text: bool = True,
+        turn_id: str | None,
+        turn_end: bool,
     ) -> list[Event]:
-
         _clip = clipper(clip_text)
 
         role = record.get("role")
@@ -1245,6 +1469,7 @@ class VibeObserver(TranscriptObserver):
                     kind=EventKind.USER,
                     text=_clip(raw),
                     raw_text=raw,
+                    turn_id=turn_id,
                     raw_index=index,
                 )
             ]
@@ -1256,6 +1481,7 @@ class VibeObserver(TranscriptObserver):
                     text=_clip(raw),
                     raw_text=raw,
                     tool_name=record.get("name"),
+                    turn_id=turn_id,
                     raw_index=index,
                 )
             ]
@@ -1272,6 +1498,7 @@ class VibeObserver(TranscriptObserver):
                     kind=EventKind.ASSISTANT,
                     text=_clip(raw),
                     raw_text=raw,
+                    turn_id=turn_id,
                     raw_index=index,
                 )
             )
@@ -1286,13 +1513,13 @@ class VibeObserver(TranscriptObserver):
                 Event(
                     kind=EventKind.TOOL_CALL,
                     tool_name=fn_name,
+                    turn_id=turn_id,
                     raw_index=index,
                     paths=paths,
                 )
             )
-        if calls:
+        if not turn_end:
             return out
-        # No tool calls: the agent has finished its turn. No turn_id: records carry no id.
         if out:
             last = out[-1]
             out[-1] = Event(
@@ -1302,169 +1529,202 @@ class VibeObserver(TranscriptObserver):
                 tool_name=last.tool_name,
                 ts=last.ts,
                 turn_end=True,
+                turn_id=turn_id,
                 raw_index=last.raw_index,
                 paths=last.paths,
             )
         else:
-            out.append(Event(kind=EventKind.ASSISTANT, turn_end=True, raw_index=index))
+            out.append(
+                Event(
+                    kind=EventKind.ASSISTANT,
+                    turn_end=True,
+                    turn_id=turn_id,
+                    raw_index=index,
+                )
+            )
         return out
 
-    def _facts_for_record(self, record: dict, index: int) -> list[TrajectoryFact]:
+    def _facts_for_record(
+        self, record: dict, index: int, *, turn_id: str | None
+    ) -> list[TrajectoryFact]:
         role = record.get("role")
-        message_id = next(
-            (
-                value
-                for key in ("message_id", "messageId", "id", "uuid")
-                if isinstance((value := record.get(key)), str) and value
-            ),
-            None,
-        )
-        turn_id = next(
-            (
-                value
-                for key in ("turn_id", "turnId")
-                if isinstance((value := record.get(key)), str) and value
-            ),
-            None,
-        )
-        facts: list[TrajectoryFact] = []
-        ordinal = 0
         if role == "user":
-            content = _vibe_text(record.get("content"))
-            if content or message_id is not None:
-                facts.append(
-                    _vibe_fact(
-                        kind=TrajectoryKind.USER,
-                        summary=content,
-                        native_id=message_id,
-                        raw_index=index,
-                        event_ordinal=ordinal,
-                        turn_id=turn_id,
-                    )
-                )
-            return facts
+            fact = self._user_fact(record, index, turn_id)
+            return [fact] if fact is not None else []
         if role == "assistant":
-            content = _vibe_text(record.get("content"))
-            calls = record.get("tool_calls") or []
-            if content or message_id is not None or not calls:
-                facts.append(
-                    _vibe_fact(
-                        kind=TrajectoryKind.ASSISTANT,
-                        summary=content,
-                        native_id=message_id,
-                        raw_index=index,
-                        event_ordinal=ordinal,
-                        turn_id=turn_id,
-                    )
+            return self._assistant_facts(record, index, turn_id)
+        if role == "tool":
+            return [self._tool_result_fact(record, index, turn_id)]
+        return []
+
+    @staticmethod
+    def _user_fact(record: dict, index: int, turn_id: str | None) -> TrajectoryFact | None:
+        content = _vibe_text(record.get("content"))
+        message_id = _vibe_message_id(record)
+        if not content and message_id is None:
+            return None
+        boundary = record.get("context_boundary")
+        details = tuple(
+            detail
+            for detail in (
+                _vibe_detail("context_boundary", boundary),
+                _vibe_detail("injected", record.get("injected")),
+            )
+            if detail is not None
+        )
+        return _vibe_fact(
+            kind=TrajectoryKind.CONTEXT if boundary else TrajectoryKind.USER,
+            summary=content,
+            native_id=message_id,
+            raw_index=index,
+            event_ordinal=0,
+            turn_id=turn_id,
+            details=details,
+        )
+
+    def _assistant_facts(
+        self, record: dict, index: int, turn_id: str | None
+    ) -> list[TrajectoryFact]:
+        message_id = _vibe_message_id(record)
+        content = _vibe_text(record.get("content"))
+        calls = record.get("tool_calls") or []
+        facts: list[TrajectoryFact] = []
+        if content or message_id is not None or not calls:
+            facts.append(
+                _vibe_fact(
+                    kind=TrajectoryKind.ASSISTANT,
+                    summary=content,
+                    native_id=message_id,
+                    raw_index=index,
+                    event_ordinal=len(facts),
+                    turn_id=turn_id,
                 )
-                ordinal += 1
-            reasoning = record.get("reasoning_content")
-            if isinstance(reasoning, str) and reasoning:
-                reasoning_id = record.get("reasoning_message_id")
-                facts.append(
-                    _vibe_fact(
-                        kind=TrajectoryKind.REASONING,
-                        summary=reasoning,
-                        native_id=reasoning_id if isinstance(reasoning_id, str) else None,
-                        raw_index=index,
-                        event_ordinal=ordinal,
-                        turn_id=turn_id,
-                    )
+            )
+        reasoning = record.get("reasoning_content")
+        if isinstance(reasoning, str) and reasoning:
+            reasoning_id = record.get("reasoning_message_id")
+            facts.append(
+                _vibe_fact(
+                    kind=TrajectoryKind.REASONING,
+                    summary=reasoning,
+                    native_id=reasoning_id if isinstance(reasoning_id, str) else None,
+                    raw_index=index,
+                    event_ordinal=len(facts),
+                    turn_id=turn_id,
                 )
-                ordinal += 1
-            if not isinstance(calls, list):
-                return facts
-            for call in calls:
-                if not isinstance(call, dict):
-                    continue
-                function = call.get("function")
-                if not isinstance(function, dict):
-                    function = {}
-                call_id = call.get("id") or call.get("call_id")
-                call_id = call_id if isinstance(call_id, str) else None
-                name = function.get("name")
-                name = name if isinstance(name, str) else None
-                mcp_identity = _vibe_mcp_identity(name)
-                mcp_server, mcp_tool = mcp_identity or (None, None)
-                details = [
-                    value
-                    for value in (
-                        _vibe_detail(
-                            "arguments",
-                            function.get("arguments"),
-                            format=ContentFormat.JSON,
-                        ),
-                        _vibe_detail("tool", name),
-                    )
-                    if value is not None
-                ]
-                parent = call.get("parent_call_id") or call.get("parentCallId")
-                parent = parent if isinstance(parent, str) else None
-                facts.append(
-                    _vibe_fact(
-                        kind=TrajectoryKind.TOOL_CALL,
-                        summary=name or "",
-                        native_id=call_id,
-                        raw_index=index,
-                        event_ordinal=ordinal,
-                        status=TrajectoryStatus.UNKNOWN,
-                        turn_id=turn_id,
-                        call_id=call_id,
-                        parent_call_id=parent,
-                        mcp_server=mcp_server,
-                        mcp_tool=mcp_tool,
-                        details=tuple(details),
-                    )
-                )
-                ordinal += 1
+            )
+        if not isinstance(calls, list):
             return facts
-        if role != "tool":
-            return facts
+        for call in calls:
+            if isinstance(call, dict):
+                facts.append(self._tool_call_fact(call, index, len(facts), turn_id))
+        return facts
+
+    def _tool_call_fact(
+        self, call: dict, index: int, ordinal: int, turn_id: str | None
+    ) -> TrajectoryFact:
+        function = call.get("function")
+        if not isinstance(function, dict):
+            function = {}
+        call_id = call.get("id") or call.get("call_id")
+        call_id = call_id if isinstance(call_id, str) else None
+        name = function.get("name")
+        name = name if isinstance(name, str) else None
+        arguments = function.get("arguments")
+        paths = _extract_paths(name, arguments, self._cwd)
+        presentation_kind, presentation_message, _success = _vibe_presentation(
+            call.get("presentation")
+        )
+        mcp_identity = _vibe_mcp_identity(name)
+        mcp_server, mcp_tool = mcp_identity or (None, None)
+        details = tuple(
+            value
+            for value in (
+                _vibe_detail("arguments", arguments, format=ContentFormat.JSON),
+                _vibe_detail("tool", name),
+                _vibe_detail("presentation", presentation_kind),
+                *_vibe_path_details(paths),
+            )
+            if value is not None
+        )
+        parent = call.get("parent_call_id") or call.get("parentCallId")
+        parent = parent if isinstance(parent, str) else None
+        return _vibe_fact(
+            kind=TrajectoryKind.TOOL_CALL,
+            summary=presentation_message or name or "",
+            native_id=call_id,
+            raw_index=index,
+            event_ordinal=ordinal,
+            status=TrajectoryStatus.UNKNOWN,
+            turn_id=turn_id,
+            call_id=call_id,
+            parent_call_id=parent,
+            mcp_server=mcp_server,
+            mcp_tool=mcp_tool,
+            details=details,
+        )
+
+    @staticmethod
+    def _tool_result_fact(record: dict, index: int, turn_id: str | None) -> TrajectoryFact:
         content = _vibe_text(record.get("content"))
         result = record.get("tool_result")
+        result_data = result if isinstance(result, dict) else {}
         call_id = record.get("tool_call_id") or record.get("call_id")
         call_id = call_id if isinstance(call_id, str) else None
         name = record.get("name")
         name = name if isinstance(name, str) else None
         mcp_identity = _vibe_mcp_identity(name)
         mcp_server, mcp_tool = mcp_identity or (None, None)
-        details = [
+        presentation = result_data.get("presentation")
+        presentation_kind, presentation_message, presentation_success = _vibe_presentation(
+            presentation
+        )
+        projected = presentation.get("projectedOutput") if isinstance(presentation, dict) else None
+        output = projected if projected is not None else result_data.get("output", result)
+        error = _vibe_text(record.get("error")) or _vibe_tagged_text(content, "tool_error")
+        cancelled = result_data.get("cancelled") is True or (
+            _vibe_tagged_text(content, "user_cancellation") is not None
+        )
+        if cancelled:
+            status = TrajectoryStatus.CANCELLED
+        elif error is not None or presentation_success is False:
+            status = TrajectoryStatus.ERROR
+        else:
+            status = TrajectoryStatus.COMPLETED
+        failure_detail = error or (
+            presentation_message if status is TrajectoryStatus.ERROR else None
+        )
+        details = tuple(
             value
             for value in (
-                _vibe_detail("result", result if result is not None else content),
+                _vibe_detail("result", output if output is not None else content),
                 _vibe_detail("tool", name),
+                _vibe_detail("presentation", presentation_kind),
             )
             if value is not None
-        ]
-        status = (
-            TrajectoryStatus.ERROR
-            if record.get("error") is not None
-            else TrajectoryStatus.COMPLETED
         )
-        facts.append(
-            _vibe_fact(
-                kind=TrajectoryKind.TOOL_RESULT,
-                summary=content or _vibe_text(result),
-                native_id=f"{call_id}:result" if call_id else None,
-                raw_index=index,
-                event_ordinal=ordinal,
-                status=status,
-                turn_id=turn_id,
-                call_id=call_id,
-                mcp_server=mcp_server,
-                mcp_tool=mcp_tool,
-                failure=(
-                    TrajectoryFailure(
-                        TrajectoryFailureCategory.TOOL,
-                        detail=_vibe_text(record.get("error")),
-                    )
-                    if record.get("error") is not None
-                    else None
-                ),
-                details=tuple(details),
-            )
+        return _vibe_fact(
+            kind=TrajectoryKind.TOOL_RESULT,
+            summary=failure_detail or presentation_message or content or _vibe_text(output),
+            native_id=f"{call_id}:result" if call_id else None,
+            raw_index=index,
+            event_ordinal=0,
+            status=status,
+            turn_id=turn_id,
+            call_id=call_id,
+            mcp_server=mcp_server,
+            mcp_tool=mcp_tool,
+            timing=_vibe_duration(result),
+            failure=(
+                TrajectoryFailure(
+                    TrajectoryFailureCategory.TOOL,
+                    detail=failure_detail or "tool failed",
+                )
+                if status is TrajectoryStatus.ERROR
+                else None
+            ),
+            details=details,
         )
-        return facts
 
     def native_children(self, transcript: Path) -> list[NativeChild]:
         """Read the session's own list of sub-agents from meta.json."""

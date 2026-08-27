@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 from pathlib import Path
 
@@ -9,7 +10,8 @@ from shipped import ClaudeCodeObserver, CodexObserver, OpenCodeObserver, VibeObs
 from test_harness_opencode import Recorder
 
 from theater.harness import EventKind
-from theater.trajectory import TrajectoryKind, TrajectoryStatus
+from theater.trajectory import ContentFormat, TimingProvenance, TrajectoryKind, TrajectoryStatus
+from theater.trajectory.capabilities import TrajectoryFeature
 
 FIXTURE = Path(__file__).parent / "fixtures" / "vibe_messages.jsonl"
 CODEX_FIXTURE = Path(__file__).parent / "fixtures" / "trajectory_codex.jsonl"
@@ -66,6 +68,277 @@ def test_vibe_facts_keep_ids_reasoning_and_tool_pairing() -> None:
     assert result.call_id == call.call_id
     assert result.native_id == f"{call.call_id}:result"
     assert call.details[0].name == "arguments"
+    assert {fact.turn_id for fact in facts} == {records[0]["message_id"]}
+
+
+def test_vibe_facts_parse_current_tool_result_shape(workdir: Path) -> None:
+    observer = VibeObserver()
+    observer._cwd = str(workdir)
+    records = [
+        {"role": "user", "content": "inspect", "message_id": "turn-1"},
+        {
+            "role": "assistant",
+            "message_id": "assistant-1",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps({"file_path": str(workdir / "note.txt")}),
+                    },
+                    "presentation": {
+                        "kind": "file_read",
+                        "display": {"message": "Read note.txt"},
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "name": "read_file",
+            "tool_call_id": "call-1",
+            "content": "file contents",
+            "tool_result": {
+                "output": {"content": "file contents"},
+                "duration": 0.125,
+                "cancelled": False,
+                "presentation": {
+                    "kind": "file_read",
+                    "display": {"success": True, "message": "Read note.txt"},
+                },
+            },
+        },
+        {"role": "assistant", "content": "done", "message_id": "assistant-2"},
+    ]
+    parsed = [
+        observer.parse_record(json.dumps(record), index) for index, record in enumerate(records)
+    ]
+    facts = [fact for item in parsed for fact in item.trajectory]
+    call = next(fact for fact in facts if fact.kind is TrajectoryKind.TOOL_CALL)
+    result = next(fact for fact in facts if fact.kind is TrajectoryKind.TOOL_RESULT)
+
+    assert all(item.trajectory_events == () for item in parsed)
+    assert {fact.turn_id for fact in facts} == {"turn-1"}
+    assert call.summary == "Read note.txt"
+    assert any(
+        detail.format is ContentFormat.PATH and detail.preview.text == "note.txt"
+        for detail in call.details
+    )
+    assert result.summary == "Read note.txt"
+    assert result.status is TrajectoryStatus.COMPLETED
+    assert result.timing is not None
+    assert result.timing.duration_ms == 125
+    assert result.timing.provenance is TimingProvenance.SOURCE
+    assert next(detail for detail in result.details if detail.name == "result").preview.text == (
+        '{"content": "file contents"}'
+    )
+
+
+def test_vibe_recognizes_tagged_tool_errors_and_cancellation() -> None:
+    observer = VibeObserver()
+    observer.parse_record(json.dumps({"role": "user", "content": "run", "message_id": "turn-1"}), 0)
+    failed = observer.parse_record(
+        json.dumps(
+            {
+                "role": "tool",
+                "name": "bash",
+                "tool_call_id": "call-1",
+                "content": "<tool_error>bash failed</tool_error>",
+            }
+        ),
+        1,
+    ).trajectory[0]
+    cancelled = observer.parse_record(
+        json.dumps(
+            {
+                "role": "tool",
+                "name": "bash",
+                "tool_call_id": "call-2",
+                "content": "<user_cancellation>stopped</user_cancellation>",
+                "tool_result": {"cancelled": True, "duration": 0.01},
+            }
+        ),
+        2,
+    ).trajectory[0]
+
+    assert failed.status is TrajectoryStatus.ERROR
+    assert failed.failure is not None
+    assert failed.failure.detail == "bash failed"
+    assert cancelled.status is TrajectoryStatus.CANCELLED
+    assert cancelled.timing is not None
+    assert cancelled.timing.duration_ms == 10
+
+
+def test_vibe_injected_retry_keeps_turn_and_regular_user_opens_next() -> None:
+    observer = VibeObserver()
+    records = [
+        {"role": "user", "content": "one", "message_id": "turn-1"},
+        {"role": "assistant", "content": "retrying", "message_id": "assistant-1"},
+        {"role": "user", "content": "retry", "message_id": "injected-1", "injected": True},
+        {"role": "assistant", "content": "done", "message_id": "assistant-2"},
+        {"role": "user", "content": "two", "message_id": "turn-2", "injected": False},
+    ]
+    facts = [
+        fact
+        for index, record in enumerate(records)
+        for fact in observer.parse_record(json.dumps(record), index).trajectory
+    ]
+
+    assert [fact.turn_id for fact in facts] == [
+        "turn-1",
+        "turn-1",
+        "turn-1",
+        "turn-1",
+        "turn-2",
+    ]
+
+
+def test_vibe_history_seed_restores_turn_before_page() -> None:
+    observer = VibeObserver()
+    prefix = "\n".join(
+        json.dumps(record)
+        for record in (
+            {"role": "user", "content": "inspect", "message_id": "turn-1"},
+            {
+                "role": "assistant",
+                "tool_calls": [{"id": "call-1", "function": {"name": "bash", "arguments": "{}"}}],
+            },
+        )
+    )
+    stream = io.BytesIO((prefix + "\n").encode())
+    observer._seed_history_context(stream, len(stream.getvalue()))
+    result = observer.parse_record(
+        json.dumps(
+            {
+                "role": "tool",
+                "name": "bash",
+                "tool_call_id": "call-1",
+                "content": "done",
+            }
+        ),
+        2,
+    )
+
+    assert result.trajectory[0].turn_id == "turn-1"
+
+
+def test_vibe_history_page_seeds_turn_without_mutating_live_parser(
+    tmp_path: Path, workdir: Path
+) -> None:
+    root = tmp_path / "sessions"
+    session = root / "session_20260827_120000_12345678"
+    session.mkdir(parents=True)
+    records = [
+        {"role": "user", "content": "inspect", "message_id": "turn-1"},
+        {
+            "role": "assistant",
+            "tool_calls": [{"id": "call-1", "function": {"name": "bash", "arguments": "{}"}}],
+        },
+        {"role": "tool", "name": "bash", "tool_call_id": "call-1", "content": "done"},
+        {"role": "assistant", "content": "finished", "message_id": "assistant-1"},
+    ]
+    transcript = session / "messages.jsonl"
+    transcript.write_text("".join(f"{json.dumps(record)}\n" for record in records))
+    (session / "meta.json").write_text(
+        json.dumps(
+            {
+                "session_id": "12345678-abcd",
+                "environment": {"working_directory": str(workdir)},
+            }
+        )
+    )
+    observer = VibeObserver(root=root)
+    source = observer.open_source(cwd=str(workdir))
+
+    page = asyncio.run(source.history_page(limit=2))
+
+    assert len(page.trajectory) == 2
+    assert {fact.turn_id for fact in page.trajectory} == {"turn-1"}
+    assert source._observer is not None
+    assert source._observer.current_turn_id is None
+
+
+def test_vibe_live_attachment_seeds_an_in_progress_turn(tmp_path: Path, workdir: Path) -> None:
+    root = tmp_path / "sessions"
+    session = root / "session_20260827_120000_12345678"
+    session.mkdir(parents=True)
+    transcript = session / "messages.jsonl"
+    prefix = [
+        {"role": "user", "content": "inspect", "message_id": "turn-1"},
+        {
+            "role": "assistant",
+            "tool_calls": [{"id": "call-1", "function": {"name": "bash", "arguments": "{}"}}],
+        },
+    ]
+    transcript.write_text("".join(f"{json.dumps(record)}\n" for record in prefix))
+    (session / "meta.json").write_text(
+        json.dumps(
+            {
+                "session_id": "12345678-abcd",
+                "environment": {"working_directory": str(workdir)},
+            }
+        )
+    )
+    source = VibeObserver(root=root).open_source(cwd=str(workdir))
+    attached = asyncio.run(source.read())
+    assert attached.attached is not None
+    source.commit_attachment()
+    with transcript.open("a") as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "role": "tool",
+                    "name": "bash",
+                    "tool_call_id": "call-1",
+                    "content": "done",
+                }
+            )
+            + "\n"
+        )
+
+    batch = asyncio.run(source.read())
+
+    assert len(batch.trajectory) == 1
+    assert batch.trajectory[0].turn_id == "turn-1"
+
+
+def test_vibe_context_boundary_is_a_context_fact() -> None:
+    fact = (
+        VibeObserver()
+        .parse_record(
+            json.dumps(
+                {
+                    "role": "user",
+                    "content": "compacted context",
+                    "message_id": "context-1",
+                    "injected": True,
+                    "context_boundary": "compaction",
+                }
+            ),
+            0,
+        )
+        .trajectory[0]
+    )
+
+    assert fact.kind is TrajectoryKind.CONTEXT
+    assert fact.turn_id == "context-1"
+    assert next(
+        detail for detail in fact.details if detail.name == "context_boundary"
+    ).preview.text == ("compaction")
+
+
+def test_vibe_capabilities_match_enriched_transcript_data() -> None:
+    capabilities = VibeObserver.trajectory_capabilities
+
+    assert {
+        TrajectoryFeature.MODELS,
+        TrajectoryFeature.USAGE,
+        TrajectoryFeature.TIMING,
+        TrajectoryFeature.CONTEXT,
+    } <= capabilities.supported
+    assert capabilities.unsupported == frozenset(
+        {TrajectoryFeature.REQUESTS, TrajectoryFeature.RETRIES}
+    )
 
 
 def test_vibe_facts_bound_malformed_large_content_without_timing() -> None:

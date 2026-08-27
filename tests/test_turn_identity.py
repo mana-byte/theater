@@ -92,18 +92,18 @@ def test_claude_reports_the_message_id_the_split_records_share():
     assert ends[0].turn_id == assistant["message"]["id"]
 
 
-def test_vibe_reports_no_turn_id_because_it_publishes_none():
-    """Absence, asserted. Vibe writes no id of any kind on its records.
-
-    Left as None rather than synthesised, so the observer's "an unidentified
-    boundary is never a duplicate" rule applies and every Vibe boundary is
-    answered — which is correct, because Vibe never repeats one.
-    """
-    events = events_for(VibeObserver(), FIXTURES / "turn_vibe.jsonl")
+def test_vibe_uses_the_user_message_id_as_its_turn_identity():
+    records = [json.loads(line) for line in (FIXTURES / "turn_vibe.jsonl").read_text().splitlines()]
+    observer = VibeObserver()
+    events = [
+        event
+        for index, record in enumerate(records)
+        for event in observer.parse(json.dumps(record), index)
+    ]
     ends = boundaries(events)
 
     assert len(ends) == 1
-    assert ends[0].turn_id is None
+    assert ends[0].turn_id == records[0]["message_id"]
 
 
 # ---- opencode, whose transcript is a database --------------------------

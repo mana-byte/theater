@@ -6,7 +6,7 @@ from pathlib import Path
 
 from theater.harness.builtin.plugins.vibe import _VibeSource
 from theater.harness.source import Batch, Source, TranscriptSource
-from theater.trajectory.enums import CostProvenance
+from theater.trajectory.enums import CostProvenance, TrajectoryKind
 
 
 class FakeTranscriptSource(Source):
@@ -105,6 +105,30 @@ def test_new_launch_counts_initial_usage_and_prices_like_vibe(tmp_path):
     assert usage.cache_read_input_tokens == 4
     assert usage.cost_usd == 35 / 1_000_000
     assert usage.cost_provenance is CostProvenance.ESTIMATED
+
+
+def test_usage_delta_is_also_available_to_trajectory(tmp_path):
+    source, _inner, meta = _source(tmp_path, cold=True)
+    _write_meta(
+        meta,
+        10,
+        3,
+        4,
+        config={"active_model": "gpt-5"},
+    )
+
+    batch = asyncio.run(source.read())
+
+    assert len(batch.trajectory) == 1
+    fact = batch.trajectory[0]
+    assert fact.kind is TrajectoryKind.USAGE
+    assert fact.request_id is None
+    assert fact.usage is not None
+    assert fact.usage.request_id == "vibe:0:0:0->10:3:4"
+    assert fact.usage.model == "gpt-5"
+    assert fact.usage.input_tokens == 6
+    assert fact.usage.output_tokens == 3
+    assert fact.usage.cache_read_tokens == 4
 
 
 def test_cached_tokens_are_clamped_to_prompt_tokens(tmp_path):

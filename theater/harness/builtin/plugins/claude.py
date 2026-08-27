@@ -47,7 +47,7 @@ import math
 import shlex
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO, Literal
@@ -81,6 +81,7 @@ from theater.harness.observation import (
     TranscriptObserver,
 )
 from theater.harness.source import Batch, ReceiptAdmission, TranscriptCandidate, TranscriptSource
+from theater.harness.transcript.history import HistoryReader
 from theater.models import BadRequest
 from theater.provenance import TranscriptProvenance
 from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFeature
@@ -147,6 +148,25 @@ _WRITE_TOOLS: dict[str, str] = {
 _READ_TOOLS: dict[str, str] = {
     "Read": "file_path",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class _ClaudeCausalRecord:
+    timestamp: float | None
+    turn_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ClaudeRequestClock:
+    start: float | None
+    first_token: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ClaudeTimingProjection:
+    record: Timing | None
+    request: Timing | None
+    turn_id: str | None
 
 
 def _claude_settings_path(participant_id: str) -> Path:
@@ -345,6 +365,129 @@ def _claude_timing(record: dict, timestamp: float | None) -> Timing | None:
     return Timing(start=start, end=end, duration_ms=duration, provenance=TimingProvenance.SOURCE)
 
 
+def _claude_turn_timing(record: dict, timestamp: float | None) -> Timing | None:
+    explicit = _claude_timing(record, None)
+    start = explicit.start if explicit is not None else None
+    end = explicit.end if explicit is not None else None
+    duration = explicit.duration_ms if explicit is not None else None
+    end = end if end is not None else timestamp
+    derived = False
+    if duration is not None:
+        if start is None and end is not None:
+            start = end - duration / 1_000
+            derived = True
+        elif end is None and start is not None:
+            end = start + duration / 1_000
+            derived = True
+    elif start is not None and end is not None:
+        duration = (end - start) * 1_000
+        derived = True
+    if start is not None and end is not None and end < start:
+        start = None
+    if start is None and end is None and duration is None:
+        return None
+    return Timing(
+        start=start,
+        end=end,
+        duration_ms=duration,
+        provenance=TimingProvenance.DERIVED if derived else TimingProvenance.SOURCE,
+    )
+
+
+def _claude_request_id(message: dict, record: dict) -> str | None:
+    return _trajectory_id(
+        record.get("requestId")
+        or record.get("request_id")
+        or message.get("requestId")
+        or message.get("request_id")
+        or message.get("id")
+    )
+
+
+def _remember_bounded[ContextValue](
+    mapping: dict[str, ContextValue], key: str, value: ContextValue
+) -> None:
+    mapping.pop(key, None)
+    mapping[key] = value
+    while len(mapping) > TRAJECTORY_MCP_CALL_CONTEXT_LIMIT:
+        mapping.pop(next(iter(mapping)))
+
+
+def _claude_request_bounds(
+    explicit: Timing | None,
+    prior: _ClaudeRequestClock | None,
+    timestamp: float | None,
+    parent_timestamp: float | None,
+) -> tuple[float | None, float | None, float | None]:
+    start = explicit.start if explicit is not None else None
+    end = explicit.end if explicit is not None else None
+    duration = explicit.duration_ms if explicit is not None else None
+    if duration is not None:
+        if start is not None and end is None:
+            end = start + duration / 1_000
+        elif end is not None and start is None:
+            start = end - duration / 1_000
+        elif start is None and end is None and timestamp is not None:
+            end = timestamp
+            start = end - duration / 1_000
+    if start is None and prior is not None:
+        start = prior.start
+    if start is None:
+        start = parent_timestamp
+    if end is None:
+        end = timestamp
+    if start is not None and end is not None and end < start:
+        start = end = None
+    return start, end, duration
+
+
+def _claude_first_token(
+    prior: _ClaudeRequestClock | None,
+    timestamp: float | None,
+    start: float | None,
+    end: float | None,
+) -> float | None:
+    first_token = prior.first_token if prior is not None else timestamp
+    if first_token is not None and start is not None and first_token < start:
+        return None
+    if first_token is not None and end is not None and first_token > end:
+        return None
+    return first_token
+
+
+def _claude_request_timing_value(
+    explicit: Timing | None,
+    fallback: Timing | None,
+    start: float | None,
+    end: float | None,
+    duration: float | None,
+    first_token: float | None,
+) -> Timing | None:
+    if start is not None and end is not None:
+        complete_source = (
+            explicit is not None
+            and explicit.start is not None
+            and explicit.end is not None
+            and explicit.duration_ms is not None
+        )
+        return Timing(
+            start=start,
+            end=end,
+            duration_ms=duration if duration is not None else (end - start) * 1_000,
+            provenance=(TimingProvenance.SOURCE if complete_source else TimingProvenance.DERIVED),
+            first_token=first_token,
+        )
+    if duration is None:
+        return fallback
+    return Timing(
+        start=start,
+        end=end,
+        duration_ms=duration,
+        provenance=explicit.provenance if explicit is not None else TimingProvenance.SOURCE,
+        first_token=first_token,
+    )
+
+
 def _trajectory_status(value: object, default: TrajectoryStatus) -> TrajectoryStatus:
     if isinstance(value, TrajectoryStatus):
         return value
@@ -377,9 +520,7 @@ def _claude_trajectory_usage(message: dict, record: dict) -> TrajectoryUsage | N
         return None
     model = _trajectory_id(message.get("model"))
     provider = _trajectory_id(message.get("provider") or record.get("provider"))
-    request_id = _trajectory_id(
-        record.get("requestId") or message.get("request_id") or message.get("id")
-    )
+    request_id = _claude_request_id(message, record)
     cost = _trajectory_float(record.get("costUSD"))
     return TrajectoryUsage(
         model=model,
@@ -414,10 +555,10 @@ def _claude_block_native_id(
     explicit = _trajectory_id(block.get("id"))
     if explicit is not None:
         return explicit
-    if base_id is not None:
-        return base_id if ordinal == 0 else f"{base_id}:block:{ordinal}"
     if record_id is not None:
         return record_id if ordinal == 0 else f"{record_id}:block:{ordinal}"
+    if base_id is not None:
+        return base_id if ordinal == 0 else f"{base_id}:block:{ordinal}"
     return None
 
 
@@ -579,8 +720,13 @@ class _ClaudeSource(TranscriptSource):
         self._claude = observer
         self._expected_location: Path | None = None
 
-    def _prepare_history_parse(self, fh: BinaryIO, start: int) -> None:
-        self._claude._seed_mcp_context(fh, start)
+    def _history_reader(self) -> HistoryReader:
+        reader = ClaudeCodeObserver(root=self._claude.root)
+        return HistoryReader(
+            parse_record=lambda line, index: reader.parse_record(line, index, clip_text=False),
+            decorate_parsed=self._decorate_parsed,
+            prepare_history_parse=reader._seed_mcp_context,
+        )
 
     async def read(self) -> Batch:
         self._require_decision()
@@ -657,6 +803,8 @@ class ClaudeCodeObserver(TranscriptObserver):
         #: Injectable so tests never touch the real ~/.claude.
         self.root = root or Path.home() / ".claude" / "projects"
         self._mcp_calls: dict[str, tuple[str, str]] = {}
+        self._causal_records: dict[str, _ClaudeCausalRecord] = {}
+        self._request_clocks: dict[str, _ClaudeRequestClock] = {}
 
     def open_source(
         self,
@@ -980,6 +1128,78 @@ class ClaudeCodeObserver(TranscriptObserver):
             raise ValueError(f"claude receipt transcript_path is not readable: {exc}") from exc
         return found_evidence
 
+    def _trajectory_timing(self, record: dict, timestamp: float | None) -> _ClaudeTimingProjection:
+        parent_id = _trajectory_id(record.get("parentUuid") or record.get("parent_uuid"))
+        parent = self._causal_records.get(parent_id) if parent_id is not None else None
+        turn_id = _trajectory_id(
+            record.get("turn_id") or record.get("turnId") or record.get("promptId")
+        )
+        if turn_id is None and parent is not None:
+            turn_id = parent.turn_id
+
+        is_turn_duration = (
+            record.get("type") == "system" and record.get("subtype") == "turn_duration"
+        )
+        record_timing = (
+            _claude_turn_timing(record, timestamp)
+            if is_turn_duration
+            else _claude_timing(record, timestamp)
+        )
+        request_timing: Timing | None = None
+        if record.get("type") == "assistant":
+            message = record.get("message")
+            message = message if isinstance(message, dict) else {}
+            request_id = _claude_request_id(message, record)
+            if request_id is not None:
+                request_timing = self._request_timing(
+                    request_id,
+                    record,
+                    timestamp,
+                    parent.timestamp if parent is not None else None,
+                    record_timing,
+                )
+
+        record_id = _trajectory_id(record.get("uuid") or record.get("id"))
+        if record_id is not None:
+            anchor = timestamp
+            if anchor is None and record_timing is not None:
+                anchor = record_timing.end if record_timing.end is not None else record_timing.start
+            if anchor is None and parent is not None:
+                anchor = parent.timestamp
+            _remember_bounded(
+                self._causal_records,
+                record_id,
+                _ClaudeCausalRecord(anchor, turn_id),
+            )
+        return _ClaudeTimingProjection(record_timing, request_timing, turn_id)
+
+    def _request_timing(
+        self,
+        request_id: str,
+        record: dict,
+        timestamp: float | None,
+        parent_timestamp: float | None,
+        record_timing: Timing | None,
+    ) -> Timing | None:
+        prior = self._request_clocks.get(request_id)
+        explicit = _claude_timing(record, None)
+        start, end, duration = _claude_request_bounds(explicit, prior, timestamp, parent_timestamp)
+        first_token = _claude_first_token(prior, timestamp, start, end)
+        request_timing = _claude_request_timing_value(
+            explicit, record_timing, start, end, duration, first_token
+        )
+        clock_start = start
+        if clock_start is None and prior is not None:
+            clock_start = prior.start
+        if clock_start is None:
+            clock_start = timestamp
+        _remember_bounded(
+            self._request_clocks,
+            request_id,
+            _ClaudeRequestClock(clock_start, first_token),
+        )
+        return request_timing
+
     def _remember_mcp_calls(self, record: dict) -> None:
         if record.get("type") != "assistant":
             return
@@ -997,12 +1217,12 @@ class ClaudeCodeObserver(TranscriptObserver):
             identity = _claude_mcp_identity(block.get("name"))
             if call_id is None or identity is None:
                 continue
-            self._mcp_calls[call_id] = identity
-            while len(self._mcp_calls) > TRAJECTORY_MCP_CALL_CONTEXT_LIMIT:
-                self._mcp_calls.pop(next(iter(self._mcp_calls)))
+            _remember_bounded(self._mcp_calls, call_id, identity)
 
     def _seed_mcp_context(self, fh: BinaryIO, start: int) -> None:
         self._mcp_calls.clear()
+        self._causal_records.clear()
+        self._request_clocks.clear()
         scan_start = max(0, start - TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES)
         fh.seek(scan_start)
         context = fh.read(start - scan_start)
@@ -1014,6 +1234,7 @@ class ClaudeCodeObserver(TranscriptObserver):
             record = self._decode(raw.decode("utf-8", errors="replace"))
             if record is not None:
                 self._remember_mcp_calls(record)
+                self._trajectory_timing(record, _epoch(record.get("timestamp")))
 
     def parse(self, line: str, index: int, *, clip_text: bool = True) -> list[Event]:
         record = self._decode(line)
@@ -1229,11 +1450,14 @@ class ClaudeCodeObserver(TranscriptObserver):
         self, record: dict, index: int
     ) -> list[TrajectoryFact]:
         timestamp = _epoch(record.get("timestamp"))
-        timing = _claude_timing(record, timestamp)
+        timing_projection = self._trajectory_timing(record, timestamp)
+        timing = timing_projection.record
         record_id = _trajectory_id(record.get("uuid") or record.get("id"))
         turn_id = _trajectory_id(
             record.get("turn_id") or record.get("turnId") or record.get("promptId")
         )
+        if record.get("type") == "system" and record.get("subtype") == "turn_duration":
+            turn_id = turn_id or timing_projection.turn_id
         step_id = _trajectory_id(record.get("step_id") or record.get("stepId"))
         facts: list[TrajectoryFact] = []
 
@@ -1298,11 +1522,7 @@ class ClaudeCodeObserver(TranscriptObserver):
                 message.get("status") or record.get("status"), TrajectoryStatus.COMPLETED
             )
             usage = _claude_trajectory_usage(message, record)
-            request = (
-                (usage.request_id if usage is not None else None)
-                or message_id
-                or _trajectory_id(record.get("requestId"))
-            )
+            request = _claude_request_id(message, record)
             content = message.get("content")
             blocks = content if isinstance(content, list) else []
             if isinstance(content, str):
@@ -1325,6 +1545,7 @@ class ClaudeCodeObserver(TranscriptObserver):
                         status=message_status,
                         turn=message_turn,
                         request=request,
+                        fact_timing=timing_projection.request,
                     )
                 elif block_type == "thinking":
                     raw = _safe_trajectory_text(block.get("thinking"))
@@ -1338,6 +1559,7 @@ class ClaudeCodeObserver(TranscriptObserver):
                         status=_trajectory_status(block.get("status"), message_status),
                         turn=message_turn,
                         request=request,
+                        fact_timing=timing_projection.request,
                         details=(_trajectory_detail("thinking", raw, format=ContentFormat.TEXT),),
                     )
                 elif block_type in ("tool_use", "server_tool_use"):
@@ -1416,9 +1638,26 @@ class ClaudeCodeObserver(TranscriptObserver):
                     status=message_status,
                     turn=message_turn,
                     request=request,
+                    fact_timing=timing_projection.request,
                 )
-            if usage is not None and facts:
-                facts[-1] = replace(facts[-1], usage=usage)
+            if usage is not None:
+                usage_native_id = (
+                    f"{record_id}:usage"
+                    if record_id is not None
+                    else f"{message_id}:usage"
+                    if message_id is not None
+                    else None
+                )
+                add(
+                    TrajectoryKind.USAGE,
+                    TrajectoryLane.MODEL,
+                    native_id=usage_native_id,
+                    status=TrajectoryStatus.COMPLETED,
+                    turn=message_turn,
+                    request=request,
+                    fact_timing=timing_projection.request,
+                    usage=usage,
+                )
             return facts
 
         if kind == "user":
