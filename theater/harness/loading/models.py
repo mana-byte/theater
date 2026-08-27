@@ -14,10 +14,7 @@ LOCAL = "local"
 
 
 class PluginError(ConfigError):
-    """A plugin manifest that cannot be turned into a harness.
-
-    Subclass of ``ConfigError`` so the CLI and daemon keep one catch site.
-    """
+    """A plugin manifest that cannot be turned into a harness."""
 
 
 @dataclass(frozen=True, slots=True)
