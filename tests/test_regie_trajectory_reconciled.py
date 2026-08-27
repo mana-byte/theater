@@ -14,12 +14,9 @@ from textual.widgets import Button, Input, RichLog, Select, SelectionList, Tab
 from theater.constants.regie_trajectory import (
     FILTER_MAX_ROWS,
     LEDGER_OVERSCAN_ROWS,
-    TIMELINE_HOVER_LEFT_GLYPH,
-    TIMELINE_HOVER_RIGHT_GLYPH,
     TIMELINE_LABEL_RIGHT_PADDING,
     TIMELINE_LABEL_WIDTH,
     TIMELINE_LANE_HEIGHT,
-    TIMELINE_RELATED_GLYPH,
     TIMELINE_SPAN_MIN_WIDTH,
     TIMELINE_TURN_BOUNDARY_GLYPH,
     TRAJECTORY_SPAN_ROW_HEIGHT,
@@ -331,7 +328,7 @@ async def test_timeline_projects_four_lanes_and_duration_widths() -> None:
     assert all(span.width >= TIMELINE_SPAN_MIN_WIDTH for span in duration.spans)
 
 
-async def test_timeline_hover_marks_span_edges_and_related_records() -> None:
+async def test_timeline_hover_grows_span_without_markers() -> None:
     records = [
         record("first", index=0, request_id="request"),
         record("second", index=1, request_id="request"),
@@ -345,20 +342,19 @@ async def test_timeline_hover_marks_span_edges_and_related_records() -> None:
 
         view.on_timeline_span_hovered(TimelineSpanHovered("first"))
 
-        assert timeline.related_ids == frozenset({"second"})
-        assert view.state.related_record_ids("call") == frozenset({"result"})
+        assert timeline.hovered_id == "first"
         strip = timeline._lane_strip(TrajectoryLane.MODEL, 0, timeline.projection.width)
         hovered = timeline.projection.span_for("first")
-        related = timeline.projection.span_for("second")
-        assert hovered is not None and related is not None
-        assert strip.text[hovered.x] == TIMELINE_HOVER_LEFT_GLYPH
-        assert strip.text[hovered.end - 1] == TIMELINE_HOVER_RIGHT_GLYPH
+        other = timeline.projection.span_for("second")
+        assert hovered is not None and other is not None
         assert hovered.visual_start > hovered.x
         assert hovered.visual_end < hovered.end
-        assert (
-            strip.text[(related.visual_start + related.visual_end - 1) // 2]
-            == TIMELINE_RELATED_GLYPH
-        )
+        assert strip.text == " " * timeline.projection.width
+        highlighted = timeline._lane_style(TrajectoryLane.MODEL, highlighted=True)
+        styles = [segment.style for segment in strip._segments for _ in range(len(segment.text))]
+        assert all(styles[x] == highlighted for x in range(hovered.x, hovered.end))
+        assert styles[other.visual_start] != highlighted
+        assert styles[other.x] != highlighted
 
 
 async def test_timeline_uses_two_rows_per_lane_and_marks_new_turns() -> None:

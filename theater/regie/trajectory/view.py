@@ -298,7 +298,6 @@ class TrajectoryView(Vertical):
             records,
             matched_ids=self.projection.search_result.matched_ids,
             hovered_id=self.state.hovered_id,
-            related_ids=self.state.related_record_ids(self.state.hovered_id),
             selected_id=self.state.selected_id,
             duration_mode=self.state.order_mode is OrderMode.DURATION,
             scroll_offset=timeline_offset,
@@ -1051,10 +1050,7 @@ class TrajectoryView(Vertical):
     def on_timeline_span_hovered(self, message: TimelineSpanHovered) -> None:
         self.state.hovered_id = message.record_id
         if self.is_mounted:
-            self.query_one("#trajectory-timeline", Timeline).set_hovered(
-                message.record_id,
-                related_ids=self.state.related_record_ids(message.record_id),
-            )
+            self.query_one("#trajectory-timeline", Timeline).set_hovered(message.record_id)
             self.query_one("#trajectory-ledger", Ledger).set_hovered(message.record_id)
             self._show_timeline_hover(message.record_id)
 
@@ -1111,10 +1107,7 @@ class TrajectoryView(Vertical):
         self.state.hovered_id = message.record_id
         if self.is_mounted:
             self.query_one("#trajectory-hover-card", TimelineHoverCard).hide()
-            self.query_one("#trajectory-timeline", Timeline).set_hovered(
-                message.record_id,
-                related_ids=self.state.related_record_ids(message.record_id),
-            )
+            self.query_one("#trajectory-timeline", Timeline).set_hovered(message.record_id)
             self.query_one("#trajectory-ledger", Ledger).set_hovered(message.record_id)
 
     def on_ledger_record_clicked(self, message: LedgerRecordClicked) -> None:
@@ -1127,10 +1120,7 @@ class TrajectoryView(Vertical):
         if not self.is_mounted:
             return
         self.query_one("#trajectory-hover-card", TimelineHoverCard).hide()
-        self.query_one("#trajectory-timeline", Timeline).set_hovered(
-            message.record_id,
-            related_ids=self.state.related_record_ids(message.record_id),
-        )
+        self.query_one("#trajectory-timeline", Timeline).set_hovered(message.record_id)
         self.query_one("#trajectory-ledger", Ledger).set_hovered(message.record_id)
 
     def on_insight_activated(self, message: InsightActivated) -> None:

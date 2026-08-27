@@ -174,22 +174,6 @@ class ParticipantTrajectoryState:
             return self.tool_index.anchor_by_id.get(operation_id)
         return record_id if record_id in self.records else None
 
-    def related_record_ids(self, record_id: str | None) -> frozenset[str]:
-        """Return retained records in the same request or tool operation."""
-        if record_id is None or record_id not in self.records:
-            return frozenset()
-        related: set[str] = set()
-        request_id = self.request_index.by_record_id.get(record_id)
-        if request_id is not None:
-            request = self.request_index.by_id.get(request_id)
-            if request is not None:
-                related.update(request.record_ids)
-        operation_id = self.tool_index.by_record_id.get(record_id)
-        if operation_id is not None:
-            related.update(self.tool_index.members_by_id.get(operation_id, ()))
-        related.discard(record_id)
-        return frozenset(candidate for candidate in related if candidate in self.records)
-
     def _trim(self, *, evict_newest: bool) -> None:
         while (
             len(self.records) > TRAJECTORY_UI_RECORD_LIMIT
