@@ -929,7 +929,7 @@ def discover(monkeypatch, harness: str, result, *extra):
     "cannot be asked" path is reached.
 
     Called directly rather than through `main`, because `main` rebuilds the
-    registry first and `plugins.scan` re-imports the plugin files — so neither
+    registry first and `loading.scan` re-imports the plugin manifests — so neither
     the instance nor the class present at patch time is the one the command
     would end up calling. The real adapters have to be kept out of this: `vibe`
     reads ~/.vibe/config.toml, so unpatched these tests would assert against

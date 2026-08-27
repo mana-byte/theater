@@ -1,14 +1,15 @@
 """Harness registry — compatibility façade.
 
-Every adapter is a plugin file. The ones Theater ships live in
+Every adapter is a package manifest. The ones Theater ships live in
 `builtin/plugins/`, the ones a user writes live in `$THEATER_HOME/harnesses/`,
-and both are read by `plugins.scan` under the same contract. There is no
-built-in tier. Each adapter is two objects: a `Harness` that knows how to launch
-the CLI, and the `HarnessObserver` it carries, which knows how to watch it.
+and both are read by :mod:`theater.harness.loading` under the same contract.
+There is no built-in tier. Each adapter is two objects: a `Harness` that knows
+how to launch the CLI, and the `HarnessObserver` it carries, which knows how
+to watch it.
 
-`install` turns those files into the live registry. Until it runs the registry
-is empty, which is deliberate. Every process that touches the registry
-installs first.
+`install` turns those manifests into the live registry. Until it runs the
+registry is empty, which is deliberate. Every process that touches the
+registry installs first.
 
 Nothing above this package needs to change to add a harness, because nothing
 above it sees anything but `Event`.
@@ -81,12 +82,12 @@ from theater.harness.contracts.source import (
     Source,
     StreamPoint,
 )
+from theater.harness.loading.models import LoadedPlugin, PluginError
 from theater.harness.manifests import (
     ManifestValidationError,
     compile_manifest,
     validate_manifest,
 )
-from theater.harness.plugins import Plugin, PluginError
 from theater.harness.registry import (  # noqa: F401
     _ALIASES,
     _BINARIES,
@@ -174,12 +175,12 @@ __all__ = [
     "LaunchParameterSupport",
     "LaunchPlan",
     "LineageManifest",
+    "LoadedPlugin",
     "ManifestValidationError",
     "ModelDiscoveryManifest",
     "NativeChild",
     "ObservationManifest",
     "ParticipantObservationContext",
-    "Plugin",
     "PluginError",
     "ResumeLaunchOverlay",
     "ScreenConfidence",

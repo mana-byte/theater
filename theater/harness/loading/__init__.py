@@ -1,9 +1,9 @@
 """Package-manifest loader: discovery, isolated import, and compilation.
 
-The new loader discovers named plugin directories, imports each under an
-isolated synthetic package, and compiles its ``MANIFEST`` into a runtime
-``Harness``. It does not activate in the live registry yet; Phase 4 will
-cut over from the legacy single-file loader.
+Discovers named plugin directories, imports each under an isolated synthetic
+package, and compiles its ``MANIFEST`` into a runtime ``Harness``. Shipped and
+local roots traverse the same loader; legacy single-file plugins are never
+executed and receive an actionable migration diagnostic.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from pathlib import Path
 
 from theater.harness.loading.discovery import MANIFEST_FILENAME, discover
 from theater.harness.loading.importer import PACKAGE_PREFIX, load_plugin
-from theater.harness.loading.models import LOCAL, SHIPPED, LoadedPlugin
+from theater.harness.loading.models import LOCAL, SHIPPED, LoadedPlugin, PluginError
 
 
 def scan(directory: Path, *, source: str, skip: Iterable[str] = ()) -> list[LoadedPlugin]:
@@ -33,6 +33,7 @@ __all__ = [
     "PACKAGE_PREFIX",
     "SHIPPED",
     "LoadedPlugin",
+    "PluginError",
     "discover",
     "load_plugin",
     "scan",

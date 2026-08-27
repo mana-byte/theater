@@ -1,15 +1,23 @@
-"""Result values for the package manifest loader."""
+"""Result values and error types for the package manifest loader."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
 
+from theater.config import ConfigError
 from theater.harness.contracts.harness import Harness
 
 #: Where a plugin came from.
 SHIPPED = "shipped"
 LOCAL = "local"
+
+
+class PluginError(ConfigError):
+    """A plugin manifest that cannot be turned into a harness.
+
+    Subclass of ``ConfigError`` so the CLI and daemon keep one catch site.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,4 +40,4 @@ class LoadedPlugin:
     error: str | None = None
 
 
-__all__ = ["LOCAL", "SHIPPED", "LoadedPlugin"]
+__all__ = ["LOCAL", "SHIPPED", "LoadedPlugin", "PluginError"]

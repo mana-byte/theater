@@ -69,7 +69,7 @@ class Harness(ABC):
     icon: str = "·"
     #: Other spellings that resolve to `name` at registration.
     aliases: tuple[str, ...] = ()
-    #: Set in __init__; an annotation, not abstract — plugins._check_observer rejects omissions.
+    #: Set in __init__; an annotation, not abstract — manifest validation rejects omissions.
     observer: HarnessObserver
     #: Class attribute, not signature introspection — opencode's -s drops --prompt.
     resume_takes_prompt: bool = True
