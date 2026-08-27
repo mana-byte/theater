@@ -14,7 +14,16 @@ LOCAL = "local"
 
 @dataclass(frozen=True, slots=True)
 class LoadedPlugin:
-    """One discovered plugin directory, loaded or not."""
+    """One discovered plugin, loaded or not.
+
+    The path travels with the harness because the registry needs it for the
+    collision messages: "two definitions of `codex`" is only actionable if it
+    says which two. `source` travels with it for the same reason.
+
+    `name` is the canonical directory name, which is also the harness name. A
+    plugin that raises on import still has one, and the whole point of
+    `[harness] disabled` is to be able to switch off the one breaking start-up.
+    """
 
     path: Path
     source: str

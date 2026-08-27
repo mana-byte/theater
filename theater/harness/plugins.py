@@ -35,13 +35,15 @@ import logging
 import sys
 import types
 from collections.abc import Iterable
-from dataclasses import dataclass
 from pathlib import Path
 
 from theater.config import HARNESS_NAME, ConfigError
 from theater.formatting import display_width as _display_width
 from theater.harness.contracts.harness import Harness
 from theater.harness.contracts.observation import HarnessObserver
+from theater.harness.loading.models import LOCAL, SHIPPED, LoadedPlugin
+
+__all__ = ["LOCAL", "SHIPPED", "Plugin", "PluginError", "scan"]
 
 logger = logging.getLogger("theater.harness.plugins")
 
@@ -52,8 +54,6 @@ MODULE_PREFIX = "theater_harness_plugin_"
 HELPER_PREFIX = "theater_harness_helper_"
 
 #: Where a plugin came from.
-SHIPPED = "shipped"
-LOCAL = "local"
 
 
 def _helper_module_name(directory: Path, source: str, stem: str) -> str:
@@ -197,25 +197,8 @@ class PluginError(ConfigError):
     """
 
 
-@dataclass(frozen=True, slots=True)
-class Plugin:
-    """One plugin file, loaded or not.
-
-    The path travels with the harness because the registry needs it for the
-    collision messages: "two definitions of `codex`" is only actionable if it
-    says which two files. `source` travels with it for the same reason.
-
-    `name` is the harness's own name once it loads, and the file stem before
-    that. A file that raises on import cannot be asked what it is called, and
-    the whole point of `[harness] disabled` is to be able to switch off the one
-    that is breaking start-up.
-    """
-
-    path: Path
-    source: str
-    name: str
-    harness: Harness | None = None
-    error: str | None = None
+#: One result type for both loaders while the built-ins are being migrated.
+Plugin = LoadedPlugin
 
 
 def scan(directory: Path, *, source: str, skip: Iterable[str] = ()) -> list[Plugin]:

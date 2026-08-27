@@ -12,7 +12,7 @@ from pathlib import Path
 
 from theater import paths
 from theater.config import Config, ConfigError
-from theater.harness import builtin, plugins
+from theater.harness import builtin, loading, plugins
 from theater.harness.plugins import Plugin, PluginError
 from theater.harness.registry import (
     _ALIASES,
@@ -55,15 +55,15 @@ def install(
     _OBSERVATION_KEYS.clear()
     _BROKEN.clear()
 
-    shipped = plugins.scan(
+    shipped = _scan(
         shipped_dir if shipped_dir is not None else builtin.plugin_dir(),
         source=plugins.SHIPPED,
-        skip=disabled,
+        disabled=disabled,
     )
-    local = plugins.scan(
+    local = _scan(
         local_dir if local_dir is not None else paths.harnesses_dir(),
         source=plugins.LOCAL,
-        skip=disabled,
+        disabled=disabled,
     )
 
     for found in [*shipped, *local]:
@@ -101,6 +101,29 @@ def install(
             claim_observation_keys(extra, found.name, str(found.path))
 
     return sorted(HARNESSES)
+
+
+def _scan(directory: Path, *, source: str, disabled: set[str]) -> list[Plugin]:
+    """Package manifests first, then not-yet-migrated single files.
+
+    Transitional for the Phase 4 built-in migration: a name available as a
+    package shadows the legacy file of the same name, and the package
+    loader's legacy-file diagnostics stay silent while the old scanner still
+    executes those files. Both halves collapse to the package loader once
+    every shipped plugin is a directory.
+    """
+    packages = [
+        found
+        for found in loading.scan(directory, source=source, skip=disabled)
+        if not (found.path.is_file() and found.path.suffix == ".py")
+    ]
+    migrated = {found.name for found in packages}
+    files = [
+        found
+        for found in plugins.scan(directory, source=source, skip=disabled)
+        if found.name not in migrated
+    ]
+    return [*packages, *files]
 
 
 def _reject(found: Plugin, config: Config) -> None:
