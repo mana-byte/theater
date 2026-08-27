@@ -1,14 +1,4 @@
-"""Vibe transcript and usage source composition.
-
-Vibe stores one session under
-``~/.vibe/logs/session/session_<YYYYMMDD>_<HHMMSS>_<short>/messages.jsonl``
-with its ``meta.json`` beside it. The directory suffix is only the first eight
-characters of the native session id. Child sessions are below the parent
-directory, so root ``session_*`` scans deliberately find top-level sessions.
-
-Vibe writes no timestamps in messages JSONL. Observer timestamps are therefore
-observation time, not source timing.
-"""
+"""Vibe transcript and usage source composition."""
 
 from __future__ import annotations
 
@@ -77,13 +67,7 @@ class _VibeTranscriptSource(TranscriptSource):
 
 
 class _VibeSource(VibeUsageMixin, Source):
-    """Wrap TranscriptSource with Vibe's cumulative meta usage deltas.
-
-    Vibe stores cumulative token totals in meta.json, not per-message in
-    messages.jsonl. This wrapper reads meta.json on every poll, computes the
-    delta from the previous cumulative baseline, and appends a usage-only
-    Event to the batch when tokens have increased.
-    """
+    """Wrap TranscriptSource with cumulative meta usage deltas."""
 
     def __init__(
         self,

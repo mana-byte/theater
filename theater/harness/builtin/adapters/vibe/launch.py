@@ -1,9 +1,4 @@
-"""Vibe launch, resume, and model discovery.
-
-`$VIBE_MCP_SERVERS` overrides the matching config field while union-merging
-MCP servers by name, so Theater replaces only its own entry. The harness reads
-the variable from the pane environment, which Theater controls at launch.
-"""
+"""Vibe launch, resume, and model discovery."""
 
 from __future__ import annotations
 
@@ -42,15 +37,12 @@ if TYPE_CHECKING:
 class VibeHarness(Harness):
     name = "vibe"
     binary = "vibe"
-    #: Stacked bars, echoing the Mistral mark.
     icon = "▤"
-    #: Registration aliases; a non-normalizing spelling is observed as nothing.
     aliases = ("Vibe", "mistral-vibe", "mistral_vibe")
 
     def __init__(self, root: Path | None = None, correlation_root: Path | None = None):
         from .observer import VibeObserver
 
-        #: `root` is the observer's business — nothing about launching depends on where it writes.
         self.observer: VibeObserver = VibeObserver(root=root, correlation_root=correlation_root)
 
     def plan_launch(
@@ -113,14 +105,7 @@ class VibeHarness(Harness):
         predecessor: Participant,
         trusted_session_owners: Sequence[Participant],
     ) -> ResumeLaunchOverlay:
-        """Validate and reuse a trusted predecessor's isolated transcript domain.
-
-        Sits behind core's ``_validate_resume_identity``, which has already
-        selected the newest dead trusted predecessor and pre-filtered the
-        trusted matching set. This check is about whether the predecessor's
-        transcript namespace is safe to reuse; it is not a second session-id
-        validator and does not require exact-only provenance.
-        """
+        """Validate and reuse a trusted predecessor's isolated transcript domain."""
         if predecessor.transcript_domain is None:
             raise BadRequest(
                 "cannot resume Vibe session safely: predecessor has no isolated "
@@ -178,22 +163,7 @@ class VibeHarness(Harness):
         return False
 
     def discover_models(self) -> list[str]:
-        """Read `[[models]]` out of vibe's own config.
-
-        Vibe has no `models` subcommand, but its model set is not a remote
-        catalogue — it is a list the user already wrote in `config.toml`, which
-        makes it exactly the thing worth copying into Theater's `[models]`.
-
-        Both spellings are returned. `VIBE_ACTIVE_MODEL` accepts either the
-        `name` (`claude-opus-5`) or the shorter `alias` (`opus-5`), and which
-        one someone wants to see in Theater's config is a matter of taste.
-
-        Reading another tool's config file is a coupling Theater does not
-        otherwise take, and it is only tolerable because of where it sits:
-        discovery, run by hand, printed for review, never on the spawn path. A
-        vibe release that renames these keys degrades this to "found nothing"
-        rather than breaking a spawn.
-        """
+        """Read Vibe model names and aliases from its config."""
         path = self._config_path()
         try:
             raw = tomllib.loads(path.read_text(encoding="utf-8"))

@@ -23,13 +23,7 @@ class VibeObserver(
     VibeScreenMixin,
     TranscriptObserver,
 ):
-    """Read Vibe's messages JSONL and meta usage data.
-
-    Theater cold launches write below a participant-specific root. Resumed
-    launches keep the trusted predecessor's root after the daemon validates
-    session provenance and the domain marker. Within an isolated root, Vibe
-    rotations are exact by construction.
-    """
+    """Read Vibe messages and meta usage from isolated or shared roots."""
 
     trajectory_capabilities = TrajectoryCapabilities(
         supported=frozenset(
@@ -58,12 +52,10 @@ class VibeObserver(
         *,
         isolated: bool = False,
     ):
-        #: Injectable so tests never touch the real ~/.vibe.
         self.root = root or Path.home() / ".vibe" / "logs" / "session"
         self.correlation_root = correlation_root
         self.isolated = isolated
         self.relocate_by_cwd = True
-        #: Set in `find_transcript` so `parse` can relativise absolute paths vibe's tool args carry.
         self._cwd: str | None = None
         self._active_turn_id: str | None = None
         self._last_turn_id: str | None = None

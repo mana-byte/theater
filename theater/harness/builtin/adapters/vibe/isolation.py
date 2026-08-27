@@ -20,13 +20,7 @@ def _canonical(path: Path) -> Path:
 
 
 def _marker_key() -> bytes:
-    """Daemon-local signing key for Vibe domain markers (create-on-write).
-
-    This is a tamper-evidence boundary for Theater's own bookkeeping, not a
-    same-UID security boundary: agents run as the same OS user and can usually
-    read anything that user can. The marker is therefore never sole proof of
-    ownership; resume still needs the daemon's trusted session provenance.
-    """
+    """Read or create the daemon-local Vibe domain signing key."""
     key_path = paths.home() / _MARKER_KEY
     key_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -40,13 +34,7 @@ def _marker_key() -> bytes:
 
 
 def _marker_key_readonly() -> bytes | None:
-    """Read the signing key without creating it.
-
-    Validation must not create the key as a side effect: a validation call on
-    a fresh daemon should return invalid, not bootstrap a key that subsequent
-    signing would then trust. Returns ``None`` when the key does not exist,
-    which the caller treats as "no valid marker can exist".
-    """
+    """Read the signing key without creating it during validation."""
     key_path = paths.home() / _MARKER_KEY
     try:
         return key_path.read_bytes()
@@ -83,13 +71,7 @@ def isolation_marker_text(*, participant_id: str, transcript_domain: Path) -> st
 def validate_isolated_domain(
     transcript_domain: Path, *, participant_id: str | None = None
 ) -> dict[str, object] | None:
-    """Return marker data when *transcript_domain* is a Theater Vibe root.
-
-    The directory and marker must be ordinary same-owner filesystem objects.
-    The marker binds the canonical path to the original domain owner; the
-    spawner separately checks that owner is a trusted row for the resumed
-    session before any successor may reuse the domain.
-    """
+    """Validate a signed same-owner domain; trusted lineage is checked separately."""
     domain = _canonical(transcript_domain)
     marker = domain / ISOLATION_MARKER
     try:

@@ -27,16 +27,7 @@ from .constants import _READ_TOOLS, _WRITE_TOOLS
 def _extract_paths(
     tool_name: str | None, arguments: object, cwd: str | None
 ) -> tuple[EventPath, ...]:
-    """Pull file paths from a vibe tool call's structured arguments.
-
-    Only the known file-path-taking tools produce paths, and only from their
-    declared argument keys — never from the shell command string of ``bash``
-    or from prose. An absolute path is relativised against ``cwd`` so the
-    recall index never carries a home directory. A path that cannot be
-    relativised (no cwd, or the path is not under it) is dropped: a missing
-    path is honest, a wrong one is a false claim in an index other agents
-    trust.
-    """
+    """Extract declared tool paths without leaking non-repository absolute paths."""
     if not tool_name or not arguments:
         return ()
     key = _WRITE_TOOLS.get(tool_name) or _READ_TOOLS.get(tool_name)
@@ -230,15 +221,7 @@ def _vibe_fact(
 
 
 def _relativise(path: str, cwd: str | None) -> str | None:
-    """Make an absolute path repo-relative, or return None if it cannot be.
-
-    Vibe's tools accept both absolute and relative paths, but the LLM is
-    told to use absolute paths, so the common case is an absolute path that
-    needs stripping down to the repo root. A path that is already relative
-    is passed through. A path that does not resolve under ``cwd`` (a config
-    file outside the repo, or no cwd at all) returns None: emitting it as-is
-    would leak a home directory, and emitting nothing is the honest answer.
-    """
+    """Return a repository-relative path, or None for external absolute paths."""
     p = Path(path).expanduser()
     if not p.is_absolute():
         return path

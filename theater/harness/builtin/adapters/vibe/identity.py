@@ -185,12 +185,7 @@ class VibeIdentityMixin:
         )
 
     def _is_candidate(self, d: Path, want: str, after: float | None) -> bool:
-        """Whether a session directory is a viable transcript match.
-
-        Checks the messages file exists, the birth-time floor, and the cwd
-        from meta.json — the three conditions that were inline branches in
-        ``find_transcript`` before they overflowed the branch limit.
-        """
+        """Check transcript shape, creation floor, and Vibe cwd."""
         messages = d / MESSAGES_FILENAME
         if not messages.exists():
             return False
