@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 
 from theater.provenance import TranscriptProvenance, normalize_provenance
 
@@ -23,14 +24,24 @@ class ParticipantObservationContext:
     def __post_init__(self) -> None:
         if not isinstance(self.participant_id, str):
             raise TypeError("participant observation context participant_id must be a string")
+        if not self.participant_id.strip():
+            raise ValueError("participant observation context participant_id must not be blank")
         for name in ("cwd", "session_id", "known_location", "transcript_domain"):
             value = getattr(self, name)
             if value is not None and not isinstance(value, str):
                 raise TypeError(f"participant observation context {name} must be a string or null")
-        if self.after is not None and type(self.after) not in (int, float):
-            raise TypeError("participant observation context after must be a number or null")
-        if self.pane_pid is not None and type(self.pane_pid) is not int:
-            raise TypeError("participant observation context pane_pid must be an integer or null")
+        if self.after is not None:
+            if type(self.after) not in (int, float):
+                raise TypeError("participant observation context after must be a number or null")
+            if not isfinite(self.after):
+                raise ValueError("participant observation context after must be finite")
+        if self.pane_pid is not None:
+            if type(self.pane_pid) is not int:
+                raise TypeError(
+                    "participant observation context pane_pid must be an integer or null"
+                )
+            if self.pane_pid <= 0:
+                raise ValueError("participant observation context pane_pid must be positive")
         if self.session_provenance is not None and not isinstance(
             self.session_provenance,
             (str, TranscriptProvenance),
