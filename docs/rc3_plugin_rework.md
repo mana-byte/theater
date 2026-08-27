@@ -34,7 +34,7 @@ RC3 is both a structural refactor and a fidelity pass. Structural moves must pre
 behaviour. Any intentional behaviour improvement lands afterward, with a fixture and an explicit
 commit that names the changed observation.
 
-## Current baseline
+## Pre-refactor baseline
 
 The public split is sound:
 

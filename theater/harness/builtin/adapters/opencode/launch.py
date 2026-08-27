@@ -19,7 +19,7 @@ from theater.harness.base import (
 )
 from theater.models import BadRequest
 
-from .constants import CORRELATION_PLUGIN_SUFFIX, MODELS_TIMEOUT
+from .constants import CORRELATION_PLUGIN_SUFFIX, MODELS_TIMEOUT, RECEIPT_RETRY_DELAYS_MS
 from .observer import OpenCodeObserver
 
 if TYPE_CHECKING:
@@ -35,31 +35,81 @@ def _correlation_plugin(participant_id: str, token_path: Path) -> str:
     participant = json.dumps(participant_id)
     token = json.dumps(str(token_path))
     command = json.dumps(theater_binary())
+    retry_delays = json.dumps(RECEIPT_RETRY_DELAYS_MS)
     return f"""import {{ spawn }} from "node:child_process"
 
 const participantID = {participant}
 const tokenPath = {token}
 const theater = {command}
+const retryDelays = {retry_delays}
+let currentSessionID = null
+let deliveredSessionID = null
+let publishing = false
+let generation = 0
 
 function publish(sessionID) {{
-  try {{
-    const child = spawn(
-      theater,
-      ["transcript-receipt", "--id", participantID, "--token-file", tokenPath],
-      {{ stdio: ["pipe", "ignore", "ignore"] }},
-    )
-    child.on("error", () => {{}})
-    child.stdin.on("error", () => {{}})
-    child.stdin.end(JSON.stringify({{ session_id: sessionID }}))
-  }} catch {{}}
+  return new Promise((resolve) => {{
+    let settled = false
+    const finish = (ok) => {{
+      if (settled) return
+      settled = true
+      resolve(ok)
+    }}
+    try {{
+      const child = spawn(
+        theater,
+        ["transcript-receipt", "--strict-exit", "--id", participantID, "--token-file", tokenPath],
+        {{ stdio: ["pipe", "ignore", "ignore"] }},
+      )
+      child.once("error", () => finish(false))
+      child.once("close", (code) => finish(code === 0))
+      child.stdin.once("error", () => finish(false))
+      child.stdin.end(JSON.stringify({{ session_id: sessionID }}))
+    }} catch {{
+      finish(false)
+    }}
+  }})
+}}
+
+const sleep = (delay) => new Promise((resolve) => setTimeout(resolve, delay))
+
+async function deliver(sessionID, version) {{
+  for (const delay of retryDelays) {{
+    if (version !== generation) return
+    if (delay > 0) await sleep(delay)
+    if (version !== generation) return
+    if (await publish(sessionID)) {{
+      if (version === generation) deliveredSessionID = sessionID
+      return
+    }}
+  }}
+}}
+
+function schedule() {{
+  if (!currentSessionID || deliveredSessionID === currentSessionID || publishing) return
+  const sessionID = currentSessionID
+  const version = generation
+  publishing = true
+  void deliver(sessionID, version).finally(() => {{
+    publishing = false
+    if (version !== generation) schedule()
+  }})
 }}
 
 export const TheaterSessionReceipt = async () => {{
   return {{
     event: async ({{ event }}) => {{
       try {{
-        if (event.type !== "session.created" || event.properties.info.parentID) return
-        publish(event.properties.info.id)
+        const info = event?.properties?.info
+        if (event.type === "session.created" && info && !info.parentID) {{
+          if (typeof info.id !== "string" || !info.id) return
+          if (info.id !== currentSessionID) {{
+            currentSessionID = info.id
+            deliveredSessionID = null
+            generation += 1
+          }}
+        }}
+        schedule()
       }} catch {{}}
     }},
   }}

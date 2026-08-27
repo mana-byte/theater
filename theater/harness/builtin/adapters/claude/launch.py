@@ -60,7 +60,11 @@ def _hook_string(data: Mapping[str, object], *names: str) -> str | None:
 
 
 def _claude_receipt_settings(participant_id: str, token_path: Path) -> dict:
-    """Launch-local Claude settings layered via ``--settings``."""
+    """Build launch-local receipt hooks without modifying user settings.
+
+    SessionStart covers starts and rotations; PreCompact preserves the old location.
+    Stop is excluded because it does not prove a new transcript location.
+    """
     hook = {"type": "command", "command": _receipt_hook_command(participant_id, token_path)}
     entry = {"hooks": [hook]}
     return {"hooks": {event: [entry] for event in CLAUDE_RECEIPT_EVENTS}}

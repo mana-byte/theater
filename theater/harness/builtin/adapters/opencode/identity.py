@@ -14,6 +14,7 @@ from theater.transcript_identity import (
     TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
 )
 
+from .constants import RECEIPT_SESSION_ID_MAX_BYTES
 from .store import (
     candidate_session,
     candidate_sessions,
@@ -24,6 +25,24 @@ from .store import (
 )
 
 logger = logging.getLogger("theater.harness.opencode")
+
+
+def validate_receipt_session_id(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("opencode receipt payload requires a nonblank session_id")
+    if not value.startswith("ses"):
+        raise ValueError("opencode receipt session_id must start with 'ses'")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("opencode receipt session_id must be valid UTF-8") from exc
+    if len(encoded) > RECEIPT_SESSION_ID_MAX_BYTES:
+        raise ValueError(
+            f"opencode receipt session_id exceeds {RECEIPT_SESSION_ID_MAX_BYTES} bytes"
+        )
+    if any(not char.isprintable() for char in value):
+        raise ValueError("opencode receipt session_id must not contain control characters")
+    return value
 
 
 def transcript_candidates(
@@ -157,11 +176,25 @@ class OpenCodeIdentity:
         row = located_sessions(conn, want, self._after)
         return row[0] if row is not None else None
 
-    def _correlation_problem(self) -> Batch | None:
+    def _correlation_problem(self, conn: sqlite3.Connection) -> Batch | None:
         """Surface a missing exact channel after bounded startup."""
-        if not self._receipt_expected or self._receipt_deadline is None:
+        if self._receipt_deadline is None or time.monotonic() < self._receipt_deadline:
             return None
-        if time.monotonic() < self._receipt_deadline:
+        if self._receipt_target is not None:
+            target = self._receipt_target
+            if session(conn, target) is None:
+                reason = f"OpenCode receipt session {target!r} did not appear in the database"
+            else:
+                reason = f"OpenCode receipt session {target!r} is not a root session"
+            return Batch(
+                waiting=True,
+                error_code="transcript_correlation_failed",
+                error=reason,
+            )
+        if not self._receipt_expected or not self._cwd:
+            return None
+        want = str(Path(self._cwd).resolve())
+        if located_sessions(conn, want, self._after) is None:
             return None
         return Batch(
             waiting=True,

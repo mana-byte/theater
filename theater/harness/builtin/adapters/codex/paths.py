@@ -1,3 +1,5 @@
+"""Codex transcript path extraction and normalization."""
+
 from __future__ import annotations
 
 from collections.abc import Mapping

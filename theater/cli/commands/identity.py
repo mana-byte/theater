@@ -41,13 +41,13 @@ def cmd_transcript_receipt(args) -> int:
         token = Path(args.token_file).read_text().strip()
         payload = json.load(sys.stdin)
     except (OSError, ValueError):
-        return 0
+        return int(bool(getattr(args, "strict_exit", False)))
     if not isinstance(payload, dict):
-        return 0
+        return int(bool(getattr(args, "strict_exit", False)))
     try:
         asyncio.run(_send_transcript_receipt(args, token=token, payload=payload))
-    except (RemoteError, ConnectionError, OSError):
-        return 0
+    except Exception:
+        return int(bool(getattr(args, "strict_exit", False)))
     return 0
 
 

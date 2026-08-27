@@ -214,7 +214,7 @@ def test_the_id_travels_in_a_merged_config_file(tmp_path):
     assert document["plugin"] == [plugin.resolve().as_uri()]
     assert plugin in plan.files
     assert "session.created" in plan.files[plugin]
-    assert "event.properties.info.parentID" in plan.files[plugin]
+    assert "!info.parentID" in plan.files[plugin]
     assert "abc123" in plan.files[plugin]
     assert plan.receipt_token_path is not None
     assert str(plan.receipt_token_path) in plan.files[plugin]

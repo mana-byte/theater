@@ -14,7 +14,7 @@ from theater.provenance import TranscriptProvenance
 from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFeature
 
 from .constants import CORRELATION_PLUGIN_SUFFIX, DB_NAME
-from .identity import admit_operator_candidate, transcript_candidates
+from .identity import admit_operator_candidate, transcript_candidates, validate_receipt_session_id
 from .screen import is_idle_screen, screen_reading
 from .source import OpenCodeSource
 
@@ -129,13 +129,7 @@ class OpenCodeObserver(HarnessObserver):
         cwd: str | None,
         expected_session_id: str | None,
     ) -> TranscriptCandidate:
-        session_id = payload.get("session_id")
-        if not isinstance(session_id, str) or not session_id.strip():
-            raise ValueError("opencode receipt payload requires a nonblank session_id")
-        if "://" in session_id:
-            raise ValueError(
-                "opencode receipt session_id must be a native session id, not a location"
-            )
+        session_id = validate_receipt_session_id(payload.get("session_id"))
         return TranscriptCandidate(
             location=f"opencode://{session_id}",
             session_id=session_id,

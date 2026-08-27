@@ -1,3 +1,5 @@
+"""Codex value, timing, and usage normalization."""
+
 from __future__ import annotations
 
 import json

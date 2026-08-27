@@ -1,3 +1,5 @@
+"""Codex tmux-screen classification."""
+
 from __future__ import annotations
 
 from theater.harness.observation import ScreenConfidence, ScreenKind, ScreenReading

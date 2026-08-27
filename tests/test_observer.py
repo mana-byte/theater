@@ -1237,6 +1237,23 @@ async def test_an_incomplete_attachment_source_retires_instead_of_spinning(regis
     assert harness.observer.source.closed
 
 
+async def test_source_construction_failure_uses_cannot_observe_diagnostic(registry, caplog):
+    class BrokenObserver(ScriptedObserver):
+        def open_source(self, *, cwd, session_id=None, after=None):
+            raise ValueError("invalid participant observation context")
+
+    harness = SourceHarness()
+    harness.observer = BrokenObserver()
+    observer = Observer(registry, {"scripted": harness})
+    participant = registry.register(harness="scripted", pane=None, cwd="/tmp")
+    caplog.set_level("WARNING", logger="theater.observer")
+
+    await asyncio.wait_for(observer._watch(participant.id, "scripted"), timeout=0.2)
+
+    assert "cannot observe" in caplog.text
+    assert "invalid participant observation context" in caplog.text
+
+
 def test_consumed_input_counts_as_activity_even_with_no_events(registry):
     """Bookkeeping records move the file without parsing to anything.
 

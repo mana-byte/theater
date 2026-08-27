@@ -104,6 +104,7 @@ def _add_receipt_parser(sub) -> None:
     receipt = sub.add_parser("transcript-receipt", help=argparse.SUPPRESS)
     receipt.add_argument("--id", required=True)
     receipt.add_argument("--token-file", required=True)
+    receipt.add_argument("--strict-exit", action="store_true", help=argparse.SUPPRESS)
 
     alias = sub.add_parser("claude-receipt", help=argparse.SUPPRESS)
     alias.add_argument("--id", required=True)

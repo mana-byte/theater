@@ -288,15 +288,16 @@ class Observer:
             timing.ready_lag(OBSERVER_WATCH, pid, p.created_at, harness=p.harness)
             self._tasks[pid] = asyncio.create_task(watch(pid, normalize_harness(p.harness)))
 
-    def _warn_unobservable(self, pid: str, p) -> None:
+    def _warn_unobservable(self, pid: str, p, *, reason: str | None = None) -> None:
         if pid in self._unobservable:
             return
         self._unobservable.add(pid)
-        if normalize_harness(p.harness) not in self.harnesses:
-            known = ", ".join(sorted(self.harnesses)) or "none"
-            reason = f"harness {p.harness!r} is not one we can read (known: {known})"
-        else:
-            reason = "it reported no working directory"
+        if reason is None:
+            if normalize_harness(p.harness) not in self.harnesses:
+                known = ", ".join(sorted(self.harnesses)) or "none"
+                reason = f"harness {p.harness!r} is not one we can read (known: {known})"
+            else:
+                reason = "it reported no working directory"
         logger.warning("cannot observe %s: %s", pid, reason)
 
     # ---- one participant -----------------------------------------------
@@ -309,7 +310,18 @@ class Observer:
 
     async def _watch_source(self, pid: str, harness_name: str) -> None:  # noqa: PLR0912, PLR0915
         observer = self.harnesses[harness_name].observer
-        source = self._open_source(pid, observer)
+        try:
+            source = self._open_source(pid, observer)
+        except Exception as exc:
+            participant = self.store.get_participant(pid)
+            if participant is not None:
+                detail = str(exc) or type(exc).__name__
+                self._warn_unobservable(
+                    pid,
+                    participant,
+                    reason=f"its observation source could not be opened: {detail}",
+                )
+            return
         if source is None:
             return
         self._restore_transcript_identity_loss(pid)

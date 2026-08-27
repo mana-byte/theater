@@ -389,9 +389,10 @@ exact name; the old command name and `claude.receipt` RPC are kept as
 forwarding aliases so those sessions keep working.
 
 Spawned OpenCode sessions use the same authenticated receipt transport. Their launch-local plugin
-publishes each root `session.created` ID, and the database source waits for the matching row before
-committing `opencode://<session-id>`. A later root session receipt stages a session switch without
-falling back to another same-cwd row.
+publishes each root `session.created` ID, retries transient delivery failures, and retries again on
+later session events. The database source waits for the matching row before committing
+`opencode://<session-id>`. A later root receipt stages a session switch without falling back to
+another same-cwd row.
 
 Vibe cold spawns get a Theater-owned isolated transcript save directory with a
 signed marker naming the original participant. Resumes may re-enter that domain

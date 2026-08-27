@@ -1,3 +1,5 @@
+"""Codex-native record names and bounded adapter values."""
+
 from __future__ import annotations
 
 import re

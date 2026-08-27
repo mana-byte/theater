@@ -898,8 +898,9 @@ writing, because the writer uses `O_TRUNC` which follows symlinks.
 The shipped OpenCode adapter uses this generic mechanism too. Its launch-local plugin submits the
 native root session ID from `session.created`; the validator returns an
 `opencode://<session-id>` candidate, and the source waits for that exact database row. Later root
-receipts may switch the same live process to a new session. Core still enforces token, participant,
-and ownership checks.
+receipts may switch the same live process to a new session. Failed delivery gets a bounded retry
+burst and another burst on later session events. Core still enforces token, participant, and
+ownership checks.
 
 ### Pre-flight
 

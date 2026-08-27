@@ -22,7 +22,11 @@ class ClaudeScreen:
         return last_screen_line(capture) in IDLE_PROMPTS
 
     def screen_reading(self, capture: str) -> ScreenReading:
-        """Classify display hints in safety order: trust, approval, working, prompt."""
+        """Classify display hints in safety order: trust, approval, working, prompt.
+
+        Trust and approval precede prompt because injecting Enter there changes permissions.
+        Working precedes prompt so a mixed frame cannot finish a live turn early.
+        """
         if TRUST_MARKER in capture:
             return ScreenReading(kind=ScreenKind.TRUST, confidence=ScreenConfidence.HIGH)
         if APPROVAL_MARKER in capture:

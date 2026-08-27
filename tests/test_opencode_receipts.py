@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import json
 import sqlite3
 from pathlib import Path
 
 import pytest
 from shipped import OpenCodeHarness, OpenCodeObserver
 
-from theater import paths
+from theater import cli, paths
+from theater.cli.commands import identity as identity_mod
 from theater.client import DaemonClient
 from theater.daemon.server import Daemon
 from theater.harness.source import SourceContractError
@@ -88,13 +91,66 @@ def test_launch_uses_a_core_owned_generic_receipt_token(tmp_path, monkeypatch):
     assert plan.receipt_token_path == token_path
     assert plan.receipt_token is None
     assert "transcript-receipt" in source
-    assert '"--id", participantID, "--token-file", tokenPath' in source
+    assert '"--strict-exit", "--id", participantID' in source
     assert "spawn(" in source
     assert 'stdio: ["pipe", "ignore", "ignore"]' in source
-    assert 'event.type !== "session.created" || event.properties.info.parentID' in source
+    assert "const retryDelays = [0, 100, 500, 2000]" in source
+    assert 'child.once("close", (code) => finish(code === 0))' in source
+    assert 'event.type === "session.created" && info && !info.parentID' in source
+    assert source.count("schedule()") >= 3
+    event_body = source.split("event: async", 1)[1].split("} catch", 1)[0]
+    assert "await " not in event_body
     assert str(token_path) in source
     assert ".opencode-session" not in source
-    assert "await" not in source
+
+
+@pytest.mark.parametrize(("strict", "expected"), [(False, 0), (True, 1)])
+def test_generic_receipt_cli_reports_token_read_failure_only_in_strict_mode(
+    tmp_path, monkeypatch, strict, expected
+):
+    token_file = tmp_path / "missing-token"
+    argv = ["transcript-receipt", "--id", "participant", "--token-file", str(token_file)]
+    if strict:
+        argv.append("--strict-exit")
+    args = cli._parser().parse_args(argv)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"session_id": "ses-root"})))
+
+    assert cli.cmd_transcript_receipt(args) == expected
+
+
+@pytest.mark.parametrize(("strict", "expected"), [(False, 0), (True, 1)])
+def test_generic_receipt_cli_reports_parse_failure_only_in_strict_mode(
+    tmp_path, monkeypatch, strict, expected
+):
+    token_file = tmp_path / "token"
+    token_file.write_text("secret")
+    argv = ["transcript-receipt", "--id", "participant", "--token-file", str(token_file)]
+    if strict:
+        argv.append("--strict-exit")
+    args = cli._parser().parse_args(argv)
+    monkeypatch.setattr("sys.stdin", io.StringIO("not-json"))
+
+    assert cli.cmd_transcript_receipt(args) == expected
+
+
+@pytest.mark.parametrize(("strict", "expected"), [(False, 0), (True, 1)])
+def test_generic_receipt_cli_reports_rpc_failure_only_in_strict_mode(
+    tmp_path, monkeypatch, strict, expected
+):
+    token_file = tmp_path / "token"
+    token_file.write_text("secret")
+    argv = ["transcript-receipt", "--id", "participant", "--token-file", str(token_file)]
+    if strict:
+        argv.append("--strict-exit")
+    args = cli._parser().parse_args(argv)
+
+    async def reject(*args, **kwargs):
+        raise ConnectionError("daemon unavailable")
+
+    monkeypatch.setattr(identity_mod, "_send_transcript_receipt", reject)
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"session_id": "ses-root"})))
+
+    assert cli.cmd_transcript_receipt(args) == expected
 
 
 def test_validator_accepts_a_root_id_before_its_database_row_exists(tmp_path):
@@ -130,7 +186,7 @@ def test_validator_rejects_invalid_session_ids(tmp_path, payload):
 def test_validator_rejects_locations_and_accepts_new_root_ids(tmp_path):
     observer = OpenCodeObserver(db=tmp_path / "opencode.db")
 
-    with pytest.raises(ValueError, match="native session id"):
+    with pytest.raises(ValueError, match="start with"):
         observer.validate_transcript_receipt(
             payload={"session_id": "opencode://ses-root"},
             cwd=None,
@@ -143,6 +199,26 @@ def test_validator_rejects_locations_and_accepts_new_root_ids(tmp_path):
     )
     assert candidate.location == "opencode://ses-root"
     assert candidate.session_id == "ses-root"
+
+
+@pytest.mark.parametrize(
+    "session_id",
+    (
+        "root",
+        "ses-root\nother",
+        "ses-" + "x" * 256,
+        "ses-\ud800",
+    ),
+)
+def test_validator_rejects_unsafe_session_ids(tmp_path, session_id):
+    observer = OpenCodeObserver(db=tmp_path / "opencode.db")
+
+    with pytest.raises(ValueError, match="session_id"):
+        observer.validate_transcript_receipt(
+            payload={"session_id": session_id},
+            cwd=None,
+            expected_session_id=None,
+        )
 
 
 def test_exact_admission_waits_for_its_root_row_without_cwd_fallback(tmp_path):
@@ -222,6 +298,60 @@ def test_different_session_receipt_stages_only_the_exact_target(tmp_path):
     conn.close()
 
 
+def test_repeated_staged_receipt_does_not_reset_state_or_extend_deadline(tmp_path):
+    db = tmp_path / "opencode.db"
+    conn = _database(db)
+    source = OpenCodeObserver(db=db).open_source(cwd=str(tmp_path))
+
+    assert (
+        source.admit_exact_location(location="opencode://ses-target", session_id="ses-target")
+        == "staged"
+    )
+    source._receipt_deadline = 123.0
+    source._roles["message"] = "assistant"
+
+    assert (
+        source.admit_exact_location(location="opencode://ses-target", session_id="ses-target")
+        == "staged"
+    )
+    assert source._receipt_deadline == 123.0
+    assert source._roles == {"message": "assistant"}
+    conn.close()
+
+
+def test_staged_receipt_times_out_when_database_row_never_appears(tmp_path):
+    db = tmp_path / "opencode.db"
+    conn = _database(db)
+    source = OpenCodeObserver(db=db).open_source(cwd=str(tmp_path))
+    source.admit_exact_location(location="opencode://ses-missing", session_id="ses-missing")
+    source._receipt_deadline = 0.0
+
+    failed = asyncio.run(source.read())
+
+    assert failed.error_code == "transcript_correlation_failed"
+    assert "did not appear" in (failed.error or "")
+    conn.close()
+
+
+def test_staged_receipt_times_out_when_database_row_is_not_a_root(tmp_path):
+    db = tmp_path / "opencode.db"
+    conn = _database(db)
+    conn.execute(
+        "INSERT INTO session (id, parent_id, directory, time_created) VALUES (?, ?, ?, ?)",
+        ("ses-child", "ses-parent", str(tmp_path.resolve()), 1000),
+    )
+    conn.commit()
+    source = OpenCodeObserver(db=db).open_source(cwd=str(tmp_path))
+    source.admit_exact_location(location="opencode://ses-child", session_id="ses-child")
+    source._receipt_deadline = 0.0
+
+    failed = asyncio.run(source.read())
+
+    assert failed.error_code == "transcript_correlation_failed"
+    assert "not a root session" in (failed.error or "")
+    conn.close()
+
+
 def test_receipt_marker_requires_a_generic_admission(tmp_path):
     cwd = tmp_path / "work"
     cwd.mkdir()
@@ -238,6 +368,32 @@ def test_receipt_marker_requires_a_generic_admission(tmp_path):
 
     assert asyncio.run(source.read()).waiting is True
     source._receipt_deadline = 0.0
+    failed = asyncio.run(source.read())
+    assert failed.error_code == "transcript_correlation_failed"
+    conn.close()
+
+
+def test_receipt_marker_waits_without_error_until_an_eligible_root_exists(tmp_path):
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    db = tmp_path / "opencode.db"
+    conn = _database(db)
+    _root_session(conn, "ses-too-old", cwd, 1000)
+    correlation = tmp_path / "correlation"
+    correlation.mkdir()
+    (correlation / "participant.opencode.mjs").write_text("// marker\n")
+    source = OpenCodeObserver(db=db, correlation_dir=correlation).open_source_for(
+        participant_id="participant",
+        cwd=str(cwd),
+        after=2.0,
+    )
+    source._receipt_deadline = 0.0
+
+    waiting = asyncio.run(source.read())
+    assert waiting.waiting is True
+    assert waiting.error_code is None
+
+    _root_session(conn, "ses-eligible", cwd, 3000)
     failed = asyncio.run(source.read())
     assert failed.error_code == "transcript_correlation_failed"
     conn.close()
@@ -303,6 +459,14 @@ def test_generic_receipt_switches_to_a_new_root_session(theater_home, tmp_path):
             assert current is not None
             assert current.session_id == "ses-one"
             assert current.transcript_location == "opencode://ses-one"
+
+            repeated = await client.call(
+                "transcript.receipt",
+                id=participant.id,
+                token="secret",
+                payload={"session_id": "ses-one"},
+            )
+            assert repeated["admission"] == "accepted"
 
             receipt = await client.call(
                 "transcript.receipt",

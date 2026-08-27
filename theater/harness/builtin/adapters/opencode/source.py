@@ -18,7 +18,7 @@ from theater.provenance import TranscriptProvenance, normalize_provenance
 
 from .constants import CORRELATION_READY_TIMEOUT, STEP_FINISH
 from .history import OpenCodeHistory
-from .identity import OpenCodeIdentity
+from .identity import OpenCodeIdentity, validate_receipt_session_id
 from .parser import OpenCodeParser
 from .store import event_head, latest_message, open_readonly
 from .trajectory import OpenCodeTrajectory
@@ -86,6 +86,7 @@ class OpenCodeSource(OpenCodeHistory, OpenCodeParser, OpenCodeTrajectory, OpenCo
         self._pending = None
         if self._receipt_target == session:
             self._receipt_target = None
+            self._receipt_deadline = None
         self._clear_session_state(detach=False)
 
     def discard_attachment(self) -> None:
@@ -101,13 +102,14 @@ class OpenCodeSource(OpenCodeHistory, OpenCodeParser, OpenCodeTrajectory, OpenCo
         self._known_location = None
         self._known_location_provenance = TranscriptProvenance.HEURISTIC
         self._receipt_target = None
+        self._receipt_deadline = None
         self._clear_session_state(detach=True)
 
     def admit_exact_location(self, *, location: str, session_id: str) -> ReceiptAdmission:
-        if not isinstance(session_id, str) or not session_id.strip():
-            raise SourceContractError("OpenCode receipt session_id must be a nonblank string")
-        if "://" in session_id:
-            raise SourceContractError("OpenCode receipt session_id must be a native session id")
+        try:
+            session_id = validate_receipt_session_id(session_id)
+        except ValueError as exc:
+            raise SourceContractError(str(exc)) from exc
         if location != f"opencode://{session_id}":
             raise SourceContractError("OpenCode receipt location must match its session_id exactly")
         self._pending = None
@@ -117,11 +119,14 @@ class OpenCodeSource(OpenCodeHistory, OpenCodeParser, OpenCodeTrajectory, OpenCo
         self._known_location = location
         self._known_location_provenance = TranscriptProvenance.EXACT
         self._receipt_expected = False
-        self._receipt_deadline = None
         if self._session == session_id:
             self._receipt_target = None
+            self._receipt_deadline = None
             return "accepted"
+        if self._receipt_target == session_id:
+            return "staged"
         self._receipt_target = session_id
+        self._receipt_deadline = time.monotonic() + CORRELATION_READY_TIMEOUT
         self._clear_session_state(detach=True)
         return "staged"
 
@@ -157,12 +162,12 @@ class OpenCodeSource(OpenCodeHistory, OpenCodeParser, OpenCodeTrajectory, OpenCo
                 if found:
                     return self._attach(conn, found)
                 if self._receipt_target is not None:
-                    return Batch(waiting=True)
+                    return self._correlation_problem(conn) or Batch(waiting=True)
                 if self._trusted_known_location():
                     return self._identity_lost_batch(
                         f"trusted transcript pin {self._known_location!r} no longer exists"
                     )
-                return self._correlation_problem() or Batch(waiting=True)
+                return self._correlation_problem(conn) or Batch(waiting=True)
             return self._drain(conn)
         except sqlite3.Error as exc:
             logger.debug("reading the opencode database failed", exc_info=True)

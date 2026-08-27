@@ -1,3 +1,5 @@
+"""Codex transcript source lifecycle."""
+
 from __future__ import annotations
 
 from pathlib import Path

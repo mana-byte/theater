@@ -62,7 +62,7 @@ class OpenCodeHistory:
 
         def _attachment_provenance(self, sid: str) -> str: ...
 
-        def _correlation_problem(self) -> Batch | None: ...
+        def _correlation_problem(self, conn: sqlite3.Connection) -> Batch | None: ...
 
         def _locate(self, conn: sqlite3.Connection, *, pinned: bool) -> str | None: ...
 
@@ -135,7 +135,7 @@ class OpenCodeHistory:
             else:
                 sid = self._session or pinned_sid or self._locate(conn, pinned=True)
             if sid is None:
-                problem = self._correlation_problem()
+                problem = self._correlation_problem(conn)
                 return (
                     History(error_code=problem.error_code, error=problem.error)
                     if problem is not None

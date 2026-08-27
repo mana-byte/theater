@@ -1,3 +1,5 @@
+"""Codex rollout parsing and event normalization."""
+
 from __future__ import annotations
 
 import json

@@ -23,11 +23,12 @@ class ClaudeCodeObserver(
     ClaudeScreen,
     TranscriptObserver,
 ):
+    """Observe Claude records while deduplicating repeated native turn boundaries."""
+
     trajectory_capabilities = TrajectoryCapabilities(
         supported=frozenset(
             {
                 TrajectoryFeature.REQUESTS,
-                TrajectoryFeature.MODELS,
                 TrajectoryFeature.MODELS,
                 TrajectoryFeature.TOOLS,
                 TrajectoryFeature.USAGE,

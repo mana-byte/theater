@@ -143,7 +143,8 @@ does not promise legacy SQLite spellings consumed by Theater.
 RC3 migrated the OpenCode receipt to the shared authenticated transport.
 `OpenCodeHarness.plan_launch` writes a generated config and `TheaterSessionReceipt` plugin,
 launching with `OPENCODE_CONFIG=<generated path>`. The plugin invokes Theater's shipped
-`transcript-receipt` command with the core-owned token file and remains fail-open. Upstream
+`transcript-receipt` command with the core-owned token file. It observes strict child exit status,
+retries a bounded burst, then retries again on later events until delivery succeeds. Upstream
 `packages/opencode/src/config/config.ts` merges `OPENCODE_CONFIG` after global config;
 `packages/web/src/content/docs/plugins.mdx` documents configured file plugins.
 `packages/sdk/js/src/gen/types.gen.ts:EventSessionCreated` and
@@ -155,9 +156,9 @@ root receipt can move the same live process to a new session without cwd fallbac
 The documented v1 `packages/plugin/src/index.ts:Hooks` API has an async `event` callback plus
 typed `chat.message`, `tool.execute.before`, and `tool.execute.after` callbacks. It documents
 session, message/part, permission, and tool event coverage. But
-`packages/opencode/src/plugin/index.ts` calls each `hook.event` with `void`: rejection is not
-awaited or retried, and filtering is only location directory. Existing atomic idempotent receipt is
-safe; richer event ingress needs captured order/loss semantics and schema fixtures first.
+`packages/opencode/src/plugin/index.ts` calls each `hook.event` with `void`, so Theater's generated
+callback starts receipt delivery without awaiting it. Existing atomic idempotent receipt is safe;
+richer event ingress still needs captured order/loss semantics and schema fixtures first.
 
 ### Native OTel
 
@@ -224,7 +225,7 @@ overflow are channel health, never completion authority.
 |---|---|---|
 | Generic transcript receipt transport | already implemented; retain/test | `transcript.receipt`, token lifecycle, and generic end-to-end tests already exist; no new transport implementation. |
 | Claude receipt migration | already implemented; retain compatibility alias | Claude already reaches the generic transport through `claude-receipt`; retain the legacy CLI/RPC aliases. |
-| OpenCode receipt migration | implemented in RC3 | Generic receipt; asynchronous failure remains fail-open. |
+| OpenCode receipt migration | implemented in RC3 | Generic receipt with bounded retry bursts and later-event self-healing. |
 | Generic richer hook/event inbox | defer | It is new unused infrastructure while every richer harness decoder remains deferred; that violates the RC3 no-speculative-mechanics rule. |
 | Claude richer hooks | defer | Documentation-only payloads; no captured installed payload, turn key, or retry contract. |
 | Codex richer hooks | defer | Exact schemas and bounds exist, but launch-only config/trust and installed-version capture are unverified. |
