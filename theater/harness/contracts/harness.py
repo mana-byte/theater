@@ -75,8 +75,8 @@ class Harness(ABC):
     resume_takes_prompt: bool = True
     #: Native resume behaviour. Forking keeps context while minting a new transcript identity.
     resume_strategy: ResumeStrategy = "continue"
-    #: Explicit optional launch support; legacy adapters retain signature detection.
-    launch_parameter_support: LaunchParameterSupport | None = None
+    #: Explicit optional launch support compiled from the manifest.
+    launch_parameter_support: LaunchParameterSupport = LaunchParameterSupport()
 
     # ---- launching ------------------------------------------------------
 

@@ -482,6 +482,13 @@ correlation before a typed decoder receives a record. An `OtelChannelManifest`
 declares the protocol, bounds, header/resource correlation fields, bindings,
 and a launch-local installer.
 
+The installer receives the private token-file path but never the token bytes. It names one
+dedicated exporter-header environment variable through `credential_header_env`; after the callback
+returns, core injects `<auth_header>=<token>` into that variable because native OTLP exporters need
+the credential value in their launch environment. Core rejects inherited or overlay collisions,
+never writes the token into generated public files, and removes the private file with participant
+cleanup.
+
 Never repoint or replace an existing user exporter. If additive launch-local
 configuration, exact correlation, and a live fixture are not proven, use
 `unavailable_reason`. This inbound channel is separate from

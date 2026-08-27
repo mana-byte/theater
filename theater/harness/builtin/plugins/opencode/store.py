@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal, cast, overload
 
@@ -135,6 +136,35 @@ def history_parts_by_session(conn: sqlite3.Connection, sid: str):
     return conn.execute(
         "SELECT message_id, data FROM part WHERE session_id = ? ORDER BY time_created, id", (sid,)
     )
+
+
+def recent_history_messages(
+    conn: sqlite3.Connection,
+    sid: str,
+    *,
+    limit: int,
+    offset: int,
+):
+    return conn.execute(
+        "SELECT id, data FROM message WHERE session_id = ? "
+        "ORDER BY time_created DESC, id DESC LIMIT ? OFFSET ?",
+        (sid, limit, offset),
+    ).fetchall()
+
+
+def history_parts_for_messages(
+    conn: sqlite3.Connection,
+    sid: str,
+    message_ids: Sequence[str],
+):
+    if not message_ids:
+        return []
+    placeholders = ",".join("?" for _ in message_ids)
+    return conn.execute(
+        f"SELECT message_id, data FROM part WHERE session_id = ? "
+        f"AND message_id IN ({placeholders}) ORDER BY time_created, id",
+        (sid, *message_ids),
+    ).fetchall()
 
 
 def paged_messages(

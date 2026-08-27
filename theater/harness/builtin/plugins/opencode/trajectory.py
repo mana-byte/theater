@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -13,6 +14,7 @@ from theater.trajectory.content import ContentFormat, DetailField
 from theater.trajectory.enums import TrajectoryFailureCategory, TrajectoryKind, TrajectoryStatus
 from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryUsage
 
+from .constants import LIVE_TRAJECTORY_STATE_LIMIT
 from .store import live_revision_row, message_coordinate
 from .values import (
     _assistant_request_id,
@@ -36,8 +38,7 @@ from .values import (
 
 class OpenCodeTrajectory:
     _text: dict[str, dict[str, str]]
-    _trajectory_revisions: dict[str, int]
-    _trajectory_signatures: dict[str, TrajectoryFact]
+    _trajectory_state: OrderedDict[str, tuple[int, TrajectoryFact]]
 
     if TYPE_CHECKING:
 
@@ -330,8 +331,10 @@ class OpenCodeTrajectory:
             details=tuple(details),
         )
         key = native or f"fallback:{candidate.raw_index}:{candidate.event_ordinal}:{kind.value}"
-        previous = self._trajectory_signatures.get(key)
-        if previous is not None:
+        previous_state = self._trajectory_state.get(key)
+        if previous_state is not None:
+            previous_revision, previous = previous_state
+            self._trajectory_state.move_to_end(key)
             comparable = replace(
                 candidate,
                 raw_index=previous.raw_index,
@@ -339,9 +342,12 @@ class OpenCodeTrajectory:
             )
             if previous == comparable:
                 return None
-        revision = max(self._trajectory_revisions.get(key, -1) + 1, revision_hint or 0)
-        self._trajectory_revisions[key] = revision
-        self._trajectory_signatures[key] = candidate
+        else:
+            previous_revision = -1
+        revision = max(previous_revision + 1, revision_hint or 0)
+        self._trajectory_state[key] = (revision, candidate)
+        while len(self._trajectory_state) > LIVE_TRAJECTORY_STATE_LIMIT:
+            self._trajectory_state.popitem(last=False)
         return replace(candidate, revision=revision)
 
     def _live_revision(

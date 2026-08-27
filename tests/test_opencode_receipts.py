@@ -15,9 +15,11 @@ from theater import cli, paths
 from theater.cli.commands import identity as identity_mod
 from theater.client import DaemonClient
 from theater.daemon.server import Daemon
+from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.source import SourceContractError
 from theater.protocol import RemoteError
 from theater.provenance import TranscriptProvenance
+from theater.trajectory import TrajectoryKind
 
 SCHEMA = """
 CREATE TABLE session (
@@ -256,7 +258,8 @@ def test_same_session_receipt_upgrades_without_resetting_live_state(tmp_path):
     source._cursor = 41
     source._roles["message"] = "assistant"
     source._text["message"] = {"part": "answer"}
-    source._trajectory_revisions["fact"] = 2
+    fact = TrajectoryFact(kind=TrajectoryKind.ASSISTANT)
+    source._trajectory_state["fact"] = (2, fact)
 
     assert (
         source.admit_exact_location(location="opencode://ses-one", session_id="ses-one")
@@ -265,7 +268,7 @@ def test_same_session_receipt_upgrades_without_resetting_live_state(tmp_path):
     assert source._cursor == 41
     assert source._roles == {"message": "assistant"}
     assert source._text == {"message": {"part": "answer"}}
-    assert source._trajectory_revisions == {"fact": 2}
+    assert source._trajectory_state == {"fact": (2, fact)}
     assert source._session_provenance is TranscriptProvenance.EXACT
     conn.close()
 

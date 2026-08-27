@@ -158,11 +158,13 @@ async def test_spawn_response_format_refuses_resume_that_drops_prompt_before_sid
     client, fake_tmux, monkeypatch
 ):
     from theater.harness import Harness, LaunchPlan
+    from theater.harness.contracts.harness import LaunchParameterSupport
 
     class DropsPromptHarness(Harness):
         name = "drops-prompt-rpc"
         binary = "drops-prompt-rpc"
         resume_takes_prompt = False
+        launch_parameter_support = LaunchParameterSupport(resume=True)
 
         def plan_launch(
             self,

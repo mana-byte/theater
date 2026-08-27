@@ -116,7 +116,7 @@ class VibeIdentityMixin:
         want = str(Path(cwd).resolve()) if cwd else None
         resolved_domain = str(root)
         rows = [
-            self._discovery._candidate_row(
+            self._discovery.candidate_row(
                 d / MESSAGES_FILENAME,
                 want=want,
                 after=after,

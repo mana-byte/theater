@@ -10,6 +10,7 @@ from shipped import ClaudeCodeObserver, CodexObserver, OpenCodeObserver, VibeObs
 from test_harness_opencode import Recorder
 
 from theater.harness import EventKind
+from theater.harness.builtin.plugins.opencode.constants import LIVE_TRAJECTORY_STATE_LIMIT
 from theater.trajectory import ContentFormat, TimingProvenance, TrajectoryKind, TrajectoryStatus
 from theater.trajectory.capabilities import TrajectoryFeature
 
@@ -490,6 +491,24 @@ def test_opencode_facts_upsert_running_tool_to_terminal(rec, workdir) -> None:
     rec._part({**running, "state": {"status": "completed", "output": "done"}})
     duplicate = asyncio.run(source.read())
     assert duplicate.trajectory == ()
+
+
+def test_opencode_live_trajectory_state_is_bounded(rec, workdir) -> None:
+    source = _source(rec, workdir)
+    for index in range(LIVE_TRAJECTORY_STATE_LIMIT + 1):
+        source._live_fact(
+            kind=TrajectoryKind.SYSTEM,
+            summary=str(index),
+            status=TrajectoryStatus.COMPLETED,
+            native_id=f"fact-{index}",
+            fallback_id=None,
+            raw_index=index,
+            event_ordinal=0,
+        )
+
+    assert len(source._trajectory_state) == LIVE_TRAJECTORY_STATE_LIMIT
+    assert "fact-0" not in source._trajectory_state
+    assert f"fact-{LIVE_TRAJECTORY_STATE_LIMIT}" in source._trajectory_state
 
 
 def test_opencode_live_and_history_revisions_share_coordinates(rec, workdir) -> None:

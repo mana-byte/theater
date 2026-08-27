@@ -117,11 +117,6 @@ class OpenCodeParser:
             trajectory_events=(),
         )
 
-    def _translate(
-        self, conn: sqlite3.Connection, kind: str, payload: dict, seq: int
-    ) -> list[Event]:
-        return self._translate_with_trajectory(conn, kind, payload, seq)[0]
-
     def _translate_with_trajectory(
         self, conn: sqlite3.Connection, kind: str, payload: dict, seq: int
     ) -> tuple[list[Event], list[TrajectoryFact]]:

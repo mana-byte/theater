@@ -18,6 +18,7 @@ from theater.harness.builtin.plugins.vibe.isolation import (
     isolation_marker_text,
     validate_isolated_domain,
 )
+from theater.harness.contracts.harness import LaunchParameterSupport
 from theater.models import BadRequest
 
 # ---- helpers -----------------------------------------------------------
@@ -45,6 +46,7 @@ class _OverlayHarness(Harness):
     name = "overlay-test"
     binary = "overlay-test"
     icon = "O"
+    launch_parameter_support = LaunchParameterSupport(model=True, resume=True)
 
     def __init__(self):
         from theater.harness.observation import TranscriptObserver
@@ -95,6 +97,7 @@ class _PermissiveHarness(Harness):
     name = "permissive-test"
     binary = "permissive-test"
     icon = "P"
+    launch_parameter_support = LaunchParameterSupport(model=True, resume=True)
 
     def __init__(self):
         from theater.harness.observation import TranscriptObserver
@@ -254,6 +257,7 @@ async def test_overlay_none_transcript_domain_preserves_plan_domain(
         name = "null-domain-test"
         binary = "null-domain-test"
         icon = "N"
+        launch_parameter_support = LaunchParameterSupport(model=True, resume=True)
 
         def __init__(self):
             from theater.harness.observation import TranscriptObserver

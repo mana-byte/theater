@@ -429,6 +429,9 @@ ownership, health, and composition contracts as hooks.
 An `OtelChannelManifest` declares installation strategy, protocol, resource/header correlation,
 and native signal bindings. All vendor signal and attribute names remain in that plugin package.
 An unavailable manifest is a valid result when upstream cannot satisfy correlation or fan-out.
+The installer receives only the private token-file location. It declares a dedicated exporter
+header environment-variable name; core injects the authenticated header value after the callback
+returns because native OTLP exporters require the credential in their launch environment.
 
 ## Shared normalization
 

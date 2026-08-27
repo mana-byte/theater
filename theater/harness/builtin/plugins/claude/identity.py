@@ -222,7 +222,7 @@ class ClaudeIdentity:
         try:
             with path.open(encoding="utf-8", errors="replace") as fh:
                 for i, line in enumerate(fh):
-                    if i >= 20:
+                    if i >= _CWD_PROBE_RECORDS:
                         return found_evidence
                     try:
                         record = json.loads(line)

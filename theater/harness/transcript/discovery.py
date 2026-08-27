@@ -119,7 +119,7 @@ class GlobDiscovery:
         want = str(Path(cwd).resolve()) if cwd else None
         resolved_domain = str(root)
         rows = [
-            self._candidate_row(path, want=want, after=after, domain=resolved_domain)
+            self.candidate_row(path, want=want, after=after, domain=resolved_domain)
             for path in root.glob(self.glob_pattern)
         ]
         return sorted(rows, key=lambda c: (c.mtime or 0, c.location), reverse=True)
@@ -169,12 +169,12 @@ class GlobDiscovery:
         real = path.resolve()
         if not real.is_relative_to(root):
             raise ValueError("candidate path is outside this harness transcript domain")
-        row = self._candidate_row(real, want=want, after=after, domain=str(root))
+        row = self.candidate_row(real, want=want, after=after, domain=str(root))
         if row.rejection_reason:
             raise ValueError(row.rejection_reason)
         return row
 
-    def _candidate_row(
+    def candidate_row(
         self,
         path: Path,
         *,

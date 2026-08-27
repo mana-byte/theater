@@ -9,6 +9,7 @@ import asyncio
 import logging
 import sqlite3
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 from theater.harness.contracts.trajectory import TrajectoryFact
@@ -66,8 +67,7 @@ class OpenCodeSource(OpenCodeHistory, OpenCodeParser, OpenCodeTrajectory, OpenCo
         self._stamp: dict[str, float] = {}
         self._finished: set[str] = set()
         self._said: set[str] = set()
-        self._trajectory_revisions: dict[str, int] = {}
-        self._trajectory_signatures: dict[str, TrajectoryFact] = {}
+        self._trajectory_state: OrderedDict[str, tuple[int, TrajectoryFact]] = OrderedDict()
 
     async def read(self) -> Batch:
         return await asyncio.to_thread(self._read)
@@ -140,8 +140,7 @@ class OpenCodeSource(OpenCodeHistory, OpenCodeParser, OpenCodeTrajectory, OpenCo
         self._stamp.clear()
         self._finished.clear()
         self._said.clear()
-        self._trajectory_revisions.clear()
-        self._trajectory_signatures.clear()
+        self._trajectory_state.clear()
 
     async def aclose(self) -> None:
         conn, self._conn = self._conn, None

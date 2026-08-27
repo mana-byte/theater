@@ -105,9 +105,7 @@ class NativeOtelRuntime:
             if not any(_has_available_channel(harness) for harness in harnesses.values()):
                 return False
             persisted_port = self._receiver_port_lookup()
-            preferred_port = _receiver_port(persisted_port)
-            await self._receiver.start(preferred_port=preferred_port)
-            if persisted_port is None:
+            if await self._start_receiver(persisted_port):
                 self._receiver_port_store(self._receiver.port)
         except Exception as exc:
             self._available = False
@@ -121,6 +119,20 @@ class NativeOtelRuntime:
             return False
         self._available = True
         return True
+
+    async def _start_receiver(self, persisted_port: str | None) -> bool:
+        if persisted_port is None:
+            await self._receiver.start(preferred_port=0)
+            return True
+        try:
+            await self._receiver.start(preferred_port=_receiver_port(persisted_port))
+        except (OSError, ValueError):
+            with contextlib.suppress(Exception):
+                await self._receiver.aclose()
+            self._receiver = NativeOtelReceiver(self.ingest_http, host=self._bind_host)
+            await self._receiver.start(preferred_port=0)
+            return True
+        return False
 
     @property
     def available(self) -> bool:

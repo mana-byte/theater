@@ -29,12 +29,15 @@ from theater.transcript_identity import (
     TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
 )
 
+from .constants import HISTORY_MESSAGE_BATCH
 from .store import (
     history_boundary,
     history_messages,
     history_parts_by_session,
+    history_parts_for_messages,
     paged_messages,
     paged_parts,
+    recent_history_messages,
     session_for_history,
 )
 from .values import _opencode_source_key, load_json_object
@@ -136,14 +139,7 @@ class OpenCodeHistory:
                     if problem is not None
                     else History()
                 )
-            parts: dict[str, list[dict]] = {}
-            rows = history_parts_by_session(conn, sid)
-            for mid, raw in rows:
-                parts.setdefault(mid, []).append(load_json_object(raw))
-            events: list[Event] = []
-            rows = history_messages(conn, sid)
-            for mid, raw in rows:
-                events.extend(self._replay(load_json_object(raw), parts.get(mid, [])))
+            events = self._history_events(conn, sid, last_n)
         except sqlite3.Error as exc:
             logger.debug("reading opencode history failed", exc_info=True)
             return History(
@@ -151,7 +147,6 @@ class OpenCodeHistory:
                 error=f"reading OpenCode database failed: {exc}",
                 pinned=pinned,
             )
-        events = [event for event in events if not event.usage_only]
         if last_n > 0:
             events = events[-last_n:]
         # Stored rows carry no sequence number, so position stands in for one.
@@ -162,6 +157,46 @@ class OpenCodeHistory:
             correlation=self._attachment_provenance(sid),
             pinned=pinned,
         )
+
+    def _history_events(self, conn: sqlite3.Connection, sid: str, last_n: int) -> list[Event]:
+        if last_n <= 0:
+            return self._replay_history_rows(
+                history_messages(conn, sid),
+                history_parts_by_session(conn, sid),
+            )
+        events: list[Event] = []
+        offset = 0
+        while len(events) < last_n:
+            rows = recent_history_messages(
+                conn,
+                sid,
+                limit=HISTORY_MESSAGE_BATCH,
+                offset=offset,
+            )
+            if not rows:
+                break
+            message_ids = [str(message_id) for message_id, _raw in rows]
+            parts = history_parts_for_messages(conn, sid, message_ids)
+            events[0:0] = self._replay_history_rows(reversed(rows), parts)
+            events = events[-last_n:]
+            offset += len(rows)
+            if len(rows) < HISTORY_MESSAGE_BATCH:
+                break
+        return events
+
+    def _replay_history_rows(self, rows, part_rows) -> list[Event]:
+        parts: dict[str, list[dict]] = {}
+        for message_id, raw in part_rows:
+            parts.setdefault(str(message_id), []).append(load_json_object(raw))
+        events: list[Event] = []
+        for message_id, raw in rows:
+            key = str(message_id)
+            events.extend(
+                event
+                for event in self._replay(load_json_object(raw), parts.get(key, []))
+                if not event.usage_only
+            )
+        return events
 
     def _history_page(self, before: str | None, limit: int) -> HistoryPage:
         if not self._db.exists():

@@ -401,6 +401,7 @@ async def test_list_participants_docstring_describes_ids_semantics(daemon):
 from pathlib import Path  # noqa: E402  (import after module body — only for fixtures below)
 
 from theater.harness import HARNESSES, Harness, LaunchPlan  # noqa: E402
+from theater.harness.contracts.harness import LaunchParameterSupport  # noqa: E402
 from theater.harness.observation import TranscriptObserver  # noqa: E402
 from theater.protocol import RemoteError  # noqa: E402
 
@@ -429,6 +430,7 @@ class _PinResumeHarness(Harness):
     name = "resume-pin-test"
     binary = "resume-pin-test"
     icon = "P"
+    launch_parameter_support = LaunchParameterSupport(resume=True)
 
     def __init__(self):
         self.observer = _ResumeObs()

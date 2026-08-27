@@ -1,11 +1,4 @@
-"""Tests for the resume plumbing in ``theater.harness``.
-
-The resume parameter follows the same compat contract as model: it is
-forwarded into the plugin only when non-None, so a third-party adapter
-written against the old signature keeps working. A resume asked of a
-harness whose ``plan_launch`` has no ``resume`` parameter is refused by
-name, not as a TypeError from inside the plugin.
-"""
+"""Tests for explicit resume capability and launch forwarding."""
 
 from __future__ import annotations
 
@@ -33,6 +26,7 @@ class _ResumeHarness(Harness):
     name = "resume-test"
     binary = "resume-test"
     icon = "R"
+    launch_parameter_support = LaunchParameterSupport(model=True, resume=True)
 
     def __init__(self):
         from theater.harness.observation import TranscriptObserver
@@ -122,7 +116,7 @@ def no_resume_harness(monkeypatch):
     return h
 
 
-def test_supports_resume_reads_the_signature(resume_harness):
+def test_supports_resume_reads_the_declared_capability(resume_harness):
     assert supports_resume(resume_harness) is True
 
 
@@ -130,7 +124,7 @@ def test_supports_resume_false_when_parameter_absent(no_resume_harness):
     assert supports_resume(no_resume_harness) is False
 
 
-def test_explicit_launch_parameter_support_overrides_legacy_signature(no_resume_harness):
+def test_explicit_launch_parameter_support_enables_optional_parameters(no_resume_harness):
     no_resume_harness.launch_parameter_support = LaunchParameterSupport(
         model=True,
         reasoning_effort=True,
@@ -142,7 +136,7 @@ def test_explicit_launch_parameter_support_overrides_legacy_signature(no_resume_
     assert supports_resume(no_resume_harness) is True
 
 
-def test_explicit_launch_parameter_support_can_disable_signature_parameters(resume_harness):
+def test_explicit_launch_parameter_support_can_disable_optional_parameters(resume_harness):
     resume_harness.launch_parameter_support = LaunchParameterSupport()
 
     assert supports_model(resume_harness) is False

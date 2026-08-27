@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 from pathlib import Path
 from typing import Any
 
@@ -14,12 +13,7 @@ from theater.models import BadRequest
 
 def supports_model(harness: Harness) -> bool:
     """Whether this adapter can honour a ``model`` request."""
-    support = harness.launch_parameter_support
-    return (
-        support.model
-        if support is not None
-        else "model" in inspect.signature(harness.plan_launch).parameters
-    )
+    return harness.launch_parameter_support.model
 
 
 def check_model(harness: str, model: str | None) -> None:
@@ -30,12 +24,7 @@ def check_model(harness: str, model: str | None) -> None:
 
 def supports_reasoning(harness: Harness) -> bool:
     """Whether this adapter can honour a reasoning-effort request."""
-    support = harness.launch_parameter_support
-    return (
-        support.reasoning_effort
-        if support is not None
-        else "reasoning_effort" in inspect.signature(harness.plan_launch).parameters
-    )
+    return harness.launch_parameter_support.reasoning_effort
 
 
 def check_reasoning(harness: str, reasoning_effort: str | None) -> None:
@@ -46,12 +35,7 @@ def check_reasoning(harness: str, reasoning_effort: str | None) -> None:
 
 def supports_resume(harness: Harness) -> bool:
     """Whether this adapter can honour a ``resume`` request."""
-    support = harness.launch_parameter_support
-    return (
-        support.resume
-        if support is not None
-        else "resume" in inspect.signature(harness.plan_launch).parameters
-    )
+    return harness.launch_parameter_support.resume
 
 
 def check_resume(harness: str, resume: str | None) -> None:

@@ -19,6 +19,7 @@ from theater.harness import HARNESSES, Harness, LaunchPlan
 from theater.harness.base import ResumeLaunchOverlay
 from theater.harness.builtin.plugins.vibe.constants import ISOLATION_MARKER
 from theater.harness.builtin.plugins.vibe.isolation import isolation_marker_text
+from theater.harness.contracts.harness import LaunchParameterSupport
 from theater.models import BadRequest
 
 
@@ -43,6 +44,7 @@ class _ResumeHarness(Harness):
     name = "resume-spawn-test"
     binary = "resume-spawn-test"
     icon = "R"
+    launch_parameter_support = LaunchParameterSupport(model=True, resume=True)
 
     def __init__(self):
         from theater.harness.observation import TranscriptObserver

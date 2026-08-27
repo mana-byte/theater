@@ -213,7 +213,7 @@ class OtelInstallContext:
 
 @dataclass(frozen=True, slots=True)
 class OtelInstallOverlay:
-    """Public files and environment from one native OTel installer."""
+    """Public overlay plus the exporter-header environment variable core fills."""
 
     env: Mapping[str, str] = MappingProxyType({})
     files: Mapping[Path, str] = MappingProxyType({})

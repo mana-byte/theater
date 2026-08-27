@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import stat
 import threading
 import time
@@ -766,47 +765,42 @@ async def test_native_otel_restores_credentials_after_restart(theater_home, tmp_
 
 
 @pytest.mark.asyncio
-async def test_native_otel_receiver_failure_degrades_closed_and_retries(
-    theater_home, tmp_path, caplog
+async def test_native_otel_receiver_replaces_an_occupied_persisted_port(
+    theater_home, tmp_path
 ) -> None:
     harness = compile_manifest("acme", _manifest())
     blocker = await asyncio.start_server(lambda _reader, _writer: None, host="127.0.0.1", port=0)
     port = blocker.sockets[0].getsockname()[1]
     daemon = Daemon(harnesses={"acme": harness})
     daemon.store.set_meta(CHANNEL_OTEL_RECEIVER_PORT_META_KEY, str(port))
-    caplog.set_level(logging.WARNING, logger="theater.harness.otel")
     await daemon.start()
     participant = daemon.registry.create_spawned(harness="acme", cwd=str(tmp_path), pid="blocked")
     try:
-        assert daemon.otel_runtime.available is False
-        assert "OSError" in daemon.otel_runtime.diagnostics[-1]
-        assert any(
-            "native OTel receiver is unavailable: OSError" in record.message
-            for record in caplog.records
-        )
+        assert daemon.otel_runtime.available is True
+        replacement_port = _endpoint_parts(daemon.otel_runtime.endpoint)[1]
+        assert replacement_port != port
+        assert daemon.store.get_meta(CHANNEL_OTEL_RECEIVER_PORT_META_KEY) == str(replacement_port)
         plan = install_otel_plan(
             LaunchPlan(argv=["acme"]), participant, harness.observer, daemon.otel_runtime
         )
-        assert plan.channel_credentials == ()
-        assert (
-            daemon.otel_runtime.active_channels(
-                participant.id, harness.observer.enrichment_manifests()
-            )
-            == ()
-        )
-        source = daemon.observer._open_source(participant.id, harness.observer)
-        assert isinstance(source, _Primary)
-        assert await source.read() == Batch()
-        await source.aclose()
-
-        blocker.close()
-        await blocker.wait_closed()
-        assert await daemon.otel_runtime.start(daemon.observer.harnesses) is True
-        assert daemon.otel_runtime.available is True
-        assert _endpoint_parts(daemon.otel_runtime.endpoint)[1] == port
+        assert len(plan.channel_credentials) == 1
     finally:
         blocker.close()
         await blocker.wait_closed()
+        await daemon.aclose()
+
+
+@pytest.mark.asyncio
+async def test_native_otel_receiver_replaces_an_invalid_persisted_port(theater_home) -> None:
+    harness = compile_manifest("acme", _manifest())
+    daemon = Daemon(harnesses={"acme": harness})
+    daemon.store.set_meta(CHANNEL_OTEL_RECEIVER_PORT_META_KEY, "invalid")
+    await daemon.start()
+    try:
+        port = _endpoint_parts(daemon.otel_runtime.endpoint)[1]
+        assert daemon.otel_runtime.available is True
+        assert daemon.store.get_meta(CHANNEL_OTEL_RECEIVER_PORT_META_KEY) == str(port)
+    finally:
         await daemon.aclose()
 
 

@@ -27,6 +27,7 @@ import pytest
 from shipped import OpenCodeHarness, OpenCodeObserver
 
 from theater.harness import EventKind
+from theater.harness.builtin.plugins.opencode.constants import HISTORY_MESSAGE_BATCH
 from theater.harness.manifests.compiler import ManifestHarnessObserver
 from theater.models import BadRequest, Participant, Status
 from theater.provenance import TranscriptProvenance
@@ -730,6 +731,33 @@ def test_history_returns_the_newest_events_when_asked_for_a_few(rec, workdir):
         EventKind.TOOL_RESULT,
         EventKind.ASSISTANT,
     ]
+
+
+def test_bounded_history_scans_older_batches_until_it_has_enough_events(rec, workdir):
+    rec.message("old-user", "user")
+    rec.user_text("old-user", "old-part", "old")
+    for index in range(HISTORY_MESSAGE_BATCH):
+        rec.message(f"ignored-{index}", "unknown")
+    rec.message("new-user", "user")
+    rec.user_text("new-user", "new-part", "new")
+
+    history = asyncio.run(source_for(rec, workdir).history(last_n=2))
+
+    assert [event.text for event in history.events] == ["old", "new"]
+
+
+def test_bounded_history_does_not_count_usage_only_events(rec, workdir):
+    rec.message("old-user", "user")
+    rec.user_text("old-user", "old-part", "old")
+    usage = rec.message("usage-only", "assistant")
+    usage.update(modelID="gpt-5", tokens={"input": 1, "output": 0})
+    rec._store_message("usage-only", usage)
+    rec.message("new-user", "user")
+    rec.user_text("new-user", "new-part", "new")
+
+    history = asyncio.run(source_for(rec, workdir).history(last_n=2))
+
+    assert [event.text for event in history.events] == ["old", "new"]
 
 
 def test_history_of_a_session_that_is_not_there_is_empty(rec, tmp_path):
