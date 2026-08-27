@@ -6,18 +6,22 @@ from dataclasses import FrozenInstanceError
 from math import inf, nan
 
 import pytest
+from shipped import VibeHarness
 
-from theater.harness.builtin.adapters.vibe.observer import VibeObserver
-from theater.harness.builtin.adapters.vibe.source import _VibeSource
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
 from theater.harness.builtin.plugins.claude.source import _ClaudeSource
 from theater.harness.builtin.plugins.codex.observer import CodexObserver
 from theater.harness.builtin.plugins.codex.source import _CodexSource
 from theater.harness.builtin.plugins.opencode.observer import OpenCodeObserver
 from theater.harness.builtin.plugins.opencode.source import OpenCodeSource
+from theater.harness.builtin.plugins.vibe.constants import ISOLATION_MARKER
+from theater.harness.builtin.plugins.vibe.isolation import isolation_marker_text
+from theater.harness.builtin.plugins.vibe.observer import VibeObserver
+from theater.harness.builtin.plugins.vibe.source import _VibeSource
 from theater.harness.contracts.context import ParticipantObservationContext
 from theater.harness.contracts.observation import HarnessObserver
 from theater.harness.contracts.source import Batch, Source
+from theater.harness.manifests.compiler import ManifestHarnessObserver
 from theater.harness.transcript.observer import open_participant_source
 from theater.provenance import TranscriptProvenance
 
@@ -331,3 +335,24 @@ def test_shipped_observers_use_context_factories_and_keep_legacy_sources(
         ),
         source_type,
     )
+
+
+def test_vibe_manifest_observer_uses_injected_roots_for_isolated_sources(tmp_path) -> None:
+    root = tmp_path / "logs"
+    correlation_root = tmp_path / "correlation"
+    isolated = correlation_root / "participant"
+    isolated.mkdir(parents=True)
+    (isolated / ISOLATION_MARKER).write_text(
+        isolation_marker_text(participant_id="participant", transcript_domain=isolated)
+    )
+
+    harness = VibeHarness(root=root, correlation_root=correlation_root)
+    assert isinstance(harness.observer, ManifestHarnessObserver)
+    source = harness.observer.open_source_for(participant_id="participant", cwd="/work")
+
+    assert isinstance(source, _VibeSource)
+    assert source.collision_domain == str(isolated.resolve())
+    assert source._inner._exact_attachments is True
+
+    shared = harness.observer.open_source_for(participant_id="other", cwd="/work")
+    assert shared.collision_domain == str(root.resolve())

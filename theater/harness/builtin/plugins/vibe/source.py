@@ -16,7 +16,7 @@ from .trajectory import usage_fact
 from .usage import VibeUsageMixin
 
 if TYPE_CHECKING:
-    from theater.harness.builtin.adapters.vibe.observer import VibeObserver
+    from .observer import VibeObserver
 
 
 def _open_vibe_source(

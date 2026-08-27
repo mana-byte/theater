@@ -11,9 +11,11 @@ import json
 from pathlib import Path
 
 import pytest
+from shipped import VibeHarness
 
 from theater.harness import HARNESSES, Harness, LaunchPlan, plan_launch
-from theater.harness.builtin.plugins.vibe import ISOLATION_MARKER, validate_isolated_domain
+from theater.harness.builtin.plugins.vibe.constants import ISOLATION_MARKER
+from theater.harness.builtin.plugins.vibe.isolation import validate_isolated_domain
 from theater.models import BadRequest
 
 
@@ -55,6 +57,24 @@ def test_vibe_cold_spawn_always_gets_an_isolated_transcript_domain(tmp_path, mon
     marker = validate_isolated_domain(save_dir, participant_id="first")
     assert marker is not None
     assert marker["transcript_domain"] == str(save_dir.resolve())
+
+
+def test_vibe_manifest_launch_uses_its_injected_correlation_root(tmp_path):
+    correlation_root = tmp_path / "correlation"
+    plan = VibeHarness(correlation_root=correlation_root).plan_launch(
+        participant_id="first",
+        prompt="",
+        config_path=tmp_path / "first.json",
+        approval="manual",
+    )
+
+    save_dir = correlation_root / "first"
+    assert Path(plan.env["VIBE_SESSION_LOGGING__SAVE_DIR"]) == save_dir
+    assert plan.transcript_domain == str(save_dir.resolve())
+    assert list(plan.files) == [save_dir / ISOLATION_MARKER]
+    assert json.loads(plan.files[save_dir / ISOLATION_MARKER])["transcript_domain"] == str(
+        save_dir.resolve()
+    )
 
 
 def test_vibe_outlasts_a_full_length_await(tmp_path):

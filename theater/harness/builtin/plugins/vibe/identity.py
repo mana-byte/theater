@@ -17,6 +17,11 @@ from .isolation import _canonical
 logger = logging.getLogger("theater.harness.vibe")
 
 
+def participant_root(participant_id: str, correlation_root: Path | None = None) -> Path:
+    base = correlation_root or paths.home() / "observations" / "vibe"
+    return base / participant_id
+
+
 class VibeIdentityMixin:
     root: Path
     correlation_root: Path | None
@@ -49,8 +54,7 @@ class VibeIdentityMixin:
         )
 
     def participant_root(self, participant_id: str) -> Path:
-        base = self.correlation_root or paths.home() / "observations" / "vibe"
-        return base / participant_id
+        return participant_root(participant_id, self.correlation_root)
 
     def _root_searchable(self) -> bool:
         try:

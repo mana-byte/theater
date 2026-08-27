@@ -4,7 +4,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from theater.harness.builtin.plugins.vibe import _VibeSource
+from theater.harness.builtin.plugins.vibe.source import _VibeSource
 from theater.harness.source import Batch, Source, TranscriptSource
 from theater.trajectory.enums import CostProvenance, TrajectoryKind
 

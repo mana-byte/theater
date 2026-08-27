@@ -13,9 +13,8 @@ import pytest
 from theater.daemon.spawner import Spawner, SpawnRequest
 from theater.harness import HARNESSES, Harness, LaunchPlan
 from theater.harness.base import ResumeLaunchOverlay
-from theater.harness.builtin.plugins.vibe import (
-    _MARKER_KEY,
-    ISOLATION_MARKER,
+from theater.harness.builtin.plugins.vibe.constants import _MARKER_KEY, ISOLATION_MARKER
+from theater.harness.builtin.plugins.vibe.isolation import (
     isolation_marker_text,
     validate_isolated_domain,
 )

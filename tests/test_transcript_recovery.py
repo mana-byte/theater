@@ -14,7 +14,8 @@ from shipped import ClaudeCodeObserver, CodexObserver, OpenCodeObserver, VibeHar
 from theater.daemon import methods
 from theater.daemon.registry import Registry
 from theater.harness import HARNESSES
-from theater.harness.builtin.plugins.vibe import ISOLATION_MARKER, isolation_marker_text
+from theater.harness.builtin.plugins.vibe.constants import ISOLATION_MARKER
+from theater.harness.builtin.plugins.vibe.isolation import isolation_marker_text
 from theater.models import BadRequest
 from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 

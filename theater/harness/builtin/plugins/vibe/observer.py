@@ -4,8 +4,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from theater.harness.contracts.callbacks import (
+    NativeChildrenContext,
+    OperatorCandidateContext,
+    ScreenContext,
+    TranscriptCandidatesContext,
+)
 from theater.harness.contracts.context import ParticipantObservationContext
-from theater.harness.contracts.source import Source
+from theater.harness.contracts.launch import NativeChild
+from theater.harness.contracts.observation import ScreenReading
+from theater.harness.contracts.source import Source, TranscriptCandidate
 from theater.harness.observation import TranscriptObserver
 from theater.provenance import TranscriptProvenance
 from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFeature
@@ -151,3 +159,52 @@ class VibeObserver(
             known_location=context.known_location,
             transcript_domain=context.transcript_domain,
         )
+
+
+def source_factory(
+    context: ParticipantObservationContext,
+    *,
+    root: Path | None = None,
+    correlation_root: Path | None = None,
+    isolated: bool = False,
+) -> Source:
+    return VibeObserver(
+        root=root,
+        correlation_root=correlation_root,
+        isolated=isolated,
+    ).open_source_context(context)
+
+
+def classify_screen(context: ScreenContext) -> ScreenReading:
+    return VibeObserver().screen_reading(context.capture)
+
+
+def transcript_candidates(
+    context: TranscriptCandidatesContext,
+    *,
+    root: Path | None = None,
+    correlation_root: Path | None = None,
+) -> list[TranscriptCandidate]:
+    return VibeObserver(root=root, correlation_root=correlation_root).transcript_candidates(
+        cwd=context.cwd,
+        domain=context.domain,
+        after=context.after,
+    )
+
+
+def admit_operator_candidate(
+    context: OperatorCandidateContext,
+    *,
+    root: Path | None = None,
+    correlation_root: Path | None = None,
+) -> TranscriptCandidate:
+    return VibeObserver(root=root, correlation_root=correlation_root).admit_operator_candidate(
+        cwd=context.cwd,
+        candidate=context.candidate,
+        domain=context.domain,
+        after=context.after,
+    )
+
+
+def native_children(context: NativeChildrenContext) -> list[NativeChild]:
+    return VibeObserver().native_children(context.transcript)

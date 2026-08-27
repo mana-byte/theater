@@ -15,11 +15,11 @@ from __future__ import annotations
 import json
 
 import pytest
+from shipped import VibeHarness
 
 from theater.daemon.jobs import JobState
 from theater.daemon.schema import jobs
 from theater.harness import HARNESSES, normalize
-from theater.harness.builtin.plugins.vibe import VibeHarness
 from theater.harness.observation import (
     ScreenConfidence,
     ScreenKind,

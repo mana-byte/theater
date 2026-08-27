@@ -42,7 +42,8 @@ from theater.daemon.observer import (
 )
 from theater.daemon.registry import Registry
 from theater.daemon.rpc import transcripts as transcripts_mod
-from theater.harness.builtin.plugins.vibe import ISOLATION_MARKER, isolation_marker_text
+from theater.harness.builtin.plugins.vibe.constants import ISOLATION_MARKER
+from theater.harness.builtin.plugins.vibe.isolation import isolation_marker_text
 from theater.harness.observation import ScreenConfidence, ScreenKind, ScreenReading
 from theater.harness.source import Attachment, Batch, History, Source
 from theater.models import BadRequest, Status, Tier, TranscriptIdentityLost
@@ -74,7 +75,8 @@ def _trust_pin(registry: Registry, participant, transcript: Path, *, provenance:
 
 
 async def _accept_bound_source(observer: Observer, harness: VibeHarness, participant):
-    source = harness.observer.open_source(
+    source = harness.observer.open_source_for(
+        participant_id=participant.id,
         cwd=participant.cwd,
         session_id=participant.session_id,
         session_provenance=participant.session_correlation,

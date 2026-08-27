@@ -16,7 +16,7 @@ from theater.daemon.trajectory.project import event_to_fact, fact_to_record
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
 from theater.harness.builtin.plugins.codex.observer import CodexObserver
 from theater.harness.builtin.plugins.opencode import OpenCodeSource
-from theater.harness.builtin.plugins.vibe import VibeObserver
+from theater.harness.builtin.plugins.vibe.observer import VibeObserver
 from theater.harness.contracts.events import Event, EventKind, TokenUsage
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.trajectory import (

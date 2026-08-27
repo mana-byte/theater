@@ -17,7 +17,8 @@ from theater.constants.daemon import BUS_KIND_PARTICIPANT_SESSION_BOUNDARY
 from theater.daemon.spawner import Spawner, SpawnRequest
 from theater.harness import HARNESSES, Harness, LaunchPlan
 from theater.harness.base import ResumeLaunchOverlay
-from theater.harness.builtin.plugins.vibe import ISOLATION_MARKER, isolation_marker_text
+from theater.harness.builtin.plugins.vibe.constants import ISOLATION_MARKER
+from theater.harness.builtin.plugins.vibe.isolation import isolation_marker_text
 from theater.models import BadRequest
 
 
