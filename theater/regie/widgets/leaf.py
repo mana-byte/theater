@@ -197,7 +197,7 @@ class AgentLeaf(Static):
             self._stop_timer()
 
     async def _on_click(self, event: events.Click) -> None:
-        """Stage on left-click or toggle trajectory on right-click."""
+        """Stage and focus on left-click or toggle trajectory on right-click."""
         from theater.regie.app import RegieApp
 
         event.stop()
@@ -213,7 +213,7 @@ class AgentLeaf(Static):
         if event.button == 3:
             await app.action_toggle_trajectory()
         elif event.button == 1 and event.chain == 1:
-            await app.action_stage()
+            await app.action_stage_and_focus_tmux()
 
     def on_mount(self) -> None:
         if self._node.get("status") == "working":

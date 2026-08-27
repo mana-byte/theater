@@ -2933,7 +2933,7 @@ async def test_configured_sidebar_width_reaches_both_style_and_resize(daemon, tm
 # ---- mouse --------------------------------------------------------------
 
 
-async def test_single_left_click_selects_and_stages_the_agent(daemon, tmux):
+async def test_single_left_click_selects_stages_and_focuses_the_agent(daemon, tmux):
     app, _ = make_app()
     async with app.run_test(size=(80, 40)) as pilot:
         assert app.cursor == 0
@@ -2943,6 +2943,7 @@ async def test_single_left_click_selects_and_stages_the_agent(daemon, tmux):
         assert app.cursor == 1
         assert app.staged_pane == "%11"
     assert ("join", "%11", "@7") in tmux
+    assert ("select", "%11") in tmux
 
 
 async def test_left_double_click_stages_only_once(daemon, tmux):
@@ -2953,6 +2954,7 @@ async def test_left_double_click_stages_only_once(daemon, tmux):
         await pilot.click(widget=parent_widget, times=2)
         assert app.staged_pane == "%10"
         assert tmux.count(("join", "%10", "@7")) == 1
+        assert tmux.count(("select", "%10")) == 1
         assert ("break", "%10") not in tmux
 
 
