@@ -9,11 +9,12 @@ import pytest
 
 import theater.harness.builtin.plugins.claude.parser as claude_parser
 import theater.harness.builtin.plugins.claude.usage as claude_plugin
-import theater.harness.builtin.plugins.codex as codex_plugin
 import theater.harness.builtin.plugins.opencode as opencode_plugin
 from theater.daemon.trajectory.project import fact_to_record
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
-from theater.harness.builtin.plugins.codex import CodexObserver
+from theater.harness.builtin.plugins.codex import parser as codex_plugin
+from theater.harness.builtin.plugins.codex.observer import CodexObserver
+from theater.harness.builtin.plugins.codex.values import _codex_usage
 from theater.harness.contracts.trajectory import ParsedRecord
 from theater.provenance import TranscriptProvenance
 from theater.trajectory.enums import (
@@ -492,7 +493,7 @@ def test_codex_task_complete_preserves_explicit_first_token_time() -> None:
 
 def test_cost_provenance_tracks_reported_adapter_values() -> None:
     claude = claude_plugin._token_usage({"usage": {"input_tokens": 1}}, {"costUSD": 0.1})
-    codex = codex_plugin._codex_usage({}, {"usage": {"input_tokens": 1, "cost_usd": 0.2}})
+    codex = _codex_usage({}, {"usage": {"input_tokens": 1, "cost_usd": 0.2}})
     opencode = opencode_plugin._opencode_usage({"tokens": {"input": 1}, "cost": 0.3})
 
     assert claude is not None and claude.cost_provenance is CostProvenance.REPORTED

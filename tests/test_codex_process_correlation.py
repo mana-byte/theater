@@ -29,12 +29,14 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from shipped import CodexHarness, CodexObserver
+from shipped import CodexHarness
 
 from theater import proc
 from theater.daemon import observer as observer_mod
 from theater.daemon.observer import Observer
 from theater.daemon.registry import Registry
+from theater.harness.builtin.plugins.codex.observer import CodexObserver
+from theater.harness.transcript import open_participant_source
 from theater.models import Status
 from theater.provenance import TranscriptProvenance
 
@@ -197,13 +199,15 @@ async def test_two_siblings_each_read_their_own_transcript(monkeypatch, codex_tr
     hold(monkeypatch, {PID_A: [codex_tree["a"]], PID_B: [codex_tree["b"]]})
     harness = CodexHarness(root=codex_tree["root"])
 
-    first = harness.observer.open_source_for(
-        participant_id="one", cwd=str(codex_tree["project"]), pane_pid=PID_A
+    first = open_participant_source(
+        harness.observer, participant_id="one", cwd=str(codex_tree["project"]), pane_pid=PID_A
     )
-    second = harness.observer.open_source_for(
-        participant_id="two", cwd=str(codex_tree["project"]), pane_pid=PID_B
+    second = open_participant_source(
+        harness.observer, participant_id="two", cwd=str(codex_tree["project"]), pane_pid=PID_B
     )
     try:
+        assert (first._observer.pane_pid, second._observer.pane_pid) == (PID_A, PID_B)
+        assert first._observer.proves_ownership is True
         one = await first.history(last_n=0)
         two = await second.history(last_n=0)
     finally:

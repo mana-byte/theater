@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from theater import proc
+from theater.harness.contracts.callbacks import (
+    OperatorCandidateContext,
+    TranscriptCandidatesContext,
+)
 from theater.harness.source import Source, TranscriptCandidate
 from theater.harness.transcript.discovery import GlobDiscovery, stat_birthtime
 from theater.provenance import TranscriptProvenance, normalize_provenance
@@ -22,6 +26,31 @@ from .constants import (
 from .source import _open_codex_source
 
 logger = logging.getLogger("theater.harness.codex")
+
+
+def transcript_candidates(
+    context: TranscriptCandidatesContext, *, root: Path | None = None
+) -> list[TranscriptCandidate]:
+    from .observer import CodexObserver
+
+    return CodexObserver(root=root).transcript_candidates(
+        cwd=context.cwd,
+        domain=context.domain,
+        after=context.after,
+    )
+
+
+def admit_operator_candidate(
+    context: OperatorCandidateContext, *, root: Path | None = None
+) -> TranscriptCandidate:
+    from .observer import CodexObserver
+
+    return CodexObserver(root=root).admit_operator_candidate(
+        cwd=context.cwd,
+        candidate=context.candidate,
+        domain=context.domain,
+        after=context.after,
+    )
 
 
 def _resolve(path: Path) -> Path:

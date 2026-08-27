@@ -13,7 +13,7 @@ from theater.constants.trajectory import (
 )
 from theater.daemon.trajectory.project import fact_to_record
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
-from theater.harness.builtin.plugins.codex import CodexObserver
+from theater.harness.builtin.plugins.codex.observer import CodexObserver
 from theater.trajectory import (
     ContentPreview,
     DetailField,

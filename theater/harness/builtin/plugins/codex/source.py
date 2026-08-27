@@ -5,11 +5,23 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
 
+from theater.harness.contracts.context import ParticipantObservationContext
+from theater.harness.contracts.source import Source
 from theater.harness.source import TranscriptSource
 from theater.provenance import TranscriptProvenance
 
 if TYPE_CHECKING:
     from .observer import CodexObserver
+
+
+def source_for(context: ParticipantObservationContext, *, root: Path | None = None) -> Source:
+    from .observer import CodexObserver
+
+    return CodexObserver(
+        root=root,
+        pane_pid=context.pane_pid,
+        session_provenance=context.session_provenance,
+    ).open_source_context(context)
 
 
 def _open_codex_source(

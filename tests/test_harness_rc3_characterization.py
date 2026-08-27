@@ -10,7 +10,7 @@ import pytest
 
 from theater.harness import EventKind
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
-from theater.harness.builtin.plugins.codex import CodexObserver
+from theater.harness.builtin.plugins.codex.observer import CodexObserver
 from theater.harness.builtin.plugins.opencode import OpenCodeObserver
 from theater.harness.builtin.plugins.vibe import VibeObserver
 from theater.trajectory.enums import TrajectoryKind, TrajectoryStatus

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from theater.harness.contracts.callbacks import ScreenContext
 from theater.harness.observation import ScreenConfidence, ScreenKind, ScreenReading
 from theater.harness.transcript.discovery import screen_tail
 
@@ -38,3 +39,7 @@ class CodexScreenMixin:
         if self.is_idle_screen(capture):
             return ScreenReading(kind=ScreenKind.PROMPT, confidence=ScreenConfidence.HIGH)
         return ScreenReading(kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW)
+
+
+def screen_reading(context: ScreenContext) -> ScreenReading:
+    return CodexScreenMixin().screen_reading(context.capture)

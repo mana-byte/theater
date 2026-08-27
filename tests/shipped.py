@@ -15,16 +15,31 @@ the registry's internals.
 
 from __future__ import annotations
 
-from theater.harness import builtin, plugins
-from theater.harness.builtin.plugins.claude.manifest import MANIFEST, manifest_for_root
+from pathlib import Path
+
+from theater.harness import builtin, loading, plugins
+from theater.harness.builtin.plugins.claude.manifest import (
+    MANIFEST as CLAUDE_MANIFEST,
+)
+from theater.harness.builtin.plugins.claude.manifest import (
+    manifest_for_root as claude_manifest_for_root,
+)
 from theater.harness.builtin.plugins.claude.observer import (
     ClaudeCodeObserver as _ClaudeCodeObserver,
 )
+from theater.harness.builtin.plugins.codex.manifest import MANIFEST as CODEX_MANIFEST
+from theater.harness.builtin.plugins.codex.manifest import (
+    manifest_for_root as codex_manifest_for_root,
+)
+from theater.harness.builtin.plugins.codex.observer import CodexObserver as _CodexObserver
 from theater.harness.manifests.compiler import compile_manifest
 
 
 def harness_class(stem: str) -> type:
-    """The adapter class defined by the shipped plugin file `<stem>.py`."""
+    """The adapter class loaded for the shipped plugin ``stem``."""
+    for found in loading.scan(builtin.plugin_dir(), source=loading.SHIPPED):
+        if found.name == stem and found.harness is not None:
+            return type(found.harness)
     for found in plugins.scan(builtin.plugin_dir(), source=plugins.SHIPPED):
         if found.path.stem == stem:
             assert found.harness is not None, found.error
@@ -33,7 +48,7 @@ def harness_class(stem: str) -> type:
 
 
 def observer_class(stem: str) -> type:
-    """The observer class carried by the shipped plugin file `<stem>.py`.
+    """The observer class carried by the shipped plugin ``stem``.
 
     Taken off a default-constructed harness rather than looked up by name in
     the plugin module, because the pairing is the thing under test everywhere
@@ -45,16 +60,22 @@ def observer_class(stem: str) -> type:
     return type(harness_class(stem)().observer)
 
 
-def _claude_harness(root=None):
-    return compile_manifest("claude", manifest_for_root(root) if root is not None else MANIFEST)
+def _claude_harness(root: Path | None = None):
+    manifest = CLAUDE_MANIFEST if root is None else claude_manifest_for_root(root)
+    return compile_manifest("claude", manifest)
 
 
-CodexHarness = harness_class("codex")
+ClaudeCodeHarness = _claude_harness
+
+def CodexHarness(root: Path | None = None):  # noqa: N802
+    manifest = CODEX_MANIFEST if root is None else codex_manifest_for_root(root)
+    return compile_manifest("codex", manifest)
+
+
 OpenCodeHarness = harness_class("opencode")
 VibeHarness = harness_class("vibe")
 
-ClaudeCodeHarness = _claude_harness
 ClaudeCodeObserver = _ClaudeCodeObserver
-CodexObserver = observer_class("codex")
+CodexObserver = _CodexObserver
 OpenCodeObserver = observer_class("opencode")
 VibeObserver = observer_class("vibe")
