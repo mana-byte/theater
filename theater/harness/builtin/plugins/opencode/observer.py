@@ -7,8 +7,14 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from theater import paths
+from theater.harness.contracts.callbacks import (
+    OperatorCandidateContext,
+    ReceiptValidationContext,
+    ScreenContext,
+    TranscriptCandidatesContext,
+)
 from theater.harness.contracts.context import ParticipantObservationContext
-from theater.harness.observation import HarnessObserver, ScreenReading
+from theater.harness.observation import ScreenReading
 from theater.harness.source import Source, TranscriptCandidate
 from theater.provenance import TranscriptProvenance
 from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFeature
@@ -25,7 +31,8 @@ def data_dir() -> Path:
     return root / "opencode"
 
 
-class OpenCodeObserver(HarnessObserver):
+class OpenCodeObserver:
+    has_transcript = True
     trajectory_capabilities = TrajectoryCapabilities(
         supported=frozenset(
             {
@@ -82,6 +89,12 @@ class OpenCodeObserver(HarnessObserver):
         )
 
     def open_source_context(self, context: ParticipantObservationContext) -> Source:
+        if context.participant_id == "unbound":
+            return self.open_source(
+                cwd=context.cwd,
+                session_id=context.session_id,
+                after=context.after,
+            )
         return self.open_source_for(
             participant_id=context.participant_id,
             cwd=context.cwd,
@@ -135,3 +148,47 @@ class OpenCodeObserver(HarnessObserver):
             session_id=session_id,
             domain=f"opencode://{self.db.resolve()}",
         )
+
+
+def source_factory(
+    context: ParticipantObservationContext,
+    *,
+    db: Path | None = None,
+    correlation_dir: Path | None = None,
+) -> Source:
+    return OpenCodeObserver(db=db, correlation_dir=correlation_dir).open_source_context(context)
+
+
+def classify_screen(context: ScreenContext) -> ScreenReading:
+    return screen_reading(context.capture)
+
+
+def read_transcript_candidates(
+    context: TranscriptCandidatesContext, *, db: Path | None = None
+) -> list[TranscriptCandidate]:
+    return OpenCodeObserver(db=db).transcript_candidates(
+        cwd=context.cwd,
+        domain=context.domain,
+        after=context.after,
+    )
+
+
+def admit_operator_candidate_context(
+    context: OperatorCandidateContext, *, db: Path | None = None
+) -> TranscriptCandidate:
+    return OpenCodeObserver(db=db).admit_operator_candidate(
+        cwd=context.cwd,
+        candidate=context.candidate,
+        domain=context.domain,
+        after=context.after,
+    )
+
+
+def validate_receipt(
+    context: ReceiptValidationContext, *, db: Path | None = None
+) -> TranscriptCandidate:
+    return OpenCodeObserver(db=db).validate_transcript_receipt(
+        payload=context.payload,
+        cwd=context.cwd,
+        expected_session_id=context.expected_session_id,
+    )

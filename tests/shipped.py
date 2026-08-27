@@ -32,6 +32,8 @@ from theater.harness.builtin.plugins.codex.manifest import (
     manifest_for_root as codex_manifest_for_root,
 )
 from theater.harness.builtin.plugins.codex.observer import CodexObserver as _CodexObserver
+from theater.harness.builtin.plugins.opencode import OpenCodeObserver as _OpenCodeObserver
+from theater.harness.builtin.plugins.opencode.manifest import manifest_for_paths
 from theater.harness.manifests.compiler import compile_manifest
 
 
@@ -67,15 +69,22 @@ def _claude_harness(root: Path | None = None):
 
 ClaudeCodeHarness = _claude_harness
 
+
 def CodexHarness(root: Path | None = None):  # noqa: N802
     manifest = CODEX_MANIFEST if root is None else codex_manifest_for_root(root)
     return compile_manifest("codex", manifest)
 
-
-OpenCodeHarness = harness_class("opencode")
 VibeHarness = harness_class("vibe")
 
 ClaudeCodeObserver = _ClaudeCodeObserver
 CodexObserver = _CodexObserver
-OpenCodeObserver = observer_class("opencode")
 VibeObserver = observer_class("vibe")
+OpenCodeObserver = _OpenCodeObserver
+
+
+def _opencode_harness(db: Path | None = None, correlation_dir: Path | None = None):
+    return compile_manifest("opencode", manifest_for_paths(db=db, correlation_dir=correlation_dir))
+
+
+OpenCodeHarness = _opencode_harness
+OpenCodeHarness.resume_takes_prompt = False  # type: ignore[attr-defined]

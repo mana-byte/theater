@@ -27,7 +27,8 @@ import pytest
 from shipped import OpenCodeHarness, OpenCodeObserver
 
 from theater.harness import EventKind
-from theater.models import BadRequest, Status
+from theater.harness.manifests.compiler import ManifestHarnessObserver
+from theater.models import BadRequest, Participant, Status
 from theater.provenance import TranscriptProvenance
 from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
@@ -777,13 +778,49 @@ def test_a_pane_that_has_not_drawn_yet_is_not_idle():
 # ---- how this adapter is observed ---------------------------------------
 
 
-def test_the_harness_carries_the_observer_the_database_was_given_to():
-    """`db` is passed through to the observer, which is the half that opens it.
+def test_configured_manifest_reads_the_injected_database_and_correlation(rec, workdir, tmp_path):
+    correlation = tmp_path / "correlation"
+    correlation.mkdir()
+    (correlation / "participant.opencode.mjs").write_text("")
+    harness = OpenCodeHarness(db=rec.path, correlation_dir=correlation)
+    assert isinstance(harness.observer, ManifestHarnessObserver)
+    candidates = harness.observer.transcript_candidates(cwd=str(workdir))
+    assert [candidate.domain for candidate in candidates] == [f"opencode://{rec.path.resolve()}"]
+    admitted = harness.observer.admit_operator_candidate(
+        cwd=str(workdir), candidate="opencode://ses_one"
+    )
+    assert admitted.domain == f"opencode://{rec.path.resolve()}"
 
-    Compared by class name rather than `isinstance`: `shipped.py` loads the
-    plugin file a second time under its own module name, so the class here is
-    not the one the registry holds even though the source is identical.
-    """
-    observer = OpenCodeHarness(db=Path("/tmp/somewhere.db")).observer
-    assert type(observer).__name__ == OpenCodeObserver.__name__
-    assert observer.db == Path("/tmp/somewhere.db")
+    source = harness.observer.open_source_for(participant_id="participant", cwd=str(workdir))
+    assert source._db == rec.path
+    assert source._receipt_expected is True
+    assert (
+        source.admit_exact_location(location="opencode://ses_one", session_id="ses_one") == "staged"
+    )
+    attached = asyncio.run(source.read())
+    assert attached.attached is not None
+    assert attached.attached.location == "opencode://ses_one"
+    receipt = harness.observer.validate_transcript_receipt(
+        payload={"session_id": "ses_one"}, cwd=str(workdir), expected_session_id=None
+    )
+    assert receipt.domain == f"opencode://{rec.path.resolve()}"
+
+
+def test_configured_manifest_resume_overlay_uses_the_injected_database(tmp_path):
+    database = tmp_path / "opencode.db"
+    expected = f"opencode://{database.resolve()}"
+    harness = OpenCodeHarness(db=database)
+    predecessor = Participant(id="predecessor", transcript_domain=expected)
+
+    assert (
+        harness.resume_launch_overlay(
+            predecessor=predecessor,
+            trusted_session_owners=(),
+        ).transcript_domain
+        == expected
+    )
+    with pytest.raises(BadRequest, match="does not match the OpenCode observation"):
+        harness.resume_launch_overlay(
+            predecessor=Participant(id="wrong", transcript_domain="opencode://wrong.db"),
+            trusted_session_owners=(),
+        )

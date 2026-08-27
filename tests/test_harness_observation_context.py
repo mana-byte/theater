@@ -7,14 +7,14 @@ from math import inf, nan
 
 import pytest
 
-from theater.harness.builtin.adapters.opencode.observer import OpenCodeObserver
-from theater.harness.builtin.adapters.opencode.source import OpenCodeSource
 from theater.harness.builtin.adapters.vibe.observer import VibeObserver
 from theater.harness.builtin.adapters.vibe.source import _VibeSource
 from theater.harness.builtin.plugins.claude.observer import ClaudeCodeObserver
 from theater.harness.builtin.plugins.claude.source import _ClaudeSource
 from theater.harness.builtin.plugins.codex.observer import CodexObserver
 from theater.harness.builtin.plugins.codex.source import _CodexSource
+from theater.harness.builtin.plugins.opencode.observer import OpenCodeObserver
+from theater.harness.builtin.plugins.opencode.source import OpenCodeSource
 from theater.harness.contracts.context import ParticipantObservationContext
 from theater.harness.contracts.observation import HarnessObserver
 from theater.harness.contracts.source import Batch, Source
