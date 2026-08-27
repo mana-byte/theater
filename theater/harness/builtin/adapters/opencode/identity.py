@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
 import time
@@ -15,11 +14,9 @@ from theater.transcript_identity import (
     TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
 )
 
-from .constants import CORRELATION_READY_TIMEOUT
 from .store import (
     candidate_session,
     candidate_sessions,
-    has_root_session,
     located_sessions,
     open_readonly,
     root_session,
@@ -125,44 +122,29 @@ class OpenCodeIdentity:
     _cwd: str | None
     _known_location: str | None
     _known_location_provenance: TranscriptProvenance
-    _located_exact: bool
-    _located_receipt_sid: str | None
-    _participant_id: str | None
     _pending: tuple[str, int] | None
-    _receipt: Path | None
-    _receipt_started: float
+    _receipt_deadline: float | None
+    _receipt_expected: bool
+    _receipt_target: str | None
     _session_exact: bool
     _session_id: str | None
 
     def _locate(self, conn: sqlite3.Connection, *, pinned: bool) -> str | None:
-        if self._receipt is not None:
-            sid = self._read_receipt()
-            if sid is None:
-                self._located_exact = False
-                self._located_receipt_sid = None
-                return None
-            row = root_session(conn, sid)
-            self._located_exact = row is not None
-            self._located_receipt_sid = row[0] if row is not None else None
+        if self._receipt_target is not None:
+            row = root_session(conn, self._receipt_target)
             return row[0] if row is not None else None
         pinned_sid = self._pinned_sid()
         if pinned and pinned_sid is not None and self._trusted_known_location():
             row = root_session(conn, pinned_sid)
-            self._located_exact = row is not None
-            self._located_receipt_sid = None
             return row[0] if row is not None else None
-        if pinned and self._session_id:
+        if pinned and self._session_id and (not self._receipt_expected or self._session_exact):
             row = session(conn, self._session_id)
             if row is not None:
-                self._located_exact = self._session_exact
-                self._located_receipt_sid = None
                 return row[0]
-        if not self._cwd:
-            self._located_exact = False
-            self._located_receipt_sid = None
+        if self._receipt_expected:
             return None
-        self._located_exact = False
-        self._located_receipt_sid = None
+        if not self._cwd:
+            return None
         want = str(Path(self._cwd).resolve())
         count = located_sessions(conn, want, self._after, count=True)
         if count is not None and count[0] > 1:
@@ -175,43 +157,16 @@ class OpenCodeIdentity:
         row = located_sessions(conn, want, self._after)
         return row[0] if row is not None else None
 
-    def _read_receipt(self) -> str | None:
-        """Read and validate the process-local participant/session receipt."""
-        if self._receipt is None or self._participant_id is None:
-            return None
-        try:
-            found = json.loads(self._receipt.read_text())
-        except (FileNotFoundError, OSError, ValueError):
-            return None
-        if not isinstance(found, dict) or found.get("participant_id") != self._participant_id:
-            return None
-        sid = found.get("session_id")
-        return sid if isinstance(sid, str) and sid else None
-
-    def _correlation_problem(self, conn: sqlite3.Connection) -> Batch | None:
+    def _correlation_problem(self) -> Batch | None:
         """Surface a missing exact channel after bounded startup."""
-        if self._receipt is None or self._participant_id is None:
+        if not self._receipt_expected or self._receipt_deadline is None:
             return None
-        if time.monotonic() - self._receipt_started < CORRELATION_READY_TIMEOUT:
-            return None
-        try:
-            found = json.loads(self._receipt.read_text())
-        except (FileNotFoundError, OSError, ValueError):
-            found = None
-        if not isinstance(found, dict) or found.get("participant_id") != self._participant_id:
-            return Batch(
-                waiting=True,
-                error_code="transcript_correlation_failed",
-                error="OpenCode's Theater correlation plugin did not initialize",
-            )
-        if not self._cwd:
-            return None
-        if not has_root_session(conn, str(Path(self._cwd).resolve()), self._after):
+        if time.monotonic() < self._receipt_deadline:
             return None
         return Batch(
             waiting=True,
             error_code="transcript_correlation_failed",
-            error="OpenCode created a session but its exact Theater receipt is missing",
+            error="OpenCode's Theater correlation plugin did not initialize",
         )
 
     def _pinned_sid(self) -> str | None:
@@ -241,8 +196,6 @@ class OpenCodeIdentity:
             self._known_location_provenance
         ):
             return str(self._known_location_provenance)
-        if self._located_receipt_sid == sid:
-            return str(TranscriptProvenance.EXACT)
         if self._session_exact and self._session_id == sid:
             return str(TranscriptProvenance.EXACT)
         return str(TranscriptProvenance.HEURISTIC)

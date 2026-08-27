@@ -16,7 +16,6 @@ STEP_FINISH = "tool-calls"
 DRAIN_LIMIT = 500
 
 CORRELATION_PLUGIN_SUFFIX = ".opencode.mjs"
-CORRELATION_RECEIPT_SUFFIX = ".opencode-session"
 CORRELATION_READY_TIMEOUT = 30.0
 
 _WRITE_TOOLS = frozenset({"write", "edit"})

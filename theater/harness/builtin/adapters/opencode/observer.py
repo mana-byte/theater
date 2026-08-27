@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 from theater import paths
@@ -11,7 +12,7 @@ from theater.harness.source import Source, TranscriptCandidate
 from theater.provenance import TranscriptProvenance
 from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFeature
 
-from .constants import CORRELATION_PLUGIN_SUFFIX, CORRELATION_RECEIPT_SUFFIX, DB_NAME
+from .constants import CORRELATION_PLUGIN_SUFFIX, DB_NAME
 from .identity import admit_operator_candidate, transcript_candidates
 from .screen import is_idle_screen, screen_reading
 from .source import OpenCodeSource
@@ -69,16 +70,12 @@ class OpenCodeObserver(HarnessObserver):
             else paths.mcp_config_path(participant_id)
         )
         plugin_path = config_path.with_suffix(CORRELATION_PLUGIN_SUFFIX)
-        receipt_path = (
-            config_path.with_suffix(CORRELATION_RECEIPT_SUFFIX) if plugin_path.exists() else None
-        )
         return OpenCodeSource(
             self.db,
             cwd=cwd,
             session_id=session_id,
             after=after,
-            participant_id=participant_id,
-            receipt=receipt_path,
+            receipt_expected=plugin_path.exists(),
             session_provenance=session_provenance,
             known_location=known_location,
         )
@@ -112,4 +109,29 @@ class OpenCodeObserver(HarnessObserver):
             candidate=candidate,
             domain=domain,
             after=after,
+        )
+
+    def validate_transcript_receipt(
+        self,
+        *,
+        payload: Mapping[str, object],
+        cwd: str | None,
+        expected_session_id: str | None,
+    ) -> TranscriptCandidate:
+        session_id = payload.get("session_id")
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError("opencode receipt payload requires a nonblank session_id")
+        if "://" in session_id:
+            raise ValueError(
+                "opencode receipt session_id must be a native session id, not a location"
+            )
+        if expected_session_id is not None and session_id != expected_session_id:
+            raise ValueError(
+                f"opencode receipt session_id {session_id!r} does not match expected "
+                f"session {expected_session_id!r}"
+            )
+        return TranscriptCandidate(
+            location=f"opencode://{session_id}",
+            session_id=session_id,
+            domain=f"opencode://{self.db.resolve()}",
         )

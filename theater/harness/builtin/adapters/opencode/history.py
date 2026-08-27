@@ -52,23 +52,23 @@ class OpenCodeHistory:
     _cwd: str | None
     _db: Path
     _known_location: str | None
-    _receipt: Path | None
+    _receipt_expected: bool
+    _receipt_target: str | None
     _session: str | None
+    _session_exact: bool
     _session_id: str | None
 
     if TYPE_CHECKING:
 
         def _attachment_provenance(self, sid: str) -> str: ...
 
-        def _correlation_problem(self, conn: sqlite3.Connection) -> Batch | None: ...
+        def _correlation_problem(self) -> Batch | None: ...
 
         def _locate(self, conn: sqlite3.Connection, *, pinned: bool) -> str | None: ...
 
         def _open(self) -> sqlite3.Connection | None: ...
 
         def _pinned_sid(self) -> str | None: ...
-
-        def _read_receipt(self) -> str | None: ...
 
         def _replay(self, info: dict, parts: list[dict]) -> list[Event]: ...
 
@@ -118,6 +118,7 @@ class OpenCodeHistory:
             if (
                 pinned_sid is not None
                 and self._trusted_known_location()
+                and self._receipt_target is None
                 and not self._session_exists(conn, pinned_sid)
             ):
                 return History(
@@ -125,9 +126,16 @@ class OpenCodeHistory:
                     error=f"trusted transcript pin {self._known_location!r} no longer exists",
                     pinned=True,
                 )
-            sid = self._session or pinned_sid or self._locate(conn, pinned=True)
+            if self._receipt_target is not None:
+                sid = (
+                    self._receipt_target
+                    if self._session_exists(conn, self._receipt_target)
+                    else None
+                )
+            else:
+                sid = self._session or pinned_sid or self._locate(conn, pinned=True)
             if sid is None:
-                problem = self._correlation_problem(conn)
+                problem = self._correlation_problem()
                 return (
                     History(error_code=problem.error_code, error=problem.error)
                     if problem is not None
@@ -299,14 +307,18 @@ class OpenCodeHistory:
     def _history_session(self, conn: sqlite3.Connection) -> str | None:
         if self._session is not None:
             return self._session if self._session_exists(conn, self._session) else None
-        if self._receipt is not None:
-            sid = self._read_receipt()
-            if sid is not None and self._session_exists(conn, sid):
-                return sid
+        if self._receipt_target is not None:
+            return (
+                self._receipt_target if self._session_exists(conn, self._receipt_target) else None
+            )
         pinned = self._pinned_sid()
         if pinned is not None and self._trusted_known_location():
             return pinned if self._session_exists(conn, pinned) else None
-        if self._session_id is not None and self._session_exists(conn, self._session_id):
+        if (
+            self._session_id is not None
+            and (not self._receipt_expected or self._session_exact)
+            and self._session_exists(conn, self._session_id)
+        ):
             return self._session_id
         if not self._cwd:
             return None

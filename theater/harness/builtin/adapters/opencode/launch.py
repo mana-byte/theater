@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from theater import paths
 from theater.harness.base import (
     APPROVALS,
     SERVER_NAME,
@@ -18,7 +19,7 @@ from theater.harness.base import (
 )
 from theater.models import BadRequest
 
-from .constants import CORRELATION_PLUGIN_SUFFIX, CORRELATION_RECEIPT_SUFFIX, MODELS_TIMEOUT
+from .constants import CORRELATION_PLUGIN_SUFFIX, MODELS_TIMEOUT
 from .observer import OpenCodeObserver
 
 if TYPE_CHECKING:
@@ -29,42 +30,37 @@ def _plugin_path(config_path: Path) -> Path:
     return config_path.with_suffix(CORRELATION_PLUGIN_SUFFIX)
 
 
-def _receipt_path(config_path: Path) -> Path:
-    return config_path.with_suffix(CORRELATION_RECEIPT_SUFFIX)
-
-
-def _correlation_plugin(participant_id: str, receipt_path: Path) -> str:
+def _correlation_plugin(participant_id: str, token_path: Path) -> str:
     """Generate the process-local root-session receipt hook."""
     participant = json.dumps(participant_id)
-    receipt = json.dumps(str(receipt_path))
-    return f"""import {{ rename, writeFile }} from "node:fs/promises"
+    token = json.dumps(str(token_path))
+    command = json.dumps(theater_binary())
+    return f"""import {{ spawn }} from "node:child_process"
 
 const participantID = {participant}
-const receipt = {receipt}
+const tokenPath = {token}
+const theater = {command}
 
-async function publish(body) {{
-  const pending = `${{receipt}}.${{process.pid}}.tmp`
-  await writeFile(pending, JSON.stringify(body) + "\\n", "utf8")
-  await rename(pending, receipt)
+function publish(sessionID) {{
+  try {{
+    const child = spawn(
+      theater,
+      ["transcript-receipt", "--id", participantID, "--token-file", tokenPath],
+      {{ stdio: ["pipe", "ignore", "ignore"] }},
+    )
+    child.on("error", () => {{}})
+    child.stdin.on("error", () => {{}})
+    child.stdin.end(JSON.stringify({{ session_id: sessionID }}))
+  }} catch {{}}
 }}
 
 export const TheaterSessionReceipt = async () => {{
-  try {{
-    await publish({{ participant_id: participantID, ready: true }})
-  }} catch (error) {{
-    console.error("theater session receipt failed to initialize", error)
-  }}
   return {{
     event: async ({{ event }}) => {{
-      if (event.type !== "session.created" || event.properties.info.parentID) return
       try {{
-        await publish({{
-          participant_id: participantID,
-          session_id: event.properties.info.id,
-        }})
-      }} catch (error) {{
-        console.error("theater session receipt failed to publish", error)
-      }}
+        if (event.type !== "session.created" || event.properties.info.parentID) return
+        publish(event.properties.info.id)
+      }} catch {{}}
     }},
   }}
 }}
@@ -106,7 +102,7 @@ class OpenCodeHarness(Harness):
             },
         }
         plugin_path = _plugin_path(config_path)
-        receipt_path = _receipt_path(config_path)
+        token_path = paths.observation_dir("opencode", participant_id) / "receipt-token"
         config["plugin"] = [plugin_path.resolve().as_uri()]
         argv = ["opencode"]
         if model:
@@ -119,9 +115,14 @@ class OpenCodeHarness(Harness):
             argv += ["--prompt", prompt]
         files = {
             config_path: json.dumps(config, indent=2),
-            plugin_path: _correlation_plugin(participant_id, receipt_path),
+            plugin_path: _correlation_plugin(participant_id, token_path),
         }
-        return LaunchPlan(argv=argv, env={"OPENCODE_CONFIG": str(config_path)}, files=files)
+        return LaunchPlan(
+            argv=argv,
+            env={"OPENCODE_CONFIG": str(config_path)},
+            files=files,
+            receipt_token_path=token_path,
+        )
 
     def resume_launch_overlay(
         self,

@@ -84,15 +84,6 @@ def session_for_history(
     return located_sessions(conn, directory, after)
 
 
-def has_root_session(conn: sqlite3.Connection, directory: str, after: float | None) -> bool:
-    sql = "SELECT 1 FROM session WHERE directory = ? AND parent_id IS NULL"
-    args: list[object] = [directory]
-    if after is not None:
-        sql += " AND time_created >= ?"
-        args.append(int(after * 1000))
-    return conn.execute(sql + " LIMIT 1", args).fetchone() is not None
-
-
 def event_head(conn: sqlite3.Connection, sid: str) -> tuple[int, int]:
     return cast(
         tuple[int, int],
