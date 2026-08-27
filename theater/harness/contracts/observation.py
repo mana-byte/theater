@@ -1,47 +1,4 @@
-"""Observation contracts: how to watch one harness.
-
-A plugin answers two unrelated questions. *How do I start this CLI so it comes
-up knowing its participant id* — that is ``Harness``, in contracts/harness.py.
-*How do I tell what it is doing once it is running* — that is everything here.
-
-Why they are separate objects
------------------------------
-They were one interface until v1.6, and the seam was visible from outside.
-``OpenCodeHarness`` had to implement ``find_transcript``, ``session_id``,
-``parse`` and ``native_children`` purely to return nothing, because its output
-is a shared SQLite database and none of those questions has an answer for it.
-A plugin should not have to write four stubs to say "not applicable"; that it
-had to meant the interface was describing one particular way of observing
-rather than observation itself.
-
-Splitting also fixes who talks to whom. The daemon's reducer
-(``theater/daemon/observer.py``) needs nothing from a harness except how to
-watch it, and it now holds a ``HarnessObserver`` rather than a ``Harness`` —
-so the launch path and the observe path cannot accidentally couple, and a
-future harness that is launched one way and observed another does not have to
-pretend to be one object.
-
-The two halves of observing
----------------------------
-Getting the facts is per-CLI and lives here. Deciding what they mean — status
-policy, quiet timers, job completion, every write to the registry and the bus
-— is identical for every CLI and stays in the one shared reducer. That boundary
-is not negotiable: every observation bug this project has had lived in the
-second half, and four copies of it would mean fixing each one four times,
-badly.
-
-So a plugin observer reports; it never acts. See contracts/source.py for the
-same rule stated for ``Source``, which is the object this hands back.
-
-Which base class to subclass
-----------------------------
-``TranscriptObserver`` if the CLI appends a transcript file — three of the
-four shipped adapters do, and it wants three methods: where the file is, what
-the session is called, and how to read one line of it. ``HarnessObserver``
-directly if the output lives anywhere else, in which case write a ``Source``
-and return it from ``open_source``; ``builtin/plugins/opencode/source.py`` is
-the shipped example.
-"""
+"""Contracts for harness observation and screen classification."""
 
 from __future__ import annotations
 
