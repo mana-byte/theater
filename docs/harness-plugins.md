@@ -1,1191 +1,577 @@
 # Harness plugins
 
-A harness plugin teaches Theater a CLI agent it has never heard of, in Python,
-without touching the source tree. Drop a file in `$THEATER_HOME/harnesses/`
-(default `~/.theater/harnesses/`), restart the daemon, and the harness is in the
-registry: spawnable, observable, listed by `theater harnesses`, offered by the
-régie palette.
+A harness plugin teaches Theater how to launch and observe one coding-agent
+CLI. It is a named package directory, not a loose Python file. Use public
+`theater.harness.contracts` modules; do not import a shipped plugin's private
+implementation.
 
-## One mechanism, not two
+## Package layout and loading
 
-Every adapter Theater can drive is a plugin, including the four it ships:
-`claude`, `codex`, `opencode` and `vibe` live in
-`theater/harness/builtin/plugins/` as thin scanner entrypoints and are loaded by the same scanner
-that reads yours. Their implementation packages live under
-`theater/harness/builtin/adapters/`; local plugins may remain one file. There is no built-in tier
-and no
-lighter-weight way to declare a harness in TOML.
+Place a local plugin under `$THEATER_HOME/harnesses/` (normally
+`~/.theater/harnesses/`):
 
-There used to be. A `[harness.<name>]` table could describe how to launch a CLI
-and what its idle prompt looked like, and that was enough for spawning, MCP
-wiring, presence and an icon — everything except reading a transcript. It was
-removed in v1.4 for two reasons.
-
-The first is that the two halves are not comparable. A declared harness ended a
-turn when its prompt reappeared on screen: a guess, confirmed across two polls,
-but still a rendering. A plugin ends a turn when the transcript says so. Only a
-plugin can put messages on the bus, answer `read_transcript`, or show native
-sub-agents (though the sub-agent display is not wired up yet — see the note
-under `native_children` below). Offering the cheap path first steered people
-toward the weaker half of the system for harnesses that deserved the real
-one.
-
-The second is that nothing that shipped used the extension point. The built-in
-adapters were ordinary imports, so the plugin loader was exercised only by
-tests. Now every shipped adapter goes through it on every run: the path you are
-about to write on is the path Theater itself depends on.
-
-A harness with no machine-readable transcript is still supported — its observer
-sets `has_transcript = False` and the daemon falls back to the screen for turn
-boundaries. That is a property of the adapter, not a second kind of adapter.
-
-The four shipped adapter packages are the best worked examples available. Their `launch.py`,
-`observer.py`, `source.py`, `parser.py`, `trajectory.py`, and `screen.py` modules show each
-responsibility without requiring one giant plugin file. OpenCode is the database-backed example;
-Claude, Codex, and Vibe are transcript-backed examples.
-
-## Where plugins live, and how they load
-
-```
+```text
 $THEATER_HOME/harnesses/
-├── nova.py          loaded
-├── _shared.py       skipped: leading underscore
-└── .draft.py        skipped: leading dot
+└── acme/
+    ├── manifest.py
+    ├── launch.py
+    ├── source.py
+    └── screen.py
 ```
 
-Every `*.py` in that directory, in filename order, must export a `Harness`
-instance named `HARNESS`. Files beginning with `_` or `.` are skipped. A
-`_`-prefixed file is importable as a shared helper: while a plugin loads, a
-meta path finder resolves `import _shared` to `_shared.py` in the plugin's
-own directory, loading it lazily under a mangled module name keyed by source
-and directory. No bare helper name survives in `sys.modules` after the plugin
-loads, so two same-named helpers in two scanned directories (shipped and
-local) cannot collide — each plugin sees its own. A helper is loaded only
-when a plugin or another helper imports it, so a helper nobody imports is
-never executed. A helper may import another helper in the same directory.
-Helper modules are cached in `sys.modules` under their mangled names for the
-life of the process, so editing a helper and re-scanning does not re-execute
-it — restart the daemon to pick up the change.
+The directory name, here `acme`, is the canonical harness name. It must use
+lowercase letters, digits, `_`, or `-`, starting with a letter or digit.
+`manifest.py` exports one root value named `MANIFEST`; there is no separate
+manifest name field.
 
-Loading is by path under a synthetic module name
-(`theater_harness_plugin_local_nova` for a local plugin,
-`theater_harness_plugin_shipped_nova` for a shipped one — the source is
-part of the name so a local override does not evict the shipped one),
-not by putting the directory on `sys.path`. The difference matters: on
-`sys.path`, a file you called `json.py` would shadow the standard library for
-the whole daemon process, and the resulting failure would name neither your file
-nor the plugin system. Under a prefixed name it collides with nothing — and your
-plugin can `import json` and get the real one.
+The loader imports each directory as an isolated synthetic package. Relative
+imports such as `from .source import source_factory` work, sibling modules in
+different plugins cannot collide, and the loader never changes `sys.path`. A
+failed import is cleaned from `sys.modules`.
 
-The directory is created empty by `theater daemon` on first run. Its existence
-is how the extension point announces itself.
+Shipped packages are scanned first and local packages second: a local package
+with the same canonical name deliberately overrides a shipped one. A broken
+shipped plugin stops startup; a broken local plugin is skipped. The
+`theater harnesses` command reports loaded and rejected plugins at the behavior
+level; its output schema is not an authoring API.
 
-Plugins are read once, at start-up. After editing one:
+`[harness].disabled` filters a directory name before import, so it can disable
+a plugin that would otherwise fail during import. A top-level legacy file such
+as `$THEATER_HOME/harnesses/acme.py` is never executed. It receives this
+actionable migration diagnostic:
 
-```
-theater restart
+```text
+legacy single-file plugin. Move acme.py to acme/manifest.py and export MANIFEST
 ```
 
-## Two objects: a harness and its observer
+Move its helpers into `acme/`, change sibling imports to relative imports, and
+replace `HARNESS` with `MANIFEST`. Restart the daemon after an install or edit.
 
-A plugin answers two unrelated questions, and since v1.6 they are two classes.
-*How do I start this CLI so that it comes up knowing its participant id* is the
-`Harness`. *How do I tell what it is doing once it is running* is a
-`HarnessObserver`, which the harness constructs and carries:
+## A minimal complete package
+
+This package loads without a `Harness` subclass. It demonstrates the public
+callback signatures and a tiny JSONL source. The illustrative CLI accepts
+`--mcp-config`; adapt argv and transcript details to the real CLI rather than
+copying that convention blindly.
+
+### `acme/manifest.py`
 
 ```python
-class NovaHarness(Harness):
-    name = "nova"                  # required
-    binary = "nova"                # required
-    icon = "◈"                     # one display cell
-    aliases = ("nova-cli",)        # optional
+from theater.harness.contracts.channels import (
+    ChannelCapability,
+    ChannelDeclaration,
+    ChannelKind,
+    SignalKind,
+    SignalOwnership,
+)
+from theater.harness.contracts.manifest import (
+    MANIFEST_API_VERSION,
+    HarnessManifest,
+    LaunchManifest,
+    ObservationManifest,
+    ScreenManifest,
+    SourceManifest,
+)
 
-    def __init__(self, root: Path | None = None):
-        self.observer = NovaObserver(root=root)
+from .launch import plan_launch
+from .screen import classify_screen
+from .source import source_factory
 
-
-class NovaObserver(TranscriptObserver):
-    has_transcript = True          # default
-
-    def __init__(self, root: Path | None = None):
-        self.root = root or Path.home() / ".nova" / "sessions"
-
-
-HARNESS = NovaHarness()
-```
-
-The split is not bookkeeping. The old OpenCode adapter implemented `find_transcript`,
-`session_id`, `parse` and `native_children` purely to return nothing, because
-its output is a shared SQLite database and none of those questions has an answer
-for it — a plugin that must write four stubs to say "not applicable" is being
-described by the wrong interface. It also fixes who talks to whom: the daemon's
-reducer needs nothing from a harness except how to watch it, and it now holds
-the observer rather than the harness.
-
-Assigning `self.observer` is not optional. It is checked at load time rather
-than declared abstract, because a property returning a value the constructor
-already has is four lines of ceremony in every plugin; see the failure table
-below for what forgetting it says.
-
-### On the harness
-
-`name` is the spawn key (`theater spawn nova …`) and the registry key. Lowercase
-letters, digits, `-` and `_`, starting with a letter or digit.
-
-`binary` is what is looked for on `PATH` to decide whether the harness is
-installed, and what the unmanaged-pane sweep matches a pane's running command
-against. It is not automatically argv[0] — your `plan_launch` decides that — but
-it should be the same executable, or `theater harnesses` will lie.
-
-`binaries` is the declarative way to claim additional executable names for
-pane detection — a `frozenset[str]`, defaulting to empty. The primary `binary`
-is always included regardless of what `binaries` contains; this is for
-additional names only. A harness whose CLI can be installed under a
-nonstandard name (a wrapper, a versioned suffix) declares them here and the
-detection chain finds it without further configuration.
-
-### How a pane is matched to a harness
-
-When `theater adopt` runs, the foreground process is `theater` or `uv`, not
-the harness session that is its ancestor in the process tree. Detection
-works in two stages:
-
-1. **String comparison against declared names.** The pane's foreground
-   command is compared to `{harness.binary} | harness.binaries` for every
-   registered harness. Three forms of the command are tried in the same
-   loop: the basename, the unwrapped basename (a leading `.` stripped and
-   a trailing `-wrapped` stripped — how Nix's `makeWrapper` renames
-   binaries, so `.claude-wrapped` unwraps to `claude`), and the raw command
-   string. Plugin-declared and free — no process listing is needed.
-
-2. **Process-tree fallback.** Only if the string comparison finds nothing,
-   the pane's root process `comm` is checked, then its descendants
-   breadth-first. This needs no declaration but costs a `ps` listing.
-
-One caveat matters in practice: the kernel caps a process name at 15 usable
-characters, so a long wrapper name is truncated before the unwrap convention
-sees it. `.opencode-wrapped` appears as `.opencode-wrapp`, and stripping the
-leading dot and trailing `-wrapped` from that does not yield `opencode`. A
-plugin whose wrapper name is long enough to truncate should declare the
-truncated string in `binaries` so stage 1 catches it.
-
-`icon` is one display cell, not one character. A wide emoji is refused
-because it would break column alignment in listings; a base character plus
-combining marks is fine because it occupies one cell. The loader also refuses
-any non-printable codepoint. The width is a conservative estimate from
-`unicodedata`, not an exact terminal measurement — a glyph that renders
-differently in someone's font will not be caught here, so prefer a codepoint
-a default font has. A Nerd Font private-use glyph renders as an empty box for
-anyone who has not installed one.
-
-`aliases` are other spellings that should resolve to `name` when an agent
-reports its own harness at registration. An agent that calls itself `nova-cli`
-with no alias registered is observed as nothing at all, forever. An alias that
-already belongs to another harness is refused at load time rather than
-silently reassigned.
-
-### On the observer
-
-`has_transcript` selects the daemon's watch loop, and the name is narrower than
-the meaning: it asks whether your adapter can be observed by *reading* anything
-at all. Leave it `True` if `parse` works, and also if you have no file but
-override `open_source` to read some other store. Set it `False` only when there
-is nothing to read — otherwise the daemon waits on a source that never produces,
-the participant never produces an event, and every `theater_send` to it hangs.
-
-Whatever locates the harness's output — a transcript root, a database path —
-belongs on the observer, injected through its constructor, which is what keeps a
-test away from the developer's real home directory. Nothing per-session belongs
-there: one observer is shared by every session of its harness, and per-session
-state lives on the `Source` it opens.
-
-## The harness, method by method
-
-One abstract method and one optional concrete one. Everything else on a harness
-is the identity data above and the observer it carries.
-
-### `plan_launch(*, participant_id, prompt, config_path, approval, model=None) -> LaunchPlan`
-
-Describe how to start the harness. Pure — it must not write anything itself;
-return the files you need written and the spawner writes them before the window
-is created.
-
-```python
-LaunchPlan(
-    argv=["nova", "--mcp-config", str(config_path), prompt],
-    env={"NOVA_SOMETHING": "1"},
-    files={config_path: json.dumps(server_config)},
+MANIFEST = HarnessManifest(
+    api_version=MANIFEST_API_VERSION,
+    binary="acme",
+    icon="A",
+    aliases=("acme-cli",),
+    launch=LaunchManifest(
+        planner=plan_launch,
+        approvals=("manual", "edits", "yolo"),
+        supports_model=False,
+        supports_reasoning_effort=False,
+        supports_resume=False,
+    ),
+    observation=ObservationManifest(
+        primary=SourceManifest(
+            factory=source_factory,
+            channel=ChannelDeclaration(
+                id="transcript",
+                kind=ChannelKind.TRANSCRIPT,
+                capabilities=(
+                    ChannelCapability(SignalKind.IDENTITY, SignalOwnership.PRIMARY),
+                    ChannelCapability(SignalKind.CONTENT, SignalOwnership.PRIMARY),
+                    ChannelCapability(SignalKind.TURN, SignalOwnership.PRIMARY),
+                ),
+            ),
+        ),
+        screen=ScreenManifest(classifier=classify_screen),
+    ),
 )
 ```
 
-`participant_id` is the twelve-character Theater id, and getting it into the
-harness is the whole reason this method is not a template. The MCP server has to
-come up already knowing which participant it belongs to, and the *only* channel
-that survives is the server's own argv:
+`HarnessManifest` and all its sub-manifests are frozen. Use
+`dataclasses.replace` to derive a test manifest rather than mutating one. The
+compiler validates it before a participant can spawn.
 
-```
-theater mcp --id <participant_id>
-```
-
-Not the environment. The MCP Python SDK does not pass the parent environment to
-a stdio server: when a server config omits `env` it substitutes an allowlist of
-six variables and drops everything else. So `THEATER_ID` in the pane environment
-is visible to the harness process but *not* to the MCP server it spawns. Bake
-the id into argv. Use `theater_binary()` to resolve the absolute path — a tmux
-window does not inherit the daemon's `PATH`, so the bare name `theater` may not
-be found.
-
-Each harness has a different lever for getting that argv in place. Vibe reads
-`VIBE_MCP_SERVERS` from the environment; Claude Code takes `--mcp-config=<path>`;
-Codex takes `-c mcp_servers.theater.command=…` on the command line. Look for
-yours before writing the method — it is the part most likely to be wrong.
-
-`config_path` is a per-participant path under `$THEATER_HOME/mcp/` that Theater
-has reserved for you. Use it as the key in `files` if your harness wants a config
-file; ignore it entirely if it does not.
-
-`approval` is one of `manual`, `edits`, `yolo`, and it is always passed — there
-is no default anywhere in Theater, because the choice is the whole safety story
-for a child nobody is watching. Map all three. Raise `BadRequest` for anything
-else.
-
-`prompt` may be empty, meaning "start interactive with nothing to do". Do not
-append an empty string to argv; most CLIs treat it as a real, blank argument.
-
-`model` is optional and defaults to `None`, meaning "the CLI picks". Accept it if
-your CLI can be pointed at a specific model, and pass the string through
-untouched — do not validate it against a list of names you know. Model namespaces
-change faster than a plugin gets updated, and a name your CLI rejects fails
-visibly in the pane, which is the right place for it.
-
-Declaring the parameter is what opts you in. Theater inspects your signature and
-only passes `model` when you have somewhere to put it, so a plugin written before
-this option existed keeps working unchanged for every launch that does not ask
-for a model. Ask such a plugin for one and the spawn is refused by name, before
-anything is created — Theater will not quietly drop the caller's choice and start
-the wrong model instead.
-
-Use whichever lever the CLI actually offers; it does not have to be a flag. The
-built-ins split both ways — `claude`, `codex`, and `opencode` take a flag, while
-`vibe` has none and reads `VIBE_ACTIVE_MODEL` from the environment. If yours is
-an environment variable, set it *unconditionally*, empty when no model was asked
-for:
+### `acme/launch.py`
 
 ```python
-env["NOVA_MODEL"] = model or ""
+import json
+
+from theater.harness.contracts.callbacks import LaunchContext
+from theater.harness.contracts.launch import LaunchPlan, theater_binary
+
+
+def plan_launch(context: LaunchContext) -> LaunchPlan:
+    mcp_config = {
+        "mcpServers": {
+            "theater": {
+                "command": theater_binary(),
+                "args": ["mcp", "--id", context.participant_id],
+            }
+        }
+    }
+    argv = ["acme", "--mcp-config", str(context.config_path)]
+    if context.approval == "edits":
+        argv.append("--allow-edits")
+    elif context.approval == "yolo":
+        argv.append("--accept-all")
+    if context.prompt:
+        argv.append(context.prompt)
+    return LaunchPlan(
+        argv=argv,
+        files={context.config_path: json.dumps(mcp_config) + "\n"},
+    )
 ```
 
-Environments are inherited and flags are not. Skip the empty case and an agent
-you started on one model hands that model to every grandchild it spawns without
-one.
+`LaunchManifest.planner` receives a frozen `LaunchContext` with
+`participant_id`, `prompt`, `config_path`, `approval`, and optional `model`,
+`reasoning_effort`, and `resume`. Return a `LaunchPlan`; do not create files,
+start processes, write SQLite, or call tmux in the planner. The daemon writes
+the plan's files and launches its argv.
 
-### `discover_models() -> list[str]`
+`LaunchPlan.argv` is the command vector. `env` is an environment overlay;
+`files` is a path-to-text mapping written before launch; and `private_files`
+is a path-to-secret-text mapping written mode 0600. `session_id` is an exact
+native session id a planner has minted or otherwise knows before launch.
+`transcript_domain` is a stable namespace used for transcript collision policy.
 
-Optional. Model names your CLI reports it can run, for `theater models
---discover <harness>`, which prints them as a `[models]` block for the user to
-paste into Theater's config and cut down.
+The daemon, not a plugin, populates `receipt_token`, writes a declared
+`receipt_token_path`, and creates `channel_credentials`. A planner may declare
+the token path for a proven launch-local transcript receipt, but never receives
+the token bytes. Hook/OTel installers are separate typed channel callbacks;
+they return launch-local files and environment, not side effects.
 
-Concrete on the base class, so omitting it costs you nothing: the inherited
-version raises `NotImplementedError`, and the CLI reports that as "cannot be
-asked" rather than as a broken plugin. Two of the four shipped adapters do
-exactly that — neither `claude` nor `codex` offers a listing of any kind, and a
-hand-written catalogue on their behalf would go stale in silence.
+There is no approval default. `LaunchManifest.approvals` must be a non-empty
+ordered subset of `manual`, `edits`, and `yolo`; a planner receives the choice
+the caller made and translates it to native CLI behavior. Declare model,
+reasoning-effort, and resume support truthfully—unsupported requested values
+are refused before the planner runs.
 
-**This is an authoring aid and never a gate.** It is not consulted when a spawn
-happens. What a spawn may name is the `[models]` allowlist in Theater's config,
-which a human wrote; your job here is only to save them the typing. So it is
-fine for the answer to be incomplete, out of date, or to include models the user
-is not authenticated for.
+The example puts the Theater MCP server in the harness's native configuration.
+`theater_binary()` is the public helper for the executable path; the identity
+must be the `theater mcp --id <participant-id>` argv, not an assumed inherited
+environment variable.
 
-Two failure shapes, and the distinction is the contract:
-
-- **`NotImplementedError`** — there is no way to ask. No command, no config file
-  to read, or the binary is not installed. Retrying will not help, and the CLI
-  says so and points at writing the list by hand.
-- **`[]`** — you asked and were told none. Usually a provider that is not logged
-  in yet, which the CLI reports as such, because that one *is* worth retrying
-  after logging in.
-
-Never return a guess to paper over either. Turn anything that goes wrong while
-asking into `NotImplementedError` with a message that says what was tried:
+### `acme/source.py`
 
 ```python
-def discover_models(self) -> list[str]:
-    try:
-        out = subprocess.check_output(
-            [self.binary, "models"], text=True, timeout=20,
-            stderr=subprocess.DEVNULL,
-        )
-    except FileNotFoundError as exc:
-        raise NotImplementedError(f"{self.binary} is not on PATH") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise NotImplementedError(f"`{self.binary} models` timed out") from exc
-    return [line.strip() for line in out.splitlines() if line.strip()]
-```
-
-A subprocess is not the only source. `vibe` has no listing command, so its
-adapter reads the `[[models]]` tables out of `~/.vibe/config.toml` instead —
-whatever answers the question without starting a session. Give any subprocess a
-timeout: a human is waiting at a terminal, and hanging is worse than failing.
-
-Return the names in the CLI's own spelling, in whatever order is most useful to
-read, deduplicated. They go straight into a config file and then straight back
-to your `plan_launch` as `model`, so a friendly alias here becomes a name that
-is allowlisted and then rejected by the CLI.
-
-## The observer, method by method
-
-Four methods you will usually write and three that have defaults.
-`find_transcript`, `session_id` and `parse` are abstract on
-`TranscriptObserver`; `is_idle_screen` is abstract on every observer, because
-the daemon needs it for two things reading cannot do — confirming a pane
-looks idle before rescuing a job whose turn end was never seen, and feeding
-the screen-reading shim. The shim (`screen_reading` on `HarnessObserver`)
-maps the boolean to `ScreenKind.PROMPT` or `UNKNOWN`, never to `APPROVAL` or
-`TRUST`; only `APPROVAL` and `TRUST` settle `AWAITING_INPUT`, so a
-boolean-only plugin cannot produce that status. `native_children` defaults
-to none. `open_source` defaults to tailing a file, and only a harness whose
-output is not a file replaces it — see "When the output is not a file" below.
-
-`identity_loss_candidate` is the third default. Shared-root formats may override
-it with a bounded search for a newer same-cwd candidate. Its result is exposed
-only as quarantine evidence: it is never an attachment and can never auto-repoint
-the source. Exact/proven rotations still belong in `Source.refresh`.
-
-### `find_transcript(*, cwd, session_id=None, after=None) -> Path | None`
-
-Locate the file this session writes, or `None` if it is not there yet. Called
-repeatedly until it answers, so `None` means "not yet", not "never".
-
-Note what is *not* a parameter: the tmux pane. No harness records the pane it
-was launched from, so a pane cannot narrow the search. The usable keys are the
-working directory, the harness's own session id once known, and a lower bound on
-start time.
-
-`after` is a floor on session start, set for participants Theater spawned and
-whose creation time it therefore knows. It is `None` for adopted participants,
-whose transcript predates Theater's first sight of them — so do not treat
-`after=None` as zero and pick the newest file; treat it as "no floor" and match
-on the working directory.
-
-Returning `None` forever with `has_transcript = True` is the one silent failure
-mode in this interface. If there is no file to find, you want one of the other
-two shapes: subclass `HarnessObserver` and write a source, or set
-`has_transcript = False`.
-
-### `session_id(transcript) -> str | None`
-
-The harness's own identifier for the session, read from the transcript or its
-directory. Recorded on the participant so harness-native identifiers — which is
-what sub-agent bookkeeping is written in — can be matched back to a Theater
-participant later.
-
-`None` is not free. It costs you native-child matching, and it also closes
-the exact-session correlation path: the source's `correlation_for` can return
-`exact` only when the id the transcript reports matches the id Theater already
-has, so a `session_id` that always returns `None` can never be trusted through
-that channel. A participant whose only evidence is a cwd/time match is
-`heuristic`, and `heuristic` is never enough to attribute text, complete a turn,
-or allow a send — see "Trust" below.
-
-### `parse(line, index, *, clip_text=True) -> list[Event]`
-
-Turn one line of the transcript into zero or more normalized events. This is the
-method that makes Theater cross-harness: nothing above the adapter ever sees
-your format.
-
-Returning `[]` is normal and common — the shipped harnesses skip bookkeeping
-records that mean nothing to an observer. A malformed line must also return `[]`
-rather than raise: the file is being appended to while you read it, and a torn
-last line is an expected condition, not an error.
-
-```python
-Event(
-    kind=EventKind.ASSISTANT,   # USER | ASSISTANT | TOOL_CALL | TOOL_RESULT | ERROR
-    text=clip("..."),
-    tool_name=None,
-    ts=None,                    # None if the harness writes no timestamp
-    turn_end=True,              # the agent stopped and is waiting for a human
-    raw_index=index,
-)
-```
-
-`turn_end` is the load-bearing field. It sets the participant to IDLE, and it
-finishes the job that `theater_send` created. Get it wrong in one direction and
-a caller waits forever; wrong in the other and it reads a partial answer. Find
-the record that means "the model stopped": Claude Code has an explicit
-`stop_reason`, Vibe has the *absence* of a `tool_calls` key on an assistant
-record. Emit exactly one `turn_end` per turn, on the last event of that turn.
-
-`ts` should be the timestamp the transcript recorded, or `None` if it records
-none. Do not substitute the current time — the observer already stamps its own
-observation time, and a stamped-on-read time is a different quantity from when
-the event happened.
-
-`clip_text` distinguishes the two callers. `True` (the default) means the events
-are going on the bus, which is an activity feed, not an archive: clip with
-`clip()` from `theater.harness`, since a single tool result is routinely 25 KB.
-`False` means `read_transcript` is reading the full record back for an agent.
-The helper `clipper(clip_text)` returns the right function; use it rather than
-branching.
-
-Spawned transcript-backed adapters need a real identity channel if their
-transcripts live in a shared namespace. A cwd/time match is `heuristic`: Theater
-may show it in `theater candidates`, but it will not attribute text, complete
-turns, allow trusted resume, or accept sends on that evidence alone. Use
-participant-isolated transcript storage, an exact launch/lifecycle receipt, or a
-daemon-checkable process proof so the source can report `exact` or `proven`
-ownership. If a trusted pin later disappears or a newer heuristic candidate
-appears while the old pin is inert and the screen is working, Theater enters
-`transcript_identity_lost` and waits for operator bind rather than repointing
-your source.
-
-`index` is the zero-based record number. Pass it through as `raw_index`. Several
-events may share one index — a Vibe assistant turn with three tool calls is four
-events.
-
-### `native_children(transcript) -> list[NativeChild]`
-
-Sub-agents the harness spawned by itself, outside Theater's knowledge, read from
-whatever bookkeeping it keeps. These are a second lineage edge: Theater did not
-create them and cannot address them, but showing them in the tree is the
-difference between an accurate picture and a misleading one.
-
-`[]` is a perfectly good answer, and the right one if the harness has no
-sub-agents or does not record them — which is why it is the default and why you
-can leave the method out entirely.
-
-Note: `native_children` is currently inert. The built-in adapters implement
-it, but no production code calls it — the lineage display that would consume
-the result is not wired up. The method is part of the interface and the
-built-ins exercise it, so implementing it is not wasted effort, but do not
-expect sub-agents to appear in the tree yet.
-
-### `is_idle_screen(capture) -> bool`
-
-Given `tmux capture-pane -p` output — the rendered pane as plain text — does the
-screen show a bare prompt?
-
-For a plugin with a working `parse`, this is a display hint. The
-`screen_reading` shim maps `True` to `ScreenKind.PROMPT`, which settles
-`IDLE` — not `AWAITING_INPUT`, which requires `APPROVAL` or `TRUST` and so
-requires overriding `screen_reading` directly. Tune the boolean to accept
-false negatives and return `False` when unsure. A false positive marks a
-working agent idle and hides activity from the régie.
-
-The helper `last_screen_line(capture)` gives the bottom-most non-empty line,
-stripped. Match it *exactly* against your prompt strings, not as a prefix:
-anything after the prompt is a human typing, which is presence, not idleness.
-
-## When the output is not a file
-
-Everything above assumes the harness appends to a transcript. Most do. If yours
-writes to a database or offers only an event stream, subclass `HarnessObserver`
-directly instead of `TranscriptObserver`, implement `open_source`, and the
-byte-offset model gets out of your way:
-
-```python
-class NovaObserver(HarnessObserver):
-    def open_source(self, *, cwd, session_id=None, after=None) -> Source:
-        return NovaSource(cwd=cwd)
-
-    def is_idle_screen(self, capture):
-        return last_screen_line(capture) in IDLE_PROMPTS
-```
-
-That is the reading half of the observer. `find_transcript`, `session_id`
-and `parse` are not on this base class at all — they are how the *default*
-source is built, and a plugin supplying its own source has no reason to mention
-them. Before v1.6 they were abstract on every adapter and this plugin had to
-define three stubs to say so; deleting those stubs is what the split bought.
-
-What it is not is the whole observer. Attachment trust and history
-provenance are the two things a source that returns `Batch.attached` or
-`History` must also handle, and they are what the rest of this section
-covers. Operator recovery (`transcript_candidates` /
-`admit_operator_candidate`) is a separate concern that lives on the
-observer, not the source; it is documented in the advanced section below.
-
-A `Source` is a live view of one participant's output. Unlike the rest of the
-interface it is an object with a lifetime, so it is the right place for a
-connection or a subscription you need to hold open:
-
-```python
-class NovaSource(Source):
-    async def read(self) -> Batch:       # required
-    async def refresh(self) -> Batch:    # optional: re-check where to read from
-    async def aclose(self) -> None:      # optional: release what you hold
-```
-
-`read` is polled and returns a `Batch`:
-
-| field | meaning |
-|---|---|
-| `events` | normalized `Event`s, exactly as `parse` would produce |
-| `progressed` | you consumed new input, even if it produced no events |
-| `status` | an authoritative status, when you can actually tell |
-| `attached` | an `Attachment`, the first time you start reading somewhere |
-| `waiting` | there is nothing to read *from* yet |
-
-Three things are worth getting right.
-
-**`progressed` is not "produced events".** Bookkeeping records that parse to
-nothing still mean the agent is alive. If that read as silence, the rescue timer
-would fire mid-turn and hand a caller a half-finished answer. Report it. The
-reverse is free — events are counted as progress whether you set the flag or
-not.
-
-**`status` is for sources that can ask.** Tailing an append-only file gives no
-turn-end signal beyond what the records say, so the observer infers status from
-silence. If your harness will tell you plainly that a session went idle, put it
-here and the guessing is skipped for your participants. Leave it `None` and you
-get the same inference everyone else does.
-
-**Hold mutable records back.** A byte offset into an append-only file is a proof
-that everything behind it is final. A cursor into a table is only a watermark:
-rows behind it may still change. Emit a record when it is terminal, not while it
-is still being written — the bus has no retraction.
-
-### The attachment staging protocol
-
-`Batch.attached` is not a declaration; it is a *staging* request. The source
-finds a candidate input location and reports it without changing its live
-cursor; the observer checks ownership and calls `commit_attachment` or
-`discard_attachment` before the next read. This handshake is what keeps one
-participant's rejected rotation from silently switching onto a sibling's
-transcript.
-
-Whenever your source can return `Batch(attached=...)`, it **must** also
-implement both halves of the handshake:
-
-```python
-def commit_attachment(self) -> None:   # adopt the staged candidate
-def discard_attachment(self) -> None:  # forget it, keep the live cursor
-```
-
-The base `Source` raises `SourceContractError` from both if you do not
-override them. The observer catches that error and **retires the watcher for
-the rest of the daemon's life** — the participant gets screen-only status and
-no further transcript attempts, because retrying cannot repair an adapter that
-does not implement the protocol.
-
-Staging must not move the source's live cursor. The candidate is held
-separately; `commit_attachment` is what makes it live, and `discard_attachment`
-is what drops it. A source that moves its cursor on staging will desync from
-the observer's bookkeeping.
-
-Two related methods are **not** required and live in the advanced section
-below: `revoke_attachment` (for a source that may later be displaced by
-stronger evidence) and `admit_exact_location` (a receipt capability).
-
-What you do *not* implement is everything the observer does with a batch:
-status transitions, job completion, the rescue path, dead detection, the
-awaiting-input check. That policy is written once and it is where every
-observation bug in this project has been. A source reports facts; it must not
-touch the registry, the bus or the job manager.
-
-One optional method is worth implementing: `history`.
-
-```python
-async def history(self, *, last_n: int) -> History:
-```
-
-`read` is a tail — it answers "what happened since I last looked". `history`
-answers "what has this session said, from the beginning", and it is what backs
-the `read_transcript` tool, which exists because the bus clips long replies and
-an agent sometimes needs the whole thing. `TranscriptSource.history`
-re-reads the file with clipping off; the base `Source.history` returns an
-empty `History()` — which is what a source over a database has to replace.
-Skip it and the default `Source.history` returns `History()` with
-`location=None`, which `read_transcript` rejects as
-`BadRequest("cannot read transcript: transcript no longer exists on disk")`
-— a misleading message that blames a missing file rather than an
-unimplemented method. A caller that searches for that string will not find
-the real cause, which is that the source never overrode `history`.
-
-Two rules. Return the *newest* `last_n` events, `0` meaning all. And do not clip
-text: clipping is the caller's job, and this is the path a caller takes
-precisely because the clipped copy was not enough.
-
-A third rule is not about the events but about the `History` object itself:
-`History.correlation` defaults to `heuristic`. The `read_transcript` tool
-refuses a history whose correlation is not trusted, so a source that builds a
-`History` with the default and no override will have its transcript rejected
-as untrusted — the same trust gap that attachments face, applied to the
-history path. Set `correlation` to whatever the source can prove; if it cannot
-prove ownership, leave the default and know that `read_transcript` will refuse
-until the participant is bound by an operator or proven by the daemon.
-
-## A complete plugin
-
-`nova` is invented for this document — there is no such CLI. The shape is real;
-the file paths and record format are not.
-
-```python
-"""Nova. Writes ~/.nova/sessions/<session-id>/log.jsonl."""
-
+import asyncio
 import json
 from pathlib import Path
 
-from theater.harness import (
-    Event,
-    EventKind,
-    Harness,
-    LaunchPlan,
-    NativeChild,
-    TranscriptObserver,
-    clipper,
-    last_screen_line,
-    theater_binary,
-)
-from theater.models import BadRequest
+from theater.harness.contracts.context import ParticipantObservationContext
+from theater.harness.contracts.events import Event, EventKind
+from theater.harness.contracts.source import Attachment, Batch, Source
 
-APPROVAL_FLAGS = {
-    "manual": [],
-    "edits": ["--auto-edit"],
-    "yolo": ["--yes-to-everything"],
-}
-
-IDLE_PROMPTS = ("nova>", "nova> ")
+_MAX_RECORDS_PER_READ = 128
+_MAX_RECORD_BYTES = 64 * 1024
+_MAX_READ_BYTES = 256 * 1024
+_MAX_PENDING_RECORDS = 512
 
 
-class NovaHarness(Harness):
-    name = "nova"
-    binary = "nova"
-    icon = "◈"
-    aliases = ("nova-cli",)
+class AcmeSource(Source):
+    def __init__(self, context: ParticipantObservationContext) -> None:
+        self._session_id = context.session_id or context.participant_id
+        root = Path(context.cwd or ".") / ".acme" / "sessions"
+        self._path = root / f"{self._session_id}.jsonl"
+        self._offset = 0
+        self._pending: list[bytes] = []
+        self._tail = b""
+        self._staged: Attachment | None = None
+        self._attached = False
+        self._closed = False
 
-    def __init__(self, root: Path | None = None):
-        # Nothing else to keep: the harness starts the CLI, the observer reads
-        # it, and only the reading needs to know where ~/.nova is.
-        self.observer = NovaObserver(root=root)
+    async def read(self) -> Batch:
+        if self._closed:
+            return Batch()
+        try:
+            size, skipped = await asyncio.to_thread(_attachment_point, self._path)
+        except FileNotFoundError:
+            return Batch(waiting=True)
 
-    def plan_launch(self, *, participant_id, prompt, config_path, approval, model=None):
-        flags = APPROVAL_FLAGS.get(approval)
-        if flags is None:
-            raise BadRequest(f"unknown approval mode {approval!r}")
+        if not self._attached:
+            self._staged = Attachment(
+                location=str(self._path),
+                session_id=self._session_id,
+                skipped=skipped,
+            )
+            self._offset = size
+            return Batch(attached=self._staged)
 
-        config = {
-            "mcpServers": {
-                "theater": {
-                    "command": theater_binary(),
-                    "args": ["mcp", "--id", participant_id],
-                }
-            }
-        }
-        argv = [self.binary, *flags, "--mcp-config", str(config_path)]
-        if model:
-            # Passed through as given. Nova owns its namespace, not us.
-            argv += ["--model", model]
-        if prompt:
-            argv.append(prompt)
-        return LaunchPlan(
-            argv=argv,
-            files={config_path: json.dumps(config)},
+        try:
+            data, self._offset = await asyncio.to_thread(_read_chunk, self._path, self._offset)
+        except FileNotFoundError:
+            return Batch(waiting=True)
+        records, overflow = self._take_records(data)
+        events, malformed = _events(records)
+        malformed = malformed or overflow
+        return Batch(
+            events=events,
+            progressed=bool(data or records),
+            error_code="acme_malformed_or_overflow" if malformed else None,
+            error="ignored malformed or excess Acme transcript records" if malformed else None,
         )
 
+    def commit_attachment(self) -> None:
+        if self._staged is not None:
+            self._attached = True
+            self._staged = None
 
-class NovaObserver(TranscriptObserver):
-    def __init__(self, root: Path | None = None):
-        # Injectable so a test never touches the real ~/.nova.
-        self.root = root or Path.home() / ".nova" / "sessions"
+    def discard_attachment(self) -> None:
+        self._staged = None
 
-    def find_transcript(self, *, cwd, session_id=None, after=None):
-        if not self.root.is_dir():
-            return None
-        if session_id:
-            log = self.root / session_id / "log.jsonl"
-            return log if log.exists() else None
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
 
-        want = str(Path(cwd).resolve()) if cwd else None
-        if want is None:
-            return None
-        for directory in sorted(self.root.iterdir(), reverse=True):
-            log = directory / "log.jsonl"
-            if not log.exists():
-                continue
-            if after is not None and directory.stat().st_mtime < after:
-                continue
-            if self._meta(directory).get("cwd") == want:
-                return log
-        return None
+    def _take_records(self, data: bytes) -> tuple[list[bytes], bool]:
+        complete = (self._tail + data).split(b"\n")
+        self._tail = complete.pop()
+        overflow = False
+        if len(self._tail) > _MAX_RECORD_BYTES:
+            complete.append(self._tail)
+            self._tail = b""
+            overflow = True
+        self._pending.extend(complete)
+        if len(self._pending) > _MAX_PENDING_RECORDS:
+            del self._pending[_MAX_PENDING_RECORDS:]
+            overflow = True
+        records = self._pending[:_MAX_RECORDS_PER_READ]
+        del self._pending[:_MAX_RECORDS_PER_READ]
+        return records, overflow
 
-    def _meta(self, directory: Path) -> dict:
+
+def source_factory(context: ParticipantObservationContext) -> Source:
+    return AcmeSource(context)
+
+
+def _attachment_point(path: Path) -> tuple[int, int]:
+    size = 0
+    records = 0
+    with path.open("rb") as stream:
+        while block := stream.read(_MAX_READ_BYTES):
+            size += len(block)
+            records += block.count(b"\n")
+    return size, records
+
+
+def _read_chunk(path: Path, offset: int) -> tuple[bytes, int]:
+    with path.open("rb") as stream:
+        stream.seek(offset)
+        data = stream.read(_MAX_READ_BYTES)
+        return data, stream.tell()
+
+
+def _events(records: list[bytes]) -> tuple[tuple[Event, ...], bool]:
+    events: list[Event] = []
+    malformed = False
+    for raw in records:
+        if len(raw) > _MAX_RECORD_BYTES:
+            malformed = True
+            continue
         try:
-            data = json.loads((directory / "meta.json").read_text())
-        except (OSError, ValueError):
-            return {}
-        return data if isinstance(data, dict) else {}
-
-    def session_id(self, transcript):
-        return transcript.parent.name
-
-    def parse(self, line, index, *, clip_text=True):
-        line = line.strip()
-        if not line:
-            return []
-        try:
-            record = json.loads(line)
-        except ValueError:
-            return []          # torn last line; the file is still being written
-        if not isinstance(record, dict):
-            return []
-
-        clip = clipper(clip_text)
-        role = record.get("role")
-
-        if role == "user":
-            return [
-                Event(
-                    kind=EventKind.USER,
-                    text=clip(record.get("text")),
-                    ts=record.get("time"),
-                    raw_index=index,
-                )
-            ]
-        if role != "assistant":
-            return []          # bookkeeping record, nothing to show
-
-        events = []
-        if record.get("text"):
-            events.append(
-                Event(
-                    kind=EventKind.ASSISTANT,
-                    text=clip(record["text"]),
-                    ts=record.get("time"),
-                    raw_index=index,
-                )
+            record = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            malformed = True
+            continue
+        text = record.get("text") if isinstance(record, dict) else None
+        if not isinstance(text, str):
+            malformed = True
+            continue
+        events.append(
+            Event(
+                kind=EventKind.ASSISTANT,
+                text=text,
+                raw_text=text,
+                turn_end=record.get("done") is True,
             )
-        for call in record.get("tools") or []:
-            events.append(
-                Event(
-                    kind=EventKind.TOOL_CALL,
-                    tool_name=call.get("name"),
-                    ts=record.get("time"),
-                    raw_index=index,
-                )
-            )
-
-        # The turn ends when Nova says so. Mark the last event, and make sure
-        # there is one to mark even on a degenerate record.
-        if record.get("done"):
-            if not events:
-                events.append(Event(kind=EventKind.ASSISTANT, raw_index=index))
-            last = events[-1]
-            events[-1] = Event(
-                kind=last.kind,
-                text=last.text,
-                tool_name=last.tool_name,
-                ts=last.ts,
-                turn_end=True,
-                raw_index=last.raw_index,
-            )
-        return events
-
-    def native_children(self, transcript):
-        entries = self._meta(transcript.parent).get("subagents") or []
-        return [
-            NativeChild(session_id=e["id"], agent=e.get("name"))
-            for e in entries
-            if isinstance(e, dict) and e.get("id")
-        ]
-
-    def is_idle_screen(self, capture):
-        return last_screen_line(capture) in IDLE_PROMPTS
-
-
-HARNESS = NovaHarness()
+        )
+    return tuple(events), malformed
 ```
 
-### The trust gap, and why this example is not complete
+The factory receives the full frozen `ParticipantObservationContext`, including
+the Theater participant id, cwd, native session id, `after`, known location,
+transcript domain, and provenance. It returns one participant-scoped `Source`;
+do not put per-participant cursor or connection state on the manifest callback.
 
-The `nova` above is a working launch-and-read adapter, but it is not a working
-*trusted* adapter. It returns no `LaunchPlan.session_id`, and its
-`TranscriptObserver` inherits the default `TranscriptSource`, which discovers
-its transcript by cwd and mtime — `heuristic` provenance. The observer refuses
-any attachment that is not trusted: a heuristic candidate is discarded, the
-source never commits, and the participant stays on screen-only status.
+`read()` is asynchronous and must not block the daemon event loop. The example
+puts its file read on a worker thread and bounds parsing per poll. A database or
+network source needs equivalent bounds on query/page size, retries, payload
+size, retained state, and parser work. Missing input is `Batch(waiting=True)`,
+not an exception. Malformed native input is ignored or reported with bounded,
+non-sensitive error text—never dump its raw payload into diagnostics.
 
-What that means in practice:
+`Batch.events` contains normalized `Event` reports. `progressed=True` means
+input was consumed even when it yielded no events. `status`, when a durable
+source knows it, is an optional `Status` report; the reducer remains the policy
+owner. `trajectory` is additive rich `TrajectoryFact` data, not a control path.
+Sources never change registry state, complete jobs, publish to the bus, or
+operate tmux.
 
-- No transcript is ever committed, so no parsed events reach the bus.
-- No turn is ever completed from the transcript. A running job is
-  **crashed** after the 30-second observation-failure grace, not rescued:
-  the 60-second rescue path is deliberately excluded for a source that has
-  never attached, because rescuing with `clock.last_text` from a
-  participant nothing has ever been read from would hand the caller an
-  empty string as the answer. A caller whose `await_sessions` timeout is
-  shorter than the grace sees a timeout instead.
-- The first failure also emits an `agent.observation_error` bus event.
+The first attachment is staged in `Batch(attached=Attachment(...))`. The daemon
+checks ownership then calls `commit_attachment()` or `discard_attachment()`;
+never move a live cursor to a heuristic candidate before that handshake. A
+durable primary should also implement, where its storage permits:
 
-The guide warned earlier that heuristic evidence is insufficient and named
-isolated storage, receipts, and process proof. Three public mechanisms work
-today. **`LaunchPlan.session_id`** is one: when the CLI lets Theater choose
-or learn the native session id at launch, returning it on the launch plan
-enables exact correlation. The spawner persists `session_correlation =
-exact` before the process starts, so the observer's source never has to
-guess from cwd during the creation race. Exact correlation holds when the
-transcript's own reported session id matches the one Theater recorded at
-launch; the field alone is necessary but not sufficient — the match is
-what makes the attachment trusted. **`proves_ownership` /
-`proven_transcript`** is another: a `TranscriptObserver` that can show
-a transcript is its own process's overrides both, and the source records
-the result as `proven` — trusted. The Codex adapter uses this channel; see
-`builtin/adapters/codex/identity.py` and `source.py`. **Transcript receipts** are the third: a
-lifecycle hook
-calls back into Theater with an opaque JSON payload, and the plugin's
-`validate_transcript_receipt` turns it into trusted transcript identity.
-See the section below.
+- `history(last_n=...)` and optionally `history_page(...)` for independent,
+  unclipped history reads that do not advance the polling cursor;
+- `refresh()` when a transcript location can rotate;
+- `probe_identity_loss()` only as bounded loss evidence, not a new binding;
+- `admit_exact_location(location=..., session_id=...)` for exact receipt-led
+  attachment, if the source supports receipts.
 
-`LaunchPlan.private_files` is like `files` but written mode 0600 by the
-daemon in a parent directory chmod 0700. Use it for launch secrets —
-authentication material — that should not be world-readable in
-`$THEATER_HOME`.
+`aclose()` releases handles/subscriptions and must be idempotent. The primary
+source remains the authority for attachment, identity, completion inputs, and
+history even when it also has optional enrichments.
 
-## Transcript receipts
-
-A receipt is a harness lifecycle hook calling back into Theater with a
-JSON payload that proves which transcript belongs to which participant.
-Core never inspects the payload — the plugin owns every field name, path
-rule, and record-format check. Core keeps everything that is a security or
-bookkeeping concern: token authentication, liveness, ownership-conflict
-policy, persistence, the bus audit event, watcher admission, and token
-renewal.
-
-### `validate_transcript_receipt`
-
-```
-HarnessObserver.validate_transcript_receipt(
-    *,
-    payload: Mapping[str, object],
-    cwd: str | None,
-    expected_session_id: str | None,
-) -> TranscriptCandidate
-```
-
-`payload` is the decoded JSON object the hook sent, opaque to core.
-Override this method to extract the fields your hook provides and validate
-them against your harness's own format rules. The return value must be a
-`TranscriptCandidate` whose `location` and `session_id` are non-empty
-strings; core rejects anything else. Rejection is an exception, never a
-candidate carrying `rejection_reason`: raise `ValueError` with prose
-telling the caller what to fix, and core maps it to a `BadRequest`. Core
-catches only `ValueError`; any other exception propagates.
-
-The base implementation refuses, so a plugin that does not override the
-method cannot use receipts. This is concrete rather than abstract so
-existing plugins that do not use receipts keep working unchanged.
-
-A plugin's validator is the **proof authority** for its harness. A
-successful receipt promotes the binding to exact correlation, so a
-validator that accepts a plausible-looking location manufactures trust
-that core cannot audit afterwards. Core's ownership-conflict checks
-prevent one participant from stealing another's transcript, but they do
-not prove a location is authentic — that is the validator's job.
-
-### `LaunchPlan.receipt_token_path`
-
-Core owns the token file: it mints the secret, writes it mode 0600 in a
-parent directory chmod 0700, and deletes it on death. The plugin sets
-only `receipt_token_path`; it must NOT set `receipt_token` (core mints
-that) and must NOT list the path in `files` or `private_files` — core and
-the plugin would both own the same file.
-
-The path must resolve under `paths.observation_dir(harness,
-participant_id)`. An existing symlink at the path is refused before
-writing, because the writer uses `O_TRUNC` which follows symlinks.
-
-The shipped OpenCode adapter uses this generic mechanism too. Its launch-local plugin submits the
-native root session ID from `session.created`; the validator returns an
-`opencode://<session-id>` candidate, and the source waits for that exact database row. Later root
-receipts may switch the same live process to a new session. Failed delivery gets a bounded retry
-burst and another burst on later session events. Core still enforces token, participant, and
-ownership checks.
-
-### Pre-flight
-
-The pre-flight check runs at spawn time, after `_build_plan` returns and
-before any launch-plan or token file is written or tmux is touched. A
-plugin that declares `receipt_token_path` but inherits the base
-`validate_transcript_receipt` (the refusing default) fails the spawn
-rather than launching a session whose receipts can never be accepted.
-
-If your harness writes no transcript file, you have two options, and both
-change only the observer — `NovaHarness` above is already finished either
-way. If it keeps its history somewhere else — a database, a socket —
-subclass `HarnessObserver`, implement `open_source`, and keep
-`has_transcript = True`; `builtin/adapters/opencode/` is the worked example. If it keeps no
-history at all, subclass `HarnessObserver`, set `has_transcript = False`, and
-the entire observer is `is_idle_screen`: the daemon stops looking for a file
-and reads the screen instead, and that method becomes the signal that a turn
-ended rather than a hint about a stuck agent.
-
-## Precedence
-
-The registry is rebuilt at every start-up in this order:
-
-```
-shipped plugins  →  local plugins
-```
-
-Later wins: name your plugin `vibe` and it takes over from the shipped Vibe
-adapter. That is deliberate. Both are the same kind of file with the same
-powers, so overriding one is the supported way to fix or extend it locally
-without editing an installed package.
-
-The asymmetry is in what a failure means. A shipped plugin that will not import
-stops start-up — the install is broken, and the only way past it is `[harness]
-disabled`, which is why that key matches the filename before the file is
-imported. A local plugin that will not import is skipped with a warning and
-shown as rejected by `theater harnesses`, because a file in your own directory
-is yours to break and should not take the daemon down with it.
-
-Two plugins from the *same* source defining the same name is an error
-naming both files — two shipped or two local, not one of each. A local
-plugin overriding a shipped one is supported and logged, not an error;
-that is how a user fixes or extends a built-in locally. An alias
-collision is an error naming the claimant and the current owner. Nothing here
-resolves a conflict by load order, because "whichever file sorts first wins" is
-not something anyone can debug from the symptom.
-
-## When it goes wrong
-
-Every failure below is reported with the file path in the message. There are
-two failure modes with different severity:
-
-- A plugin that fails to **load** — bad `HARNESS`, missing observer, a property
-  getter that raises, a syntax error — is a **warning** for one of yours (the
-  harness is absent from the registry and `theater harnesses` lists it under
-  rejected) and **fatal** for one Theater ships. A plugin the user believes they
-  installed but which is quietly absent — with nothing anywhere saying so — is
-  the defect this design exists to prevent.
-
-- A plugin that **collides** with another harness's name, alias, or binary is
-  **always fatal**, local or shipped. A shadowed alias makes a harness silently
-  unreachable, and refusing is better than resolving by load order — "whichever
-  file sorts first wins" is not something anyone can debug from the symptom.
-
-### Load failures (warning for local, fatal for shipped)
-
-| What you wrote | What you get |
-|---|---|
-| a file that raises on import | `…/nova.py: failed to import: ValueError(...)` |
-| a syntax error | `…/nova.py: failed to import: SyntaxError(...)` |
-| no `HARNESS` | `…/nova.py: defines no HARNESS. A plugin must end with HARNESS = MyHarness()` |
-| `HARNESS = NovaHarness` | `…/nova.py: HARNESS is the class NovaHarness, not an instance of it` |
-| `HARNESS = 3` | `…/nova.py: HARNESS is a int, which does not subclass theater.harness.Harness` |
-| a missing abstract method | `…/nova.py: failed to import: TypeError("Can't instantiate abstract class …")` |
-| an `__init__` that never sets `self.observer` | `…/nova.py: harness 'nova' sets no observer. A harness must assign one in __init__ …` |
-| `self.observer = NovaObserver` | `…/nova.py: harness 'nova' sets observer to the class NovaObserver, not an instance of it` |
-| an observer subclassing neither base | `…/nova.py: harness 'nova' has a NovaObserver observer, which does not subclass theater.harness.HarnessObserver` |
-| `name = "My Nova"` | `…/nova.py: harness name 'My Nova' must be lowercase letters, digits, '-' or '_'` |
-| `binary = ""` | `…/nova.py: harness 'nova' sets no binary to look for` |
-| `icon = "<>"` | ``…/nova.py: harness 'nova' has icon '<>' with an estimated display width of 2 terminal cells; an icon must occupy exactly one cell so every column of `theater harnesses` lines up. Use a narrow glyph (one cell wide), not a wide emoji or a multi-character string.`` |
-| `icon = ""` | `…/nova.py: harness 'nova' has icon ''; it must contain only printable codepoints, since listings align on it` |
-
-### Collisions (always fatal, local or shipped)
-
-| What you wrote | What you get |
-|---|---|
-| an alias another harness owns | `…/nova.py claims alias 'mistral-vibe', which already resolves to 'vibe'` |
-
-Load failures and collisions surface wherever the registry is built — every
-CLI command except `theater config`, which reads only the TOML file and never
-reaches the loader because it must be able to explain a broken config file.
-Check your plugin with the cheapest one:
-
-```
-theater harnesses
-```
-
-which either lists `nova` or tells you why it could not.
-
-## Advanced hooks
-
-The methods and attributes below are not needed by a plugin that launches a
-CLI and reads its transcript. They gate behaviour that is real but
-specialised — resume with a prompt, operator recovery for adopted sessions.
-Several have deliberate safe defaults that keep a simple plugin working
-without knowing about them. They are documented here so a plugin that needs
-one knows it exists, and so a plugin that does not knows it can safely
-ignore it.
-
-### `plan_launch(resume=…)` and `plan_launch(reasoning_effort=…)`
-
-Both follow the same pattern as `model`: the funnel inspects your signature
-and forwards the keyword only when your `plan_launch` accepts it. Declaring
-the parameter is what opts you in; omitting it keeps an older adapter
-working. `resume` is the native session id to continue, and `reasoning_effort`
-is a thinking-effort level the CLI may support. Both are passed through
-untouched.
-
-### `Harness.resume_takes_prompt`
-
-This attribute defaults to **`True`**, and the default is a trap. It says
-"my resume path can carry a prompt and a `response_format`." A harness
-whose resume path *cannot* — opencode's `-s` routes to the session view
-and drops `--prompt` — must set this to `False`. If it does not, the
-spawner will hand it a prompt it silently swallows, and the caller's
-`await_sessions` will wait for a turn that never starts. The spawner
-refuses a resume-with-prompt for a harness where `resume_takes_prompt` is
-`False`, telling the caller to resume without a prompt and use `send` to
-deliver the task. The same refusal covers `response_format`.
-
-### `Harness.resume_launch_overlay`
-
-When core resumes a session, it selects a trusted dead predecessor and
-then calls `resume_launch_overlay` on the harness. The hook returns a
-`ResumeLaunchOverlay` with two fields:
-
-- `env` — environment overrides merged into the launch plan (overlay wins
-  on conflict).
-- `transcript_domain` — the namespace persisted on the successor. `None`
-  means *no override* (core keeps what `plan_launch` returned), not "clear
-  it".
-
-The base implementation is **conditionally fail-closed**:
-
-- A predecessor with `transcript_domain is None` returns an empty overlay.
-  This is the normal case for a harness with no isolated namespace.
-- A predecessor with a domain is refused, naming the harness. A plugin that
-  wants to resume a session with a transcript domain must implement the
-  hook and validate the domain itself.
-
-The three shipped non-Vibe harnesses (claude, codex, opencode) each
-implement a conditional override: `None` domain returns an empty overlay;
-a non-`None` domain is validated against the harness's own observation
-namespace and refused on mismatch. Vibe's override validates the signed
-isolation marker and lineage before returning the domain.
-
-`trusted_session_owners` is the complete trusted matching set including
-the selected predecessor — the Vibe marker commonly names that very row.
-
-### Operator recovery for adopted sessions
-
-Two methods on `HarnessObserver` support the `theater candidates` / `theater
-bind` recovery workflow for adopted sessions whose transcript identity is not
-trusted:
-
-- `transcript_candidates(*, cwd, domain, after)` returns operator-visible
-  candidates — locations the operator can inspect and choose from. The
-  default returns `[]`.
-- `admit_operator_candidate(*, cwd, candidate, domain, after)` validates an
-  operator-named candidate before the daemon persists trust. The default
-  raises `ValueError`, meaning "no operator-bindable transcript."
-
-A `TranscriptObserver` that knows how to list transcripts in its root
-overrides both. The daemon calls `admit_operator_candidate` when an operator
-runs `theater bind` to verify the candidate is real before promoting it to
-trusted.
-
-The trap is that `TranscriptObserver` itself overrides neither. It inherits
-the `[]` default and the `ValueError`-raising default from `HarnessObserver`,
-even though it already knows how to find transcripts through `find_transcript`.
-Every built-in hand-rolls both methods. If you subclass
-`TranscriptObserver` and skip them, Theater's untrusted-transcript error
-text will tell the operator to run `theater candidates` and `theater bind` —
-and both will fail against your harness, because your observer returns
-nothing and admits nothing. The recovery commands are printed unconditionally;
-they are not a promise that your plugin can answer them.
-
-### Other specialised hooks
-
-These have safe defaults and do not need attention from a simple plugin:
-
-- `open_source_context` — the typed source factory. It receives an immutable
-  `ParticipantObservationContext` containing participant id, cwd, session provenance, known
-  location/domain, creation floor, and pane pid. New adapters that need participant-specific facts
-  should override this method.
-- `open_source_for` — the legacy participant-aware factory. The compatibility dispatcher offers
-  only arguments named by its signature, so existing one-file plugins keep working. The default
-  forwards to `open_source`.
-- `screen_reading` — the structured replacement for `is_idle_screen` that
-  distinguishes a prompt from an approval modal. The default derives a
-  `ScreenReading` from the boolean, so a plugin that only implements
-  `is_idle_screen` keeps working.
-- `stream_floor` — captures the stream position of a transcript at the
-  last safe pre-launch moment, so a resumed session does not attribute stale
-  records to the successor. `TranscriptObserver` overrides this for file
-  paths; the default returns `None`.
-- `relocate_by_cwd` — opts a `TranscriptObserver` into cwd-only relocation,
-  unsafe in a shared root. Default `False`.
-- `Source.collision_domain` — the namespace a heuristic source searches,
-  so two sources with different domains cannot collide. Default `None`
-  (conservative: same-harness/same-cwd sources are treated as competitors).
-- `proves_ownership` / `proven_transcript` — a proof channel for a
-  `TranscriptObserver` that can show a transcript is its own process's.
-  Default `False` / `None`.
-- `revoke_attachment` — drops an accepted heuristic attachment when exact
-  evidence displaces it. Not required; matters only for a source that may
-  be superseded.
-- `admit_exact_location` — moves discovery to a daemon-proven transcript
-  location via a receipt. A receipt capability, not required for normal
-  operation. See the "Transcript receipts" section above for the full
-  plugin surface (`validate_transcript_receipt`, `receipt_token_path`,
-  and the pre-flight check).
-
-## Testing a plugin without spawning anything
-
-Everything except `plan_launch`'s effect on a real CLI is testable offline, and
-the launch plan itself is pure data you can assert on.
+### `acme/screen.py`
 
 ```python
-from pathlib import Path
-from theater import harness as registry
-
-def test_it_loads(tmp_path):
-    (tmp_path / "nova.py").write_text(PLUGIN_SOURCE)
-    added = registry.install(Config(), local_dir=tmp_path)
-    assert "nova" in added
-    assert registry.HARNESSES["nova"].icon == "◈"
-```
-
-`install(config, local_dir=…)` is the seam: it rebuilds the registry from a
-directory you choose, so nothing has to relocate `$THEATER_HOME`. It is
-idempotent — calling it again rebuilds from scratch rather than accumulating —
-and `install(Config())` restores the shipped set, which is how a test cleans up
-after itself.
-
-Instantiate the two classes directly, and test each for what it owns — the
-launch plan on the harness, everything about reading on the observer:
-
-```python
-plan = NovaHarness().plan_launch(
-    participant_id="abc123def456",
-    prompt="hello",
-    config_path=tmp_path / "mcp.json",
-    approval="manual",
+from theater.harness.contracts.callbacks import ScreenContext
+from theater.harness.contracts.observation import (
+    ScreenConfidence,
+    ScreenKind,
+    ScreenReading,
 )
-assert "--mcp-config" in plan.argv
-assert "abc123def456" in plan.files[tmp_path / "mcp.json"]
 
-obs = NovaObserver(root=tmp_path)          # never the real ~/.nova
 
-events = obs.parse('{"role":"assistant","text":"hi","done":true}', 0)
-assert [e.kind for e in events] == [EventKind.ASSISTANT]
-assert events[0].turn_end
-
-assert obs.parse("{not json", 0) == []     # torn line, no exception
-assert obs.is_idle_screen("nova> ")
-assert not obs.is_idle_screen("nova> what is")
+def classify_screen(context: ScreenContext) -> ScreenReading:
+    if context.capture.rstrip().endswith("acme>"):
+        return ScreenReading(ScreenKind.PROMPT, ScreenConfidence.LOW)
+    return ScreenReading(ScreenKind.UNKNOWN, ScreenConfidence.LOW)
 ```
 
-`NovaHarness(root=tmp_path).observer` reaches the same object through the
-harness, which is the path the daemon takes; either is fine in a test.
+The screen classifier is a display and rescue hint, never permission to inject
+input or a replacement for durable turn evidence. Be conservative: return
+`UNKNOWN` when a capture could be working, an approval dialog, or a trust
+dialog. A false prompt can cause unsafe control behavior; `AWAITING_INPUT` is
+not a control decision.
 
-Take the constructor-injected root seriously. Every shipped observer has one
-for exactly this reason, and a test that reads the real home directory passes or
-fails depending on what the developer did yesterday.
+## Typed callback surface
 
-`tests/test_harness_plugins.py` in this repository is the loader's own test
-suite and doubles as a worked example of the fixtures.
+Every custom function is placed in a named manifest field and receives one
+frozen context. There is no callback bag, signature inspection, global name
+lookup, or harness-name branch in the manifest runtime. Pure decoders should
+only normalize bounded values; a factory/planner may perform only the I/O its
+return contract owns and never reach Theater's SQLite connection.
+
+| Manifest field | Context → result | Use |
+| --- | --- | --- |
+| `launch.planner` | `LaunchContext → LaunchPlan` | Pure launch description. |
+| `launch.resume_planner` | `ResumeContext → ResumeLaunchOverlay` | Safe native resume overlay. |
+| `observation.primary.factory` | `ParticipantObservationContext → Source` | Participant-scoped durable input. |
+| `observation.screen.classifier` | `ScreenContext → ScreenReading` | Conservative terminal classification. |
+| `observation.identity.*` | typed context → `StreamPoint`/`TranscriptCandidate` | Exact identity and recovery. |
+| `observation.lineage.native_children` | `NativeChildrenContext → Sequence[NativeChild]` | Native sub-agent display facts. |
+| `models.discoverer` | `ModelDiscoveryContext → Sequence[str]` | Optional model-list suggestion. |
+
+The compiler checks callback presence and returned runtime values, while the
+manifest validator checks its structural contract. Keep callback modules beside
+the manifest and wire them visibly with relative imports.
+
+## Identity, resume, and recovery
+
+`IdentityManifest` fields are all optional. Omission means the capability is
+unavailable; it does not authorize a heuristic substitute.
+
+- `stream_floor: StreamFloorContext → StreamPoint | None` records the durable
+  stream's pre-launch location for safe successor/resume comparison. Omit it
+  when the store cannot prove such a point.
+- `transcript_candidates: TranscriptCandidatesContext → Sequence[TranscriptCandidate]`
+  lists bounded, operator-visible candidates. It does not attribute them.
+- `receipt_validator: ReceiptValidationContext → TranscriptCandidate` validates
+  the opaque authenticated `transcript.receipt` payload. It must prove an exact
+  location and native session id, not infer either from cwd or time.
+- `operator_candidate_admitter: OperatorCandidateContext → TranscriptCandidate`
+  revalidates a user-selected candidate before Theater persists trust.
+
+The generic receipt is an identity transport, not a rich hook/event channel.
+Its validator owns native field names, path checks, and transcript/database
+evidence. Reject invalid input with actionable `ValueError`; do not accept
+timestamp, model, cwd, or prose proximity as identity correlation.
+
+Resume is opt-in. `LaunchManifest.supports_resume` defaults to `False`;
+`resume_planner` must be callable only when it is true. It receives a trusted
+predecessor and all trusted matching session owners, then returns
+`ResumeLaunchOverlay(env=..., transcript_domain=...)`. The overlay may only
+adjust those two fields after planning. `resume_strategy` is `"continue"` or
+`"fork"` and defaults to `"continue"`; `resume_takes_prompt` defaults to
+`True` and must be set to `False` when the native resume command cannot carry a
+new prompt. A predecessor with a transcript domain is fail-closed unless the
+plugin's resume callback validates reuse.
+
+## Capabilities, lineage, models, and screens
+
+`ObservationManifest.trajectory_capabilities` is a frozen
+`TrajectoryCapabilities` declaration. Its `supported`, `unsupported`, and
+`observed` fields are `frozenset[TrajectoryFeature]`; declare only features
+your durable parser/source can substantiate. A feature cannot be both supported
+and unsupported. Omit the field for the empty, unknown default.
+
+`LineageManifest.native_children` is optional. It receives a transcript path
+and returns `Sequence[NativeChild]` with the native session id and optional
+agent/path/tool-call metadata. It reports a native lineage edge; it does not
+create or control a participant.
+
+`ModelDiscoveryManifest.discoverer` is optional and returns model names the
+harness can actually list. It is a suggestion for `theater models`, not a
+spawn authorization policy; Theater's `[models]` allowlist remains the gate.
+Do not advertise guessed model names.
+
+`ObservationManifest` requires a `ScreenManifest` and classifier. Its reading
+is conservative evidence: `PROMPT`, `WORKING`, `APPROVAL`, `TRUST`, and
+`UNKNOWN` each carry `LOW` or `HIGH` confidence. A text scrape is normally low
+confidence; unknown is the safe answer when it cannot distinguish a prompt from
+a sensitive modal.
+
+## Optional signal enrichment
+
+`CompositeSource` combines the durable primary with ordered, bounded
+enrichment sources. Enrichment contributes trajectory facts only; it cannot
+replace durable completion, attachment, identity, or history. Its timeout,
+failure, malformed output, and overflow are bounded channel health and cannot
+break primary observation.
+
+Each `ChannelDeclaration` lists `ChannelCapability` values with one explicit
+`SignalOwnership`: `PRIMARY`, `ENRICHMENT`, or `FALLBACK`. Duplicate channel
+ids, two non-fallback owners for the same signal, ambiguous fallbacks, invalid
+bounds, and durable enrichment channels are rejected. A hook/OTel decoder
+returns `ChannelFact` values whose fact `native_id` exactly equals the accepted
+native correlation key. Never join by timestamp proximity, cwd, model name, or
+rendered prose.
+
+### Hooks
+
+`theater/harness/channels/hooks/` provides generic authenticated ingress,
+bounded queues/deduplication, off-loop callback execution, and a source
+adapter. A `HookChannelManifest` names the channel, explicit `HookBinding`s,
+and a launch-local installer. Each binding supplies a native event name,
+normalized signals, delivery expectation, exact correlation extractor, and
+decoder.
+
+Installers return only launch-local files/environment. Do not rewrite global or
+project hook configuration. Payloads are untrusted bounded JSON; diagnostics
+must not contain raw payloads or credentials.
+
+### Native OTel
+
+`theater/harness/channels/otel/` is a distinct inbound harness channel. It can
+provide a bounded loopback-only OTLP receiver and requires authentication plus
+participant, harness, channel, binding, delivery, and exact native-key
+correlation before a typed decoder receives a record. An `OtelChannelManifest`
+declares the protocol, bounds, header/resource correlation fields, bindings,
+and a launch-local installer.
+
+Never repoint or replace an existing user exporter. If additive launch-local
+configuration, exact correlation, and a live fixture are not proven, use
+`unavailable_reason`. This inbound channel is separate from
+`theater/observability/`, which exports Theater's own daemon, CLI, and régie
+logs, metrics, and spans.
+
+### Current shipped state
+
+Claude, Codex, OpenCode, and Vibe explicitly declare richer hook and native
+OTel channels, but all are currently unavailable. Their durable transcript or
+database sources remain authoritative until safety and evidence gates pass.
+Do not advertise an unimplemented native integration.
+
+## Offline authoring checks
+
+The loader can be exercised without starting a daemon or a real CLI. This
+self-contained test creates `acme/manifest.py` and installs it from a
+temporary local root:
+
+```python
+import textwrap
+
+from theater.config import Config
+from theater.harness.registry import HARNESSES, install
+
+
+MANIFEST_SOURCE = """
+from theater.harness.contracts.callbacks import LaunchContext, ScreenContext
+from theater.harness.contracts.launch import LaunchPlan
+from theater.harness.contracts.manifest import (
+    MANIFEST_API_VERSION, HarnessManifest, LaunchManifest, ObservationManifest, ScreenManifest,
+)
+from theater.harness.contracts.observation import ScreenKind, ScreenReading
+
+def plan(context: LaunchContext) -> LaunchPlan:
+    return LaunchPlan(argv=["acme"])
+
+def screen(context: ScreenContext) -> ScreenReading:
+    return ScreenReading(ScreenKind.UNKNOWN)
+
+MANIFEST = HarnessManifest(
+    api_version=MANIFEST_API_VERSION, binary="acme", icon="A",
+    launch=LaunchManifest(planner=plan, approvals=("manual",)),
+    observation=ObservationManifest(primary=None, screen=ScreenManifest(classifier=screen)),
+)
+"""
+
+
+def test_acme_manifest_loads(tmp_path):
+    package = tmp_path / "acme"
+    package.mkdir()
+    (package / "manifest.py").write_text(textwrap.dedent(MANIFEST_SOURCE))
+
+    assert "acme" in install(Config(), local_dir=tmp_path)
+    assert HARNESSES["acme"].binary == "acme"
+```
+
+Keep loader tests deliberately small: prove discovery, manifest compilation,
+and local precedence. Add one relative helper module when testing isolated
+relative imports. Test `plan_launch`, source attachment/read/error paths,
+history, receipt validation, resume overlays, and screen classification
+directly with their frozen contexts. Restore the normal registry in fixture
+teardown if the test suite continues in the same process.
+
+## Validation and failure behavior
+
+| Problem | Result |
+| --- | --- |
+| Missing `manifest.py` or `MANIFEST` | Rejected with a path-qualified migration/load diagnostic. |
+| `MANIFEST` is a class or wrong type | Rejected; it must be a `HarnessManifest` instance. |
+| Import error or invalid API version | Rejected with the manifest path and failure. |
+| Invalid directory/name, icon width, approvals, bounds, callbacks, or signal ownership | Rejected by manifest validation before spawn. |
+| Broken local plugin | Skipped with a warning and visible to `theater harnesses`. |
+| Broken shipped plugin | Fatal startup error, unless disabled before import. |
+| Alias, binary, or same-source name collision | Fatal; ambiguity is never resolved by load order. |
+| Local package shares a shipped canonical name | Supported local override. |
+
+## Safety checklist
+
+- Keep durable transcript/database observation authoritative; optional
+  enrichment must fail independently.
+- Bound queues, payloads, parser work, retries, retained identities, and
+  history/page reads.
+- Preserve exact participant correlation and do not log raw credentials or
+  native payloads.
+- Do not alter global/project hooks or steal an OTel exporter.
+- Preserve daemon-only ownership of SQLite, pane lifecycle, and tmux input.
 
 ## Trust
 
-A plugin is arbitrary Python executed by the daemon at the privileges of the
-user who started it. There is no sandbox and no attempt at one — the same trust
-level as `~/.bashrc` or a shell plugin, in a directory under `$THEATER_HOME`
-where nothing else writes.
-
-Read a plugin before you install it, exactly as you would a shell snippet from
-the internet.
+A plugin is Python executed by the daemon under the daemon user's privileges.
+Treat it like a shell plugin: inspect it before installing it and keep the
+plugin directory writable only by trusted users.

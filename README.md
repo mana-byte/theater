@@ -39,12 +39,10 @@ Theater supports two setup paths: Nix or a source checkout using `uv`.
 The flake provides a wrapped runtime with `tmux` and `git`:
 
 ~~~sh
-nix run github:mana-byte/theater
 nix profile add github:mana-byte/theater
 ~~~
 
-From a clone, use `nix run .` to run it or `nix develop` to enter the
-development environment.
+From a clone, use `nix develop` to enter the development environment.
 
 ### From source
 
@@ -219,15 +217,17 @@ defaults.
 
 ## Harness plugins
 
-The shipped adapters are Claude Code (`claude`), Codex (`codex`),
-`opencode`, and `vibe`. Additional adapters can be dropped into
-`$THEATER_HOME/harnesses/` as Python files that export a `HARNESS` instance.
-The default plugin directory is `~/.theater/harnesses/`. Run `theater restart`,
-then check `theater harnesses` for load and rejection details.
+The shipped harnesses are Claude Code (`claude`), Codex (`codex`),
+`opencode`, and `vibe`. An additional harness is a package at
+`$THEATER_HOME/harnesses/<name>/manifest.py` that exports `MANIFEST`; the
+folder name is its canonical name. The default plugin directory is
+`~/.theater/harnesses/`. A local package can override a shipped harness. Run
+`theater restart`, then check `theater harnesses` for load and rejection
+details.
 
-Read [docs/harness-plugins.md](docs/harness-plugins.md) before writing an
-adapter. Plugins cover launch arguments, MCP wiring, transcript observation,
-turn boundaries, and harness-specific status.
+Read [docs/harness-plugins.md](docs/harness-plugins.md) before writing one.
+Plugins cover launch arguments, durable transcript/database observation, turn
+boundaries, and optional native signal enrichment.
 
 ## Optional observability
 
@@ -253,6 +253,9 @@ structured record logs, and request/tool spans. Agent log content is excluded
 by default; enable `agent_log_content` only when transcript payloads may leave
 the machine. Individual agent signal families can be disabled with
 `agent_metrics`, `agent_logs`, or `agent_spans`.
+
+This is Theater's outbound observability. It is separate from the optional
+inbound native-OTel harness channel, which no shipped harness currently enables.
 
 ## Development
 

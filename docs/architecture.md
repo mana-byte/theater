@@ -604,14 +604,36 @@ output is a shared SQLite database and none of those questions has an answer for
 it — four stubs to say "not applicable" meant the interface was describing one
 particular way of observing rather than observation itself.
 
-Every adapter has a plugin entrypoint loaded by `harness/plugins.py` under one
-contract. The four that ship — `claude`, `codex`, `opencode`, `vibe` — have thin files in
-`builtin/plugins/`; their implementations are responsibility-scoped packages under
-`builtin/adapters/`. The entrypoints are read by the same scanner as anything in
-`$THEATER_HOME/harnesses/`. There is no built-in tier. The only asymmetry is
-what happens when one will not import: a shipped plugin failing is fatal (the
-install is broken and hiding it makes the bug report unreadable), a local one
-is skipped with a warning and listed by `theater harnesses`.
+Every adapter is a named package loaded under one manifest contract. The four
+that ship — `claude`, `codex`, `opencode`, `vibe` — live entirely under
+`theater/harness/builtin/plugins/<harness>/`, each with `manifest.py` exporting
+one immutable `MANIFEST`. Local packages use the same shape at
+`$THEATER_HOME/harnesses/<name>/manifest.py`; the directory name is canonical,
+relative sibling imports are isolated, and a local package overrides a shipped
+one. Disabled names are skipped before import. A legacy top-level local `.py`
+is never executed and is retained only as an actionable migration diagnostic.
+`harness/plugins.py` remains a generic compatibility facade for the loader.
+There is no built-in tier. The only asymmetry is what happens when one will not
+import: a shipped plugin failing is fatal (the install is broken and hiding it
+makes the bug report unreadable), a local one is skipped with a warning and
+listed by `theater harnesses`.
+
+Manifests are immutable values with explicit typed callbacks; there is no
+opaque callback bag or private built-in extension API. A primary transcript or
+database source remains the durable authority for identity, completion, and
+history. `CompositeSource` may add bounded hook or native-OTel trajectory
+enrichment only when declared signal ownership and exact native-key correlation
+make it safe. Optional channel failure is bounded health, never a reason to
+break durable observation. Hooks use authenticated ingress and launch-local
+installation only; native OTel uses the separate loopback/authenticated inbound
+channel at `harness/channels/otel/`. Neither may rewrite global hooks or take
+over a user's exporter.
+
+This inbound harness OTel channel is distinct from `theater/observability/`,
+which exports Theater's own daemon, CLI, and régie telemetry. All four shipped
+plugins declare richer hooks and native OTel explicitly but currently mark them
+unavailable; their durable transcript/database sources remain authoritative
+until safety and live-evidence gates pass.
 
 That is a v1.4 decision, and the reason is that a plugin was previously the
 second of two mechanisms — the other being a TOML block that could describe a
@@ -695,6 +717,7 @@ theater/
 │   ├── engine.py         timing context, prose rendering, log extras, metric bridge
 │   ├── metrics.py        metric specs, histogram/counter registries, cached gauges
 │   ├── tracing.py        span lifecycle, explicit W3C inject/extract
+│   ├── signals.py        direct structured-log and completed-span transport
 │   ├── logging.py        owned handlers, rotation, stderr-generation pruning
 │   └── runtime.py        process-level composition and RuntimeHandle shutdown
 ├── timing.py           compatibility facade — re-exports observability engine
@@ -713,7 +736,7 @@ theater/
 │   ├── observation/    watch loop, identity, completion, status policy
 │   ├── persistence/    SQLite repositories and store (sync on purpose)
 │   │   ├── database.py · repositories/ (participants, jobs, bus, metadata,
-│   │   │   receipts, scratchpad, statistics, usage, worktrees)
+│   │   │   receipts, channels, scratchpad, statistics, usage, worktrees)
 │   ├── rpc/            @method handlers, including trajectory snapshot/follow/history
 │   ├── runtime/        socket dispatch, lifecycle, maintenance loops
 │   ├── spawning/       launch planning, resume, service
@@ -733,14 +756,16 @@ theater/
 │   ├── schema.py       table metadata, the one place columns are declared
 │   └── migrations/     alembic env + versions/
 ├── harness/
-│   ├── contracts/      harness, source, typed observation context, events, trajectory facts
+│   ├── contracts/      immutable manifests, typed callbacks, harness/source/observation facts
+│   ├── manifests/      manifest compiler, validation, and reusable strategies
+│   ├── loading/        named-directory discovery and isolated package imports
+│   ├── channels/       CompositeSource, bounded hooks, and inbound native OTel
 │   ├── normalization/  bounded cross-harness value and timestamp conversion
 │   ├── registry/       lookup, install, capabilities, claims
 │   ├── transcript/     source, observer, attachment, bounded history reader
-│   ├── builtin/adapters/  responsibility-scoped implementations for four shipped adapters
-│   ├── builtin/plugins/   thin scanner entrypoints and compatibility exports
+│   ├── builtin/plugins/  claude/, codex/, opencode/, vibe/ package manifests and native code
 │   ├── base.py · observation.py · source.py   compatibility facades
-│   └── plugins.py      plugin loader
+│   └── plugins.py      generic loader compatibility facade
 ├── mcp/                server composition, session, toolsets, compatibility facade
 ├── tmux/               client, commands, panes, buffers, presence, delivery, facts, options
 └── regie/              Textual app composition, palette, bus view

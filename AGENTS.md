@@ -107,17 +107,19 @@ theater/
 │   ├── recall.py / recall_read.py  path-touch history + segment reader (v2)
 │   ├── schema.py       the one place table columns are declared
 │   └── migrations/     alembic env + versions/
-├── harness/            plugin loader + adapters (no privileged built-in tier)
-│   ├── contracts/       Harness, Source, HarnessObserver, launch, events, trajectory facts
+├── harness/            package-manifest plugins + generic channels (no privileged built-in tier)
+│   ├── contracts/       immutable manifests, typed callbacks, Harness, Source, observation facts
+│   ├── manifests/       manifest compiler, validation, reusable strategies
+│   ├── loading/         named-directory discovery and isolated package imports
+│   ├── channels/        CompositeSource plus generic hook and inbound native-OTel channels
 │   ├── normalization/   shared bounded value and timestamp conversion
 │   ├── registry/       plugin lookup, install, capabilities, claims
 │   ├── transcript/     transcript-file source, observer, attachment, bounded history
-│   ├── builtin/adapters/  modular Claude, Codex, OpenCode, and Vibe implementations
-│   ├── builtin/plugins/   thin scanner entrypoints and compatibility exports
+│   ├── builtin/plugins/   claude/, codex/, opencode/, vibe/ package manifests and all native code
 │   ├── base.py         compatibility facade — re-exports contracts
 │   ├── observation.py  compatibility facade — re-exports contracts + transcript
 │   ├── source.py       compatibility facade — re-exports contracts + transcript
-│   └── plugins.py      the plugin loader
+│   └── plugins.py      generic loader compatibility facade
 ├── mcp/                server.py (14 agent tools) · session.py · toolsets/
 │   ├── toolsets/       delegation, participants, recall, transcripts
 │   ├── server.py       composition surface — registers @mcp.tool entries
@@ -207,12 +209,18 @@ theater/
 
 ## When adding a harness
 
-Write a plugin: a Python file implementing the adapter, dropped in
-`$THEATER_HOME/harnesses/` (or `theater/harness/builtin/plugins/` to ship it).
-There is no TOML shortcut — the deep half of an adapter (turn boundaries, bus
-messages, `read_transcript`, native sub-agents) can't be expressed in config.
-Full guide: [`docs/harness-plugins.md`](docs/harness-plugins.md). `theater
-harnesses` reports what loaded and why anything was rejected.
+Write a named package: `$THEATER_HOME/harnesses/<name>/manifest.py` exporting
+one immutable `MANIFEST`. The folder name is canonical; use relative sibling
+modules and only public `theater.harness.contracts` APIs. Local packages
+override shipped packages, disabled names are skipped before import, and a
+legacy top-level `.py` is only a non-executing migration diagnostic. All
+shipped harness-specific production code belongs in
+`theater/harness/builtin/plugins/<harness>/`; `builtin/adapters/` and loose
+`builtin/plugins/*.py` do not exist. There is no TOML shortcut — the deep half
+of an adapter (turn boundaries, durable source semantics, native sub-agents)
+cannot be expressed in config. Full guide:
+[`docs/harness-plugins.md`](docs/harness-plugins.md). `theater harnesses`
+reports what loaded and why anything was rejected.
 
 ## Further reading
 
