@@ -10,10 +10,17 @@ from theater.constants.core import HARNESS_NAME
 from theater.constants.harness import (
     HARNESS_APPROVAL_POLICIES,
     HARNESS_CHANNEL_ID_MAX_CHARS,
+    HARNESS_CHANNEL_IDENTIFIER_MAX_CHARS,
     HARNESS_HOOK_IDENTIFIER_MAX_CHARS,
     HARNESS_HOOK_MAX_PAYLOAD_BYTES,
     HARNESS_HOOK_MAX_QUEUE,
     HARNESS_MANIFEST_API_VERSION,
+    HARNESS_OTEL_MAX_ATTRIBUTES,
+    HARNESS_OTEL_MAX_PAYLOAD_BYTES,
+    HARNESS_OTEL_MAX_QUEUE,
+    HARNESS_OTEL_MAX_RECORDS,
+    HARNESS_OTEL_MAX_TEXT_BYTES,
+    HARNESS_OTEL_MAX_VALUE_DEPTH,
 )
 from theater.formatting import display_width
 from theater.harness.contracts.channels import (
@@ -23,6 +30,11 @@ from theater.harness.contracts.channels import (
     ChannelKind,
     HookBinding,
     HookDeliveryMode,
+    OtelBinding,
+    OtelBounds,
+    OtelCorrelation,
+    OtelProtocol,
+    OtelSignal,
     SignalKind,
     SignalOwnership,
 )
@@ -43,6 +55,11 @@ from theater.trajectory import TrajectoryCapabilities
 
 _DURABLE_KINDS = frozenset({ChannelKind.TRANSCRIPT, ChannelKind.DATABASE})
 _HOOK_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
+_HTTP_FIELD_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+_OTEL_ATTRIBUTE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]*$")
+_RESERVED_OTEL_HEADERS = frozenset(
+    {"connection", "content-length", "content-type", "host", "transfer-encoding"}
+)
 
 
 class ManifestValidationError(ValueError):
@@ -262,7 +279,7 @@ def _validate_enrichment(name: str, path: str, enrichment: object) -> ChannelDec
         _validate_channel(name, f"{path}.declaration", enrichment.declaration)
         if enrichment.declaration.kind is not ChannelKind.OTEL:
             _fail(name, f"{path}.declaration.kind", "must be otel")
-        _validate_optional_reason(name, f"{path}.unavailable_reason", enrichment.unavailable_reason)
+        _validate_otel_channel(name, path, enrichment)
         return enrichment.declaration
     if isinstance(enrichment, UnavailableChannelManifest):
         _validate_channel(name, f"{path}.declaration", enrichment.declaration)
@@ -352,6 +369,156 @@ def _validate_hook_binding(
         _fail(name, f"{path}.correlation", "must be callable")
     if not isinstance(binding.delivery, HookDeliveryMode):
         _fail(name, f"{path}.delivery", "must be a HookDeliveryMode")
+
+
+def _validate_otel_channel(  # noqa: PLR0912
+    name: str,
+    path: str,
+    channel: OtelChannelManifest,
+) -> None:
+    _validate_optional_reason(name, f"{path}.unavailable_reason", channel.unavailable_reason)
+    for index, capability in enumerate(channel.declaration.capabilities):
+        if capability.ownership is SignalOwnership.PRIMARY:
+            _fail(
+                name,
+                f"{path}.declaration.capabilities[{index}].ownership",
+                "OTel channels cannot claim primary ownership",
+            )
+    if channel.declaration.bounds.max_queue > HARNESS_OTEL_MAX_QUEUE:
+        _fail(
+            name,
+            f"{path}.declaration.bounds.max_queue",
+            f"must not exceed {HARNESS_OTEL_MAX_QUEUE}",
+        )
+    if channel.declaration.bounds.max_payload_bytes > HARNESS_OTEL_MAX_PAYLOAD_BYTES:
+        _fail(
+            name,
+            f"{path}.declaration.bounds.max_payload_bytes",
+            f"must not exceed {HARNESS_OTEL_MAX_PAYLOAD_BYTES}",
+        )
+    if not isinstance(channel.protocol, OtelProtocol):
+        _fail(name, f"{path}.protocol", "must be an OtelProtocol")
+    _validate_otel_bounds(name, f"{path}.bounds", channel.bounds)
+    if not isinstance(channel.bindings, tuple):
+        _fail(name, f"{path}.bindings", "must be a tuple of OtelBinding values")
+    if channel.unavailable_reason is not None:
+        if channel.bindings:
+            _fail(name, f"{path}.bindings", "must be empty when unavailable_reason is set")
+        if channel.installer is not None:
+            _fail(name, f"{path}.installer", "must be null when unavailable_reason is set")
+        if channel.correlation is not None:
+            _fail(name, f"{path}.correlation", "must be null when unavailable_reason is set")
+        return
+    if not channel.bindings:
+        _fail(name, f"{path}.bindings", "must be non-empty when available")
+    if not callable(channel.installer):
+        _fail(name, f"{path}.installer", "must be callable when bindings are declared")
+    _validate_otel_correlation(name, f"{path}.correlation", channel.correlation)
+    declared = {capability.signal for capability in channel.declaration.capabilities}
+    seen: set[tuple[OtelSignal, str]] = set()
+    for index, binding in enumerate(channel.bindings):
+        _validate_otel_binding(
+            name,
+            f"{path}.bindings[{index}]",
+            binding,
+            declared,
+            seen,
+        )
+
+
+def _validate_otel_bounds(name: str, path: str, bounds: object) -> None:
+    if not isinstance(bounds, OtelBounds):
+        _fail(name, path, f"expected OtelBounds, got {type(bounds).__name__}")
+    limits = {
+        "max_records": HARNESS_OTEL_MAX_RECORDS,
+        "max_attributes": HARNESS_OTEL_MAX_ATTRIBUTES,
+        "max_value_depth": HARNESS_OTEL_MAX_VALUE_DEPTH,
+        "max_text_bytes": HARNESS_OTEL_MAX_TEXT_BYTES,
+    }
+    for field, ceiling in limits.items():
+        value = getattr(bounds, field)
+        if type(value) is not int or value <= 0:
+            _fail(name, f"{path}.{field}", "must be a positive integer")
+        if value > ceiling:
+            _fail(name, f"{path}.{field}", f"must not exceed {ceiling}")
+    if bounds.max_text_bytes > HARNESS_OTEL_MAX_PAYLOAD_BYTES:
+        _fail(name, f"{path}.max_text_bytes", "cannot exceed the native OTel payload limit")
+
+
+def _validate_otel_correlation(name: str, path: str, correlation: object) -> None:
+    if not isinstance(correlation, OtelCorrelation):
+        _fail(name, path, "must be an OtelCorrelation when native OTel is available")
+    header = correlation.auth_header
+    if (
+        not isinstance(header, str)
+        or len(header) > HARNESS_CHANNEL_IDENTIFIER_MAX_CHARS
+        or not _HTTP_FIELD_NAME.fullmatch(header)
+    ):
+        _fail(name, f"{path}.auth_header", "must be a bounded HTTP field name")
+    if header.lower() in _RESERVED_OTEL_HEADERS:
+        _fail(name, f"{path}.auth_header", "must not name a transport-reserved header")
+    for field in (
+        "participant_attribute",
+        "harness_attribute",
+        "channel_attribute",
+        "binding_attribute",
+        "delivery_id_attribute",
+    ):
+        value = getattr(correlation, field)
+        if (
+            not isinstance(value, str)
+            or len(value) > HARNESS_CHANNEL_IDENTIFIER_MAX_CHARS
+            or not _OTEL_ATTRIBUTE.fullmatch(value)
+        ):
+            _fail(name, f"{path}.{field}", "must be a bounded native identifier")
+    values = (
+        correlation.participant_attribute,
+        correlation.harness_attribute,
+        correlation.channel_attribute,
+        correlation.binding_attribute,
+        correlation.delivery_id_attribute,
+    )
+    if len(set(values)) != len(values):
+        _fail(name, path, "resource and record correlation attributes must be distinct")
+
+
+def _validate_otel_binding(
+    name: str,
+    path: str,
+    binding: object,
+    declared: set[SignalKind],
+    seen: set[tuple[OtelSignal, str]],
+) -> None:
+    if not isinstance(binding, OtelBinding):
+        _fail(name, path, f"expected OtelBinding, got {type(binding).__name__}")
+    if (
+        not isinstance(binding.name, str)
+        or len(binding.name) > HARNESS_CHANNEL_IDENTIFIER_MAX_CHARS
+        or not _OTEL_ATTRIBUTE.fullmatch(binding.name)
+    ):
+        _fail(name, f"{path}.name", "must be a bounded native signal identifier")
+    if not isinstance(binding.signal, OtelSignal):
+        _fail(name, f"{path}.signal", "must be an OtelSignal")
+    key = (binding.signal, binding.name)
+    if key in seen:
+        _fail(name, f"{path}.name", f"duplicates OTel binding {binding.name!r}")
+    seen.add(key)
+    if not isinstance(binding.signals, tuple) or not binding.signals:
+        _fail(name, f"{path}.signals", "must be a non-empty tuple of SignalKind values")
+    signal_seen: set[SignalKind] = set()
+    for index, signal in enumerate(binding.signals):
+        signal_path = f"{path}.signals[{index}]"
+        if not isinstance(signal, SignalKind):
+            _fail(name, signal_path, "must be a SignalKind")
+        if signal in signal_seen:
+            _fail(name, signal_path, "must not repeat a signal")
+        if signal not in declared:
+            _fail(name, signal_path, "must be declared by the channel capabilities")
+        signal_seen.add(signal)
+    if not callable(binding.decoder):
+        _fail(name, f"{path}.decoder", "must be callable")
+    if not callable(binding.correlation):
+        _fail(name, f"{path}.correlation", "must be callable")
 
 
 def _validate_channel(name: str, path: str, channel: object) -> None:

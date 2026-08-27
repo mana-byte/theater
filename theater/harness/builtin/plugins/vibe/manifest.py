@@ -22,6 +22,7 @@ from theater.harness.contracts.manifest import (
     LineageManifest,
     ModelDiscoveryManifest,
     ObservationManifest,
+    OtelChannelManifest,
     ScreenManifest,
     SourceManifest,
 )
@@ -61,6 +62,11 @@ _NATIVE_HOOKS = HookChannelManifest(
         "Vibe hooks are limited to project or global files and have no safe launch-local "
         "installation path"
     ),
+)
+
+_NATIVE_OTEL = OtelChannelManifest(
+    declaration=ChannelDeclaration(id="native-otel", kind=ChannelKind.OTEL),
+    unavailable_reason="installs one global provider/exporter; exporter theft.",
 )
 
 
@@ -111,7 +117,7 @@ def manifest_for_roots(
             ),
             lineage=LineageManifest(native_children=native_children),
             trajectory_capabilities=VibeObserver.trajectory_capabilities,
-            enrichments=(_NATIVE_HOOKS,),
+            enrichments=(_NATIVE_HOOKS, _NATIVE_OTEL),
         ),
         models=ModelDiscoveryManifest(discoverer=discover_models),
     )

@@ -153,7 +153,7 @@ async def sweep(
 
     # Phase 4: receipt tokens — after participant cleanup so orphans vanish in the same pass.
     store.cleanup_receipt_tokens()
-    store.cleanup_hook_credentials()
+    store.cleanup_channel_credentials()
     await asyncio.sleep(0)
 
     result = SweepResult(

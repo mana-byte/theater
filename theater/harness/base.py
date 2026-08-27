@@ -35,7 +35,7 @@ from theater.harness.contracts.events import (
 )
 from theater.harness.contracts.harness import Harness, LaunchParameterSupport
 from theater.harness.contracts.launch import (
-    HookCredential,
+    ChannelCredential,
     LaunchPlan,
     NativeChild,
     ResumeLaunchOverlay,
@@ -47,11 +47,11 @@ __all__ = [
     "MAX_TEXT",
     "MCP_TOOL_TIMEOUT",
     "SERVER_NAME",
+    "ChannelCredential",
     "Event",
     "EventKind",
     "EventPath",
     "Harness",
-    "HookCredential",
     "LaunchParameterSupport",
     "LaunchPlan",
     "NativeChild",

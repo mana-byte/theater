@@ -173,7 +173,11 @@ def _hook_channel(harness) -> HookChannelManifest:
 )
 def test_shipped_manifests_declare_native_hooks_unavailable(name, built) -> None:
     compiled = compile_manifest(name, built)
-    channels = compiled.observer.enrichment_manifests()
+    channels = tuple(
+        channel
+        for channel in compiled.observer.enrichment_manifests()
+        if isinstance(channel, HookChannelManifest)
+    )
 
     assert len(channels) == 1
     channel = channels[0]
@@ -355,7 +359,7 @@ async def test_hook_transport_credentials_bounds_decode_and_cleanup(  # noqa: PL
     plan = install_hook_plan(LaunchPlan(argv=["acme"]), participant, harness.observer)
     record_launch_identity(participant, plan, daemon.registry)
     write_plan_files(plan)
-    credential = plan.hook_credentials[0]
+    credential = plan.channel_credentials[0]
     assert stat.S_IMODE(credential.token_path.stat().st_mode) == 0o600
     assert credential.token not in (credential.token_path.with_name("native-hook.json")).read_text()
     assert plan.env["ACME_HOOK_CONFIG"].endswith("native-hook.json")
@@ -523,7 +527,7 @@ async def test_hook_credential_survives_runtime_restart(theater_home, tmp_path) 
     plan = install_hook_plan(LaunchPlan(argv=["acme"]), participant, harness.observer)
     record_launch_identity(participant, plan, daemon.registry)
     write_plan_files(plan)
-    credential = plan.hook_credentials[0]
+    credential = plan.channel_credentials[0]
     await daemon.aclose()
 
     restarted = Daemon(harnesses={"acme": harness})
@@ -580,7 +584,7 @@ async def test_hook_correlation_is_admitted_once_before_enqueue(theater_home, tm
     plan = install_hook_plan(LaunchPlan(argv=["acme"]), participant, harness.observer)
     record_launch_identity(participant, plan, daemon.registry)
     write_plan_files(plan)
-    credential = plan.hook_credentials[0]
+    credential = plan.channel_credentials[0]
     client = await _client(daemon)
     try:
         assert await _event(
@@ -662,7 +666,7 @@ async def test_concurrent_retry_waits_for_a_real_accepted_delivery(theater_home,
     )
     plan = install_hook_plan(LaunchPlan(argv=["acme"]), participant, harness.observer)
     record_launch_identity(participant, plan, daemon.registry)
-    credential = plan.hook_credentials[0]
+    credential = plan.channel_credentials[0]
     client = await _client(daemon)
     try:
         first = asyncio.create_task(
@@ -705,7 +709,7 @@ async def test_hook_semantic_dedupe_survives_source_recreation(theater_home, tmp
     plan = install_hook_plan(LaunchPlan(argv=["acme"]), participant, harness.observer)
     record_launch_identity(participant, plan, daemon.registry)
     write_plan_files(plan)
-    credential = plan.hook_credentials[0]
+    credential = plan.channel_credentials[0]
     client = await _client(daemon)
     try:
         await _event(
@@ -769,7 +773,7 @@ async def test_hook_correlation_timeout_is_generic_and_not_audited(theater_home,
     plan = install_hook_plan(LaunchPlan(argv=["acme"]), participant, harness.observer)
     record_launch_identity(participant, plan, daemon.registry)
     write_plan_files(plan)
-    credential = plan.hook_credentials[0]
+    credential = plan.channel_credentials[0]
     client = await _client(daemon)
     try:
         before = sum(

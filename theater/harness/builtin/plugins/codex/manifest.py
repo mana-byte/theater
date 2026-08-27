@@ -19,6 +19,7 @@ from theater.harness.contracts.manifest import (
     IdentityManifest,
     LaunchManifest,
     ObservationManifest,
+    OtelChannelManifest,
     ScreenManifest,
     SourceManifest,
 )
@@ -37,6 +38,11 @@ _NATIVE_HOOKS = HookChannelManifest(
         "Codex hooks need verified launch-local configuration, trust behavior, and installed "
         "payloads before Theater can enable them"
     ),
+)
+
+_NATIVE_OTEL = OtelChannelManifest(
+    declaration=ChannelDeclaration(id="native-otel", kind=ChannelKind.OTEL),
+    unavailable_reason="endpoint choice replaces exporter; no safe fan-out.",
 )
 
 MANIFEST = HarnessManifest(
@@ -77,7 +83,7 @@ MANIFEST = HarnessManifest(
             operator_candidate_admitter=admit_operator_candidate,
         ),
         trajectory_capabilities=CodexObserver.trajectory_capabilities,
-        enrichments=(_NATIVE_HOOKS,),
+        enrichments=(_NATIVE_HOOKS, _NATIVE_OTEL),
     ),
 )
 

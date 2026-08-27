@@ -25,6 +25,7 @@ from theater.daemon.spawning.models import Reservation, SpawnRequest
 from theater.daemon.spawning.planning import (
     build_plan,
     install_hook_plan,
+    install_otel_plan,
     record_launch_identity,
     validate_receipt_plan,
     write_plan_files,
@@ -64,8 +65,9 @@ class Spawner:
     #: Interval between kill-pane confirmation polls, in seconds.
     KILL_POLL_INTERVAL = SPAWN_KILL_POLL_INTERVAL_SECONDS
 
-    def __init__(self, registry: Registry):
+    def __init__(self, registry: Registry, *, otel_runtime=None):
         self.registry = registry
+        self.otel_runtime = otel_runtime
         self._named_locks: dict[str, asyncio.Lock] = {}
 
     def _named_lock(self, repo_root: str) -> asyncio.Lock:
@@ -96,9 +98,10 @@ class Spawner:
             if minted_token is not None:
                 plan = replace(plan, receipt_token=minted_token)
             plan = self._install_hook_plan(plan, participant, harness.observer)
+            plan = self._install_otel_plan(plan, participant, harness.observer)
             with timing.span(SPAWN_WORKTREE, id=participant.id, kind=req.worktree or None):
                 child_cwd = await self._prepare_worktree(req, participant)
-            self._record_launch_identity(participant, plan)
+            self._record_launch_identity(participant, plan, harness.observer)
 
             if resume_predecessor is not None:
                 participant.resume_floor = self._capture_resume_floor(harness, resume_predecessor)
@@ -226,14 +229,29 @@ class Spawner:
         """Apply generic launch-local hook installation."""
         return install_hook_plan(plan, participant, observer)
 
+    def _install_otel_plan(
+        self,
+        plan: LaunchPlan,
+        participant: Participant,
+        observer,
+    ) -> LaunchPlan:
+        """Apply generic launch-local native OTel installation."""
+        return install_otel_plan(plan, participant, observer, self.otel_runtime)
+
     @staticmethod
     def _write_plan_files(plan: LaunchPlan) -> None:
         """Plan file writing via the planning module."""
         write_plan_files(plan)
 
-    def _record_launch_identity(self, participant: Participant, plan: LaunchPlan) -> None:
+    def _record_launch_identity(self, participant: Participant, plan: LaunchPlan, observer) -> None:
         """Identity recording via the planning module."""
-        record_launch_identity(participant, plan, self.registry)
+        record_launch_identity(
+            participant,
+            plan,
+            self.registry,
+            runtime=self.otel_runtime,
+            observer=observer,
+        )
 
     def _resolve_resume_reference(self, req: SpawnRequest) -> SpawnRequest:
         """Resume reference resolution via the resume module."""

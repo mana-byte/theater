@@ -1,4 +1,4 @@
-"""Participant-scoped generic hook credentials."""
+"""Participant-scoped credentials for bounded native signal channels."""
 
 from __future__ import annotations
 
@@ -9,26 +9,28 @@ from pathlib import Path
 
 from sqlalchemy import delete, select
 
-from theater.constants.daemon import HOOK_CREDENTIAL_PREFIX
+from theater.constants.daemon import CHANNEL_CREDENTIAL_PREFIX
 from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories.metadata import MetadataRepository
 from theater.daemon.persistence.repositories.participants import ParticipantRepository
 from theater.daemon.schema import meta
+from theater.harness.contracts.channels import ChannelKind
 from theater.models import Status
 
 
 @dataclass(frozen=True, slots=True)
-class HookCredentialRecord:
-    """One persisted hook credential scope."""
+class ChannelCredentialRecord:
+    """One persisted participant-scoped native channel credential."""
 
     harness: str
+    kind: ChannelKind
     channel_id: str
     token: str
     token_path: str
 
 
-class HookCredentialRepository:
-    """Persist only restart-required hook credential state."""
+class ChannelCredentialRepository:
+    """Persist only credentials required by native channels after restart."""
 
     def __init__(
         self,
@@ -45,15 +47,17 @@ class HookCredentialRepository:
         participant_id: str,
         *,
         harness: str,
+        kind: ChannelKind,
         channel_id: str,
         token: str,
         token_path: str,
     ) -> None:
         self._meta.set(
-            self._key(participant_id, channel_id),
+            self._key(participant_id, kind, channel_id),
             json.dumps(
                 {
                     "harness": harness,
+                    "kind": kind.value,
                     "channel_id": channel_id,
                     "token": token,
                     "token_path": token_path,
@@ -61,12 +65,17 @@ class HookCredentialRepository:
             ),
         )
 
-    def get(self, participant_id: str, channel_id: str) -> HookCredentialRecord | None:
+    def get(
+        self,
+        participant_id: str,
+        kind: ChannelKind,
+        channel_id: str,
+    ) -> ChannelCredentialRecord | None:
         participant = self._participants.get(participant_id)
         if participant is None or participant.status is Status.DEAD:
             self.delete_participant(participant_id)
             return None
-        raw = self._meta.get(self._key(participant_id, channel_id))
+        raw = self._meta.get(self._key(participant_id, kind, channel_id))
         if raw is None:
             return None
         try:
@@ -75,20 +84,27 @@ class HookCredentialRepository:
             return None
         if not isinstance(payload, dict):
             return None
-        fields = ("harness", "channel_id", "token", "token_path")
+        fields = ("harness", "kind", "channel_id", "token", "token_path")
         if any(not isinstance(payload.get(field), str) or not payload[field] for field in fields):
             return None
-        return HookCredentialRecord(
+        try:
+            stored_kind = ChannelKind(payload["kind"])
+        except ValueError:
+            return None
+        if stored_kind is not kind or payload["channel_id"] != channel_id:
+            return None
+        return ChannelCredentialRecord(
             harness=payload["harness"],
+            kind=stored_kind,
             channel_id=payload["channel_id"],
             token=payload["token"],
             token_path=payload["token_path"],
         )
 
     def delete_participant(self, participant_id: str) -> None:
-        prefix = f"{HOOK_CREDENTIAL_PREFIX}{participant_id}:"
+        prefix = f"{CHANNEL_CREDENTIAL_PREFIX}{participant_id}:"
         rows = self._db.conn.execute(
-            select(meta.c.key, meta.c.value).where(meta.c.key.like(f"{HOOK_CREDENTIAL_PREFIX}%"))
+            select(meta.c.key, meta.c.value).where(meta.c.key.like(f"{CHANNEL_CREDENTIAL_PREFIX}%"))
         ).fetchall()
         for key, raw in rows:
             if not key.startswith(prefix):
@@ -98,10 +114,10 @@ class HookCredentialRepository:
 
     def cleanup(self) -> int:
         rows = self._db.conn.execute(
-            select(meta.c.key).where(meta.c.key.like(f"{HOOK_CREDENTIAL_PREFIX}%"))
+            select(meta.c.key).where(meta.c.key.like(f"{CHANNEL_CREDENTIAL_PREFIX}%"))
         ).fetchall()
         participant_ids = {
-            key.removeprefix(HOOK_CREDENTIAL_PREFIX).split(":", 1)[0] for (key,) in rows
+            key.removeprefix(CHANNEL_CREDENTIAL_PREFIX).split(":", 1)[0] for (key,) in rows
         }
         deleted = 0
         for participant_id in participant_ids:
@@ -113,8 +129,8 @@ class HookCredentialRepository:
         return deleted
 
     @staticmethod
-    def _key(participant_id: str, channel_id: str) -> str:
-        return f"{HOOK_CREDENTIAL_PREFIX}{participant_id}:{channel_id}"
+    def _key(participant_id: str, kind: ChannelKind, channel_id: str) -> str:
+        return f"{CHANNEL_CREDENTIAL_PREFIX}{participant_id}:{kind.value}:{channel_id}"
 
     @staticmethod
     def _unlink_token(raw: str) -> None:
@@ -128,4 +144,4 @@ class HookCredentialRepository:
                 Path(token_path).unlink(missing_ok=True)
 
 
-__all__ = ["HookCredentialRecord", "HookCredentialRepository"]
+__all__ = ["ChannelCredentialRecord", "ChannelCredentialRepository"]

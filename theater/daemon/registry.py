@@ -399,12 +399,12 @@ class Registry:
             # Already dead or gone: still purge stale name entry so the mask can be reused.
             self._names.pop(pid, None)
             self.store.delete_receipt_token(pid)
-            self.store.delete_hook_credentials(pid)
+            self.store.delete_channel_credentials(pid)
             self._cleanup_participant(pid)
             return
         self.store.set_status(pid, Status.DEAD)
         self.store.delete_receipt_token(pid)
-        self.store.delete_hook_credentials(pid)
+        self.store.delete_channel_credentials(pid)
         self._cleanup_participant(pid)
         self._names.pop(pid, None)
         self.store.bus_append("participant.dead", to_id=pid)

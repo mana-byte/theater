@@ -12,7 +12,7 @@ from theater.harness.contracts.context import ParticipantObservationContext
 from theater.harness.contracts.values import freeze_json_mapping
 
 if TYPE_CHECKING:
-    from theater.harness.contracts.channels import ChannelFact
+    from theater.harness.contracts.channels import ChannelFact, OtelRecord
     from theater.harness.contracts.launch import LaunchPlan, NativeChild, ResumeLaunchOverlay
     from theater.harness.contracts.observation import ScreenReading
     from theater.harness.contracts.source import Source, StreamPoint, TranscriptCandidate
@@ -164,6 +164,66 @@ class HookInstallOverlay:
         object.__setattr__(self, "files", MappingProxyType(dict(self.files)))
 
 
+@dataclass(frozen=True, slots=True)
+class OtelCorrelationContext:
+    """One accepted bounded native OTel record awaiting correlation."""
+
+    participant_id: str
+    harness: str
+    channel_id: str
+    record: OtelRecord
+    delivery_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class OtelDecodeContext:
+    """One accepted native OTel record with exact correlation."""
+
+    participant_id: str
+    harness: str
+    channel_id: str
+    record: OtelRecord
+    delivery_id: str
+    native_id: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.native_id, str) or not self.native_id.strip():
+            raise TypeError("OTel native_id must be a non-blank string")
+
+
+@dataclass(frozen=True, slots=True)
+class OtelInstallContext:
+    """Launch-local facts exposed to a native OTel installer."""
+
+    participant_id: str
+    harness: str
+    channel_id: str
+    token_file: Path
+    endpoint: str
+    auth_header: str
+    resource_attributes: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "resource_attributes",
+            MappingProxyType(dict(self.resource_attributes)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class OtelInstallOverlay:
+    """Public files and environment from one native OTel installer."""
+
+    env: Mapping[str, str] = MappingProxyType({})
+    files: Mapping[Path, str] = MappingProxyType({})
+    credential_header_env: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
+        object.__setattr__(self, "files", MappingProxyType(dict(self.files)))
+
+
 class LaunchPlanner(Protocol):
     """Build the pure launch plan for one requested participant."""
 
@@ -242,6 +302,24 @@ class HookInstaller(Protocol):
     def __call__(self, context: HookInstallContext) -> HookInstallOverlay: ...
 
 
+class OtelSignalDecoder(Protocol):
+    """Decode one declared OTel record into normalized facts."""
+
+    def __call__(self, context: OtelDecodeContext) -> Sequence[ChannelFact]: ...
+
+
+class OtelCorrelationExtractor(Protocol):
+    """Extract one exact native correlation identity from an OTel record."""
+
+    def __call__(self, context: OtelCorrelationContext) -> str: ...
+
+
+class OtelInstaller(Protocol):
+    """Build launch-local OTel configuration without secret bytes."""
+
+    def __call__(self, context: OtelInstallContext) -> OtelInstallOverlay: ...
+
+
 __all__ = [
     "HookCorrelationContext",
     "HookCorrelationExtractor",
@@ -258,6 +336,13 @@ __all__ = [
     "NativeChildrenReader",
     "OperatorCandidateAdmitter",
     "OperatorCandidateContext",
+    "OtelCorrelationContext",
+    "OtelCorrelationExtractor",
+    "OtelDecodeContext",
+    "OtelInstallContext",
+    "OtelInstallOverlay",
+    "OtelInstaller",
+    "OtelSignalDecoder",
     "ReceiptValidationContext",
     "ReceiptValidator",
     "ResumeContext",

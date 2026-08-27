@@ -16,6 +16,7 @@ from theater.harness.channels.hooks import (
     validate_hook_payload,
 )
 from theater.harness.contracts.callbacks import HookCorrelationContext
+from theater.harness.contracts.channels import ChannelKind
 from theater.harness.contracts.manifest import HookChannelManifest
 from theater.models import BadRequest, Status
 
@@ -63,7 +64,7 @@ async def _harness_event(daemon, params: dict) -> dict:  # noqa: PLR0912
     if participant is None:
         raise BadRequest("harness event id does not name an existing participant")
     if participant.status is Status.DEAD:
-        daemon.store.delete_hook_credentials(pid)
+        daemon.store.delete_channel_credentials(pid)
         raise BadRequest("harness event id names a dead participant")
     supplied_harness = params.get("harness")
     if supplied_harness is not None:
@@ -71,7 +72,7 @@ async def _harness_event(daemon, params: dict) -> dict:  # noqa: PLR0912
             raise BadRequest("harness event parameter 'harness' must be a string or null")
         if supplied_harness != participant.harness:
             raise BadRequest("harness event harness does not match the participant")
-    credential = daemon.store.get_hook_credential(pid, channel_id)
+    credential = daemon.store.get_channel_credential(pid, ChannelKind.HOOK, channel_id)
     if (
         credential is None
         or credential.harness != participant.harness

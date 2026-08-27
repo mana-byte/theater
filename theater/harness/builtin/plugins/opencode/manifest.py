@@ -20,6 +20,7 @@ from theater.harness.contracts.manifest import (
     LaunchManifest,
     ModelDiscoveryManifest,
     ObservationManifest,
+    OtelChannelManifest,
     ScreenManifest,
     SourceManifest,
 )
@@ -40,6 +41,11 @@ _NATIVE_HOOKS = HookChannelManifest(
         "OpenCode hooks need verified fire-and-forget ordering, loss, and installed payload "
         "contracts before Theater can enable them"
     ),
+)
+
+_NATIVE_OTEL = OtelChannelManifest(
+    declaration=ChannelDeclaration(id="native-otel", kind=ChannelKind.OTEL),
+    unavailable_reason="one endpoint, no safe fan-out or stable join.",
 )
 
 _DATABASE_CHANNEL = ChannelDeclaration(
@@ -81,7 +87,7 @@ MANIFEST = HarnessManifest(
             operator_candidate_admitter=admit_operator_candidate_context,
         ),
         trajectory_capabilities=OpenCodeObserver.trajectory_capabilities,
-        enrichments=(_NATIVE_HOOKS,),
+        enrichments=(_NATIVE_HOOKS, _NATIVE_OTEL),
     ),
     models=ModelDiscoveryManifest(discoverer=discover_models),
 )

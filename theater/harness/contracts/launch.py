@@ -8,6 +8,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from theater.harness.contracts.channels import ChannelKind
+
 
 def theater_binary() -> str:
     """Resolve the absolute path to the ``theater`` executable.
@@ -45,13 +47,17 @@ class NativeChild:
 
 
 @dataclass(frozen=True, slots=True)
-class HookCredential:
-    """Core-owned credential for one hook channel."""
+class ChannelCredential:
+    """Core-owned credential for one bounded native channel."""
 
+    kind: ChannelKind
     channel_id: str
     token: str
     token_path: Path
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, ChannelKind):
+            raise TypeError("channel credential kind must be a ChannelKind")
 
 @dataclass(frozen=True, slots=True)
 class LaunchPlan:
@@ -71,11 +77,11 @@ class LaunchPlan:
     receipt_token_path: Path | None = None
     #: Resolved transcript namespace; persisted before launch so collision policy is stable.
     transcript_domain: str | None = None
-    #: Core-populated channel credentials; plugins never receive token bytes.
-    hook_credentials: tuple[HookCredential, ...] = ()
+    #: Core-populated native channel credentials; plugins never receive token bytes.
+    channel_credentials: tuple[ChannelCredential, ...] = ()
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "hook_credentials", tuple(self.hook_credentials))
+        object.__setattr__(self, "channel_credentials", tuple(self.channel_credentials))
 
 
 @dataclass(frozen=True, slots=True)

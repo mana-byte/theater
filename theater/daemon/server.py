@@ -38,6 +38,7 @@ from theater import harness as harness_registry
 from theater import paths, protocol, timing  # noqa: F401 — compatibility imports
 from theater.config import Config
 from theater.config import load as load_config
+from theater.constants.daemon import CHANNEL_OTEL_RECEIVER_PORT_META_KEY
 
 # Importing methods registers all @method handlers as a side effect.
 from theater.daemon import (  # noqa: F401
@@ -60,6 +61,8 @@ from theater.daemon.trajectory import TrajectoryService
 from theater.daemon.trajectory.telemetry import AGENT_METRIC_SPECS, create_agent_telemetry
 from theater.harness import Harness
 from theater.harness.channels.hooks import HookRuntime
+from theater.harness.channels.otel import NativeOtelRuntime
+from theater.harness.contracts.channels import ChannelKind
 from theater.observability import metric_bridge
 from theater.tmux import client as tmux  # noqa: F401 — monkeypatched via server_mod
 
@@ -118,7 +121,13 @@ class Daemon:
             self.registry = Registry(self.store)
             self.hook_runtime = HookRuntime(self._hook_credential_active)
             self.registry.add_participant_cleanup(self.hook_runtime.drop_participant)
-            self.spawner = Spawner(self.registry)
+            self.otel_runtime = NativeOtelRuntime(
+                self._otel_credential,
+                receiver_port_lookup=self._otel_receiver_port,
+                receiver_port_store=self._set_otel_receiver_port,
+            )
+            self.registry.add_participant_cleanup(self.otel_runtime.drop_participant)
+            self.spawner = Spawner(self.registry, otel_runtime=self.otel_runtime)
             self.jobs = JobManager(self.store)
             agent_telemetry = create_agent_telemetry(
                 self.store,
@@ -144,6 +153,7 @@ class Daemon:
                 jobs=self.jobs,
                 agent_telemetry=agent_telemetry,
                 hook_runtime=self.hook_runtime,
+                otel_runtime=self.otel_runtime,
             )
             self.trajectory = TrajectoryService(self.store, self.registry, self.observer)
             self.trajectory_service = self.trajectory
@@ -165,7 +175,19 @@ class Daemon:
             raise
 
     def _hook_credential_active(self, participant_id: str, channel_id: str) -> bool:
-        return self.store.get_hook_credential(participant_id, channel_id) is not None
+        return (
+            self.store.get_channel_credential(participant_id, ChannelKind.HOOK, channel_id)
+            is not None
+        )
+
+    def _otel_credential(self, participant_id: str, channel_id: str):
+        return self.store.get_channel_credential(participant_id, ChannelKind.OTEL, channel_id)
+
+    def _otel_receiver_port(self) -> str | None:
+        return self.store.get_meta(CHANNEL_OTEL_RECEIVER_PORT_META_KEY)
+
+    def _set_otel_receiver_port(self, port: int) -> None:
+        self.store.set_meta(CHANNEL_OTEL_RECEIVER_PORT_META_KEY, str(port))
 
     def _next_send_seq(self) -> int:
         return lifecycle.next_send_seq(self)

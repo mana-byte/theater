@@ -16,6 +16,7 @@ from theater.harness.contracts.callbacks import (
     ModelDiscoverer,
     NativeChildrenReader,
     OperatorCandidateAdmitter,
+    OtelInstaller,
     ReceiptValidator,
     ResumePlanner,
     ScreenClassifier,
@@ -26,6 +27,10 @@ from theater.harness.contracts.callbacks import (
 from theater.harness.contracts.channels import (
     ChannelDeclaration,
     HookBinding,
+    OtelBinding,
+    OtelBounds,
+    OtelCorrelation,
+    OtelProtocol,
     SignalKind,
 )
 from theater.harness.contracts.harness import ResumeStrategy
@@ -106,10 +111,18 @@ class HookChannelManifest:
 
 @dataclass(frozen=True, slots=True)
 class OtelChannelManifest:
-    """A future native-telemetry declaration with no transport implementation."""
+    """A generic native-telemetry channel with explicit safe bindings."""
 
     declaration: ChannelDeclaration
+    protocol: OtelProtocol = OtelProtocol.OTLP_HTTP_JSON
+    bounds: OtelBounds = field(default_factory=OtelBounds)
+    correlation: OtelCorrelation | None = None
+    bindings: tuple[OtelBinding, ...] = ()
+    installer: OtelInstaller | None = None
     unavailable_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "bindings", tuple(self.bindings))
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +169,11 @@ class ObservationManifest:
     def hook_channels(self) -> tuple[HookChannelManifest, ...]:
         """Declared hook channels in manifest order."""
         return tuple(item for item in self.enrichments if isinstance(item, HookChannelManifest))
+
+    @property
+    def otel_channels(self) -> tuple[OtelChannelManifest, ...]:
+        """Declared native OTel channels in manifest order."""
+        return tuple(item for item in self.enrichments if isinstance(item, OtelChannelManifest))
 
 
 def _channel_declaration(manifest: EnrichmentManifest) -> ChannelDeclaration:

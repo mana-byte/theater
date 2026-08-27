@@ -18,6 +18,7 @@ from theater.harness.contracts.manifest import (
     IdentityManifest,
     LineageManifest,
     ObservationManifest,
+    OtelChannelManifest,
     ScreenManifest,
     SourceManifest,
 )
@@ -56,6 +57,11 @@ _NATIVE_HOOKS = HookChannelManifest(
     ),
 )
 
+_NATIVE_OTEL = OtelChannelManifest(
+    declaration=ChannelDeclaration(id="native-otel", kind=ChannelKind.OTEL),
+    unavailable_reason="emitted schema/fan-out/launch correlation unverified.",
+)
+
 OBSERVATION = ObservationManifest(
     primary=SourceManifest(factory=source_factory, channel=TRANSCRIPT),
     screen=ScreenManifest(classifier=screen_classifier),
@@ -67,7 +73,7 @@ OBSERVATION = ObservationManifest(
     ),
     lineage=LineageManifest(native_children=native_children),
     trajectory_capabilities=ClaudeCodeObserver.trajectory_capabilities,
-    enrichments=(_NATIVE_HOOKS,),
+    enrichments=(_NATIVE_HOOKS, _NATIVE_OTEL),
 )
 
 

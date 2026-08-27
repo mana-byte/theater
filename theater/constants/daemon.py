@@ -24,8 +24,11 @@ SEND_SEQ_META_KEY = "send_seq"
 #: Meta key prefix for per-participant receipt tokens; the participant id is appended.
 RECEIPT_TOKEN_PREFIX = "receipt_token:"
 
-#: Meta key prefix for participant-scoped generic hook credentials.
-HOOK_CREDENTIAL_PREFIX = "hook_credential:"
+#: Meta key prefix for participant-scoped native channel credentials.
+CHANNEL_CREDENTIAL_PREFIX = "channel_credential:"
+
+#: Meta key for the stable loopback endpoint used by native OTel channels.
+CHANNEL_OTEL_RECEIVER_PORT_META_KEY = "channel_otel_receiver_port"
 
 #: Default time budget for jobs.await when the caller does not specify one.
 RPC_DEFAULT_MAX_WAIT_SECONDS = 150.0

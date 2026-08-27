@@ -65,6 +65,8 @@ async def start(daemon, *, check_path) -> None:
     sock = paths.socket_path()
     check_path(sock)
     try:
+        if await daemon.otel_runtime.start(daemon.observer.harnesses):
+            daemon.otel_runtime.restore(daemon.registry.list(), daemon.observer.harnesses)
         daemon._clear_stale_socket(sock)
         daemon._server = await asyncio.start_unix_server(
             daemon._handle, path=str(sock), limit=protocol.MAX_MESSAGE_BYTES
@@ -177,6 +179,7 @@ async def aclose(daemon, *, close_timeout: float, shutdown_workers) -> None:
             if inspect.isawaitable(result):
                 await result
     await daemon.observer.aclose()
+    await daemon.otel_runtime.aclose()
     await daemon.hook_runtime.aclose()
     if daemon._reaper:
         daemon._reaper.cancel()

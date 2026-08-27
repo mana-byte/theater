@@ -40,6 +40,7 @@ from theater.harness import (
 )
 from theater.harness.channels.composite import CompositeSource, EnrichmentBinding
 from theater.harness.channels.hooks import HookRuntime
+from theater.harness.channels.otel import NativeOtelRuntime
 from theater.harness.source import (
     Attachment,
     Batch,
@@ -81,6 +82,7 @@ class Observer:
         jobs=None,
         agent_telemetry=None,
         hook_runtime: HookRuntime | None = None,
+        otel_runtime: NativeOtelRuntime | None = None,
     ):
         self.registry = registry
         self.store = registry.store
@@ -95,6 +97,7 @@ class Observer:
         self.jobs = jobs
         self.agent_telemetry = agent_telemetry
         self.hook_runtime = hook_runtime
+        self.otel_runtime = otel_runtime
         self._tasks: dict[str, asyncio.Task] = {}
         self._retired: set[str] = set()
         self._unobservable: set[str] = set()
@@ -281,14 +284,16 @@ class Observer:
                 continue
             observer = harness.observer
             hook_active = self._has_active_hooks(p.id, observer)
+            otel_active = self._has_active_otel(p.id, observer)
             durable_source = observer.has_transcript and p.cwd is not None
-            if observer.has_transcript and not p.cwd and not hook_active:
+            if observer.has_transcript and not p.cwd and not hook_active and not otel_active:
                 self._warn_unobservable(pid, p)
                 continue
             if p.tier is Tier.SPAWNED and p.tmux_pane is None:
                 continue
             self._unobservable.discard(pid)
-            watch = self._watch if durable_source or hook_active else self._watch_screen
+            active_source = durable_source or hook_active or otel_active
+            watch = self._watch if active_source else self._watch_screen
             if durable_source:
                 self._restore_transcript_identity_loss(pid)
             timing.ready_lag(OBSERVER_WATCH, pid, p.created_at, harness=p.harness)
@@ -298,6 +303,11 @@ class Observer:
         if self.hook_runtime is None:
             return False
         return self.hook_runtime.has_active(participant_id, observer.enrichment_manifests())
+
+    def _has_active_otel(self, participant_id: str, observer: HarnessObserver) -> bool:
+        if self.otel_runtime is None:
+            return False
+        return self.otel_runtime.has_active(participant_id, observer.enrichment_manifests())
 
     def _warn_unobservable(self, pid: str, p, *, reason: str | None = None) -> None:
         if pid in self._unobservable:
@@ -495,6 +505,14 @@ class Observer:
         bindings: tuple[EnrichmentBinding, ...] = ()
         if self.hook_runtime is not None:
             bindings = self.hook_runtime.enrichment_bindings(p.id, observer.enrichment_manifests())
+        otel_bindings: tuple[EnrichmentBinding, ...] = ()
+        if self.otel_runtime is not None:
+            otel_bindings = self.otel_runtime.enrichment_bindings(
+                p.id,
+                p.harness,
+                observer.enrichment_manifests(),
+            )
+        bindings = bindings + otel_bindings
         if source is None and not bindings:
             return None
         if bindings:
