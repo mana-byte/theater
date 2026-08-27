@@ -387,6 +387,21 @@ async def test_list_participants_forwards_ids_none():
     assert params["ids"] is None
 
 
+async def test_list_participants_scopes_children_to_caller():
+    rows = [{**_RECORD_WITH_RESUME, "id": "p-child", "parent_id": "p-me"}]
+    s = resolved(**{"participants.list": rows})
+    got = await tools.list_participants(s, children_only=True)
+    params = s.client.params("participants.list")
+    assert params["parent_id"] == "p-me"
+    assert [row["id"] for row in got] == ["p-child"]
+
+
+async def test_list_participants_default_has_no_parent_scope():
+    s = resolved(**{"participants.list": []})
+    await tools.list_participants(s)
+    assert s.client.params("participants.list")["parent_id"] is None
+
+
 async def test_list_participants_resume_state_in_projection():
     """resume_state appears in each returned row."""
     rows = [

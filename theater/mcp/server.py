@@ -167,6 +167,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
     async def list_participants(
         include_dead: bool = False,
         ids: list[str] | None = None,
+        children_only: bool = False,
     ) -> list[dict]:
         """List every agent on this machine that Theater knows about.
 
@@ -195,6 +196,10 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         a dead participant is only returned when `include_dead=True`, even when
         its id is listed explicitly.
 
+        Set `children_only=True` to list only participants spawned directly by
+        you. It excludes deeper descendants and composes with both `ids` and
+        `include_dead`.
+
         Each row includes `resume_state`, which exposes the verdict from the
         generic identity and capability gates that `spawn_session(resume=...)`
         checks before delegating to harness-specific resume validation. Values:
@@ -206,7 +211,12 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         below operator-level), `owned_by_live` (a live participant already holds
         a trusted binding for the same session id).
         """
-        return await tools.list_participants(session, include_dead=include_dead, ids=ids)
+        return await tools.list_participants(
+            session,
+            include_dead=include_dead,
+            ids=ids,
+            children_only=children_only,
+        )
 
     @mcp.tool()
     async def list_harnesses() -> list[dict]:

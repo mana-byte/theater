@@ -47,10 +47,16 @@ async def list_participants(
     *,
     include_dead: bool = False,
     ids: list[str] | None = None,
+    children_only: bool = False,
 ) -> list[dict]:
     if not session._resolved:
         await session.identify()
-    rows = await session.client.call("participants.list", include_dead=include_dead, ids=ids)
+    rows = await session.client.call(
+        "participants.list",
+        include_dead=include_dead,
+        ids=ids,
+        parent_id=session.participant_id if children_only else None,
+    )
     assert isinstance(rows, list)
     me = session.participant_id
     return [
