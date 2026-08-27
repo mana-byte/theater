@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from theater.harness.contracts.context import ParticipantObservationContext
+from theater.harness.contracts.source import Source
 from theater.harness.observation import TranscriptObserver
 from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFeature
 
@@ -43,3 +45,13 @@ class ClaudeCodeObserver(
         self._mcp_calls: dict[str, tuple[str, str]] = {}
         self._causal_records: dict[str, _ClaudeCausalRecord] = {}
         self._request_clocks: dict[str, _ClaudeRequestClock] = {}
+
+    def open_source_context(self, context: ParticipantObservationContext) -> Source:
+        return self.open_source_for(
+            participant_id=context.participant_id,
+            cwd=context.cwd,
+            session_id=context.session_id,
+            after=context.after,
+            session_provenance=context.session_provenance,
+            known_location=context.known_location,
+        )

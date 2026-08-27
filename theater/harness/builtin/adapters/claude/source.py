@@ -13,6 +13,29 @@ if TYPE_CHECKING:
     from .observer import ClaudeCodeObserver
 
 
+def _open_claude_source(
+    *,
+    root: Path,
+    relocate_by_cwd: bool,
+    cwd: str | None,
+    session_id: str | None = None,
+    after: float | None = None,
+    session_provenance: str | TranscriptProvenance | None = None,
+    known_location: str | None = None,
+) -> _ClaudeSource:
+    from .observer import ClaudeCodeObserver
+
+    return _ClaudeSource(
+        ClaudeCodeObserver(root=root),
+        cwd=cwd,
+        session_id=session_id,
+        after=after,
+        allow_refresh=relocate_by_cwd,
+        session_provenance=session_provenance,
+        known_location=known_location,
+    )
+
+
 class _ClaudeSource(TranscriptSource):
     """Keep a receipt pending until its JSONL materializes.
 

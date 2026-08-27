@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from theater.harness.contracts.context import ParticipantObservationContext
+from theater.harness.contracts.source import Source
 from theater.harness.observation import TranscriptObserver
 from theater.provenance import TranscriptProvenance
 from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFeature
@@ -12,7 +14,7 @@ from .identity import VibeIdentityMixin
 from .isolation import _canonical, validate_isolated_domain
 from .parser import VibeParserMixin
 from .screen import VibeScreenMixin
-from .source import _VibeSource, _VibeTranscriptSource
+from .source import _open_vibe_source
 from .trajectory import VibeTrajectoryMixin
 
 
@@ -70,29 +72,13 @@ class VibeObserver(
         known_location: str | None = None,
     ):
         """Give every source its own parser state, including its cwd."""
-        reader = VibeObserver(
-            root=self.root,
-            correlation_root=self.correlation_root,
-            isolated=self.isolated,
-        )
-        reader._cwd = cwd
-        inner = _VibeTranscriptSource(
-            reader,
+        return _open_vibe_source(
+            self,
             cwd=cwd,
             session_id=session_id,
             after=after,
-            allow_refresh=True,
-            exact_attachments=reader.isolated,
             session_provenance=session_provenance,
-            collision_domain=str(reader.root.resolve()),
             known_location=known_location,
-        )
-        return _VibeSource(
-            inner,
-            after=after,
-            session_id=session_id,
-            known_location=known_location,
-            observer=reader,
         )
 
     def open_source_for(
@@ -153,4 +139,15 @@ class VibeObserver(
             after=after,
             session_provenance=session_provenance,
             known_location=known_location,
+        )
+
+    def open_source_context(self, context: ParticipantObservationContext) -> Source:
+        return self.open_source_for(
+            participant_id=context.participant_id,
+            cwd=context.cwd,
+            session_id=context.session_id,
+            after=context.after,
+            session_provenance=context.session_provenance,
+            known_location=context.known_location,
+            transcript_domain=context.transcript_domain,
         )

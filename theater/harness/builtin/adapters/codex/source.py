@@ -10,6 +10,25 @@ if TYPE_CHECKING:
     from .observer import CodexObserver
 
 
+def _open_codex_source(
+    reader: CodexObserver,
+    *,
+    cwd: str | None,
+    session_id: str | None = None,
+    after: float | None = None,
+    session_provenance: str | TranscriptProvenance | None = None,
+    known_location: str | None = None,
+) -> _CodexSource:
+    return _CodexSource(
+        reader,
+        cwd=cwd,
+        session_id=session_id,
+        after=after,
+        session_provenance=session_provenance,
+        known_location=known_location,
+    )
+
+
 class _CodexSource(TranscriptSource):
     """Report per-location process proof for Codex rollouts."""
 

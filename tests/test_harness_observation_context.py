@@ -7,6 +7,12 @@ from math import inf, nan
 
 import pytest
 
+from theater.harness.builtin.adapters.claude.observer import ClaudeCodeObserver
+from theater.harness.builtin.adapters.claude.source import _ClaudeSource
+from theater.harness.builtin.adapters.codex.observer import CodexObserver
+from theater.harness.builtin.adapters.codex.source import _CodexSource
+from theater.harness.builtin.adapters.vibe.observer import VibeObserver
+from theater.harness.builtin.adapters.vibe.source import _VibeSource
 from theater.harness.contracts.context import ParticipantObservationContext
 from theater.harness.contracts.observation import HarnessObserver
 from theater.harness.contracts.source import Batch, Source
@@ -246,3 +252,77 @@ def test_instance_context_override_is_selected() -> None:
 
     open_participant_source(observer, participant_id="participant", cwd=None)
     assert seen == [ParticipantObservationContext(participant_id="participant", cwd=None)]
+
+
+def _shipped_observer(name: str, tmp_path):
+    if name == "claude":
+        return ClaudeCodeObserver(root=tmp_path)
+    if name == "codex":
+        return CodexObserver(root=tmp_path)
+    return VibeObserver(root=tmp_path, correlation_root=tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("name", "source_type", "extra"),
+    [
+        pytest.param("claude", _ClaudeSource, {}, id="claude"),
+        pytest.param("codex", _CodexSource, {"pane_pid": 42}, id="codex"),
+        pytest.param("vibe", _VibeSource, {"transcript_domain": "/logs"}, id="vibe"),
+    ],
+)
+def test_shipped_observers_use_context_factories_and_keep_legacy_sources(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    source_type: type[Source],
+    extra: dict[str, object],
+    tmp_path,
+) -> None:
+    instance = _shipped_observer(name, tmp_path)
+    source, seen = _Source(), []
+
+    def open_source_context(context: ParticipantObservationContext) -> Source:
+        seen.append(context)
+        return source
+
+    monkeypatch.setattr(instance, "open_source_context", open_source_context)
+    assert "open_source_context" in type(instance).__dict__
+    assert open_participant_source(instance, participant_id="participant", cwd="/work") is source
+    assert seen == [ParticipantObservationContext(participant_id="participant", cwd="/work")]
+
+    instance = _shipped_observer(name, tmp_path)
+    received: dict[str, object] = {}
+
+    def open_source_for(**kwargs: object) -> Source:
+        received.update(kwargs)
+        return source
+
+    context = ParticipantObservationContext(
+        participant_id="participant",
+        cwd="/work",
+        session_id="session",
+        after=4,
+        session_provenance="operator",
+        known_location="/logs/session.jsonl",
+        transcript_domain="/logs",
+        pane_pid=42,
+    )
+    monkeypatch.setattr(instance, "open_source_for", open_source_for)
+    assert instance.open_source_context(context) is source
+    assert received == {
+        "participant_id": "participant",
+        "cwd": "/work",
+        "session_id": "session",
+        "after": 4,
+        "session_provenance": TranscriptProvenance.OPERATOR,
+        "known_location": "/logs/session.jsonl",
+        **extra,
+    }
+
+    instance = _shipped_observer(name, tmp_path)
+    assert isinstance(instance.open_source(cwd="/work", session_id="session", after=4), source_type)
+    assert isinstance(
+        instance.open_source_for(
+            participant_id="participant", cwd="/work", session_id="session", after=4
+        ),
+        source_type,
+    )

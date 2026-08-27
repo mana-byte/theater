@@ -15,7 +15,7 @@ from theater.provenance import TranscriptProvenance
 
 from .constants import _CWD_PROBE_BYTES, _CWD_PROBE_RECORDS, _LOSS_CANDIDATE_PROBES
 from .launch import _hook_string
-from .source import _ClaudeSource
+from .source import _ClaudeSource, _open_claude_source
 
 logger = logging.getLogger("theater.harness.claude")
 
@@ -33,15 +33,12 @@ class ClaudeIdentity:
         session_id: str | None = None,
         after: float | None = None,
     ) -> _ClaudeSource:
-        from .observer import ClaudeCodeObserver
-
-        reader = ClaudeCodeObserver(root=self.root)
-        return _ClaudeSource(
-            reader,
+        return _open_claude_source(
+            root=self.root,
+            relocate_by_cwd=self.relocate_by_cwd,
             cwd=cwd,
             session_id=session_id,
             after=after,
-            allow_refresh=self.relocate_by_cwd,
         )
 
     def open_source_for(
@@ -54,15 +51,12 @@ class ClaudeIdentity:
         session_provenance: str | TranscriptProvenance | None = None,
         known_location: str | None = None,
     ) -> _ClaudeSource:
-        from .observer import ClaudeCodeObserver
-
-        reader = ClaudeCodeObserver(root=self.root)
-        return _ClaudeSource(
-            reader,
+        return _open_claude_source(
+            root=self.root,
+            relocate_by_cwd=self.relocate_by_cwd,
             cwd=cwd,
             session_id=session_id,
             after=after,
-            allow_refresh=self.relocate_by_cwd,
             session_provenance=session_provenance,
             known_location=known_location,
         )

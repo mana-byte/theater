@@ -10,12 +10,50 @@ from theater.constants.trajectory import TRAJECTORY_PAGE_RECORD_LIMIT
 from theater.harness.base import Event
 from theater.harness.source import Batch, Source, TranscriptSource
 from theater.harness.transcript.history import HistoryReader
+from theater.provenance import TranscriptProvenance
 
 from .trajectory import usage_fact
 from .usage import VibeUsageMixin
 
 if TYPE_CHECKING:
     from theater.harness.builtin.adapters.vibe.observer import VibeObserver
+
+
+def _open_vibe_source(
+    observer: VibeObserver,
+    *,
+    cwd: str | None,
+    session_id: str | None = None,
+    after: float | None = None,
+    session_provenance: str | TranscriptProvenance | None = None,
+    known_location: str | None = None,
+) -> _VibeSource:
+    from .observer import VibeObserver
+
+    reader = VibeObserver(
+        root=observer.root,
+        correlation_root=observer.correlation_root,
+        isolated=observer.isolated,
+    )
+    reader._cwd = cwd
+    inner = _VibeTranscriptSource(
+        reader,
+        cwd=cwd,
+        session_id=session_id,
+        after=after,
+        allow_refresh=True,
+        exact_attachments=reader.isolated,
+        session_provenance=session_provenance,
+        collision_domain=str(reader.root.resolve()),
+        known_location=known_location,
+    )
+    return _VibeSource(
+        inner,
+        after=after,
+        session_id=session_id,
+        known_location=known_location,
+        observer=reader,
+    )
 
 
 class _VibeTranscriptSource(TranscriptSource):

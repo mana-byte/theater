@@ -16,7 +16,7 @@ from .constants import (
     CODEX_BINARY,
     CODEX_SESSION_META_RECORD_TYPE,
 )
-from .source import _CodexSource
+from .source import _open_codex_source
 
 logger = logging.getLogger("theater.harness.codex")
 
@@ -57,7 +57,7 @@ class CodexIdentityMixin:
             reader = CodexObserver(
                 root=self.root, pane_pid=self.pane_pid, session_exact=session_exact
             )
-        return _CodexSource(
+        return _open_codex_source(
             reader,
             cwd=cwd,
             session_id=session_id,
@@ -82,7 +82,8 @@ class CodexIdentityMixin:
         provenance = normalize_provenance(session_provenance)
         session_exact = provenance is TranscriptProvenance.EXACT
         reader = CodexObserver(root=self.root, pane_pid=pane_pid, session_exact=session_exact)
-        return reader.open_source(
+        return _open_codex_source(
+            reader,
             cwd=cwd,
             session_id=session_id,
             after=after,
