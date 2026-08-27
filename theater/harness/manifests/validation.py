@@ -129,8 +129,6 @@ def _validate_launch(name: str, launch: object) -> None:
         _fail(name, "launch.approvals", "must be an ordered sequence of approval policies")
     if not launch.approvals:
         _fail(name, "launch.approvals", "must declare at least one supported approval policy")
-    if len(set(launch.approvals)) != len(launch.approvals):
-        _fail(name, "launch.approvals", "must not repeat an approval policy")
     for approval in launch.approvals:
         if not isinstance(approval, str) or approval not in HARNESS_APPROVAL_POLICIES:
             _fail(
@@ -138,6 +136,8 @@ def _validate_launch(name: str, launch: object) -> None:
                 "launch.approvals",
                 f"contains {approval!r}; expected only {', '.join(HARNESS_APPROVAL_POLICIES)}",
             )
+    if len(set(launch.approvals)) != len(launch.approvals):
+        _fail(name, "launch.approvals", "must not repeat an approval policy")
     _validate_launch_options(name, launch)
 
 

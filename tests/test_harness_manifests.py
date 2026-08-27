@@ -226,6 +226,17 @@ def test_unsupported_api_version_is_rejected() -> None:
     assert "unsupported API version" in str(raised.value)
 
 
+@pytest.mark.parametrize("approval", [[], object()])
+def test_invalid_approval_values_get_manifest_diagnostics(approval: object) -> None:
+    launch = LaunchManifest(planner=plan, approvals=(approval,))  # type: ignore[arg-type]
+
+    with pytest.raises(ManifestValidationError) as raised:
+        compile_manifest("acme", manifest(launch=launch))
+
+    assert raised.value.path == "launch.approvals"
+    assert "expected only manual, edits, yolo" in raised.value.message
+
+
 @pytest.mark.parametrize(
     ("changed", "path"),
     [
