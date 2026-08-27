@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 
+from theater.harness.normalization.timing import iso_epoch as _epoch
 from theater.trajectory.enums import TimingProvenance
 from theater.trajectory.records import Timing
 
@@ -28,15 +28,6 @@ class _ClaudeTimingProjection:
     record: Timing | None
     request: Timing | None
     turn_id: str | None
-
-
-def _epoch(value) -> float | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return None
 
 
 def _trajectory_time(value: object) -> float | None:

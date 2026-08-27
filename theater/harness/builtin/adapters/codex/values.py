@@ -2,23 +2,23 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import datetime
 
-from theater.constants.trajectory import TRAJECTORY_IDENTIFIER_MAX_BYTES
-from theater.trajectory.content import ContentFormat, DetailField
-from theater.trajectory.enums import CostProvenance, TimingProvenance, TrajectoryStatus
+from theater.harness.normalization.timing import iso_epoch as _epoch
+from theater.harness.normalization.values import finite_float as _trajectory_float
+from theater.harness.normalization.values import nonnegative_int as _trajectory_int
+from theater.harness.normalization.values import safe_trajectory_text as _safe_trajectory_text
+from theater.harness.normalization.values import stable_json as _stable_json
+from theater.harness.normalization.values import (
+    trajectory_detail as _trajectory_detail,  # noqa: F401
+)
+from theater.harness.normalization.values import trajectory_identifier as _trajectory_id
+from theater.harness.normalization.values import (
+    trajectory_status as _trajectory_status,  # noqa: F401
+)
+from theater.trajectory.enums import CostProvenance, TimingProvenance
 from theater.trajectory.records import Timing, TrajectoryUsage
 
 from .constants import CODEX_MODEL_PROVIDER_ID_KEY, CODEX_MODEL_PROVIDER_KEY
-
-
-def _epoch(value) -> float | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return None
 
 
 def _flatten(output) -> str:
@@ -41,30 +41,6 @@ def _turn_id(payload: dict) -> str | None:
     return tid if isinstance(tid, str) and tid else None
 
 
-def _safe_trajectory_text(value: object) -> str:
-    if not isinstance(value, str):
-        return ""
-    try:
-        value.encode("utf-8")
-    except UnicodeEncodeError:
-        return value.encode("utf-8", "replace").decode("utf-8")
-    return value
-
-
-def _trajectory_id(value: object) -> str | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        encoded = value.encode("utf-8")
-    except UnicodeEncodeError:
-        return None
-    if len(encoded) > TRAJECTORY_IDENTIFIER_MAX_BYTES:
-        return None
-    if any(ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F for char in value):
-        return None
-    return value
-
-
 def _codex_mcp_identity(value: object) -> tuple[str, str] | None:
     if not isinstance(value, dict):
         return None
@@ -74,38 +50,6 @@ def _codex_mcp_identity(value: object) -> tuple[str, str] | None:
     server = _trajectory_id(value.get("server"))
     tool = _trajectory_id(value.get("tool"))
     return (server, tool) if server is not None and tool is not None else None
-
-
-def _stable_json(value: object) -> str:
-    try:
-        return json.dumps(
-            value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
-        )
-    except (TypeError, ValueError, UnicodeError):
-        return json.dumps(str(value), ensure_ascii=True)
-
-
-def _trajectory_detail(name: str, value: object, *, format: ContentFormat) -> DetailField:
-    text = value if isinstance(value, str) else _stable_json(value)
-    return DetailField.from_text(name, _safe_trajectory_text(text), format=format)
-
-
-def _trajectory_int(value: object) -> int:
-    if type(value) is int and value >= 0:
-        return value
-    if type(value) is float and math.isfinite(value) and value >= 0 and value.is_integer():
-        return int(value)
-    return 0
-
-
-def _trajectory_float(value: object) -> float | None:
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return None
-    try:
-        number = float(value)
-    except OverflowError:
-        return None
-    return number if math.isfinite(number) else None
 
 
 def _trajectory_time(value: object) -> float | None:
@@ -182,31 +126,6 @@ def _codex_timing(record: dict, payload: dict, timestamp: float | None) -> Timin
         duration_ms=duration,
         provenance=TimingProvenance.SOURCE,
     )
-
-
-def _trajectory_status(value: object, default: TrajectoryStatus) -> TrajectoryStatus:
-    if isinstance(value, TrajectoryStatus):
-        return value
-    if not isinstance(value, str):
-        return default
-    aliases = {
-        "complete": TrajectoryStatus.COMPLETED,
-        "completed": TrajectoryStatus.COMPLETED,
-        "done": TrajectoryStatus.COMPLETED,
-        "success": TrajectoryStatus.COMPLETED,
-        "failed": TrajectoryStatus.ERROR,
-        "failure": TrajectoryStatus.ERROR,
-        "error": TrajectoryStatus.ERROR,
-        "cancelled": TrajectoryStatus.CANCELLED,
-        "canceled": TrajectoryStatus.CANCELLED,
-        "aborted": TrajectoryStatus.INTERRUPTED,
-        "interrupted": TrajectoryStatus.INTERRUPTED,
-        "in_progress": TrajectoryStatus.RUNNING,
-        "running": TrajectoryStatus.RUNNING,
-        "partial": TrajectoryStatus.PARTIAL,
-        "pending": TrajectoryStatus.PENDING,
-    }
-    return aliases.get(value.lower().replace("-", "_"), default)
 
 
 def _codex_revision(record: dict, payload: dict) -> int:
