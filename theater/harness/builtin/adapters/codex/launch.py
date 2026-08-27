@@ -86,4 +86,6 @@ class CodexHarness(Harness):
         if predecessor.transcript_domain is None:
             return ResumeLaunchOverlay()
         root = self.observer.root.resolve()  # type: ignore[attr-defined]
-        return root_domain_overlay(predecessor, str(root), "Codex")
+        return root_domain_overlay(
+            predecessor, str(root), "Codex", resolve_declared=True, noun="root"
+        )

@@ -147,4 +147,6 @@ class ClaudeCodeHarness(Harness):
         if predecessor.transcript_domain is None:
             return ResumeLaunchOverlay()
         root = cast("ClaudeCodeObserver", self.observer).root.resolve()
-        return root_domain_overlay(predecessor, str(root), "Claude")
+        return root_domain_overlay(
+            predecessor, str(root), "Claude", resolve_declared=True, noun="root"
+        )

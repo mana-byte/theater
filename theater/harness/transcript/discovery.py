@@ -239,6 +239,9 @@ def root_domain_overlay(
     predecessor: _Predecessor,
     expected: str,
     label: str,
+    *,
+    resolve_declared: bool = False,
+    noun: str = "domain",
 ) -> ResumeLaunchOverlay:
     """Validate that a predecessor's transcript domain matches the expected root."""
     from theater.harness.contracts.launch import ResumeLaunchOverlay
@@ -246,11 +249,14 @@ def root_domain_overlay(
 
     if predecessor.transcript_domain is None:
         return ResumeLaunchOverlay()
-    if predecessor.transcript_domain != expected:
+    declared = predecessor.transcript_domain
+    if resolve_declared:
+        declared = str(Path(declared).resolve(strict=False))
+    if declared != expected:
         raise BadRequest(
             f"cannot resume {label} session: predecessor transcript domain "
-            f"{predecessor.transcript_domain!r} does not match the {label} "
-            f"observation domain {expected!r}"
+            f"{declared!r} does not match the {label} "
+            f"observation {noun} {expected!r}"
         )
     return ResumeLaunchOverlay(transcript_domain=expected)
 
