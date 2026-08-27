@@ -1,0 +1,1 @@
+"""Shipped harness adapter implementations."""
