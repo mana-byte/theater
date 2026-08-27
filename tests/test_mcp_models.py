@@ -17,7 +17,7 @@ import json
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 
-from tests.test_harness_plugins import install, plugin
+from tests.test_harness_plugins import install, write_plugin
 from theater.config import Config
 from theater.daemon.server import Daemon
 from theater.mcp.server import build
@@ -120,7 +120,7 @@ async def test_an_adapter_that_cannot_take_a_model_says_so(daemon, local_dir, al
     `check_model` however the config reads, so an agent told only that the list
     is empty would suggest a config edit that changes nothing.
     """
-    plugin(local_dir, "acme.py")
+    write_plugin(local_dir)
     install(local_dir)
 
     rows = await _rows(build("p1", "vibe"))

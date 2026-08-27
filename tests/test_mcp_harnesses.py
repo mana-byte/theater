@@ -17,7 +17,7 @@ import json
 
 import pytest
 
-from tests.test_harness_plugins import install, plugin
+from tests.test_harness_plugins import install, write_plugin
 from theater.daemon.server import Daemon
 from theater.mcp.server import build
 
@@ -81,7 +81,7 @@ async def test_spawn_names_every_shipped_harness(daemon):
 async def test_spawn_names_a_harness_the_user_added(daemon, local_dir):
     """A plugin someone wrote reaches the schema too, or the extension point
     stops at the humans."""
-    plugin(local_dir, "acme.py")
+    write_plugin(local_dir)
     install(local_dir)
 
     text = _description(await build("p1", "vibe").list_tools(), "spawn_session")
