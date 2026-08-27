@@ -1,14 +1,17 @@
 # RC3 plugin rework
 
-Status: implemented structural scope on `mana/rc3-plugin-rework`; native enrichment deferred.
+Status: superseded by [`rc2v2_plan.md`](rc2v2_plan.md), whose package-manifest and shared-channel
+architecture is implemented on `mana/rc3-plugin-rework`.
+
+This file is retained as design history. Its loose-plugin layout and deferred-channel statements
+are not current behavior; use `docs/harness-plugins.md` for the supported interface.
 
 ## RC3 implementation outcome
 
-The evidence audit in `docs/rc3_upstream_signals.md` narrowed this plan before transport work began.
-The branch implements the durable, testable portion:
+The evidence audit in `docs/rc3_upstream_signals.md` informed the later manifest architecture. The
+branch now implements:
 
-- all four built-in entrypoints are thin scanner modules backed by responsibility-scoped adapter
-  packages;
+- all four built-ins as self-contained manifest packages;
 - `ParticipantObservationContext` gives shipped observers one typed source-opening boundary while
   retaining signature-based compatibility for existing local plugins;
 - duplicated Claude/Codex value and timestamp normalization has one shared implementation;
@@ -17,11 +20,9 @@ The branch implements the durable, testable portion:
 - characterization and contract tests pin launch, observation, history, trajectory, compatibility,
   and receipt behavior.
 
-`CompositeSource`, a generic live-event inbox, native harness OTel ingestion, and richer hook
-decoders are deliberately not implemented in RC3. No verified integration currently satisfies the
-identity, boundedness, live-fixture, and exporter-fan-out requirements below. Adding unused channel
-machinery would create an untested second observation architecture. The design sections remain the
-criteria for a future evidence-backed implementation, not claims about current code.
+`CompositeSource`, generic hook ingress, and native harness OTel ingestion are shared bounded
+frameworks. Shipped manifests declare these channels unavailable where upstream installation,
+identity, or fan-out cannot yet meet the safety gates below.
 
 ## Goal
 

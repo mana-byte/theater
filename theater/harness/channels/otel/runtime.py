@@ -372,9 +372,7 @@ class NativeOtelRuntime:
         if self._parse_in_flight >= HARNESS_OTEL_PARSE_MAX_IN_FLIGHT:
             raise OtelHttpError("native OTel decoder is overloaded", status=429)
         decoder = (
-            decode_otlp_json
-            if protocol is OtelProtocol.OTLP_HTTP_JSON
-            else decode_otlp_protobuf
+            decode_otlp_json if protocol is OtelProtocol.OTLP_HTTP_JSON else decode_otlp_protobuf
         )
         self._parse_in_flight += 1
         task = asyncio.create_task(asyncio.to_thread(decoder, body))

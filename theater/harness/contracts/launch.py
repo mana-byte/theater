@@ -59,6 +59,7 @@ class ChannelCredential:
         if not isinstance(self.kind, ChannelKind):
             raise TypeError("channel credential kind must be a ChannelKind")
 
+
 @dataclass(frozen=True, slots=True)
 class LaunchPlan:
     """Everything tmux needs to bring a participant up."""

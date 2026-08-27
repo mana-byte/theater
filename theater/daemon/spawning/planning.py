@@ -284,8 +284,7 @@ def _reject_inherited_otel_environment(overlay: OtelInstallOverlay, header_env: 
             )
     if header_env in os.environ:
         raise BadRequest(
-            "native OTel credential_header_env collides with inherited environment "
-            f"{header_env!r}"
+            f"native OTel credential_header_env collides with inherited environment {header_env!r}"
         )
 
 

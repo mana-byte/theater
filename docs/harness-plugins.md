@@ -495,6 +495,18 @@ OTel channels, but all are currently unavailable. Their durable transcript or
 database sources remain authoritative until safety and evidence gates pass.
 Do not advertise an unimplemented native integration.
 
+### Diagnostics
+
+`theater harnesses` derives static capabilities from each validated manifest. It shows the
+package and manifest paths, primary source, enrichment bindings, normalized signals, ownership,
+and explicit unavailability reasons. With a daemon running, it also shows participant-scoped
+channel state, accepted and dropped counts, last successful activity, and the newest bounded
+diagnostic. `--json` exposes the same bounded data for tooling.
+
+Runtime diagnostics contain no credentials, native payloads, prompts, or results. A malformed
+plugin health snapshot is ignored, and an enrichment-health failure cannot interrupt the durable
+source. Without a daemon, the command reports static manifest capabilities only.
+
 ## Offline authoring checks
 
 The loader can be exercised without starting a daemon or a real CLI. This

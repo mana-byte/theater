@@ -1,6 +1,7 @@
 # RC2v2 plugin manifests and signal channels
 
-Status: proposed; implementation starts only after plan validation.
+Status: implemented through Phase 7 on `mana/rc3-plugin-rework`; final validation and dogfood are
+in progress.
 
 This plan supersedes the plugin-layout and future-channel sections of
 `docs/rc3_plugin_rework.md`. The modular adapter work already on

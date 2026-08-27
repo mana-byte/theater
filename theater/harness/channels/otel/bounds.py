@@ -57,9 +57,7 @@ def decode_otlp_protobuf(
 ) -> tuple[OtelRecord, ...]:
     """Lazily decode the optional OTLP protobuf logs request."""
     try:
-        module = importlib.import_module(
-            "opentelemetry.proto.collector.logs.v1.logs_service_pb2"
-        )
+        module = importlib.import_module("opentelemetry.proto.collector.logs.v1.logs_service_pb2")
         json_format = importlib.import_module("google.protobuf.json_format")
     except ImportError as exc:
         raise OtelOptionalDependencyError(

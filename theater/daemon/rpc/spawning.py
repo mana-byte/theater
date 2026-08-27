@@ -24,6 +24,8 @@ from theater.harness import (
     supports_model,
     supports_reasoning,
 )
+from theater.harness.channels.health import merge_channel_health
+from theater.harness.contracts.channels import ChannelHealth
 from theater.models import JobState
 
 
@@ -106,15 +108,20 @@ async def _harnesses(daemon, params: dict) -> list[dict]:
     failure this method exists to prevent, and it becomes real the moment the
     set stops being a hardcoded literal.
     """
-    runtime: dict[str, dict[str, tuple]] = {}
+    runtime: dict[str, dict[str, tuple[ChannelHealth, ...]]] = {}
     for participant in daemon.registry.list():
         snapshot = daemon.observer.channel_health_snapshot(participant.id)
-        seen = {health.channel_id for health in snapshot}
         supplemental = (
             *daemon.hook_runtime.health_snapshot(participant.id),
             *daemon.otel_runtime.health_snapshot(participant.id),
         )
-        health = (*snapshot, *(item for item in supplemental if item.channel_id not in seen))
+        health_by_id: dict[str, ChannelHealth] = {item.channel_id: item for item in snapshot}
+        for item in supplemental:
+            current = health_by_id.get(item.channel_id)
+            health_by_id[item.channel_id] = (
+                item if current is None else merge_channel_health(current, item)
+            )
+        health = tuple(health_by_id.values())
         if health:
             runtime.setdefault(normalize(participant.harness), {})[participant.id] = health
     return describe(runtime=runtime)

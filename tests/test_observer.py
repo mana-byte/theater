@@ -33,7 +33,13 @@ from theater.daemon.schema import jobs as jobs_table
 from theater.daemon.schema import participants as participants_table
 from theater.daemon.schema import usage as usage_table
 from theater.harness.base import Event, EventKind, TokenUsage
-from theater.harness.contracts.channels import ChannelDeclaration, ChannelHealthState, ChannelKind
+from theater.harness.channels.health import ChannelHealthTracker
+from theater.harness.contracts.channels import (
+    ChannelDeclaration,
+    ChannelHealth,
+    ChannelHealthState,
+    ChannelKind,
+)
 from theater.harness.observation import (
     HarnessObserver,
     ScreenConfidence,
@@ -1319,6 +1325,47 @@ async def test_untrusted_health_snapshot_does_not_stop_observation(registry, res
     finally:
         await observer.aclose()
     assert source.closed
+
+
+@pytest.mark.asyncio
+async def test_invalid_health_snapshot_clears_stale_cached_health(registry):
+    class MutableHealthSource(Source):
+        valid = True
+
+        async def read(self) -> Batch:
+            return Batch()
+
+        def health_snapshot(self):
+            if self.valid:
+                return (ChannelHealth(channel_id="primary", state=ChannelHealthState.HEALTHY),)
+            return ("not-health",)
+
+    source = MutableHealthSource()
+    observer = Observer(registry, harnesses={})
+    observer._record_channel_health("participant", source)
+    assert observer.channel_health_snapshot("participant")
+
+    source.valid = False
+    observer._record_channel_health("participant", source)
+
+    assert observer.channel_health_snapshot("participant") == ()
+
+
+@pytest.mark.asyncio
+async def test_source_cancellation_does_not_report_primary_failure(registry):
+    class CancelledSource(Source):
+        async def read(self) -> Batch:
+            raise asyncio.CancelledError
+
+    observer = Observer(registry, harnesses={})
+    tracker = ChannelHealthTracker("primary")
+    tracker.mark_starting()
+    observer._primary_channel_health[("participant", "primary")] = tracker
+
+    with pytest.raises(asyncio.CancelledError):
+        await observer._read_source("participant", CancelledSource())
+
+    assert tracker.snapshot().state is ChannelHealthState.STARTING
 
 
 def test_consumed_input_counts_as_activity_even_with_no_events(registry):

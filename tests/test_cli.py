@@ -355,7 +355,8 @@ def test_harness_diagnostics_prints_primary_once_after_json_round_trip():
     assert not any(line.startswith("channel transcript/transcript") for line in lines)
 
 
-def test_harness_diagnostics_prints_runtime_success_and_latest_diagnostic():
+def test_harness_diagnostics_prints_runtime_success_and_latest_diagnostic(monkeypatch):
+    monkeypatch.setattr(introspection_mod.time, "time", lambda: 101.25)
     lines = introspection_mod._harness_diagnostics(
         {
             "manifest_api_version": 1,
@@ -385,7 +386,7 @@ def test_harness_diagnostics_prints_runtime_success_and_latest_diagnostic():
     )
 
     assert lines[-1] == (
-        "runtime p1: primary failed dropped=2 accepted=3 last_success_at=1.250 "
+        "runtime p1: primary failed dropped=2 accepted=3 last_success=1m ago "
         "diagnostic=primary read failed (ValueError)"
     )
 

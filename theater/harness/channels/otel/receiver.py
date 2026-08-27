@@ -62,9 +62,7 @@ class NativeOtelReceiver:
         self._ingest = ingest
         self._host = host
         self._max_concurrent = (
-            HARNESS_OTEL_HTTP_MAX_CONCURRENT_REQUESTS
-            if max_concurrent is None
-            else max_concurrent
+            HARNESS_OTEL_HTTP_MAX_CONCURRENT_REQUESTS if max_concurrent is None else max_concurrent
         )
         self._request_timeout = (
             HARNESS_OTEL_HTTP_REQUEST_TIMEOUT_SECONDS

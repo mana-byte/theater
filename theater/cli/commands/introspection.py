@@ -139,13 +139,26 @@ def _runtime_channel_diagnostic(channel: dict) -> str:
         and math.isfinite(success_at)
         and success_at >= 0
     ):
-        summary += f" last_success_at={success_at:.3f}"
+        summary += f" last_success={_channel_success_age(success_at)}"
     diagnostics = channel.get("diagnostics")
     if isinstance(diagnostics, list):
         latest = next((item for item in reversed(diagnostics) if isinstance(item, str)), None)
         if latest is not None:
             summary += f" diagnostic={_compact_diagnostic(latest)}"
     return summary
+
+
+def _channel_success_age(success_at: float) -> str:
+    age = max(0.0, time.time() - success_at)
+    if age < 1:
+        return "now"
+    if age < 60:
+        return f"{int(age)}s ago"
+    if age < 3_600:
+        return f"{int(age // 60)}m ago"
+    if age < 86_400:
+        return f"{int(age // 3_600)}h ago"
+    return f"{int(age // 86_400)}d ago"
 
 
 def _compact_diagnostic(diagnostic: str) -> str:

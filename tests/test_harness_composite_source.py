@@ -17,6 +17,7 @@ from theater.constants.harness import (
 from theater.constants.trajectory import TRAJECTORY_PAGE_RECORD_LIMIT
 from theater.harness.channels import ChannelHealthTracker, CompositeSource, EnrichmentBinding
 from theater.harness.channels.composite import CompositeSourceError
+from theater.harness.channels.health import merge_channel_health
 from theater.harness.contracts.channels import (
     ChannelCapability,
     ChannelDeclaration,
@@ -1130,6 +1131,66 @@ def test_health_tracker_counters_saturate() -> None:
     snap = tracker.snapshot()
     assert snap.accepted == HARNESS_CHANNEL_HEALTH_COUNTER_MAX
     assert snap.dropped == HARNESS_CHANNEL_HEALTH_COUNTER_MAX
+
+
+def test_merged_health_does_not_double_count_shared_tracker_snapshots() -> None:
+    earlier = ChannelHealth(
+        channel_id="h",
+        state=ChannelHealthState.HEALTHY,
+        diagnostics=("earlier",),
+        accepted=HARNESS_CHANNEL_HEALTH_COUNTER_MAX,
+        dropped=2,
+        last_success_at=1,
+    )
+    later = ChannelHealth(
+        channel_id="h",
+        state=ChannelHealthState.DEGRADED,
+        diagnostics=("earlier", "later"),
+        accepted=HARNESS_CHANNEL_HEALTH_COUNTER_MAX,
+        dropped=3,
+        last_success_at=2,
+    )
+
+    merged = merge_channel_health(earlier, later)
+
+    assert merged.state is ChannelHealthState.DEGRADED
+    assert merged.diagnostics == ("earlier", "later")
+    assert merged.accepted == HARNESS_CHANNEL_HEALTH_COUNTER_MAX
+    assert merged.dropped == 3
+    assert merged.last_success_at == 2
+
+
+@pytest.mark.asyncio
+async def test_primary_cancellation_does_not_report_failure() -> None:
+    class CancelledSource(Source):
+        async def read(self) -> Batch:
+            raise asyncio.CancelledError
+
+    composite = CompositeSource(primary=CancelledSource())
+
+    with pytest.raises(asyncio.CancelledError):
+        await composite.read()
+
+    assert composite.primary_health().state is ChannelHealthState.STARTING
+
+
+def test_enrichment_health_failure_is_contained_and_redacted() -> None:
+    class BrokenHealthSource(Source):
+        async def read(self) -> Batch:
+            return Batch()
+
+        def channel_health(self):
+            raise ValueError("secret health value")
+
+    composite = CompositeSource(
+        enrichments=[EnrichmentBinding(source=BrokenHealthSource(), declaration=_decl("h"))]
+    )
+
+    (health,) = composite.channel_health()
+
+    assert health.state is ChannelHealthState.DEGRADED
+    assert health.diagnostics == ("channel health snapshot failed (ValueError)",)
+    assert "secret health value" not in str(health)
 
 
 @pytest.mark.parametrize("field", ["accepted", "dropped"])

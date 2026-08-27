@@ -531,6 +531,7 @@ class Observer:
         bindings = bindings + otel_bindings
         primary_method = getattr(observer, "primary_channel_declaration", None)
         primary = primary_method() if callable(primary_method) else None
+        primary_tracker: ChannelHealthTracker | None = None
         if source is None and not bindings:
             self._clear_primary_channel_health(pid)
             return None
@@ -542,10 +543,9 @@ class Observer:
                 enrichments=bindings,
             )
         elif source is not None and primary is not None:
-            tracker = ChannelHealthTracker(primary.id)
-            tracker.mark_starting()
+            primary_tracker = ChannelHealthTracker(primary.id)
+            primary_tracker.mark_starting()
             self._clear_primary_channel_health(pid)
-            self._primary_channel_health[(pid, primary.id)] = tracker
         else:
             self._clear_primary_channel_health(pid)
         if source is None:
@@ -553,13 +553,15 @@ class Observer:
         if source.collision_domain is not None and p.transcript_domain != source.collision_domain:
             p.transcript_domain = source.collision_domain
             self.store.upsert_participant(p)
+        if primary_tracker is not None and primary is not None:
+            self._primary_channel_health[(pid, primary.id)] = primary_tracker
         return source
 
     def _record_channel_health(self, participant_id: str, source: Source) -> None:
         health: tuple[ChannelHealth, ...] = ()
         try:
             snapshot = source.health_snapshot()
-        except BaseException:
+        except Exception:
             snapshot = ()
         if isinstance(snapshot, tuple) and all(
             isinstance(item, ChannelHealth) for item in snapshot
@@ -574,11 +576,15 @@ class Observer:
             )
         if health:
             self._channel_health[participant_id] = health
+        else:
+            self._channel_health.pop(participant_id, None)
 
     async def _read_source(self, participant_id: str, source: Source) -> Batch:
         try:
             batch = await source.read()
-        except BaseException as exc:
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
             self._record_primary_failure(participant_id, exc)
             raise
         else:

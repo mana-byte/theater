@@ -10,7 +10,6 @@ from dataclasses import dataclass
 
 from theater.constants.core import HARNESS_NAME
 from theater.constants.harness import (
-    HARNESS_CHANNEL_HEALTH_MAX_DIAGNOSTICS,
     HARNESS_CHANNEL_ID_MAX_CHARS,
     HARNESS_DEDUPE_MAX_FACTS,
     HARNESS_ENRICHMENT_READ_TIMEOUT_SECONDS,
@@ -18,13 +17,13 @@ from theater.constants.harness import (
 from theater.constants.trajectory import TRAJECTORY_PAGE_RECORD_LIMIT
 from theater.harness.channels.health import (
     ChannelHealthTracker,
+    merge_channel_health,
     read_error_diagnostic,
     read_exception_diagnostic,
 )
 from theater.harness.contracts.channels import (
     ChannelDeclaration,
     ChannelHealth,
-    ChannelHealthState,
     ChannelKind,
     SignalKind,
     SignalOwnership,
@@ -198,33 +197,24 @@ class CompositeSource(Source):
     def _channel_health(self, binding: EnrichmentBinding) -> ChannelHealth:
         composite = self._health[binding.declaration.id].snapshot()
         snapshot = getattr(binding.source, "channel_health", None)
-        source = snapshot() if callable(snapshot) else None
-        if not isinstance(source, ChannelHealth):
+        try:
+            source = snapshot() if callable(snapshot) else None
+        except Exception as exc:
+            self._health[binding.declaration.id].mark_degraded(
+                _exception_diagnostic("channel health snapshot failed", exc)
+            )
+            return self._health[binding.declaration.id].snapshot()
+        if source is None:
             return composite
-        states = {
-            ChannelHealthState.INACTIVE: 0,
-            ChannelHealthState.HEALTHY: 1,
-            ChannelHealthState.STARTING: 2,
-            ChannelHealthState.DEGRADED: 3,
-            ChannelHealthState.FAILED: 4,
-        }
-        state = source.state if states[source.state] >= states[composite.state] else composite.state
-        success_values = tuple(
-            value
-            for value in (composite.last_success_at, source.last_success_at)
-            if value is not None
-        )
-        success_at = max(success_values) if success_values else None
-        return ChannelHealth(
-            channel_id=composite.channel_id,
-            state=state,
-            diagnostics=(composite.diagnostics + source.diagnostics)[
-                -HARNESS_CHANNEL_HEALTH_MAX_DIAGNOSTICS:
-            ],
-            dropped=composite.dropped + source.dropped,
-            accepted=composite.accepted + source.accepted,
-            last_success_at=success_at,
-        )
+        if not isinstance(source, ChannelHealth):
+            self._health[binding.declaration.id].mark_degraded("channel health snapshot is invalid")
+            return self._health[binding.declaration.id].snapshot()
+        if source.channel_id != composite.channel_id:
+            self._health[binding.declaration.id].mark_degraded(
+                "channel health snapshot id does not match declaration"
+            )
+            return self._health[binding.declaration.id].snapshot()
+        return merge_channel_health(composite, source)
 
     def primary_health(self) -> ChannelHealth | None:
         if self._primary is None:
@@ -240,8 +230,7 @@ class CompositeSource(Source):
         tracker = self._health[self._primary_channel_id]
         try:
             batch = await self._primary.read()
-        except asyncio.CancelledError as exc:
-            tracker.mark_failed(_exception_diagnostic("primary read failed", exc))
+        except asyncio.CancelledError:
             raise
         except Exception as exc:
             tracker.mark_failed(_exception_diagnostic("primary read failed", exc))

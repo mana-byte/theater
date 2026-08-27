@@ -19,6 +19,13 @@ _DIAGNOSTIC_CHARS = HARNESS_CHANNEL_HEALTH_DIAGNOSTIC_MAX_CHARS
 _COUNTER_MAX = HARNESS_CHANNEL_HEALTH_COUNTER_MAX
 _SAFE_ERROR_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SAFE_TYPE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+_STATE_PRIORITY = {
+    ChannelHealthState.INACTIVE: 0,
+    ChannelHealthState.HEALTHY: 1,
+    ChannelHealthState.STARTING: 2,
+    ChannelHealthState.DEGRADED: 3,
+    ChannelHealthState.FAILED: 4,
+}
 
 
 def _sanitize_diagnostic(raw: str) -> str:
@@ -44,6 +51,24 @@ def read_exception_diagnostic(prefix: str, exc: BaseException) -> str:
     name = type(exc).__name__
     safe_name = name if _SAFE_TYPE_NAME.fullmatch(name) else "Exception"
     return f"{prefix} ({safe_name})"
+
+
+def merge_channel_health(first: ChannelHealth, second: ChannelHealth) -> ChannelHealth:
+    """Merge two snapshots of the same logical channel without double-counting."""
+    if first.channel_id != second.channel_id:
+        raise ValueError("channel health snapshots must have the same channel id")
+    diagnostics = tuple(dict.fromkeys((*first.diagnostics, *second.diagnostics)))[-_DIAGNOSTIC_MAX:]
+    successes = tuple(
+        value for value in (first.last_success_at, second.last_success_at) if value is not None
+    )
+    return ChannelHealth(
+        channel_id=first.channel_id,
+        state=max((first.state, second.state), key=_STATE_PRIORITY.__getitem__),
+        diagnostics=diagnostics,
+        dropped=max(first.dropped, second.dropped),
+        accepted=max(first.accepted, second.accepted),
+        last_success_at=max(successes) if successes else None,
+    )
 
 
 class ChannelHealthTracker:
@@ -113,4 +138,9 @@ def _success_at(at: float | None) -> float:
     return time.time() if at is None else float(at)
 
 
-__all__ = ["ChannelHealthTracker", "read_error_diagnostic", "read_exception_diagnostic"]
+__all__ = [
+    "ChannelHealthTracker",
+    "merge_channel_health",
+    "read_error_diagnostic",
+    "read_exception_diagnostic",
+]
