@@ -28,9 +28,11 @@ token file; `cmd_claude_receipt` retains the legacy field-extracting alias.
 
 `theater/daemon/spawning/planning.py:validate_receipt_plan`, `record_launch_identity`, and
 `write_plan_files` mint, validate, persist, and privately write the token. The end-to-end generic
-transport is covered by `tests/test_generic_receipts.py`. This audit's proposed **generic live
-lifecycle-event inbox** is distinct: it would retain bounded non-durable hook facts after identity
-is known. It does not exist today and is deferred below; do not conflate it with `transcript.receipt`.
+transport is covered by `tests/test_generic_receipts.py`. The generic live lifecycle-event inbox is
+distinct: it retains bounded non-durable hook facts after identity is known. Its common transport
+now exists and has a synthetic fixture, but every shipped harness declares it unavailable until its
+native integration satisfies the evidence and safety gates below. Do not conflate it with
+`transcript.receipt`.
 
 ## Claude Code
 
@@ -226,7 +228,7 @@ overflow are channel health, never completion authority.
 | Generic transcript receipt transport | already implemented; retain/test | `transcript.receipt`, token lifecycle, and generic end-to-end tests already exist; no new transport implementation. |
 | Claude receipt migration | already implemented; retain compatibility alias | Claude already reaches the generic transport through `claude-receipt`; retain the legacy CLI/RPC aliases. |
 | OpenCode receipt migration | implemented in RC3 | Generic receipt with bounded retry bursts and later-event self-healing. |
-| Generic richer hook/event inbox | defer | It is new unused infrastructure while every richer harness decoder remains deferred; that violates the RC3 no-speculative-mechanics rule. |
+| Generic richer hook/event inbox | framework implemented | Synthetic transport proves authentication, bounds, dedupe, health, and lifecycle; no shipped harness claims native support yet. |
 | Claude richer hooks | defer | Documentation-only payloads; no captured installed payload, turn key, or retry contract. |
 | Codex richer hooks | defer | Exact schemas and bounds exist, but launch-only config/trust and installed-version capture are unverified. |
 | OpenCode richer hooks | defer | Event callbacks are fire-and-forget with no retry; capture order/loss and decoder semantics first. |

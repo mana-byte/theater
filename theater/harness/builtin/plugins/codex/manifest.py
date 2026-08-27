@@ -15,6 +15,7 @@ from theater.harness.contracts.channels import (
 from theater.harness.contracts.manifest import (
     MANIFEST_API_VERSION,
     HarnessManifest,
+    HookChannelManifest,
     IdentityManifest,
     LaunchManifest,
     ObservationManifest,
@@ -29,6 +30,14 @@ from .launch import plan_launch, resume_launch_overlay
 from .observer import CodexObserver
 from .screen import screen_reading
 from .source import source_for
+
+_NATIVE_HOOKS = HookChannelManifest(
+    declaration=ChannelDeclaration(id="native-hooks", kind=ChannelKind.HOOK),
+    unavailable_reason=(
+        "Codex hooks need verified launch-local configuration, trust behavior, and installed "
+        "payloads before Theater can enable them"
+    ),
+)
 
 MANIFEST = HarnessManifest(
     api_version=MANIFEST_API_VERSION,
@@ -68,6 +77,7 @@ MANIFEST = HarnessManifest(
             operator_candidate_admitter=admit_operator_candidate,
         ),
         trajectory_capabilities=CodexObserver.trajectory_capabilities,
+        enrichments=(_NATIVE_HOOKS,),
     ),
 )
 

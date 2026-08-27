@@ -14,6 +14,7 @@ from theater.harness.contracts.channels import (
     SignalOwnership,
 )
 from theater.harness.contracts.manifest import (
+    HookChannelManifest,
     IdentityManifest,
     LineageManifest,
     ObservationManifest,
@@ -47,6 +48,14 @@ TRANSCRIPT = ChannelDeclaration(
     ),
 )
 
+_NATIVE_HOOKS = HookChannelManifest(
+    declaration=ChannelDeclaration(id="native-hooks", kind=ChannelKind.HOOK),
+    unavailable_reason=(
+        "Claude hooks need captured installed payloads and stable exact joins before Theater can "
+        "decode them safely"
+    ),
+)
+
 OBSERVATION = ObservationManifest(
     primary=SourceManifest(factory=source_factory, channel=TRANSCRIPT),
     screen=ScreenManifest(classifier=screen_classifier),
@@ -58,6 +67,7 @@ OBSERVATION = ObservationManifest(
     ),
     lineage=LineageManifest(native_children=native_children),
     trajectory_capabilities=ClaudeCodeObserver.trajectory_capabilities,
+    enrichments=(_NATIVE_HOOKS,),
 )
 
 

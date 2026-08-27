@@ -41,6 +41,7 @@ EXPECTED_COMMANDS = {
     "config",
     "daemon",
     "gc",
+    "harness-event",
     "harnesses",
     "kill",
     "ls",

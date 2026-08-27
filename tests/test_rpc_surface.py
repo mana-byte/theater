@@ -12,6 +12,7 @@ EXPECTED_RPC_METHODS = {
     "claude.receipt",
     "gc",
     "harnesses",
+    "harness.event",
     "hello",
     "jobs.await",
     "jobs.status",

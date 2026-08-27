@@ -16,6 +16,7 @@ from theater.harness.contracts.channels import (
 from theater.harness.contracts.manifest import (
     MANIFEST_API_VERSION,
     HarnessManifest,
+    HookChannelManifest,
     IdentityManifest,
     LaunchManifest,
     LineageManifest,
@@ -51,6 +52,14 @@ _TRANSCRIPT_CHANNEL = ChannelDeclaration(
             SignalKind.USAGE,
             SignalKind.LINEAGE,
         )
+    ),
+)
+
+_NATIVE_HOOKS = HookChannelManifest(
+    declaration=ChannelDeclaration(id="native-hooks", kind=ChannelKind.HOOK),
+    unavailable_reason=(
+        "Vibe hooks are limited to project or global files and have no safe launch-local "
+        "installation path"
     ),
 )
 
@@ -102,6 +111,7 @@ def manifest_for_roots(
             ),
             lineage=LineageManifest(native_children=native_children),
             trajectory_capabilities=VibeObserver.trajectory_capabilities,
+            enrichments=(_NATIVE_HOOKS,),
         ),
         models=ModelDiscoveryManifest(discoverer=discover_models),
     )

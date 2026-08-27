@@ -19,6 +19,10 @@ from theater.daemon.spawning.planning import (
     record_launch_identity,
     write_plan_files,
 )
+from theater.harness.builtin.plugins.claude.manifest import MANIFEST as CLAUDE_MANIFEST
+from theater.harness.builtin.plugins.codex.manifest import MANIFEST as CODEX_MANIFEST
+from theater.harness.builtin.plugins.opencode.manifest import MANIFEST as OPENCODE_MANIFEST
+from theater.harness.builtin.plugins.vibe.manifest import MANIFEST as VIBE_MANIFEST
 from theater.harness.channels import CompositeSource, HookRuntime
 from theater.harness.channels.hooks import HookDelivery, HookInbox
 from theater.harness.channels.hooks.callbacks import HookCallbackRunner
@@ -156,6 +160,30 @@ def _hook_channel(harness) -> HookChannelManifest:
     channel = harness.observer.enrichment_manifests()[0]
     assert isinstance(channel, HookChannelManifest)
     return channel
+
+
+@pytest.mark.parametrize(
+    ("name", "built"),
+    (
+        ("claude", CLAUDE_MANIFEST),
+        ("codex", CODEX_MANIFEST),
+        ("opencode", OPENCODE_MANIFEST),
+        ("vibe", VIBE_MANIFEST),
+    ),
+)
+def test_shipped_manifests_declare_native_hooks_unavailable(name, built) -> None:
+    compiled = compile_manifest(name, built)
+    channels = compiled.observer.enrichment_manifests()
+
+    assert len(channels) == 1
+    channel = channels[0]
+    assert isinstance(channel, HookChannelManifest)
+    assert channel.declaration.id == "native-hooks"
+    assert channel.declaration.kind is ChannelKind.HOOK
+    assert channel.declaration.capabilities == ()
+    assert channel.bindings == ()
+    assert channel.installer is None
+    assert channel.unavailable_reason
 
 
 def test_hook_manifest_rejects_unavailable_active_and_duplicate_events() -> None:

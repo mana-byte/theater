@@ -15,6 +15,7 @@ from theater.harness.contracts.channels import (
 from theater.harness.contracts.manifest import (
     MANIFEST_API_VERSION,
     HarnessManifest,
+    HookChannelManifest,
     IdentityManifest,
     LaunchManifest,
     ModelDiscoveryManifest,
@@ -31,6 +32,14 @@ from .observer import (
     read_transcript_candidates,
     source_factory,
     validate_receipt,
+)
+
+_NATIVE_HOOKS = HookChannelManifest(
+    declaration=ChannelDeclaration(id="native-hooks", kind=ChannelKind.HOOK),
+    unavailable_reason=(
+        "OpenCode hooks need verified fire-and-forget ordering, loss, and installed payload "
+        "contracts before Theater can enable them"
+    ),
 )
 
 _DATABASE_CHANNEL = ChannelDeclaration(
@@ -72,6 +81,7 @@ MANIFEST = HarnessManifest(
             operator_candidate_admitter=admit_operator_candidate_context,
         ),
         trajectory_capabilities=OpenCodeObserver.trajectory_capabilities,
+        enrichments=(_NATIVE_HOOKS,),
     ),
     models=ModelDiscoveryManifest(discoverer=discover_models),
 )
