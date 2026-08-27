@@ -52,5 +52,11 @@ HARNESS_CHANNEL_HEALTH_MAX_DIAGNOSTICS = 8
 #: Individual runtime channel diagnostics remain bounded and display-safe.
 HARNESS_CHANNEL_HEALTH_DIAGNOSTIC_MAX_CHARS = 240
 
+#: Default timeout for bounded enrichment source reads.
+HARNESS_ENRICHMENT_READ_TIMEOUT_SECONDS = 5.0
+
+#: Maximum trajectory facts retained for dedupe across children and polls.
+HARNESS_DEDUPE_MAX_FACTS = 4096
+
 # Compatibility alias re-exported by the spawner façade.
 FALLBACK_SESSION = SPAWN_FALLBACK_TMUX_SESSION
