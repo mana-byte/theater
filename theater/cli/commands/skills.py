@@ -6,6 +6,7 @@ import asyncio
 import json
 
 from theater.client import DaemonClient
+from theater.protocol import RemoteError
 
 
 def _skills_snapshot() -> dict:
@@ -17,8 +18,20 @@ def _skills_snapshot() -> dict:
         data = asyncio.run(go())
     except (FileNotFoundError, ConnectionRefusedError, ConnectionError, OSError) as exc:
         raise ConnectionError("no daemon running; start it with `theater daemon`") from exc
+    except RemoteError as exc:
+        if exc.code == "unknown_method":
+            raise ConnectionError(
+                "running daemon lacks skills support; run `theater restart`"
+            ) from exc
+        raise
     assert isinstance(data, dict)
     return data
+
+
+def _terminal_line(value: object, fallback: str) -> str:
+    if value is None:
+        return fallback
+    return "".join(char if char.isprintable() else " " for char in str(value))
 
 
 def cmd_skills(args) -> int:
@@ -29,13 +42,18 @@ def cmd_skills(args) -> int:
 
     skills = data.get("skills") or []
     if skills:
-        width = max(len(str(skill.get("name", ""))) for skill in skills)
-        print(f"{'NAME':<{width}}  {'SOURCE':<8}  DESCRIPTION")
-        for skill in skills:
-            print(
-                f"{skill.get('name', '-'):<{width}}  {skill.get('source', '-'):<8}  "
-                f"{skill.get('description', '-') }"
+        rows = [
+            (
+                _terminal_line(skill.get("name"), "-"),
+                _terminal_line(skill.get("source"), "-"),
+                _terminal_line(skill.get("description"), "-"),
             )
+            for skill in skills
+        ]
+        width = max(len(name) for name, _, _ in rows)
+        print(f"{'NAME':<{width}}  {'SOURCE':<8}  DESCRIPTION")
+        for name, source, description in rows:
+            print(f"{name:<{width}}  {source:<8}  {description}")
     else:
         print("no skills available")
 
@@ -43,7 +61,8 @@ def cmd_skills(args) -> int:
     if rejections:
         print("\nrejected user skill packages:")
         for rejection in rejections:
-            name = rejection.get("name") or "unnamed"
-            path = rejection.get("path") or "unknown path"
-            print(f"- {name} ({path}): {rejection.get('error', 'rejected')}")
+            name = _terminal_line(rejection.get("name"), "unnamed")
+            path = _terminal_line(rejection.get("path"), "unknown path")
+            error = _terminal_line(rejection.get("error"), "rejected")
+            print(f"- {name} ({path}): {error}")
     return 0

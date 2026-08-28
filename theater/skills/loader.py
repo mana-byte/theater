@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import errno
+import os
 import stat
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +23,8 @@ from theater.constants.skills import (
 from theater.skills.models import Skill, SkillSource, SkillValidationError
 
 SKILL_FILENAME = "SKILL.md"
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+_SKILL_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 
 
 class _StrictSafeLoader(yaml.SafeLoader):
@@ -60,29 +65,31 @@ def is_canonical_name(name: str) -> bool:
     return len(name) <= SKILL_NAME_MAX_CHARS and SKILL_NAME.fullmatch(name) is not None
 
 
-def _load_package(package_dir: Path, *, source: SkillSource, root: Path) -> Skill:
-    """Load one package after proving it remains inside its discovery root."""
-    _require_directory(package_dir, "skill package")
-    _require_contained(package_dir, root)
-    name = package_dir.name
+def _load_package(package_name: str, *, source: SkillSource, root: Path, root_fd: int) -> Skill:
+    """Load one package through the already-open discovery root."""
+    name = package_name
     if not is_canonical_name(name):
         raise SkillValidationError(
             f"directory name {name!r} must use lowercase ASCII letters, digits, and hyphens"
         )
+    package_fd = _open_directory(name, "skill package", dir_fd=root_fd)
+    assert package_fd is not None
     try:
-        entries = tuple(package_dir.iterdir())
-    except OSError as exc:
-        raise SkillValidationError(
-            f"cannot list skill package: {exc.strerror or 'I/O error'}"
-        ) from exc
-    if any(entry.is_symlink() for entry in entries):
-        raise SkillValidationError("skill package must not contain symlinks")
-    if len(entries) != 1 or entries[0].name != SKILL_FILENAME:
-        raise SkillValidationError(f"skill package must contain only {SKILL_FILENAME}")
-    content_path = entries[0]
-    _require_regular_file(content_path, SKILL_FILENAME)
-    _require_contained(content_path, root)
-    content = _read_utf8(content_path)
+        try:
+            entries, overflow = _bounded_entry_names(package_fd, limit=1)
+        except OSError as exc:
+            raise SkillValidationError(
+                f"cannot list skill package: {exc.strerror or 'I/O error'}"
+            ) from exc
+        if overflow or entries != (SKILL_FILENAME,):
+            raise SkillValidationError(f"skill package must contain only {SKILL_FILENAME}")
+        skill_fd = _open_skill_file(package_fd)
+        try:
+            content = _read_utf8(skill_fd)
+        finally:
+            _close_fd(skill_fd)
+    finally:
+        _close_fd(package_fd)
     frontmatter, body = _frontmatter(content)
     metadata = _metadata(frontmatter)
     declared_name = metadata["name"]
@@ -100,51 +107,104 @@ def _load_package(package_dir: Path, *, source: SkillSource, root: Path) -> Skil
         description=metadata["description"],
         content=content,
         source=source,
-        source_path=content_path,
+        source_path=root / name / SKILL_FILENAME,
     )
 
 
-def _validate_root(root: Path) -> None:
-    """Validate a discovery root before reading its child directories."""
-    _require_directory(root, "skill root")
-
-
-def _require_directory(path: Path, kind: str) -> None:
-    if path.is_symlink():
-        raise SkillValidationError(f"{kind} must not be a symlink")
+def _open_directory(
+    path: Path | str, kind: str, *, dir_fd: int | None = None, missing_ok: bool = False
+) -> int | None:
     try:
-        mode = path.stat(follow_symlinks=False).st_mode
+        fd = os.open(path, _DIRECTORY_FLAGS, dir_fd=dir_fd)
+    except FileNotFoundError as exc:
+        if missing_ok:
+            return None
+        raise SkillValidationError(
+            f"cannot inspect {kind}: {exc.strerror or 'I/O error'}"
+        ) from exc
     except OSError as exc:
-        raise SkillValidationError(f"cannot inspect {kind}: {exc.strerror or 'I/O error'}") from exc
+        if exc.errno == errno.ELOOP or _is_symlink(path, dir_fd=dir_fd):
+            raise SkillValidationError(f"{kind} must not be a symlink") from exc
+        if exc.errno == errno.ENOTDIR:
+            raise SkillValidationError(f"{kind} must be a directory") from exc
+        raise SkillValidationError(
+            f"cannot inspect {kind}: {exc.strerror or 'I/O error'}"
+        ) from exc
+    try:
+        mode = os.fstat(fd).st_mode
+    except OSError as exc:
+        _close_fd(fd)
+        raise SkillValidationError(
+            f"cannot inspect {kind}: {exc.strerror or 'I/O error'}"
+        ) from exc
     if not stat.S_ISDIR(mode):
+        _close_fd(fd)
         raise SkillValidationError(f"{kind} must be a directory")
+    return fd
 
 
-def _require_regular_file(path: Path, kind: str) -> None:
-    if path.is_symlink():
-        raise SkillValidationError(f"{kind} must not be a symlink")
+def _bounded_entry_names(directory_fd: int, *, limit: int) -> tuple[tuple[str, ...], bool]:
+    scan_fd = os.dup(directory_fd)
     try:
-        mode = path.stat(follow_symlinks=False).st_mode
+        entries = _open_scandir(scan_fd)
+    except OSError:
+        _close_fd(scan_fd)
+        raise
+    names: list[str] = []
+    with entries:
+        for entry in entries:
+            names.append(entry.name)
+            if len(names) > limit:
+                return tuple(names), True
+    return tuple(names), False
+
+
+def _open_scandir(fd: int):
+    return os.scandir(fd)
+
+
+def _open_skill_file(package_fd: int) -> int:
+    try:
+        fd = os.open(SKILL_FILENAME, _SKILL_FLAGS, dir_fd=package_fd)
     except OSError as exc:
-        raise SkillValidationError(f"cannot inspect {kind}: {exc.strerror or 'I/O error'}") from exc
+        if exc.errno == errno.ELOOP or _is_symlink(SKILL_FILENAME, dir_fd=package_fd):
+            raise SkillValidationError(f"{SKILL_FILENAME} must not be a symlink") from exc
+        raise SkillValidationError(
+            f"cannot inspect {SKILL_FILENAME}: {exc.strerror or 'I/O error'}"
+        ) from exc
+    try:
+        mode = os.fstat(fd).st_mode
+    except OSError as exc:
+        _close_fd(fd)
+        raise SkillValidationError(
+            f"cannot inspect {SKILL_FILENAME}: {exc.strerror or 'I/O error'}"
+        ) from exc
     if not stat.S_ISREG(mode):
-        raise SkillValidationError(f"{kind} must be a regular file")
+        _close_fd(fd)
+        raise SkillValidationError(f"{SKILL_FILENAME} must be a regular file")
+    return fd
 
 
-def _require_contained(path: Path, root: Path) -> None:
+def _close_fd(fd: int) -> None:
+    with suppress(OSError):
+        os.close(fd)
+
+
+def _is_symlink(path: Path | str, *, dir_fd: int | None) -> bool:
     try:
-        resolved_path = path.resolve(strict=True)
-        resolved_root = root.resolve(strict=True)
-    except OSError as exc:
-        raise SkillValidationError(f"cannot resolve path: {exc.strerror or 'I/O error'}") from exc
-    if not resolved_path.is_relative_to(resolved_root):
-        raise SkillValidationError("skill package path escapes its discovery root")
+        return stat.S_ISLNK(os.stat(path, dir_fd=dir_fd, follow_symlinks=False).st_mode)
+    except OSError:
+        return False
 
 
-def _read_utf8(path: Path) -> str:
+def _read_utf8(fd: int) -> str:
+    data = bytearray()
     try:
-        with path.open("rb") as handle:
-            data = handle.read(SKILL_MAX_BYTES + 1)
+        while len(data) <= SKILL_MAX_BYTES:
+            chunk = os.read(fd, SKILL_MAX_BYTES + 1 - len(data))
+            if not chunk:
+                break
+            data.extend(chunk)
     except OSError as exc:
         raise SkillValidationError(
             f"cannot read {SKILL_FILENAME}: {exc.strerror or 'I/O error'}"
@@ -192,6 +252,8 @@ def _metadata(frontmatter: str) -> dict[str, str]:
         raise SkillValidationError("frontmatter name must be a canonical skill name")
     if not isinstance(description, str) or not description.strip():
         raise SkillValidationError("frontmatter description must be a non-whitespace string")
+    if not description.isprintable():
+        raise SkillValidationError("frontmatter description must contain only printable characters")
     if len(description) > SKILL_DESCRIPTION_MAX_CHARS:
         raise SkillValidationError(
             f"frontmatter description exceeds {SKILL_DESCRIPTION_MAX_CHARS} characters"

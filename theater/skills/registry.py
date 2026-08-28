@@ -14,7 +14,13 @@ from theater.constants.skills import (
     SKILL_MAX_COUNT,
     SKILL_MAX_REJECTIONS,
 )
-from theater.skills.loader import _load_package, _validate_root, is_canonical_name
+from theater.skills.loader import (
+    _bounded_entry_names,
+    _close_fd,
+    _load_package,
+    _open_directory,
+    is_canonical_name,
+)
 from theater.skills.models import (
     BuiltinSkillError,
     Skill,
@@ -98,43 +104,38 @@ def _scan_root(
     root: Path, source: SkillSource, *, required: bool
 ) -> tuple[Skill | SkillRejection, ...]:
     try:
-        absent = not root.exists() and not root.is_symlink()
-    except OSError as exc:
-        return (
-            _rejection(
-                source, root, None, f"cannot inspect skill root: {exc.strerror or 'I/O error'}"
-            ),
-        )
-    if absent and not required:
-        return ()
-    try:
-        _validate_root(root)
+        root_fd = _open_directory(root, "skill root", missing_ok=not required)
     except SkillValidationError as exc:
         return (_rejection(source, root, None, str(exc)),)
+    if root_fd is None:
+        return ()
     try:
-        entries = sorted(root.iterdir(), key=lambda entry: entry.name)
-    except OSError as exc:
-        return (
-            _rejection(
-                source, root, None, f"cannot list skill root: {exc.strerror or 'I/O error'}"
-            ),
-        )
-    results: list[Skill | SkillRejection] = []
-    for entry in entries[:SKILL_MAX_COUNT]:
         try:
-            results.append(_load_package(entry, source=source, root=root))
-        except SkillValidationError as exc:
-            results.append(_rejection(source, entry, entry.name, str(exc)))
-    if len(entries) > SKILL_MAX_COUNT:
-        results.append(
-            _rejection(
-                source,
-                root,
-                None,
-                f"skill root exceeds the limit of {SKILL_MAX_COUNT} entries",
+            entries, overflow = _bounded_entry_names(root_fd, limit=SKILL_MAX_COUNT)
+        except OSError as exc:
+            return (
+                _rejection(
+                    source, root, None, f"cannot list skill root: {exc.strerror or 'I/O error'}"
+                ),
             )
-        )
-    return tuple(results)
+        if overflow:
+            return (
+                _rejection(
+                    source,
+                    root,
+                    None,
+                    f"skill root exceeds the limit of {SKILL_MAX_COUNT} entries",
+                ),
+            )
+        results: list[Skill | SkillRejection] = []
+        for name in sorted(entries):
+            try:
+                results.append(_load_package(name, source=source, root=root, root_fd=root_fd))
+            except SkillValidationError as exc:
+                results.append(_rejection(source, root / name, name, str(exc)))
+        return tuple(results)
+    finally:
+        _close_fd(root_fd)
 
 
 def _append_rejection(rejections: list[SkillRejection], rejection: SkillRejection) -> None:

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,6 +27,7 @@ from theater.skills import (
     discover,
     is_canonical_name,
 )
+from theater.skills import loader as skills_loader
 
 
 def write_skill(root: Path, name: str, *, description: str = "A useful skill.") -> Path:
@@ -121,6 +124,39 @@ def test_whitespace_only_description_is_rejected_without_normalizing_authored_te
     assert registry.load("preserved-description").description == "  Keep this spacing.  "
 
 
+@pytest.mark.parametrize(
+    ("name", "escaped"),
+    [
+        ("tab-description", r"has\ttab"),
+        ("newline-description", r"has\nnewline"),
+        ("escape-description", r"has\eescape"),
+    ],
+)
+def test_control_characters_in_descriptions_are_rejected(tmp_path, name, escaped):
+    write_raw(
+        tmp_path,
+        name,
+        f'---\nname: {name}\ndescription: "{escaped}"\n---\n\n# Instructions\n',
+    )
+
+    registry = discover(user_dir=tmp_path)
+
+    assert registry.rejections[0].name == name
+    assert "printable" in registry.rejections[0].error
+
+
+def test_printable_unicode_description_is_preserved(tmp_path):
+    write_raw(
+        tmp_path,
+        "unicode-description",
+        '---\nname: unicode-description\ndescription: "  Café — useful  "\n---\n\n# Instructions\n',
+    )
+
+    registry = discover(user_dir=tmp_path)
+
+    assert registry.load("unicode-description").description == "  Café — useful  "
+
+
 def test_whitespace_only_markdown_body_is_rejected(tmp_path):
     write_raw(tmp_path, "blank-body", "---\nname: blank-body\ndescription: x\n---\n \t\n")
 
@@ -181,6 +217,38 @@ def test_symlink_and_path_escape_candidates_are_rejected(tmp_path):
     assert all("symlink" in rejection.error for rejection in registry.rejections)
 
 
+def test_skill_file_swap_to_symlink_is_rejected_from_the_open_descriptor(tmp_path, monkeypatch):
+    package = write_skill(tmp_path, "swapped")
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.md"
+    outside.write_text("outside", encoding="utf-8")
+    original = skills_loader._bounded_entry_names
+
+    def swap_after_listing(fd, *, limit):
+        entries, overflow = original(fd, limit=limit)
+        if limit == 1:
+            (package / "SKILL.md").unlink()
+            (package / "SKILL.md").symlink_to(outside)
+        return entries, overflow
+
+    monkeypatch.setattr(skills_loader, "_bounded_entry_names", swap_after_listing)
+
+    registry = discover(user_dir=tmp_path)
+
+    assert registry.rejections[0].name == "swapped"
+    assert "symlink" in registry.rejections[0].error
+
+
+def test_fifo_skill_file_is_rejected_without_blocking(tmp_path):
+    package = tmp_path / "fifo-skill"
+    package.mkdir()
+    os.mkfifo(package / "SKILL.md")
+
+    registry = discover(user_dir=tmp_path)
+
+    assert registry.rejections[0].name == "fifo-skill"
+    assert "regular file" in registry.rejections[0].error
+
+
 def test_extra_unsupported_package_contents_are_rejected(tmp_path):
     package = write_skill(tmp_path, "extra-file")
     (package / "README.md").write_text("not allowed", encoding="utf-8")
@@ -224,21 +292,80 @@ def test_empty_user_root_is_allowed(tmp_path):
     assert registry.rejections == ()
 
 
-def test_discovery_returns_a_fresh_bounded_snapshot(tmp_path):
+def test_overfull_user_root_is_rejected_wholesale(tmp_path):
     for number in range(SKILL_MAX_COUNT + 1):
         write_skill(tmp_path, f"skill-{number}")
 
     registry = discover(user_dir=tmp_path)
 
-    assert (
-        len([skill for skill in registry.skills if skill.source is SkillSource.USER])
-        == SKILL_MAX_COUNT
-    )
-    assert any("exceeds the limit" in rejection.error for rejection in registry.rejections)
+    assert all(skill.source is SkillSource.BUILTIN for skill in registry.skills)
+    diagnostics = [
+        (rejection.name, rejection.source_path, rejection.error)
+        for rejection in registry.rejections
+    ]
+    assert diagnostics == [
+        (None, tmp_path, f"skill root exceeds the limit of {SKILL_MAX_COUNT} entries")
+    ]
+
+
+def test_overfull_builtin_root_is_fatal(tmp_path):
+    builtin = tmp_path / "builtin"
+    for number in range(SKILL_MAX_COUNT + 1):
+        write_skill(builtin, f"skill-{number}")
+
+    with pytest.raises(BuiltinSkillError, match="exceeds the limit"):
+        discover(builtin_dir=builtin, user_dir=tmp_path / "empty")
+
+
+def test_discovery_returns_a_fresh_snapshot(tmp_path):
+    write_skill(tmp_path, "alpha")
+
+    registry = discover(user_dir=tmp_path)
+
     write_skill(tmp_path, "later")
     refreshed = discover(user_dir=tmp_path)
     assert all(skill.name != "later" for skill in registry.skills)
     assert refreshed.load("later").source is SkillSource.USER
+
+
+@pytest.mark.parametrize("limit", [1, SKILL_MAX_COUNT])
+def test_bounded_entry_enumeration_stops_after_the_limit(tmp_path, monkeypatch, limit):
+    seen = 0
+
+    class Entries:
+        def __init__(self, fd):
+            self.fd = fd
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            os.close(self.fd)
+            return False
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            nonlocal seen
+            seen += 1
+            if seen > limit + 1:
+                raise AssertionError("enumeration exceeded the bounded cap")
+            return SimpleNamespace(name=f"entry-{seen}")
+
+    def fake_scandir(fd):
+        return Entries(fd)
+
+    monkeypatch.setattr(skills_loader, "_open_scandir", fake_scandir)
+    root_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        entries, overflow = skills_loader._bounded_entry_names(root_fd, limit=limit)
+    finally:
+        os.close(root_fd)
+
+    assert overflow is True
+    assert len(entries) == limit + 1
+    assert seen == limit + 1
 
 
 def test_direct_registry_construction_sorts_skills_by_name():
