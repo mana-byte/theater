@@ -19,6 +19,7 @@ from theater.harness.contracts.callbacks import (
     OtelInstaller,
     ReceiptValidator,
     ResumePlanner,
+    ResumePreflight,
     ScreenClassifier,
     SourceFactory,
     StreamFloorReader,
@@ -47,6 +48,7 @@ class LaunchManifest:
     supports_model: bool = False
     supports_reasoning_effort: bool = False
     supports_resume: bool = False
+    resume_preflight: ResumePreflight | None = None
     resume_planner: ResumePlanner | None = None
     resume_takes_prompt: bool = True
     resume_strategy: ResumeStrategy = "continue"

@@ -379,6 +379,7 @@ return contract owns and never reach Theater's SQLite connection.
 | Manifest field | Context → result | Use |
 | --- | --- | --- |
 | `launch.planner` | `LaunchContext → LaunchPlan` | Pure launch description. |
+| `launch.resume_preflight` | `ResumePreflightContext → None` | Reject an unsafe resume before reservation. |
 | `launch.resume_planner` | `ResumeContext → ResumeLaunchOverlay` | Safe native resume overlay. |
 | `observation.primary.factory` | `ParticipantObservationContext → Source` | Participant-scoped durable input. |
 | `observation.screen.classifier` | `ScreenContext → ScreenReading` | Conservative terminal classification. |
@@ -412,14 +413,19 @@ evidence. Reject invalid input with actionable `ValueError`; do not accept
 timestamp, model, cwd, or prose proximity as identity correlation.
 
 Resume is opt-in. `LaunchManifest.supports_resume` defaults to `False`;
-`resume_planner` must be callable only when it is true. It receives a trusted
+`resume_preflight` and `resume_planner` must be callable only when it is true.
+The preflight receives a trusted predecessor and may reject before reservation;
+it is also used for a dead participant's resume projection, so it must be
+synchronous, bounded, and side-effect-free. The planner receives a trusted
 predecessor and all trusted matching session owners, then returns
-`ResumeLaunchOverlay(env=..., transcript_domain=...)`. The overlay may only
-adjust those two fields after planning. `resume_strategy` is `"continue"` or
-`"fork"` and defaults to `"continue"`; `resume_takes_prompt` defaults to
-`True` and must be set to `False` when the native resume command cannot carry a
-new prompt. A predecessor with a transcript domain is fail-closed unless the
-plugin's resume callback validates reuse.
+`ResumeLaunchOverlay(env=..., transcript_domain=..., cwd=...)`. The overlay may
+only adjust those fields and an optional authoritative launch `cwd`; core
+applies a cwd override before it creates the successor participant.
+`resume_strategy` is `"continue"` or `"fork"` and defaults to `"continue"`;
+`resume_takes_prompt` defaults to `True` and must be set to `False` when the
+native resume command cannot carry a new prompt. A predecessor with a
+transcript domain is fail-closed unless the plugin's resume callback validates
+reuse.
 
 ## Capabilities, lineage, models, and screens
 

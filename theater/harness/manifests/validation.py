@@ -169,6 +169,8 @@ def _validate_launch_options(name: str, launch: LaunchManifest) -> None:
     for field in ("supports_model", "supports_reasoning_effort", "supports_resume"):
         if type(getattr(launch, field)) is not bool:
             _fail(name, f"launch.{field}", "must be a boolean")
+    if launch.resume_preflight is not None and not callable(launch.resume_preflight):
+        _fail(name, "launch.resume_preflight", "must be callable or null")
     if launch.resume_planner is not None and not callable(launch.resume_planner):
         _fail(name, "launch.resume_planner", "must be callable or null")
     if type(launch.resume_takes_prompt) is not bool:
@@ -184,6 +186,8 @@ def _validate_launch_options(name: str, launch: LaunchManifest) -> None:
 def _validate_resume_options(name: str, launch: LaunchManifest) -> None:
     if launch.supports_resume:
         return
+    if launch.resume_preflight is not None:
+        _fail(name, "launch.resume_preflight", "requires supports_resume=True")
     if launch.resume_planner is not None:
         _fail(name, "launch.resume_planner", "requires supports_resume=True")
     if not launch.resume_takes_prompt:

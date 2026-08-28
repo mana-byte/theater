@@ -44,6 +44,13 @@ class ResumeContext:
 
 
 @dataclass(frozen=True, slots=True)
+class ResumePreflightContext:
+    """Trusted predecessor facts available before a resume reservation."""
+
+    predecessor: Participant
+
+
+@dataclass(frozen=True, slots=True)
 class ScreenContext:
     """One captured terminal screen."""
 
@@ -236,6 +243,12 @@ class ResumePlanner(Protocol):
     def __call__(self, context: ResumeContext) -> ResumeLaunchOverlay: ...
 
 
+class ResumePreflight(Protocol):
+    """Reject an unsafe resume before a successor participant exists."""
+
+    def __call__(self, context: ResumePreflightContext) -> None: ...
+
+
 class SourceFactory(Protocol):
     """Open a per-participant source without accessing daemon state."""
 
@@ -347,6 +360,8 @@ __all__ = [
     "ReceiptValidator",
     "ResumeContext",
     "ResumePlanner",
+    "ResumePreflight",
+    "ResumePreflightContext",
     "ScreenClassifier",
     "ScreenContext",
     "SourceFactory",

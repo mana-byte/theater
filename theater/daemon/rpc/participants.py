@@ -32,12 +32,8 @@ def _resume_state(p: Participant, live_peers: list[Participant]) -> str:
     """Derive the resume verdict for one participant without extra DB queries.
 
     Covers the generic identity and capability gates spawn_session checks before
-    delegating to the harness-specific ``resume_launch_overlay`` hook. It does
-    **not** cover harness-specific resume validation: a markerless trusted dead
-    Vibe row reports ``resumable`` here while the spawner would refuse it, and a
-    predecessor with a mismatched transcript domain may pass here and fail in
-    the hook. The verdict is an honest pre-flight, not a guarantee that spawn
-    would succeed.
+    plus an opt-in harness preflight. The verdict remains point-in-time:
+    external transcript state may change before spawn.
 
     The gates, in the order spawn_session hits them:
 
@@ -55,14 +51,11 @@ def _resume_state(p: Participant, live_peers: list[Participant]) -> str:
                                    immediately.
     5. ``untrusted``             — _validate_resume_identity then raises
                                    when no trusted dead match exists.
-    6. ``resumable``             — all generic gates passed; harness-specific
-                                   validation in resume_launch_overlay may
-                                   still refuse.
+    6. ``harness_resume_rejected`` — an opt-in harness preflight refused.
+    7. ``resumable``             — all available current gates passed.
 
     ``live_peers`` must be the set of currently live participants so that the
-    owned_by_live check can find peers sharing a session id.  Dead rows are
-    never needed here: the spawner's live-peer check discards dead participants
-    by construction (only non-dead rows enter live_matches).
+    owned_by_live check can find peers sharing a session id.
     """
     if p.status is not Status.DEAD:
         return "live"
@@ -81,6 +74,10 @@ def _resume_state(p: Participant, live_peers: list[Participant]) -> str:
             return "owned_by_live"
     if not is_trusted_provenance(p.session_correlation):
         return "untrusted"
+    try:
+        harness.resume_preflight(predecessor=p)
+    except BadRequest:
+        return "harness_resume_rejected"
     return "resumable"
 
 

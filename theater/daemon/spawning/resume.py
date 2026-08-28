@@ -87,6 +87,7 @@ def validate_before_create(
     predecessor, trusted_owners = validate_resume_identity(req, registry)
     overlay: ResumeLaunchOverlay | None = None
     if predecessor is not None:
+        harness.resume_preflight(predecessor=predecessor)
         overlay = harness.resume_launch_overlay(
             predecessor=predecessor,
             trusted_session_owners=trusted_owners,

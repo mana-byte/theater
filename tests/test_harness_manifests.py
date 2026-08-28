@@ -17,6 +17,7 @@ from theater.harness.contracts.callbacks import (
     LaunchContext,
     ModelDiscoveryContext,
     ResumeContext,
+    ResumePreflightContext,
     ScreenContext,
 )
 from theater.harness.contracts.channels import (
@@ -286,6 +287,14 @@ def test_missing_or_wrong_callback_diagnostics(changed, path: str) -> None:
             LaunchManifest(
                 planner=plan,
                 approvals=("manual",),
+                resume_preflight=lambda _context: None,
+            ),
+            "launch.resume_preflight",
+        ),
+        (
+            LaunchManifest(
+                planner=plan,
+                approvals=("manual",),
                 resume_planner=lambda _context: ResumeLaunchOverlay(),
             ),
             "launch.resume_planner",
@@ -321,6 +330,7 @@ def test_compilation_forwards_typed_callbacks_and_runtime_contracts(tmp_path: Pa
     seen_screen: list[ScreenContext] = []
     seen_models: list[ModelDiscoveryContext] = []
     seen_resume: list[ResumeContext] = []
+    seen_preflight: list[ResumePreflightContext] = []
     opened = StubSource()
 
     def launch_callback(context: LaunchContext) -> LaunchPlan:
@@ -343,6 +353,9 @@ def test_compilation_forwards_typed_callbacks_and_runtime_contracts(tmp_path: Pa
         seen_resume.append(context)
         return ResumeLaunchOverlay(env={"RESUMED": "1"})
 
+    def preflight_callback(context: ResumePreflightContext) -> None:
+        seen_preflight.append(context)
+
     built = manifest(
         launch=LaunchManifest(
             planner=launch_callback,
@@ -350,6 +363,7 @@ def test_compilation_forwards_typed_callbacks_and_runtime_contracts(tmp_path: Pa
             supports_model=True,
             supports_reasoning_effort=True,
             supports_resume=True,
+            resume_preflight=preflight_callback,
             resume_planner=resume_callback,
             resume_takes_prompt=False,
             resume_strategy="fork",
@@ -396,6 +410,7 @@ def test_compilation_forwards_typed_callbacks_and_runtime_contracts(tmp_path: Pa
         ScreenConfidence.HIGH,
     )
     assert harness.discover_models() == ["alpha", "beta"]
+    assert harness.resume_preflight(predecessor=predecessor) is None
     assert harness.resume_launch_overlay(
         predecessor=predecessor,
         trusted_session_owners=[predecessor, owner],
@@ -418,6 +433,7 @@ def test_compilation_forwards_typed_callbacks_and_runtime_contracts(tmp_path: Pa
     assert seen_source[-1].participant_scoped is False
     assert seen_screen == [ScreenContext(capture="ready> ")]
     assert seen_models == [ModelDiscoveryContext(name="acme", binary="acme")]
+    assert seen_preflight == [ResumePreflightContext(predecessor=predecessor)]
     assert seen_resume == [
         ResumeContext(predecessor=predecessor, trusted_session_owners=(predecessor, owner))
     ]

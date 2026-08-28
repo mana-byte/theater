@@ -449,6 +449,7 @@ async def test_list_participants_docstring_describes_resume_state(daemon):
         "harness_cannot_resume",
         "untrusted",
         "owned_by_live",
+        "harness_resume_rejected",
     ):
         assert value in desc, f"resume_state value {value!r} missing from docstring"
 
