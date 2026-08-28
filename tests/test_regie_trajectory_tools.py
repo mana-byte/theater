@@ -10,6 +10,7 @@ import pytest
 from rich.console import Console
 from rich.style import Style
 from textual.app import App, ComposeResult
+from textual.geometry import Region
 from textual.widgets import LoadingIndicator, RichLog, Tab, TabbedContent
 
 from theater.constants.regie_trajectory import TOOL_ROW_SUMMARY_MAX_CHARS
@@ -481,6 +482,80 @@ async def test_span_detail_defers_one_render_behind_loading_indicator(monkeypatc
         assert not indicator.display
         assert writes == 1
         assert panel.query_one(f"#{panel._log_id(InspectorTab.INPUT)}", RichLog).lines
+
+
+@pytest.mark.asyncio
+async def test_span_detail_drops_reflow_when_callback_cannot_be_scheduled(monkeypatch) -> None:
+    item = _tool("call", 1, TrajectoryKind.TOOL_CALL, "one")
+
+    class DetailHost(App):
+        def compose(self) -> ComposeResult:
+            yield SpanDetailPanel()
+
+    app = DetailHost()
+    async with app.run_test(size=(80, 24)) as pilot:
+        panel = app.query_one(SpanDetailPanel)
+        panel.set_span(item)
+        await pilot.pause()
+
+        monkeypatch.setattr(
+            RichLog,
+            "scrollable_content_region",
+            property(lambda _log: Region(0, 0, 0, 0)),
+        )
+        monkeypatch.setattr(panel, "call_after_refresh", lambda *_args, **_kwargs: False)
+
+        panel._schedule_reflow(force=True, loading=True)
+
+        assert not panel._reflow_pending
+        assert not panel._reflow_force
+        assert panel._reflow_scroll_y is None
+        assert not panel.query_one("#trajectory-span-detail-loading", LoadingIndicator).display
+
+
+@pytest.mark.asyncio
+async def test_span_detail_waits_for_later_reflow_when_width_is_zero(monkeypatch) -> None:
+    item = _tool("call", 1, TrajectoryKind.TOOL_CALL, "one")
+
+    class DetailHost(App):
+        def compose(self) -> ComposeResult:
+            yield SpanDetailPanel()
+
+    app = DetailHost()
+    async with app.run_test(size=(80, 24)) as pilot:
+        panel = app.query_one(SpanDetailPanel)
+        panel.set_span(item)
+        await pilot.pause()
+        log = panel.query_one(f"#{panel._log_id(panel.tab)}", RichLog)
+        original_region = RichLog.scrollable_content_region
+        width_is_zero = True
+        callbacks = []
+
+        def content_region(widget):
+            if widget is log and width_is_zero:
+                return Region(0, 0, 0, 0)
+            return original_region.__get__(widget, RichLog)
+
+        def defer(callback, *args, **kwargs) -> bool:
+            callbacks.append(lambda: callback(*args, **kwargs))
+            return True
+
+        monkeypatch.setattr(RichLog, "scrollable_content_region", property(content_region))
+        monkeypatch.setattr(panel, "call_after_refresh", defer)
+
+        panel._schedule_reflow(force=True)
+        callbacks.pop(0)()
+
+        assert not callbacks
+        assert not panel._reflow_pending
+        assert panel._reflow_force
+
+        width_is_zero = False
+        panel._schedule_reflow()
+        callbacks.pop(0)()
+
+        assert not panel._reflow_force
+        assert panel._rendered_widths[panel.tab] == log.scrollable_content_region.width
 
 
 def _request(

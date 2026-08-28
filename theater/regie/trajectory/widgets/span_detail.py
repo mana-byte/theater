@@ -350,17 +350,13 @@ class SpanDetailPanel(Vertical):
         self.query_one("#trajectory-span-detail-duration", Label).update(format_duration(timing))
         self._sync_tabs()
 
-    def _render_content(self, scroll_y: float | None = None) -> None:
+    def _write_content(self, width: int, scroll_y: float | None = None) -> None:
         if not self.is_mounted:
             return
         if self._details is None:
             return
         tab = self._details.tab
         log = self.query_one(f"#{self._log_id(self._details.tab)}", RichLog)
-        width = log.scrollable_content_region.width
-        if width <= 0:
-            self._schedule_reflow(scroll_y, force=True)
-            return
         log.clear()
         with span(REGIE_TRAJECTORY_DETAIL_RENDER, tab=tab.value):
             log.write(self._details.content, width=width, scroll_end=False)
@@ -399,7 +395,10 @@ class SpanDetailPanel(Vertical):
             return
         self._reflow_pending = True
         if not self.call_after_refresh(self._reflow_content):
-            self._reflow_content()
+            self._reflow_pending = False
+            self._reflow_force = False
+            self._reflow_scroll_y = None
+            self._stop_loading()
 
     def _stop_loading(self) -> None:
         if self.is_mounted:
@@ -409,22 +408,24 @@ class SpanDetailPanel(Vertical):
 
     def _reflow_content(self) -> None:
         self._reflow_pending = False
-        force = self._reflow_force
-        scroll_y = self._reflow_scroll_y
-        self._reflow_force = False
-        self._reflow_scroll_y = None
         if not self.is_mounted or self._details is None:
+            self._reflow_force = False
+            self._reflow_scroll_y = None
             self._stop_loading()
             return
         tab = self._details.tab
         log = self.query_one(f"#{self._log_id(self._details.tab)}", RichLog)
         width = log.scrollable_content_region.width
         if width <= 0:
-            self._schedule_reflow(scroll_y, force=force)
+            self._stop_loading()
             return
+        force = self._reflow_force
+        scroll_y = self._reflow_scroll_y
+        self._reflow_force = False
+        self._reflow_scroll_y = None
         try:
             if force or width != self._rendered_widths.get(tab):
-                self._render_content(scroll_y)
+                self._write_content(width, scroll_y)
         finally:
             self._stop_loading()
 
