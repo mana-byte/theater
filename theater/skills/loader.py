@@ -55,7 +55,7 @@ def _construct_mapping(
 _StrictSafeLoader.add_constructor(BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping)
 
 
-def _is_canonical_name(name: str) -> bool:
+def is_canonical_name(name: str) -> bool:
     """Whether ``name`` satisfies the skill identifier contract."""
     return len(name) <= SKILL_NAME_MAX_CHARS and SKILL_NAME.fullmatch(name) is not None
 
@@ -65,7 +65,7 @@ def _load_package(package_dir: Path, *, source: SkillSource, root: Path) -> Skil
     _require_directory(package_dir, "skill package")
     _require_contained(package_dir, root)
     name = package_dir.name
-    if not _is_canonical_name(name):
+    if not is_canonical_name(name):
         raise SkillValidationError(
             f"directory name {name!r} must use lowercase ASCII letters, digits, and hyphens"
         )
@@ -188,7 +188,7 @@ def _metadata(frontmatter: str) -> dict[str, str]:
         raise SkillValidationError("frontmatter must contain exactly name and description")
     name = parsed["name"]
     description = parsed["description"]
-    if not isinstance(name, str) or not _is_canonical_name(name):
+    if not isinstance(name, str) or not is_canonical_name(name):
         raise SkillValidationError("frontmatter name must be a canonical skill name")
     if not isinstance(description, str) or not description.strip():
         raise SkillValidationError("frontmatter description must be a non-whitespace string")

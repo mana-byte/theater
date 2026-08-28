@@ -38,6 +38,8 @@ that share a file do not run in parallel, they produce a conflict; split the
 work so each owns files no sibling touches. And a child reports on itself —
 "done" is the end of its turn, not a verdict on its work — so check the repo
 before you trust it.
+
+Use list_skills to discover optional skills, then load_skill only for an exact selected skill.
 """
 
 SPAWN_DOC = """Start a new agent in its own tmux window as your child.
@@ -260,6 +262,25 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         Answered by the daemon, which is the process that enforces the list.
         """
         return await tools.models(session)
+
+    @mcp.tool()
+    async def list_skills() -> dict:
+        """List skill metadata first, before choosing one to load.
+
+        Returns names, descriptions, sources, and any rejected user skill
+        packages, without instruction content. Choose a listed exact name
+        before calling load_skill.
+        """
+        return await tools.list_skills(session)
+
+    @mcp.tool()
+    async def load_skill(name: str) -> dict:
+        """Load the full instructions for one exact skill selected from list_skills.
+
+        Loading returns the complete validated SKILL.md content and consumes
+        context, so list metadata first and load only the selected exact skill.
+        """
+        return await tools.load_skill(session, name=name)
 
     @mcp.tool(description=_spawn_description())
     async def spawn_session(

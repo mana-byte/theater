@@ -18,6 +18,7 @@ from theater.cli.commands import identity as identity_mod
 from theater.cli.commands import introspection as introspection_mod
 from theater.cli.commands import maintenance as maintenance_mod
 from theater.cli.commands import participants as participants_mod
+from theater.cli.commands import skills as skills_mod
 from theater.formatting import event_summary, flatten_tree
 from theater.protocol import RemoteError
 
@@ -51,6 +52,7 @@ EXPECTED_COMMANDS = {
     "regie",
     "restart",
     "spawn",
+    "skills",
     "stats",
     "stop",
     "transcript-receipt",
@@ -571,6 +573,97 @@ def test_a_real_daemon_error_is_not_papered_over(monkeypatch):
     monkeypatch.setattr(introspection_mod, "DaemonClient", Broken)
     with pytest.raises(RemoteError):
         cli.cmd_harnesses(parse("harnesses"))
+
+
+# ---- skills -------------------------------------------------------------
+
+
+def test_skills_main_skips_harness_installation(monkeypatch):
+    def explode(*args, **kwargs):
+        raise AssertionError("skills must not install harness plugins")
+
+    seen = []
+
+    def command(args):
+        seen.append(args.json)
+        return 0
+
+    monkeypatch.setattr(cli.harness_registry, "install", explode)
+    monkeypatch.setitem(cli._COMMANDS, "skills", command)
+
+    assert cli.main(["skills", "--json"]) == 0
+    assert seen == [True]
+
+
+def test_skills_uses_the_running_daemon_and_renders_diagnostics(monkeypatch, capsys):
+    class FakeClient:
+        def __init__(self, *, autostart):
+            assert autostart is False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def call(self, method, **params):
+            assert (method, params) == ("skills.list", {})
+            return {
+                "skills": [
+                    {"name": "alpha", "description": "An alpha skill.", "source": "user"}
+                ],
+                "rejections": [
+                    {
+                        "name": "broken",
+                        "path": "/tmp/skills/broken",
+                        "error": "invalid frontmatter",
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(skills_mod, "DaemonClient", FakeClient)
+    assert cli.cmd_skills(parse("skills")) == 0
+    out = capsys.readouterr().out
+    assert "alpha" in out and "An alpha skill." in out
+    assert "rejected user skill packages" in out
+    assert "/tmp/skills/broken" in out and "invalid frontmatter" in out
+
+
+def test_skills_json_is_the_daemon_wire_object(monkeypatch, capsys):
+    data = {"skills": [{"name": "alpha", "description": "A.", "source": "user"}], "rejections": []}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            assert kwargs == {"autostart": False}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def call(self, method, **params):
+            return data
+
+    monkeypatch.setattr(skills_mod, "DaemonClient", FakeClient)
+    assert cli.cmd_skills(parse("skills", "--json")) == 0
+    assert json.loads(capsys.readouterr().out) == data
+
+
+def test_skills_reports_an_unavailable_daemon_without_starting_one(monkeypatch, capsys):
+    class NoDaemon:
+        def __init__(self, **kwargs):
+            assert kwargs == {"autostart": False}
+
+        async def __aenter__(self):
+            raise FileNotFoundError
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(skills_mod, "DaemonClient", NoDaemon)
+    assert cli.main(["skills"]) == 1
+    assert "no daemon running" in capsys.readouterr().err
 
 
 # ---- stop and restart ---------------------------------------------------

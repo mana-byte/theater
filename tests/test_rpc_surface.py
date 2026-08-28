@@ -31,6 +31,8 @@ EXPECTED_RPC_METHODS = {
     "scratchpad.get",
     "scratchpad.write",
     "send",
+    "skills.list",
+    "skills.load",
     "shutdown",
     "spawn",
     "stats",

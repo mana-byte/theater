@@ -20,6 +20,7 @@ from theater.mcp.toolsets.delegation import (
 )
 from theater.mcp.toolsets.participants import _summarise, list_participants, register_pane, whoami
 from theater.mcp.toolsets.recall import recall, recall_read
+from theater.mcp.toolsets.skills import list_skills, load_skill
 from theater.mcp.toolsets.transcripts import read_transcript
 
 __all__ = [
@@ -28,6 +29,8 @@ __all__ = [
     "await_sessions",
     "harnesses",
     "list_participants",
+    "list_skills",
+    "load_skill",
     "models",
     "put_child_back_in_the_wound",
     "read_transcript",

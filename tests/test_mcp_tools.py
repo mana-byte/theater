@@ -138,6 +138,19 @@ async def test_harnesses_hides_the_ones_that_cannot_be_spawned():
     assert "installed" not in got[0]
 
 
+async def test_skill_tools_forward_only_the_skills_rpc_methods():
+    listed = {"skills": [{"name": "alpha"}], "rejections": []}
+    loaded = {"name": "alpha", "content": "# Alpha\n"}
+    s = session(**{"skills.list": listed, "skills.load": loaded})
+
+    assert await tools.list_skills(s) == listed
+    assert await tools.load_skill(s, name="alpha") == loaded
+    assert s.client.calls == [
+        ("skills.list", {}),
+        ("skills.load", {"name": "alpha"}),
+    ]
+
+
 async def test_spawn_names_the_caller_as_the_parent():
     """Lineage is set here or never — the child cannot know who asked for it."""
     s = resolved()

@@ -47,6 +47,8 @@ async def test_tools_are_registered(daemon):
         "list_participants",
         "list_harnesses",
         "list_models",
+        "list_skills",
+        "load_skill",
         "spawn_session",
         "register_pane",
         "await_sessions",
@@ -73,7 +75,7 @@ async def test_the_server_carries_its_instructions(daemon):
     server still starts, every tool still works, and only the orchestration
     guidance disappears. Nothing else would notice.
     """
-    assert build("p1", "vibe").instructions
+    assert "list_skills" in build("p1", "vibe").instructions
 
 
 async def test_orchestration_directives_reach_the_tools_that_need_them(daemon):
@@ -214,6 +216,58 @@ async def test_new_tool_schemas_match_public_signatures(daemon):
 
     assert schema["scratchpad_write"]["required"] == ["value", "namespace"]
     assert schema["scratchpad_get"]["required"] == ["namespace"]
+    assert schema["list_skills"].get("required", []) == []
+    assert schema["load_skill"]["required"] == ["name"]
+
+
+async def test_skill_tool_wrappers_forward_to_tool_bodies(monkeypatch):
+    calls = []
+
+    async def fake_list_skills(session) -> dict:
+        calls.append(("list", session))
+        return {"skills": [], "rejections": []}
+
+    async def fake_load_skill(session, *, name: str) -> dict:
+        calls.append(("load", session, name))
+        return {"name": name, "content": "# Alpha\n"}
+
+    monkeypatch.setattr(mcp_tools, "list_skills", fake_list_skills)
+    monkeypatch.setattr(mcp_tools, "load_skill", fake_load_skill)
+
+    mcp = build("p1", "vibe")
+    assert _payload(await mcp.call_tool("list_skills", {})) == {"skills": [], "rejections": []}
+    assert _payload(await mcp.call_tool("load_skill", {"name": "alpha"})) == {
+        "name": "alpha",
+        "content": "# Alpha\n",
+    }
+    assert [call[0] for call in calls] == ["list", "load"]
+    assert calls[1][2] == "alpha"
+
+
+async def test_skill_tool_descriptions_explain_context_cost(daemon):
+    tools = {
+        tool.name: (tool.description or "").lower()
+        for tool in await build("p1", "vibe").list_tools()
+    }
+    assert "metadata first" in tools["list_skills"]
+    assert "exact" in tools["load_skill"]
+    assert "context" in tools["load_skill"]
+
+
+async def test_skill_tools_round_trip_through_the_daemon(daemon):
+    mcp = build("p1", "vibe")
+
+    listed = _payload(await mcp.call_tool("list_skills", {}))
+    assert [skill["name"] for skill in listed["skills"]] == [
+        "theater-debate",
+        "theater-orchestrate",
+    ]
+    assert all("content" not in skill for skill in listed["skills"])
+
+    loaded = _payload(await mcp.call_tool("load_skill", {"name": "theater-orchestrate"}))
+    assert loaded["name"] == "theater-orchestrate"
+    assert loaded["source"] == "builtin"
+    assert loaded["content"].startswith("---\nname: theater-orchestrate\n")
 
 
 async def test_read_transcript_schema_uses_target_not_target_id(daemon):
