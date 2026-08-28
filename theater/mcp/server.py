@@ -453,50 +453,33 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         return await tools.read_transcript(session, target=target, cursor=cursor)
 
     @mcp.tool()
-    async def put_child_back_in_the_wound(target_id: str) -> dict:
-        """Kill a child agent that you spawned.
+    async def put_child_back_in_the_wound(target: str) -> dict:
+        """Permanently kill one direct child session.
 
-        **Ask the user before every call, and wait for an explicit yes.**
-        The kill is destructive and cannot be undone, so the decision
-        belongs to the user, not to you. Put the question at the end of
-        your answer and stop there — for example: "May I clean up the
-        child sessions I spawned?" Name the children you mean, because an
-        approval covers only those: ask again for a different child, and
-        ask again on a later turn. An approval to spawn is not an approval
-        to kill, and neither is a general instruction to tidy up.
+        **Before every call, ask the user for permission and wait for an
+        explicit yes.** Name every child you intend to kill. Approval applies
+        only to those named children in the current turn: approval to spawn,
+        an earlier approval, or a general request to clean up is not enough.
+        Do not bypass this rule by invoking `theater kill` through a shell.
 
-        Only a direct child of yours can be killed via this tool. Do not
-        bypass this safety policy by shelling out to `theater kill`.
-
-        target_id: the participant id or name of the child to kill. Use the
-                   stable child ID; avoid recyclable names for destructive
-                   targeting.
+        target: stable participant id or current live name. Prefer the id:
+        dead names cannot resolve, and a recycled name may identify a new
+        participant. Only your direct children are eligible.
 
         Refuses with `no_self_kill`, `not_your_child`, or `not_found`.
-        An already-dead target addressed by ID is a no-op returning {"killed": false,
-        "reason": "already_dead"}.
+        Killing an already-dead child by id is a harmless no-op.
 
-        **Side effect: destroying a worktree child erases uncommitted
-        work.** If the child was spawned with worktree=True (a unique
-        isolated worktree), killing it removes the git worktree and
-        deletes its branch. Commits already made on the branch are
-        lost with the branch; uncommitted changes in the worktree are
-        lost irreversibly. There is no confirmation prompt and no undo
-        anywhere below this tool — the user's yes is the only thing
-        standing between a call and lost work, which is why it has to
-        be asked for every time.
+        **Collect the child's work before asking to kill it.** If it was
+        spawned with `worktree=True`, this call removes its unique worktree
+        directory and deletes its branch. Uncommitted changes are erased, and
+        commits not preserved on another branch or merged first are lost.
 
-        If the child was spawned with worktree="<name>" (a named shared
-        worktree), the directory is removed on the last live participant's
-        teardown but the shared branch is always retained.
-
-        So collect before you kill. Merge the branch, or record the
-        commits somewhere outside the worktree, and only then ask. A
-        child that has finished still holds its entire output in a
-        branch that this call deletes; the natural order — it says it
-        is done, so tidy it away — is the order that loses the work.
+        For `worktree="<name>"`, Theater removes the shared worktree directory
+        only after its last live participant is gone. The shared branch is
+        retained. A child without a worktree has no worktree or branch to
+        delete. The session kill itself cannot be undone.
         """
-        return await tools.put_child_back_in_the_wound(session, target_id=target_id)
+        return await tools.put_child_back_in_the_wound(session, target=target)
 
     @mcp.tool()
     async def recall(paths: list[str], depth: int = 5) -> dict:

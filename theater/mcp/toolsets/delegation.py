@@ -263,48 +263,13 @@ async def scratchpad_get(
     return result
 
 
-async def put_child_back_in_the_wound(session: Session, *, target_id: str) -> dict:
-    """Kill a child agent that the caller spawned.
-
-    The permission check lives in the daemon: ``participant.kill`` refuses
-    unless the target's ``parent_id`` equals ``caller_id`` — but only for
-    callers that send a ``caller_id``, which this tool always does. The CLI
-    and the régie deliberately send none and are treated as the operator,
-    so an agent that shells out to ``theater kill`` bypasses the check
-    entirely. This body is a thin pass-through that adds ``caller_id``,
-    exactly as ``send_prompt`` does — so the gate covers this MCP path,
-    and nothing else.
-
-    ``target_id`` may be a participant id or a name. Names work only while
-    the participant is live; a dead participant's name is null and cannot
-    be resolved. An already-dead kill is a no-op, but only when addressed
-    by id — a dead participant has no name to resolve. Because names are
-    recyclable, use the id for destructive targeting: a recycled name can
-    identify a successor.
-
-    **Side effect: destroying a worktree child erases uncommitted work.**
-    If the child was spawned with ``worktree=True`` (a unique isolated
-    worktree), killing it removes the git worktree and deletes its
-    branch. Commits already made on the branch are lost with the branch;
-    uncommitted changes in the worktree are lost irreversibly.
-
-    If the child was spawned with ``worktree="<name>"`` (a named shared
-    linked worktree), the directory is removed on the last live
-    participant's teardown but the **shared branch is always retained** —
-    other participants may already have completed work on it. After the
-    last teardown the branch remains, and the name cannot be recreated
-    until the retained branch is integrated as appropriate and deleted by
-    the user.
-
-    This is the daemon's behaviour, not a choice this tool makes, but it
-    is the one fact the caller must know before calling — there is no
-    confirmation prompt, and no undo.
-    """
+async def put_child_back_in_the_wound(session: Session, *, target: str) -> dict:
+    """Forward a direct-child kill to the daemon with the caller identity."""
     if not session._resolved:
         await session.identify()
     result = await session.client.call(
         "participant.kill",
-        id=target_id,
+        id=target,
         caller_id=session.participant_id,
     )
     assert isinstance(result, dict)

@@ -336,7 +336,7 @@ async def test_read_transcript_forwards_only_the_returned_cursor():
 async def test_put_child_back_in_the_wound_names_the_caller_so_the_daemon_can_authorize():
     """The daemon checks parentage against caller_id, so it must reach the daemon."""
     s = resolved(**{"participant.kill": {"id": "p-child", "killed": True}})
-    await tools.put_child_back_in_the_wound(s, target_id="p-child")
+    await tools.put_child_back_in_the_wound(s, target="p-child")
     p = s.client.params("participant.kill")
     assert p["id"] == "p-child"
     assert p["caller_id"] == "p-me"
@@ -344,7 +344,7 @@ async def test_put_child_back_in_the_wound_names_the_caller_so_the_daemon_can_au
 
 async def test_put_child_back_in_the_wound_identifies_first_or_the_daemon_cannot_authorize():
     s = session(**{"participant.kill": {"id": "p-child", "killed": True}})
-    await tools.put_child_back_in_the_wound(s, target_id="p-child")
+    await tools.put_child_back_in_the_wound(s, target="p-child")
     assert s.client.methods == ["hello", "participant.kill"]
 
 

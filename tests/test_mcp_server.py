@@ -163,10 +163,16 @@ async def test_name_semantics_reach_the_tools_that_target_by_name(daemon):
     assert "dead" in desc
     assert "id" in desc
 
-    # put_child_back_in_the_wound: already-dead is a no-op only by id;
-    # names are recyclable.
-    assert "already" in tools["put_child_back_in_the_wound"].lower()
-    assert "recycl" in tools["put_child_back_in_the_wound"].lower()
+    # put_child_back_in_the_wound: destructive targeting and worktree loss are explicit.
+    desc = tools["put_child_back_in_the_wound"].lower()
+    assert "explicit yes" in desc
+    assert "before every call" in desc
+    assert "worktree=true" in desc
+    assert "deletes its branch" in desc
+    assert "uncommitted changes" in desc
+    assert "shared branch" in desc
+    assert "already" in desc
+    assert "recycl" in desc
 
 
 async def test_lazy_session_id_semantics_reach_participant_record_tools(daemon):
@@ -278,6 +284,13 @@ async def test_read_transcript_schema_uses_target_not_target_id(daemon):
     assert set(transcript["properties"]) == {"target", "cursor"}
     assert transcript["properties"]["cursor"]["default"] is None
     assert transcript["required"] == ["target"]
+
+
+async def test_kill_schema_uses_target_not_target_id(daemon):
+    schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
+    kill = schema["put_child_back_in_the_wound"]
+    assert set(kill["properties"]) == {"target"}
+    assert kill["required"] == ["target"]
 
 
 async def test_list_participants_schema_exposes_keyset_pagination(daemon):
