@@ -8,7 +8,7 @@ import os
 import re
 import secrets
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -17,6 +17,7 @@ from theater.constants.observability import (
     DEFAULT_LOG_BACKUP_COUNT,
     DEFAULT_LOG_MAX_BYTES,
     MAX_ERROR_TYPE_LEN,
+    REGIE_GENERATIONS,
     STDERR_GENERATIONS,
     STDERR_TOKEN_BYTES,
     STDERR_TOKEN_HEX_LEN,
@@ -26,6 +27,10 @@ from theater.constants.observability import (
 FORMATTER_FMT = "%(asctime)s %(levelname)-7s %(name)s %(message)s"
 _TOKEN_PATTERN = re.compile(r"^[0-9a-f]+$")
 _GENERATION_PATTERN = re.compile(rf"^daemon\.([0-9a-f]{{{STDERR_TOKEN_HEX_LEN}}})\.stderr\.log$")
+_REGIE_IDENTITY_PATTERN = re.compile(r"^(?:pane|pid)-[0-9]+$")
+_REGIE_GENERATION_PATTERN = re.compile(
+    r"^(?P<identity>(?:pane|pid)-[0-9]+)\.log(?:\.(?:[1-9][0-9]*))?$"
+)
 
 
 def make_formatter() -> logging.Formatter:
@@ -158,6 +163,69 @@ def prune_stderr_generations(
             _stderr_diagnostic(f"prune: cannot unlink {path.name}")
 
     return deleted
+
+
+def prune_regie_generations(
+    directory: Path,
+    current: Path | None,
+    protected: Iterable[Path | str] = (),
+    retain: int = REGIE_GENERATIONS,
+) -> int:
+    """Prune inactive régie log groups while preserving protected identities."""
+    protected_identities = {
+        identity
+        for value in (current, *protected)
+        if (identity := _regie_identity(value, allow_input_identity=True)) is not None
+    }
+    groups: dict[str, list[tuple[float, Path]]] = {}
+    failed: set[str] = set()
+    try:
+        entries = list(directory.iterdir())
+    except OSError as error:
+        _stderr_diagnostic(f"régie prune: cannot list {directory}: {error}")
+        return 0
+
+    for entry in entries:
+        identity = _regie_identity(entry)
+        if identity is None:
+            continue
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError as error:
+            failed.add(identity)
+            _stderr_diagnostic(f"régie prune: cannot stat {entry.name}: {error}")
+            continue
+        groups.setdefault(identity, []).append((mtime, entry))
+
+    candidates = [
+        (max(mtime for mtime, _path in group_entries), identity, group_entries)
+        for identity, group_entries in groups.items()
+        if identity not in protected_identities and identity not in failed
+    ]
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+
+    deleted = 0
+    for _mtime, _identity, group_entries in candidates[max(retain, 0) :]:
+        for _entry_mtime, path in group_entries:
+            try:
+                path.unlink(missing_ok=True)
+                deleted += 1
+            except OSError as error:
+                _stderr_diagnostic(f"régie prune: cannot unlink {path.name}: {error}")
+    return deleted
+
+
+def _regie_identity(value: Path | str | None, *, allow_input_identity: bool = False) -> str | None:
+    if value is None:
+        return None
+    name = Path(value).name
+    if allow_input_identity:
+        if name.startswith("%") and name[1:].isdigit():
+            return f"pane-{name[1:]}"
+        if _REGIE_IDENTITY_PATTERN.fullmatch(name) is not None:
+            return name
+    match = _REGIE_GENERATION_PATTERN.fullmatch(name)
+    return match.group("identity") if match is not None else None
 
 
 def _stderr_diagnostic(msg: str) -> None:

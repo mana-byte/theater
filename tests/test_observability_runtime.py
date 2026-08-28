@@ -82,7 +82,8 @@ def test_regie_local_log_works_without_otel(tmp_path):
         import logging
         from pathlib import Path
         from theater.observability.runtime import configure
-        path = Path({str(tmp_path / "regie.pane-7.log")!r})
+        path = Path({str(tmp_path / "logs" / "regie" / "pane-7.log")!r})
+        path.parent.mkdir(parents=True)
         h = configure(role="regie", otlp_enabled=False, log_path=path)
         logging.getLogger("theater.regie").warning("regie-visible")
         h.shutdown()

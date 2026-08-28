@@ -815,7 +815,7 @@ configuration says export is enabled.
 
 The daemon has two log files that must never share an inode:
 
-- **`daemon.log`** — the routine human-readable log. A `RotatingFileHandler`
+- **`logs/daemon.log`** — the routine human-readable log. A `RotatingFileHandler`
   attaches directly to the `theater` logger with the existing formatter
   (`%(asctime)s %(levelname)-7s %(name)s %(message)s`). Rotation is **always
   active**, regardless of whether OTLP export is enabled — this is the fix for
@@ -824,9 +824,9 @@ The daemon has two log files that must never share an inode:
   output. A direct foreground daemon (`theater daemon`) also attaches a stderr
   handler with the same formatter; an autostarted daemon does not mirror routine
   logs into raw stderr.
-- **`daemon.<token>.stderr.log`** — raw crash output. When `DaemonClient`
+- **`logs/daemon.<token>.stderr.log`** — raw crash output. When `DaemonClient`
   autostarts a daemon, the parent generates 12 lowercase hex chars with
-  `secrets.token_hex(6)`, creates a mode-0600 file under Theater home, and
+  `secrets.token_hex(6)`, creates a mode-0600 file under `THEATER_HOME/logs`, and
   passes the same open fd as the child's stdout and stderr. The child does not
   reopen or redirect stderr — it inherited the correct descriptor. Token
   exists only for safe cleanup, pruning, and error reporting.
@@ -841,10 +841,13 @@ generation; the current path is pinned regardless of mtime. Only `LockHeld`
 (the singleton race loser) deletes its own generation — every other failure
 keeps it, whether before or after lock acquisition.
 
-Each régie writes a rotating `regie.pane-<id>.log` beside the daemon logs, with
-a PID fallback when no pane identity is available. Per-pane files prevent two
-régie processes from rotating the same inode. Its event-loop lag monitor and
-unhandled Textual exceptions use the same shared logging and OTel pipeline.
+Each régie writes a rotating `logs/regie/pane-<id>.log`, with a
+`logs/regie/pid-<pid>.log` fallback when no pane identity is available. Per-pane
+files prevent two régie processes from rotating the same inode. Startup keeps
+the current and live-pane generations, plus a small bounded number of newest
+inactive generations; each base file and its `.1`, `.2`, … backups count as one
+generation. Its event-loop lag monitor and unhandled Textual exceptions use the
+same shared logging and OTel pipeline.
 MCP attaches only the OTel `LoggingHandler`; stdout remains protocol-only and
 there is no local MCP log file.
 
@@ -982,8 +985,8 @@ broken query does not suppress others. `stop()` is awaited before `Store.close()
 Raw stderr generation files are intentionally not rotated while a daemon is
 alive. They normally contain only interpreter or native crash output and
 accidental direct writes; routine Python logs go to the bounded rotating
-`daemon.log`. Per-generation retention (3 files total, including current) bounds
+`logs/daemon.log`. Per-generation retention (3 files total, including current) bounds
 old files, not one pathological current generation. Rotating an arbitrary
 inherited file descriptor requires a pipe or fd-reopen protocol; phase 1
 deliberately avoids that complexity. The observed growth source — 25 MB/9 h of
-routine logs — is moved to the bounded rotating `daemon.log`.
+routine logs — is moved to the bounded rotating `logs/daemon.log`.

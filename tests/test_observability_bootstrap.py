@@ -258,6 +258,7 @@ async def test_autostart_creates_mode_0600_generation(theater_home, monkeypatch)
     path = await client._start_daemon()
     assert path is not None
     assert path.exists()
+    assert path.parent == paths.logs_dir()
     mode = stat.S_IMODE(path.stat().st_mode)
     assert mode == 0o600
     assert "--stderr-token" in forked_cmds[0]
@@ -276,7 +277,7 @@ async def test_autostart_cleans_generation_on_popen_failure(theater_home, monkey
     client = DaemonClient()
     with pytest.raises(OSError, match="fork failed"):
         await client._start_daemon()
-    assert list(paths.home().glob("daemon.*.stderr.log")) == []
+    assert list(paths.logs_dir().glob("daemon.*.stderr.log")) == []
 
 
 async def test_start_daemon_returns_none_when_lock_held(theater_home):
@@ -295,10 +296,10 @@ async def test_timeout_names_exact_generation_path(theater_home, monkeypatch):
 
     monkeypatch.setattr(client_mod, "START_TIMEOUT", 0.01)
     client = DaemonClient(autostart=False)
-    client._stderr_path = generation_path(paths.home(), "abc123def456")
+    client._stderr_path = generation_path(paths.logs_dir(), "abc123def456")
     with pytest.raises(ConnectionError) as exc:
         await client._await_socket()
-    assert "abc123def456" in str(exc.value)
+    assert f"see {client._stderr_path}" in str(exc.value)
 
 
 async def test_timeout_names_generic_paths_without_token(theater_home, monkeypatch):
@@ -309,7 +310,8 @@ async def test_timeout_names_generic_paths_without_token(theater_home, monkeypat
     client._stderr_path = None
     with pytest.raises(ConnectionError) as exc:
         await client._await_socket()
-    assert "daemon.log" in str(exc.value)
+    assert str(paths.log_path()) in str(exc.value)
+    assert str(paths.logs_dir() / "daemon.*.stderr.log") in str(exc.value)
 
 
 def test_cmd_daemon_rejects_invalid_token():
@@ -341,7 +343,7 @@ def test_cmd_daemon_deletes_generation_on_lock_held(theater_home, monkeypatch):
     from theater.observability.logging import generation_path
 
     token = "deadbeefdead"
-    gen_path = generation_path(paths.home(), token)
+    gen_path = generation_path(paths.logs_dir(), token)
     gen_path.write_text("")
 
     async def refuse(options=None):
@@ -359,7 +361,7 @@ def test_cmd_daemon_keeps_generation_on_runtime_error(theater_home, monkeypatch)
     from theater.observability.logging import generation_path
 
     token = "cafebabecafe"
-    gen_path = generation_path(paths.home(), token)
+    gen_path = generation_path(paths.logs_dir(), token)
     gen_path.write_text("")
 
     async def boom(options=None):
