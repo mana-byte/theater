@@ -996,6 +996,21 @@ def test_span_details_use_only_contextual_tabs() -> None:
     assert details.tab is InspectorTab.CURRENT
 
 
+def test_span_details_render_model_prose_as_markdown() -> None:
+    item = record(
+        "assistant",
+        summary="## Result\n\n- **Passed** checks\n- Read `src/app.py`",
+    )
+
+    details = build_span_details(item, InspectorTab.OUTPUT)
+    console = Console(width=60, record=True)
+    console.print(details.content)
+
+    assert "• Passed checks" in console.export_text()
+    assert "**Passed**" in details.copy_text
+    assert "No output supplied" not in details.copy_text
+
+
 async def test_span_detail_tab_and_content_update_without_rebuilding_ledger(monkeypatch) -> None:
     item = record(
         "r1",

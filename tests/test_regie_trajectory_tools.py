@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
+import json
+from io import StringIO
 from types import MappingProxyType
 
 import pytest
 from rich.console import Console
+from rich.style import Style
 from textual.app import App, ComposeResult
-from textual.widgets import Tab, TabbedContent
+from textual.widgets import RichLog, Tab, TabbedContent
 
 from theater.constants.regie_trajectory import TOOL_ROW_SUMMARY_MAX_CHARS
 from theater.constants.trajectory import TRAJECTORY_DETAIL_RECORD_MAX_BYTES
 from theater.regie.trajectory.enums import InspectorTab
-from theater.regie.trajectory.inspection.links import DETAIL_RECORD_TARGET_META
+from theater.regie.trajectory.inspection.links import (
+    DETAIL_JSON_TOGGLE_META,
+    DETAIL_RECORD_TARGET_META,
+)
+from theater.regie.trajectory.inspection.rich_content import DetailStyles
 from theater.regie.trajectory.inspection.styled import (
     build_tool_span_details,
 )
@@ -275,6 +282,70 @@ def test_tool_details_bound_copy_and_show_omission() -> None:
         InspectorTab.TIMING,
     )
 
+    themed = build_tool_span_details(
+        operation,
+        InspectorTab.RESULT,
+        styles=DetailStyles(
+            text=Style(color="#eeeeee", bgcolor="#101010"),
+            accent=Style(color="#ffaa00"),
+            code=Style(color="#eeeeee", bgcolor="#202020"),
+            muted=Style(color="#888888"),
+            error=Style(color="#ff0000"),
+            success=Style(color="#00ff00"),
+        ),
+    )
+    rendered = Console(width=80, color_system="truecolor").render(themed.content)
+    assert any(
+        segment.style is not None
+        and segment.style.bgcolor is not None
+        and segment.style.bgcolor.name == "#202020"
+        for segment in rendered
+    )
+
+
+def test_tool_json_details_expand_formatted_string_values() -> None:
+    field = DetailField.from_text(
+        "result",
+        json.dumps(
+            {
+                "type": "text",
+                "text": "## Result\n\n- **Passed** checks\n- Read `src/app.py`",
+                "short": "kept inline",
+            }
+        ),
+        format=ContentFormat.JSON,
+    )
+    result = _tool("result", 2, TrajectoryKind.TOOL_RESULT, "one", details=(field,))
+    operation = build_tool_index((result,)).ordered[0]
+    detail = build_tool_span_details(operation, InspectorTab.RESULT)
+    output = StringIO()
+    console = Console(width=80, file=output)
+
+    console.print(detail.content)
+    rendered = output.getvalue()
+
+    assert '"text": ▾' in rendered
+    assert '"short": "kept inline"' in rendered
+    assert "• Passed checks" in rendered
+    assert r"## Result\n\n- **Passed** checks" in detail.copy_text
+
+    toggle_key = next(
+        segment.style.meta[DETAIL_JSON_TOGGLE_META]
+        for segment in Console(width=80).render(detail.content)
+        if segment.style is not None and DETAIL_JSON_TOGGLE_META in segment.style.meta
+    )
+    collapsed = build_tool_span_details(
+        operation,
+        InspectorTab.RESULT,
+        collapsed_json_paths=frozenset({toggle_key}),
+    )
+    collapsed_output = StringIO()
+    collapsed_console = Console(width=80, file=collapsed_output)
+    collapsed_console.print(collapsed.content)
+    collapsed_text = collapsed_output.getvalue()
+    assert '"text": ▸' in collapsed_text
+    assert "• Passed checks" not in collapsed_text
+
     bounded = bounded_preview("y" * 5000, max_bytes=128)
     bounded_result = _tool(
         "bounded-result",
@@ -288,6 +359,59 @@ def test_tool_details_bound_copy_and_show_omission() -> None:
     )
     marker = f"… {bounded.omitted_bytes} bytes omitted …"
     assert bounded_text.count(marker) == 1
+
+
+@pytest.mark.asyncio
+async def test_json_string_blocks_toggle_from_the_detail_log() -> None:
+    item = _tool(
+        "call",
+        1,
+        TrajectoryKind.TOOL_CALL,
+        "one",
+        details=(
+            DetailField.from_text(
+                "arguments",
+                json.dumps({"text": "first line\nsecond line"}),
+                format=ContentFormat.JSON,
+            ),
+        ),
+    )
+
+    class DetailHost(App):
+        def compose(self) -> ComposeResult:
+            yield SpanDetailPanel()
+
+    app = DetailHost()
+    async with app.run_test(size=(80, 24)) as pilot:
+        panel = app.query_one(SpanDetailPanel)
+        panel.set_span(item, tab=InspectorTab.INPUT)
+        await pilot.pause()
+        log = panel.query_one(f"#{panel._log_id(panel.tab)}", RichLog)
+        target: tuple[int, int] | None = None
+        toggle_key: str | None = None
+        for row, strip in enumerate(log.lines):
+            column = 0
+            for segment in strip:
+                meta = segment.style.meta if segment.style is not None else {}
+                if isinstance(meta.get(DETAIL_JSON_TOGGLE_META), str):
+                    target = (column + 2, row + 1)
+                    toggle_key = meta[DETAIL_JSON_TOGGLE_META]
+                    break
+                column += segment.cell_length
+            if target is not None:
+                break
+
+        assert target is not None and toggle_key is not None
+        await pilot.click(log, offset=target)
+        await pilot.pause()
+
+        assert toggle_key in panel._collapsed_json_paths
+        assert log.styles.background_tint.a == 0
+        assert panel._details is not None
+        output = StringIO()
+        console = Console(width=80, file=output)
+        console.print(panel._details.content)
+        assert '"text": ▸' in output.getvalue()
 
 
 def _request(
@@ -417,6 +541,8 @@ async def test_tool_detail_tabs_render_and_move_in_contextual_order() -> None:
         visible_tabs = [tab for tab in content.query(Tab) if tab.display]
         expected_tabs = [content.get_tab(panel._pane_id(tab)) for tab in panel.tabs]
         assert visible_tabs == expected_tabs
+        log = panel.query_one(f"#{panel._log_id(panel.tab)}", RichLog)
+        assert all(line.cell_length == log.scrollable_content_region.width for line in log.lines)
 
         for expected in panel.tabs[1:]:
             await pilot.press("l")

@@ -14,12 +14,14 @@ from textual.widgets import Button, Label, RichLog, TabbedContent, TabPane
 
 from theater.regie.trajectory.enums import InspectorTab
 from theater.regie.trajectory.inspection.links import (
+    DETAIL_JSON_TOGGLE_META,
     DETAIL_PARTICIPANT_EXACT_META,
     DETAIL_PARTICIPANT_META,
     DETAIL_PARTICIPANT_UNRESOLVED_META,
     DETAIL_RECORD_TARGET_META,
     participant_link_from_meta,
 )
+from theater.regie.trajectory.inspection.rich_content import DetailStyles
 from theater.regie.trajectory.inspection.styled import (
     SpanDetails,
     build_span_details,
@@ -66,7 +68,14 @@ class SpanDetailPanel(Vertical):
     """Replace the ledger with bounded, tabbed, scrollable span details."""
 
     can_focus = True
-    COMPONENT_CLASSES: ClassVar[set[str]] = Widget.COMPONENT_CLASSES | {"span-detail--accent"}
+    COMPONENT_CLASSES: ClassVar[set[str]] = Widget.COMPONENT_CLASSES | {
+        "span-detail--accent",
+        "span-detail--code",
+        "span-detail--error",
+        "span-detail--muted",
+        "span-detail--success",
+        "span-detail--text",
+    }
 
     DEFAULT_CSS = """
     SpanDetailPanel {
@@ -155,9 +164,31 @@ class SpanDetailPanel(Vertical):
         background: $background;
         scrollbar-size: 1 1;
     }
+    SpanDetailPanel RichLog:focus {
+        background-tint: transparent;
+    }
     SpanDetailPanel > .span-detail--accent {
         color: $accent;
         text-style: dim;
+    }
+    SpanDetailPanel > .span-detail--text {
+        color: $text;
+        background: $background;
+    }
+    SpanDetailPanel > .span-detail--code {
+        color: $text;
+        background: $background;
+    }
+    SpanDetailPanel > .span-detail--muted {
+        color: $text-muted;
+        background: $background;
+        text-style: dim;
+    }
+    SpanDetailPanel > .span-detail--error {
+        color: $error;
+    }
+    SpanDetailPanel > .span-detail--success {
+        color: $success;
     }
     """
 
@@ -167,6 +198,7 @@ class SpanDetailPanel(Vertical):
         self._tool: TrajectoryToolOperation | None = None
         self._request: TrajectoryRequest | None = None
         self._details: SpanDetails | None = None
+        self._collapsed_json_paths: set[str] = set()
         self._syncing_tabs = False
 
     @staticmethod
@@ -204,11 +236,29 @@ class SpanDetailPanel(Vertical):
         return self._details.copy_text if self._details is not None else ""
 
     def _build_details(self, tab: InspectorTab) -> SpanDetails | None:
-        accent = self.get_component_rich_style("span-detail--accent", partial=True)
+        styles = DetailStyles(
+            text=self.get_component_rich_style("span-detail--text", partial=True),
+            accent=self.get_component_rich_style("span-detail--accent", partial=True),
+            code=self.get_component_rich_style("span-detail--code", partial=True),
+            muted=self.get_component_rich_style("span-detail--muted", partial=True),
+            error=self.get_component_rich_style("span-detail--error", partial=True),
+            success=self.get_component_rich_style("span-detail--success", partial=True),
+        )
         if self._tool is not None:
-            return build_tool_span_details(self._tool, tab, accent_style=accent)
+            return build_tool_span_details(
+                self._tool,
+                tab,
+                styles=styles,
+                collapsed_json_paths=frozenset(self._collapsed_json_paths),
+            )
         if self._record is not None:
-            return build_span_details(self._record, tab, accent_style=accent, request=self._request)
+            return build_span_details(
+                self._record,
+                tab,
+                styles=styles,
+                request=self._request,
+                collapsed_json_paths=frozenset(self._collapsed_json_paths),
+            )
         return None
 
     def _title(self) -> Text:
@@ -259,7 +309,7 @@ class SpanDetailPanel(Vertical):
             return
         log = self.query_one(f"#{self._log_id(self._details.tab)}", RichLog)
         log.clear()
-        log.write(self._details.content, scroll_end=False)
+        log.write(self._details.content, expand=True, shrink=True, scroll_end=False)
         if scroll_y is None:
             log.scroll_home(animate=False)
         else:
@@ -273,6 +323,8 @@ class SpanDetailPanel(Vertical):
         request: TrajectoryRequest | None = None,
         tab: InspectorTab = InspectorTab.SUMMARY,
     ) -> InspectorTab:
+        if self._record is None or self._record.record_id != record.record_id:
+            self._collapsed_json_paths.clear()
         if (
             self._record == record
             and self._tool == tool
@@ -345,6 +397,11 @@ class SpanDetailPanel(Vertical):
         if event.button != 1:
             return
         meta = event.style.meta
+        toggle_key = meta.get(DETAIL_JSON_TOGGLE_META)
+        if isinstance(toggle_key, str):
+            event.stop()
+            self._toggle_json_path(toggle_key)
+            return
         if link := participant_link_from_meta(meta):
             event.stop()
             self.post_message(
@@ -368,6 +425,18 @@ class SpanDetailPanel(Vertical):
         if isinstance(record_id, str):
             event.stop()
             self.post_message(SpanDetailRecordLinkClicked(record_id))
+
+    def _toggle_json_path(self, toggle_key: str) -> None:
+        if self._details is None or not self.is_mounted:
+            return
+        log = self.query_one(f"#{self._log_id(self._details.tab)}", RichLog)
+        scroll_y = float(log.scroll_y)
+        if toggle_key in self._collapsed_json_paths:
+            self._collapsed_json_paths.remove(toggle_key)
+        else:
+            self._collapsed_json_paths.add(toggle_key)
+        self._details = self._build_details(self._details.tab)
+        self._render_content(scroll_y)
 
 
 __all__ = [

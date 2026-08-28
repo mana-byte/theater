@@ -9,6 +9,7 @@ from types import MappingProxyType
 
 from theater.constants.trajectory import TRAJECTORY_DETAIL_RECORD_MAX_BYTES
 from theater.regie.trajectory.enums import InspectorTab
+from theater.regie.trajectory.inspection.blocks import DetailBlock
 from theater.regie.trajectory.inspection.lines import (
     InspectorLine,
     failure_lines,
@@ -42,6 +43,7 @@ class RecordDetailProjection:
     copy_text: str
     participant_links: Mapping[int, ParticipantLink]
     record_links: Mapping[int, str]
+    blocks: tuple[DetailBlock, ...]
 
 
 def tabs_for_record(record: TrajectoryRecord | None) -> tuple[InspectorTab, ...]:
@@ -89,6 +91,21 @@ _TAB_FIELD_ALIASES: dict[InspectorTab, frozenset[str]] = {
     ),
     InspectorTab.DIFF: frozenset({"context_diff", "diff", "changes"}),
 }
+
+_CONTENT_TABS = frozenset(
+    {
+        InspectorTab.OUTPUT,
+        InspectorTab.RESULT,
+        InspectorTab.PAYLOAD,
+        InspectorTab.RAW,
+        InspectorTab.INPUT,
+        InspectorTab.REASONING,
+        InspectorTab.PREVIEW,
+        InspectorTab.CURRENT,
+        InspectorTab.PREVIOUS,
+        InspectorTab.DIFF,
+    }
+)
 
 
 def _field_key(name: str) -> str:
@@ -156,6 +173,19 @@ def _record_tab_lines(  # noqa: PLR0912
         InspectorTab.PREVIEW,
     }:
         fields = _fields_for_tab(record, tab)
+        summary_is_content = (
+            (
+                tab is InspectorTab.OUTPUT
+                and (record.kind is TrajectoryKind.ASSISTANT or record.lane is TrajectoryLane.MODEL)
+            )
+            or (tab is InspectorTab.REASONING and record.kind is TrajectoryKind.REASONING)
+            or (
+                tab is InspectorTab.PREVIEW
+                and (record.kind is TrajectoryKind.USER or record.lane is TrajectoryLane.INPUT)
+            )
+        )
+        if not fields and record.summary and summary_is_content:
+            return ()
         return _field_lines(fields) if fields else (InspectorLine(f"No {tab.value} supplied."),)
     if tab in {InspectorTab.CURRENT, InspectorTab.PREVIOUS, InspectorTab.DIFF}:
         fields = _fields_for_tab(record, tab)
@@ -229,6 +259,24 @@ def _bounded_lines(lines: list[str]) -> str:
     ).text
 
 
+def _detail_blocks(record: TrajectoryRecord, tab: InspectorTab) -> tuple[DetailBlock, ...]:
+    blocks: list[DetailBlock] = []
+    summary_lines = record.summary.split("\n")
+    if record.summary and (
+        record.kind in {TrajectoryKind.ASSISTANT, TrajectoryKind.REASONING, TrajectoryKind.USER}
+        or record.lane in {TrajectoryLane.INPUT, TrajectoryLane.MODEL}
+    ):
+        blocks.append(DetailBlock(1, 1 + len(summary_lines), ContentFormat.MARKDOWN))
+    if tab not in _CONTENT_TABS:
+        return tuple(blocks)
+    cursor = 1 + len(summary_lines)
+    for field in _fields_for_tab(record, tab):
+        line_count = len(_format_detail(field).split("\n"))
+        blocks.append(DetailBlock(cursor, cursor + line_count, field.format, field.name))
+        cursor += line_count
+    return tuple(blocks)
+
+
 def _project_record_details(
     record: TrajectoryRecord | None,
     requested_tab: InspectorTab,
@@ -241,6 +289,15 @@ def _project_record_details(
     lines, participant_links, record_links = _detail_lines(record, active, request)
     copy_text = _bounded_lines(lines)
     bounded = copy_text.splitlines()
+    blocks = (
+        tuple(
+            clipped
+            for block in _detail_blocks(record, active)
+            if (clipped := block.clipped(len(bounded))) is not None
+        )
+        if record is not None
+        else ()
+    )
     visible_participant_links = {
         line_index: link
         for line_index, link in participant_links.items()
@@ -257,6 +314,7 @@ def _project_record_details(
         copy_text,
         MappingProxyType(visible_participant_links),
         MappingProxyType(visible_record_links),
+        blocks,
     )
 
 

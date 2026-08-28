@@ -13,6 +13,7 @@ DETAIL_PARTICIPANT_CORRELATION_KEY_META = "trajectory_detail_participant_correla
 DETAIL_PARTICIPANT_EXACT_META = "trajectory_detail_participant_exact"
 DETAIL_PARTICIPANT_UNRESOLVED_META = "trajectory_detail_participant_unresolved"
 DETAIL_RECORD_TARGET_META = "trajectory_detail_record_target"
+DETAIL_JSON_TOGGLE_META = "trajectory_detail_json_toggle"
 
 
 def participant_link_meta(link: ParticipantLink) -> dict[str, str]:
@@ -65,6 +66,7 @@ def participant_link_from_meta(meta: dict[str, object]) -> ParticipantLink | Non
 
 
 __all__ = [
+    "DETAIL_JSON_TOGGLE_META",
     "DETAIL_PARTICIPANT_CORRELATION_KEY_META",
     "DETAIL_PARTICIPANT_CORRELATION_TYPE_META",
     "DETAIL_PARTICIPANT_DIRECTION_META",
