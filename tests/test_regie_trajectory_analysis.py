@@ -44,6 +44,7 @@ def _record(
     failure: TrajectoryFailure | None = None,
     retry_of_record_id: str | None = None,
     retry_attempt: int | None = None,
+    turn_id: str | None = "turn-1",
 ) -> TrajectoryRecord:
     return TrajectoryRecord(
         record_id=record_id,
@@ -56,7 +57,7 @@ def _record(
         summary=record_id,
         status=status,
         raw_index=index,
-        turn_id="turn-1",
+        turn_id=turn_id,
         request_id=request_id,
         call_id=call_id,
         parent_call_id=parent_call_id,
@@ -158,6 +159,100 @@ def test_analysis_projects_nested_waterfall_and_only_structured_file_paths() -> 
         "src/visible.py": frozenset({"reference"}),
     }
     assert all("must-not-be-inferred" not in row.path for row in index.files)
+
+
+def test_waterfall_aggregates_model_requests_by_canonical_turn() -> None:
+    records = (
+        _record(
+            "model-1",
+            1,
+            request_id="request-1",
+            timing=Timing(1, 2, 1_000, TimingProvenance.SOURCE),
+            usage=TrajectoryUsage(model="claude", input_tokens=10),
+        ),
+        _record(
+            "tool-call",
+            2,
+            lane=TrajectoryLane.TOOLS,
+            kind=TrajectoryKind.TOOL_CALL,
+            request_id="request-1",
+            call_id="tool",
+            timing=Timing(start=2, provenance=TimingProvenance.SOURCE),
+        ),
+        _record(
+            "tool-result",
+            3,
+            lane=TrajectoryLane.TOOLS,
+            kind=TrajectoryKind.TOOL_RESULT,
+            request_id="request-1",
+            call_id="tool",
+            timing=Timing(end=3, provenance=TimingProvenance.SOURCE),
+        ),
+        _record(
+            "model-2",
+            4,
+            request_id="request-2",
+            timing=Timing(3, 5, 2_000, TimingProvenance.SOURCE),
+            usage=TrajectoryUsage(model="claude", output_tokens=20),
+        ),
+    )
+
+    index = _index(records)
+
+    assert len(index.waterfalls) == 1
+    waterfall = index.waterfalls[0]
+    assert waterfall.turn_id == "turn-1"
+    assert waterfall.label == "claude · 2 calls"
+    assert [(row.label, row.scope) for row in waterfall.rows] == [
+        ("claude · 2 calls", True),
+        ("tool-call", False),
+    ]
+    assert index.waterfall_for("model-1") is waterfall
+    assert index.waterfall_for("model-2") is waterfall
+
+
+def test_waterfall_keeps_request_scopes_separate_without_a_turn_identity() -> None:
+    records = (
+        _record("model-1", 1, request_id="request-1", turn_id=None),
+        _record("model-2", 2, request_id="request-2", turn_id=None),
+    )
+
+    assert len(_index(records).waterfalls) == 2
+
+
+def test_waterfall_uses_turn_records_when_harness_has_no_request_identity() -> None:
+    records = (
+        _record("answer", 1),
+        _record(
+            "tool-call",
+            2,
+            lane=TrajectoryLane.TOOLS,
+            kind=TrajectoryKind.TOOL_CALL,
+            call_id="tool",
+            timing=Timing(start=2, provenance=TimingProvenance.OBSERVED),
+        ),
+        _record(
+            "tool-result",
+            3,
+            lane=TrajectoryLane.TOOLS,
+            kind=TrajectoryKind.TOOL_RESULT,
+            call_id="tool",
+            timing=Timing(duration_ms=250, provenance=TimingProvenance.SOURCE),
+        ),
+    )
+
+    index = _index(records)
+
+    assert not build_request_index(records).ordered
+    assert len(index.waterfalls) == 1
+    waterfall = index.waterfalls[0]
+    assert waterfall.turn_id == "turn-1"
+    assert waterfall.label == "model activity"
+    assert waterfall.record_ids == ("answer", "tool-call", "tool-result")
+    assert [(row.label, row.scope) for row in waterfall.rows] == [
+        ("model activity", True),
+        ("tool-call", False),
+    ]
 
 
 def test_file_activity_preserves_every_operation_per_path_in_chronological_order() -> None:

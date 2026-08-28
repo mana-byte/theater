@@ -130,9 +130,9 @@ def test_vibe_facts_parse_current_tool_result_shape(workdir: Path) -> None:
     assert result.timing is not None
     assert result.timing.duration_ms == 125
     assert result.timing.provenance is TimingProvenance.SOURCE
-    assert next(detail for detail in result.details if detail.name == "result").preview.text == (
-        '{"content": "file contents"}'
-    )
+    result_detail = next(detail for detail in result.details if detail.name == "result")
+    assert result_detail.format is ContentFormat.JSON
+    assert result_detail.preview.text == '{"content": "file contents"}'
 
 
 def test_vibe_recognizes_tagged_tool_errors_and_cancellation() -> None:

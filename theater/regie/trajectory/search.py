@@ -213,6 +213,7 @@ class SearchResult:
     tools: Mapping[str, TrajectoryToolOperation] = field(default_factory=dict)
     row_id_by_record_id: Mapping[str, str] = field(default_factory=dict)
     request_id_by_row_id: Mapping[str, str] = field(default_factory=dict)
+    show_request_headers: bool = True
 
     @property
     def record_ids(self) -> tuple[str, ...]:
@@ -330,6 +331,7 @@ def search_records(  # noqa: PLR0912, PLR0915
     request_index: RequestIndex | None = None,
     tool_index: ToolIndex | None = None,
     candidate_ids: frozenset[str] | None = None,
+    show_request_headers: bool = True,
 ) -> SearchResult:
     """Filter source order and retain visible step headers."""
     ordered = ordering or build_ordering(records, groups)
@@ -453,13 +455,20 @@ def search_records(  # noqa: PLR0912, PLR0915
                 )
             if len(request_ids) == 1:
                 request_id_by_row_id[row_id] = next(iter(request_ids))
-        entries, requests = compose_request_headers(
-            entries,
-            frozenset(visible_rows),
-            paths,
-            request_index.ordered,
-            request_id_by_row_id,
-        )
+        visible_request_ids = frozenset(request_id_by_row_id.values())
+        requests = {
+            request.request_id: request
+            for request in request_index.ordered
+            if request.request_id in visible_request_ids
+        }
+        if show_request_headers:
+            entries, requests = compose_request_headers(
+                entries,
+                frozenset(visible_rows),
+                paths,
+                request_index.ordered,
+                request_id_by_row_id,
+            )
     return SearchResult(
         records=tuple(matched),
         entries=tuple(entries),
@@ -471,6 +480,7 @@ def search_records(  # noqa: PLR0912, PLR0915
         tools={operation.operation_id: operation for operation in tool_by_anchor.values()},
         row_id_by_record_id=row_id_by_record_id,
         request_id_by_row_id=request_id_by_row_id,
+        show_request_headers=show_request_headers,
     )
 
 

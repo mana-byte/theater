@@ -98,6 +98,7 @@ class TrajectoryViewProjection:
             request_index=state.request_index,
             tool_index=state.tool_index,
             candidate_ids=projection.record_ids,
+            show_request_headers=False,
         )
         self.all_visible_ids = self.search_result.row_ids
         self.all_visible_indices = {

@@ -75,6 +75,18 @@ def _vibe_detail(
     return optional_trajectory_detail(name, value, format=format)
 
 
+def _vibe_result_format(value: object) -> ContentFormat:
+    if isinstance(value, (dict, list)):
+        return ContentFormat.JSON
+    if not isinstance(value, str):
+        return ContentFormat.TEXT
+    try:
+        decoded = json.loads(value)
+    except (TypeError, ValueError):
+        return ContentFormat.TEXT
+    return ContentFormat.JSON if isinstance(decoded, (dict, list)) else ContentFormat.TEXT
+
+
 def _vibe_mcp_identity(value: object) -> tuple[str, str] | None:
     prefix = f"{SERVER_NAME}_"
     if not isinstance(value, str) or not value.startswith(prefix):
@@ -373,10 +385,11 @@ class VibeTrajectoryMixin:
         failure_detail = error or (
             presentation_message if status is TrajectoryStatus.ERROR else None
         )
+        detail_value = output if output is not None else content
         details = tuple(
             value
             for value in (
-                _vibe_detail("result", output if output is not None else content),
+                _vibe_detail("result", detail_value, format=_vibe_result_format(detail_value)),
                 _vibe_detail("tool", name),
                 _vibe_detail("presentation", presentation_kind),
             )

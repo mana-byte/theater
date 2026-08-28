@@ -46,6 +46,7 @@ class ClaudeCodeObserver(
         self._mcp_calls: dict[str, tuple[str, str]] = {}
         self._causal_records: dict[str, _ClaudeCausalRecord] = {}
         self._request_clocks: dict[str, _ClaudeRequestClock] = {}
+        self._main_turn_id: str | None = None
 
     def open_source_context(self, context: ParticipantObservationContext) -> Source:
         return self.open_source_for(

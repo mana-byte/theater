@@ -72,15 +72,42 @@ class ClaudeTrajectory:
     _mcp_calls: dict[str, tuple[str, str]]
     _causal_records: dict[str, _ClaudeCausalRecord]
     _request_clocks: dict[str, _ClaudeRequestClock]
+    _main_turn_id: str | None
+
+    @staticmethod
+    def _starts_turn(record: dict) -> bool:
+        if record.get("type") != "user":
+            return False
+        if record.get("promptSource") == "typed":
+            return True
+        origin = record.get("origin")
+        if isinstance(origin, dict) and origin.get("kind") == "human":
+            return True
+        message = record.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str):
+            return bool(content)
+        return isinstance(content, list) and any(
+            isinstance(block, dict) and block.get("type") == "text" for block in content
+        )
 
     def _trajectory_timing(self, record: dict, timestamp: float | None) -> _ClaudeTimingProjection:
         parent_id = _trajectory_id(record.get("parentUuid") or record.get("parent_uuid"))
         parent = self._causal_records.get(parent_id) if parent_id is not None else None
-        turn_id = _trajectory_id(
+        explicit_turn = _trajectory_id(
             record.get("turn_id") or record.get("turnId") or record.get("promptId")
         )
-        if turn_id is None and parent is not None:
-            turn_id = parent.turn_id
+        record_id = _trajectory_id(record.get("uuid") or record.get("id"))
+        starts_turn = self._starts_turn(record)
+        turn_id = (
+            (explicit_turn or record_id)
+            if starts_turn
+            else explicit_turn
+            or (parent.turn_id if parent is not None else None)
+            or (self._main_turn_id if record.get("isSidechain") is not True else None)
+        )
+        if record.get("isSidechain") is not True and (explicit_turn is not None or starts_turn):
+            self._main_turn_id = turn_id
 
         is_turn_duration = (
             record.get("type") == "system" and record.get("subtype") == "turn_duration"
@@ -104,7 +131,6 @@ class ClaudeTrajectory:
                     record_timing,
                 )
 
-        record_id = _trajectory_id(record.get("uuid") or record.get("id"))
         if record_id is not None:
             anchor = timestamp
             if anchor is None and record_timing is not None:
@@ -164,6 +190,7 @@ class ClaudeTrajectory:
         self._mcp_calls.clear()
         self._causal_records.clear()
         self._request_clocks.clear()
+        self._main_turn_id = None
         scan_start = max(0, start - TRAJECTORY_TRANSCRIPT_HISTORY_MAX_SCAN_BYTES)
         fh.seek(scan_start)
         context = fh.read(start - scan_start)
@@ -184,11 +211,7 @@ class ClaudeTrajectory:
         timing_projection = self._trajectory_timing(record, timestamp)
         timing = timing_projection.record
         record_id = _trajectory_id(record.get("uuid") or record.get("id"))
-        turn_id = _trajectory_id(
-            record.get("turn_id") or record.get("turnId") or record.get("promptId")
-        )
-        if record.get("type") == "system" and record.get("subtype") == "turn_duration":
-            turn_id = turn_id or timing_projection.turn_id
+        turn_id = timing_projection.turn_id
         step_id = _trajectory_id(record.get("step_id") or record.get("stepId"))
         facts: list[TrajectoryFact] = []
 
@@ -242,9 +265,9 @@ class ClaudeTrajectory:
             message_id = _trajectory_id(message.get("id"))
             message_turn = (
                 _trajectory_id(message.get("turn_id") or message.get("turnId"))
+                or turn_id
                 or message_id
                 or _trajectory_id(record.get("requestId"))
-                or turn_id
             )
             stop = message.get("stop_reason")
             message_status = _trajectory_status(

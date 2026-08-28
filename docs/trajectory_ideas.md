@@ -208,7 +208,9 @@ The shared trajectory layer now implements the full delivery order:
 - capability and coverage reporting, current operation, loaded-scope totals, active duration,
   slowest operations, errors, and explicit retry counts;
 - first-class request projections with provider/model, usage, cost provenance, timing diagnostics,
-  typed failures, retry links, and exact retained-record associations;
+  typed failures, retry links, and exact retained-record associations; Régie keeps request data in
+  context and builds turn-scoped waterfall rows even when a harness has no stable request IDs,
+  instead of repeating request headers in the span ledger;
 - paired tool operations with one logical row and bounded detail panel, typed failures, retry
   links, timing, and unmatched-call states;
 - All, Running, Errors, Slow, Tools, and Coordination views over the same cached records;

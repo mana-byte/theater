@@ -881,10 +881,11 @@ class TrajectoryView(Vertical):
             text = self.query_one("#trajectory-span-detail", SpanDetailPanel).copy_text
         elif self.state.selected_record is not None:
             record = self.state.selected_record
+            request = self._request_for_record(record.record_id)
             text = detail_text(
                 record,
-                active_detail_tab(record, self.state.detail_tab),
-                self._request_for_record(record.record_id),
+                active_detail_tab(record, self.state.detail_tab, request),
+                request,
             )
         else:
             text = ""

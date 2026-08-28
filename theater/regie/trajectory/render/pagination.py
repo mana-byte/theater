@@ -61,11 +61,15 @@ def paginate_search_result(result: SearchResult, page: int, page_size: int) -> L
         for record_id, request_id in all_by_record_id.items()
         if request_id in known_request_ids
     }
-    base_entries = base_request_entries(
-        result.entries,
-        page_row_ids,
-        result.group_paths,
-        all_by_record_id,
+    base_entries = (
+        base_request_entries(
+            result.entries,
+            page_row_ids,
+            result.group_paths,
+            all_by_record_id,
+        )
+        if result.show_request_headers
+        else result.entries
     )
     page_entries = tuple(
         entry
@@ -76,13 +80,17 @@ def paginate_search_result(result: SearchResult, page: int, page_size: int) -> L
             else entry.group_id in group_ids
         )
     )
-    entries, requests = compose_request_headers(
-        page_entries,
-        page_row_ids,
-        result.group_paths,
-        ordered_requests,
-        by_record_id,
-    )
+    if result.show_request_headers:
+        entries, requests = compose_request_headers(
+            page_entries,
+            page_row_ids,
+            result.group_paths,
+            ordered_requests,
+            by_record_id,
+        )
+    else:
+        entries = list(page_entries)
+        requests = {request.request_id: request for request in ordered_requests}
     page_result = SearchResult(
         records=records,
         entries=tuple(entries),
@@ -110,6 +118,7 @@ def paginate_search_result(result: SearchResult, page: int, page_size: int) -> L
             for row_id, request_id in result.request_id_by_row_id.items()
             if row_id in page_row_ids
         },
+        show_request_headers=result.show_request_headers,
     )
     return LedgerPage(
         index=index,

@@ -47,10 +47,10 @@ TRAJECTORY_AUXILIARY_ROW_HEIGHT = 2
 # Render compact resource intensity bars in diagnostic tables.
 TRAJECTORY_RESOURCE_HEAT_WIDTH = 8
 TRAJECTORY_RESOURCE_HEAT_GLYPH = "█"
-# Bound waterfall nesting and per-request projection rows.
+# Bound waterfall nesting and per-scope projection rows.
 WATERFALL_BAR_WIDTH = 24
 WATERFALL_MAX_DEPTH = 8
-WATERFALL_ROWS_PER_REQUEST = 64
+WATERFALL_ROWS_PER_SCOPE = 64
 # Recognize structured tool fields that contain file paths.
 TRAJECTORY_FILE_PATH_KEYS = frozenset(
     {
@@ -243,5 +243,5 @@ __all__ = [
     "TRAJECTORY_TOOL_WRITE_HINTS",
     "WATERFALL_BAR_WIDTH",
     "WATERFALL_MAX_DEPTH",
-    "WATERFALL_ROWS_PER_REQUEST",
+    "WATERFALL_ROWS_PER_SCOPE",
 ]

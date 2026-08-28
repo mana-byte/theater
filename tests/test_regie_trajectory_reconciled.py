@@ -988,11 +988,7 @@ def test_span_details_use_only_contextual_tabs() -> None:
         ],
     )
     details = build_span_details(item, InspectorTab.CURRENT)
-    assert details.tabs == (
-        InspectorTab.CURRENT,
-        InspectorTab.PREVIOUS,
-        InspectorTab.DIFF,
-    )
+    assert details.tabs == (InspectorTab.CURRENT,)
     assert details.tab is InspectorTab.CURRENT
 
 
@@ -1009,6 +1005,7 @@ def test_span_details_render_model_prose_as_markdown() -> None:
     assert "• Passed checks" in console.export_text()
     assert "**Passed**" in details.copy_text
     assert "No output supplied" not in details.copy_text
+    assert details.tabs == (InspectorTab.SUMMARY, InspectorTab.OUTPUT)
 
 
 async def test_span_detail_tab_and_content_update_without_rebuilding_ledger(monkeypatch) -> None:

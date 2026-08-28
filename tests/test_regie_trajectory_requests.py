@@ -430,7 +430,7 @@ async def test_ledger_request_headers_are_noninteractive_and_patch_in_place(
 
 
 @pytest.mark.asyncio
-async def test_view_places_request_before_step_and_keeps_record_navigation() -> None:
+async def test_view_omits_request_headers_and_keeps_record_navigation() -> None:
     records = (
         record("first", 1, request_id="shared", turn_id="turn", step_id="step"),
         record("second", 2, request_id="shared", turn_id="turn", step_id="step"),
@@ -448,9 +448,9 @@ async def test_view_places_request_before_step_and_keeps_record_navigation() -> 
         view.state.upsert(records)
         view._refresh()
         ledger = app.query_one(Ledger)
-        assert ledger.entries[0].is_request_header
-        assert ledger.entries[1].is_group_header
-        group_key = f"{Ledger.GROUP_PREFIX}{ledger.entries[1].group_id}"
+        assert ledger.entries[0].is_group_header
+        assert not any(entry.is_request_header for entry in ledger.entries)
+        group_key = f"{Ledger.GROUP_PREFIX}{ledger.entries[0].group_id}"
         assert ledger.ordered_rows[ledger.get_row_index(group_key)].height == 2
         assert view._selected_visible_ids() == ("third",)
         await pilot.press("shift+h")
@@ -491,7 +491,7 @@ async def test_accounting_records_feed_requests_without_rendering_as_activity() 
         request = view.state.request_index.ordered[0]
         assert request.usage == accounting.usage
         assert view.query_one(Timeline).span_ids == ("answer",)
-        assert ledger.line_ids == (None, "answer")
+        assert ledger.line_ids == ("answer",)
         assert all(entry.record_id != "accounting" for entry in ledger.entries)
 
 

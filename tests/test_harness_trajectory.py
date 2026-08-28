@@ -185,6 +185,7 @@ def test_claude_split_blocks_keep_unique_ids_and_derive_request_timing():
     assert reasoning.native_id == "thinking-1"
     assert answer.native_id == "answer-1"
     assert reasoning.request_id == answer.request_id == "request-1"
+    assert reasoning.turn_id == answer.turn_id == "turn-1"
     assert reasoning.timing == Timing(
         start=1787479200.0,
         end=1787479201.0,

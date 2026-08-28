@@ -46,7 +46,7 @@ class RecordDetailProjection:
     blocks: tuple[DetailBlock, ...]
 
 
-def tabs_for_record(record: TrajectoryRecord | None) -> tuple[InspectorTab, ...]:
+def _candidate_tabs_for_record(record: TrajectoryRecord | None) -> tuple[InspectorTab, ...]:
     if record is None:
         return (InspectorTab.SUMMARY,)
     if record.kind in {TrajectoryKind.SYSTEM, TrajectoryKind.CONTEXT}:
@@ -117,6 +117,60 @@ def _fields_for_tab(record: TrajectoryRecord, tab: InspectorTab) -> tuple[Detail
     return tuple(field for field in record.details if _field_key(field.name) in aliases)
 
 
+def _summary_supplies_content(record: TrajectoryRecord, tab: InspectorTab) -> bool:
+    return bool(record.summary) and (
+        (
+            tab is InspectorTab.OUTPUT
+            and (record.kind is TrajectoryKind.ASSISTANT or record.lane is TrajectoryLane.MODEL)
+        )
+        or (tab is InspectorTab.REASONING and record.kind is TrajectoryKind.REASONING)
+        or (
+            tab is InspectorTab.PREVIEW
+            and (record.kind is TrajectoryKind.USER or record.lane is TrajectoryLane.INPUT)
+        )
+    )
+
+
+def _tab_has_content(
+    record: TrajectoryRecord,
+    tab: InspectorTab,
+    request: TrajectoryRequest | None,
+) -> bool:
+    if tab in {InspectorTab.SUMMARY, InspectorTab.SOURCE}:
+        return True
+    if tab in _CONTENT_TABS:
+        return (
+            bool(_fields_for_tab(record, tab))
+            or _summary_supplies_content(record, tab)
+            or (tab is _candidate_tabs_for_record(record)[0] and bool(record.links))
+        )
+    if tab is InspectorTab.USAGE:
+        return (request.usage if request is not None else record.usage) is not None
+    if tab is InspectorTab.TIMING:
+        return (request.timing if request is not None else record.timing) is not None
+    if tab is InspectorTab.ASSOCIATIONS:
+        return request is not None and bool(
+            request.context_record_ids
+            or request.model_record_ids
+            or request.tool_record_ids
+            or request.coordination_record_ids
+            or request.retry_of_record_id
+        )
+    return False
+
+
+def tabs_for_record(
+    record: TrajectoryRecord | None,
+    request: TrajectoryRequest | None = None,
+) -> tuple[InspectorTab, ...]:
+    if record is None:
+        return (InspectorTab.SUMMARY,)
+    tabs = tuple(
+        tab for tab in _candidate_tabs_for_record(record) if _tab_has_content(record, tab, request)
+    )
+    return tabs or (InspectorTab.SUMMARY,)
+
+
 def _format_detail(field: DetailField) -> str:
     preview = field.preview
     if field.format in {ContentFormat.IMAGE, ContentFormat.BINARY}:
@@ -173,18 +227,7 @@ def _record_tab_lines(  # noqa: PLR0912
         InspectorTab.PREVIEW,
     }:
         fields = _fields_for_tab(record, tab)
-        summary_is_content = (
-            (
-                tab is InspectorTab.OUTPUT
-                and (record.kind is TrajectoryKind.ASSISTANT or record.lane is TrajectoryLane.MODEL)
-            )
-            or (tab is InspectorTab.REASONING and record.kind is TrajectoryKind.REASONING)
-            or (
-                tab is InspectorTab.PREVIEW
-                and (record.kind is TrajectoryKind.USER or record.lane is TrajectoryLane.INPUT)
-            )
-        )
-        if not fields and record.summary and summary_is_content:
+        if not fields and _summary_supplies_content(record, tab):
             return ()
         return _field_lines(fields) if fields else (InspectorLine(f"No {tab.value} supplied."),)
     if tab in {InspectorTab.CURRENT, InspectorTab.PREVIOUS, InspectorTab.DIFF}:
@@ -284,7 +327,7 @@ def _project_record_details(
     *,
     resolve_tab: bool,
 ) -> RecordDetailProjection:
-    tabs = tabs_for_record(record)
+    tabs = tabs_for_record(record, request)
     active = requested_tab if not resolve_tab or requested_tab in tabs else tabs[0]
     lines, participant_links, record_links = _detail_lines(record, active, request)
     copy_text = _bounded_lines(lines)
@@ -327,8 +370,12 @@ def project_record_details(
     return _project_record_details(record, requested_tab, request, resolve_tab=True)
 
 
-def active_detail_tab(record: TrajectoryRecord, requested: InspectorTab) -> InspectorTab:
-    return project_record_details(record, requested).tab
+def active_detail_tab(
+    record: TrajectoryRecord,
+    requested: InspectorTab,
+    request: TrajectoryRequest | None = None,
+) -> InspectorTab:
+    return project_record_details(record, requested, request).tab
 
 
 def detail_text(

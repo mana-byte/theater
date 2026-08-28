@@ -570,6 +570,17 @@ def test_supported_plugins_expose_only_stable_request_identity() -> None:
     assert TrajectoryFeature.REQUESTS in VibeObserver.trajectory_capabilities.unsupported
 
 
+def test_claude_requests_share_the_enclosing_user_turn() -> None:
+    facts = _fixture_facts(ClaudeCodeObserver(), "claude_code.jsonl")
+    records = tuple(
+        fact_to_record(fact, participant_id="participant", source_epoch="epoch") for fact in facts
+    )
+    requests = requests_for_records(records)
+
+    assert len(requests) == 3
+    assert {request.turn_id for request in requests} == {"a7775170-45d7-466e-a032-2fa95ae88013"}
+
+
 def test_overview_counts_the_same_canonical_requests() -> None:
     overview = overview_for(
         (

@@ -128,6 +128,7 @@ def test_unmatched_text_and_details_are_explicit() -> None:
 
     assert "awaiting result" in tool_row_text(operation).summary
     assert tool_detail_text(operation, tab=InspectorTab.RESULT) == "No result supplied."
+    assert build_tool_span_details(operation, InspectorTab.RESULT).tabs == (InspectorTab.SUMMARY,)
 
 
 def test_tool_summary_exposes_typed_failure_and_retry_target() -> None:
@@ -277,9 +278,7 @@ def test_tool_details_bound_copy_and_show_omission() -> None:
     assert detail.copy_text == text
     assert detail.tabs == (
         InspectorTab.SUMMARY,
-        InspectorTab.INPUT,
         InspectorTab.RESULT,
-        InspectorTab.TIMING,
     )
 
     themed = build_tool_span_details(
@@ -525,8 +524,20 @@ class _LedgerHost(App):
 
 @pytest.mark.asyncio
 async def test_tool_detail_tabs_render_and_move_in_contextual_order() -> None:
-    call = _tool("call", 1, TrajectoryKind.TOOL_CALL, "one")
-    result = _tool("result", 2, TrajectoryKind.TOOL_RESULT, "one")
+    call = _tool(
+        "call",
+        1,
+        TrajectoryKind.TOOL_CALL,
+        "one",
+        details=(DetailField.from_text("arguments", '{"path":"src"}'),),
+    )
+    result = _tool(
+        "result",
+        2,
+        TrajectoryKind.TOOL_RESULT,
+        "one",
+        details=(DetailField.from_text("result", "done"),),
+    )
     app = _LedgerHost()
 
     async with app.run_test(size=(110, 24)) as pilot:
@@ -672,7 +683,8 @@ async def test_call_only_to_matched_patches_without_rebuild(
         panel = view.query_one(SpanDetailPanel)
         operation_id = next(iter(view.state.tool_index.by_id))
         row_key = f"{Ledger.TOOL_PREFIX}{operation_id}"
-        assert "No result supplied" in panel.copy_text
+        assert panel.tab is InspectorTab.SUMMARY
+        assert InspectorTab.RESULT not in panel.tabs
 
         rebuilds = 0
         original_rebuild = ledger._rebuild
@@ -699,6 +711,8 @@ async def test_call_only_to_matched_patches_without_rebuild(
         assert matched.row_ids == ("call",)
         assert ledger.get_row_index(row_key) >= 0
         assert rebuilds == 0
+        assert InspectorTab.RESULT in panel.tabs
+        panel.set_tab(InspectorTab.RESULT)
         assert "finished" in panel.copy_text
 
         view._refresh()

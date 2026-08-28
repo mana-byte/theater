@@ -84,13 +84,13 @@ def _status(value: TrajectoryStatus) -> Text:
     return Text(value.value.replace("_", " "), style=style, no_wrap=True)
 
 
-def _waterfall_bar(row: WaterfallRow, request: WaterfallProjection) -> Text:
+def _waterfall_bar(row: WaterfallRow, waterfall: WaterfallProjection) -> Text:
     interval = timing_interval(row.timing)
-    if interval is None or request.start is None or request.end is None:
+    if interval is None or waterfall.start is None or waterfall.end is None:
         return Text("timing unavailable", style="dim", no_wrap=True)
-    span = max(request.end - request.start, 1e-9)
-    start = round((interval[0] - request.start) / span * (WATERFALL_BAR_WIDTH - 1))
-    end = round((interval[1] - request.start) / span * (WATERFALL_BAR_WIDTH - 1))
+    span = max(waterfall.end - waterfall.start, 1e-9)
+    start = round((interval[0] - waterfall.start) / span * (WATERFALL_BAR_WIDTH - 1))
+    end = round((interval[1] - waterfall.start) / span * (WATERFALL_BAR_WIDTH - 1))
     start = max(0, min(WATERFALL_BAR_WIDTH - 1, start))
     end = max(start, min(WATERFALL_BAR_WIDTH - 1, end))
     cells = [" " for _ in range(WATERFALL_BAR_WIDTH)]
@@ -99,13 +99,13 @@ def _waterfall_bar(row: WaterfallRow, request: WaterfallProjection) -> Text:
     cells[start] = "╺" if start < end else "◆"
     if start < end:
         cells[end] = "╸"
-    if row.request and request.first_token is not None:
-        token = round((request.first_token - request.start) / span * (WATERFALL_BAR_WIDTH - 1))
+    if row.scope and waterfall.first_token is not None:
+        token = round((waterfall.first_token - waterfall.start) / span * (WATERFALL_BAR_WIDTH - 1))
         if 0 <= token < WATERFALL_BAR_WIDTH:
             cells[token] = "◆"
     return Text(
         "".join(cells),
-        style="cyan dim" if row.request else "yellow dim",
+        style="cyan dim" if row.scope else "yellow dim",
         no_wrap=True,
     )
 
@@ -115,23 +115,27 @@ def _waterfall_entries(
 ) -> tuple[InsightEntry, ...]:
     blocks: deque[tuple[InsightEntry, ...]] = deque()
     total = 0
-    for request in index.waterfalls:
-        matching = [row for row in request.rows if visible.intersection(row.member_record_ids)]
+    for waterfall in index.waterfalls:
+        matching = [row for row in waterfall.rows if visible.intersection(row.member_record_ids)]
         if not matching:
             continue
         entries: list[InsightEntry] = []
-        for row in (row for row in request.rows if row.request or row in matching):
+        for row in (row for row in waterfall.rows if row.scope or row in matching):
             indent = "  " * min(row.depth, 8)
-            label = f"{indent}{'◆' if row.request else '↳'} {_clip(row.label, 30)}"
+            label = f"{indent}{'◆' if row.scope else '↳'} {_clip(row.label, 30)}"
             entries.append(
                 InsightEntry(
                     key=f"waterfall:{row.key}",
                     record_id=row.record_id,
                     member_record_ids=row.member_record_ids,
                     cells=(
-                        "request" if row.request else f"tool {row.depth}",
-                        Text(label, style="cyan dim" if row.request else "yellow dim"),
-                        _waterfall_bar(row, request),
+                        "turn"
+                        if row.scope and waterfall.turn_id is not None
+                        else "model"
+                        if row.scope
+                        else f"tool {row.depth}",
+                        Text(label, style="cyan dim" if row.scope else "yellow dim"),
+                        _waterfall_bar(row, waterfall),
                         format_duration(row.timing),
                         _status(row.status),
                     ),
@@ -331,7 +335,7 @@ def build_insight_table(
         return InsightTableModel(
             (
                 InsightColumn("scope", "SCOPE", 9),
-                InsightColumn("operation", "REQUEST / TOOL", 32),
+                InsightColumn("operation", "TURN / TOOL", 32),
                 InsightColumn("waterfall", "WATERFALL", WATERFALL_BAR_WIDTH),
                 InsightColumn("time", "TIME", 10),
                 InsightColumn("state", "STATE", 12),

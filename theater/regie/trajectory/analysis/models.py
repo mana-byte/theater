@@ -24,12 +24,13 @@ class WaterfallRow:
     timing: Timing | None
     status: TrajectoryStatus
     depth: int = 0
-    request: bool = False
+    scope: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class WaterfallProjection:
-    request_id: str
+    scope_id: str
+    turn_id: str | None
     label: str
     record_ids: tuple[str, ...]
     rows: tuple[WaterfallRow, ...]
@@ -117,8 +118,8 @@ class ProblemActivity:
 @dataclass(frozen=True, slots=True)
 class TrajectoryAnalysisIndex:
     waterfalls: tuple[WaterfallProjection, ...] = ()
-    waterfall_by_id: Mapping[str, WaterfallProjection] = MappingProxyType({})
-    waterfall_id_by_record: Mapping[str, str] = MappingProxyType({})
+    waterfall_by_scope: Mapping[str, WaterfallProjection] = MappingProxyType({})
+    waterfall_scope_by_record: Mapping[str, str] = MappingProxyType({})
     files: tuple[FileActivity, ...] = ()
     delegations: tuple[DelegationActivity, ...] = ()
     resources: tuple[ResourceActivity, ...] = ()
@@ -130,8 +131,8 @@ class TrajectoryAnalysisIndex:
         visible_ids: frozenset[str] | set[str] | None = None,
     ) -> WaterfallProjection | None:
         visible = None if visible_ids is None else frozenset(visible_ids)
-        request_id = self.waterfall_id_by_record.get(record_id or "")
-        candidate = self.waterfall_by_id.get(request_id or "")
+        scope_id = self.waterfall_scope_by_record.get(record_id or "")
+        candidate = self.waterfall_by_scope.get(scope_id or "")
         if candidate is not None and (
             visible is None or visible.intersection(candidate.record_ids)
         ):

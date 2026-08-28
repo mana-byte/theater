@@ -29,17 +29,17 @@ def build_analysis_index(
 ) -> TrajectoryAnalysisIndex:
     ordered = tuple(records)
     positions = {record.record_id: index for index, record in enumerate(ordered)}
-    waterfalls = build_waterfalls(request_index, tool_index, positions)
-    waterfall_by_id = {waterfall.request_id: waterfall for waterfall in waterfalls}
-    waterfall_id_by_record = {
-        record_id: waterfall.request_id
+    waterfalls = build_waterfalls(ordered, request_index, tool_index, positions)
+    waterfall_by_scope = {waterfall.scope_id: waterfall for waterfall in waterfalls}
+    waterfall_scope_by_record = {
+        record_id: waterfall.scope_id
         for waterfall in waterfalls
         for record_id in waterfall.record_ids
     }
     return TrajectoryAnalysisIndex(
         waterfalls=waterfalls,
-        waterfall_by_id=MappingProxyType(waterfall_by_id),
-        waterfall_id_by_record=MappingProxyType(waterfall_id_by_record),
+        waterfall_by_scope=MappingProxyType(waterfall_by_scope),
+        waterfall_scope_by_record=MappingProxyType(waterfall_scope_by_record),
         files=build_file_activity(tool_index, positions),
         delegations=build_delegations(ordered),
         resources=build_resources(request_index),
