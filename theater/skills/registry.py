@@ -14,7 +14,7 @@ from theater.constants.skills import (
     SKILL_MAX_COUNT,
     SKILL_MAX_REJECTIONS,
 )
-from theater.skills.loader import _is_canonical_name, _load_package, _validate_root
+from theater.skills.loader import _load_package, _validate_root, is_canonical_name
 from theater.skills.models import (
     BuiltinSkillError,
     Skill,
@@ -47,7 +47,7 @@ class SkillRegistry:
 
     def load(self, name: str) -> Skill:
         """Load a skill by its canonical name from this snapshot."""
-        if not isinstance(name, str) or not _is_canonical_name(name):
+        if not isinstance(name, str) or not is_canonical_name(name):
             raise UnknownSkill("skill name must be canonical")
         try:
             return self._skills[name]

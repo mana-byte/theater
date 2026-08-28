@@ -13,13 +13,17 @@ from theater.constants.skills import (
     SKILL_MAX_BYTES,
     SKILL_MAX_COUNT,
 )
+from theater.daemon.rpc import skills as skills_rpc
+from theater.models import BadRequest, NotFound
 from theater.skills import (
     BuiltinSkillError,
     Skill,
     SkillRegistry,
+    SkillRejection,
     SkillSource,
     UnknownSkill,
     discover,
+    is_canonical_name,
 )
 
 
@@ -246,6 +250,11 @@ def test_direct_registry_construction_sorts_skills_by_name():
     assert [skill.name for skill in registry.skills] == ["alpha", "zebra"]
 
 
+@pytest.mark.parametrize(("name", "expected"), [("alpha", True), ("not/a-skill", False)])
+def test_canonical_name_predicate_is_public(name, expected):
+    assert is_canonical_name(name) is expected
+
+
 def test_ensure_home_creates_the_skills_directory(monkeypatch, tmp_path):
     root = tmp_path / "state"
     monkeypatch.setenv("THEATER_HOME", str(root))
@@ -254,3 +263,53 @@ def test_ensure_home_creates_the_skills_directory(monkeypatch, tmp_path):
 
     assert paths.skills_dir() == root / "skills"
     assert paths.skills_dir().is_dir()
+
+
+async def test_skill_rpc_serializes_snapshots_and_maps_load_errors(monkeypatch):
+    skill = Skill(
+        "alpha",
+        "A useful skill.",
+        "---\nname: alpha\ndescription: A useful skill.\n---\n\n# Alpha\n",
+        SkillSource.USER,
+        Path("/tmp/skills/alpha/SKILL.md"),
+    )
+    rejection = SkillRejection(
+        SkillSource.USER,
+        Path("/tmp/skills/broken"),
+        "broken",
+        "frontmatter must contain exactly name and description",
+    )
+    snapshot = SkillRegistry({"alpha": skill}, (rejection,))
+    discoveries = []
+
+    def fake_discover():
+        discoveries.append(None)
+        return snapshot
+
+    monkeypatch.setattr(skills_rpc.registry, "discover", fake_discover)
+
+    assert await skills_rpc._skills_list(None, {"ignored": True}) == {
+        "skills": [{"name": "alpha", "description": "A useful skill.", "source": "user"}],
+        "rejections": [
+            {
+                "source": "user",
+                "path": "/tmp/skills/broken",
+                "name": "broken",
+                "error": "frontmatter must contain exactly name and description",
+            }
+        ],
+    }
+    assert await skills_rpc._skills_load(None, {"name": "alpha"}) == {
+        "name": "alpha",
+        "description": "A useful skill.",
+        "source": "user",
+        "content": skill.content,
+    }
+    assert len(discoveries) == 2
+
+    with pytest.raises(BadRequest, match=r"skills\.list"):
+        await skills_rpc._skills_load(None, {"name": "not/a-skill"})
+    with pytest.raises(BadRequest, match="non-empty string"):
+        await skills_rpc._skills_load(None, {"name": ""})
+    with pytest.raises(NotFound, match=r"skills\.list"):
+        await skills_rpc._skills_load(None, {"name": "missing"})

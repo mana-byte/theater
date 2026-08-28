@@ -263,6 +263,9 @@ def _parser() -> argparse.ArgumentParser:
     harnesses = sub.add_parser("harnesses", help="List the coding CLIs Theater knows how to drive.")
     harnesses.add_argument("--json", action="store_true")
 
+    skills = sub.add_parser("skills", help="List declarative agent skills from the running daemon.")
+    skills.add_argument("--json", action="store_true")
+
     conf = sub.add_parser("config", help="Show resolved settings and where they came from.")
     conf.add_argument(
         "topic",

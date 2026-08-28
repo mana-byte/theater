@@ -37,6 +37,7 @@ from theater.cli.commands.process import (
     cmd_mcp,
     cmd_regie,
 )
+from theater.cli.commands.skills import cmd_skills
 from theater.constants.cli import TRANSCRIPT_RECEIPT_COMMAND
 
 COMMANDS = {
@@ -55,6 +56,7 @@ COMMANDS = {
     "bind": cmd_bind,
     "adopt": cmd_adopt,
     "harnesses": cmd_harnesses,
+    "skills": cmd_skills,
     "stats": cmd_stats,
     "gc": cmd_gc,
     "config": cmd_config,

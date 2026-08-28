@@ -61,6 +61,7 @@ from theater.cli.commands.participants import (  # noqa: F401
     cmd_spawn,
 )
 from theater.cli.commands.process import cmd_daemon, cmd_mcp, cmd_regie  # noqa: F401
+from theater.cli.commands.skills import cmd_skills  # noqa: F401
 from theater.cli.errors import BadUsage
 from theater.cli.parser import (  # noqa: F401
     _add_gc_parser,
@@ -117,6 +118,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command not in _PROCESS_COMMANDS and args.command not in {
             "config",
             "harness-event",
+            "skills",
         }:
             harness_registry.install(config.load())
         return _COMMANDS[args.command](args)
