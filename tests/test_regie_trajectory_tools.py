@@ -550,6 +550,51 @@ async def test_tool_detail_tabs_render_and_move_in_contextual_order() -> None:
 
 
 @pytest.mark.asyncio
+async def test_span_detail_reflows_to_the_available_width() -> None:
+    item = _tool(
+        "call",
+        1,
+        TrajectoryKind.TOOL_CALL,
+        "one",
+        details=(
+            DetailField.from_text(
+                "arguments",
+                "A long detail value that should wrap against the current viewport width. " * 8,
+            ),
+        ),
+    )
+    app = _LedgerHost()
+
+    async with app.run_test(size=(52, 24)) as pilot:
+        view = app.query_one(TrajectoryView)
+        view.state.upsert((item,))
+        view._refresh()
+        view.state.detail_tab = InspectorTab.INPUT
+        view._open_details("call")
+        await pilot.pause()
+
+        panel = view.query_one(SpanDetailPanel)
+        log = panel.query_one(f"#{panel._log_id(panel.tab)}", RichLog)
+        narrow_width = log.scrollable_content_region.width
+        assert log.virtual_size.width == narrow_width
+
+        await pilot.resize_terminal(100, 24)
+        await pilot.pause()
+
+        wide_width = log.scrollable_content_region.width
+        assert wide_width > narrow_width
+        assert log.virtual_size.width == wide_width
+
+        for _ in range(5):
+            for key in ("h", "l"):
+                await pilot.press(key)
+                await pilot.pause()
+                log = panel.query_one(f"#{panel._log_id(panel.tab)}", RichLog)
+                assert log.scrollable_content_region.width > 1
+                assert log.virtual_size.width == log.scrollable_content_region.width
+
+
+@pytest.mark.asyncio
 async def test_result_member_hover_and_expansion_target_combined_row() -> None:
     call = _tool(
         "call",

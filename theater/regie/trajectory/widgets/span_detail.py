@@ -200,6 +200,10 @@ class SpanDetailPanel(Vertical):
         self._details: SpanDetails | None = None
         self._collapsed_json_paths: set[str] = set()
         self._syncing_tabs = False
+        self._rendered_widths: dict[InspectorTab, int] = {}
+        self._reflow_pending = False
+        self._reflow_force = False
+        self._reflow_scroll_y: float | None = None
 
     @staticmethod
     def _pane_id(tab: InspectorTab) -> str:
@@ -217,7 +221,13 @@ class SpanDetailPanel(Vertical):
         with TabbedContent(id="trajectory-span-detail-tabs"):
             for tab in InspectorTab:
                 with TabPane(tab.value.replace("_", " ").title(), id=self._pane_id(tab)):
-                    yield RichLog(id=self._log_id(tab), wrap=True, markup=False, highlight=False)
+                    yield RichLog(
+                        id=self._log_id(tab),
+                        min_width=1,
+                        wrap=True,
+                        markup=False,
+                        highlight=False,
+                    )
 
     @property
     def record_id(self) -> str | None:
@@ -307,13 +317,50 @@ class SpanDetailPanel(Vertical):
         self._sync_tabs()
         if self._details is None:
             return
+        tab = self._details.tab
         log = self.query_one(f"#{self._log_id(self._details.tab)}", RichLog)
+        width = log.scrollable_content_region.width
+        if width <= 0:
+            self._schedule_reflow(scroll_y, force=True)
+            return
         log.clear()
-        log.write(self._details.content, expand=True, shrink=True, scroll_end=False)
+        log.write(self._details.content, width=width, scroll_end=False)
+        self._rendered_widths[tab] = width
         if scroll_y is None:
             log.scroll_home(animate=False)
         else:
-            log.scroll_to(y=scroll_y, animate=False, force=True)
+            log.scroll_to(x=0, y=scroll_y, animate=False, force=True)
+
+    def on_resize(self, _event: events.Resize) -> None:
+        if self._details is None or not self.is_mounted:
+            return
+        log = self.query_one(f"#{self._log_id(self._details.tab)}", RichLog)
+        self._schedule_reflow(float(log.scroll_y))
+
+    def _schedule_reflow(self, scroll_y: float | None = None, *, force: bool = False) -> None:
+        if not self.is_mounted or self._details is None:
+            return
+        self._reflow_scroll_y = scroll_y
+        self._reflow_force = self._reflow_force or force
+        if self._reflow_pending:
+            return
+        self._reflow_pending = True
+        self.call_after_refresh(self._reflow_content)
+
+    def _reflow_content(self) -> None:
+        self._reflow_pending = False
+        force = self._reflow_force
+        scroll_y = self._reflow_scroll_y
+        self._reflow_force = False
+        self._reflow_scroll_y = None
+        if not self.is_mounted or self._details is None:
+            return
+        tab = self._details.tab
+        log = self.query_one(f"#{self._log_id(self._details.tab)}", RichLog)
+        width = log.scrollable_content_region.width
+        if width <= 0 or (not force and width == self._rendered_widths.get(tab)):
+            return
+        self._render_content(scroll_y)
 
     def set_span(
         self,
@@ -332,6 +379,9 @@ class SpanDetailPanel(Vertical):
             and self._details is not None
             and tab is self._details.tab
         ):
+            if self.is_mounted:
+                log = self.query_one(f"#{self._log_id(self._details.tab)}", RichLog)
+                self._schedule_reflow(float(log.scroll_y))
             return self.tab
         preserve_scroll = (
             self._record is not None
@@ -349,8 +399,7 @@ class SpanDetailPanel(Vertical):
         self._request = request
         self._details = self._build_details(tab)
         self._render_content(scroll_y)
-        if self.is_mounted:
-            self.call_after_refresh(self._render_content, scroll_y)
+        self._schedule_reflow(scroll_y, force=True)
         return self.tab
 
     def set_tab(self, tab: InspectorTab) -> InspectorTab:
@@ -358,6 +407,7 @@ class SpanDetailPanel(Vertical):
             return self.tab
         self._details = self._build_details(tab)
         self._render_content()
+        self._schedule_reflow(force=True)
         self.post_message(SpanDetailTabChanged(self.tab))
         return self.tab
 
