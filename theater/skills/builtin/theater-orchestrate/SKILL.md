@@ -55,6 +55,19 @@ decision. Keep entries concise and namespaced to the orchestration. Update stale
 plan changes. Never place credentials or other secrets there, and do not treat scratchpad state as a
 durable project artifact.
 
+## Keep orchestration work local
+
+Delegate substantive, independently verifiable work: investigation, reproduction, audit, review,
+implementation, focused tests, migrations, and documentation coupled to an implementation. Keep
+planning, worker coordination, integration, final validation, user updates, final responses, and PR
+descriptions with the orchestrator. Do not delegate a prose-only summary or report merely to save
+context or tokens.
+
+A worker may own a complete bounded delivery workflow only when the user explicitly requests it.
+For example, delegating a PR may include investigating the changes, drafting the description, and
+submitting it; do not delegate only its prose. Submission still requires the user's authority for
+that external side effect, and the orchestrator remains responsible for reviewing the result.
+
 ## Spawn workers
 
 Every worker must:
