@@ -14,6 +14,7 @@ from theater.harness import HARNESSES, UNKNOWN_ICON, harness_icon, normalize
 from theater.harness.normalization import (
     finite_float,
     iso_epoch,
+    json_container_format,
     nonnegative_int,
     safe_trajectory_text,
     stable_json,
@@ -94,6 +95,22 @@ def test_trajectory_detail_uses_safe_text_or_stable_json():
     payload = trajectory_detail("data", {"b": 2, "a": 1}, format=ContentFormat.JSON)
     assert (text.preview.text, text.format) == ("bad?", ContentFormat.TEXT)
     assert (payload.preview.text, payload.format) == ('{"a":1,"b":2}', ContentFormat.JSON)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ({"ok": True}, ContentFormat.JSON),
+        ([1, 2], ContentFormat.JSON),
+        ('{"ok":true}', ContentFormat.JSON),
+        ("[1,2]", ContentFormat.JSON),
+        ('"text"', ContentFormat.TEXT),
+        ("42", ContentFormat.TEXT),
+        ("plain text", ContentFormat.TEXT),
+    ],
+)
+def test_json_container_format_rejects_json_scalars(value, expected):
+    assert json_container_format(value) is expected
 
 
 @pytest.mark.parametrize(

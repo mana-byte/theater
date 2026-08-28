@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.normalization.facts import tool_failure
+from theater.harness.normalization.values import json_container_format
 from theater.trajectory.content import ContentFormat, DetailField
 from theater.trajectory.enums import TrajectoryFailureCategory, TrajectoryKind, TrajectoryStatus
 from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryUsage
@@ -252,7 +253,9 @@ class OpenCodeTrajectory:
         ]
         if state_status in ("completed", "error"):
             result = _tool_output(state)
-            result_detail = _trajectory_detail("result", result)
+            result_detail = _trajectory_detail(
+                "result", result, format=json_container_format(result)
+            )
             facts.append(
                 _stored_fact(
                     kind=TrajectoryKind.TOOL_RESULT,
@@ -509,7 +512,9 @@ class OpenCodeTrajectory:
         if state_status in ("completed", "error"):
             result = _tool_output(state)
             result_details: list[DetailField] = []
-            result_detail = _trajectory_detail("result", result)
+            result_detail = _trajectory_detail(
+                "result", result, format=json_container_format(result)
+            )
             if result_detail is not None:
                 result_details.append(result_detail)
             result_fact = self._live_fact(

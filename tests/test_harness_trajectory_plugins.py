@@ -554,10 +554,39 @@ def test_opencode_facts_upsert_running_tool_to_terminal(rec, workdir) -> None:
     assert first_call.request_id == second_call.request_id == "opencode:message-1"
     assert result.call_id == second_call.call_id == "call-1"
     assert result.request_id == "opencode:message-1"
+    assert result.details[0].format is ContentFormat.TEXT
 
     rec._part({**running, "state": {"status": "completed", "output": "done"}})
     duplicate = asyncio.run(source.read())
     assert duplicate.trajectory == ()
+
+
+def test_opencode_marks_json_tool_results_live_and_in_history(rec, workdir) -> None:
+    source = _source(rec, workdir)
+    message = rec.message("message-1", "assistant")
+    rec._part(
+        {
+            "id": "part-1",
+            "messageID": message["id"],
+            "type": "tool",
+            "callID": "call-1",
+            "tool": "external_call",
+            "state": {"status": "completed", "output": '{"ok":true,"items":[1,2]}'},
+        }
+    )
+
+    live = asyncio.run(source.read())
+    history = asyncio.run(source.history_page(limit=10))
+    results = [
+        next(fact for fact in facts if fact.kind is TrajectoryKind.TOOL_RESULT)
+        for facts in (live.trajectory, history.trajectory)
+    ]
+
+    assert [result.details[0].format for result in results] == [
+        ContentFormat.JSON,
+        ContentFormat.JSON,
+    ]
+    assert all(result.details[0].preview.text == '{"ok":true,"items":[1,2]}' for result in results)
 
 
 def test_opencode_live_trajectory_state_is_bounded(rec, workdir) -> None:

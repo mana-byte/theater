@@ -16,6 +16,7 @@ from theater.harness.normalization.facts import (
 )
 from theater.harness.normalization.usage import trajectory_usage_from_token_usage
 from theater.harness.normalization.values import (
+    json_container_format,
     loose_trajectory_text,
     optional_trajectory_detail,
     trajectory_identifier,
@@ -73,18 +74,6 @@ def _vibe_detail(
     name: str, value, *, format: ContentFormat = ContentFormat.TEXT
 ) -> DetailField | None:
     return optional_trajectory_detail(name, value, format=format)
-
-
-def _vibe_result_format(value: object) -> ContentFormat:
-    if isinstance(value, (dict, list)):
-        return ContentFormat.JSON
-    if not isinstance(value, str):
-        return ContentFormat.TEXT
-    try:
-        decoded = json.loads(value)
-    except (TypeError, ValueError):
-        return ContentFormat.TEXT
-    return ContentFormat.JSON if isinstance(decoded, (dict, list)) else ContentFormat.TEXT
 
 
 def _vibe_named_mcp_identity(value: object, tool: object) -> tuple[str, str] | None:
@@ -420,7 +409,7 @@ class VibeTrajectoryMixin:
         details = tuple(
             value
             for value in (
-                _vibe_detail("result", detail_value, format=_vibe_result_format(detail_value)),
+                _vibe_detail("result", detail_value, format=json_container_format(detail_value)),
                 _vibe_detail("tool", name),
                 _vibe_detail("presentation", presentation_kind),
             )

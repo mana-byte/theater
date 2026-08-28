@@ -50,6 +50,19 @@ def stable_json(value: object) -> str:
         return json.dumps(str(value), ensure_ascii=True)
 
 
+def json_container_format(value: object) -> ContentFormat:
+    """Identify native objects or strings containing a JSON object or array."""
+    if isinstance(value, (dict, list)):
+        return ContentFormat.JSON
+    if not isinstance(value, str):
+        return ContentFormat.TEXT
+    try:
+        decoded = json.loads(value)
+    except (TypeError, ValueError):
+        return ContentFormat.TEXT
+    return ContentFormat.JSON if isinstance(decoded, (dict, list)) else ContentFormat.TEXT
+
+
 def trajectory_detail(name: str, value: object, *, format: ContentFormat) -> DetailField:
     """Build a trajectory detail field from text or stable JSON."""
     text = value if isinstance(value, str) else stable_json(value)
