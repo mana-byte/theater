@@ -23,6 +23,7 @@ from theater.daemon.rails import (
     check_wait_cycle,
 )
 from theater.daemon.registry import Registry
+from theater.models import Status
 
 # ---- depth cap ----------------------------------------------------------
 
@@ -167,6 +168,28 @@ def test_budget_counts_entire_subtree(store):
     # 3 participants. Budget 3 means the tree is full.
     with pytest.raises(BudgetExceeded):
         check_budget(store, child.id, limit=3)
+
+
+def test_dead_leaf_releases_budget(store):
+    reg = Registry(store)
+    root = reg.create_spawned(harness="vibe", cwd="/tmp")
+    dead = reg.create_spawned(harness="vibe", cwd="/tmp", parent_id=root.id)
+    store.set_status(dead.id, Status.DEAD)
+
+    check_budget(store, root.id, limit=2)
+
+
+def test_dead_intermediary_does_not_hide_live_descendant_from_budget(store):
+    reg = Registry(store)
+    root = reg.create_spawned(harness="vibe", cwd="/tmp")
+    dead = reg.create_spawned(harness="vibe", cwd="/tmp", parent_id=root.id)
+    live = reg.create_spawned(harness="vibe", cwd="/tmp", parent_id=dead.id)
+    store.set_status(dead.id, Status.DEAD)
+
+    with pytest.raises(BudgetExceeded, match="2 live participants"):
+        check_budget(store, root.id, limit=2)
+
+    assert live.status is Status.IDLE
 
 
 # ---- the model allowlist ------------------------------------------------
