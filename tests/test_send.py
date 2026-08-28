@@ -153,7 +153,7 @@ async def test_adopted_vibe_send_and_history_work_after_operator_bind(
         await client.call("send", target=target["id"], prompt="before bind")
     assert exc.value.code == "transcript_untrusted"
     with pytest.raises(RemoteError, match="cwd/time"):
-        await client.call("read_transcript", id=target["id"], last_n=0)
+        await client.call("read_transcript", id=target["id"])
 
     rows = await client.call("transcript.candidates", id=target["id"])
     assert [row["location"] for row in rows["candidates"]] == [str(candidate.resolve())]
@@ -165,7 +165,7 @@ async def test_adopted_vibe_send_and_history_work_after_operator_bind(
         confirm_id=target["id"],
     )
     job = await client.call("send", target=target["id"], prompt="after bind")
-    history = await client.call("read_transcript", id=target["id"], last_n=0)
+    history = await client.call("read_transcript", id=target["id"])
 
     assert job["state"] == "running"
     assert fake_tmux.sent == [("%1", "after bind")]

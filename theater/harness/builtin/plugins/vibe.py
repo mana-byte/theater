@@ -651,9 +651,19 @@ class _VibeSource(Source):
         return await self._inner.history(last_n=last_n)
 
     async def history_page(
-        self, *, before: str | None = None, limit: int = TRAJECTORY_PAGE_RECORD_LIMIT
+        self,
+        *,
+        before: str | None = None,
+        snapshot: str | None = None,
+        limit: int = TRAJECTORY_PAGE_RECORD_LIMIT,
+        include_full_text: bool = False,
     ):
-        return await self._inner.history_page(before=before, limit=limit)
+        return await self._inner.history_page(
+            before=before,
+            snapshot=snapshot,
+            limit=limit,
+            include_full_text=include_full_text,
+        )
 
     async def aclose(self) -> None:
         await self._inner.aclose()

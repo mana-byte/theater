@@ -354,13 +354,14 @@ Three fields in that contract are load-bearing:
   The observer sleeps and runs no timers, because a quiet timer against a
   source that has never spoken measures nothing.
 
-A source has one more job, and it is not the observer's: `history(last_n)`
-returns the session from the beginning, unclipped, and is what `read_transcript`
-calls. `read()` is a tail and cannot answer that question — by the time an agent
-asks for the full text of a reply, the batch carrying it is long gone. The
-default implementation re-reads the file with clipping off; a database source
-writes its own query. A custom source that skips it does not error, it just
-returns nothing, which is the one feature a source can silently lose.
+A source has one more job, and it is not the observer's: `history_page` reads a
+bounded history window without advancing the live cursor, and is what
+`read_transcript` calls. `read()` is a tail and cannot answer that question — by
+the time an agent asks for older text, the batch carrying it is long gone. File
+and database sources page from their own storage cursors; the generic pager
+owns the MCP response budget and continuation chunks. The legacy
+`history(last_n)` projection remains for internal consumers, but is not the
+agent-facing transcript surface.
 
 **Why not let a plugin bring its own observer?** Because job 2 would then be
 written once per harness, and the settling logic, the rescue and the
@@ -522,8 +523,9 @@ ceiling comes back as `running` and the caller decides whether to re-await.
 
 The agent-facing reply drops `prompt` and `result` from each entry. The prompt
 is what the caller already sent, and `result` was only ever a 2000-char clip of
-the child's turn; an agent that wants what the child said or did reads the
-transcript directly via `read_transcript`, which returns it whole.
+the child's turn; an agent that wants what the child said or did reads bounded
+transcript pages via `read_transcript`, continuing only with Theater's returned
+cursor when needed.
 
 The in-memory events do not survive a daemon restart, and that is correct — a
 restarted daemon has no observer attached yet, so an in-flight await would have

@@ -1531,7 +1531,7 @@ async def test_read_transcript_by_dead_name_fails_not_found(client, fake_tmux):
     await client.call("participant.kill", id=record["id"])
 
     with pytest.raises(RemoteError) as exc:
-        await client.call("read_transcript", id=_FIXED_NAME, last_n=5)
+        await client.call("read_transcript", id=_FIXED_NAME)
     assert exc.value.code == "not_found"
 
 

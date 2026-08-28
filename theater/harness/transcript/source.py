@@ -279,15 +279,26 @@ class TranscriptSource(Source):
             pinned=pinned,
         )
 
-    async def history_page(
-        self, *, before: str | None = None, limit: int = TRAJECTORY_PAGE_RECORD_LIMIT
+    async def history_page(  # noqa: PLR0912
+        self,
+        *,
+        before: str | None = None,
+        snapshot: str | None = None,
+        limit: int = TRAJECTORY_PAGE_RECORD_LIMIT,
+        include_full_text: bool = False,
     ) -> HistoryPage:
         """Read a bounded JSONL window without touching the live tail cursor."""
         if type(limit) is not int or limit <= 0:
             return HistoryPage(
                 error_code="invalid_limit", error="history page limit must be positive"
             )
+        if before is not None and snapshot is not None:
+            return HistoryPage(
+                error_code="history_cursor_invalid",
+                error="history page accepts either an older cursor or a snapshot cursor",
+            )
         limit = min(limit, TRAJECTORY_PAGE_RECORD_LIMIT)
+        page_cursor = before if before is not None else snapshot
         pinned = self._known_location is not None
         path = self.path
         if path is None and self._known_location is not None:
@@ -299,9 +310,15 @@ class TranscriptSource(Source):
         if path is None:
             path = await self._locate(session_id=self._session_id)
         if path is None:
+            if page_cursor is not None:
+                return HistoryPage(
+                    error_code="history_cursor_invalid",
+                    error="history cursor cannot be used because the transcript is unavailable",
+                    pinned=pinned,
+                )
             return HistoryPage(pinned=pinned)
         if path_error := self._history_path_error(path, pinned=pinned):
-            if before is not None and path_error.error_code is None:
+            if page_cursor is not None and path_error.error_code is None:
                 return HistoryPage(
                     location=path_error.location,
                     error_code="history_cursor_invalid",
@@ -319,20 +336,21 @@ class TranscriptSource(Source):
         try:
             reader = self._history_reader()
             end, end_index, cursor_identity = (
-                reader.decode_page_cursor(before, path)
-                if before is not None
+                reader.decode_page_cursor(page_cursor, path)
+                if page_cursor is not None
                 else (None, None, None)
             )
-            live_offset = self.offset if before is None and self.path == path else None
-            live_index = self.index if before is None and self.path == path else None
+            live_offset = self.offset if page_cursor is None and self.path == path else None
+            live_index = self.index if page_cursor is None and self.path == path else None
             result = await asyncio.to_thread(
                 reader.read_page,
                 path,
                 end=end,
-                end_index=end_index if before is not None else live_index,
+                end_index=end_index if page_cursor is not None else live_index,
                 live_offset=live_offset,
                 limit=limit,
                 expected_identity=cursor_identity,
+                include_full_text=include_full_text,
             )
         except HistoryPageError as exc:
             return HistoryPage(error_code=exc.code, error=str(exc), pinned=pinned)
@@ -351,14 +369,17 @@ class TranscriptSource(Source):
                 pinned=pinned,
             )
         session_id = self._observer.session_id(path)
+        snapshot_cursor = reader.encode_page_cursor(
+            path, result.page_end, result.page_end_index, result.identity
+        )
         return HistoryPage(
             location=str(path),
             events=result.events,
+            complete_events=result.complete_events if include_full_text else None,
             trajectory=result.facts,
             trajectory_events=result.trajectory_events,
-            cursor=reader.encode_page_cursor(
-                path, result.page_end, result.page_end_index, result.identity
-            ),
+            cursor=snapshot_cursor,
+            snapshot_cursor=snapshot_cursor,
             older_cursor=(
                 reader.encode_page_cursor(
                     path, result.start, result.start_index, result.older_identity
@@ -368,6 +389,7 @@ class TranscriptSource(Source):
             ),
             has_older=0 < result.start < result.page_end,
             provenance=self.correlation_for(path, session_id),
+            collision_domain=self.collision_domain,
             pinned=pinned,
         )
 

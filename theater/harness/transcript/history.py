@@ -32,6 +32,7 @@ class HistoryPageError(ValueError):
 @dataclass(frozen=True, slots=True)
 class PageReadResult:
     events: tuple[Event, ...]
+    complete_events: tuple[Event, ...]
     facts: tuple[TrajectoryFact, ...]
     trajectory_events: tuple[Event, ...]
     start: int
@@ -70,6 +71,7 @@ class HistoryReader:
         live_offset: int | None,
         limit: int,
         expected_identity: dict[str, object] | None,
+        include_full_text: bool = False,
     ) -> PageReadResult:
         with path.open("rb") as fh:
             stat = os.fstat(fh.fileno())
@@ -100,15 +102,19 @@ class HistoryReader:
             else:
                 line_index_base = page_end_index - len(lines)
                 selected_end_index = page_end_index
-            events, facts, trajectory_events, start, start_index = self.select_page_records(
-                lines,
-                line_index_base=line_index_base,
-                page_end_index=page_end_index,
-                page_end=page_end,
-                limit=limit,
+            events, complete_events, facts, trajectory_events, start, start_index = (
+                self.select_page_records(
+                    lines,
+                    line_index_base=line_index_base,
+                    page_end_index=page_end_index,
+                    page_end=page_end,
+                    limit=limit,
+                    include_full_text=include_full_text,
+                )
             )
             return PageReadResult(
                 events=tuple(events),
+                complete_events=tuple(complete_events),
                 facts=tuple(facts),
                 trajectory_events=tuple(trajectory_events),
                 start=start,
@@ -149,34 +155,50 @@ class HistoryReader:
         page_end_index: int | None,
         page_end: int,
         limit: int,
-    ) -> tuple[list[Event], list[TrajectoryFact], list[Event], int, int | None]:
+        include_full_text: bool = False,
+    ) -> tuple[
+        list[Event],
+        list[Event],
+        list[TrajectoryFact],
+        list[Event],
+        int,
+        int | None,
+    ]:
         selected_position = max(0, len(lines) - limit)
         parsed_lines: list[
-            tuple[int, int, tuple[Event, ...], tuple[TrajectoryFact, ...], tuple[Event, ...]]
+            tuple[
+                int,
+                int,
+                tuple[Event, ...],
+                tuple[Event, ...],
+                tuple[TrajectoryFact, ...],
+                tuple[Event, ...],
+            ]
         ] = []
         for position in range(selected_position, len(lines)):
             record_offset, raw = lines[position]
             line = raw.decode("utf-8", errors="replace").strip()
             if not line:
-                parsed_lines.append((position, record_offset, (), (), ()))
+                parsed_lines.append((position, record_offset, (), (), (), ()))
                 continue
             parsed = self._parse_record(line, line_index_base + position)
             decorated = self._decorate_parsed(parsed, record_offset)
+            record_complete_events = tuple(
+                event for event in decorated.events if not event.usage_only
+            )
             parsed_lines.append(
                 (
                     position,
                     record_offset,
-                    tuple(
-                        bound_history_event(event)
-                        for event in decorated.events
-                        if not event.usage_only
-                    ),
+                    tuple(bound_history_event(event) for event in record_complete_events),
+                    record_complete_events,
                     tuple(decorated.trajectory),
                     tuple(bound_history_event(event) for event in decorated.baseline_events),
                 )
             )
 
         events: list[Event] = []
+        full_events: list[Event] = []
         facts: list[TrajectoryFact] = []
         trajectory_events: list[Event] = []
         selected: list[tuple[int, int]] = []
@@ -184,17 +206,20 @@ class HistoryReader:
             position,
             record_offset,
             candidate_events,
+            candidate_complete_events,
             candidate_facts,
             candidate_trajectory_events,
         ) in reversed(parsed_lines):
-            if len(candidate_events) > limit or len(candidate_facts) > limit:
+            if not include_full_text and (
+                len(candidate_events) > limit or len(candidate_facts) > limit
+            ):
                 if not selected:
                     raise HistoryPageError(
                         "history_record_too_large",
                         "one transcript record exceeds the history page limit",
                     )
                 break
-            if (
+            if not include_full_text and (
                 len(events) + len(candidate_events) > limit
                 or len(facts) + len(candidate_facts) > limit
                 or len(trajectory_events) + len(candidate_trajectory_events) > limit
@@ -202,6 +227,7 @@ class HistoryReader:
                 break
             selected.append((position, record_offset))
             events[0:0] = candidate_events
+            full_events[0:0] = candidate_complete_events
             facts[0:0] = candidate_facts
             trajectory_events[0:0] = candidate_trajectory_events
         selected.reverse()
@@ -211,7 +237,11 @@ class HistoryReader:
         else:
             start = page_end
             start_index = None
-        return events, facts, trajectory_events, start, start_index
+        if include_full_text:
+            events = events[-limit:]
+            facts = facts[-limit:]
+            trajectory_events = trajectory_events[-limit:]
+        return events, full_events, facts, trajectory_events, start, start_index
 
     @staticmethod
     def byte_at(fh: BinaryIO, offset: int) -> bytes:

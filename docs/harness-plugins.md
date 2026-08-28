@@ -583,36 +583,36 @@ awaiting-input check. That policy is written once and it is where every
 observation bug in this project has been. A source reports facts; it must not
 touch the registry, the bus or the job manager.
 
-One optional method is worth implementing: `history`.
+One optional method is worth implementing: `history_page`.
 
 ```python
-async def history(self, *, last_n: int) -> History:
+async def history_page(
+    self, *, before: str | None = None, snapshot: str | None = None,
+    limit: int = 200,
+    include_full_text: bool = False,
+) -> HistoryPage:
 ```
 
-`read` is a tail — it answers "what happened since I last looked". `history`
-answers "what has this session said, from the beginning", and it is what backs
-the `read_transcript` tool, which exists because the bus clips long replies and
-an agent sometimes needs the whole thing. `TranscriptSource.history`
-re-reads the file with clipping off; the base `Source.history` returns an
-empty `History()` — which is what a source over a database has to replace.
-Skip it and the default `Source.history` returns `History()` with
-`location=None`, which `read_transcript` rejects as
-`BadRequest("cannot read transcript: transcript no longer exists on disk")`
-— a misleading message that blames a missing file rather than an
-unimplemented method. A caller that searches for that string will not find
-the real cause, which is that the source never overrode `history`.
+`read` is a tail — it answers "what happened since I last looked". The
+agent-facing `read_transcript` call uses `history_page` with a fixed bounded
+newest source batch. With `include_full_text=True`, return complete events for
+those bounded source records in `HistoryPage.complete_events`; the daemon pager
+owns response sizing and opaque continuation cursors. The source owns `cursor`,
+`snapshot_cursor`, `older_cursor`, transcript identity, and provenance. `before`
+is the source cursor returned in `older_cursor`; `snapshot` replays the same
+newest boundary for a split event. Neither is an agent-authored offset.
 
-Two rules. Return the *newest* `last_n` events, `0` meaning all. And do not clip
-text: clipping is the caller's job, and this is the path a caller takes
-precisely because the clipped copy was not enough.
+The base `Source.history_page` provides a newest-page fallback for sources that
+only implement legacy history, but it cannot page older content. A file source
+or database source should implement bounded paging directly so it does not
+read the whole transcript before slicing it.
 
-A third rule is not about the events but about the `History` object itself:
-`History.correlation` defaults to `heuristic`. The `read_transcript` tool
-refuses a history whose correlation is not trusted, so a source that builds a
-`History` with the default and no override will have its transcript rejected
-as untrusted — the same trust gap that attachments face, applied to the
-history path. Set `correlation` to whatever the source can prove; if it cannot
-prove ownership, leave the default and know that `read_transcript` will refuse
+The legacy `history` method remains for internal consumers that still need its
+unclipped projection. It is not the agent-facing transcript paging surface.
+
+The page provenance defaults to `heuristic`. The `read_transcript` tool refuses
+an untrusted page, so set `HistoryPage.provenance` to what the source can prove;
+if it cannot prove ownership, leave the default and the daemon will refuse
 until the participant is bound by an operator or proven by the daemon.
 
 ## A complete plugin

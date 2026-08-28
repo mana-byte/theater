@@ -221,6 +221,8 @@ async def test_read_transcript_schema_uses_target_not_target_id(daemon):
     transcript = schema["read_transcript"]
     assert "target" in transcript["properties"]
     assert "target_id" not in transcript["properties"]
+    assert set(transcript["properties"]) == {"target", "cursor"}
+    assert transcript["properties"]["cursor"]["default"] is None
     assert transcript["required"] == ["target"]
 
 
@@ -426,8 +428,14 @@ async def test_read_transcript_docstring_describes_direct_live_names(daemon):
     desc = tools["read_transcript"].lower()
     assert "current live name" in desc
     assert "do not call" in desc
+    assert "next_cursor" in desc
+    assert "bounded" in desc
+    assert "last_n" not in desc
+    assert "all events" not in desc
     assert "list_participants first" in desc
     assert "dead reads require the stable id" in desc
+    assert "response budget" in desc
+    assert "reaches_text_start" in desc
 
 
 # ---- list_participants: resume_state pinned to spawner (test 15) ----------

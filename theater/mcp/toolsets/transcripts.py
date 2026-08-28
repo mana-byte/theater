@@ -1,32 +1,27 @@
-"""Transcript reading tools.
-
-The agent-facing ``await_sessions`` reply drops prompt and result text; this
-is where an agent goes to get the full, unclipped text instead.
-"""
+"""Bounded transcript reading for agents."""
 
 from __future__ import annotations
 
 from theater.mcp.session import Session
 
 
-async def read_transcript(session: Session, *, target: str, last_n: int = 5) -> dict:
-    """Read the transcript of a participant, returning full unclipped text.
+async def read_transcript(session: Session, *, target: str, cursor: str | None = None) -> dict:
+    """Read one bounded newest transcript page, then page toward older content.
 
-    The agent-facing await_sessions reply drops prompt and result text.
-    This method returns the full assistant responses from the transcript on
-    disk, so a caller that needs the complete text can get it.
+    Call once with a known live name or stable id, inspect the newest bounded
+    chunk, and use only its next_cursor when older content is necessary.
+    Stop when the needed event is found. Do not list participants first.
 
-    ``target`` accepts a participant id or a current live name directly; do
-    not call ``list_participants`` first when the live name is known. Dead
+    target accepts a participant id or a current live name directly. Dead
     names are cleared and recyclable, so reading a dead participant requires
-    its stable id while the retained row exists.
-
-    Returns the last `last_n` events (user, assistant, tool_call,
-    tool_result) from the transcript, in chronological order. Each entry
-    has `role`, `text` (full, unclipped), `tool_name`, and `turn_end`.
+    its stable id while the retained row exists. cursor is an opaque value
+    returned by Theater; omit it for the newest page.
     """
     if not session._resolved:
         await session.identify()
-    record = await session.client.call("read_transcript", id=target, last_n=last_n)
+    params = {"id": target}
+    if cursor is not None:
+        params["cursor"] = cursor
+    record = await session.client.call("read_transcript", **params)
     assert isinstance(record, dict)
     return record

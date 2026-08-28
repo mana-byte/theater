@@ -476,7 +476,7 @@ async def test_read_transcript_refuses_a_fulgenzio_style_heuristic_swap(
         observer=Observer(collision_registry, {"vibe": harness}),
     )
     with pytest.raises(BadRequest, match="transcript_correlation_untrusted"):
-        await methods_mod.METHODS["read_transcript"](daemon, {"id": fulgenzio.id, "last_n": 0})
+        await methods_mod.METHODS["read_transcript"](daemon, {"id": fulgenzio.id})
 
 
 async def test_read_transcript_reopens_vibe_isolated_domain_through_factory(
@@ -520,9 +520,7 @@ async def test_read_transcript_reopens_vibe_isolated_domain_through_factory(
         observer=Observer(collision_registry, {"vibe": harness}),
     )
 
-    result = await methods_mod.METHODS["read_transcript"](
-        daemon, {"id": participant.id, "last_n": 0}
-    )
+    result = await methods_mod.METHODS["read_transcript"](daemon, {"id": participant.id})
 
     assert result["path"] == str(session / "messages.jsonl")
     assert [event["text"] for event in result["events"]] == ["isolated"]
@@ -561,7 +559,7 @@ async def test_read_transcript_pinned_symlink_escape_fails_closed(
     )
 
     with pytest.raises(TranscriptIdentityLost, match="no longer exists"):
-        await methods_mod.METHODS["read_transcript"](daemon, {"id": participant.id, "last_n": 0})
+        await methods_mod.METHODS["read_transcript"](daemon, {"id": participant.id})
 
 
 async def test_restored_heuristic_location_is_rejudged_after_restart(collision_registry, vibe_tree):
@@ -652,9 +650,7 @@ async def test_read_transcript_trusts_restored_location_only(
         observer=Observer(collision_registry, {"vibe": harness}),
     )
 
-    result = await methods_mod.METHODS["read_transcript"](
-        daemon, {"id": participant.id, "last_n": 0}
-    )
+    result = await methods_mod.METHODS["read_transcript"](daemon, {"id": participant.id})
 
     assert result["path"] == str(vibe_tree["transcript_b"])
 
@@ -682,7 +678,7 @@ async def test_read_transcript_does_not_apply_restored_trust_without_location(
     )
 
     with pytest.raises(BadRequest, match="transcript_correlation_untrusted"):
-        await methods_mod.METHODS["read_transcript"](daemon, {"id": participant.id, "last_n": 0})
+        await methods_mod.METHODS["read_transcript"](daemon, {"id": participant.id})
 
 
 @pytest.mark.parametrize(
@@ -900,7 +896,7 @@ async def test_read_transcript_reports_a_missing_pin_instead_of_ambiguity(
     )
 
     with pytest.raises(TranscriptIdentityLost, match="no longer exists"):
-        await methods_mod.METHODS["read_transcript"](daemon, {"id": participant.id, "last_n": 0})
+        await methods_mod.METHODS["read_transcript"](daemon, {"id": participant.id})
     assert not observer.transcript_identity_lost(participant.id)
     assert jobs.get("still-running").state == "running"
     assert not any(

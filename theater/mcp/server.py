@@ -327,8 +327,9 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
 
         "done" means the child's turn ended, not that the work is right. The
         agent-facing reply drops prompt and result text entirely: an agent that
-        wants what the child said or did reads the transcript via
-        read_transcript, which returns it whole. The transcript is not evidence
+        wants what the child said or did reads bounded transcript pages via
+        read_transcript. Continue only with its returned cursor when older
+        content is necessary. The transcript is not evidence
         either — before you build on a child's answer, or merge its branch,
         look at what it changed in the repo.
         """
@@ -406,28 +407,29 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         return await tools.scratchpad_get(session, namespace=namespace, keys=keys)
 
     @mcp.tool()
-    async def read_transcript(target: str, last_n: int = 5) -> dict:
-        """Read the transcript of a participant, returning full unclipped text.
+    async def read_transcript(target: str, cursor: str | None = None) -> dict:
+        """Read a bounded transcript page and continue toward older content.
 
-        The agent-facing await_sessions reply drops prompt and result text.
-        This method reads the full transcript from disk and returns the last
-        `last_n` events (user, assistant, tool_call, tool_result) with
-        complete, unclipped text.
+        Call once with a known live name or stable id, inspect the newest
+        bounded chunk, and use only the returned next_cursor when older
+        content is necessary. Stop when the needed event is found; do not call
+        list_participants first.
 
-        target:    stable participant id or current live name. If the live
-                   name is known, call this directly; do not call
-                   list_participants first. Dead names are cleared and
-                   recyclable, so dead reads require the stable id while the
-                   row is retained (historical access is retention-bounded).
-        last_n:    number of events to return, newest. Default 5. Set to
-                   0 for all events in the current transcript.
+        target: stable participant id or current live name. Dead names are
+        cleared and recyclable, so dead reads require the stable id.
+        cursor: opaque next_cursor returned by Theater, or null for the
+        newest page. Never construct or edit a cursor.
 
-        Returns {"id": ..., "events": [...], "path": ...}. Each event
-        has "role", "text" (full), "tool_name", and "turn_end".
+        Returns id, path, chronological event chunks, cursor (the supplied
+        cursor), next_cursor, has_more, and truncated. has_more means a
+        next_cursor exists; truncated means the response budget cut this
+        source page before all eligible events were returned. Event chunks
+        retain index, role, tool_name, and turn_end plus UTF-8 byte offsets;
+        reaches_text_start is true when a suffix-first chunk includes byte zero.
 
         Refuses if the transcript needs binding or its identity is lost.
         """
-        return await tools.read_transcript(session, target=target, last_n=last_n)
+        return await tools.read_transcript(session, target=target, cursor=cursor)
 
     @mcp.tool()
     async def put_child_back_in_the_wound(target_id: str) -> dict:

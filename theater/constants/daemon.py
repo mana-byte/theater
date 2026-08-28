@@ -30,6 +30,15 @@ RPC_DEFAULT_MAX_WAIT_SECONDS = 150.0
 #: Transcript kinds reported by read_transcript and recall_read; ERROR is not a conversation turn.
 TRANSCRIPT_READABLE_KINDS = ("assistant", "user", "tool_call", "tool_result")
 
+# Maximum encoded bytes in one transcript read response.
+TRANSCRIPT_READ_RESPONSE_MAX_BYTES = 16 * 1024
+
+# Maximum source records loaded into one transcript read page.
+TRANSCRIPT_READ_SOURCE_PAGE_LIMIT = 24
+
+# Maximum consecutive empty source pages scanned by one transcript read.
+TRANSCRIPT_READ_EMPTY_PAGE_SCAN_LIMIT = 8
+
 #: Bus kind for refused sends; GC protects it from age-based deletion and caps it separately.
 BUS_KIND_SEND_REFUSED = "send.refused"
 

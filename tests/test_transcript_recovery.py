@@ -482,7 +482,7 @@ def test_bind_persists_operator_and_read_transcript_uses_bound_path(
         )
     )
     restarted = _daemon(Registry(registry.store))
-    history = asyncio.run(methods._read_transcript(restarted, {"id": p.id, "last_n": 0}))
+    history = asyncio.run(methods._read_transcript(restarted, {"id": p.id}))
 
     assert history["path"] == str(bound.resolve())
     assert any(event["text"] == "BOUND-TEXT" for event in history["events"])

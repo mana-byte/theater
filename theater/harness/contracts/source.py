@@ -157,12 +157,11 @@ class IdentityLossEvidence:
 
 @dataclass(frozen=True, slots=True)
 class History:
-    """A session's past, read back in full. What ``read_transcript`` asks for.
+    """A legacy full-history projection for internal consumers.
 
     Separate from ``read()`` because it answers a different question. Polling
     asks "what is new"; this asks "what was said", and the answer must be
-    unclipped — the entire reason the tool exists is that the bus clips to
-    ``MAX_TEXT`` and an agent sometimes needs the whole reply.
+    unclipped. Bounded agent-facing transcript reads use ``HistoryPage``.
 
     It is a method on the source rather than a free function over a transcript
     path because "where the text lives" is precisely what the source owns. A
@@ -185,25 +184,34 @@ class HistoryPage:
 
     location: str | None = None
     events: Sequence[Event] = ()
+    complete_events: Sequence[Event] | None = None
     trajectory: Sequence[TrajectoryFact] = ()
     #: None projects all control events into trajectory records.
     trajectory_events: Sequence[Event] | None = None
     cursor: str | None = None
+    #: Source-owned boundary that replays this page without advancing the live tail.
+    snapshot_cursor: str | None = None
     older_cursor: str | None = None
     has_older: bool = False
     error_code: str | None = None
     error: str | None = None
     provenance: str = str(TranscriptProvenance.HEURISTIC)
+    collision_domain: str | None = None
     pinned: bool = False
 
     def __post_init__(self) -> None:
         events = tuple(self.events)
+        complete_events = None if self.complete_events is None else tuple(self.complete_events)
         trajectory = tuple(self.trajectory)
         trajectory_events = (
             None if self.trajectory_events is None else tuple(self.trajectory_events)
         )
         if any(not isinstance(event, Event) for event in events):
             raise SourceContractError("history page events must contain Event values")
+        if complete_events is not None and any(
+            not isinstance(event, Event) for event in complete_events
+        ):
+            raise SourceContractError("history page complete_events must contain Event values")
         if any(not isinstance(fact, TrajectoryFact) for fact in trajectory):
             raise SourceContractError("history page trajectory must contain TrajectoryFact values")
         if trajectory_events is not None and any(
@@ -221,9 +229,10 @@ class HistoryPage:
             "events",
             tuple(bound_history_event(event) for event in events),
         )
+        object.__setattr__(self, "complete_events", complete_events)
         object.__setattr__(self, "trajectory", trajectory)
         object.__setattr__(self, "trajectory_events", trajectory_events)
-        for name in ("cursor", "older_cursor"):
+        for name in ("cursor", "snapshot_cursor", "older_cursor"):
             value = getattr(self, name)
             if value is None:
                 continue
@@ -243,6 +252,10 @@ class HistoryPage:
     @property
     def facts(self) -> tuple[TrajectoryFact, ...]:
         return tuple(self.trajectory)
+
+    @property
+    def transcript_events(self) -> tuple[Event, ...]:
+        return tuple(self.events if self.complete_events is None else self.complete_events)
 
     @property
     def correlation(self) -> str:
@@ -367,15 +380,15 @@ class Source(ABC):
         raise SourceContractError(f"{type(self).__name__} cannot admit transcript receipts")
 
     async def history(self, *, last_n: int) -> History:
-        """The session so far, with text unclipped. Newest ``last_n`` events.
+        """Return a legacy unclipped history projection.
 
         Independent of the poll cursor: reading history must not disturb where
         the watcher has got to, because the caller is usually a *different*
-        consumer — ``read_transcript`` opens its own short-lived source rather
-        than borrowing the observer's.
+        consumer and opens its own short-lived source.
 
-        ``last_n <= 0`` means everything. The default returns nothing, which is
-        the honest answer for a source that can only see forward.
+        ``last_n <= 0`` retains the legacy full-history behavior. The default
+        returns nothing, which is the honest answer for a source that can only
+        see forward. Agent-facing transcript reads use ``history_page``.
         """
         return History()
 
@@ -383,32 +396,42 @@ class Source(ABC):
         self,
         *,
         before: str | None = None,
+        snapshot: str | None = None,
         limit: int = TRAJECTORY_PAGE_RECORD_LIMIT,
+        include_full_text: bool = False,
     ) -> HistoryPage:
         """Read a bounded baseline page without changing the live watcher cursor.
 
-        The base contract can expose only a newest-page fallback. It therefore
-        never invents an older cursor and reports paging as unavailable when a
-        caller asks for one.
+        ``snapshot`` replays a source-owned newest boundary for transcript chunks.
+        ``include_full_text`` is reserved for bounded transcript paging.
         """
         if type(limit) is not int or limit <= 0:
             return HistoryPage(
                 error_code="invalid_limit", error="history page limit must be positive"
             )
         limit = min(limit, TRAJECTORY_PAGE_RECORD_LIMIT)
-        if before is not None:
+        if before is not None and snapshot is not None:
+            return HistoryPage(
+                error_code="history_cursor_invalid",
+                error="history page accepts either an older cursor or a snapshot cursor",
+            )
+        if before is not None or snapshot is not None:
             return HistoryPage(
                 error_code="history_paging_unavailable",
                 error="this source provides a bounded newest page but cannot page older history",
             )
         history = await self.history(last_n=limit)
-        events = tuple(bound_history_event(event) for event in history.events[:limit])
+        complete_events = tuple(history.events[:limit])
+        events = tuple(bound_history_event(event) for event in complete_events)
         return HistoryPage(
             location=history.location,
             events=events,
+            complete_events=complete_events if include_full_text else None,
+            snapshot_cursor=None,
             error_code=history.error_code,
             error=history.error,
             provenance=history.correlation,
+            collision_domain=history.collision_domain,
             pinned=history.pinned,
         )
 
