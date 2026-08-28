@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
-from collections.abc import Sequence
 
 from theater import paths, timing
 from theater.constants.daemon import BUS_KIND_PARTICIPANT_SESSION_BOUNDARY
@@ -34,7 +33,7 @@ from theater.daemon.spawning.resume import (
     capture_resume_floor,
     reject_unsafe_resume_shape,
     resolve_resume_reference,
-    validate_resume_identity,
+    validate_before_create,
 )
 from theater.harness import get as get_harness
 from theater.harness.base import LaunchPlan, ResumeLaunchOverlay
@@ -85,6 +84,8 @@ class Spawner:
             raise BadRequest(f"{harness.binary!r} is not on PATH")
         req = self._resolve_resume_reference(req)
         resume_predecessor, resume_overlay = self._validate_before_create(req, harness)
+        if resume_overlay is not None and resume_overlay.cwd is not None:
+            req = replace(req, cwd=resume_overlay.cwd)
         participant = self.registry.create_spawned(
             harness=req.harness,
             cwd=req.cwd,
@@ -261,31 +262,12 @@ class Spawner:
         self, req: SpawnRequest, harness
     ) -> tuple[Participant | None, ResumeLaunchOverlay | None]:
         """Refuse unsafe launches before a participant or worktree exists."""
-        from theater.harness import check_model, check_reasoning, check_resume
-
-        check_model(req.harness, req.model)
-        check_reasoning(req.harness, req.reasoning_effort)
-        check_resume(req.harness, req.resume)
-        self._reject_unsafe_resume_shape(req, harness)
-        predecessor, trusted_owners = self._validate_resume_identity(req)
-        overlay: ResumeLaunchOverlay | None = None
-        if predecessor is not None:
-            overlay = harness.resume_launch_overlay(
-                predecessor=predecessor,
-                trusted_session_owners=trusted_owners,
-            )
-        return predecessor, overlay
+        return validate_before_create(req, harness, self.registry)
 
     @staticmethod
     def _reject_unsafe_resume_shape(req: SpawnRequest, harness) -> None:
         """Refuse resume combinations that are unsafe or silently dropped."""
         reject_unsafe_resume_shape(req, harness)
-
-    def _validate_resume_identity(
-        self, req: SpawnRequest
-    ) -> tuple[Participant | None, Sequence[Participant]]:
-        """Resume identity validation via the resume module."""
-        return validate_resume_identity(req, self.registry)
 
     @staticmethod
     def _capture_resume_floor(harness, predecessor: Participant) -> str:

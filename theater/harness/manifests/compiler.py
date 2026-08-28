@@ -12,6 +12,7 @@ from theater.harness.contracts.callbacks import (
     OperatorCandidateContext,
     ReceiptValidationContext,
     ResumeContext,
+    ResumePreflightContext,
     ScreenContext,
     StreamFloorContext,
     TranscriptCandidatesContext,
@@ -294,6 +295,14 @@ class _CompiledHarness(Harness):
         if not isinstance(overlay, ResumeLaunchOverlay):
             raise TypeError("manifest resume planner must return a ResumeLaunchOverlay")
         return overlay
+
+    def resume_preflight(self, *, predecessor: Participant) -> None:
+        callback = self._launch.resume_preflight
+        if callback is None:
+            return
+        result = callback(ResumePreflightContext(predecessor=predecessor))
+        if result is not None:
+            raise TypeError("manifest resume preflight must return None")
 
     def discover_models(self) -> list[str]:
         if self._models is None:

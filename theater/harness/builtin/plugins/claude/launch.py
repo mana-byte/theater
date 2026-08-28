@@ -9,6 +9,7 @@ import json
 import shlex
 import uuid
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 
 from theater import paths
@@ -20,7 +21,7 @@ from theater.harness.base import (
     ResumeLaunchOverlay,
     theater_binary,
 )
-from theater.harness.contracts.callbacks import LaunchContext, ResumeContext
+from theater.harness.contracts.callbacks import LaunchContext, ResumeContext, ResumePreflightContext
 from theater.harness.contracts.manifest import LaunchManifest
 from theater.harness.transcript.discovery import root_domain_overlay
 
@@ -113,10 +114,35 @@ def resume_launch_overlay(context: ResumeContext) -> ResumeLaunchOverlay:
 
 
 def _resume_launch_overlay(context: ResumeContext, root: Path) -> ResumeLaunchOverlay:
-    if context.predecessor.transcript_domain is None:
-        return ResumeLaunchOverlay()
-    return root_domain_overlay(
+    domain = root_domain_overlay(
         context.predecessor, str(root.resolve()), "Claude", resolve_declared=True, noun="root"
+    )
+    from .identity import authoritative_resume_cwd
+
+    return replace(
+        domain,
+        cwd=authoritative_resume_cwd(
+            root=root,
+            session_id=context.predecessor.session_id,
+            known_location=context.predecessor.transcript_location,
+        ),
+    )
+
+
+def resume_preflight(context: ResumePreflightContext) -> None:
+    _resume_preflight(context, Path.home() / ".claude" / "projects")
+
+
+def _resume_preflight(context: ResumePreflightContext, root: Path) -> None:
+    from .identity import materialized_resume_transcript
+
+    root_domain_overlay(
+        context.predecessor, str(root.resolve()), "Claude", resolve_declared=True, noun="root"
+    )
+    materialized_resume_transcript(
+        root=root,
+        session_id=context.predecessor.session_id,
+        known_location=context.predecessor.transcript_location,
     )
 
 
@@ -126,6 +152,7 @@ LAUNCH = LaunchManifest(
     supports_model=True,
     supports_reasoning_effort=True,
     supports_resume=True,
+    resume_preflight=resume_preflight,
     resume_planner=resume_launch_overlay,
     resume_strategy="fork",
 )

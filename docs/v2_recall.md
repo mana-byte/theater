@@ -422,7 +422,7 @@ Verified against source at `~/Desktop/coding_clis/`:
 |----------|----------------------------|-------------------------|
 | codex    | `resume <id>` subcommand   | yes (`main.rs:3616`)    |
 | vibe     | `--resume <id>`            | yes (`cli.py:259`)      |
-| claude   | `--resume [value]`         | **unverified**          |
+| claude   | `--resume <id> --fork-session` | yes                 |
 | opencode | `-s` / `--session <id>`    | **no — dropped**        |
 
 Per-harness traps:
@@ -438,8 +438,11 @@ Per-harness traps:
   only fires on the home screen (`home.tsx:64`), so the prompt is silently
   discarded. Silently is the problem: the job would look launched and never
   receive its task.
-- **claude** — `coding_clis/claude-code` is documentation with no bundle. argv
-  composition, prompt positional and cwd behaviour are all unverified.
+- **claude** — Claude Code 2.0.73 accepts a fresh `--session-id` with
+  `--resume <id> --fork-session`. It resolves resume/fork sessions in the
+  transcript's current project cwd, so Theater requires a materialized native
+  JSONL and launches from its latest recorded cwd rather than the predecessor
+  row's original cwd.
 
 opencode needs a capability that a function signature cannot express — it
 *accepts* a resume flag and cannot carry a prompt through it. So
@@ -463,15 +466,12 @@ Two combinations are refused there as well:
 - resuming a participant that is still live — that is a `send`, and `send`
   already exists.
 
-**All four harnesses continue the same session id on resume** (codex appends to
+Codex and Vibe continue the same native session id on resume (codex appends to
 the same rollout, `recorder.rs:895`; vibe to the same `messages.jsonl`,
 `_runtime.py:265`). Two participants can therefore claim one transcript. The
 mitigation is to seek to the end at attach: seed `after=` to the current
-transcript end so the resumed observer replays nothing. That plumbing already
-exists in `harness/source.py`. Claude's `--fork-session` would solve it more
-cleanly for claude alone, which is why it was rejected — it does not
-generalise, and a resume that means two different things by harness is worse
-than one that means the same awkward thing everywhere.
+transcript end so the resumed observer replays nothing. Claude instead forks
+to a fresh native id and transcript.
 
 Session-id coverage on spawns is opencode 98%, vibe 92%, codex 83%, **claude
 47%**. Claude can resume but half its spawns have no recorded id to resume
@@ -533,7 +533,6 @@ From `v2_ideas.md` §1, all still binding:
 - `busy_timeout` is unset (`store.py:46`), which means a contended write fails
   immediately rather than waiting. Worth fixing regardless of this work; recall
   adds readers, which makes it likelier to bite.
-- Claude's resume argv is unverified — no bundle in `coding_clis/claude-code`.
 - Claude records a session id on 47% of spawns. Cause unknown.
 - 3 of 147 recorded transcript paths are gone from disk. `recall_read` needs a
   graceful answer for a timeline point whose transcript no longer exists.

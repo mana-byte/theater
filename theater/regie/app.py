@@ -1618,6 +1618,7 @@ class RegieApp(App):
                 "harness_cannot_resume": "this harness does not support resume",
                 "untrusted": "transcript identity could not be verified",
                 "owned_by_live": "another live session holds this session id",
+                "harness_resume_rejected": "the harness rejected this session as unsafe to resume",
             }
             reason = reasons.get(state, state or "unknown reason")
             self.notify(

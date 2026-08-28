@@ -90,8 +90,7 @@ class ResumeLaunchOverlay:
     """Harness-specific overrides to merge into a launch plan on resume.
 
     Returned by ``Harness.resume_launch_overlay`` when core resumes a session.
-    The two fields are the only things a plugin may influence after
-    ``plan_launch`` has run:
+    The fields are the only things a plugin may influence around a resume:
 
     - ``env``: extra environment variables (or overrides for plan env) that
       the successor process needs. Merged as ``{**plan.env, **overlay.env}``,
@@ -101,7 +100,15 @@ class ResumeLaunchOverlay:
       returned. It does **not** mean "clear it"; that would let a declared
       predecessor domain silently disappear on a resume plan that returns
       ``transcript_domain=None``.
+    - ``cwd``: an authoritative working directory for the successor launch.
+      ``None`` keeps the requested cwd. Core applies a non-None value before
+      creating the successor participant or planning its launch.
     """
 
     env: Mapping[str, str] = field(default_factory=dict)
     transcript_domain: str | None = None
+    cwd: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.cwd is not None and (not isinstance(self.cwd, str) or not self.cwd.strip()):
+            raise TypeError("resume launch cwd must be a non-blank string or None")

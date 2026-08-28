@@ -6,16 +6,171 @@ The lossy directory slug is never reconstructed; records provide the trusted cwd
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Mapping
+from glob import escape
 from pathlib import Path
+from typing import NoReturn
 
 from theater.harness.source import TranscriptCandidate
 from theater.harness.transcript.discovery import GlobDiscovery, stat_birthtime
+from theater.models import BadRequest
 from theater.provenance import TranscriptProvenance
 
-from .constants import _CWD_PROBE_BYTES, _CWD_PROBE_RECORDS, _LOSS_CANDIDATE_PROBES
+from .constants import (
+    _CWD_PROBE_BYTES,
+    _CWD_PROBE_RECORDS,
+    _LOSS_CANDIDATE_PROBES,
+    _RESUME_CWD_SUFFIX_BYTES,
+    _RESUME_CWD_SUFFIX_RECORDS,
+)
 from .launch import _hook_string
 from .source import _ClaudeSource, _open_claude_source
+
+
+def authoritative_resume_cwd(
+    *, root: Path, session_id: str | None, known_location: str | None
+) -> str:
+    """Return the current project cwd recorded by one durable Claude session."""
+    if not session_id:
+        raise BadRequest("cannot resume Claude session: Theater has no native session id")
+    transcript = materialized_resume_transcript(
+        root=root,
+        session_id=session_id,
+        known_location=known_location,
+    )
+    return _current_transcript_cwd(transcript, session_id)
+
+
+def materialized_resume_transcript(
+    *, root: Path, session_id: str | None, known_location: str | None
+) -> Path:
+    """Return one exact materialized Claude transcript without reading its contents."""
+    if not session_id:
+        raise BadRequest("cannot resume Claude session: Theater has no native session id")
+    domain = root.expanduser().resolve(strict=False)
+    candidates: list[Path] = []
+    if known_location is not None:
+        candidate = _materialized_candidate(domain, Path(known_location).expanduser(), session_id)
+        if candidate is not None:
+            candidates.append(candidate)
+    if domain.is_dir():
+        for path in domain.glob(f"*/{escape(session_id)}.jsonl"):
+            candidate = _materialized_candidate(domain, path, session_id)
+            if candidate is not None and candidate not in candidates:
+                candidates.append(candidate)
+    if not candidates:
+        return _missing_resume_transcript(session_id, domain)
+    if len(candidates) != 1:
+        raise BadRequest(
+            f"cannot resume Claude session {session_id!r}: multiple native transcripts "
+            f"exist under {str(domain)!r}; resolve the duplicate before retrying."
+        )
+    return candidates[0]
+
+
+def _materialized_candidate(root: Path, path: Path, session_id: str) -> Path | None:
+    if path.is_symlink() or not path.is_file():
+        return None
+    canonical = path.resolve(strict=False)
+    try:
+        relative = canonical.relative_to(root)
+    except ValueError:
+        return None
+    if canonical.suffix != ".jsonl" or len(relative.parts) != 2 or canonical.stem != session_id:
+        return None
+    return canonical
+
+
+def _missing_resume_transcript(session_id: str, root: Path) -> NoReturn:
+    raise BadRequest(
+        f"cannot resume Claude session {session_id!r}: its native transcript has not "
+        f"materialized under {str(root)!r}. The recorded id may be only a planned "
+        "launch id; start a new Claude session instead."
+    )
+
+
+def _current_transcript_cwd(path: Path, session_id: str) -> str:
+    suffix = _resume_cwd_suffix(path, session_id)
+    for raw in reversed(_complete_suffix_lines(suffix)):
+        record = _json_record(raw)
+        if record is None:
+            continue
+        _validate_resume_record_session(record, path, session_id)
+        if cwd := _resume_record_cwd(record, path, session_id):
+            return cwd
+    if not suffix:
+        raise BadRequest(
+            f"cannot resume Claude session {session_id!r}: native transcript {str(path)!r} "
+            "has no complete records in its bounded suffix"
+        )
+    raise BadRequest(
+        f"cannot resume Claude session {session_id!r}: native transcript {str(path)!r} "
+        "does not record a usable project cwd in its bounded suffix"
+    )
+
+
+def _resume_cwd_suffix(path: Path, session_id: str) -> bytes:
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            start = max(0, fh.tell() - _RESUME_CWD_SUFFIX_BYTES)
+            fh.seek(start)
+            suffix = fh.read(_RESUME_CWD_SUFFIX_BYTES)
+    except OSError as exc:
+        raise BadRequest(
+            f"cannot resume Claude session {session_id!r}: native transcript {str(path)!r} "
+            f"is not readable: {exc}"
+        ) from exc
+    if start:
+        _partial, separator, suffix = suffix.partition(b"\n")
+        if not separator:
+            suffix = b""
+    return suffix
+
+
+def _complete_suffix_lines(suffix: bytes) -> list[bytes]:
+    lines = suffix.split(b"\n")
+    if lines[-1] == b"":
+        lines.pop()
+    return lines[-_RESUME_CWD_SUFFIX_RECORDS:]
+
+
+def _json_record(raw: bytes) -> dict | None:
+    try:
+        record = json.loads(raw.decode("utf-8", errors="replace"))
+    except ValueError:
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def _validate_resume_record_session(record: dict, path: Path, session_id: str) -> None:
+    for key in ("session_id", "sessionId"):
+        found_session = record.get(key)
+        if isinstance(found_session, str) and found_session and found_session != session_id:
+            raise BadRequest(
+                f"cannot resume Claude session {session_id!r}: transcript {str(path)!r} "
+                "records a different native session id"
+            )
+
+
+def _resume_record_cwd(record: dict, path: Path, session_id: str) -> str | None:
+    found_cwd = record.get("cwd")
+    if not isinstance(found_cwd, str) or not found_cwd:
+        return None
+    candidate = Path(found_cwd).expanduser()
+    if not candidate.is_absolute():
+        raise BadRequest(
+            f"cannot resume Claude session {session_id!r}: transcript {str(path)!r} "
+            "records a relative cwd"
+        )
+    current = str(candidate.resolve(strict=False))
+    if not Path(current).is_dir():
+        raise BadRequest(
+            f"cannot resume Claude session {session_id!r}: transcript project cwd "
+            f"{current!r} no longer exists"
+        )
+    return current
 
 
 class ClaudeIdentity:

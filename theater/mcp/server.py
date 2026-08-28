@@ -212,15 +212,15 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         `after_id` cannot be used with `ids`.
 
         Each row includes `resume_state`, which exposes the verdict from the
-        generic identity and capability gates that `spawn_session(resume=...)`
-        checks before delegating to harness-specific resume validation. Values:
-        `resumable` (generic gates passed; harness-specific validation in
-        `resume_launch_overlay` may still refuse), `live` (participant is still
-        running), `no_session_id` (Theater has not recorded the harness session
-        id), `harness_cannot_resume` (the harness adapter does not support
-        resume), `untrusted` (session id present but transcript provenance is
-        below operator-level), `owned_by_live` (a live participant already holds
-        a trusted binding for the same session id).
+        generic identity and capability gates plus any harness resume preflight
+        that `spawn_session(resume=...)` checks. Values: `resumable` (all
+        available current gates passed), `live` (participant is still running), `no_session_id`
+        (Theater has not recorded the harness session id),
+        `harness_cannot_resume` (the harness adapter does not support resume),
+        `untrusted` (session id present but transcript provenance is below
+        operator-level), `owned_by_live` (a live participant already holds a
+        trusted binding for the same session id), `harness_resume_rejected`
+        (the harness preflight refused the session).
         """
         return await tools.list_participants(
             session,

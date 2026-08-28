@@ -158,6 +158,10 @@ class Harness(ABC):
             "adopted and bound."
         )
 
+    def resume_preflight(self, *, predecessor: Participant) -> None:
+        """Reject a harness-specific unsafe resume before reservation."""
+        del predecessor
+
     def discover_models(self) -> list[str]:
         """Model names this CLI reports it can run, for `theater models`.
 
