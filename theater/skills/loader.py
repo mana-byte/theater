@@ -119,24 +119,18 @@ def _open_directory(
     except FileNotFoundError as exc:
         if missing_ok:
             return None
-        raise SkillValidationError(
-            f"cannot inspect {kind}: {exc.strerror or 'I/O error'}"
-        ) from exc
+        raise SkillValidationError(f"cannot inspect {kind}: {exc.strerror or 'I/O error'}") from exc
     except OSError as exc:
         if exc.errno == errno.ELOOP or _is_symlink(path, dir_fd=dir_fd):
             raise SkillValidationError(f"{kind} must not be a symlink") from exc
         if exc.errno == errno.ENOTDIR:
             raise SkillValidationError(f"{kind} must be a directory") from exc
-        raise SkillValidationError(
-            f"cannot inspect {kind}: {exc.strerror or 'I/O error'}"
-        ) from exc
+        raise SkillValidationError(f"cannot inspect {kind}: {exc.strerror or 'I/O error'}") from exc
     try:
         mode = os.fstat(fd).st_mode
     except OSError as exc:
         _close_fd(fd)
-        raise SkillValidationError(
-            f"cannot inspect {kind}: {exc.strerror or 'I/O error'}"
-        ) from exc
+        raise SkillValidationError(f"cannot inspect {kind}: {exc.strerror or 'I/O error'}") from exc
     if not stat.S_ISDIR(mode):
         _close_fd(fd)
         raise SkillValidationError(f"{kind} must be a directory")

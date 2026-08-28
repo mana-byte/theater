@@ -609,9 +609,7 @@ def test_skills_uses_the_running_daemon_and_renders_diagnostics(monkeypatch, cap
         async def call(self, method, **params):
             assert (method, params) == ("skills.list", {})
             return {
-                "skills": [
-                    {"name": "alpha", "description": "An alpha skill.", "source": "user"}
-                ],
+                "skills": [{"name": "alpha", "description": "An alpha skill.", "source": "user"}],
                 "rejections": [
                     {
                         "name": "broken",
