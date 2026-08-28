@@ -10,8 +10,13 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import Button, Label, RichLog, TabbedContent, TabPane
+from textual.widgets import Button, Label, LoadingIndicator, RichLog, TabbedContent, TabPane
 
+from theater.observability import span
+from theater.observability.catalog import (
+    REGIE_TRAJECTORY_DETAIL_PROJECT,
+    REGIE_TRAJECTORY_DETAIL_RENDER,
+)
 from theater.regie.trajectory.enums import InspectorTab
 from theater.regie.trajectory.inspection.links import (
     DETAIL_JSON_TOGGLE_META,
@@ -62,6 +67,16 @@ class SpanDetailRecordLinkClicked(Message):
     def __init__(self, record_id: str) -> None:
         super().__init__()
         self.record_id = record_id
+
+
+class _DetailLoadingIndicator(LoadingIndicator):
+    def _on_mount(self, event: events.Mount) -> None:
+        super()._on_mount(event)
+        self.auto_refresh = None
+
+    def set_active(self, active: bool) -> None:
+        self.display = active
+        self.auto_refresh = 1 / 16 if active else None
 
 
 class SpanDetailPanel(Vertical):
@@ -127,7 +142,14 @@ class SpanDetailPanel(Vertical):
         background: $accent 20%;
         tint: transparent;
     }
-    SpanDetailPanel > #trajectory-span-detail-tabs {
+    SpanDetailPanel > #trajectory-span-detail-body {
+        width: 1fr;
+        height: 1fr;
+        min-height: 0;
+        layers: detail-content detail-loading;
+    }
+    SpanDetailPanel #trajectory-span-detail-tabs {
+        layer: detail-content;
         width: 1fr;
         height: 1fr;
         min-height: 0;
@@ -166,6 +188,15 @@ class SpanDetailPanel(Vertical):
     }
     SpanDetailPanel RichLog:focus {
         background-tint: transparent;
+    }
+    SpanDetailPanel > #trajectory-span-detail-body > LoadingIndicator {
+        display: none;
+        position: absolute;
+        layer: detail-loading;
+        width: 1fr;
+        height: 1fr;
+        color: $accent;
+        background: $background;
     }
     SpanDetailPanel > .span-detail--accent {
         color: $accent;
@@ -218,16 +249,18 @@ class SpanDetailPanel(Vertical):
             yield Label("No span selected", id="trajectory-span-detail-title")
             yield Label("—", id="trajectory-span-detail-duration")
             yield Button("← Quit span", id="trajectory-span-detail-close", compact=True, flat=True)
-        with TabbedContent(id="trajectory-span-detail-tabs"):
-            for tab in InspectorTab:
-                with TabPane(tab.value.replace("_", " ").title(), id=self._pane_id(tab)):
-                    yield RichLog(
-                        id=self._log_id(tab),
-                        min_width=1,
-                        wrap=True,
-                        markup=False,
-                        highlight=False,
-                    )
+        with Vertical(id="trajectory-span-detail-body"):
+            with TabbedContent(id="trajectory-span-detail-tabs"):
+                for tab in InspectorTab:
+                    with TabPane(tab.value.replace("_", " ").title(), id=self._pane_id(tab)):
+                        yield RichLog(
+                            id=self._log_id(tab),
+                            min_width=1,
+                            wrap=True,
+                            markup=False,
+                            highlight=False,
+                        )
+            yield _DetailLoadingIndicator(id="trajectory-span-detail-loading")
 
     @property
     def record_id(self) -> str | None:
@@ -246,30 +279,31 @@ class SpanDetailPanel(Vertical):
         return self._details.copy_text if self._details is not None else ""
 
     def _build_details(self, tab: InspectorTab) -> SpanDetails | None:
-        styles = DetailStyles(
-            text=self.get_component_rich_style("span-detail--text", partial=True),
-            accent=self.get_component_rich_style("span-detail--accent", partial=True),
-            code=self.get_component_rich_style("span-detail--code", partial=True),
-            muted=self.get_component_rich_style("span-detail--muted", partial=True),
-            error=self.get_component_rich_style("span-detail--error", partial=True),
-            success=self.get_component_rich_style("span-detail--success", partial=True),
-        )
-        if self._tool is not None:
-            return build_tool_span_details(
-                self._tool,
-                tab,
-                styles=styles,
-                collapsed_json_paths=frozenset(self._collapsed_json_paths),
+        with span(REGIE_TRAJECTORY_DETAIL_PROJECT, tab=tab.value):
+            styles = DetailStyles(
+                text=self.get_component_rich_style("span-detail--text", partial=True),
+                accent=self.get_component_rich_style("span-detail--accent", partial=True),
+                code=self.get_component_rich_style("span-detail--code", partial=True),
+                muted=self.get_component_rich_style("span-detail--muted", partial=True),
+                error=self.get_component_rich_style("span-detail--error", partial=True),
+                success=self.get_component_rich_style("span-detail--success", partial=True),
             )
-        if self._record is not None:
-            return build_span_details(
-                self._record,
-                tab,
-                styles=styles,
-                request=self._request,
-                collapsed_json_paths=frozenset(self._collapsed_json_paths),
-            )
-        return None
+            if self._tool is not None:
+                return build_tool_span_details(
+                    self._tool,
+                    tab,
+                    styles=styles,
+                    collapsed_json_paths=frozenset(self._collapsed_json_paths),
+                )
+            if self._record is not None:
+                return build_span_details(
+                    self._record,
+                    tab,
+                    styles=styles,
+                    request=self._request,
+                    collapsed_json_paths=frozenset(self._collapsed_json_paths),
+                )
+            return None
 
     def _title(self) -> Text:
         if self._record is None:
@@ -302,7 +336,7 @@ class SpanDetailPanel(Vertical):
         finally:
             self._syncing_tabs = False
 
-    def _render_content(self, scroll_y: float | None = None) -> None:
+    def _sync_chrome(self) -> None:
         if not self.is_mounted:
             return
         self.query_one("#trajectory-span-detail-title", Label).update(self._title())
@@ -315,6 +349,10 @@ class SpanDetailPanel(Vertical):
         )
         self.query_one("#trajectory-span-detail-duration", Label).update(format_duration(timing))
         self._sync_tabs()
+
+    def _render_content(self, scroll_y: float | None = None) -> None:
+        if not self.is_mounted:
+            return
         if self._details is None:
             return
         tab = self._details.tab
@@ -324,7 +362,8 @@ class SpanDetailPanel(Vertical):
             self._schedule_reflow(scroll_y, force=True)
             return
         log.clear()
-        log.write(self._details.content, width=width, scroll_end=False)
+        with span(REGIE_TRAJECTORY_DETAIL_RENDER, tab=tab.value):
+            log.write(self._details.content, width=width, scroll_end=False)
         self._rendered_widths[tab] = width
         if scroll_y is None:
             log.scroll_home(animate=False)
@@ -337,15 +376,36 @@ class SpanDetailPanel(Vertical):
         log = self.query_one(f"#{self._log_id(self._details.tab)}", RichLog)
         self._schedule_reflow(float(log.scroll_y))
 
-    def _schedule_reflow(self, scroll_y: float | None = None, *, force: bool = False) -> None:
+    def _schedule_reflow(
+        self,
+        scroll_y: float | None = None,
+        *,
+        force: bool = False,
+        loading: bool = False,
+    ) -> None:
         if not self.is_mounted or self._details is None:
             return
-        self._reflow_scroll_y = scroll_y
+        if force or not self._reflow_pending:
+            self._reflow_scroll_y = scroll_y
         self._reflow_force = self._reflow_force or force
+        if loading:
+            log = self.query_one(f"#{self._log_id(self._details.tab)}", RichLog)
+            self._stop_loading()
+            log.clear()
+            self.query_one("#trajectory-span-detail-loading", _DetailLoadingIndicator).set_active(
+                True
+            )
         if self._reflow_pending:
             return
         self._reflow_pending = True
-        self.call_after_refresh(self._reflow_content)
+        if not self.call_after_refresh(self._reflow_content):
+            self._reflow_content()
+
+    def _stop_loading(self) -> None:
+        if self.is_mounted:
+            self.query_one("#trajectory-span-detail-loading", _DetailLoadingIndicator).set_active(
+                False
+            )
 
     def _reflow_content(self) -> None:
         self._reflow_pending = False
@@ -354,13 +414,19 @@ class SpanDetailPanel(Vertical):
         self._reflow_force = False
         self._reflow_scroll_y = None
         if not self.is_mounted or self._details is None:
+            self._stop_loading()
             return
         tab = self._details.tab
         log = self.query_one(f"#{self._log_id(self._details.tab)}", RichLog)
         width = log.scrollable_content_region.width
-        if width <= 0 or (not force and width == self._rendered_widths.get(tab)):
+        if width <= 0:
+            self._schedule_reflow(scroll_y, force=force)
             return
-        self._render_content(scroll_y)
+        try:
+            if force or width != self._rendered_widths.get(tab):
+                self._render_content(scroll_y)
+        finally:
+            self._stop_loading()
 
     def set_span(
         self,
@@ -398,16 +464,16 @@ class SpanDetailPanel(Vertical):
         self._tool = tool
         self._request = request
         self._details = self._build_details(tab)
-        self._render_content(scroll_y)
-        self._schedule_reflow(scroll_y, force=True)
+        self._sync_chrome()
+        self._schedule_reflow(scroll_y, force=True, loading=True)
         return self.tab
 
     def set_tab(self, tab: InspectorTab) -> InspectorTab:
         if self._record is None or tab not in self.tabs or tab is self.tab:
             return self.tab
         self._details = self._build_details(tab)
-        self._render_content()
-        self._schedule_reflow(force=True)
+        self._sync_chrome()
+        self._schedule_reflow(force=True, loading=True)
         self.post_message(SpanDetailTabChanged(self.tab))
         return self.tab
 
@@ -486,7 +552,8 @@ class SpanDetailPanel(Vertical):
         else:
             self._collapsed_json_paths.add(toggle_key)
         self._details = self._build_details(self._details.tab)
-        self._render_content(scroll_y)
+        self._sync_chrome()
+        self._schedule_reflow(scroll_y, force=True, loading=True)
 
 
 __all__ = [

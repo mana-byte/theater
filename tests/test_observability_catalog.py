@@ -18,7 +18,7 @@ from theater.observability.catalog import (
 
 def test_tuple_unique():
     keys = [s.key for s in OPERATIONS]
-    assert len(keys) == len(set(keys)) == 16
+    assert len(keys) == len(set(keys)) == 18
 
 
 def test_by_key_readonly():
@@ -82,6 +82,20 @@ def test_shared_metric_consistent():
     ps = [s for s in OPERATIONS if s.metric_name == "theater.process.command.duration"]
     assert len(ps) == 3
     assert all(s.description == ps[0].description for s in ps)
+
+
+def test_regie_trajectory_detail_phases_share_bounded_metric() -> None:
+    specs = [
+        BY_KEY["REGIE_TRAJECTORY_DETAIL_PROJECT"],
+        BY_KEY["REGIE_TRAJECTORY_DETAIL_RENDER"],
+    ]
+
+    assert {spec.metric_name for spec in specs} == {"theater.regie.trajectory.detail.duration"}
+    assert {dict(spec.static_attrs)["phase"] for spec in specs} == {"project", "render"}
+    assert all(
+        [(mapping.source, mapping.metric_key) for mapping in spec.attrs] == [("tab", "tab")]
+        for spec in specs
+    )
 
 
 def test_observer_shared_description_generic():

@@ -10,7 +10,7 @@ import pytest
 from rich.console import Console
 from rich.style import Style
 from textual.app import App, ComposeResult
-from textual.widgets import RichLog, Tab, TabbedContent
+from textual.widgets import LoadingIndicator, RichLog, Tab, TabbedContent
 
 from theater.constants.regie_trajectory import TOOL_ROW_SUMMARY_MAX_CHARS
 from theater.constants.trajectory import TRAJECTORY_DETAIL_RECORD_MAX_BYTES
@@ -411,6 +411,52 @@ async def test_json_string_blocks_toggle_from_the_detail_log() -> None:
         console = Console(width=80, file=output)
         console.print(panel._details.content)
         assert '"text": ▸' in output.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_span_detail_defers_one_render_behind_loading_indicator(monkeypatch) -> None:
+    item = _tool(
+        "call",
+        1,
+        TrajectoryKind.TOOL_CALL,
+        "one",
+        details=(DetailField.from_text("arguments", '{"path":"src"}'),),
+    )
+
+    class DetailHost(App):
+        def compose(self) -> ComposeResult:
+            yield SpanDetailPanel()
+
+    app = DetailHost()
+    async with app.run_test(size=(80, 24)) as pilot:
+        panel = app.query_one(SpanDetailPanel)
+        callbacks = []
+        writes = 0
+        original_write = RichLog.write
+
+        def defer(callback, *args, **kwargs) -> bool:
+            callbacks.append(lambda: callback(*args, **kwargs))
+            return True
+
+        def count_write(log, *args, **kwargs):
+            nonlocal writes
+            writes += 1
+            return original_write(log, *args, **kwargs)
+
+        monkeypatch.setattr(panel, "call_after_refresh", defer)
+        monkeypatch.setattr(RichLog, "write", count_write)
+
+        panel.set_span(item, tab=InspectorTab.INPUT)
+        indicator = panel.query_one("#trajectory-span-detail-loading", LoadingIndicator)
+        assert indicator.display
+        assert writes == 0
+
+        await pilot.pause()
+        callbacks.pop(0)()
+
+        assert not indicator.display
+        assert writes == 1
+        assert panel.query_one(f"#{panel._log_id(InspectorTab.INPUT)}", RichLog).lines
 
 
 def _request(

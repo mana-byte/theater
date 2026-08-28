@@ -17,6 +17,9 @@ PROC_MS = 50.0
 #: Slow threshold for a worker task.
 WORKERS_MS = 500.0
 
+#: Slow threshold for projecting or rendering a trajectory detail tab.
+REGIE_TRAJECTORY_DETAIL_MS = 50.0
+
 #: Past this, a readiness lag is not a spawn measurement: re-watched on restart.
 READY_LAG_MAX_S = 60.0
 
