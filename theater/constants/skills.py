@@ -1,0 +1,25 @@
+"""Hard limits for declarative skill packages."""
+
+from __future__ import annotations
+
+import re
+
+SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+SKILL_NAME_MAX_CHARS = 64
+SKILL_MAX_COUNT = 64
+SKILL_MAX_REJECTIONS = 64
+SKILL_MAX_BYTES = 64 * 1024
+SKILL_FRONTMATTER_MAX_BYTES = 8 * 1024
+SKILL_DESCRIPTION_MAX_CHARS = 1_000
+SKILL_DIAGNOSTIC_MAX_CHARS = 500
+
+__all__ = [
+    "SKILL_DESCRIPTION_MAX_CHARS",
+    "SKILL_DIAGNOSTIC_MAX_CHARS",
+    "SKILL_FRONTMATTER_MAX_BYTES",
+    "SKILL_MAX_BYTES",
+    "SKILL_MAX_COUNT",
+    "SKILL_MAX_REJECTIONS",
+    "SKILL_NAME",
+    "SKILL_NAME_MAX_CHARS",
+]

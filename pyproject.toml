@@ -24,6 +24,8 @@ dependencies = [
     "alembic>=1.13",
     # Declared directly even though MCP brings it transitively.
     "opentelemetry-api>=1.44,<2",
+    # Declarative SKILL.md frontmatter parsed with PyYAML SafeLoader.
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]
