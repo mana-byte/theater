@@ -147,16 +147,15 @@ def _bounded_entry_names(directory_fd: int, *, limit: int) -> tuple[tuple[str, .
     scan_fd = os.dup(directory_fd)
     try:
         entries = _open_scandir(scan_fd)
-    except OSError:
+        names: list[str] = []
+        with entries:
+            for entry in entries:
+                names.append(entry.name)
+                if len(names) > limit:
+                    return tuple(names), True
+        return tuple(names), False
+    finally:
         _close_fd(scan_fd)
-        raise
-    names: list[str] = []
-    with entries:
-        for entry in entries:
-            names.append(entry.name)
-            if len(names) > limit:
-                return tuple(names), True
-    return tuple(names), False
 
 
 def _open_scandir(fd: int):

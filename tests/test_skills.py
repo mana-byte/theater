@@ -368,6 +368,25 @@ def test_bounded_entry_enumeration_stops_after_the_limit(tmp_path, monkeypatch, 
     assert seen == limit + 1
 
 
+def test_bounded_entry_enumeration_closes_its_duplicate_fd(tmp_path, monkeypatch):
+    opened: list[int] = []
+    original = skills_loader._open_scandir
+
+    def capture(fd):
+        opened.append(fd)
+        return original(fd)
+
+    monkeypatch.setattr(skills_loader, "_open_scandir", capture)
+    root_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        skills_loader._bounded_entry_names(root_fd, limit=1)
+    finally:
+        os.close(root_fd)
+
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
+
+
 def test_direct_registry_construction_sorts_skills_by_name():
     alpha = Skill("alpha", "a", "alpha", SkillSource.USER, Path("/tmp/alpha/SKILL.md"))
     zebra = Skill("zebra", "z", "zebra", SkillSource.USER, Path("/tmp/zebra/SKILL.md"))
