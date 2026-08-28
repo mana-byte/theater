@@ -19,6 +19,7 @@ Theater is three cooperating processes:
   bus.
 - Isolated `git` worktrees or named shared worktrees for parallel tasks.
 - Explicit approval policy for every spawned agent.
+- Built-in and user-provided orchestration skills loaded on demand.
 - A machine-local daemon and a human-friendly régie, without a hosted service.
 
 ## Requirements
@@ -112,7 +113,9 @@ including the participant identity. An agent can then use tools such as:
 `whoami` → `list_participants` → `spawn_session` → `await_sessions` →
 `read_transcript`
 
-It can also use `send`, `recall`, and `list_models`. The normal loop is to
+It can also use `send`, `recall`, and `list_models`. `list_skills` discovers
+optional workflow instructions; `load_skill` loads only the selected skill's
+full content. The normal loop is to
 inspect the participant list, spawn a child with an explicit approval mode,
 await its turn, read the transcript, and inspect the repository before keeping
 the work.
@@ -139,6 +142,19 @@ Adoption identifies the pane; transcript trust and recovery are separate
 operator decisions. Use `theater candidates ID` to inspect candidates and
 `theater bind ID CANDIDATE --confirm-id ID` when a recovered transcript must be
 bound.
+
+### Agent skills
+
+Theater ships `theater-orchestrate` and `theater-debate`. Run `theater skills`
+or `theater skills --json` against a running daemon to inspect available skills
+and rejected user packages.
+
+Add a user skill at `$THEATER_HOME/skills/<name>/SKILL.md`. The directory may
+contain only `SKILL.md`; its YAML frontmatter contains exactly `name` and
+`description`, and `name` must match the directory. Bundled names are reserved,
+so a user package cannot silently replace a Theater skill. Skill content is
+data only: Theater does not execute Python, scripts, hooks, or templates from a
+skill package.
 
 ## Régie
 

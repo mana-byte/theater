@@ -120,8 +120,10 @@ theater/
 │   ├── observation.py  compatibility facade — re-exports contracts + transcript
 │   ├── source.py       compatibility facade — re-exports contracts + transcript
 │   └── plugins.py      generic loader compatibility facade
-├── mcp/                server.py (14 agent tools) · session.py · toolsets/
-│   ├── toolsets/       delegation, participants, recall, transcripts
+├── skills/             declarative SKILL.md validation, discovery, immutable registry
+│   └── builtin/        theater-orchestrate/ · theater-debate/
+├── mcp/                server.py (16 agent tools) · session.py · toolsets/
+│   ├── toolsets/       delegation, participants, recall, transcripts, skills
 │   ├── server.py       composition surface — registers @mcp.tool entries
 │   └── tools.py        compatibility facade — re-exports toolsets + session
 ├── tmux/               client.py · command.py · panes.py · presence.py · delivery · facts · options
@@ -221,6 +223,15 @@ of an adapter (turn boundaries, durable source semantics, native sub-agents)
 cannot be expressed in config. Full guide:
 [`docs/harness-plugins.md`](docs/harness-plugins.md). `theater harnesses`
 reports what loaded and why anything was rejected.
+
+## When adding a skill
+
+Write one data-only package at `$THEATER_HOME/skills/<name>/SKILL.md`, or under
+`theater/skills/builtin/` for a shipped skill. It may contain only `SKILL.md`;
+frontmatter contains exactly `name` and `description`, with the canonical name
+matching the folder. Do not add scripts, Python imports, references, templates,
+project scanning, or silent overrides. The daemon owns discovery; MCP tools
+only forward `skills.list` and `skills.load`.
 
 ## Further reading
 

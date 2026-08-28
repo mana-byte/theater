@@ -187,10 +187,22 @@ without `_meta`, and no protocol version bump is needed. Trace metadata lives
 in `_meta`, never inside `params` — handlers must not see or reject it.
 Receivers ignore unknown or malformed `_meta` keys.
 
-The daemon exposes 33 methods (`theater/daemon/rpc/`); the MCP server
-exposes 14 tools to agents (`theater/mcp/server.py`), namespaced `theater_*`.
+The daemon exposes 39 methods (`theater/daemon/rpc/`); the MCP server
+exposes 16 tools to agents (`theater/mcp/server.py`), namespaced `theater_*`.
 The two sets are not the same and should not be: `shutdown`, `adopt`, and
 `bus.tail` are operator verbs, not agent verbs.
+
+Skills use the same boundary. `skills.list` and `skills.load` discover and
+validate packages in the daemon; the MCP tools only forward. Listing returns
+bounded metadata and diagnostics without instruction bodies. Loading accepts
+one canonical name and returns that validated `SKILL.md` verbatim. This keeps
+filesystem access out of per-agent MCP processes and prevents broad skill
+discovery from consuming agent context.
+
+Packages live at `theater/skills/builtin/<name>/SKILL.md` or
+`$THEATER_HOME/skills/<name>/SKILL.md`. A package contains no executable code or
+auxiliary files. Bundled names are authoritative; invalid user packages are
+reported, while an invalid bundled package is fatal.
 
 ---
 
