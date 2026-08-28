@@ -81,9 +81,11 @@ create a duplicate participant.
 
 ## Supervise and review
 
-Use bounded waits rather than conversational polling. Update the user at meaningful phase boundaries,
-not after every poll. Read only a narrow transcript tail when needed to diagnose status or recover
-missing context; never load a whole transcript by default.
+For each wait, use the longest duration safely below the current client's tool timeout. If that wait
+expires, await the same handles again: timeout means the caller stopped waiting, not that a worker
+stopped. Never replace long waits with rapid conversational polling or duplicate spawns. Update the
+user at meaningful phase boundaries, not after every wait. Read only a narrow transcript tail when
+needed to diagnose status or recover missing context; never load a whole transcript by default.
 
 When the user changes scope or priorities, update the plan first, then redirect or stop affected
 workers before continuing. Do not let superseded tasks keep changing their worktrees.
