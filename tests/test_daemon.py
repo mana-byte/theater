@@ -18,6 +18,7 @@ from theater import paths
 from theater.daemon import methods
 from theater.daemon.rpc import participants as participants_mod
 from theater.harness import HARNESSES
+from theater.models import Participant, Status
 from theater.protocol import RemoteError
 
 _JSON_SCHEMA_PREFIX = (
@@ -1532,7 +1533,7 @@ async def test_read_transcript_by_dead_name_fails_not_found(client, fake_tmux):
     await client.call("participant.kill", id=record["id"])
 
     with pytest.raises(RemoteError) as exc:
-        await client.call("read_transcript", id=_FIXED_NAME, last_n=5)
+        await client.call("read_transcript", id=_FIXED_NAME)
     assert exc.value.code == "not_found"
 
 
@@ -2002,6 +2003,114 @@ async def test_list_ids_dead_returned_with_include_dead(client, fake_tmux):
     assert rows[0]["status"] == "dead"
 
 
+async def test_list_live_default_remains_unbounded(client, daemon):
+    for index in range(101):
+        daemon.store.upsert_participant(
+            Participant(id=f"live-{index:03}", harness="vibe", created_at=float(index))
+        )
+
+    rows = await client.call("participants.list")
+    assert [row["id"] for row in rows] == [f"live-{index:03}" for index in range(101)]
+
+
+async def test_list_include_dead_is_unbounded_without_explicit_limit(client, daemon):
+    for index in range(101):
+        daemon.store.upsert_participant(
+            Participant(
+                id=f"dead-{index:03}",
+                harness="vibe",
+                status=Status.DEAD,
+                created_at=float(index),
+            )
+        )
+
+    all_rows = await client.call("participants.list", include_dead=True)
+    first = await client.call("participants.list", include_dead=True, limit=100)
+    second = await client.call(
+        "participants.list",
+        include_dead=True,
+        limit=100,
+        after_id=first[-1]["id"],
+    )
+    end = await client.call(
+        "participants.list",
+        include_dead=True,
+        limit=100,
+        after_id=second[-1]["id"],
+    )
+
+    assert [row["id"] for row in all_rows] == [f"dead-{index:03}" for index in range(101)]
+    assert [row["id"] for row in first] == [f"dead-{index:03}" for index in range(100)]
+    assert [row["id"] for row in second] == ["dead-100"]
+    assert end == []
+
+
+@pytest.mark.parametrize("limit", [True, "10", 0, 201])
+async def test_list_rejects_invalid_page_limit(client, limit):
+    with pytest.raises(RemoteError) as exc:
+        await client.call("participants.list", limit=limit)
+    assert exc.value.code == "bad_request"
+
+
+@pytest.mark.parametrize("after_id", ["", 1])
+async def test_list_rejects_invalid_after_id(client, after_id):
+    with pytest.raises(RemoteError) as exc:
+        await client.call("participants.list", after_id=after_id)
+    assert exc.value.code == "bad_request"
+
+
+async def test_list_rejects_missing_keyset_cursor(client):
+    with pytest.raises(RemoteError) as exc:
+        await client.call("participants.list", after_id="gone")
+    assert exc.value.code == "bad_request"
+    assert "restart pagination" in str(exc.value)
+
+
+@pytest.mark.parametrize("params", [{"limit": 1}, {"after_id": "p-any"}])
+async def test_list_rejects_pagination_with_ids(client, params):
+    with pytest.raises(RemoteError) as exc:
+        await client.call("participants.list", ids=[], **params)
+    assert exc.value.code == "bad_request"
+
+
+async def test_list_keyset_composes_with_direct_children_and_dead_rows(client, daemon):
+    parent = Participant(id="parent", harness="vibe", created_at=0.0)
+    child_a = Participant(
+        id="child-a",
+        harness="vibe",
+        parent_id=parent.id,
+        status=Status.DEAD,
+        created_at=1.0,
+    )
+    child_b = Participant(
+        id="child-b",
+        harness="vibe",
+        parent_id=parent.id,
+        status=Status.DEAD,
+        created_at=2.0,
+    )
+    outsider = Participant(id="outsider", harness="vibe", status=Status.DEAD, created_at=3.0)
+    for participant in (parent, child_a, child_b, outsider):
+        daemon.store.upsert_participant(participant)
+
+    first = await client.call(
+        "participants.list",
+        include_dead=True,
+        parent_id=parent.id,
+        limit=1,
+    )
+    second = await client.call(
+        "participants.list",
+        include_dead=True,
+        parent_id=parent.id,
+        limit=1,
+        after_id=first[-1]["id"],
+    )
+
+    assert [row["id"] for row in first] == [child_a.id]
+    assert [row["id"] for row in second] == [child_b.id]
+
+
 async def test_list_parent_filter_returns_direct_children_only(client, fake_tmux):
     parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
     child = await client.call(
@@ -2130,6 +2239,7 @@ async def test_list_resume_state_owned_by_live(client, daemon):
     dead_part = daemon.registry.get(dead_id)
     dead_part.session_id = "sess-shared"
     dead_part.session_correlation = "operator"
+    dead_part.created_at = 0.0
     daemon.store.upsert_participant(dead_part)
     daemon.registry.mark_dead(dead_id)
 
@@ -2141,11 +2251,10 @@ async def test_list_resume_state_owned_by_live(client, daemon):
     live_part.session_correlation = "operator"
     daemon.store.upsert_participant(live_part)
 
-    rows = await client.call("participants.list", include_dead=True)
-    dead_row = next(r for r in rows if r["id"] == dead_id)
-    live_row = next(r for r in rows if r["id"] == live_id)
+    rows = await client.call("participants.list", include_dead=True, limit=1)
+    assert [row["id"] for row in rows] == [dead_id]
+    dead_row = rows[0]
     assert dead_row["resume_state"] == "owned_by_live"
-    assert live_row["resume_state"] == "live"
 
 
 async def test_list_resume_state_owned_by_live_beats_untrusted(client, daemon):

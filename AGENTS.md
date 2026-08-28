@@ -202,7 +202,7 @@ theater/
   observability setup and shutdown; `cmd_daemon` owns only argument translation
   and exit codes. `runtime.configure()` is called exactly once — global tracer
   providers cannot be reset safely, so a second configure attempt is rejected.
-  `daemon.log` (rotating) and `daemon.<token>.stderr.log` (raw crash output)
+  `logs/daemon.log` (rotating) and `logs/daemon.<token>.stderr.log` (raw crash output)
   are never the same file. Gauge sampling runs on the daemon event loop because
   Store's SQLite connection is loop-thread-only; exporter callbacks read only a
   cache and never query SQLite. See §13 of architecture.md.

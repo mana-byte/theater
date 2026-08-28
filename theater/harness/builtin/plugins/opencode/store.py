@@ -172,6 +172,8 @@ def paged_messages(
     sid: str,
     boundary: tuple[int | float, str, str] | None,
     limit: int,
+    *,
+    inclusive: bool = False,
 ):
     params: list[object] = [sid]
     sql = (
@@ -180,22 +182,24 @@ def paged_messages(
     )
     if boundary is not None:
         created, message_id, _fingerprint = boundary
-        sql += " AND (time_created < ? OR (time_created = ? AND id < ?))"
+        operator = "<=" if inclusive else "<"
+        sql += f" AND (time_created < ? OR (time_created = ? AND id {operator} ?))"
         params.extend((created, created, message_id))
     sql += " ORDER BY time_created DESC, id DESC LIMIT ?"
     params.append(limit + 1)
     return conn.execute(sql, params).fetchall()
 
 
-def paged_parts(conn: sqlite3.Connection, sid: str, message_id: str, limit: int):
-    return list(
-        conn.execute(
-            "SELECT id, time_created, time_updated, data FROM part "
-            "WHERE message_id = ? AND session_id = ? "
-            "ORDER BY time_created, id LIMIT ?",
-            (message_id, sid, limit + 1),
-        )
+def paged_parts(conn: sqlite3.Connection, sid: str, message_id: str, limit: int | None):
+    query = (
+        "SELECT id, time_created, time_updated, data FROM part "
+        "WHERE message_id = ? AND session_id = ? ORDER BY time_created, id"
     )
+    params: tuple[object, ...] = (message_id, sid)
+    if limit is not None:
+        query += " LIMIT ?"
+        params += (limit + 1,)
+    return list(conn.execute(query, params))
 
 
 def history_boundary(

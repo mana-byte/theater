@@ -8,6 +8,7 @@ deadlock rail — neither shows up as an error, only as work that never lands.
 
 from __future__ import annotations
 
+from theater.constants.daemon import PARTICIPANTS_LIST_DEFAULT_DEAD_LIMIT
 from theater.mcp import tools
 
 RECORD = {
@@ -303,10 +304,20 @@ async def test_scratchpad_get_identifies_and_forwards_exact_rpc_arguments():
     }
 
 
-async def test_read_transcript_asks_for_the_number_of_events_requested():
+async def test_read_transcript_forwards_a_live_name_without_listing_first():
     s = resolved(read_transcript={"id": "p-you", "events": []})
-    await tools.read_transcript(s, target_id="p-you", last_n=12)
-    assert s.client.params("read_transcript") == {"id": "p-you", "last_n": 12}
+    await tools.read_transcript(s, target="Arlequin")
+    assert s.client.methods == ["read_transcript"]
+    assert s.client.params("read_transcript") == {"id": "Arlequin"}
+
+
+async def test_read_transcript_forwards_only_the_returned_cursor():
+    s = resolved(read_transcript={"id": "p-you", "events": []})
+    await tools.read_transcript(s, target="Arlequin", cursor="trc1.cursor")
+    assert s.client.params("read_transcript") == {
+        "id": "Arlequin",
+        "cursor": "trc1.cursor",
+    }
 
 
 async def test_put_child_back_in_the_wound_names_the_caller_so_the_daemon_can_authorize():
@@ -385,6 +396,41 @@ async def test_list_participants_forwards_ids_none():
     await tools.list_participants(s, ids=None)
     params = s.client.params("participants.list")
     assert params["ids"] is None
+
+
+async def test_list_participants_forwards_keyset_pagination_to_daemon():
+    rows = [{**_RECORD_WITH_RESUME, "id": "p-other"}]
+    s = resolved(**{"participants.list": rows})
+    await tools.list_participants(s, include_dead=True, limit=25, after_id="p-before")
+    assert s.client.params("participants.list") == {
+        "include_dead": True,
+        "ids": None,
+        "parent_id": None,
+        "limit": 25,
+        "after_id": "p-before",
+    }
+
+
+async def test_list_participants_caps_unfiltered_dead_history_for_mcp():
+    s = resolved(**{"participants.list": []})
+    await tools.list_participants(s, include_dead=True)
+    assert s.client.params("participants.list")["limit"] == PARTICIPANTS_LIST_DEFAULT_DEAD_LIMIT
+
+
+async def test_list_participants_keeps_mcp_dead_cap_on_cursor_pages():
+    s = resolved(**{"participants.list": []})
+    await tools.list_participants(s, include_dead=True, after_id="p-before")
+    assert s.client.params("participants.list")["limit"] == PARTICIPANTS_LIST_DEFAULT_DEAD_LIMIT
+
+
+async def test_list_participants_does_not_cap_id_or_live_queries():
+    with_ids = resolved(**{"participants.list": []})
+    await tools.list_participants(with_ids, include_dead=True, ids=["p-dead"])
+    assert "limit" not in with_ids.client.params("participants.list")
+
+    live = resolved(**{"participants.list": []})
+    await tools.list_participants(live)
+    assert "limit" not in live.client.params("participants.list")
 
 
 async def test_list_participants_scopes_children_to_caller():

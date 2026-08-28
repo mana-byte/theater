@@ -64,6 +64,9 @@ MIN_EXPORT_INTERVAL_MS = 100
 #: Total raw stderr generations retained, including current.
 STDERR_GENERATIONS = 3
 
+#: Inactive régie pane generations retained in addition to protected groups.
+REGIE_GENERATIONS = 3
+
 #: Stderr token: number of random bytes; secrets.token_hex doubles to hex chars.
 STDERR_TOKEN_BYTES = 6
 

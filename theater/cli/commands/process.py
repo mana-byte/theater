@@ -34,7 +34,7 @@ def cmd_daemon(args) -> int:
         if stderr_token is not None:
             from theater import paths
 
-            delete_generation_file(generation_path(paths.home(), stderr_token))
+            delete_generation_file(generation_path(paths.logs_dir(), stderr_token))
         print(f"theater: {exc}", file=sys.stderr)
         return 1
     except RuntimeError as exc:
@@ -85,12 +85,28 @@ def cmd_regie(args) -> int:
         )
         return 1
     from theater.constants.observability import PROCESS_ROLE_REGIE
-    from theater.observability.logging import log_unhandled_exceptions
+    from theater.observability.logging import log_unhandled_exceptions, prune_regie_generations
     from theater.observability.runtime import configure
 
     settings = config.load()
     obs = settings.observability
     paths.ensure_home()
+    current_log = paths.regie_log_path()
+    try:
+        live_panes = asyncio.run(tmux.list_panes())
+    except Exception as error:
+        logging.getLogger("theater.regie").warning(
+            "régie log pruning skipped: cannot discover live tmux panes: %s", error
+        )
+    else:
+        try:
+            prune_regie_generations(
+                paths.regie_logs_dir(),
+                current_log,
+                (pane.pane_id for pane in live_panes),
+            )
+        except OSError as error:
+            logging.getLogger("theater.regie").warning("régie log pruning failed: %s", error)
     runtime_handle = configure(
         role=PROCESS_ROLE_REGIE,
         otlp_enabled=obs.otlp_enabled,

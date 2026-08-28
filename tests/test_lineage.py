@@ -8,8 +8,9 @@ is how a runaway spawn gets past the depth cap.
 
 from __future__ import annotations
 
-from theater.daemon.lineage import ancestor_ids, depth_of, root_of, subtree_ids
+from theater.daemon.lineage import ancestor_ids, depth_of, root_of, subtree, subtree_ids
 from theater.daemon.registry import Registry
+from theater.models import Status
 
 
 def chain(store, length: int):
@@ -117,6 +118,38 @@ def test_a_subtree_includes_grandchildren(store):
 def test_a_subtree_is_taken_from_where_you_ask_not_the_root(store):
     _root, child, grandchild = chain(store, 3)
     assert set(subtree_ids(store, child.id)) == {child.id, grandchild.id}
+
+
+def test_subtree_returns_participants_in_breadth_first_order(store):
+    reg = Registry(store)
+    root = reg.create_spawned(harness="vibe", cwd="/tmp")
+    first = reg.create_spawned(harness="vibe", cwd="/tmp", parent_id=root.id)
+    second = reg.create_spawned(harness="vibe", cwd="/tmp", parent_id=root.id)
+    grandchild = reg.create_spawned(harness="vibe", cwd="/tmp", parent_id=first.id)
+
+    participants = subtree(store, root.id)
+
+    assert [participant.id for participant in participants] == [
+        root.id,
+        first.id,
+        second.id,
+        grandchild.id,
+    ]
+    assert subtree_ids(store, root.id) == [participant.id for participant in participants]
+
+
+def test_subtree_crosses_dead_intermediary(store):
+    reg = Registry(store)
+    root = reg.create_spawned(harness="vibe", cwd="/tmp")
+    dead = reg.create_spawned(harness="vibe", cwd="/tmp", parent_id=root.id)
+    live = reg.create_spawned(harness="vibe", cwd="/tmp", parent_id=dead.id)
+    store.set_status(dead.id, Status.DEAD)
+
+    assert [participant.id for participant in subtree(store, root.id)] == [
+        root.id,
+        dead.id,
+        live.id,
+    ]
 
 
 def test_a_loop_below_the_root_does_not_repeat_anyone(store):

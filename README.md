@@ -231,8 +231,10 @@ boundaries, and optional native signal enrichment.
 
 ## Optional observability
 
-Human-readable diagnostics are always written to rotating `daemon.log` and
-per-pane `regie.pane-<id>.log` files under `$THEATER_HOME`.
+Human-readable diagnostics are always written to rotating
+`$THEATER_HOME/logs/daemon.log` and per-pane
+`$THEATER_HOME/logs/regie/pane-<id>.log` files. Outside tmux, régie uses a
+`pid-<pid>.log` name instead.
 
 OTLP traces, metrics, and structured logs are off by default. In a source
 checkout, install the optional dependencies:

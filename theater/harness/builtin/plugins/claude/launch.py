@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from theater import paths
+from theater.constants.cli import TRANSCRIPT_RECEIPT_COMMAND
 from theater.harness.base import (
     APPROVALS,
     SERVER_NAME,
@@ -23,7 +24,7 @@ from theater.harness.contracts.callbacks import LaunchContext, ResumeContext
 from theater.harness.contracts.manifest import LaunchManifest
 from theater.harness.transcript.discovery import root_domain_overlay
 
-from .constants import CLAUDE_RECEIPT_COMMAND, CLAUDE_RECEIPT_EVENTS
+from .constants import CLAUDE_RECEIPT_EVENTS
 
 
 def _claude_settings_path(participant_id: str) -> Path:
@@ -36,7 +37,7 @@ def _receipt_hook_command(participant_id: str, token_path: Path) -> str:
     return shlex.join(
         [
             theater_binary(),
-            CLAUDE_RECEIPT_COMMAND,
+            TRANSCRIPT_RECEIPT_COMMAND,
             "--id",
             participant_id,
             "--token-file",

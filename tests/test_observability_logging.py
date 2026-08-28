@@ -14,6 +14,7 @@ from theater.observability.logging import (
     log_unhandled_exceptions,
     make_formatter,
     make_rotating_handler,
+    prune_regie_generations,
     prune_stderr_generations,
     validate_token,
 )
@@ -142,3 +143,72 @@ def test_prune_ignores_non_generation(tmp_path):
     assert prune_stderr_generations(tmp_path, path) == 0
     assert (tmp_path / "daemon.log").exists()
     path.unlink()
+
+
+def _regie_generation(tmp_path, identity, mtime):
+    paths = [tmp_path / f"{identity}.log", tmp_path / f"{identity}.log.1"]
+    for path in paths:
+        path.write_text(path.name)
+        os.utime(path, (mtime, mtime))
+    return paths
+
+
+def test_prune_regie_deletes_whole_inactive_rotation_groups(tmp_path):
+    groups = {
+        identity: _regie_generation(tmp_path, identity, index)
+        for index, identity in enumerate(("pane-1", "pane-2", "pane-3", "pane-4"), 1)
+    }
+
+    deleted = prune_regie_generations(
+        tmp_path,
+        groups["pane-1"][0],
+        protected={"%2"},
+        retain=1,
+    )
+
+    assert deleted == 2
+    assert all(path.exists() for path in groups["pane-1"] + groups["pane-2"] + groups["pane-4"])
+    assert all(not path.exists() for path in groups["pane-3"])
+
+
+def test_prune_regie_keeps_newest_inactive_groups_within_bound(tmp_path):
+    groups = {
+        identity: _regie_generation(tmp_path, identity, index)
+        for index, identity in enumerate(("pane-1", "pane-2", "pane-3", "pane-4"), 1)
+    }
+
+    prune_regie_generations(tmp_path, groups["pane-1"][0], retain=1)
+
+    assert all(path.exists() for path in groups["pane-1"] + groups["pane-4"])
+    assert all(not path.exists() for path in groups["pane-2"] + groups["pane-3"])
+
+
+def test_prune_regie_ignores_unrelated_and_malformed_files(tmp_path):
+    keep = [
+        tmp_path / "daemon.log",
+        tmp_path / "pane-nope.log",
+        tmp_path / "pane-9",
+        tmp_path / "%9",
+        tmp_path / "pane-9.log.0",
+        tmp_path / "pane-9.log.backup",
+    ]
+    for path in keep:
+        path.write_text("keep")
+    old = _regie_generation(tmp_path, "pane-8", 1)
+
+    prune_regie_generations(tmp_path, None, retain=0)
+
+    assert all(path.exists() for path in keep)
+    assert all(not path.exists() for path in old)
+
+
+def test_prune_regie_unlink_failure_is_best_effort(tmp_path, monkeypatch):
+    paths = _regie_generation(tmp_path, "pane-8", 1)
+
+    def fail(*args, **kwargs):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(type(paths[0]), "unlink", fail)
+
+    assert prune_regie_generations(tmp_path, None, retain=0) == 0
+    assert all(path.exists() for path in paths)

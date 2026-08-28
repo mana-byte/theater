@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-CLAUDE_RECEIPT_COMMAND = "transcript-receipt"
 CLAUDE_RECEIPT_EVENTS = ("SessionStart", "PreCompact")
 
 IDLE_PROMPTS = (">", "> ")

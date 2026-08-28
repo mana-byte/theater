@@ -22,8 +22,18 @@ def socket_path() -> Path:
     return home() / "daemon.sock"
 
 
+def logs_dir() -> Path:
+    """Directory for daemon and raw stderr logs."""
+    return home() / "logs"
+
+
+def regie_logs_dir() -> Path:
+    """Directory for régie pane log generations."""
+    return logs_dir() / "regie"
+
+
 def log_path() -> Path:
-    return home() / "daemon.log"
+    return logs_dir() / "daemon.log"
 
 
 def regie_log_path() -> Path:
@@ -31,7 +41,7 @@ def regie_log_path() -> Path:
     pane = os.environ.get("TMUX_PANE", "")
     match = _TMUX_PANE_ID.fullmatch(pane)
     identity = f"pane-{match.group(1)}" if match is not None else f"pid-{os.getpid()}"
-    return home() / f"regie.{identity}.log"
+    return regie_logs_dir() / f"{identity}.log"
 
 
 def pidfile_path() -> Path:
@@ -76,6 +86,8 @@ def harnesses_dir() -> Path:
 def ensure_home() -> Path:
     root = home()
     root.mkdir(parents=True, exist_ok=True)
+    logs_dir().mkdir(parents=True, exist_ok=True)
+    regie_logs_dir().mkdir(parents=True, exist_ok=True)
     mcp_config_dir().mkdir(parents=True, exist_ok=True)
     (root / "observations").mkdir(parents=True, exist_ok=True)
     harnesses_dir().mkdir(parents=True, exist_ok=True)

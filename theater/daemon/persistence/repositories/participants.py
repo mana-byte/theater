@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from theater.daemon.persistence.database import Database
@@ -69,6 +69,8 @@ class ParticipantRepository:
         include_dead: bool = False,
         ids: Sequence[str] | None = None,
         parent_id: str | None = None,
+        after: tuple[float, str] | None = None,
+        limit: int | None = None,
     ) -> list[Participant]:
         stmt = select(participants)
         if not include_dead:
@@ -79,7 +81,20 @@ class ParticipantRepository:
             stmt = stmt.where(participants.c.id.in_(ids))
         if parent_id is not None:
             stmt = stmt.where(participants.c.parent_id == parent_id)
-        stmt = stmt.order_by(participants.c.created_at.asc())
+        if after is not None:
+            created_at, participant_id = after
+            stmt = stmt.where(
+                or_(
+                    participants.c.created_at > created_at,
+                    and_(
+                        participants.c.created_at == created_at,
+                        participants.c.id > participant_id,
+                    ),
+                )
+            )
+        stmt = stmt.order_by(participants.c.created_at.asc(), participants.c.id.asc())
+        if limit is not None:
+            stmt = stmt.limit(limit)
         return [Participant.from_row(r._mapping) for r in self._db.conn.execute(stmt)]
 
     def list_recent_dead(

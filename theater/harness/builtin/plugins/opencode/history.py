@@ -90,14 +90,23 @@ class OpenCodeHistory:
         self,
         *,
         before: str | None = None,
+        snapshot: str | None = None,
         limit: int = TRAJECTORY_PAGE_RECORD_LIMIT,
+        include_full_text: bool = False,
     ) -> HistoryPage:
         if type(limit) is not int or limit <= 0:
             return HistoryPage(
                 error_code="invalid_limit", error="history page limit must be positive"
             )
+        if before is not None and snapshot is not None:
+            return HistoryPage(
+                error_code="history_cursor_invalid",
+                error="history page accepts either an older cursor or a snapshot cursor",
+            )
         limit = min(limit, TRAJECTORY_PAGE_RECORD_LIMIT)
-        return await asyncio.to_thread(self._history_page, before, limit)
+        return await asyncio.to_thread(
+            self._history_page, before, snapshot, limit, include_full_text
+        )
 
     def _history(self, last_n: int) -> History:
         """Replay current message and part rows independently of the live cursor."""
@@ -198,7 +207,13 @@ class OpenCodeHistory:
             )
         return events
 
-    def _history_page(self, before: str | None, limit: int) -> HistoryPage:
+    def _history_page(
+        self,
+        before: str | None,
+        snapshot: str | None,
+        limit: int,
+        include_full_text: bool = False,
+    ) -> HistoryPage:
         if not self._db.exists():
             return HistoryPage(
                 error_code=TRANSCRIPT_SOURCE_UNAVAILABLE_CODE,
@@ -212,7 +227,9 @@ class OpenCodeHistory:
                 error=f"reading OpenCode database failed: {exc}",
             )
         try:
-            return self._history_page_with_connection(conn, before, limit)
+            return self._history_page_with_connection(
+                conn, before, snapshot, limit, include_full_text
+            )
         except sqlite3.Error as exc:
             logger.debug("reading opencode history page failed", exc_info=True)
             return HistoryPage(
@@ -223,12 +240,23 @@ class OpenCodeHistory:
             conn.close()
 
     def _history_page_with_connection(  # noqa: PLR0912, PLR0915
-        self, conn: sqlite3.Connection, before: str | None, limit: int
+        self,
+        conn: sqlite3.Connection,
+        before: str | None,
+        snapshot: str | None,
+        limit: int,
+        include_full_text: bool = False,
     ) -> HistoryPage:
+        snapshot_payload: dict[str, object] | None = None
+        if snapshot is not None:
+            try:
+                snapshot_payload = self._decode_snapshot_cursor(snapshot)
+            except HistoryPageError as exc:
+                return HistoryPage(error_code=exc.code, error=str(exc))
         sid = self._history_session(conn)
         pinned = self._known_location is not None
         if sid is None:
-            if before is not None:
+            if before is not None or snapshot is not None:
                 return HistoryPage(
                     error_code="history_cursor_invalid",
                     error="history cursor session is unavailable",
@@ -245,6 +273,7 @@ class OpenCodeHistory:
             )
         identity = {"dev": int(stat.st_dev), "ino": int(stat.st_ino), "size": int(stat.st_size)}
         boundary: tuple[int | float, str, str] | None = None
+        snapshot_boundary: tuple[int | float, str, str] | None = None
         if before is not None:
             try:
                 cursor = self._decode_history_cursor(before)
@@ -255,7 +284,20 @@ class OpenCodeHistory:
                     error=str(exc),
                     pinned=pinned,
                 )
-        rows = paged_messages(conn, sid, boundary, limit)
+        if snapshot_payload is not None:
+            try:
+                snapshot_boundary = self._validate_history_cursor(
+                    conn, snapshot_payload, sid, identity
+                )
+            except HistoryPageError as exc:
+                return HistoryPage(error_code=exc.code, error=str(exc), pinned=pinned)
+        rows = paged_messages(
+            conn,
+            sid,
+            snapshot_boundary if snapshot_boundary is not None else boundary,
+            limit,
+            inclusive=snapshot_boundary is not None,
+        )
         selected: list[tuple[object, object, object, object]] = []
         selected_output: list[tuple[tuple[Event, ...], tuple[TrajectoryFact, ...], int]] = []
         event_count = 0
@@ -269,7 +311,12 @@ class OpenCodeHistory:
             key = self._history_row_key(created, message_id)
             if key is None:
                 continue
-            parts, parts_truncated = self._history_parts(conn, sid, str(message_id), limit)
+            parts, parts_truncated = self._history_parts(
+                conn,
+                sid,
+                str(message_id),
+                None if include_full_text else limit,
+            )
             if parts_truncated:
                 return HistoryPage(
                     error_code="history_record_too_large",
@@ -292,13 +339,17 @@ class OpenCodeHistory:
                     message_revision=self._stored_revision(info, updated, created),
                 )
             )
-            if len(message_events) > limit or len(message_facts) > limit:
+            if not include_full_text and (
+                len(message_events) > limit or len(message_facts) > limit
+            ):
                 return HistoryPage(
                     error_code="history_record_too_large",
                     error="one OpenCode message exceeds the history page limit",
                     pinned=pinned,
                 )
-            if event_count + len(message_events) > limit or fact_count + len(message_facts) > limit:
+            if not include_full_text and (
+                event_count + len(message_events) > limit or fact_count + len(message_facts) > limit
+            ):
                 has_more = True
                 break
             selected.append(row)
@@ -322,12 +373,19 @@ class OpenCodeHistory:
             facts.extend(message_facts)
         newest_cursor = self._encode_history_cursor(sid, identity, newest)
         older_cursor = self._encode_history_cursor(sid, identity, oldest) if has_more else None
+        snapshot_cursor = (
+            snapshot
+            if snapshot is not None
+            else self._encode_snapshot_cursor(sid, identity, newest)
+        )
         return HistoryPage(
             location=f"opencode://{sid}",
-            events=events,
-            trajectory=facts,
+            events=events[-limit:] if include_full_text else events,
+            complete_events=events if include_full_text else None,
+            trajectory=facts[-limit:] if include_full_text else facts,
             trajectory_events=(),
             cursor=newest_cursor,
+            snapshot_cursor=snapshot_cursor,
             older_cursor=older_cursor,
             has_older=has_more,
             provenance=self._attachment_provenance(sid),
@@ -405,6 +463,21 @@ class OpenCodeHistory:
     def _encode_history_cursor(
         self, sid: str, identity: dict[str, int], row: Sequence[object]
     ) -> str:
+        return self._encode_history_boundary_cursor(sid, identity, row, prefix="oc1.")
+
+    def _encode_snapshot_cursor(
+        self, sid: str, identity: dict[str, int], row: Sequence[object]
+    ) -> str:
+        return self._encode_history_boundary_cursor(sid, identity, row, prefix="oc1s.")
+
+    def _encode_history_boundary_cursor(
+        self,
+        sid: str,
+        identity: dict[str, int],
+        row: Sequence[object],
+        *,
+        prefix: str,
+    ) -> str:
         message_id, created, updated, raw = row
         key = self._history_row_key(created, message_id)
         if key is None:
@@ -419,6 +492,8 @@ class OpenCodeHistory:
             "revision": self._history_revision(updated, created),
             "fingerprint": self._history_fingerprint(updated, raw),
         }
+        if prefix == "oc1s.":
+            payload["mode"] = "snapshot"
         encoded = (
             base64.urlsafe_b64encode(
                 json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -426,14 +501,22 @@ class OpenCodeHistory:
             .decode("ascii")
             .rstrip("=")
         )
-        cursor = "oc1." + encoded
+        cursor = prefix + encoded
         if len(cursor.encode("utf-8")) > TRAJECTORY_CURSOR_MAX_BYTES:
             raise ValueError("OpenCode history cursor exceeds its size limit")
         return cursor
 
     @staticmethod
     def _decode_history_cursor(cursor: str) -> dict[str, object]:
-        if not isinstance(cursor, str) or not cursor.startswith("oc1."):
+        return OpenCodeHistory._decode_source_cursor(cursor, prefix="oc1.", mode=None)
+
+    @staticmethod
+    def _decode_snapshot_cursor(cursor: str) -> dict[str, object]:
+        return OpenCodeHistory._decode_source_cursor(cursor, prefix="oc1s.", mode="snapshot")
+
+    @staticmethod
+    def _decode_source_cursor(cursor: str, *, prefix: str, mode: str | None) -> dict[str, object]:
+        if not isinstance(cursor, str) or not cursor.startswith(prefix):
             raise HistoryPageError(
                 "history_cursor_invalid", "history cursor is not valid for OpenCode"
             )
@@ -444,7 +527,8 @@ class OpenCodeHistory:
         if encoded_length > TRAJECTORY_CURSOR_MAX_BYTES:
             raise HistoryPageError("history_cursor_invalid", "history cursor is too large")
         try:
-            raw = base64.urlsafe_b64decode(cursor[4:] + "=" * (-len(cursor[4:]) % 4))
+            encoded = cursor[len(prefix) :]
+            raw = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
             payload = json.loads(raw.decode("utf-8"))
         except HistoryPageError:
             raise
@@ -462,7 +546,13 @@ class OpenCodeHistory:
             "revision",
             "fingerprint",
         }
+        if mode is not None:
+            required.add("mode")
         if set(payload) != required or payload.get("v") != 1 or payload.get("source") != "opencode":
+            raise HistoryPageError(
+                "history_cursor_invalid", "history cursor does not belong to OpenCode"
+            )
+        if mode is not None and payload.get("mode") != mode:
             raise HistoryPageError(
                 "history_cursor_invalid", "history cursor does not belong to OpenCode"
             )
@@ -487,6 +577,8 @@ class OpenCodeHistory:
                 found_identity.get("dev") == identity["dev"]
                 and found_identity.get("ino") == identity["ino"]
                 and type(found_size) is int
+                and found_size >= 0
+                and found_size <= identity["size"]
             )
         if not valid_identity:
             raise HistoryPageError("history_cursor_invalid", "OpenCode database identity changed")
@@ -518,11 +610,12 @@ class OpenCodeHistory:
         return created, message_id, str(cursor["fingerprint"])
 
     def _history_parts(
-        self, conn: sqlite3.Connection, sid: str, message_id: str, limit: int
+        self, conn: sqlite3.Connection, sid: str, message_id: str, limit: int | None
     ) -> tuple[list[tuple[object, object, object, object]], bool]:
         found = paged_parts(conn, sid, message_id, limit)
-        truncated = len(found) > limit
-        found = found[:limit]
+        truncated = limit is not None and len(found) > limit
+        if limit is not None:
+            found = found[:limit]
         found.sort(
             key=lambda row: (
                 row[1] if isinstance(row[1], (int, float)) and not isinstance(row[1], bool) else 0,

@@ -357,13 +357,14 @@ Three fields in that contract are load-bearing:
   The observer sleeps and runs no timers, because a quiet timer against a
   source that has never spoken measures nothing.
 
-A source has one more job, and it is not the observer's: `history(last_n)`
-returns the session from the beginning, unclipped, and is what `read_transcript`
-calls. `read()` is a tail and cannot answer that question — by the time an agent
-asks for the full text of a reply, the batch carrying it is long gone. The
-default implementation re-reads the file with clipping off; a database source
-writes its own query. A custom source that skips it does not error, it just
-returns nothing, which is the one feature a source can silently lose.
+A source has one more job, and it is not the observer's: `history_page` reads a
+bounded history window without advancing the live cursor, and is what
+`read_transcript` calls. `read()` is a tail and cannot answer that question — by
+the time an agent asks for older text, the batch carrying it is long gone. File
+and database sources page from their own storage cursors; the generic pager
+owns the MCP response budget and continuation chunks. The legacy
+`history(last_n)` projection remains for internal consumers, but is not the
+agent-facing transcript surface.
 
 **Why not let a plugin bring its own observer?** Because job 2 would then be
 written once per harness, and the settling logic, the rescue and the
@@ -385,8 +386,10 @@ token file. `SessionStart` covers cold starts and post-compaction
 locations, while `PreCompact` records the old transcript before the
 harness rotates. Live Claude sessions shipped in v3.2.0 have
 `settings.json` files on disk that invoke `theater claude-receipt` by that
-exact name; the old command name and `claude.receipt` RPC are kept as
-forwarding aliases so those sessions keep working.
+exact name; the old CLI command remains as a payload-transparent alias of
+`transcript-receipt` so those sessions keep working. Both command names use
+the harness-neutral `transcript.receipt` RPC, and only the plugin interprets
+the native payload.
 
 Spawned OpenCode sessions use the same authenticated receipt transport. Their launch-local plugin
 publishes each root `session.created` ID, retries transient delivery failures, and retries again on
@@ -531,8 +534,9 @@ ceiling comes back as `running` and the caller decides whether to re-await.
 
 The agent-facing reply drops `prompt` and `result` from each entry. The prompt
 is what the caller already sent, and `result` was only ever a 2000-char clip of
-the child's turn; an agent that wants what the child said or did reads the
-transcript directly via `read_transcript`, which returns it whole.
+the child's turn; an agent that wants what the child said or did reads bounded
+transcript pages via `read_transcript`, continuing only with Theater's returned
+cursor when needed.
 
 The in-memory events do not survive a daemon restart, and that is correct — a
 restarted daemon has no observer attached yet, so an in-flight await would have
@@ -854,7 +858,7 @@ configuration says export is enabled.
 
 The daemon has two log files that must never share an inode:
 
-- **`daemon.log`** — the routine human-readable log. A `RotatingFileHandler`
+- **`logs/daemon.log`** — the routine human-readable log. A `RotatingFileHandler`
   attaches directly to the `theater` logger with the existing formatter
   (`%(asctime)s %(levelname)-7s %(name)s %(message)s`). Rotation is **always
   active**, regardless of whether OTLP export is enabled — this is the fix for
@@ -863,9 +867,9 @@ The daemon has two log files that must never share an inode:
   output. A direct foreground daemon (`theater daemon`) also attaches a stderr
   handler with the same formatter; an autostarted daemon does not mirror routine
   logs into raw stderr.
-- **`daemon.<token>.stderr.log`** — raw crash output. When `DaemonClient`
+- **`logs/daemon.<token>.stderr.log`** — raw crash output. When `DaemonClient`
   autostarts a daemon, the parent generates 12 lowercase hex chars with
-  `secrets.token_hex(6)`, creates a mode-0600 file under Theater home, and
+  `secrets.token_hex(6)`, creates a mode-0600 file under `THEATER_HOME/logs`, and
   passes the same open fd as the child's stdout and stderr. The child does not
   reopen or redirect stderr — it inherited the correct descriptor. Token
   exists only for safe cleanup, pruning, and error reporting.
@@ -880,10 +884,13 @@ generation; the current path is pinned regardless of mtime. Only `LockHeld`
 (the singleton race loser) deletes its own generation — every other failure
 keeps it, whether before or after lock acquisition.
 
-Each régie writes a rotating `regie.pane-<id>.log` beside the daemon logs, with
-a PID fallback when no pane identity is available. Per-pane files prevent two
-régie processes from rotating the same inode. Its event-loop lag monitor and
-unhandled Textual exceptions use the same shared logging and OTel pipeline.
+Each régie writes a rotating `logs/regie/pane-<id>.log`, with a
+`logs/regie/pid-<pid>.log` fallback when no pane identity is available. Per-pane
+files prevent two régie processes from rotating the same inode. Startup keeps
+the current and live-pane generations, plus a small bounded number of newest
+inactive generations; each base file and its `.1`, `.2`, … backups count as one
+generation. Its event-loop lag monitor and unhandled Textual exceptions use the
+same shared logging and OTel pipeline.
 MCP attaches only the OTel `LoggingHandler`; stdout remains protocol-only and
 there is no local MCP log file.
 
@@ -1021,8 +1028,8 @@ broken query does not suppress others. `stop()` is awaited before `Store.close()
 Raw stderr generation files are intentionally not rotated while a daemon is
 alive. They normally contain only interpreter or native crash output and
 accidental direct writes; routine Python logs go to the bounded rotating
-`daemon.log`. Per-generation retention (3 files total, including current) bounds
+`logs/daemon.log`. Per-generation retention (3 files total, including current) bounds
 old files, not one pathological current generation. Rotating an arbitrary
 inherited file descriptor requires a pipe or fd-reopen protocol; phase 1
 deliberately avoids that complexity. The observed growth source — 25 MB/9 h of
-routine logs — is moved to the bounded rotating `daemon.log`.
+routine logs — is moved to the bounded rotating `logs/daemon.log`.

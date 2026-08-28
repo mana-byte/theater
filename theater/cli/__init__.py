@@ -27,7 +27,6 @@ from theater.cli.commands.bus import (  # noqa: F401
     cmd_bus,
 )
 from theater.cli.commands.identity import (  # noqa: F401
-    _hook_string,
     _send_harness_event,
     _send_transcript_receipt,
     cmd_bind,

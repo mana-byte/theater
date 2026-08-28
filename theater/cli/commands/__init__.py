@@ -37,12 +37,13 @@ from theater.cli.commands.process import (
     cmd_mcp,
     cmd_regie,
 )
+from theater.constants.cli import TRANSCRIPT_RECEIPT_COMMAND
 
 COMMANDS = {
     None: cmd_launch,
     "daemon": cmd_daemon,
     "mcp": cmd_mcp,
-    "transcript-receipt": cmd_transcript_receipt,
+    TRANSCRIPT_RECEIPT_COMMAND: cmd_transcript_receipt,
     "claude-receipt": cmd_claude_receipt,
     "harness-event": cmd_harness_event,
     "ls": cmd_ls,

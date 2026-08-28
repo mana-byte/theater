@@ -36,11 +36,26 @@ RPC_DEFAULT_MAX_WAIT_SECONDS = 150.0
 #: Transcript kinds reported by read_transcript and recall_read; ERROR is not a conversation turn.
 TRANSCRIPT_READABLE_KINDS = ("assistant", "user", "tool_call", "tool_result")
 
+# Maximum encoded bytes in one transcript read response.
+TRANSCRIPT_READ_RESPONSE_MAX_BYTES = 16 * 1024
+
+# Maximum source records loaded into one transcript read page.
+TRANSCRIPT_READ_SOURCE_PAGE_LIMIT = 24
+
+# Maximum consecutive empty source pages scanned by one transcript read.
+TRANSCRIPT_READ_EMPTY_PAGE_SCAN_LIMIT = 8
+
 #: Bus kind for refused sends; GC protects it from age-based deletion and caps it separately.
 BUS_KIND_SEND_REFUSED = "send.refused"
 
 #: Maximum rows returned by one participant-scoped bus page.
 BUS_PARTICIPANT_PAGE_MAX_LIMIT = 200
+
+#: Safe default for unfiltered participant history pages.
+PARTICIPANTS_LIST_DEFAULT_DEAD_LIMIT = 100
+
+#: Hard ceiling for one explicitly requested participant-list page.
+PARTICIPANTS_LIST_MAX_LIMIT = 200
 
 #: Bus kind for an accepted operator or agent kill request.
 BUS_KIND_PARTICIPANT_KILL_REQUESTED = "participant.kill_requested"

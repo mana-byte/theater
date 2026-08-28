@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 from theater.daemon.store import Store
+from theater.models import Participant
 
 
 def ancestor_ids(store: Store, pid: str) -> Iterator[str]:
@@ -58,16 +59,24 @@ def root_of(store: Store, pid: str) -> str:
     return root
 
 
-def subtree_ids(store: Store, root_id: str) -> list[str]:
-    """The root and everything under it, breadth-first, each id once."""
-    found: list[str] = []
+def subtree(store: Store, root_id: str) -> list[Participant]:
+    """The root and everything under it, breadth-first, each participant once."""
+    root = store.get_participant(root_id)
+    if root is None:
+        return []
+    found: list[Participant] = []
     seen: set[str] = set()
-    queue = [root_id]
+    queue = [root]
     while queue:
-        pid = queue.pop(0)
-        if pid in seen:
+        participant = queue.pop(0)
+        if participant.id in seen:
             continue
-        seen.add(pid)
-        found.append(pid)
-        queue.extend(child.id for child in store.children_of(pid))
+        seen.add(participant.id)
+        found.append(participant)
+        queue.extend(store.children_of(participant.id))
     return found
+
+
+def subtree_ids(store: Store, root_id: str) -> list[str]:
+    """The ids in :func:`subtree`, in breadth-first order."""
+    return [participant.id for participant in subtree(store, root_id)]

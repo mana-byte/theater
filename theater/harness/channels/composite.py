@@ -359,16 +359,23 @@ class CompositeSource(Source):
         self,
         *,
         before: str | None = None,
+        snapshot: str | None = None,
         limit: int = TRAJECTORY_PAGE_RECORD_LIMIT,
+        include_full_text: bool = False,
     ) -> HistoryPage:
         if self._primary is None:
-            if before is not None:
+            if before is not None or snapshot is not None:
                 return HistoryPage(
                     error_code="history_paging_unavailable",
                     error="this source cannot page older history",
                 )
             return HistoryPage()
-        return await self._primary.history_page(before=before, limit=limit)
+        return await self._primary.history_page(
+            before=before,
+            snapshot=snapshot,
+            limit=limit,
+            include_full_text=include_full_text,
+        )
 
     async def aclose(self) -> None:
         if self._closed:

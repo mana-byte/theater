@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from theater.constants.daemon import PARTICIPANTS_LIST_DEFAULT_DEAD_LIMIT
 from theater.mcp.session import Session
 
 
@@ -48,15 +49,23 @@ async def list_participants(
     include_dead: bool = False,
     ids: list[str] | None = None,
     children_only: bool = False,
+    limit: int | None = None,
+    after_id: str | None = None,
 ) -> list[dict]:
     if not session._resolved:
         await session.identify()
-    rows = await session.client.call(
-        "participants.list",
-        include_dead=include_dead,
-        ids=ids,
-        parent_id=session.participant_id if children_only else None,
-    )
+    params: dict[str, object] = {
+        "include_dead": include_dead,
+        "ids": ids,
+        "parent_id": session.participant_id if children_only else None,
+    }
+    if limit is not None:
+        params["limit"] = limit
+    elif include_dead and ids is None:
+        params["limit"] = PARTICIPANTS_LIST_DEFAULT_DEAD_LIMIT
+    if after_id is not None:
+        params["after_id"] = after_id
+    rows = await session.client.call("participants.list", **params)
     assert isinstance(rows, list)
     me = session.participant_id
     return [

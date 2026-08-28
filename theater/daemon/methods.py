@@ -45,7 +45,6 @@ from theater.daemon.rpc.sending import (
 )
 from theater.daemon.rpc.transcripts import (
     _READABLE,
-    CLAUDE_RECEIPT_RPC,
     TRANSCRIPT_RECEIPT_BUS_KIND,
     TRANSCRIPT_RECEIPT_RPC,
     _candidate_owner,
@@ -61,7 +60,6 @@ from theater.daemon.rpc.usage import _calendar_period_since, _retention_floor
 
 __all__ = [
     "AWAIT_ANNOUNCE_AFTER",
-    "CLAUDE_RECEIPT_RPC",
     "HARNESS_EVENT_RPC",
     "MAX_AWAIT",
     "METHODS",

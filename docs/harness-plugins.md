@@ -333,8 +333,9 @@ checks ownership then calls `commit_attachment()` or `discard_attachment()`;
 never move a live cursor to a heuristic candidate before that handshake. A
 durable primary should also implement, where its storage permits:
 
-- `history(last_n=...)` and optionally `history_page(...)` for independent,
-  unclipped history reads that do not advance the polling cursor;
+- `history_page(before=..., snapshot=..., limit=..., include_full_text=...)` for bounded,
+  cursor-based history reads that do not advance the polling cursor; `history(last_n=...)`
+  remains a legacy internal projection;
 - `refresh()` when a transcript location can rotate;
 - `probe_identity_loss()` only as bounded loss evidence, not a new binding;
 - `admit_exact_location(location=..., session_id=...)` for exact receipt-led

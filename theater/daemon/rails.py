@@ -46,7 +46,7 @@ from collections.abc import Mapping
 from theater.config import RailsSection
 from theater.daemon import lineage
 from theater.daemon.store import Store
-from theater.models import BadRequest
+from theater.models import BadRequest, Status
 
 logger = logging.getLogger("theater.rails")
 
@@ -242,15 +242,18 @@ def check_budget(
 ) -> None:
     """Reject a spawn that would exceed the per-tree budget.
 
-    The budget is a count of participants in the tree. The root's budget
-    is shared by all descendants. When the count hits the limit, no more
-    spawns are allowed in that tree.
+    The budget is a count of live participants in the tree. Dead retained
+    rows release their allowance, while live descendants remain counted.
+    The root's budget is shared by all descendants. When the count hits the
+    limit, no more spawns are allowed in that tree.
     """
     if parent_id is None:
         return
     root_id = lineage.root_of(store, parent_id)
-    count = len(lineage.subtree_ids(store, root_id))
+    count = sum(
+        participant.status is not Status.DEAD for participant in lineage.subtree(store, root_id)
+    )
     if count >= limit:
         raise BudgetExceeded(
-            f"tree rooted at {root_id} has {count} participants, budget is {limit}"
+            f"tree rooted at {root_id} has {count} live participants, budget is {limit}"
         )

@@ -126,6 +126,7 @@ class _PrimaryWithAttachment(Source):
         self.discarded = False
         self.revoked = False
         self.admitted: tuple[str, str] | None = None
+        self.history_page_call: tuple[str | None, str | None, int, bool] | None = None
         self._batch = Batch(attached=Attachment(location="/work/t.jsonl"))
 
     async def read(self) -> Batch:
@@ -147,7 +148,15 @@ class _PrimaryWithAttachment(Source):
     async def history(self, *, last_n: int) -> History:
         return History(location="/work/t.jsonl")
 
-    async def history_page(self, *, before: str | None = None, limit: int = 100) -> HistoryPage:
+    async def history_page(
+        self,
+        *,
+        before: str | None = None,
+        snapshot: str | None = None,
+        limit: int = 100,
+        include_full_text: bool = False,
+    ) -> HistoryPage:
+        self.history_page_call = (before, snapshot, limit, include_full_text)
         return HistoryPage(location="/work/t.jsonl")
 
 
@@ -880,8 +889,9 @@ async def test_history_delegates_to_primary() -> None:
 async def test_history_page_delegates_to_primary() -> None:
     primary = _PrimaryWithAttachment()
     composite = CompositeSource(primary=primary)
-    page = await composite.history_page(limit=10)
+    page = await composite.history_page(snapshot="snapshot", limit=10, include_full_text=True)
     assert page.location == "/work/t.jsonl"
+    assert primary.history_page_call == (None, "snapshot", 10, True)
     await composite.aclose()
 
 

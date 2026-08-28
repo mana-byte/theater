@@ -16,7 +16,9 @@ from theater.daemon.rpc.params import (
     _string_param,
 )
 from theater.daemon.rpc.router import method
+from theater.daemon.rpc.transcript_paging import TranscriptCursorError, TranscriptPager
 from theater.harness import HARNESSES, normalize
+from theater.harness.contracts.source import History
 from theater.harness.source import TranscriptCandidate
 from theater.harness.transcript.observer import (
     enumerate_transcript_candidates,
@@ -41,7 +43,6 @@ from theater.transcript_identity import (
     transcript_identity_recovery_message,
 )
 
-CLAUDE_RECEIPT_RPC = "claude.receipt"
 TRANSCRIPT_RECEIPT_RPC = "transcript.receipt"
 TRANSCRIPT_RECEIPT_BUS_KIND = BUS_KIND_AGENT_TRANSCRIPT_RECEIPT
 
@@ -222,32 +223,6 @@ async def _transcript_receipt(daemon, params: dict) -> dict:
     return {"ok": True, "admission": admission}
 
 
-@method(CLAUDE_RECEIPT_RPC)
-async def _claude_receipt_alias(daemon, params: dict) -> dict:
-    """Backward-compatible alias: live Claude sessions invoke this name.
-
-    Shipped in v3.2.0 with settings.json on disk referencing
-    ``claude.receipt`` by that exact name. Forwards ``session_id`` and
-    ``transcript_path`` into the generic ``transcript.receipt`` payload.
-    """
-    session_id = params.get("session_id")
-    transcript_path = params.get("transcript_path")
-    if session_id is not None and not isinstance(session_id, str):
-        raise BadRequest("claude.receipt parameter 'session_id' must be a string")
-    if transcript_path is not None and not isinstance(transcript_path, str):
-        raise BadRequest("claude.receipt parameter 'transcript_path' must be a string")
-    forwarded = dict(params)
-    forwarded["payload"] = {
-        k: v
-        for k, v in (
-            ("session_id", session_id),
-            ("transcript_path", transcript_path),
-        )
-        if v is not None
-    }
-    return await _transcript_receipt(daemon, forwarded)
-
-
 @method("transcript.candidates")
 async def _transcript_candidates(daemon, params: dict) -> dict:
     p = daemon.registry.resolve(_require(params, "id"))
@@ -354,7 +329,7 @@ async def _transcript_bind(daemon, params: dict) -> dict:
 
 @method("read_transcript")
 async def _read_transcript(daemon, params: dict) -> dict:
-    """Read a participant's session back, with the text unclipped.
+    """Read one bounded, reverse-paginated transcript page.
 
     Goes through the observer's `Source`, not through `find_transcript`, so an
     adapter whose output is a database answers this as well as one that writes
@@ -363,7 +338,11 @@ async def _read_transcript(daemon, params: dict) -> dict:
     """
     p = daemon.registry.resolve(_require(params, "id"))
     pid = p.id
-    last_n = int(params.get("last_n", 5))
+    if "last_n" in params:
+        raise BadRequest(
+            "read_transcript does not accept event counts; use the next_cursor returned by Theater"
+        )
+    cursor = _optional_string_param(params, "cursor", method_name="read_transcript")
 
     harness_name = normalize(p.harness)
     harness = HARNESSES.get(harness_name)
@@ -386,24 +365,42 @@ async def _read_transcript(daemon, params: dict) -> dict:
         pane_pid=p.live_pid,
     )
     try:
-        history = await source.history(last_n=last_n)
+        try:
+            page = await TranscriptPager(
+                source,
+                target=pid,
+                event_filter=lambda event: event.kind.value in _READABLE,
+            ).read(cursor)
+        except TranscriptCursorError as exc:
+            raise BadRequest(str(exc)) from None
     finally:
         await source.aclose()
 
-    if history.error_code is not None:
-        if history.error_code == TRANSCRIPT_IDENTITY_LOST_CODE:
+    history_page = page.history
+    history = History(
+        location=history_page.location,
+        correlation=history_page.provenance,
+        collision_domain=history_page.collision_domain,
+        pinned=history_page.pinned,
+    )
+    if history_page.error_code is not None:
+        if history_page.error_code == TRANSCRIPT_IDENTITY_LOST_CODE:
             if p.status is Status.DEAD:
                 raise BadRequest(
                     "cannot read transcript: trusted dead binding is retained for resume, "
                     "but its transcript is unavailable"
                 )
-            raise TranscriptIdentityLost(transcript_identity_recovery_message(pid, history.error))
-        raise BadRequest(
-            f"cannot read transcript: {history.error or history.error_code} ({history.error_code})"
-        )
-    if history.location is None:
+            raise TranscriptIdentityLost(
+                transcript_identity_recovery_message(pid, history_page.error)
+            )
+        detail = f"cannot read transcript: {history_page.error or history_page.error_code} "
+        detail += f"({history_page.error_code})"
+        if cursor is not None and history_page.error_code == "history_cursor_invalid":
+            detail += "; omit cursor to restart from newest"
+        raise BadRequest(detail)
+    if history_page.location is None:
         raise BadRequest("cannot read transcript: transcript no longer exists on disk")
-    if not is_trusted_provenance(history.correlation):
+    if not is_trusted_provenance(history_page.provenance):
         raise BadRequest(
             "cannot read transcript: this session is known only from cwd/time; "
             "wait for exact/proven correlation or bind the session before reading it "
@@ -415,15 +412,4 @@ async def _read_transcript(daemon, params: dict) -> dict:
             "live participant of the same harness shares that transcript root and cwd "
             "(transcript_correlation_ambiguous)"
         )
-    events = [
-        {
-            "index": event.raw_index,
-            "role": str(event.kind),
-            "text": event.text or "",
-            "tool_name": event.tool_name,
-            "turn_end": event.turn_end,
-        }
-        for event in history.events
-        if event.kind.value in _READABLE
-    ]
-    return {"id": pid, "events": events, "path": history.location}
+    return page.to_wire(target=pid)

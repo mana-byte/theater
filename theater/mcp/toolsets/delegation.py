@@ -178,7 +178,7 @@ async def await_sessions(
     `prompt` and `result` are dropped from the agent-facing shape. The prompt
     is what the caller already sent, and `result` was only ever a 2000-char
     clip of the child's own turn; an agent that wants what the child said or
-    did reads the transcript directly, which returns it whole. See
+    did reads bounded transcript pages directly. See
     `read_transcript`.
     """
     if not session._resolved:

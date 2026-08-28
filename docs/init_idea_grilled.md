@@ -117,7 +117,7 @@ Consequence for phase 1b: the primary adoption path ("MCP server reads inherited
 | Tool | Returns | Semantics |
 |---|---|---|
 | `list_participants()` | list | static facts + one-line last activity |
-| `read_transcript(id, last_n)` | text | opt-in deep read; caller pays for its own curiosity |
+| `read_transcript(target, cursor?)` | bounded text chunks | newest page first; Theater returns opaque cursors for older content |
 | `send(to, prompt)` | handle | deliver to a live session; async |
 | `spawn(harness, prompt, approval=, worktree=)` | handle + id | launch a new CLI as a child |
 | `await(handles[], max_wait)` | `done` \| `still_running` \| `error` | block this caller only |

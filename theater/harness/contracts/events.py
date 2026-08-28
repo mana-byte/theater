@@ -28,7 +28,7 @@ def clip(text: str | None) -> str:
 
 
 def whole(text: str | None) -> str:
-    """The text as written. What `read_transcript` asks for."""
+    """The text as written for a history reader."""
     return text or ""
 
 

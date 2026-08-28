@@ -286,9 +286,8 @@ class TranscriptObserver(HarnessObserver):
         raising — a transcript being appended to as we read it is an expected
         condition, not an error.
 
-        `clip_text` False returns the full text instead of clipping to MAX_TEXT.
-        The bus clips; `read_transcript` does not, which is the whole reason that
-        tool exists.
+        ``clip_text=False`` returns the source text instead of clipping it for
+        the bus; bounded history paging applies the response budget later.
         """
 
     def parse_record(self, line: str, index: int, *, clip_text: bool = True) -> ParsedRecord:

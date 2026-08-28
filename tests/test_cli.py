@@ -1208,6 +1208,27 @@ def test_regie_hands_the_config_to_the_app(monkeypatch):
     assert configured["log_backup_count"] == seen[0].observability.log_backup_count
 
 
+def test_regie_starts_when_live_pane_discovery_fails(monkeypatch):
+    import theater.regie.app as app_mod
+    from theater.observability import runtime as runtime_mod
+
+    class _FakeHandle:
+        def shutdown(self) -> None:
+            pass
+
+    async def fail():
+        raise RuntimeError("tmux unavailable")
+
+    seen: list = []
+    monkeypatch.setattr(runtime_mod, "configure", lambda **kwargs: _FakeHandle())
+    monkeypatch.setattr(cli.tmux, "inside_tmux", lambda: True)
+    monkeypatch.setattr(cli.tmux, "list_panes", fail)
+    monkeypatch.setattr(app_mod, "run_regie", seen.append)
+
+    assert cli.cmd_regie(parse("regie")) == 0
+    assert seen
+
+
 def test_regie_logs_uncaught_startup_failure_and_shuts_down(monkeypatch, caplog):
     import logging
 

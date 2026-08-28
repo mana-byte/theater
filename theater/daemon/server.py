@@ -266,11 +266,11 @@ async def run(options: DaemonRunOptions | None = None) -> None:
         from theater.observability.logging import generation_path, prune_stderr_generations
 
         current: Path | None = (
-            generation_path(paths.home(), options.stderr_token)
+            generation_path(paths.logs_dir(), options.stderr_token)
             if options.stderr_token is not None
             else None
         )
-        prune_stderr_generations(paths.home(), current, retain=STDERR_GENERATIONS)
+        prune_stderr_generations(paths.logs_dir(), current, retain=STDERR_GENERATIONS)
         settings = load_config()
         from theater.observability.runtime import configure
 

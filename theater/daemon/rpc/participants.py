@@ -7,7 +7,10 @@ Also owns ``_resume_state``, the generic resume pre-flight verdict used by
 from __future__ import annotations
 
 from theater import proc
-from theater.constants.daemon import BUS_KIND_PARTICIPANT_KILL_REQUESTED
+from theater.constants.daemon import (
+    BUS_KIND_PARTICIPANT_KILL_REQUESTED,
+    PARTICIPANTS_LIST_MAX_LIMIT,
+)
 from theater.daemon import workers
 from theater.daemon.harness_detect import detect_harness, match_binary
 from theater.daemon.rpc.params import _require
@@ -81,6 +84,44 @@ def _resume_state(p: Participant, live_peers: list[Participant]) -> str:
     return "resumable"
 
 
+def _pagination(
+    daemon,
+    params: dict,
+    *,
+    ids: list[str] | None,
+) -> tuple[tuple[float, str] | None, int | None]:
+    raw_limit = params.get("limit")
+    if raw_limit is not None and (
+        isinstance(raw_limit, bool)
+        or not isinstance(raw_limit, int)
+        or not 1 <= raw_limit <= PARTICIPANTS_LIST_MAX_LIMIT
+    ):
+        raise BadRequest(
+            f"limit must be an integer between 1 and {PARTICIPANTS_LIST_MAX_LIMIT}, or absent"
+        )
+
+    after_id = params.get("after_id")
+    if after_id is not None and (not isinstance(after_id, str) or not after_id):
+        raise BadRequest("after_id must be a non-empty participant id, or absent")
+
+    if ids is not None and (raw_limit is not None or after_id is not None):
+        raise BadRequest(
+            "limit and after_id cannot be used with ids; request ids without pagination"
+        )
+
+    after = None
+    if after_id is not None:
+        cursor = daemon.store.get_participant(after_id)
+        if cursor is None:
+            raise BadRequest(
+                f"after_id {after_id!r} is no longer retained; "
+                "restart pagination from the first page"
+            )
+        after = (cursor.created_at, cursor.id)
+
+    return after, raw_limit
+
+
 @method("hello")
 async def _hello(daemon, params: dict) -> dict:
     """First contact. Establishes or confirms the caller's identity and tier."""
@@ -114,11 +155,19 @@ async def _list(daemon, params: dict) -> list[dict]:
                     "ids must be a list of non-empty strings; "
                     "an empty string would widen the query to all rows"
                 )
-        if len(raw_ids) > 200:
-            raise BadRequest("ids list is capped at 200 entries")
+        if len(raw_ids) > PARTICIPANTS_LIST_MAX_LIMIT:
+            raise BadRequest(f"ids list is capped at {PARTICIPANTS_LIST_MAX_LIMIT} entries")
         ids = raw_ids
 
-    page = daemon.registry.list(include_dead=include_dead, ids=ids, parent_id=parent_id)
+    after, limit = _pagination(daemon, params, ids=ids)
+
+    page = daemon.registry.list(
+        include_dead=include_dead,
+        ids=ids,
+        parent_id=parent_id,
+        after=after,
+        limit=limit,
+    )
 
     live_peers = daemon.registry.list(include_dead=False) if include_dead else []
 
