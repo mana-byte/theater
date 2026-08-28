@@ -1,4 +1,4 @@
-"""Interactive four-lane trajectory overview."""
+"""Interactive trajectory overview."""
 
 from __future__ import annotations
 
@@ -23,13 +23,14 @@ from theater.constants.regie_trajectory import (
     TIMELINE_SPAN_MIN_WIDTH,
     TIMELINE_TURN_BOUNDARY_GLYPH,
 )
-from theater.regie.trajectory.enums import OrderMode
+from theater.regie.trajectory.enums import OrderMode, TimelineLane
 from theater.regie.trajectory.render.timeline import (
     TimelineLayout,
     TimelineSpan,
     build_timeline_layout,
+    timeline_lane,
 )
-from theater.trajectory import TrajectoryLane, TrajectoryRecord, TrajectoryStatus
+from theater.trajectory import TrajectoryRecord, TrajectoryStatus
 
 
 class TimelineSpanHovered(Message):
@@ -67,6 +68,8 @@ class Timeline(ScrollView):
         "trajectory-timeline--label",
         "trajectory-timeline--model",
         "trajectory-timeline--model-highlighted",
+        "trajectory-timeline--mcp",
+        "trajectory-timeline--mcp-highlighted",
         "trajectory-timeline--muted",
         "trajectory-timeline--rail",
         "trajectory-timeline--running",
@@ -104,6 +107,8 @@ class Timeline(ScrollView):
     Timeline > .trajectory-timeline--model-highlighted {{ background: $accent; }}
     Timeline > .trajectory-timeline--tools {{ background: $warning 26%; }}
     Timeline > .trajectory-timeline--tools-highlighted {{ background: $warning; }}
+    Timeline > .trajectory-timeline--mcp {{ background: $success 26%; }}
+    Timeline > .trajectory-timeline--mcp-highlighted {{ background: $success; }}
     Timeline > .trajectory-timeline--theater {{ background: $secondary 26%; }}
     Timeline > .trajectory-timeline--theater-highlighted {{ background: $secondary; }}
     Timeline > .trajectory-timeline--error {{ background: $error; }}
@@ -115,7 +120,7 @@ class Timeline(ScrollView):
     }}
     """
 
-    _LANES = tuple(TrajectoryLane)
+    _LANES = tuple(TimelineLane)
 
     def __init__(
         self,
@@ -139,11 +144,11 @@ class Timeline(ScrollView):
         self._duration_mode = duration_mode
         self._layout = build_timeline_layout((), OrderMode.ORDER)
         self._span_by_id: dict[str, TimelineSpan] = {}
-        self._lane_spans: dict[TrajectoryLane, tuple[TimelineSpan, ...]] = dict.fromkeys(
+        self._lane_spans: dict[TimelineLane, tuple[TimelineSpan, ...]] = dict.fromkeys(
             self._LANES, ()
         )
-        self._lane_starts: dict[TrajectoryLane, tuple[int, ...]] = dict.fromkeys(self._LANES, ())
-        self._lane_max_ends: dict[TrajectoryLane, tuple[int, ...]] = dict.fromkeys(self._LANES, ())
+        self._lane_starts: dict[TimelineLane, tuple[int, ...]] = dict.fromkeys(self._LANES, ())
+        self._lane_max_ends: dict[TimelineLane, tuple[int, ...]] = dict.fromkeys(self._LANES, ())
         self._turn_boundaries: tuple[int, ...] = ()
         self._scroll_offset = max(0, int(scroll_offset))
         self._viewport_width = 0
@@ -191,7 +196,7 @@ class Timeline(ScrollView):
     def _component(self, name: str) -> Style:
         return self.get_component_rich_style(f"trajectory-timeline--{name}")
 
-    def _lane_style(self, lane: TrajectoryLane, *, highlighted: bool = False) -> Style:
+    def _lane_style(self, lane: TimelineLane, *, highlighted: bool = False) -> Style:
         suffix = "-highlighted" if highlighted else ""
         return self._component(f"{lane.value}{suffix}")
 
@@ -200,7 +205,7 @@ class Timeline(ScrollView):
 
     def _span_style(self, record: TrajectoryRecord) -> Style:
         highlighted = record.record_id == self._highlighted_id()
-        style = self._lane_style(record.lane, highlighted=highlighted)
+        style = self._lane_style(timeline_lane(record), highlighted=highlighted)
         if record.status in {TrajectoryStatus.ERROR, TrajectoryStatus.INTERRUPTED}:
             style += self._component("error")
         elif record.status in {TrajectoryStatus.PENDING, TrajectoryStatus.RUNNING}:
@@ -211,7 +216,7 @@ class Timeline(ScrollView):
             style += self._component("selected")
         return style
 
-    def _lane_row(self, y: int) -> tuple[TrajectoryLane, int] | None:
+    def _lane_row(self, y: int) -> tuple[TimelineLane, int] | None:
         if y < 0:
             return None
         lane_index, row = divmod(y, TIMELINE_LANE_HEIGHT)
@@ -245,7 +250,7 @@ class Timeline(ScrollView):
 
     def _lane_strip(
         self,
-        lane: TrajectoryLane,
+        lane: TimelineLane,
         start: int,
         width: int,
         row: int = TIMELINE_LANE_HEIGHT // 2,

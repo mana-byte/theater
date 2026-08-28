@@ -23,14 +23,14 @@ from theater.constants.regie_trajectory import (
     TRAJECTORY_TABLE_CELL_PADDING,
 )
 from theater.constants.trajectory import TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS
-from theater.regie.trajectory.enums import FilterDimension, InspectorTab, OrderMode
+from theater.regie.trajectory.enums import FilterDimension, InspectorTab, OrderMode, TimelineLane
 from theater.regie.trajectory.inspection.links import DETAIL_PARTICIPANT_META
 from theater.regie.trajectory.inspection.project import detail_text, tabs_for_record
 from theater.regie.trajectory.inspection.styled import build_span_details
 from theater.regie.trajectory.models import decode_delta, decode_page
 from theater.regie.trajectory.render.ordering import build_ordering
 from theater.regie.trajectory.render.records import record_line, sanitize_text, tooltip_text
-from theater.regie.trajectory.render.timeline import build_timeline_layout
+from theater.regie.trajectory.render.timeline import build_timeline_layout, timeline_lane
 from theater.regie.trajectory.search import FilterCounts, search_records
 from theater.regie.trajectory.view import TrajectoryParticipantSelected, TrajectoryView
 from theater.regie.trajectory.widgets.filter_panel import FilterPanel
@@ -76,6 +76,8 @@ def wire_record(
     links: list[dict[str, object]] | None = None,
     request_id: str | None = None,
     call_id: str | None = None,
+    mcp_server: str | None = None,
+    mcp_tool: str | None = None,
     timing: dict[str, object] | None = None,
     usage: dict[str, object] | None = None,
 ) -> dict[str, object]:
@@ -102,6 +104,10 @@ def wire_record(
         result["request_id"] = request_id
     if call_id is not None:
         result["call_id"] = call_id
+    if mcp_server is not None:
+        result["mcp_server"] = mcp_server
+    if mcp_tool is not None:
+        result["mcp_tool"] = mcp_tool
     if timing is not None:
         result["timing"] = timing
     if usage is not None:
@@ -266,18 +272,26 @@ async def test_timeline_manual_scroll_continues_from_automatic_reveal() -> None:
         assert timeline.horizontal_offset == automatic_offset - app.scroll_sensitivity_x
 
 
-async def test_timeline_projects_four_lanes_and_duration_widths() -> None:
+async def test_timeline_projects_mcp_on_its_own_lane_and_preserves_duration_widths() -> None:
     records = [
         record("input", index=0, lane="input", kind="user"),
         record("model", index=1, lane="model", kind="assistant"),
         record("tools", index=2, lane="tools", kind="tool_call"),
-        record("theater", index=3, lane="theater", kind="spawn"),
+        record(
+            "mcp",
+            index=3,
+            lane="tools",
+            kind="tool_call",
+            mcp_server="grafana",
+            mcp_tool="query_prometheus",
+        ),
+        record("theater", index=4, lane="theater", kind="spawn"),
     ]
     app = Host()
     async with app.run_test(size=(100, 30)):
         view = await populate(app, records)
         timeline = view.query_one(Timeline)
-        assert {span.lane for span in timeline.projection.spans} == set(TrajectoryLane)
+        assert {span.lane for span in timeline.projection.spans} == set(TimelineLane)
         for lane_index, record_item in enumerate(records):
             span = timeline.projection.span_for(record_item.record_id)
             assert span is not None
@@ -295,7 +309,7 @@ async def test_timeline_projects_four_lanes_and_duration_widths() -> None:
         assert timeline.projection.spans[0].x == 0
         assert timeline.projection.spans[-1].end == timeline.projection.width
         model_strip = timeline._lane_strip(
-            TrajectoryLane.MODEL,
+            TimelineLane.MODEL,
             0,
             timeline.projection.width,
         )
@@ -303,7 +317,7 @@ async def test_timeline_projects_four_lanes_and_duration_widths() -> None:
         assert any(segment.style and segment.style.bgcolor for segment in model_strip._segments)
 
         model_top = timeline._lane_strip(
-            TrajectoryLane.MODEL,
+            TimelineLane.MODEL,
             0,
             timeline.projection.width,
             row=0,
@@ -343,14 +357,14 @@ async def test_timeline_hover_grows_span_without_markers() -> None:
         view.on_timeline_span_hovered(TimelineSpanHovered("first"))
 
         assert timeline.hovered_id == "first"
-        strip = timeline._lane_strip(TrajectoryLane.MODEL, 0, timeline.projection.width)
+        strip = timeline._lane_strip(TimelineLane.MODEL, 0, timeline.projection.width)
         hovered = timeline.projection.span_for("first")
         other = timeline.projection.span_for("second")
         assert hovered is not None and other is not None
         assert hovered.visual_start > hovered.x
         assert hovered.visual_end < hovered.end
         assert strip.text == " " * timeline.projection.width
-        highlighted = timeline._lane_style(TrajectoryLane.MODEL, highlighted=True)
+        highlighted = timeline._lane_style(TimelineLane.MODEL, highlighted=True)
         styles = [segment.style for segment in strip._segments for _ in range(len(segment.text))]
         assert all(styles[x] == highlighted for x in range(hovered.x, hovered.end))
         assert styles[other.visual_start] != highlighted
@@ -369,10 +383,10 @@ async def test_timeline_uses_two_rows_per_lane_and_marks_new_turns() -> None:
         timeline = view.query_one(Timeline)
         next_span = timeline.projection.span_for("next-turn")
         assert next_span is not None
-        strip = timeline._lane_strip(TrajectoryLane.MODEL, 0, timeline.projection.width)
+        strip = timeline._lane_strip(TimelineLane.MODEL, 0, timeline.projection.width)
 
         assert TIMELINE_LANE_HEIGHT == 2
-        assert timeline.virtual_size.height == len(TrajectoryLane) * TIMELINE_LANE_HEIGHT
+        assert timeline.virtual_size.height == len(TimelineLane) * TIMELINE_LANE_HEIGHT
         assert strip.text[next_span.x] == TIMELINE_TURN_BOUNDARY_GLYPH
 
 
@@ -381,7 +395,7 @@ async def test_timeline_lane_labels_are_right_aligned() -> None:
     async with app.run_test(size=(100, 30)):
         view = await populate(app, [record("model", index=0)])
         timeline = view.query_one(Timeline)
-        model_middle = 1 + list(TrajectoryLane).index(TrajectoryLane.MODEL) * TIMELINE_LANE_HEIGHT
+        model_middle = 1 + list(TimelineLane).index(TimelineLane.MODEL) * TIMELINE_LANE_HEIGHT
 
         line = timeline.render_line(model_middle)
 
@@ -689,7 +703,7 @@ async def test_repeated_hover_reuses_tooltip_without_reprocessing(
         monkeypatch.setattr(
             "theater.regie.trajectory.widgets.hover_card.tooltip_text", render_tooltip
         )
-        lane_y = tuple(TrajectoryLane).index(item.lane) * TIMELINE_LANE_HEIGHT + 1
+        lane_y = tuple(TimelineLane).index(timeline_lane(item)) * TIMELINE_LANE_HEIGHT + 1
         await pilot.hover(timeline, offset=(TIMELINE_LABEL_WIDTH + 2, lane_y))
         await pilot.hover(timeline, offset=(TIMELINE_LABEL_WIDTH + 3, lane_y))
 
@@ -718,7 +732,7 @@ async def test_timeline_hover_card_stays_inside_terminal_edges(
         item = records[record_index]
         anchor = timeline.hover_anchor(item.record_id)
         assert anchor is not None
-        lane_y = tuple(TrajectoryLane).index(item.lane) * TIMELINE_LANE_HEIGHT + 1
+        lane_y = tuple(TimelineLane).index(timeline_lane(item)) * TIMELINE_LANE_HEIGHT + 1
 
         await pilot.hover(timeline, offset=(anchor.x - timeline.region.x, lane_y))
         await pilot.pause()

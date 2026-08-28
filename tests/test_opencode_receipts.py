@@ -15,6 +15,7 @@ from theater import cli, paths
 from theater.cli.commands import identity as identity_mod
 from theater.client import DaemonClient
 from theater.daemon.server import Daemon
+from theater.harness.builtin.plugins.opencode.mcp import catalog_path
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.source import SourceContractError
 from theater.protocol import RemoteError
@@ -100,6 +101,11 @@ def test_launch_uses_a_core_owned_generic_receipt_token(tmp_path, monkeypatch):
     assert 'child.once("close", (code) => finish(code === 0))' in source
     assert 'event.type === "session.created" && info && !info.parentID' in source
     assert source.count("schedule()") >= 3
+    assert "config: async (config)" in source
+    assert '"tool.definition": async' in source
+    assert '"tool.execute.before": async' in source
+    assert "mcp.tools.changed" in source
+    assert str(catalog_path("participant")) in source
     event_body = source.split("event: async", 1)[1].split("} catch", 1)[0]
     assert "await " not in event_body
     assert str(token_path) in source

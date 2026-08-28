@@ -62,6 +62,8 @@ def record_search_text(record: TrajectoryRecord) -> str:
         record.call_id or "",
         record.parent_call_id or "",
         record.request_id or "",
+        record.mcp_server or "",
+        record.mcp_tool or "",
     ]
     if record.usage is not None:
         values.extend(

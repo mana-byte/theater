@@ -43,6 +43,8 @@ class OpenCodeParser:
             self, conn: sqlite3.Connection, payload: dict, seq: int, *, raw_index: int
         ) -> list[TrajectoryFact]: ...
 
+        def _refresh_mcp_trajectory(self) -> tuple[TrajectoryFact, ...]: ...
+
     def _replay(self, info: dict, parts: list[dict]) -> list[Event]:
         """One stored message, as events. Text unclipped: this is history."""
         time = _table(info.get("time"))
@@ -99,7 +101,8 @@ class OpenCodeParser:
     def _drain(self, conn: sqlite3.Connection) -> Batch:
         rows = event_rows(conn, self._session, self._cursor, DRAIN_LIMIT)
         if not rows:
-            return Batch()
+            updates = self._refresh_mcp_trajectory()
+            return Batch(trajectory=updates, trajectory_events=() if updates else None)
         events: list[Event] = []
         trajectory: list[TrajectoryFact] = []
         for seq, kind, raw in rows:
@@ -109,6 +112,7 @@ class OpenCodeParser:
             )
             events.extend(translated)
             trajectory.extend(facts)
+        trajectory.extend(self._refresh_mcp_trajectory())
         # Rows consumed is progress: session.updated through a turn, else rescue fires mid-turn.
         return Batch(
             events=events,

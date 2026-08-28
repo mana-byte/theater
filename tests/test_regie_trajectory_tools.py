@@ -65,6 +65,8 @@ def _tool(
     revision: int = 1,
     turn_id: str | None = None,
     step_id: str | None = None,
+    mcp_server: str | None = None,
+    mcp_tool: str | None = None,
     failure: TrajectoryFailure | None = None,
     retry_of_record_id: str | None = None,
     retry_attempt: int | None = None,
@@ -84,6 +86,8 @@ def _tool(
         request_id=request_id,
         turn_id=turn_id,
         step_id=step_id,
+        mcp_server=mcp_server,
+        mcp_tool=mcp_tool,
         details=details,
         failure=failure,
         retry_of_record_id=retry_of_record_id,
@@ -231,6 +235,26 @@ def test_tool_name_prefix_and_summary_bound() -> None:
         text = tool_row_text(operation, compact=compact).summary
         assert text.startswith("[runner]")
         assert len(text) <= TOOL_ROW_SUMMARY_MAX_CHARS
+
+
+def test_mcp_tool_row_and_summary_expose_protocol_identity() -> None:
+    call = _tool(
+        "call",
+        1,
+        TrajectoryKind.TOOL_CALL,
+        "one",
+        details=(DetailField.from_text("tool", "grafana_query"),),
+        mcp_server="grafana",
+        mcp_tool="query",
+    )
+    operation = build_tool_index((call,)).ordered[0]
+
+    row = tool_row_text(operation)
+    assert row.event == "◇ MCP"
+    assert row.summary.startswith("[grafana/query]")
+    summary = tool_detail_text(operation, InspectorTab.SUMMARY)
+    assert "MCP server: grafana" in summary
+    assert "MCP tool: query" in summary
 
 
 def test_tool_summary_prefers_structured_call_input_over_result_text() -> None:

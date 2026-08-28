@@ -11,15 +11,21 @@ from theater.constants.regie_trajectory import (
     TIMELINE_SPAN_GUTTER,
     TIMELINE_SPAN_MIN_WIDTH,
 )
-from theater.regie.trajectory.enums import OrderMode
+from theater.regie.trajectory.enums import OrderMode, TimelineLane
 from theater.regie.trajectory.render.records import supports_duration_interval
 from theater.trajectory import TrajectoryLane, TrajectoryRecord
+
+
+def timeline_lane(record: TrajectoryRecord) -> TimelineLane:
+    if record.lane is TrajectoryLane.TOOLS and record.mcp_server is not None:
+        return TimelineLane.MCP
+    return TimelineLane(record.lane.value)
 
 
 @dataclass(frozen=True, slots=True)
 class TimelineSpan:
     record_id: str
-    lane: TrajectoryLane
+    lane: TimelineLane
     x: int
     width: int
     timed: bool
@@ -49,7 +55,7 @@ class TimelineLayout:
             return None
         return next((span for span in self.spans if span.record_id == record_id), None)
 
-    def record_at(self, x: int, lane: TrajectoryLane) -> str | None:
+    def record_at(self, x: int, lane: TimelineLane) -> str | None:
         matches = [
             span
             for span in self.spans
@@ -67,7 +73,7 @@ def _sequence_layout(records: tuple[TrajectoryRecord, ...], minimum_width: int) 
         tuple(
             TimelineSpan(
                 record_id=record.record_id,
-                lane=record.lane,
+                lane=timeline_lane(record),
                 x=index * width // count,
                 width=max(1, (index + 1) * width // count - index * width // count),
                 timed=False,
@@ -144,13 +150,13 @@ def _duration_layout(records: tuple[TrajectoryRecord, ...], minimum_width: int) 
         start, end = interval
         x = round((start - domain_start) / domain * (timed_width - 1))
         width = max(TIMELINE_SPAN_MIN_WIDTH, ceil((end - start) / domain * timed_width))
-        spans.append(TimelineSpan(record.record_id, record.lane, x, width, True))
+        spans.append(TimelineSpan(record.record_id, timeline_lane(record), x, width, True))
 
     untimed_start = timed_width + (TIMELINE_DURATION_UNTIMED_GAP if untimed else 0)
     spans.extend(
         TimelineSpan(
             record.record_id,
-            record.lane,
+            timeline_lane(record),
             untimed_start + index * TIMELINE_SPAN_MIN_WIDTH,
             TIMELINE_SPAN_MIN_WIDTH,
             False,
@@ -188,4 +194,5 @@ __all__ = [
     "TimelineLayout",
     "TimelineSpan",
     "build_timeline_layout",
+    "timeline_lane",
 ]

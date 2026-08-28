@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
-from theater.harness.base import SERVER_NAME, TokenUsage
+from theater.harness.base import TokenUsage
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.normalization.facts import lane_for_kind
 from theater.harness.normalization.usage import (
@@ -98,14 +98,6 @@ def _trajectory_text(value) -> str:
 
 def _trajectory_string(value) -> str:
     return value if isinstance(value, str) else ""
-
-
-def _opencode_mcp_identity(value: object) -> tuple[str, str] | None:
-    prefix = f"{SERVER_NAME}_"
-    if not isinstance(value, str) or not value.startswith(prefix):
-        return None
-    tool = _trajectory_identifier(value.removeprefix(prefix), "tool")
-    return (SERVER_NAME, tool) if tool is not None else None
 
 
 def _trajectory_lane(kind: TrajectoryKind):

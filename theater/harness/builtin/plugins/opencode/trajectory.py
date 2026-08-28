@@ -15,12 +15,12 @@ from theater.trajectory.enums import TrajectoryFailureCategory, TrajectoryKind, 
 from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryUsage
 
 from .constants import LIVE_TRAJECTORY_STATE_LIMIT
+from .mcp import OpenCodeMcpCatalog
 from .store import live_revision_row, message_coordinate
 from .values import (
     _assistant_request_id,
     _finish_status,
     _message_timing,
-    _opencode_mcp_identity,
     _part_timing,
     _stored_fact,
     _table,
@@ -37,6 +37,8 @@ from .values import (
 
 
 class OpenCodeTrajectory:
+    _mcp_catalog: OpenCodeMcpCatalog
+    _mcp_catalog_generation: int
     _text: dict[str, dict[str, str]]
     _trajectory_state: OrderedDict[str, tuple[int, TrajectoryFact]]
 
@@ -216,7 +218,7 @@ class OpenCodeTrajectory:
         call = part.get("callID") or part.get("id")
         call_id = call if isinstance(call, str) else None
         tool_name = part.get("tool") if isinstance(part.get("tool"), str) else None
-        mcp_identity = _opencode_mcp_identity(tool_name)
+        mcp_identity = self._opencode_mcp_identity(tool_name)
         mcp_server, mcp_tool = mcp_identity or (None, None)
         parent = part.get("parentCallID") or state.get("parentCallID")
         parent_id = parent if isinstance(parent, str) else None
@@ -471,7 +473,7 @@ class OpenCodeTrajectory:
         call = part.get("callID") or part.get("id")
         call_id = call if isinstance(call, str) else None
         tool_name = part.get("tool") if isinstance(part.get("tool"), str) else None
-        mcp_identity = _opencode_mcp_identity(tool_name)
+        mcp_identity = self._opencode_mcp_identity(tool_name)
         mcp_server, mcp_tool = mcp_identity or (None, None)
         parent = part.get("parentCallID") or state.get("parentCallID")
         parent_id = parent if isinstance(parent, str) else None
@@ -541,6 +543,38 @@ class OpenCodeTrajectory:
             if result_fact is not None:
                 facts.append(result_fact)
         return facts
+
+    def _opencode_mcp_identity(self, value: object) -> tuple[str, str] | None:
+        return self._mcp_catalog.identity(value)
+
+    def _refresh_mcp_trajectory(self) -> tuple[TrajectoryFact, ...]:
+        generation = self._mcp_catalog.generation
+        if generation == self._mcp_catalog_generation:
+            return ()
+        self._mcp_catalog_generation = generation
+        identities: dict[str, tuple[str, str]] = {}
+        for _key, (_revision, fact) in self._trajectory_state.items():
+            if fact.kind is not TrajectoryKind.TOOL_CALL or fact.call_id is None:
+                continue
+            identity = (
+                (fact.mcp_server, fact.mcp_tool)
+                if fact.mcp_server is not None and fact.mcp_tool is not None
+                else self._opencode_mcp_identity(fact.summary)
+            )
+            if identity is not None:
+                identities[fact.call_id] = identity
+        updates: list[TrajectoryFact] = []
+        for key, (revision, fact) in tuple(self._trajectory_state.items()):
+            if fact.mcp_server is not None or fact.call_id is None:
+                continue
+            identity = identities.get(fact.call_id)
+            if identity is None:
+                continue
+            candidate = replace(fact, mcp_server=identity[0], mcp_tool=identity[1])
+            next_revision = revision + 1
+            self._trajectory_state[key] = (next_revision, candidate)
+            updates.append(replace(candidate, revision=next_revision))
+        return tuple(updates)
 
     def _trajectory_for_message(
         self, conn: sqlite3.Connection, payload: dict, seq: int, *, raw_index: int

@@ -87,12 +87,43 @@ def _vibe_result_format(value: object) -> ContentFormat:
     return ContentFormat.JSON if isinstance(decoded, (dict, list)) else ContentFormat.TEXT
 
 
-def _vibe_mcp_identity(value: object) -> tuple[str, str] | None:
-    prefix = f"{SERVER_NAME}_"
-    if not isinstance(value, str) or not value.startswith(prefix):
+def _vibe_named_mcp_identity(value: object, tool: object) -> tuple[str, str] | None:
+    if not isinstance(value, str) or not isinstance(tool, str) or not tool:
         return None
-    tool = _vibe_identifier(value.removeprefix(prefix))
-    return (SERVER_NAME, tool) if tool is not None else None
+    suffix = f"_{tool}"
+    if not value.endswith(suffix):
+        return None
+    server = _vibe_identifier(value[: -len(suffix)])
+    tool_id = _vibe_identifier(tool)
+    return (server, tool_id) if server is not None and tool_id is not None else None
+
+
+def _vibe_mcp_identity(
+    value: object,
+    *,
+    presentation: object = None,
+    result: object = None,
+) -> tuple[str, str] | None:
+    prefix = f"{SERVER_NAME}_"
+    if isinstance(value, str) and value.startswith(prefix):
+        tool = _vibe_identifier(value.removeprefix(prefix))
+        return (SERVER_NAME, tool) if tool is not None else None
+
+    if isinstance(result, dict):
+        output = result.get("output")
+        if isinstance(output, dict):
+            identity = _vibe_named_mcp_identity(value, output.get("tool"))
+            if identity is not None:
+                return identity
+
+    if not isinstance(presentation, dict):
+        return None
+    display = presentation.get("display")
+    status = display.get("statusText") if isinstance(display, dict) else None
+    marker = "Calling MCP tool "
+    if not isinstance(status, str) or not status.startswith(marker):
+        return None
+    return _vibe_named_mcp_identity(value, status.removeprefix(marker))
 
 
 def _vibe_message_id(record: dict) -> str | None:
@@ -326,7 +357,7 @@ class VibeTrajectoryMixin:
         presentation_kind, presentation_message, _success = _vibe_presentation(
             call.get("presentation")
         )
-        mcp_identity = _vibe_mcp_identity(name)
+        mcp_identity = _vibe_mcp_identity(name, presentation=call.get("presentation"))
         mcp_server, mcp_tool = mcp_identity or (None, None)
         details = tuple(
             value
@@ -364,7 +395,7 @@ class VibeTrajectoryMixin:
         call_id = call_id if isinstance(call_id, str) else None
         name = record.get("name")
         name = name if isinstance(name, str) else None
-        mcp_identity = _vibe_mcp_identity(name)
+        mcp_identity = _vibe_mcp_identity(name, result=result_data)
         mcp_server, mcp_tool = mcp_identity or (None, None)
         presentation = result_data.get("presentation")
         presentation_kind, presentation_message, presentation_success = _vibe_presentation(

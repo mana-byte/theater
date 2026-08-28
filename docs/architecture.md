@@ -407,7 +407,10 @@ Spawned OpenCode sessions use the same authenticated receipt transport. Their la
 publishes each root `session.created` ID, retries transient delivery failures, and retries again on
 later session events. The database source waits for the matching row before committing
 `opencode://<session-id>`. A later root receipt stages a session switch without falling back to
-another same-cwd row.
+another same-cwd row. The plugin also records a bounded, atomically replaced catalog of MCP tool
+identities proved by OpenCode's merged configuration and execution hooks. The database source uses
+that catalog only to classify its own durable records; it is metadata, not a second fact stream or
+the generic hook channel.
 
 Vibe cold spawns get a Theater-owned isolated transcript save directory with a
 signed marker naming the original participant. Resumes may re-enter that domain

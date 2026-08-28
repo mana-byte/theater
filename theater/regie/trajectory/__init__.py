@@ -7,6 +7,7 @@ from theater.regie.trajectory.enums import (
     FocusRegion,
     InspectorTab,
     OrderMode,
+    TimelineLane,
 )
 from theater.regie.trajectory.models import decode_delta, decode_location, decode_page
 from theater.regie.trajectory.navigation import (
@@ -76,6 +77,7 @@ __all__ = [
     "ParticipantTrajectoryState",
     "ReturnToTree",
     "SearchResult",
+    "TimelineLane",
     "Timing",
     "TimingProvenance",
     "TrajectoryBackRequested",

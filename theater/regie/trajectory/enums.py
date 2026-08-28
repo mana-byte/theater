@@ -10,6 +10,14 @@ class OrderMode(StrEnum):
     DURATION = "duration"
 
 
+class TimelineLane(StrEnum):
+    INPUT = "input"
+    MODEL = "model"
+    TOOLS = "tools"
+    MCP = "mcp"
+    THEATER = "theater"
+
+
 class DiagnosticView(StrEnum):
     ALL = "all"
     RUNNING = "running"
@@ -73,4 +81,5 @@ __all__ = [
     "FocusRegion",
     "InspectorTab",
     "OrderMode",
+    "TimelineLane",
 ]

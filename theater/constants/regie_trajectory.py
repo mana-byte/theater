@@ -22,7 +22,7 @@ TRAJECTORY_FOOTER_NARROW_WIDTH = 58
 # Keep the trajectory surface flush with its container.
 TRAJECTORY_HORIZONTAL_PADDING = 0
 # Define the timeline's fixed vertical and horizontal grid.
-TIMELINE_HEIGHT = 10
+TIMELINE_HEIGHT = 12
 TIMELINE_LABEL_WIDTH = 11
 TIMELINE_LABEL_RIGHT_PADDING = 2
 TIMELINE_LANE_HEIGHT = 2
@@ -30,7 +30,7 @@ TIMELINE_SPAN_GUTTER = 1
 TIMELINE_SPAN_MIN_WIDTH = 5
 TIMELINE_DURATION_MIN_WIDTH = 24
 TIMELINE_DURATION_UNTIMED_GAP = 2
-TIMELINE_CONTENT_HEIGHT = 8
+TIMELINE_CONTENT_HEIGHT = 10
 # Draw timeline turn boundaries consistently.
 TIMELINE_TURN_BOUNDARY_GLYPH = "│"
 # Limit hover-card width to prevent it obscuring the timeline.

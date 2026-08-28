@@ -38,8 +38,8 @@ from .observer import (
 _NATIVE_HOOKS = HookChannelManifest(
     declaration=ChannelDeclaration(id="native-hooks", kind=ChannelKind.HOOK),
     unavailable_reason=(
-        "OpenCode hooks need verified fire-and-forget ordering, loss, and installed payload "
-        "contracts before Theater can enable them"
+        "OpenCode's launch-local metadata hook does not provide the authenticated, bounded "
+        "trajectory-fact transport required by this channel"
     ),
 )
 

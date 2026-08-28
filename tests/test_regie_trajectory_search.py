@@ -62,6 +62,18 @@ def test_search_uses_bounded_ids_and_details() -> None:
     assert result.record_ids == ("native-call",)
 
 
+def test_search_uses_mcp_identity() -> None:
+    item = TrajectoryRecord.from_wire(
+        {
+            **record("mcp-call", "unrelated").to_wire(),
+            "mcp_server": "grafana",
+            "mcp_tool": "query_prometheus",
+        }
+    )
+
+    assert search_records([item], query="prometheus").record_ids == ("mcp-call",)
+
+
 def test_filters_retain_nested_headers_and_report_counts() -> None:
     records = [
         record("input", "ask", lane="input", kind="user", step_id="s1"),

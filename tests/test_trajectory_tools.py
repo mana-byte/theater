@@ -48,6 +48,8 @@ def _record(
     revision: int = 0,
     request_id: str | None = None,
     parent_call_id: str | None = None,
+    mcp_server: str | None = None,
+    mcp_tool: str | None = None,
     timing: Timing | None = None,
     details: tuple[DetailField, ...] = (),
     failure: TrajectoryFailure | None = None,
@@ -68,6 +70,8 @@ def _record(
         call_id=call_id,
         request_id=request_id,
         parent_call_id=parent_call_id,
+        mcp_server=mcp_server,
+        mcp_tool=mcp_tool,
         timing=timing,
         details=details,
         failure=failure,
@@ -149,6 +153,18 @@ def test_tool_projection_preserves_explicit_failure_and_retry_link() -> None:
     assert operation.failure == failure
     assert operation.retry_of_record_id == "prior"
     assert operation.retry_attempt == 2
+    assert TrajectoryToolOperation.from_wire(operation.to_wire()) == operation
+
+
+def test_tool_projection_preserves_consistent_mcp_identity() -> None:
+    operation = tool_operations_for_records(
+        (
+            _call("call", 1, "id", mcp_server="grafana", mcp_tool="query"),
+            _result("result", 2, "id", mcp_server="grafana", mcp_tool="query"),
+        )
+    )[0]
+
+    assert (operation.mcp_server, operation.mcp_tool) == ("grafana", "query")
     assert TrajectoryToolOperation.from_wire(operation.to_wire()) == operation
 
 

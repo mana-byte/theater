@@ -19,8 +19,9 @@ from theater.harness.source import Source, TranscriptCandidate
 from theater.provenance import TranscriptProvenance
 from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFeature
 
-from .constants import CORRELATION_PLUGIN_SUFFIX, DB_NAME
+from .constants import DB_NAME
 from .identity import admit_operator_candidate, transcript_candidates, validate_receipt_session_id
+from .mcp import catalog_path, plugin_path
 from .screen import is_idle_screen, screen_reading
 from .source import OpenCodeSource
 
@@ -77,15 +78,16 @@ class OpenCodeObserver:
             if self.correlation_dir is not None
             else paths.mcp_config_path(participant_id)
         )
-        plugin_path = config_path.with_suffix(CORRELATION_PLUGIN_SUFFIX)
+        receipt_plugin_path = plugin_path(config_path)
         return OpenCodeSource(
             self.db,
             cwd=cwd,
             session_id=session_id,
             after=after,
-            receipt_expected=plugin_path.exists(),
+            receipt_expected=receipt_plugin_path.exists(),
             session_provenance=session_provenance,
             known_location=known_location,
+            mcp_catalog_path=catalog_path(participant_id, self.correlation_dir),
         )
 
     def open_source_context(self, context: ParticipantObservationContext) -> Source:

@@ -17,104 +17,10 @@ from theater.harness.contracts.callbacks import (
 from theater.harness.contracts.launch import LaunchPlan, ResumeLaunchOverlay
 from theater.harness.transcript.discovery import root_domain_overlay
 
-from .constants import (
-    CORRELATION_PLUGIN_SUFFIX,
-    DB_NAME,
-    MODELS_TIMEOUT,
-    RECEIPT_RETRY_DELAYS_MS,
-)
+from .constants import DB_NAME, MODELS_TIMEOUT
+from .mcp import plugin_path
+from .native_plugin import render_native_plugin
 from .observer import data_dir
-
-
-def _plugin_path(config_path: Path) -> Path:
-    return config_path.with_suffix(CORRELATION_PLUGIN_SUFFIX)
-
-
-def _correlation_plugin(participant_id: str, token_path: Path) -> str:
-    """Generate the process-local root-session receipt hook."""
-    participant = json.dumps(participant_id)
-    token = json.dumps(str(token_path))
-    command = json.dumps(theater_binary())
-    retry_delays = json.dumps(RECEIPT_RETRY_DELAYS_MS)
-    return f"""import {{ spawn }} from "node:child_process"
-
-const participantID = {participant}
-const tokenPath = {token}
-const theater = {command}
-const retryDelays = {retry_delays}
-let currentSessionID = null
-let deliveredSessionID = null
-let publishing = false
-let generation = 0
-
-function publish(sessionID) {{
-  return new Promise((resolve) => {{
-    let settled = false
-    const finish = (ok) => {{
-      if (settled) return
-      settled = true
-      resolve(ok)
-    }}
-    try {{
-      const child = spawn(
-        theater,
-        ["transcript-receipt", "--strict-exit", "--id", participantID, "--token-file", tokenPath],
-        {{ stdio: ["pipe", "ignore", "ignore"] }},
-      )
-      child.once("error", () => finish(false))
-      child.once("close", (code) => finish(code === 0))
-      child.stdin.once("error", () => finish(false))
-      child.stdin.end(JSON.stringify({{ session_id: sessionID }}))
-    }} catch {{
-      finish(false)
-    }}
-  }})
-}}
-
-const sleep = (delay) => new Promise((resolve) => setTimeout(resolve, delay))
-
-async function deliver(sessionID, version) {{
-  for (const delay of retryDelays) {{
-    if (version !== generation) return
-    if (delay > 0) await sleep(delay)
-    if (version !== generation) return
-    if (await publish(sessionID)) {{
-      if (version === generation) deliveredSessionID = sessionID
-      return
-    }}
-  }}
-}}
-
-function schedule() {{
-  if (!currentSessionID || deliveredSessionID === currentSessionID || publishing) return
-  const sessionID = currentSessionID
-  const version = generation
-  publishing = true
-  void deliver(sessionID, version).finally(() => {{
-    publishing = false
-    if (version !== generation) schedule()
-  }})
-}}
-
-export const TheaterSessionReceipt = async () => {{
-  return {{
-    event: async ({{ event }}) => {{
-      try {{
-        const info = event?.properties?.info
-        if (event.type === "session.created" && info && !info.parentID) {{
-          if (typeof info.id !== "string" || !info.id) return
-          if (info.id !== currentSessionID) {{
-            currentSessionID = info.id
-            deliveredSessionID = null
-            generation += 1
-          }}
-        }}
-        schedule()
-      }} catch {{}}
-    }},
-  }}
-}}
-"""
 
 
 def plan_launch(context: LaunchContext) -> LaunchPlan:
@@ -130,9 +36,9 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
             }
         },
     }
-    plugin_path = _plugin_path(config_path)
+    native_plugin_path = plugin_path(config_path)
     token_path = paths.observation_dir("opencode", participant_id) / "receipt-token"
-    config["plugin"] = [plugin_path.resolve().as_uri()]
+    config["plugin"] = [native_plugin_path.resolve().as_uri()]
     argv = ["opencode"]
     if context.model:
         argv += ["--model", context.model]
@@ -144,7 +50,7 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
         argv += ["--prompt", context.prompt]
     files = {
         config_path: json.dumps(config, indent=2),
-        plugin_path: _correlation_plugin(participant_id, token_path),
+        native_plugin_path: render_native_plugin(participant_id, token_path),
     }
     return LaunchPlan(
         argv=argv,

@@ -20,6 +20,7 @@ from theater.provenance import TranscriptProvenance, normalize_provenance
 from .constants import CORRELATION_READY_TIMEOUT, STEP_FINISH
 from .history import OpenCodeHistory
 from .identity import OpenCodeIdentity, validate_receipt_session_id
+from .mcp import OpenCodeMcpCatalog
 from .parser import OpenCodeParser
 from .store import event_head, latest_message, open_readonly
 from .trajectory import OpenCodeTrajectory
@@ -39,6 +40,7 @@ class OpenCodeSource(OpenCodeHistory, OpenCodeParser, OpenCodeTrajectory, OpenCo
         receipt_expected: bool = False,
         session_provenance: str | TranscriptProvenance | None = None,
         known_location: str | None = None,
+        mcp_catalog_path: Path | None = None,
     ) -> None:
         self._db = db
         self._cwd = cwd
@@ -68,6 +70,8 @@ class OpenCodeSource(OpenCodeHistory, OpenCodeParser, OpenCodeTrajectory, OpenCo
         self._finished: set[str] = set()
         self._said: set[str] = set()
         self._trajectory_state: OrderedDict[str, tuple[int, TrajectoryFact]] = OrderedDict()
+        self._mcp_catalog = OpenCodeMcpCatalog(mcp_catalog_path)
+        self._mcp_catalog_generation = self._mcp_catalog.generation
 
     async def read(self) -> Batch:
         return await asyncio.to_thread(self._read)

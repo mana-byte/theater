@@ -126,6 +126,8 @@ def request_association_lines(request: TrajectoryRequest | None) -> tuple[Inspec
 def tool_summary_lines(tool: TrajectoryToolOperation) -> tuple[InspectorLine, ...]:
     fields = (
         ("Tool", tool.tool_name),
+        ("MCP server", tool.mcp_server),
+        ("MCP tool", tool.mcp_tool),
         ("Source", tool.source),
         ("Status", tool.status.value),
         ("Identity", tool.identity.value),

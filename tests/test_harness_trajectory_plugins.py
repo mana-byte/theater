@@ -11,6 +11,7 @@ from test_harness_opencode import Recorder
 
 from theater.harness import EventKind
 from theater.harness.builtin.plugins.opencode.constants import LIVE_TRAJECTORY_STATE_LIMIT
+from theater.harness.builtin.plugins.opencode.mcp import catalog_path
 from theater.trajectory import ContentFormat, TimingProvenance, TrajectoryKind, TrajectoryStatus
 from theater.trajectory.capabilities import TrajectoryFeature
 
@@ -34,6 +35,26 @@ def rec(tmp_path: Path, workdir: Path):
 
 def _source(rec: Recorder, workdir: Path):
     source = OpenCodeObserver(db=rec.path).open_source(cwd=str(workdir))
+    attached = asyncio.run(source.read())
+    assert attached.attached is not None
+    source.commit_attachment()
+    return source
+
+
+def _opencode_source_with_mcp_catalog(
+    rec: Recorder,
+    workdir: Path,
+    correlation_dir: Path,
+    tools: dict[str, list[str]],
+):
+    participant_id = "participant"
+    path = catalog_path(participant_id, correlation_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"version": 1, "servers": ["sentry"], "tools": tools}))
+    source = OpenCodeObserver(db=rec.path, correlation_dir=correlation_dir).open_source_for(
+        participant_id=participant_id,
+        cwd=str(workdir),
+    )
     attached = asyncio.run(source.read())
     assert attached.attached is not None
     source.commit_attachment()
@@ -402,6 +423,52 @@ def test_vibe_extracts_theater_mcp_identity_without_classifying_it() -> None:
     assert (result.mcp_server, result.mcp_tool) == ("theater", "send")
 
 
+def test_vibe_extracts_native_mcp_identity_from_presentation_and_result() -> None:
+    observer = VibeObserver()
+    call = observer.parse_record(
+        json.dumps(
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "function": {"name": "grafana_query_prometheus", "arguments": "{}"},
+                        "presentation": {
+                            "kind": "tool",
+                            "display": {
+                                "message": "grafana_query_prometheus",
+                                "statusText": "Calling MCP tool query_prometheus",
+                            },
+                        },
+                    }
+                ],
+            }
+        ),
+        0,
+    ).trajectory[-1]
+    result = observer.parse_record(
+        json.dumps(
+            {
+                "role": "tool",
+                "name": "grafana_query_prometheus",
+                "tool_call_id": "call-1",
+                "content": "ok",
+                "tool_result": {
+                    "output": {
+                        "ok": True,
+                        "server": "https://grafana.example/mcp",
+                        "tool": "query_prometheus",
+                    }
+                },
+            }
+        ),
+        1,
+    ).trajectory[0]
+
+    assert (call.mcp_server, call.mcp_tool) == ("grafana", "query_prometheus")
+    assert (result.mcp_server, result.mcp_tool) == ("grafana", "query_prometheus")
+
+
 def test_claude_extracts_and_remembers_mcp_identity_for_results() -> None:
     observer = ClaudeCodeObserver()
     call = observer.parse_record(
@@ -566,6 +633,88 @@ def test_opencode_extracts_theater_mcp_identity_live_and_from_history(rec, workd
     ]
     assert mcp_facts
     assert {(fact.mcp_server, fact.mcp_tool) for fact in mcp_facts} == {("theater", "send")}
+
+
+def test_opencode_extracts_observed_external_mcp_identity_live_and_from_history(
+    rec, workdir, tmp_path
+) -> None:
+    source = _opencode_source_with_mcp_catalog(
+        rec,
+        workdir,
+        tmp_path / "correlation",
+        {"sentry_find_organizations": ["sentry", "find_organizations"]},
+    )
+    message = rec.message("message-1", "assistant")
+    running = {
+        "id": "part-1",
+        "messageID": message["id"],
+        "type": "tool",
+        "callID": "call-1",
+        "tool": "sentry_find_organizations",
+        "state": {"status": "running", "input": {}},
+    }
+    rec._part(running)
+    live = asyncio.run(source.read())
+    rec._part({**running, "state": {"status": "completed", "output": "found"}})
+    completed = asyncio.run(source.read())
+    history = asyncio.run(source.history_page(limit=10))
+
+    facts = (*live.trajectory, *completed.trajectory, *history.trajectory)
+    mcp_facts = [
+        fact
+        for fact in facts
+        if fact.kind in {TrajectoryKind.TOOL_CALL, TrajectoryKind.TOOL_RESULT}
+    ]
+    assert mcp_facts
+    assert {(fact.mcp_server, fact.mcp_tool) for fact in mcp_facts} == {
+        ("sentry", "find_organizations")
+    }
+
+
+def test_opencode_reclassifies_a_live_tool_when_the_catalog_arrives(rec, workdir, tmp_path) -> None:
+    correlation_dir = tmp_path / "correlation"
+    source = _opencode_source_with_mcp_catalog(rec, workdir, correlation_dir, {})
+    message = rec.message("message-1", "assistant")
+    rec._part(
+        {
+            "id": "part-1",
+            "messageID": message["id"],
+            "type": "tool",
+            "callID": "call-1",
+            "tool": "sentry_find_organizations",
+            "state": {"status": "completed", "input": {}, "output": "found"},
+        }
+    )
+    first = asyncio.run(source.read())
+    first_tools = {
+        fact.kind: fact
+        for fact in first.trajectory
+        if fact.kind in {TrajectoryKind.TOOL_CALL, TrajectoryKind.TOOL_RESULT}
+    }
+    assert set(first_tools) == {TrajectoryKind.TOOL_CALL, TrajectoryKind.TOOL_RESULT}
+    assert all(fact.mcp_server is None for fact in first_tools.values())
+
+    catalog_path("participant", correlation_dir).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "servers": ["sentry"],
+                "tools": {"sentry_find_organizations": ["sentry", "find_organizations"]},
+            }
+        )
+    )
+    refreshed = asyncio.run(source.read())
+    refreshed_tools = {
+        fact.kind: fact
+        for fact in refreshed.trajectory
+        if fact.kind in {TrajectoryKind.TOOL_CALL, TrajectoryKind.TOOL_RESULT}
+    }
+
+    assert refreshed.progressed is False
+    assert set(refreshed_tools) == {TrajectoryKind.TOOL_CALL, TrajectoryKind.TOOL_RESULT}
+    for kind, fact in refreshed_tools.items():
+        assert fact.revision > first_tools[kind].revision
+        assert (fact.mcp_server, fact.mcp_tool) == ("sentry", "find_organizations")
 
 
 def test_opencode_history_page_is_keyset_and_does_not_move_live_cursor(rec, workdir) -> None:

@@ -152,7 +152,12 @@ def _input_preview(operation: TrajectoryToolOperation, *, compact: bool) -> str 
 
 def tool_row_text(operation: TrajectoryToolOperation, *, compact: bool = False) -> ToolRowText:
     """Build bounded, plain values for one logical tool operation."""
-    name = _one_line(operation.tool_name) if operation.tool_name else "unknown tool"
+    if operation.mcp_server is not None and operation.mcp_tool is not None:
+        name = f"{_one_line(operation.mcp_server)}/{_one_line(operation.mcp_tool)}"
+        event = "◇ MCP"
+    else:
+        name = _one_line(operation.tool_name) if operation.tool_name else "unknown tool"
+        event = "⚙ TOOL"
     preview = _input_preview(operation, compact=compact)
     if operation.identity is TrajectoryToolIdentity.CALL_ONLY:
         summary = f"{preview} · awaiting result" if preview else "awaiting result"
@@ -171,7 +176,7 @@ def tool_row_text(operation: TrajectoryToolOperation, *, compact: bool = False) 
         summary += " · links clipped"
     summary = _clip(f"[{name}] {summary}", TOOL_ROW_SUMMARY_MAX_CHARS)
     return ToolRowText(
-        event="⚙ TOOL",
+        event=event,
         summary=summary,
         duration=format_duration(operation.timing),
     )

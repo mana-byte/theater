@@ -70,6 +70,8 @@ class TrajectoryToolOperation:
     result_record_ids: tuple[str, ...]
     tool_name: str | None
     status: TrajectoryStatus
+    mcp_server: str | None = None
+    mcp_tool: str | None = None
     timing: Timing | None = None
     request_id: str | None = None
     parent_call_id: str | None = None
@@ -139,6 +141,9 @@ class TrajectoryToolOperation:
             "result_count": self.result_count,
             "records_truncated": self.records_truncated,
         }
+        if self.mcp_server is not None:
+            value["mcp_server"] = self.mcp_server
+            value["mcp_tool"] = self.mcp_tool
         if self.failure is not None:
             value["failure"] = self.failure.to_wire()
         if self.retry_of_record_id is not None:
@@ -173,7 +178,13 @@ class TrajectoryToolOperation:
         keys(
             data,
             required=required,
-            optional={"failure", "retry_of_record_id", "retry_attempt"},
+            optional={
+                "failure",
+                "mcp_server",
+                "mcp_tool",
+                "retry_of_record_id",
+                "retry_attempt",
+            },
             label="trajectory tool operation",
         )
         return cls(
@@ -193,6 +204,8 @@ class TrajectoryToolOperation:
             ),
             tool_name=string_or_none(data["tool_name"], "tool.tool_name"),
             status=enum_value(TrajectoryStatus, data["status"], "tool.status"),
+            mcp_server=string_or_none(data.get("mcp_server"), "tool.mcp_server"),
+            mcp_tool=string_or_none(data.get("mcp_tool"), "tool.mcp_tool"),
             timing=Timing.from_wire(data["timing"]) if data["timing"] is not None else None,
             request_id=string_or_none(data["request_id"], "tool.request_id"),
             parent_call_id=string_or_none(data["parent_call_id"], "tool.parent_call_id"),
@@ -277,6 +290,7 @@ def _operation_for_group(
     call_id = primary.call_id
     call_ids = tuple(record.record_id for record in calls)
     result_ids = tuple(record.record_id for record in results)
+    mcp_server, mcp_tool = _mcp_identity(records)
     return TrajectoryToolOperation(
         operation_id=_operation_id(primary.participant_id, primary.source_epoch, call_id, primary),
         participant_id=primary.participant_id,
@@ -288,6 +302,8 @@ def _operation_for_group(
         result_record_ids=result_ids[-TRAJECTORY_TOOL_RECORD_LIMIT:],
         tool_name=_tool_name(primary_call),
         status=display.status,
+        mcp_server=mcp_server,
+        mcp_tool=mcp_tool,
         timing=_timing(calls, results, primary_call, primary_result),
         request_id=_consistent(records, "request_id"),
         parent_call_id=_parent_call_id(calls, results, call_id),
@@ -366,6 +382,15 @@ def _tool_name(record: TrajectoryRecord | None) -> str | None:
 def _consistent(records: list[TrajectoryRecord], name: str) -> str | None:
     values = {getattr(record, name) for record in records if getattr(record, name) is not None}
     return next(iter(values)) if len(values) == 1 else None
+
+
+def _mcp_identity(records: list[TrajectoryRecord]) -> tuple[str | None, str | None]:
+    identities = {
+        (record.mcp_server, record.mcp_tool)
+        for record in records
+        if record.mcp_server is not None and record.mcp_tool is not None
+    }
+    return next(iter(identities)) if len(identities) == 1 else (None, None)
 
 
 def _parent_call_id(
@@ -469,7 +494,14 @@ def _bound_attributes(operation: TrajectoryToolOperation) -> None:
             nonempty=True,
         ),
     )
-    for name in ("call_id", "request_id", "parent_call_id", "retry_of_record_id"):
+    for name in (
+        "call_id",
+        "request_id",
+        "parent_call_id",
+        "mcp_server",
+        "mcp_tool",
+        "retry_of_record_id",
+    ):
         value = getattr(operation, name)
         if value is not None:
             object.__setattr__(
@@ -482,6 +514,8 @@ def _bound_attributes(operation: TrajectoryToolOperation) -> None:
                     nonempty=True,
                 ),
             )
+    if (operation.mcp_server is None) != (operation.mcp_tool is None):
+        raise TrajectoryValidationError("tool MCP identity requires both server and tool")
     if operation.tool_name is not None:
         object.__setattr__(
             operation,
