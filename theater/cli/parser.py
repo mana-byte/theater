@@ -11,6 +11,7 @@ import argparse
 import os
 
 from theater import __version__
+from theater.constants.cli import TRANSCRIPT_RECEIPT_COMMAND
 from theater.harness import APPROVALS
 
 
@@ -101,7 +102,7 @@ def _add_gc_parser(sub) -> None:
 
 def _add_receipt_parser(sub) -> None:
     """Register the hidden hook ingestion commands."""
-    receipt = sub.add_parser("transcript-receipt", help=argparse.SUPPRESS)
+    receipt = sub.add_parser(TRANSCRIPT_RECEIPT_COMMAND, help=argparse.SUPPRESS)
     receipt.add_argument("--id", required=True)
     receipt.add_argument("--token-file", required=True)
 

@@ -43,7 +43,6 @@ from theater.transcript_identity import (
     transcript_identity_recovery_message,
 )
 
-CLAUDE_RECEIPT_RPC = "claude.receipt"
 TRANSCRIPT_RECEIPT_RPC = "transcript.receipt"
 TRANSCRIPT_RECEIPT_BUS_KIND = BUS_KIND_AGENT_TRANSCRIPT_RECEIPT
 
@@ -222,32 +221,6 @@ async def _transcript_receipt(daemon, params: dict) -> dict:
         payload={"location": location, "session_id": session_id, "admission": admission},
     )
     return {"ok": True, "admission": admission}
-
-
-@method(CLAUDE_RECEIPT_RPC)
-async def _claude_receipt_alias(daemon, params: dict) -> dict:
-    """Backward-compatible alias: live Claude sessions invoke this name.
-
-    Shipped in v3.2.0 with settings.json on disk referencing
-    ``claude.receipt`` by that exact name. Forwards ``session_id`` and
-    ``transcript_path`` into the generic ``transcript.receipt`` payload.
-    """
-    session_id = params.get("session_id")
-    transcript_path = params.get("transcript_path")
-    if session_id is not None and not isinstance(session_id, str):
-        raise BadRequest("claude.receipt parameter 'session_id' must be a string")
-    if transcript_path is not None and not isinstance(transcript_path, str):
-        raise BadRequest("claude.receipt parameter 'transcript_path' must be a string")
-    forwarded = dict(params)
-    forwarded["payload"] = {
-        k: v
-        for k, v in (
-            ("session_id", session_id),
-            ("transcript_path", transcript_path),
-        )
-        if v is not None
-    }
-    return await _transcript_receipt(daemon, forwarded)
 
 
 @method("transcript.candidates")

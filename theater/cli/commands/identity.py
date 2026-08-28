@@ -1,4 +1,4 @@
-"""Transcript identity commands: receipt ingestion, Claude alias, candidates, bind."""
+"""Transcript identity commands: receipt ingestion, candidates, and binding."""
 
 from __future__ import annotations
 
@@ -10,14 +10,6 @@ from pathlib import Path
 from theater.cli.render import _candidate_line
 from theater.client import DaemonClient, call_sync
 from theater.protocol import RemoteError
-
-
-def _hook_string(data: dict, *names: str) -> str | None:
-    for name in names:
-        value = data.get(name)
-        if isinstance(value, str) and value:
-            return value
-    return None
 
 
 async def _send_transcript_receipt(args, *, token: str, payload: dict) -> None:
@@ -51,31 +43,7 @@ def cmd_transcript_receipt(args) -> int:
     return 0
 
 
-def cmd_claude_receipt(args) -> int:
-    """Backward-compatible alias for the Claude-specific hook command.
-
-    Shipped in v3.2.0; live Claude sessions have settings.json invoking
-    ``claude-receipt`` by that exact name. Extracts ``session_id`` and
-    ``transcript_path`` from stdin JSON and wraps them into a payload before
-    forwarding to the generic ``transcript.receipt`` RPC.
-    """
-    try:
-        token = Path(args.token_file).read_text().strip()
-        payload = json.load(sys.stdin)
-    except (OSError, ValueError):
-        return 0
-    if not isinstance(payload, dict):
-        return 0
-    session_id = _hook_string(payload, "session_id", "sessionId")
-    transcript_path = _hook_string(payload, "transcript_path", "transcriptPath")
-    if session_id is None or transcript_path is None:
-        return 0
-    forwarded = {"session_id": session_id, "transcript_path": transcript_path}
-    try:
-        asyncio.run(_send_transcript_receipt(args, token=token, payload=forwarded))
-    except (RemoteError, ConnectionError, OSError):
-        return 0
-    return 0
+cmd_claude_receipt = cmd_transcript_receipt
 
 
 def cmd_candidates(args) -> int:

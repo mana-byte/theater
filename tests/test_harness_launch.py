@@ -224,7 +224,7 @@ def test_claude_launch_adds_receipt_hooks_without_editing_user_settings(tmp_path
     assert "Stop" not in settings["hooks"]
     for entries in settings["hooks"].values():
         command = entries[0]["hooks"][0]["command"]
-        assert "claude-receipt" in command
+        assert "transcript-receipt" in command
         assert "--id abc123" in command
         assert str(plan.receipt_token_path) in command
 

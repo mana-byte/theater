@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO, Literal
 
 from theater import paths
+from theater.constants.cli import TRANSCRIPT_RECEIPT_COMMAND
 from theater.constants.trajectory import (
     TRAJECTORY_IDENTIFIER_MAX_BYTES,
     TRAJECTORY_MCP_CALL_CONTEXT_LIMIT,
@@ -99,7 +100,6 @@ if TYPE_CHECKING:
     from theater.models import Participant
 
 logger = logging.getLogger("theater.harness.claude")
-CLAUDE_RECEIPT_COMMAND = "claude-receipt"
 CLAUDE_RECEIPT_EVENTS = ("SessionStart", "PreCompact")
 
 #: Screen lines that mean "waiting for you".
@@ -169,7 +169,7 @@ def _receipt_hook_command(participant_id: str, token_path: Path) -> str:
     return shlex.join(
         [
             theater_binary(),
-            CLAUDE_RECEIPT_COMMAND,
+            TRANSCRIPT_RECEIPT_COMMAND,
             "--id",
             participant_id,
             "--token-file",

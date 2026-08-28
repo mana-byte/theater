@@ -10,3 +10,6 @@ CLI_FOLLOW_BATCH_SIZE = 200
 
 #: How long to wait for a stopping daemon to release socket and lock.
 CLI_STOP_TIMEOUT_SECONDS = 5.0
+
+#: Hidden command used by harness lifecycle hooks to submit transcript identity receipts.
+TRANSCRIPT_RECEIPT_COMMAND = "transcript-receipt"

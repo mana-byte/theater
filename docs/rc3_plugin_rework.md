@@ -192,8 +192,8 @@ Generalize the existing receipt mechanism instead of adding one daemon RPC per h
 5. A bounded inbox supplies the participant's hook source. Overflow is observable and degrades
    coverage; it never blocks the hook process.
 
-Keep `claude-receipt` and old receipt RPC names as forwarding compatibility aliases. Hook setup
-must be launch-local and must not rewrite the user's global configuration.
+Keep `claude-receipt` as a payload-transparent compatibility alias of the generic command. Hook
+setup must be launch-local and must not rewrite the user's global configuration.
 
 ### Native OTel ingress
 

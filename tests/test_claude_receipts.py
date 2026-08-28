@@ -755,11 +755,17 @@ def test_claude_receipt_cli_uses_non_autostart_client(monkeypatch, tmp_path):
     token_file = tmp_path / "token"
     token_file.write_text("secret")
     transcript = tmp_path / "11111111-1111-4111-8111-111111111111.jsonl"
+    payload = {
+        "session_id": transcript.stem,
+        "transcript_path": str(transcript),
+        "hook_event_name": "SessionStart",
+        "native": {"future": True},
+    }
     seen = []
 
     class Client:
         def __init__(self, *, autostart=True):
-            seen.append(autostart)
+            seen.append(("autostart", autostart))
 
         async def __aenter__(self):
             return self
@@ -768,13 +774,20 @@ def test_claude_receipt_cli_uses_non_autostart_client(monkeypatch, tmp_path):
             return None
 
         async def call(self, method, **params):
+            seen.append((method, params))
             return {"ok": True}
 
     monkeypatch.setattr(identity_mod, "DaemonClient", Client)
-    monkeypatch.setattr("sys.stdin", _receipt_stdin(transcript))
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
 
     assert cli.cmd_claude_receipt(_receipt_args(token_file)) == 0
-    assert seen == [False]
+    assert seen == [
+        ("autostart", False),
+        (
+            "transcript.receipt",
+            {"id": "p-claude", "token": "secret", "payload": payload},
+        ),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -799,28 +812,3 @@ def test_claude_receipt_cli_is_quiet_when_daemon_cannot_accept(monkeypatch, caps
     out = capsys.readouterr()
     assert out.out == ""
     assert out.err == ""
-
-
-async def test_claude_receipt_rpc_alias_still_works(claude_daemon, claude_client, tmp_path):
-    """The claude.receipt RPC alias forwards to transcript.receipt.
-
-    Live Claude sessions have settings.json on disk invoking
-    ``claude.receipt`` by that exact name. The alias must keep working.
-    """
-    daemon, root = claude_daemon
-    cwd = tmp_path / "repo"
-    cwd.mkdir()
-    _spawn_claude(daemon, cwd, pid="p-claude", token="secret")
-    path = _transcript(root, "11111111-1111-4111-8111-111111111111", cwd)
-
-    await claude_client.call(
-        "claude.receipt",
-        id="p-claude",
-        token="secret",
-        session_id=path.stem,
-        transcript_path=str(path),
-    )
-
-    assert await _until(
-        lambda: daemon.store.get_participant("p-claude").transcript_location == str(path.resolve())
-    )

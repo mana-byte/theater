@@ -9,7 +9,6 @@ import sys
 EXPECTED_RPC_METHODS = {
     "adopt",
     "bus.tail",
-    "claude.receipt",
     "gc",
     "harnesses",
     "hello",

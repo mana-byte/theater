@@ -383,8 +383,10 @@ token file. `SessionStart` covers cold starts and post-compaction
 locations, while `PreCompact` records the old transcript before the
 harness rotates. Live Claude sessions shipped in v3.2.0 have
 `settings.json` files on disk that invoke `theater claude-receipt` by that
-exact name; the old command name and `claude.receipt` RPC are kept as
-forwarding aliases so those sessions keep working.
+exact name; the old CLI command remains as a payload-transparent alias of
+`transcript-receipt` so those sessions keep working. Both command names use
+the harness-neutral `transcript.receipt` RPC, and only the plugin interprets
+the native payload.
 
 Vibe cold spawns get a Theater-owned isolated transcript save directory with a
 signed marker naming the original participant. Resumes may re-enter that domain
