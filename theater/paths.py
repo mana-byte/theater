@@ -83,6 +83,11 @@ def harnesses_dir() -> Path:
     return home() / "harnesses"
 
 
+def skills_dir() -> Path:
+    """Data-only skill packages, one ``SKILL.md`` directory each."""
+    return home() / "skills"
+
+
 def ensure_home() -> Path:
     root = home()
     root.mkdir(parents=True, exist_ok=True)
@@ -91,4 +96,5 @@ def ensure_home() -> Path:
     mcp_config_dir().mkdir(parents=True, exist_ok=True)
     (root / "observations").mkdir(parents=True, exist_ok=True)
     harnesses_dir().mkdir(parents=True, exist_ok=True)
+    skills_dir().mkdir(parents=True, exist_ok=True)
     return root
