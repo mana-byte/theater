@@ -697,6 +697,30 @@ def test_list_participants_ids_dead_included_with_include_dead(store):
     assert rows[0].id == p.id
 
 
+def test_list_participants_keyset_orders_ties_and_excludes_the_cursor(store):
+    rows = [
+        Participant(id="p-b", harness="vibe", created_at=1.0),
+        Participant(id="p-a", harness="vibe", created_at=1.0),
+        Participant(id="p-c", harness="vibe", created_at=2.0),
+    ]
+    for participant in rows:
+        store.upsert_participant(participant)
+
+    first = store.list_participants(limit=2)
+    second = store.list_participants(
+        after=(first[-1].created_at, first[-1].id),
+        limit=2,
+    )
+    end = store.list_participants(
+        after=(second[-1].created_at, second[-1].id),
+        limit=2,
+    )
+
+    assert [participant.id for participant in first] == ["p-a", "p-b"]
+    assert [participant.id for participant in second] == ["p-c"]
+    assert end == []
+
+
 # ---- recent dead -------------------------------------------------------------
 
 

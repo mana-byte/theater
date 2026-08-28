@@ -168,6 +168,8 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         include_dead: bool = False,
         ids: list[str] | None = None,
         children_only: bool = False,
+        limit: int | None = None,
+        after_id: str | None = None,
     ) -> list[dict]:
         """List every agent on this machine that Theater knows about.
 
@@ -200,6 +202,13 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         you. It excludes deeper descendants and composes with both `ids` and
         `include_dead`.
 
+        An unfiltered `include_dead=True` listing returns at most 100 rows by
+        default. Pass `limit` (1 through 200) to choose a page size, then use
+        the final row's stable id as `after_id` for the next page; an empty
+        page ends pagination. The order is oldest first. If a cursor was
+        deleted by retention GC, restart from the first page. `limit` and
+        `after_id` cannot be used with `ids`.
+
         Each row includes `resume_state`, which exposes the verdict from the
         generic identity and capability gates that `spawn_session(resume=...)`
         checks before delegating to harness-specific resume validation. Values:
@@ -216,6 +225,8 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
             include_dead=include_dead,
             ids=ids,
             children_only=children_only,
+            limit=limit,
+            after_id=after_id,
         )
 
     @mcp.tool()
@@ -395,7 +406,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         return await tools.scratchpad_get(session, namespace=namespace, keys=keys)
 
     @mcp.tool()
-    async def read_transcript(target_id: str, last_n: int = 5) -> dict:
+    async def read_transcript(target: str, last_n: int = 5) -> dict:
         """Read the transcript of a participant, returning full unclipped text.
 
         The agent-facing await_sessions reply drops prompt and result text.
@@ -403,11 +414,11 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         `last_n` events (user, assistant, tool_call, tool_result) with
         complete, unclipped text.
 
-        target_id: the participant id or its name. Use the id for dead
-                   participants (names are null when dead). The id is the
-                   stable reference for as long as the row is retained
-                   (historical access is retention-bounded; dead rows are
-                   eventually deleted by GC).
+        target:    stable participant id or current live name. If the live
+                   name is known, call this directly; do not call
+                   list_participants first. Dead names are cleared and
+                   recyclable, so dead reads require the stable id while the
+                   row is retained (historical access is retention-bounded).
         last_n:    number of events to return, newest. Default 5. Set to
                    0 for all events in the current transcript.
 
@@ -416,7 +427,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
 
         Refuses if the transcript needs binding or its identity is lost.
         """
-        return await tools.read_transcript(session, target_id=target_id, last_n=last_n)
+        return await tools.read_transcript(session, target=target, last_n=last_n)
 
     @mcp.tool()
     async def put_child_back_in_the_wound(target_id: str) -> dict:

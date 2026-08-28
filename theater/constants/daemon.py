@@ -36,6 +36,12 @@ BUS_KIND_SEND_REFUSED = "send.refused"
 #: Maximum rows returned by one participant-scoped bus page.
 BUS_PARTICIPANT_PAGE_MAX_LIMIT = 200
 
+#: Safe default for unfiltered participant history pages.
+PARTICIPANTS_LIST_DEFAULT_DEAD_LIMIT = 100
+
+#: Hard ceiling for one explicitly requested participant-list page.
+PARTICIPANTS_LIST_MAX_LIMIT = 200
+
 #: Bus kind for an accepted operator or agent kill request.
 BUS_KIND_PARTICIPANT_KILL_REQUESTED = "participant.kill_requested"
 

@@ -216,6 +216,20 @@ async def test_new_tool_schemas_match_public_signatures(daemon):
     assert schema["scratchpad_get"]["required"] == ["namespace"]
 
 
+async def test_read_transcript_schema_uses_target_not_target_id(daemon):
+    schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
+    transcript = schema["read_transcript"]
+    assert "target" in transcript["properties"]
+    assert "target_id" not in transcript["properties"]
+    assert transcript["required"] == ["target"]
+
+
+async def test_list_participants_schema_exposes_keyset_pagination(daemon):
+    schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
+    props = schema["list_participants"]["properties"]
+    assert {"limit", "after_id"} <= set(props)
+
+
 async def test_response_format_wrappers_forward_to_tool_bodies(monkeypatch):
     calls = {}
 
@@ -397,6 +411,23 @@ async def test_list_participants_docstring_describes_children_only(daemon):
     desc = tools["list_participants"].lower()
     assert "children_only" in desc
     assert "direct" in desc
+
+
+async def test_list_participants_docstring_describes_dead_pagination(daemon):
+    tools = {t.name: t.description or "" for t in await build("p1", "vibe").list_tools()}
+    desc = tools["list_participants"].lower()
+    assert "100" in desc
+    assert "after_id" in desc
+    assert "retention gc" in desc
+
+
+async def test_read_transcript_docstring_describes_direct_live_names(daemon):
+    tools = {t.name: t.description or "" for t in await build("p1", "vibe").list_tools()}
+    desc = tools["read_transcript"].lower()
+    assert "current live name" in desc
+    assert "do not call" in desc
+    assert "list_participants first" in desc
+    assert "dead reads require the stable id" in desc
 
 
 # ---- list_participants: resume_state pinned to spawner (test 15) ----------

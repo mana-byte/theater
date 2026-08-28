@@ -77,6 +77,8 @@ class Registry:
         include_dead: bool = False,
         ids: builtins.list[str] | None = None,
         parent_id: str | None = None,
+        after: tuple[float, str] | None = None,
+        limit: int | None = None,
     ) -> builtins.list[Participant]:
         return [
             self._named(p)
@@ -84,6 +86,8 @@ class Registry:
                 include_dead=include_dead,
                 ids=ids,
                 parent_id=parent_id,
+                after=after,
+                limit=limit,
             )
         ]
 
