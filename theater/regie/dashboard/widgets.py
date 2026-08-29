@@ -12,13 +12,18 @@ from textual.timer import Timer
 
 from theater.constants.regie import (
     REGIE_DASHBOARD_CURSOR_STYLE,
-    REGIE_DASHBOARD_TIP_CURSOR_STYLE,
+    REGIE_DASHBOARD_TIP_WINDOW_SIZE,
     REGIE_DASHBOARD_TIPS,
 )
-from theater.regie.animations.cycling_text import CyclingTextController, CyclingTextFrame
+from theater.regie.animations.cycling_text import (
+    CyclingTextController,
+    CyclingTextFrame,
+    CyclingWindowController,
+)
 from theater.regie.animations.reveal import StyledPart
 from theater.regie.dashboard.content import (
     animated_text_content,
+    dashboard_tip_window_content,
     harness_availability_content,
     sentence_parts,
 )
@@ -121,6 +126,89 @@ class AnimatedDashboardText(NonSelectableStatic):
         self._stop_timer()
 
 
+class DashboardTipWindow(NonSelectableStatic):
+    """One active dashboard tip followed by two dimmed upcoming tips."""
+
+    def __init__(
+        self,
+        items: Sequence[Sequence[StyledPart]],
+        *,
+        hold_seconds: float,
+        char_interval: float,
+        paused: bool = False,
+        **kwargs,
+    ) -> None:
+        self._controller = CyclingWindowController(
+            items,
+            window_size=REGIE_DASHBOARD_TIP_WINDOW_SIZE,
+            hold=hold_seconds,
+            char_interval=char_interval,
+        )
+        self._paused = paused
+        self._timer: Timer | None = None
+        super().__init__(self._content(), **kwargs)
+
+    @property
+    def controller(self) -> CyclingWindowController:
+        return self._controller
+
+    @property
+    def timer(self) -> Timer | None:
+        return self._timer
+
+    def _content(self, *, cursor: bool = False) -> Content:
+        return dashboard_tip_window_content(
+            self._controller.window,
+            incoming_visible=self._controller.incoming_visible,
+            cursor=cursor,
+        )
+
+    def _stop_timer(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+
+    def _schedule(self, delay: float) -> None:
+        self._stop_timer()
+        if not self._paused and self._controller.active:
+            self._timer = self.set_timer(delay, self._tick)
+
+    def _tick(self) -> None:
+        self._timer = None
+        if self._paused or not self.is_mounted:
+            return
+        frame = self._controller.tick()
+        self.update(self._content(cursor=frame.cursor), layout=False)
+        self._schedule(frame.next_delay)
+
+    def advance(self) -> bool:
+        if self._paused or not self._controller.advance():
+            return False
+        self._stop_timer()
+        self._tick()
+        return True
+
+    def set_paused(self, paused: bool) -> None:
+        if paused == self._paused:
+            return
+        self._paused = paused
+        if paused:
+            self._stop_timer()
+            self.update(self._content(), layout=False)
+        else:
+            self._schedule(self._controller.resume_delay)
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.advance()
+
+    def on_mount(self) -> None:
+        self._schedule(self._controller.initial_delay)
+
+    def on_unmount(self) -> None:
+        self._stop_timer()
+
+
 class WelcomeDashboard(Vertical):
     """Centered animated sentence and clickable tip, hidden while staged."""
 
@@ -141,7 +229,8 @@ class WelcomeDashboard(Vertical):
         align: center middle;
         layer: copy;
     }
-    WelcomeDashboard AnimatedDashboardText {
+    WelcomeDashboard AnimatedDashboardText,
+    WelcomeDashboard DashboardTipWindow {
         width: 100%;
         height: auto;
         min-height: 1;
@@ -153,6 +242,7 @@ class WelcomeDashboard(Vertical):
         color: $text;
     }
     WelcomeDashboard #dashboard-tip {
+        min-height: 4;
         color: $text-muted;
     }
     WelcomeDashboard > #dashboard-harnesses {
@@ -196,12 +286,10 @@ class WelcomeDashboard(Vertical):
                     randomize=True,
                     id="dashboard-sentence",
                 )
-            yield AnimatedDashboardText(
+            yield DashboardTipWindow(
                 REGIE_DASHBOARD_TIPS,
                 hold_seconds=self._tip_hold_seconds,
                 char_interval=self._tip_char_interval,
-                cursor_style=REGIE_DASHBOARD_TIP_CURSOR_STYLE,
-                click_to_advance=True,
                 id="dashboard-tip",
             )
         yield NonSelectableStatic(
@@ -226,3 +314,4 @@ class WelcomeDashboard(Vertical):
         self.set_class(staged, "-staged")
         for text in self.query(AnimatedDashboardText):
             text.set_paused(staged)
+        self.query_one(DashboardTipWindow).set_paused(staged)

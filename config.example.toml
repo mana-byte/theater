@@ -97,10 +97,10 @@ dashboard_sentence_hold_seconds = 10.0
 # Seconds between characters while typing a dashboard sentence in or out.
 dashboard_sentence_char_interval = 0.1
 
-# Seconds a dashboard tip stays fully visible before typing out.
+# Seconds the dashboard tip window stays still before advancing.
 dashboard_tip_hold_seconds = 6.0
 
-# Seconds between characters while typing a dashboard tip in or out.
+# Seconds between characters while revealing an incoming dashboard tip.
 dashboard_tip_char_interval = 0.04
 
 # Number of records shown on one trajectory ledger page.

@@ -132,9 +132,13 @@ REGIE_DASHBOARD_CURSOR_STYLE = "$secondary"
 #: Dim cursor style used by the dashboard tip animation.
 REGIE_DASHBOARD_TIP_CURSOR_STYLE = "$text-muted dim"
 #: Base style for dashboard tip text.
-REGIE_DASHBOARD_TIP_STYLE = "$text-muted dim"
+REGIE_DASHBOARD_TIP_STYLE = "$text-muted"
 #: Accent style for actionable fragments in dashboard tips.
 REGIE_DASHBOARD_TIP_HIGHLIGHT_STYLE = "$text-accent bold"
+#: Heading style for the dashboard tip window.
+REGIE_DASHBOARD_TIP_HEADING_STYLE = "$text-muted bold"
+#: Number of tips kept visible together.
+REGIE_DASHBOARD_TIP_WINDOW_SIZE = 3
 
 _H = REGIE_DASHBOARD_HIGHLIGHT_STYLE
 
@@ -177,83 +181,122 @@ del _H
 
 _D = REGIE_DASHBOARD_TIP_STYLE
 _T = REGIE_DASHBOARD_TIP_HIGHLIGHT_STYLE
+_C = REGIE_DASHBOARD_TIP_HEADING_STYLE
 
 #: Cycling tips covering the régie's user-facing controls and discovery surfaces.
 REGIE_DASHBOARD_TIPS: tuple[tuple[str | tuple[str, str], ...], ...] = (
-    (("Tips: use ", _D), ("j/k or ↑/↓", _T), (" to move through the agent tree", _D)),
+    (("Tree · ", _C), ("j/k or ↑/↓", _T), (" moves between agents", _D)),
+    (("Tree · ", _C), ("o", _T), (" opens the spawn menu", _D)),
+    (("Tree · ", _C), ("Enter", _T), (" stages or unstages the selected agent", _D)),
     (
-        ("Tips: press ", _D),
-        ("j or ↓", _T),
-        (" past the last agent to enter usage stats", _D),
+        ("Tree · ", _C),
+        ("h", _T),
+        (" opens trajectory; ", _D),
+        ("l", _T),
+        (" focuses the staged pane", _D),
     ),
     (
-        ("Tips: use ", _D),
-        ("h/j/k/l or arrows", _T),
-        (" to move through usage stats", _D),
-    ),
-    (("Tips: press ", _D), ("k or ↑", _T), (" from the top stats row to return", _D)),
-    (("Tips: press ", _D), ("Enter", _T), (" to stage or unstage an agent", _D)),
-    (
-        ("Tips: outside usage stats, ", _D),
+        ("Tree · ", _C),
         ("H/L", _T),
-        (" stage and focus trajectory or agent directly", _D),
+        (" stages and focuses trajectory or agent directly", _D),
     ),
     (
-        ("Tips: when the key is free, Theater binds ", _D),
-        ("<prefix> h", _T),
-        (" to return from the stage or trajectory", _D),
-    ),
-    (
-        ("Tips: ", _D),
+        ("Tree · ", _C),
         ("left-click", _T),
-        (" an agent to stage it; ", _D),
+        (" stages and focuses; ", _D),
         ("right-click", _T),
-        (" to toggle its trajectory", _D),
+        (" toggles trajectory", _D),
     ),
     (
-        ("Tips: hover a ", _D),
+        ("Stage · ", _C),
+        ("<prefix> h", _T),
+        (" returns from an agent pane or trajectory", _D),
+    ),
+    (("Tree · ", _C), ("x", _T), (" kills the selected managed session", _D)),
+    (
+        ("Régie · ", _C),
+        ("q", _T),
+        (" exits while the daemon and agent sessions keep running", _D),
+    ),
+    (("Usage · ", _C), ("j or ↓", _T), (" past the last agent enters usage stats", _D)),
+    (
+        ("Usage · ", _C),
+        ("h/j/k/l or arrows", _T),
+        (" moves through usage stats", _D),
+    ),
+    (("Usage · ", _C), ("k or ↑", _T), (" from the top row returns to the tree", _D)),
+    (
+        ("Usage · ", _C),
+        ("hover a ", _D),
         ("usage tile", _T),
-        (" for per-harness stats for today, this week, and this month", _D),
+        (" for per-harness day, week, and month totals", _D),
     ),
     (
-        ("Tips: ", _D),
+        ("Usage · ", _C),
         ("click a usage tile", _T),
         (" or press ", _D),
         ("Enter", _T),
-        (" in the footer to toggle per-model details", _D),
-    ),
-    (("Tips: press ", _D), ("Ctrl+P", _T), (" to open the command palette", _D)),
-    (
-        ("Tips: use the ", _D),
-        ("palette", _T),
-        (" to spawn any available harness", _D),
+        (" to toggle per-model details for every tile", _D),
     ),
     (
-        ("Tips: use the ", _D),
-        ("palette", _T),
-        (" to resume a compatible dead session", _D),
+        ("Trajectory · ", _C),
+        ("j/k", _T),
+        (" selects spans; ", _D),
+        ("H/L", _T),
+        (" changes pages", _D),
     ),
     (
-        ("Tips: use the ", _D),
-        ("palette", _T),
-        (" to show or hide inter-agent bus traffic", _D),
-    ),
-    (("Tips: use the ", _D), ("palette", _T), (" to change the régie theme", _D)),
-    (("Tips: use the ", _D), ("palette", _T), (" to save an SVG screenshot", _D)),
-    (("Tips: press ", _D), ("x", _T), (" to kill the selected managed session", _D)),
-    (
-        ("Tips: press ", _D),
-        ("q", _T),
-        (" to exit; the daemon and agent sessions keep running", _D),
+        ("Trajectory · ", _C),
+        ("Tab/Shift+Tab", _T),
+        (" switches between timeline and content", _D),
     ),
     (
-        ("Tips: set ", _D),
+        ("Trajectory · ", _C),
+        ("h/l", _T),
+        (" moves on the timeline or between detail tabs", _D),
+    ),
+    (
+        ("Trajectory · ", _C),
+        ("Enter or click", _T),
+        (" opens the selected span's full details", _D),
+    ),
+    (("Trajectory · ", _C), ("Escape", _T), (" closes details or returns to the tree", _D)),
+    (("Trajectory · ", _C), ("hover the timeline", _T), (" for a bounded preview", _D)),
+    (("Trajectory · ", _C), ("/", _T), (" opens fuzzy search", _D)),
+    (("Trajectory · ", _C), ("f", _T), (" filters by lane, event, state, or source", _D)),
+    (("Trajectory · ", _C), ("v", _T), (" cycles diagnostic views", _D)),
+    (("Trajectory · ", _C), ("d", _T), (" toggles chronology and duration order", _D)),
+    (
+        ("Trajectory · ", _C),
+        ("g/G", _T),
+        (" jumps to the oldest event or resumes the live tail", _D),
+    ),
+    (("Trajectory · ", _C), ("y", _T), (" copies the selected span or detail tab", _D)),
+    (
+        ("Trajectory · ", _C),
+        ("r/R", _T),
+        (" resets the view or retries a lost trajectory", _D),
+    ),
+    (("Trajectory · ", _C), ("b", _T), (" returns after following a participant link", _D)),
+    (
+        ("Trajectory · ", _C),
+        ("click JSON arrows", _T),
+        (" to collapse or expand nested values", _D),
+    ),
+    (("Palette · ", _C), ("Ctrl+P", _T), (" opens every régie command", _D)),
+    (("Palette · ", _C), ("Spawn", _T), (" starts any available harness", _D)),
+    (("Palette · ", _C), ("Resume sessions", _T), (" revives a compatible dead session", _D)),
+    (("Palette · ", _C), ("Show/Hide bus panel", _T), (" toggles coordination traffic", _D)),
+    (("Palette · ", _C), ("Theme", _T), (" changes the régie color scheme", _D)),
+    (("Palette · ", _C), ("SVG screenshot", _T), (" saves the current screen", _D)),
+    (
+        ("Config · ", _C),
         ("regie.cost_window", _T),
-        (" to day, week, month, or year", _D),
+        (" selects day, week, month, or year", _D),
     ),
-    (("Tips: ", _D), ("click this tip", _T), (" to show the next one", _D)),
+    (("Tips · ", _C), ("click this panel", _T), (" to advance immediately", _D)),
 )
-del _D, _T
+del _C, _D, _T
 
 #: Footer keyboard navigation: left arrow mapping.
 REGIE_USAGE_METRIC_LEFT = {"output": "input", "cache": "output", "average": "cost"}

@@ -123,9 +123,9 @@ class RegieSection:
     dashboard_sentence_hold_seconds: float = field(default=10.0, metadata={"min": MIN_INTERVAL})
     #: Seconds between characters while typing a dashboard sentence in or out.
     dashboard_sentence_char_interval: float = field(default=0.1, metadata={"min": MIN_INTERVAL})
-    #: Seconds a dashboard tip stays fully visible before typing out.
+    #: Seconds the dashboard tip window stays still before advancing.
     dashboard_tip_hold_seconds: float = field(default=6.0, metadata={"min": MIN_INTERVAL})
-    #: Seconds between characters while typing a dashboard tip in or out.
+    #: Seconds between characters while revealing an incoming dashboard tip.
     dashboard_tip_char_interval: float = field(default=0.04, metadata={"min": MIN_INTERVAL})
     #: Records shown on one trajectory ledger page.
     trajectory_page_size: int = field(

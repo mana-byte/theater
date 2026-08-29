@@ -36,7 +36,11 @@ from theater.constants.regie import REGIE_DASHBOARD_TIPS, REGIE_NEW_LEAF_REVEAL_
 from theater.protocol import RemoteError
 from theater.regie import app as app_mod
 from theater.regie.app import RegieApp
-from theater.regie.dashboard.widgets import AnimatedDashboardText, WelcomeDashboard
+from theater.regie.dashboard.widgets import (
+    AnimatedDashboardText,
+    DashboardTipWindow,
+    WelcomeDashboard,
+)
 from theater.regie.trajectory.enums import DiagnosticView
 from theater.regie.tree import SEND_STYLE, send_path
 from theater.trajectory import (
@@ -2120,7 +2124,7 @@ async def test_dashboard_is_one_centered_column_with_tip_below_sentence(daemon, 
         dashboard = app.query_one("#welcome-dashboard", WelcomeDashboard)
         assert dashboard.region.x == sidebar.region.x + sidebar.region.width
         sentence = app.query_one("#dashboard-sentence", AnimatedDashboardText)
-        tip = app.query_one("#dashboard-tip", AnimatedDashboardText)
+        tip = app.query_one("#dashboard-tip", DashboardTipWindow)
         harnesses = app.query_one("#dashboard-harnesses", app_mod.NonSelectableStatic)
         assert sentence.region.y < tip.region.y
         assert sentence.region.x == tip.region.x == dashboard.region.x
@@ -2155,10 +2159,10 @@ async def test_dashboard_custom_sentences_are_randomized_but_tips_are_ordered(da
     )
     async with app.run_test():
         sentence = app.query_one("#dashboard-sentence", AnimatedDashboardText)
-        tip = app.query_one("#dashboard-tip", AnimatedDashboardText)
+        tip = app.query_one("#dashboard-tip", DashboardTipWindow)
         assert sentence.controller.parts in tuple((item,) for item in configured)
         assert sentence.controller.randomized
-        assert not tip.controller.randomized
+        assert tip.controller.window[0] == REGIE_DASHBOARD_TIPS[0]
 
 
 async def test_empty_dashboard_sentence_config_disables_only_the_sentence(daemon, tmux):
@@ -2171,7 +2175,7 @@ async def test_empty_dashboard_sentence_config_disables_only_the_sentence(daemon
 async def test_hovering_the_dashboard_tip_does_not_paint_its_row(daemon, tmux):
     app, _ = make_app(dashboard_tip_char_interval=60.0)
     async with app.run_test() as pilot:
-        tip = app.query_one("#dashboard-tip", AnimatedDashboardText)
+        tip = app.query_one("#dashboard-tip", DashboardTipWindow)
         before = tip.styles.background
         await pilot.hover(tip)
         await pilot.pause()
@@ -2186,7 +2190,7 @@ async def test_staging_hides_and_unstaging_restores_the_dashboard(daemon, tmux):
     async with app.run_test() as pilot:
         dashboard = app.query_one("#welcome-dashboard", WelcomeDashboard)
         sentence = app.query_one("#dashboard-sentence", AnimatedDashboardText)
-        tip = app.query_one("#dashboard-tip", AnimatedDashboardText)
+        tip = app.query_one("#dashboard-tip", DashboardTipWindow)
         assert not dashboard.has_class("-staged")
         assert dashboard.styles.display != "none"
         assert sentence.timer is not None
@@ -2224,10 +2228,10 @@ async def test_dashboard_rows_use_independent_configured_speeds(daemon, tmux):
     )
     async with app.run_test():
         sentence = app.query_one("#dashboard-sentence", AnimatedDashboardText)
-        tip = app.query_one("#dashboard-tip", AnimatedDashboardText)
+        tip = app.query_one("#dashboard-tip", DashboardTipWindow)
         assert sentence.controller.initial_delay == 0.2
-        assert tip.controller.initial_delay == 0.03
-        assert tip.controller.initial_delay < sentence.controller.initial_delay
+        assert tip.controller.reveal_delay == 0.03
+        assert tip.controller.reveal_delay < sentence.controller.initial_delay
 
 
 async def test_dashboard_sentence_and_tip_use_cursor_only_while_typing(daemon, tmux):
@@ -2237,7 +2241,7 @@ async def test_dashboard_sentence_and_tip_use_cursor_only_while_typing(daemon, t
     )
     async with app.run_test():
         sentence = app.query_one("#dashboard-sentence", AnimatedDashboardText)
-        tip = app.query_one("#dashboard-tip", AnimatedDashboardText)
+        tip = app.query_one("#dashboard-tip", DashboardTipWindow)
         sentence._tick()
         tip._tick()
         assert str(sentence.render()).endswith("█")
@@ -2259,14 +2263,14 @@ async def test_clicking_tip_advances_immediately_and_replaces_timer(daemon, tmux
         dashboard_tip_char_interval=60.0,
     )
     async with app.run_test() as pilot:
-        tip = app.query_one("#dashboard-tip", AnimatedDashboardText)
+        tip = app.query_one("#dashboard-tip", DashboardTipWindow)
         old_timer = tip.timer
         assert old_timer is not None
         await pilot.click("#dashboard-tip")
         await pilot.pause()
         assert tip.controller.index == 1
         assert tip.controller.visible == 1
-        assert tip.controller.parts == REGIE_DASHBOARD_TIPS[1]
+        assert tip.controller.window[0] == REGIE_DASHBOARD_TIPS[1]
         assert tip.timer is not None
         assert tip.timer is not old_timer
         assert old_timer._task is None

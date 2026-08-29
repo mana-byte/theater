@@ -12,9 +12,11 @@ from theater.regie.animations.cycling_text import (
     TYPING_IN,
     TYPING_OUT,
     CyclingTextController,
+    CyclingWindowController,
 )
 from theater.regie.dashboard.content import (
     animated_text_content,
+    dashboard_tip_window_content,
     harness_availability_content,
     sentence_parts,
 )
@@ -57,12 +59,12 @@ def test_sentence_corpus_highlights_imagine_and_building_where_present():
             assert "building" in highlighted
 
 
-def test_tip_corpus_uses_dim_copy_and_highlighted_actions():
-    assert len(REGIE_DASHBOARD_TIPS) >= 15
+def test_tip_corpus_uses_categories_and_highlighted_actions():
+    assert len(REGIE_DASHBOARD_TIPS) >= 30
     for parts in REGIE_DASHBOARD_TIPS:
-        assert _text(parts).startswith("Tips: ")
+        assert " · " in _text(parts)
         styles = _styles(parts)
-        assert any("dim" in style for style in styles)
+        assert any("text-muted" in style for style in styles)
         assert any("accent" in style for style in styles)
 
 
@@ -72,24 +74,31 @@ def test_tip_corpus_covers_regie_capabilities():
         "h/j/k/l",
         "past the last agent",
         "Enter",
-        "outside usage stats",
         "H/L",
         "<prefix> h",
         "left-click",
         "right-click",
         "usage tile",
-        "today, this week, and this month",
+        "day, week, and month",
         "per-model details",
         "Ctrl+P",
-        "spawn",
-        "resume",
-        "bus traffic",
-        "theme",
+        "fuzzy search",
+        "diagnostic views",
+        "duration order",
+        "live tail",
+        "copies the selected span",
+        "lost trajectory",
+        "participant link",
+        "collapse or expand",
+        "Spawn",
+        "Resume sessions",
+        "coordination traffic",
+        "color scheme",
         "SVG screenshot",
-        "kill",
+        "kills",
         "daemon and agent sessions keep running",
         "regie.cost_window",
-        "click this tip",
+        "click this panel",
     ):
         assert phrase in corpus
 
@@ -218,6 +227,48 @@ def test_cursor_blinks_during_typing_out():
     assert [controller.tick().cursor for _ in range(2)] == [True, False]
 
 
+def test_cycling_window_keeps_three_tips_visible_and_reveals_only_the_new_one():
+    items = (("one",), ("two",), ("three",), ("four",))
+    controller = CyclingWindowController(
+        items,
+        window_size=3,
+        hold=6.0,
+        char_interval=0.04,
+    )
+
+    assert controller.window == items[:3]
+    assert controller.phase == HOLDING
+    assert controller.incoming_visible is None
+    assert controller.initial_delay == 6.0
+    assert controller.reveal_delay == 0.04
+
+    frame = controller.tick()
+
+    assert controller.index == 1
+    assert controller.window == items[1:]
+    assert controller.incoming_visible == 1
+    assert frame.phase == TYPING_IN
+    assert frame.next_delay == 0.04
+
+
+def test_cycling_window_wraps_and_handles_an_empty_corpus():
+    controller = CyclingWindowController(
+        (("one",), ("two",)),
+        window_size=3,
+        hold=6.0,
+        char_interval=0.04,
+    )
+    assert controller.advance()
+    assert controller.window == (("two",), ("one",))
+    assert controller.advance()
+    assert controller.index == 0
+
+    empty = CyclingWindowController((), window_size=3, hold=6.0, char_interval=0.04)
+    assert not empty.active
+    assert not empty.advance()
+    assert empty.tick().phase == HOLDING
+
+
 def test_animated_content_preserves_partial_highlight():
     parts = ("imagine ", ("writing", "$accent bold"), " code")
     content = animated_text_content(parts, 9)
@@ -244,3 +295,20 @@ def test_animated_content_accepts_dim_tip_cursor_style():
 
 def test_animated_content_at_zero_is_blank_without_cursor():
     assert str(animated_text_content(("hello",), 0)) == ""
+
+
+def test_tip_window_renders_one_active_and_two_dimmed_lines():
+    content = dashboard_tip_window_content(
+        (
+            (("Tree · ", "$text-muted bold"), ("move", "$text-accent bold")),
+            (("Usage · ", "$text-muted bold"), ("inspect", "$text-accent bold")),
+            (("Trajectory · ", "$text-muted bold"), ("search", "$text-accent bold")),
+        ),
+        incoming_visible=13,
+        cursor=True,
+    )
+
+    assert str(content) == "Tips\n› Tree · move\n  Usage · inspect\n  Trajectory · █"
+    styles = [span.style for span in content.spans if span.style]
+    assert any("accent" in style and "dim" not in style for style in styles)
+    assert any("accent" in style and "dim" in style for style in styles)

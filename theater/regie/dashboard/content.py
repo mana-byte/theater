@@ -14,6 +14,10 @@ from theater.constants.regie import (
     REGIE_DASHBOARD_HARNESS_UNAVAILABLE_GLYPH,
     REGIE_DASHBOARD_HARNESS_UNAVAILABLE_STYLE,
     REGIE_DASHBOARD_SENTENCES,
+    REGIE_DASHBOARD_TIP_CURSOR_STYLE,
+    REGIE_DASHBOARD_TIP_HEADING_STYLE,
+    REGIE_DASHBOARD_TIP_HIGHLIGHT_STYLE,
+    REGIE_DASHBOARD_TIP_STYLE,
 )
 from theater.harness import describe
 from theater.regie.animations.reveal import StyledPart, clip_parts
@@ -38,6 +42,33 @@ def sentence_parts(configured: Sequence[str] | None) -> tuple[tuple[StyledPart, 
     if configured is None:
         return REGIE_DASHBOARD_SENTENCES
     return tuple((sentence,) for sentence in configured)
+
+
+def dashboard_tip_window_content(
+    items: Sequence[Sequence[StyledPart]],
+    *,
+    incoming_visible: int | None = None,
+    cursor: bool = False,
+) -> Content:
+    """Render one active tip and dimmed upcoming tips."""
+    assembled: list[StyledPart] = [("Tips", REGIE_DASHBOARD_TIP_HEADING_STYLE)]
+    last = len(items) - 1
+    for index, item in enumerate(items):
+        assembled.append("\n")
+        active = index == 0
+        prefix_style = REGIE_DASHBOARD_TIP_HIGHLIGHT_STYLE if active else REGIE_DASHBOARD_TIP_STYLE
+        assembled.append(("› " if active else "  ", prefix_style))
+        visible_item = (
+            clip_parts(item, incoming_visible)
+            if index == last and incoming_visible is not None
+            else list(item)
+        )
+        for part in visible_item:
+            text, style = (part, REGIE_DASHBOARD_TIP_STYLE) if isinstance(part, str) else part
+            assembled.append((text, style if active else f"{style} dim"))
+        if index == last and incoming_visible is not None and cursor:
+            assembled.append((REGIE_DASHBOARD_CURSOR_GLYPH, REGIE_DASHBOARD_TIP_CURSOR_STYLE))
+    return Content.assemble(*assembled)
 
 
 def harness_availability_content(rows: list[dict] | None) -> Content:
