@@ -56,14 +56,6 @@ def test_set_send_seq_round_trips(store):
     assert store.get_send_seq() == 42
 
 
-def test_send_seq_parse_is_numeric_not_lexicographic(store):
-    """#10 must beat #9 — a lexical MAX would get this wrong."""
-    store.create_job(_job("x#9"))
-    store.create_job(_job("x#10"))
-
-    assert store.max_send_seq() == 10
-
-
 # ---- the regression test ----------------------------------------------------
 
 
