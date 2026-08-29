@@ -123,9 +123,11 @@ async def test_a_matching_epoch_delivers(client, fake_tmux, daemon):
 
 
 async def test_a_missing_epoch_skips_the_pid_check(client, fake_tmux, daemon):
-    """`hello` records no epoch. That must not make a live agent unreachable:
-    an unknown pid is an absence of evidence, not evidence of replacement."""
+    """A legacy missing pid is absence of evidence, not proof of replacement."""
     target = await _target(client, fake_tmux, daemon, pid=4242)
+    participant = daemon.registry.get(target["id"])
+    participant.pid = None
+    daemon.store.upsert_participant(participant)
     assert daemon.registry.get(target["id"]).pid is None
 
     await client.call("send", target=target["id"], prompt="hi")
