@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from theater.constants.daemon import (
+    BUS_KIND_TMUX_SERVER_RESTART,
     TMUX_RESTART_TERMINATION_REASON,
     TMUX_SERVER_IDENTITY_META_KEY,
 )
@@ -51,6 +53,8 @@ def test_record_tmux_server_restart_records_diagnosis_before_advancing_identity(
     store.upsert_participant(dead)
     store.upsert_participant(newly_owned)
     store.set_meta(TMUX_SERVER_IDENTITY_META_KEY, "server-before")
+    delivered: list[dict] = []
+    store.register_bus_listener(delivered.append)
 
     store.record_tmux_server_restart(
         server_identity="server-after",
@@ -74,6 +78,9 @@ def test_record_tmux_server_restart_records_diagnosis_before_advancing_identity(
     assert newly_owned_after.status is not Status.DEAD
     assert newly_owned_after.tmux_server_identity == "server-after"
     assert store.get_meta(TMUX_SERVER_IDENTITY_META_KEY) == "server-after"
+    incidents = [row for row in store.bus_tail() if row["kind"] == BUS_KIND_TMUX_SERVER_RESTART]
+    assert len(incidents) == 1
+    assert delivered == incidents
 
 
 def test_record_tmux_server_restart_rolls_back_diagnosis_when_identity_write_fails(
@@ -101,6 +108,21 @@ def test_record_tmux_server_restart_rolls_back_diagnosis_when_identity_write_fai
     assert restored.status is not Status.DEAD
     assert restored.termination_reason is None
     assert store.get_meta(TMUX_SERVER_IDENTITY_META_KEY) == "server-before"
+    assert not [row for row in store.bus_tail() if row["kind"] == BUS_KIND_TMUX_SERVER_RESTART]
+
+
+def test_live_resume_predecessor_claim_is_unique(store):
+    predecessor = Participant(id="predecessor", harness="vibe", status=Status.DEAD)
+    first = Participant(id="first", harness="vibe", resumed_from_id=predecessor.id)
+    second = Participant(id="second", harness="vibe", resumed_from_id=predecessor.id)
+    store.upsert_participant(predecessor)
+    store.upsert_participant(first)
+
+    with pytest.raises(IntegrityError, match="UNIQUE constraint failed"):
+        store.upsert_participant(second)
+
+    store.set_status(first.id, Status.DEAD)
+    store.upsert_participant(second)
 
 
 def test_upsert_is_idempotent(store):

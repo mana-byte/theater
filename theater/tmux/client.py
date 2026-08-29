@@ -69,11 +69,13 @@ from theater.tmux.options import (  # noqa: F401
 )
 from theater.tmux.panes import (  # noqa: F401
     TmuxInventory,
+    TmuxServerIdentity,
     break_pane,
     display_message,
     ensure_session,
     join_pane,
     kill_pane,
+    kill_pane_if_server_identity,
     kill_window,
     list_panes,
     move_window_to_index,

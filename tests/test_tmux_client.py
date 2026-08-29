@@ -168,14 +168,19 @@ async def test_inventory_observation_keeps_server_identity_with_panes(monkeypatc
     async def fake_run(*args: str, check: bool = True) -> str:
         captured.append(list(args))
         assert check is True
-        return "123\t%1\n123\t%2\n"
+        return "/tmp/tmux-100/default\t123\t456\t%1\n/tmp/tmux-100/default\t123\t456\t%2\n"
 
     monkeypatch.setattr(client, "run", fake_run)
     inventory = await client.observe_inventory()
     assert inventory is not None
-    assert inventory.server_identity == "123"
+    assert (
+        inventory.server_identity
+        == client.TmuxServerIdentity("/tmp/tmux-100/default", "123", "456").value
+    )
     assert inventory.pane_ids == frozenset({"%1", "%2"})
-    assert captured == [["list-panes", "-a", "-F", "#{pid}\t#{pane_id}"]]
+    assert captured == [
+        ["list-panes", "-a", "-F", "#{socket_path}\t#{pid}\t#{start_time}\t#{pane_id}"]
+    ]
 
 
 async def test_inventory_observation_treats_empty_output_as_inconclusive(monkeypatch):
@@ -188,7 +193,16 @@ async def test_inventory_observation_treats_empty_output_as_inconclusive(monkeyp
 
 async def test_inventory_observation_rejects_mixed_server_identities(monkeypatch):
     async def fake_run(*args: str, check: bool = True) -> str:
-        return "123\t%1\n456\t%2\n"
+        return "/tmp/tmux-100/default\t123\t456\t%1\n/tmp/tmux-100/default\t124\t456\t%2\n"
+
+    monkeypatch.setattr(client, "run", fake_run)
+    with pytest.raises(client.TmuxError, match="invalid server inventory"):
+        await client.observe_inventory()
+
+
+async def test_inventory_observation_rejects_missing_identity_component(monkeypatch):
+    async def fake_run(*args: str, check: bool = True) -> str:
+        return "/tmp/tmux-100/default\t123\t\t%1\n"
 
     monkeypatch.setattr(client, "run", fake_run)
     with pytest.raises(client.TmuxError, match="invalid server inventory"):
@@ -211,6 +225,27 @@ async def test_kill_pane_targets_pane_id_directly(monkeypatch):
     assert argv[0] == "kill-pane"
     assert "-t" in argv
     assert argv[argv.index("-t") + 1] == "%42"
+
+
+async def test_conditional_kill_checks_compound_server_identity(monkeypatch):
+    captured: list[list[str]] = []
+
+    async def fake_run(*args: str, check: bool = True) -> str:
+        captured.append(list(args))
+        return "theater-killed"
+
+    identity = client.TmuxServerIdentity("/tmp/tmux-100/default", "123", "456").value
+    monkeypatch.setattr(client, "run", fake_run)
+    assert await client.kill_pane_if_server_identity("%42", identity) is True
+    assert captured == [
+        [
+            "if-shell",
+            "-F",
+            "#{&&:#{==:#{socket_path},/tmp/tmux-100/default},#{&&:#{==:#{pid},123},#{==:#{start_time},456}}}",
+            "display-message -p theater-killed; kill-pane -t %42",
+            "display-message -p theater-identity-mismatch",
+        ]
+    ]
 
 
 async def _deliver_argv(monkeypatch, text: str, **kw) -> list[list[str]]:

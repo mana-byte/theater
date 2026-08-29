@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Collection
 
-from sqlalchemy import insert, or_, select
+from sqlalchemy import Connection, insert, or_, select
 
 from theater.constants.daemon import (
     BUS_KIND_AGENT_TRANSCRIPT,
@@ -35,8 +35,10 @@ class BusRepository:
         to_id: str | None = None,
         payload: dict | None = None,
         timestamp: float | None = None,
+        connection: Connection | None = None,
     ) -> int:
-        result = self._db.conn.execute(
+        conn = self._db.conn if connection is None else connection
+        result = conn.execute(
             insert(bus).values(
                 ts=now() if timestamp is None else timestamp,
                 from_id=from_id,

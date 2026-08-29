@@ -312,6 +312,13 @@ async def _sweep_participants(store: Store, restart_cutoff: float, batch: int) -
             .where(participants.c.id.not_in(select(jobs.c.caller_id)))
             .where(
                 participants.c.id.not_in(
+                    select(participants.c.resumed_from_id).where(
+                        participants.c.resumed_from_id.is_not(None)
+                    )
+                )
+            )
+            .where(
+                participants.c.id.not_in(
                     select(participants.c.parent_id).where(participants.c.parent_id.is_not(None))
                 )
             )

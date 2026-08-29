@@ -7,6 +7,7 @@ Only the model is missing.
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -726,6 +727,90 @@ async def test_resume_state_resumable_spawn_succeeds(daemon, pin_harnesses):
             resume="sess-resumable",
         )
         assert result["id"] is not None
+
+
+async def test_resume_predecessor_claim_prevents_a_second_live_recovery(daemon, pin_harnesses):
+    async with DaemonClient(autostart=False) as c:
+        predecessor = await c.call("hello", harness="resume-pin-test", cwd="/tmp")
+        participant = daemon.registry.get(predecessor["id"])
+        participant.session_id = "sess-predecessor-claim"
+        participant.session_correlation = "operator"
+        daemon.store.upsert_participant(participant)
+        daemon.registry.mark_dead(predecessor["id"])
+
+        first = await c.call(
+            "spawn",
+            harness="resume-pin-test",
+            prompt="",
+            approval="manual",
+            cwd="/tmp",
+            resume=predecessor["id"],
+        )
+        assert daemon.registry.get(first["id"]).resumed_from_id == predecessor["id"]
+        rows = await c.call("participants.list", include_dead=True)
+        row = next(row for row in rows if row["id"] == predecessor["id"])
+        assert row["resume_state"] == "owned_by_live"
+
+        with pytest.raises(RemoteError) as exc:
+            await c.call(
+                "spawn",
+                harness="resume-pin-test",
+                prompt="",
+                approval="manual",
+                cwd="/tmp",
+                resume=predecessor["id"],
+            )
+        assert exc.value.code == "bad_request"
+        assert "live successor" in exc.value.message
+
+        daemon.registry.mark_dead(first["id"])
+        recovered = await c.call(
+            "spawn",
+            harness="resume-pin-test",
+            prompt="",
+            approval="manual",
+            cwd="/tmp",
+            resume=predecessor["id"],
+        )
+        assert recovered["id"] != first["id"]
+
+
+async def test_concurrent_resume_claims_leave_one_live_successor(daemon, pin_harnesses):
+    async with DaemonClient(autostart=False) as setup:
+        predecessor = await setup.call("hello", harness="resume-pin-test", cwd="/tmp")
+        participant = daemon.registry.get(predecessor["id"])
+        participant.session_id = "sess-concurrent-claim"
+        participant.session_correlation = "operator"
+        daemon.store.upsert_participant(participant)
+        daemon.registry.mark_dead(predecessor["id"])
+
+    async with DaemonClient(autostart=False) as first, DaemonClient(autostart=False) as second:
+        results = await asyncio.gather(
+            first.call(
+                "spawn",
+                harness="resume-pin-test",
+                prompt="",
+                approval="manual",
+                cwd="/tmp",
+                resume=predecessor["id"],
+            ),
+            second.call(
+                "spawn",
+                harness="resume-pin-test",
+                prompt="",
+                approval="manual",
+                cwd="/tmp",
+                resume=predecessor["id"],
+            ),
+            return_exceptions=True,
+        )
+
+    successes = [result for result in results if isinstance(result, dict)]
+    failures = [result for result in results if isinstance(result, RemoteError)]
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert failures[0].code == "bad_request"
+    assert "live successor" in failures[0].message
 
 
 async def test_resume_state_owned_by_live_trusted_dead_spawn_refuses(daemon, pin_harnesses):

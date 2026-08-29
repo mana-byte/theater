@@ -14,7 +14,7 @@ from theater.daemon.registry import Registry
 from theater.daemon.server import Daemon
 from theater.daemon.store import Store
 from theater.tmux import client as tmux_client
-from theater.tmux.client import Pane
+from theater.tmux.client import Pane, TmuxServerIdentity
 
 
 @pytest.fixture(autouse=True)
@@ -195,7 +195,7 @@ class FakeTmux:
     def __init__(self) -> None:
         self.windows: list[dict] = []
         self.panes: list[str] = []
-        self.tmux_server_identity = "fake-tmux-server"
+        self.tmux_server_identity = TmuxServerIdentity("/tmp/fake-tmux", "101", "1").value
         self._next = 0
         #: Panes visible to list_panes. A window created here appears in it,
         #: because a pane that was just made does exist — the delivery gate
@@ -247,6 +247,12 @@ class FakeTmux:
         if pane_id in self.panes:
             self.panes.remove(pane_id)
         self.visible_panes = [p for p in self.visible_panes if p.pane_id != pane_id]
+
+    async def kill_pane_if_server_identity(self, pane_id, expected_identity):
+        if expected_identity != self.tmux_server_identity:
+            return False
+        await self.kill_pane(pane_id)
+        return True
 
     def add_pane(self, pane_id, *, command="vibe", pid=None, cwd="/tmp"):
         """Declare that a pane exists, and what is running in it."""
@@ -332,6 +338,7 @@ def fake_tmux(request, monkeypatch):
         "ensure_session",
         "sessions",
         "kill_pane",
+        "kill_pane_if_server_identity",
         "list_panes",
         "observe_inventory",
         "available",

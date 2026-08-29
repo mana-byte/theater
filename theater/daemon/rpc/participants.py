@@ -15,7 +15,10 @@ from theater.daemon import workers
 from theater.daemon.harness_detect import detect_harness, match_binary
 from theater.daemon.rpc.params import _require
 from theater.daemon.rpc.router import method
-from theater.daemon.runtime.tmux_reconcile import reconcile_tmux_inventory
+from theater.daemon.runtime.tmux_reconcile import (
+    reconcile_tmux_inventory,
+    reconcile_tmux_inventory_locked,
+)
 from theater.harness import HARNESSES, normalize, supports_resume
 from theater.models import (
     BadRequest,
@@ -33,9 +36,7 @@ async def _pane_server_identity(daemon, pane: str | None, *, context: str) -> st
     if pane is None:
         return None
     reconciliation = await reconcile_tmux_inventory(daemon, context=context)
-    if reconciliation.pane_ids is None or pane not in reconciliation.pane_ids:
-        return None
-    return reconciliation.server_identity
+    return reconciliation.identity_for_pane(pane)
 
 
 def _resume_state(p: Participant, live_peers: list[Participant]) -> str:
@@ -54,27 +55,25 @@ def _resume_state(p: Participant, live_peers: list[Participant]) -> str:
     3. ``harness_cannot_resume`` — check_resume (called from
                                    _validate_before_create) refuses before any
                                    identity check runs.
-    4. ``owned_by_live``         — _validate_resume_identity scans all
-                                   participants filtered to (harness match AND
-                                   session_id match AND trusted provenance).
-                                   If any such participant is live, it raises
-                                   immediately.
+    4. ``owned_by_live``         — a live trusted session owner or recovery
+                                   successor already claims this predecessor.
     5. ``untrusted``             — _validate_resume_identity then raises
                                    when no trusted dead match exists.
     6. ``harness_resume_rejected`` — an opt-in harness preflight refused.
     7. ``resumable``             — all available current gates passed.
 
     ``live_peers`` must be the set of currently live participants so that the
-    owned_by_live check can find peers sharing a session id.
+    owned_by_live check can find peers sharing a session id or predecessor id.
     """
     if p.status is not Status.DEAD:
         return "live"
+    if any(other.resumed_from_id == p.id for other in live_peers):
+        return "owned_by_live"
     if not p.session_id:
         return "no_session_id"
     harness = HARNESSES.get(normalize(p.harness))
     if harness is None or not supports_resume(harness):
         return "harness_cannot_resume"
-    # owned_by_live must be checked BEFORE untrusted, matching _validate_resume_identity's order.
     for other in live_peers:
         if (
             normalize(other.harness) == normalize(p.harness)
@@ -254,8 +253,32 @@ async def _kill(daemon, params: dict) -> dict:
                 f"refusing to kill {pid!r}: its parent is "
                 f"{target.parent_id!r}, not you ({caller_id!r})"
             )
-        if target.status is Status.DEAD:
-            return {"id": pid, "killed": False, "reason": "already_dead"}
+    if target.status is Status.DEAD:
+        return {"id": pid, "killed": False, "reason": "already_dead"}
+
+    participant = target
+    if target.tmux_pane:
+        async with daemon._tmux_reconcile_lock:
+            reconciliation = await reconcile_tmux_inventory_locked(
+                daemon,
+                context="kill",
+                retire_missing=False,
+            )
+            refreshed = daemon.store.get_participant(pid)
+            if refreshed is None or refreshed.status is Status.DEAD:
+                return {"id": pid, "killed": False, "reason": "already_dead"}
+            expected_identity = reconciliation.identity_for_pane(refreshed.tmux_pane)
+            if expected_identity is None:
+                raise BadRequest(
+                    f"cannot kill {pid!r}: tmux pane inventory is inconclusive "
+                    "or no longer contains it"
+                )
+            if refreshed.tmux_server_identity != expected_identity:
+                raise BadRequest(f"cannot kill {pid!r}: tmux pane ownership is not verified")
+            participant = await daemon.spawner.kill_pane(
+                pid,
+                expected_server_identity=expected_identity,
+            )
 
     # finish is first-terminal-write-wins. The marker tells the reaper to leave this alone.
     daemon.store.bus_append(
@@ -265,7 +288,8 @@ async def _kill(daemon, params: dict) -> dict:
     )
     daemon._explicit_kills.add(pid)
     try:
-        participant = await daemon.spawner.kill_pane(pid)
+        if not participant.tmux_pane:
+            participant = await daemon.spawner.kill_pane(pid, expected_server_identity=None)
         # Finish jobs before teardown: job completion hashes files in the worktree.
         for job in daemon.store.running_jobs_for_target(pid):
             daemon.jobs.finish(job.handle, state=JobState.KILLED, error_code="killed")

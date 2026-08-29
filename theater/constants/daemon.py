@@ -30,10 +30,7 @@ BUS_KIND_TMUX_SERVER_RESTART = "daemon.tmux_server_restart"
 #: Bound the participant ids carried by one tmux server restart diagnostic.
 TMUX_SERVER_RESTART_AFFECTED_IDS_LIMIT = 100
 
-#: Participant termination reason for a confirmed tmux server replacement.
 TMUX_RESTART_TERMINATION_REASON = "tmux_restart"
-
-#: Job failure code for work interrupted by a confirmed tmux server replacement.
 TMUX_RESTART_JOB_ERROR_CODE = "tmux_restarted"
 
 #: Meta key prefix for per-participant receipt tokens; the participant id is appended.

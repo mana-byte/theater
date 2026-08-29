@@ -25,8 +25,10 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from theater.constants.daemon import (
     BUS_KIND_OPERATOR_TRANSCRIPT_BIND,
     BUS_KIND_OPERATOR_TRANSCRIPT_UNBIND,
+    BUS_KIND_TMUX_SERVER_RESTART,
     BUS_PARTICIPANT_PAGE_MAX_LIMIT,
     TMUX_SERVER_IDENTITY_META_KEY,
+    TMUX_SERVER_RESTART_AFFECTED_IDS_LIMIT,
 )
 from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories.bus import BusRepository
@@ -137,7 +139,14 @@ class Store:
         newly_owned_ids: Sequence[str],
         incident: str,
         terminated_at: float,
-    ) -> None:
+    ) -> int:
+        payload = {
+            "incident": incident,
+            "affected_count": len(affected_ids),
+            "affected_ids": list(affected_ids[:TMUX_SERVER_RESTART_AFFECTED_IDS_LIMIT]),
+        }
+        listeners = tuple(self._bus_listeners)
+        timestamp = now()
         with self.engine.begin() as conn:
             self._participants.mark_tmux_restarted(
                 affected_ids,
@@ -155,6 +164,26 @@ class Store:
                 server_identity,
                 connection=conn,
             )
+            row_id = self._bus.append(
+                BUS_KIND_TMUX_SERVER_RESTART,
+                payload=payload,
+                timestamp=timestamp,
+                connection=conn,
+            )
+        if listeners:
+            row = self._bus_row(
+                row_id,
+                timestamp,
+                None,
+                None,
+                BUS_KIND_TMUX_SERVER_RESTART,
+                json.dumps(payload),
+            )
+            self._notify_bus_listeners(
+                [row],
+                listeners,
+            )
+        return row_id
 
     def touch(self, pid: str) -> None:
         self._participants.touch(pid)

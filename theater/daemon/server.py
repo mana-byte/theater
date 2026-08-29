@@ -168,6 +168,7 @@ class Daemon:
             self._lag: asyncio.Task | None = None
             self._gauge_sampler = None
             self._explicit_kills: set[str] = set()
+            self._tmux_reconcile_lock = asyncio.Lock()
             self._sock_id: tuple[int, int] | None = None
             self._stopping = asyncio.Event()
             self._conns: set[asyncio.Task] = set()

@@ -148,6 +148,7 @@ class Registry:
         parent_id: str | None = None,
         pid: str | None = None,
         has_prompt: bool | None = None,
+        resumed_from_id: str | None = None,
     ) -> Participant:
         """Reserve an id before the pane exists.
 
@@ -168,6 +169,7 @@ class Registry:
             tier=Tier.SPAWNED,
             cwd=cwd,
             parent_id=parent_id,
+            resumed_from_id=resumed_from_id,
             status=Status.IDLE,
         )
         self.store.upsert_participant(p)

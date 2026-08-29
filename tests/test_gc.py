@@ -381,6 +381,26 @@ async def test_tmux_restart_participant_waits_for_jobs_retention_after_terminati
     assert store.get_participant(participant.id) is None
 
 
+async def test_resume_predecessor_is_kept_until_its_successor_is_deleted(store):
+    predecessor = _participant(store, pid="predecessor")
+    successor = _participant(store, pid="successor", status=Status.IDLE)
+    successor.resumed_from_id = predecessor.id
+    store.upsert_participant(successor)
+
+    result = await sweep(store, _retention())
+    assert result.participants == 0
+    assert store.get_participant(predecessor.id) is not None
+
+    store.set_status(successor.id, Status.DEAD)
+    result = await sweep(store, _retention())
+    assert result.participants == 1
+    assert store.get_participant(predecessor.id) is not None
+
+    result = await sweep(store, _retention())
+    assert result.participants == 1
+    assert store.get_participant(predecessor.id) is None
+
+
 # ---- Jobs and touch go together -------------------------------------------
 
 

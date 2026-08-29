@@ -224,8 +224,8 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         (Theater has not recorded the harness session id),
         `harness_cannot_resume` (the harness adapter does not support resume),
         `untrusted` (session id present but transcript provenance is below
-        operator-level), `owned_by_live` (a live participant already holds a
-        trusted binding for the same session id), `harness_resume_rejected`
+        operator-level), `owned_by_live` (a live participant holds the trusted
+        session or claims this predecessor as a recovery successor), `harness_resume_rejected`
         (the harness preflight refused the session).
         """
         return await tools.list_participants(

@@ -27,6 +27,8 @@ in tests/test_tmux_panes.py. Behaviour must be verified by the user.
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
 
 from theater.constants.tmux import (
@@ -35,7 +37,60 @@ from theater.constants.tmux import (
 )
 from theater.tmux.command import _FORMAT_SEP, _PANE_FORMAT, Pane, TmuxError
 
-_INVENTORY_FORMAT = "#{pid}\t#{pane_id}"
+_INVENTORY_FORMAT = "#{socket_path}\t#{pid}\t#{start_time}\t#{pane_id}"
+_MAX_IDENTITY_COMPONENT_LENGTH = 256
+_MAX_IDENTITY_LENGTH = 512
+_SAFE_FORMAT_LITERAL = re.compile(r"^[^\s#{}\\,;]+$")
+_PANE_ID = re.compile(r"^%[0-9]+$")
+_KILLED = "theater-killed"
+_MISMATCH = "theater-identity-mismatch"
+
+
+@dataclass(frozen=True, slots=True)
+class TmuxServerIdentity:
+    socket_path: str
+    pid: str
+    start_time: str
+
+    def __post_init__(self) -> None:
+        if sum(map(len, (self.socket_path, self.pid, self.start_time))) > _MAX_IDENTITY_LENGTH:
+            raise TmuxError("tmux returned an invalid server identity")
+        for component in (self.socket_path, self.pid, self.start_time):
+            if not component or len(component) > _MAX_IDENTITY_COMPONENT_LENGTH:
+                raise TmuxError("tmux returned an invalid server identity")
+            if any(char in component for char in "\t\r\n"):
+                raise TmuxError("tmux returned an invalid server identity")
+
+    @property
+    def value(self) -> str:
+        return json.dumps((self.socket_path, self.pid, self.start_time), separators=(",", ":"))
+
+    @classmethod
+    def parse(cls, value: str) -> TmuxServerIdentity:
+        try:
+            parts = json.loads(value)
+        except (TypeError, ValueError):
+            raise TmuxError("tmux server identity is invalid") from None
+        if (
+            not isinstance(parts, list)
+            or len(parts) != 3
+            or not all(isinstance(part, str) for part in parts)
+        ):
+            raise TmuxError("tmux server identity is invalid")
+        return cls(*parts)
+
+    def format_condition(self) -> str:
+        literals = (self.socket_path, self.pid, self.start_time)
+        if not all(_SAFE_FORMAT_LITERAL.fullmatch(value) for value in literals):
+            raise TmuxError("tmux server identity cannot be used for a conditional kill")
+        return (
+            "#{&&:"
+            f"#{{==:#{{socket_path}},{self.socket_path}}},"
+            "#{&&:"
+            f"#{{==:#{{pid}},{self.pid}}},"
+            f"#{{==:#{{start_time}},{self.start_time}}}"
+            "}}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +99,9 @@ class TmuxInventory:
 
     server_identity: str
     pane_ids: frozenset[str]
+
+    def identity_for_pane(self, pane_id: str) -> str | None:
+        return self.server_identity if pane_id in self.pane_ids else None
 
 
 # Proxies: delegate to the facade at call time so both panes.run and client.run patches work.
@@ -79,17 +137,17 @@ async def list_panes(session: str | None = None) -> list[Pane]:
 async def observe_inventory() -> TmuxInventory | None:
     """Observe one non-empty server inventory without mixing server epochs."""
     out = await run("list-panes", "-a", "-F", _INVENTORY_FORMAT, check=True)
-    rows = [line.partition("\t") for line in out.splitlines() if line]
+    rows = [line.split("\t") for line in out.splitlines() if line]
     if not rows:
         return None
-    if any(not separator or not identity or not pane_id for identity, separator, pane_id in rows):
+    if any(len(row) != 4 or not all(row) for row in rows):
         raise TmuxError("tmux returned an invalid server inventory")
-    identities = {identity for identity, _, _ in rows}
+    identities = {TmuxServerIdentity(*row[:3]).value for row in rows}
     if len(identities) != 1:
         raise TmuxError("tmux returned an invalid server inventory")
     return TmuxInventory(
         server_identity=identities.pop(),
-        pane_ids=frozenset(row[2] for row in rows),
+        pane_ids=frozenset(row[3] for row in rows),
     )
 
 
@@ -186,6 +244,21 @@ async def new_window(
 
 async def kill_pane(pane_id: str) -> None:
     await run("kill-pane", "-t", pane_id, check=False)
+
+
+async def kill_pane_if_server_identity(pane_id: str, expected_identity: str) -> bool:
+    """Kill a pane only when tmux still reports the expected server identity."""
+    if not _PANE_ID.fullmatch(pane_id):
+        raise TmuxError(f"invalid tmux pane id {pane_id!r}")
+    condition = TmuxServerIdentity.parse(expected_identity).format_condition()
+    result = await run(
+        "if-shell",
+        "-F",
+        condition,
+        f"display-message -p {_KILLED}; kill-pane -t {pane_id}",
+        f"display-message -p {_MISMATCH}",
+    )
+    return result == _KILLED
 
 
 # ---- staging -----------------------------------------------------------

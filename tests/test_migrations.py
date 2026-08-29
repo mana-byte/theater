@@ -78,6 +78,7 @@ def test_migrations_created_the_alembic_version_table(store):
     assert "termination_reason" in col_names
     assert "termination_incident" in col_names
     assert "terminated_at" in col_names
+    assert "resumed_from_id" in col_names
 
     usage_cols = store.conn.exec_driver_sql("PRAGMA table_info(usage)").fetchall()
     assert "harness" in {row[1] for row in usage_cols}
@@ -153,7 +154,33 @@ def test_tmux_restart_migration_upgrades_from_0018(theater_home):
         "termination_reason",
         "termination_incident",
         "terminated_at",
+        "resumed_from_id",
     } <= after
+
+
+def test_resume_claim_migration_upgrades_from_0019(theater_home):
+    path = paths.db_path()
+    store = Store(path)
+    store.close()
+
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        with engine.connect() as conn:
+            cfg = Config()
+            cfg.set_main_option("script_location", str(MIGRATIONS))
+            cfg.attributes["connection"] = conn
+            command.downgrade(cfg, "0019")
+            before = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(participants)")}
+            assert "resumed_from_id" not in before
+            command.upgrade(cfg, "head")
+            conn.commit()
+            after = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(participants)")}
+            indexes = {row[1] for row in conn.exec_driver_sql("PRAGMA index_list(participants)")}
+    finally:
+        engine.dispose()
+
+    assert "resumed_from_id" in after
+    assert "uq_participants_live_resumed_from" in indexes
 
 
 def test_bus_ids_are_never_reused(store):

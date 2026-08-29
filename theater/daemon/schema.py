@@ -36,6 +36,7 @@ participants = Table(
     Column("transcript_domain", Text),
     Column("transcript_location", Text),
     Column("resume_floor", Text),
+    Column("resumed_from_id", Text),
     Column("parent_id", Text),
     Column("pid", Integer),
     Column("status", Text, nullable=False),
@@ -46,6 +47,12 @@ participants = Table(
 Index("idx_participants_pane", participants.c.tmux_pane)
 Index("idx_participants_parent", participants.c.parent_id)
 Index("idx_participants_status", participants.c.status)
+Index(
+    "uq_participants_live_resumed_from",
+    participants.c.resumed_from_id,
+    unique=True,
+    sqlite_where=text("status != 'dead' AND resumed_from_id IS NOT NULL"),
+)
 # Partial index: makes the reaper's list_participants() scan proportional to live rows.
 Index(
     "idx_participants_live",

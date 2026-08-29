@@ -12,6 +12,8 @@ import shutil
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
+from sqlalchemy.exc import IntegrityError
+
 from theater import paths, timing
 from theater.constants.daemon import BUS_KIND_PARTICIPANT_SESSION_BOUNDARY
 from theater.constants.harness import (
@@ -98,12 +100,21 @@ class Spawner:
         resume_predecessor, resume_overlay = self._validate_before_create(req, harness)
         if resume_overlay is not None and resume_overlay.cwd is not None:
             req = replace(req, cwd=resume_overlay.cwd)
-        participant = self.registry.create_spawned(
-            harness=req.harness,
-            cwd=req.cwd,
-            parent_id=req.parent_id,
-            has_prompt=bool(req.prompt),
-        )
+        try:
+            participant = self.registry.create_spawned(
+                harness=req.harness,
+                cwd=req.cwd,
+                parent_id=req.parent_id,
+                has_prompt=bool(req.prompt),
+                resumed_from_id=resume_predecessor.id if resume_predecessor is not None else None,
+            )
+        except IntegrityError:
+            if resume_predecessor is None:
+                raise
+            raise BadRequest(
+                f"cannot resume participant {resume_predecessor.id!r}: a live successor already "
+                "claims this recovery"
+            ) from None
 
         try:
             plan = self._build_plan(req, participant, resume_overlay)
@@ -164,13 +175,7 @@ class Spawner:
         except Exception:
             info = None
         reconciliation = await self._reconcile_tmux() if self._reconcile_tmux is not None else None
-        tmux_server_identity = (
-            reconciliation.server_identity
-            if reconciliation is not None
-            and reconciliation.pane_ids is not None
-            and pane in reconciliation.pane_ids
-            else None
-        )
+        tmux_server_identity = reconciliation.identity_for_pane(pane) if reconciliation else None
         try:
             attached = self.registry.attach_pane(
                 participant.id,
@@ -377,12 +382,30 @@ class Spawner:
             )
             return path, branch
 
-    async def kill_pane(self, participant_id: str) -> Participant:
+    async def kill_pane(
+        self,
+        participant_id: str,
+        *,
+        expected_server_identity: str | None,
+    ) -> Participant:
         """Kill the tmux pane and confirm it is gone."""
         p = self.registry.get(participant_id)
         if p.tmux_pane:
+            if (
+                expected_server_identity is None
+                or p.tmux_server_identity != expected_server_identity
+            ):
+                raise BadRequest(
+                    f"cannot kill {participant_id!r}: tmux pane ownership is not verified"
+                )
             with timing.span(KILL_PANE, id=p.id, pane=p.tmux_pane, harness=p.harness) as sp:
-                await tmux.kill_pane(p.tmux_pane)
+                if not await tmux.kill_pane_if_server_identity(
+                    p.tmux_pane,
+                    expected_server_identity,
+                ):
+                    raise TheaterError(
+                        f"cannot kill {participant_id!r}: tmux server changed before pane kill"
+                    )
                 for attempt in range(self.KILL_POLL_ATTEMPTS):
                     sp["attempts"] = attempt + 1
                     info = await tmux.pane_info(p.tmux_pane)

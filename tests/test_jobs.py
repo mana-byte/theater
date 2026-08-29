@@ -126,7 +126,7 @@ async def test_reaper_crashes_running_jobs(client, fake_tmux, daemon, monkeypatc
     monkeypatch.setattr(
         server_mod.tmux,
         "observe_inventory",
-        _fake_inventory("fake-tmux-server", "%other"),
+        _fake_inventory(fake_tmux.tmux_server_identity, "%other"),
     )
     await daemon._reap_once()
 
