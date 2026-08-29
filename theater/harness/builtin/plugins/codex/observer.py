@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from pathlib import Path
 
 from theater.harness.contracts.context import ParticipantObservationContext
@@ -60,6 +61,7 @@ class CodexObserver(
         provenance = normalize_provenance(session_provenance)
         self._session_exact = session_exact or provenance is TranscriptProvenance.EXACT
         self._proved: set[Path] = set()
+        self._rollout_metadata_cache = OrderedDict()
 
     def open_source_context(self, context: ParticipantObservationContext) -> Source:
         return self.open_source_for(

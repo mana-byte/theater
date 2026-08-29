@@ -49,6 +49,10 @@ class BirthtimeOf(Protocol):
     def __call__(self, path: Path, st: os.stat_result) -> float: ...
 
 
+class AutomaticRejectionOf(Protocol):
+    def __call__(self, path: Path) -> str | None: ...
+
+
 def stat_birthtime(path: Path, st: os.stat_result) -> float:
     return getattr(st, "st_birthtime", st.st_ctime)
 
@@ -73,6 +77,7 @@ class GlobDiscovery:
     birthtime_of: Callable[[Path, os.stat_result], float]
     loss_probes: int
     collision_warning: str
+    automatic_rejection_of: AutomaticRejectionOf | None = None
 
     def find_transcript(
         self,
@@ -95,6 +100,8 @@ class GlobDiscovery:
                 born = self.birthtime_of(path, st)
                 if born < after:
                     continue
+            if self._automatically_rejected(path):
+                continue
             candidates.append((st.st_mtime, path))
         matches: list[Path] = []
         for _, path in sorted(candidates, reverse=True):
@@ -146,6 +153,8 @@ class GlobDiscovery:
             if st.st_mtime_ns <= current_mtime_ns:
                 continue
             if after is not None and self.birthtime_of(path, st) < after:
+                continue
+            if self._automatically_rejected(path):
                 continue
             candidates.append((st.st_mtime_ns, path))
         for _mtime, path in sorted(candidates, reverse=True)[: self.loss_probes]:
@@ -212,6 +221,12 @@ class GlobDiscovery:
             size=st.st_size,
             rejection_reason=reason,
             domain=domain,
+        )
+
+    def _automatically_rejected(self, path: Path) -> bool:
+        return (
+            self.automatic_rejection_of is not None
+            and self.automatic_rejection_of(path) is not None
         )
 
 

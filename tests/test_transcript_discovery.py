@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -192,6 +193,34 @@ class TestIdentityLossCandidate:
         result = disc.identity_loss_candidate(cwd=workdir, current=current, current_mtime_ns=0)
         assert result is None
 
+    def test_rejected_candidates_do_not_consume_probe_budget(self, root, workdir):
+        current = _make_jsonl(root / "a" / "current.jsonl", cwd=workdir)
+        wanted = _make_jsonl(root / "b" / "wanted.jsonl", cwd=workdir)
+        os.utime(current, ns=(1, 1))
+        os.utime(wanted, ns=(2, 2))
+        for index in range(4):
+            rejected = _make_jsonl(root / f"r{index}" / f"rejected{index}.jsonl", cwd=workdir)
+            os.utime(rejected, ns=(10 + index, 10 + index))
+        disc = GlobDiscovery(
+            root=root,
+            glob_pattern="*/*.jsonl",
+            session_id_of=lambda p: p.stem,
+            cwd_of=lambda p: str(Path(workdir).resolve()),
+            is_shape=lambda p, *, root: True,
+            birthtime_of=stat_birthtime,
+            loss_probes=1,
+            collision_warning="test: %d %s",
+            automatic_rejection_of=(
+                lambda p: "not autonomous" if p.stem.startswith("rejected") else None
+            ),
+        )
+
+        result = disc.identity_loss_candidate(
+            cwd=workdir, current=current, current_mtime_ns=current.stat().st_mtime_ns
+        )
+
+        assert result == wanted
+
     def test_older_mtime_skipped(self, root, workdir):
         current = _make_jsonl(root / "a" / "current.jsonl", cwd=workdir)
         _make_jsonl(root / "b" / "older.jsonl", cwd=workdir)
@@ -242,6 +271,26 @@ class TestFindTranscript:
         path2 = _make_jsonl(root / "b" / "new.jsonl", cwd=workdir)
         disc = _claude_discovery(root)
         assert disc.find_transcript(cwd=workdir) == path2
+
+    def test_automatic_rejection_is_excluded_before_selection(self, root, workdir):
+        accepted = _make_jsonl(root / "a" / "accepted.jsonl", cwd=workdir)
+        rejected = _make_jsonl(root / "b" / "rejected.jsonl", cwd=workdir)
+        os.utime(accepted, ns=(1, 1))
+        os.utime(rejected, ns=(2, 2))
+        base = _claude_discovery(root)
+        disc = GlobDiscovery(
+            root=base.root,
+            glob_pattern=base.glob_pattern,
+            session_id_of=base.session_id_of,
+            cwd_of=base.cwd_of,
+            is_shape=base.is_shape,
+            birthtime_of=base.birthtime_of,
+            loss_probes=base.loss_probes,
+            collision_warning=base.collision_warning,
+            automatic_rejection_of=lambda p: "not autonomous" if p == rejected else None,
+        )
+
+        assert disc.find_transcript(cwd=workdir) == accepted
 
     def test_after_floor_filters(self, root, workdir):
         _make_jsonl(root / "a" / "old.jsonl", cwd=workdir)

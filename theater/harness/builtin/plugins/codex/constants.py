@@ -16,6 +16,7 @@ APPROVAL_MARKER = "to cancel"
 TRUST_MARKER = "Do you trust the contents"
 _SCREEN_TAIL_LINES = 5
 _CWD_PROBE_BYTES = 256 * 1024
+_ROLLOUT_METADATA_CACHE_SIZE = 512
 _LOSS_CANDIDATE_PROBES = 8
 _STEM = re.compile(r"^rollout-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-(.+)$")
 _PATCH_FILE_RE = re.compile(r"^\*\*\* (?:Update|Add|Delete) File: (.+)$", re.MULTILINE)

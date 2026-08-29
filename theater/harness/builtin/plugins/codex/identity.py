@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import logging
+from collections import OrderedDict
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -17,12 +18,12 @@ from theater.harness.transcript.discovery import GlobDiscovery, stat_birthtime
 from theater.provenance import TranscriptProvenance, normalize_provenance
 
 from .constants import (
-    _CWD_PROBE_BYTES,
     _LOSS_CANDIDATE_PROBES,
+    _ROLLOUT_METADATA_CACHE_SIZE,
     _STEM,
     CODEX_BINARY,
-    CODEX_SESSION_META_RECORD_TYPE,
 )
+from .metadata import RolloutKind, RolloutMetadata, read_rollout_metadata
 from .source import _open_codex_source
 
 logger = logging.getLogger("theater.harness.codex")
@@ -69,6 +70,9 @@ class CodexIdentityMixin:
         root: Path
         pane_pid: int | None
         _proved: set[Path]
+        _rollout_metadata_cache: OrderedDict[
+            Path, tuple[tuple[int, int, int, int], RolloutMetadata]
+        ]
         _session_exact: bool
 
     @property
@@ -85,6 +89,7 @@ class CodexIdentityMixin:
                 "codex find_transcript: %d transcripts match cwd %s; "
                 "returning the newest — the observer will refuse a collision"
             ),
+            automatic_rejection_of=self._automatic_rejection_reason,
         )
 
     def open_source(
@@ -154,6 +159,8 @@ class CodexIdentityMixin:
         if session_id and self._session_exact:
             hit = self._by_session_id(session_id)
             if hit is not None:
+                if self._binding_rejection_reason(hit) is not None:
+                    return None
                 return hit
         held = self.proven_transcript(cwd=cwd)
         if held is not None:
@@ -161,6 +168,8 @@ class CodexIdentityMixin:
         if session_id:
             hit = self._by_session_id(session_id)
             if hit is not None:
+                if self._binding_rejection_reason(hit) is not None:
+                    return None
                 return hit
         return self._discovery.find_transcript(cwd=cwd, after=after)
 
@@ -181,7 +190,13 @@ class CodexIdentityMixin:
         domain: str | None = None,
         after: float | None = None,
     ) -> list[TranscriptCandidate]:
-        return self._discovery.transcript_candidates(cwd=cwd, domain=domain, after=after)
+        rows = self._discovery.transcript_candidates(cwd=cwd, domain=domain, after=after)
+        return [
+            replace(row, rejection_reason=reason)
+            if (reason := self._binding_rejection_reason(Path(row.location))) is not None
+            else row
+            for row in rows
+        ]
 
     def identity_loss_candidate(
         self,
@@ -203,9 +218,13 @@ class CodexIdentityMixin:
         domain: str | None = None,
         after: float | None = None,
     ) -> TranscriptCandidate:
-        return self._discovery.admit_operator_candidate(
+        admitted = self._discovery.admit_operator_candidate(
             cwd=cwd, candidate=candidate, domain=domain, after=after
         )
+        reason = self._binding_rejection_reason(Path(admitted.location))
+        if reason is not None:
+            raise ValueError(reason)
+        return admitted
 
     def _is_rollout_shape(self, path: Path, *, root: Path | None = None) -> bool:
         if path.suffix != ".jsonl" or _STEM.match(path.stem) is None:
@@ -227,7 +246,10 @@ class CodexIdentityMixin:
         for path in proc.open_files(pid):
             if not self._is_rollout(path, root):
                 continue
-            if want is not None and self._transcript_cwd(path) != str(want):
+            metadata = self._rollout_metadata(path)
+            if metadata.kind is RolloutKind.SUBAGENT or metadata.cwd is None:
+                continue
+            if want is not None and metadata.cwd != str(want):
                 continue
             found.add(_resolve(path))
         if not found:
@@ -260,20 +282,31 @@ class CodexIdentityMixin:
         return _resolve(path).is_relative_to(root)
 
     def _transcript_cwd(self, path: Path) -> str | None:
+        return self._rollout_metadata(path).cwd
+
+    def _automatic_rejection_reason(self, path: Path) -> str | None:
+        return self._rollout_metadata(path).automatic_rejection
+
+    def _binding_rejection_reason(self, path: Path) -> str | None:
+        return self._rollout_metadata(path).binding_rejection
+
+    def _rollout_metadata(self, path: Path) -> RolloutMetadata:
+        resolved = _resolve(path)
         try:
-            with path.open(encoding="utf-8", errors="replace") as fh:
-                line = fh.readline(_CWD_PROBE_BYTES)
+            st = resolved.stat()
         except OSError:
-            return None
-        try:
-            record = json.loads(line)
-        except ValueError:
-            return None
-        if not isinstance(record, dict) or record.get("type") != CODEX_SESSION_META_RECORD_TYPE:
-            return None
-        payload = record.get("payload")
-        found = payload.get("cwd") if isinstance(payload, dict) else None
-        return str(Path(found).resolve()) if found else None
+            return read_rollout_metadata(resolved)
+        fingerprint = (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size)
+        cached = self._rollout_metadata_cache.get(resolved)
+        if cached is not None and cached[0] == fingerprint:
+            self._rollout_metadata_cache.move_to_end(resolved)
+            return cached[1]
+        metadata = read_rollout_metadata(resolved)
+        self._rollout_metadata_cache[resolved] = (fingerprint, metadata)
+        self._rollout_metadata_cache.move_to_end(resolved)
+        while len(self._rollout_metadata_cache) > _ROLLOUT_METADATA_CACHE_SIZE:
+            self._rollout_metadata_cache.popitem(last=False)
+        return metadata
 
     def session_id(self, transcript: Path) -> str | None:
         found = _STEM.match(transcript.stem)

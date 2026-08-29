@@ -51,7 +51,15 @@ PID_B = 74675
 PID_SHELL = 74001
 
 
-def _rollout(root: Path, session_id: str, cwd: Path, *, at: str, text: str) -> Path:
+def _rollout(
+    root: Path,
+    session_id: str,
+    cwd: Path,
+    *,
+    at: str,
+    text: str,
+    metadata: dict[str, object] | None = None,
+) -> Path:
     """One codex rollout, filed the way codex files them.
 
     `~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<local ISO>-<session id>.jsonl`,
@@ -67,7 +75,7 @@ def _rollout(root: Path, session_id: str, cwd: Path, *, at: str, text: str) -> P
                     {
                         "timestamp": "2026-08-17T01:19:02.000Z",
                         "type": "session_meta",
-                        "payload": {"id": session_id, "cwd": str(cwd)},
+                        "payload": {"id": session_id, "cwd": str(cwd), **(metadata or {})},
                     }
                 ),
                 json.dumps(
@@ -520,6 +528,39 @@ async def test_newer_codex_guess_is_only_noncommittable_loss_evidence(monkeypatc
     assert source.path == codex_tree["a"]
 
 
+def test_native_subagents_do_not_trigger_or_exhaust_identity_loss_probe(codex_tree):
+    os.utime(codex_tree["a"], ns=(1, 1))
+    os.utime(codex_tree["b"], ns=(0, 0))
+    primary = _rollout(
+        codex_tree["root"],
+        SESSION_C,
+        codex_tree["project"],
+        at="01-20-46",
+        text="independent primary",
+        metadata={"thread_source": "user", "source": "cli"},
+    )
+    os.utime(primary, ns=(2, 2))
+    for index in range(9):
+        child = _rollout(
+            codex_tree["root"],
+            f"01a00cdf-dead-beef-9a9f-{index:012d}",
+            codex_tree["project"],
+            at=f"01-21-{index:02d}",
+            text="native child",
+            metadata={"thread_source": "subagent", "source": {"subagent": {}}},
+        )
+        os.utime(child, ns=(10 + index, 10 + index))
+    reader = CodexObserver(root=codex_tree["root"])
+
+    candidate = reader.identity_loss_candidate(
+        cwd=str(codex_tree["project"]),
+        current=codex_tree["a"],
+        current_mtime_ns=codex_tree["a"].stat().st_mtime_ns,
+    )
+
+    assert candidate == primary
+
+
 async def test_process_proven_codex_rotation_still_attaches(monkeypatch, codex_tree):
     held = {PID_A: [codex_tree["a"]]}
     hold(monkeypatch, held)
@@ -636,6 +677,100 @@ async def test_two_open_rollouts_are_not_evidence(monkeypatch, codex_tree, caplo
 
     assert history.correlation == "heuristic"
     assert "declining to pick one" in caplog.text
+
+
+async def test_native_subagent_rollout_does_not_make_process_proof_ambiguous(
+    monkeypatch, codex_tree
+):
+    child = _rollout(
+        codex_tree["root"],
+        SESSION_C,
+        codex_tree["project"],
+        at="01-20-46",
+        text="native child",
+        metadata={"thread_source": "subagent", "source": {"subagent": {}}},
+    )
+    hold(monkeypatch, {PID_A: [codex_tree["a"], child]})
+    reader = CodexObserver(root=codex_tree["root"], pane_pid=PID_A)
+
+    found = reader.find_transcript(cwd=str(codex_tree["project"]))
+
+    assert found == codex_tree["a"].resolve()
+    assert reader.proved(codex_tree["a"])
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"thread_source": "subagent", "source": "cli"},
+        {"thread_source": "user", "source": {"subagent": {}}},
+    ],
+)
+def test_each_native_subagent_marker_blocks_exact_and_operator_attachment(
+    monkeypatch, tmp_path, metadata
+):
+    root = tmp_path / ".codex" / "sessions"
+    project = tmp_path / "project"
+    project.mkdir()
+    parent = _rollout(
+        root,
+        SESSION_A,
+        project,
+        at="01-19-02",
+        text="parent",
+        metadata={"thread_source": "user", "source": "cli"},
+    )
+    child = _rollout(
+        root,
+        SESSION_C,
+        project,
+        at="01-20-46",
+        text="native child",
+        metadata=metadata,
+    )
+    hold(monkeypatch, {PID_A: [parent]})
+    reader = CodexObserver(root=root, pane_pid=PID_A, session_exact=True)
+
+    assert reader.find_transcript(cwd=str(project), session_id=SESSION_C) is None
+    with pytest.raises(ValueError, match="codex native subagent rollout"):
+        reader.admit_operator_candidate(cwd=str(project), candidate=str(child))
+    listed = next(
+        row for row in reader.transcript_candidates(cwd=str(project)) if row.location == str(child)
+    )
+    assert listed.rejection_reason == "codex native subagent rollout"
+
+
+def test_unknown_metadata_requires_trusted_selection_but_user_fork_remains_eligible(tmp_path):
+    root = tmp_path / ".codex" / "sessions"
+    project = tmp_path / "project"
+    project.mkdir()
+    unknown = _rollout(
+        root,
+        SESSION_A,
+        project,
+        at="01-19-02",
+        text="future primary",
+        metadata={"thread_source": "api", "source": {"future": {}}},
+    )
+    fork = _rollout(
+        root,
+        SESSION_B,
+        project,
+        at="01-19-46",
+        text="user fork",
+        metadata={
+            "thread_source": "user",
+            "source": "cli",
+            "forked_from_id": SESSION_A,
+        },
+    )
+    reader = CodexObserver(root=root)
+
+    assert reader.find_transcript(cwd=str(project)) == fork
+    admitted = reader.admit_operator_candidate(cwd=str(project), candidate=str(unknown))
+    assert admitted.location == str(unknown.resolve())
+    exact = CodexObserver(root=root, session_exact=True)
+    assert exact.find_transcript(cwd=str(project), session_id=SESSION_A) == unknown
 
 
 async def test_a_file_outside_the_transcript_root_is_not_evidence(
