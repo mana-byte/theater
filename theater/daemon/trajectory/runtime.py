@@ -16,6 +16,7 @@ from theater.constants.trajectory import (
     TRAJECTORY_MAX_COVERAGE_GAPS,
     TRAJECTORY_MUTABLE_UPDATE_COALESCE_MS,
     TRAJECTORY_PAGE_RECORD_LIMIT,
+    TRAJECTORY_THEATER_BUS_RECORD_PREFIX,
 )
 from theater.daemon.trajectory.bus_ingest import (
     bus_history,
@@ -350,7 +351,8 @@ class TrajectoryRuntime:
     ) -> bool:
         self.refresh_participant(stream, notify=notify)
         has_transcript = any(
-            not record.record_id.startswith("bus:") for record in stream.ring.records()
+            not record.record_id.startswith(TRAJECTORY_THEATER_BUS_RECORD_PREFIX)
+            for record in stream.ring.records()
         )
         return self._replace_panel(
             stream,

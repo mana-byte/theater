@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from theater.regie.trajectory.enums import DiagnosticView
 from theater.regie.trajectory.render.diagnostics import ordering_for_projection
 from theater.regie.trajectory.render.ordering import TrajectoryOrdering, build_ordering
 from theater.regie.trajectory.render.pagination import LedgerPage, paginate_search_result
@@ -35,7 +36,11 @@ class TrajectoryViewProjection:
         recompute: bool = True,
     ) -> tuple[TrajectoryRecord, ...]:
         if recompute or not self.ordered_records:
-            ordering = build_ordering(tuple(state.display_records), state.groups)
+            records = tuple(state.display_records)
+            if state.diagnostic_view is DiagnosticView.ALL:
+                default_ids = state.diagnostic_index.projection_for(DiagnosticView.ALL).record_ids
+                records = tuple(record for record in records if record.record_id in default_ids)
+            ordering = build_ordering(records, state.groups)
             self._recompute_search(state, ordering.records, ordering)
         self._sync_page(state, page_size)
         return self.ordered_records

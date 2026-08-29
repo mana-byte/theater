@@ -10,6 +10,7 @@ from theater.constants.trajectory import (
     TRAJECTORY_IDENTIFIER_MAX_BYTES,
     TRAJECTORY_MAX_GROUP_CHILDREN,
     TRAJECTORY_MAX_GROUP_RECORD_IDS,
+    TRAJECTORY_THEATER_BUS_RECORD_PREFIX,
 )
 from theater.trajectory.enums import GroupKind, TimingProvenance
 from theater.trajectory.page import TrajectoryGroup
@@ -275,7 +276,9 @@ def _order_between_records(
     records: Iterable[tuple[int, TrajectoryRecord]],
 ) -> list[tuple[int, TrajectoryRecord]]:
     values = list(records)
-    if not values or not any(record.record_id.startswith("bus:") for _, record in values):
+    if not values or not any(
+        record.record_id.startswith(TRAJECTORY_THEATER_BUS_RECORD_PREFIX) for _, record in values
+    ):
         return values
     return sorted(values, key=lambda item: _between_order_key(item[1], item[0]))
 
@@ -294,13 +297,13 @@ def _turn_boundary_token(turn_key: tuple[str, str]) -> str:
 
 
 def _between_order_key(record: TrajectoryRecord, position: int) -> tuple[int, int | str, str, int]:
-    if record.record_id.startswith("bus:"):
+    if record.record_id.startswith(TRAJECTORY_THEATER_BUS_RECORD_PREFIX):
         return _bus_order_key(record, position)
     return (1, "", "", position)
 
 
 def _bus_order_key(record: TrajectoryRecord, position: int) -> tuple[int, int | str, str, int]:
-    value = record.record_id.removeprefix("bus:")
+    value = record.record_id.removeprefix(TRAJECTORY_THEATER_BUS_RECORD_PREFIX)
     try:
         return (0, int(value), value, position)
     except ValueError:

@@ -15,7 +15,11 @@ from theater.constants.daemon import (
     BUS_KIND_PARTICIPANT_KILL_REQUESTED,
     BUS_KIND_PARTICIPANT_SESSION_BOUNDARY,
 )
-from theater.constants.trajectory import TRAJECTORY_IDENTIFIER_MAX_BYTES
+from theater.constants.trajectory import (
+    TRAJECTORY_IDENTIFIER_MAX_BYTES,
+    TRAJECTORY_THEATER_BUS_RECORD_PREFIX,
+    TRAJECTORY_THEATER_BUS_SOURCE_EPOCH,
+)
 from theater.trajectory import (
     ContentFormat,
     DetailField,
@@ -74,6 +78,8 @@ def project_bus_row(row: Mapping[str, object], participant_id: str) -> Trajector
     to_id = _string_or_none(row.get("to_id"))
     if participant_id not in {from_id, to_id}:
         return None
+    if kind in {BUS_KIND_JOB_AWAIT_START, BUS_KIND_JOB_AWAIT_END} and participant_id != from_id:
+        return None
     payload = row.get("payload")
     payload_map = payload if isinstance(payload, Mapping) else {}
     if kind == BUS_KIND_JOB_FINISHED and str(payload_map.get("state", "")) not in {
@@ -98,10 +104,10 @@ def project_bus_row(row: Mapping[str, object], participant_id: str) -> Trajector
     )
     timing = _timing(row.get("ts"), payload_map)
     return TrajectoryRecord(
-        record_id=f"bus:{row_id}",
+        record_id=f"{TRAJECTORY_THEATER_BUS_RECORD_PREFIX}{row_id}",
         revision=0,
         participant_id=participant_id,
-        source_epoch="theater-bus",
+        source_epoch=TRAJECTORY_THEATER_BUS_SOURCE_EPOCH,
         lane=TrajectoryLane.THEATER,
         kind=record_kind,
         source="theater",

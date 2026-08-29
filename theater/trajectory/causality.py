@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 
+from theater.constants.trajectory import TRAJECTORY_THEATER_BUS_RECORD_PREFIX
 from theater.trajectory.grouping import newer_record
 from theater.trajectory.records import ParticipantLink, TrajectoryRecord
 
@@ -89,8 +90,8 @@ def _select_records(
 
 
 def _record_key(record: TrajectoryRecord) -> tuple[object, ...]:
-    if record.record_id.startswith("bus:"):
-        row_id = record.record_id.removeprefix("bus:")
+    if record.record_id.startswith(TRAJECTORY_THEATER_BUS_RECORD_PREFIX):
+        row_id = record.record_id.removeprefix(TRAJECTORY_THEATER_BUS_RECORD_PREFIX)
         if row_id.isdecimal():
             return 0, 0, int(row_id), record.participant_id, record.record_id
         return 0, 1, row_id, record.participant_id, record.record_id

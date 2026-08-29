@@ -30,12 +30,13 @@ def _record(
     call_id: str | None = None,
     request_id: str | None = None,
     timing: Timing | None = None,
+    source_epoch: str = "epoch",
 ) -> TrajectoryRecord:
     return TrajectoryRecord(
         record_id=record_id,
         revision=1,
         participant_id="p1",
-        source_epoch="epoch",
+        source_epoch=source_epoch,
         lane=lane,
         kind=kind,
         source="codex",
@@ -87,11 +88,24 @@ def test_all_running_errors_tools_and_coordination_are_exact_cached_projections(
             lane=TrajectoryLane.THEATER,
             kind=TrajectoryKind.SEND,
         ),
+        _record(
+            "bus:7",
+            7,
+            lane=TrajectoryLane.THEATER,
+            kind=TrajectoryKind.AWAIT_START,
+            source_epoch="theater-bus",
+        ),
+        _record(
+            "bus:native",
+            8,
+            lane=TrajectoryLane.THEATER,
+            kind=TrajectoryKind.THEATER_CALL,
+        ),
     )
     index, _requests, tools = _index(records)
 
     assert index.projection_for(DiagnosticView.ALL).record_ids == {
-        record.record_id for record in records
+        record.record_id for record in records if record.record_id != "bus:7"
     }
     assert index.projection_for(DiagnosticView.RUNNING).record_ids == {
         "running",
@@ -106,7 +120,11 @@ def test_all_running_errors_tools_and_coordination_are_exact_cached_projections(
         "error-call",
         "error-result",
     }
-    assert index.projection_for(DiagnosticView.COORDINATION).record_ids == {"theater-send"}
+    assert index.projection_for(DiagnosticView.COORDINATION).record_ids == {
+        "theater-send",
+        "bus:7",
+        "bus:native",
+    }
 
     tools_result = search_records(
         records,

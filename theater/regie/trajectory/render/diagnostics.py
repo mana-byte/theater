@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from itertools import batched
 from types import MappingProxyType
 
-from theater.constants.trajectory import TRAJECTORY_MAX_GROUP_RECORD_IDS
+from theater.constants.trajectory import (
+    TRAJECTORY_MAX_GROUP_RECORD_IDS,
+    TRAJECTORY_THEATER_BUS_RECORD_PREFIX,
+    TRAJECTORY_THEATER_BUS_SOURCE_EPOCH,
+)
 from theater.regie.trajectory.analysis import TrajectoryAnalysisIndex, empty_analysis_index
 from theater.regie.trajectory.enums import DiagnosticView
 from theater.regie.trajectory.render.ordering import TrajectoryOrdering
@@ -59,6 +63,13 @@ def _members(index: ToolIndex, operation: TrajectoryToolOperation) -> tuple[str,
 
 def _record_duration(record: TrajectoryRecord) -> float | None:
     return record.timing.duration_ms if record.timing is not None else None
+
+
+def is_raw_theater_bus_record(record: TrajectoryRecord) -> bool:
+    return (
+        record.source_epoch == TRAJECTORY_THEATER_BUS_SOURCE_EPOCH
+        and record.record_id.startswith(TRAJECTORY_THEATER_BUS_RECORD_PREFIX)
+    )
 
 
 def _slow_projection(
@@ -130,7 +141,9 @@ def build_diagnostic_index(
 ) -> DiagnosticIndex:
     ordered = tuple(records)
     analysis = analysis_index or empty_analysis_index()
-    all_ids = frozenset(record.record_id for record in ordered)
+    all_ids = frozenset(
+        record.record_id for record in ordered if not is_raw_theater_bus_record(record)
+    )
     running = {record.record_id for record in ordered if record.status in _ACTIVE}
     errors = {record.record_id for record in ordered if record.status in _ERRORS}
     tools = set(tool_index.by_record_id)
@@ -210,5 +223,6 @@ __all__ = [
     "DiagnosticProjection",
     "build_diagnostic_index",
     "empty_diagnostic_index",
+    "is_raw_theater_bus_record",
     "ordering_for_projection",
 ]

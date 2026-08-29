@@ -13,6 +13,7 @@ from theater.constants.trajectory import (
     TRAJECTORY_IDENTIFIER_MAX_BYTES,
     TRAJECTORY_OLDER_CURSOR_LIMIT,
     TRAJECTORY_PAGE_RECORD_LIMIT,
+    TRAJECTORY_THEATER_BUS_RECORD_PREFIX,
 )
 from theater.daemon.trajectory.cache import CacheStream, RecordChange, TrajectoryCache
 from theater.daemon.trajectory.merge import order_records
@@ -454,7 +455,7 @@ class TrajectoryService:
 
 
 def _bus_record_id(record_id: str) -> int | None:
-    prefix = "bus:"
+    prefix = TRAJECTORY_THEATER_BUS_RECORD_PREFIX
     if not record_id.startswith(prefix):
         return None
     value = record_id.removeprefix(prefix)

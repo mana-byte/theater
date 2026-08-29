@@ -749,7 +749,7 @@ def test_bus_projection_links_counterparts_and_handle_chain_without_guessing() -
     parent_records = tuple(project_bus_row(row, "parent") for row in rows)
     child_records = tuple(project_bus_row(row, "child") for row in rows)
 
-    assert all(record is not None for record in (*parent_records, *child_records))
+    assert all(record is not None for record in parent_records)
     records = tuple(record for record in (*parent_records, *child_records) if record is not None)
     assert [record.kind for record in parent_records if record is not None] == [
         TrajectoryKind.SEND,
@@ -758,9 +758,9 @@ def test_bus_projection_links_counterparts_and_handle_chain_without_guessing() -
     ]
     assert [record.kind for record in child_records if record is not None] == [
         TrajectoryKind.RECEIVE,
-        TrajectoryKind.AWAIT_START,
         TrajectoryKind.SEND,
     ]
+    assert child_records[1] is None
     assert all(
         link.target_record_id == record.record_id for record in records for link in record.links
     )

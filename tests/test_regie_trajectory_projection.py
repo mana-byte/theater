@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from theater.regie.trajectory.enums import DiagnosticView
 from theater.regie.trajectory.projection import TrajectoryViewProjection
 from theater.regie.trajectory.state import ParticipantTrajectoryState
 from theater.trajectory import (
@@ -19,12 +20,13 @@ def record(
     lane: TrajectoryLane = TrajectoryLane.MODEL,
     kind: TrajectoryKind = TrajectoryKind.ASSISTANT,
     call_id: str | None = None,
+    source_epoch: str = "epoch",
 ) -> TrajectoryRecord:
     return TrajectoryRecord(
         record_id=record_id,
         revision=1,
         participant_id="p1",
-        source_epoch="epoch",
+        source_epoch=source_epoch,
         lane=lane,
         kind=kind,
         source="codex",
@@ -119,3 +121,29 @@ def test_projection_maps_tool_members_to_their_logical_row() -> None:
 
     assert projection.search_result.row_ids == ("call",)
     assert projection.logical_row_id("result") == "call"
+
+
+def test_default_projection_hides_raw_bus_records_from_ledger_and_timeline() -> None:
+    state = state_with(
+        record("model", 1),
+        record(
+            "bus:2",
+            2,
+            lane=TrajectoryLane.THEATER,
+            kind=TrajectoryKind.AWAIT_START,
+            source_epoch="theater-bus",
+        ),
+        record("native-theater", 3, lane=TrajectoryLane.THEATER, kind=TrajectoryKind.THEATER_CALL),
+    )
+    projection = TrajectoryViewProjection(state, page_size=10)
+
+    records = projection.refresh(state, page_size=10)
+
+    assert [item.record_id for item in records] == ["model", "native-theater"]
+    assert projection.search_result.record_ids == ("model", "native-theater")
+
+    state.diagnostic_view = DiagnosticView.COORDINATION
+    records = projection.refresh(state, page_size=10)
+
+    assert "bus:2" in {item.record_id for item in records}
+    assert set(projection.search_result.record_ids) == {"bus:2", "native-theater"}

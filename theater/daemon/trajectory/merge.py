@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from theater.constants.trajectory import TRAJECTORY_THEATER_BUS_RECORD_PREFIX
 from theater.trajectory import (
     TrajectoryGroup,
     TrajectoryKind,
@@ -52,7 +53,10 @@ def groups_for_records(records: Iterable[TrajectoryRecord]) -> tuple[TrajectoryG
 
 def is_interaction(record: TrajectoryRecord) -> bool:
     """Whether an update must wake followers without the coalescing delay."""
-    return record.record_id.startswith("bus:") or record.kind in _INTERACTION_KINDS
+    return (
+        record.record_id.startswith(TRAJECTORY_THEATER_BUS_RECORD_PREFIX)
+        or record.kind in _INTERACTION_KINDS
+    )
 
 
 def is_mutable(record: TrajectoryRecord, previous: TrajectoryRecord | None) -> bool:

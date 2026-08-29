@@ -37,6 +37,7 @@ from theater.protocol import RemoteError
 from theater.regie import app as app_mod
 from theater.regie.app import RegieApp
 from theater.regie.dashboard.widgets import AnimatedDashboardText, WelcomeDashboard
+from theater.regie.trajectory.enums import DiagnosticView
 from theater.regie.tree import SEND_STYLE, send_path
 from theater.trajectory import (
     ParticipantLink,
@@ -1811,8 +1812,8 @@ async def test_reentering_trajectory_resumes_at_latest_span(daemon, tmux):
         await app._show_trajectory(PARENT["id"], managed=True)
         view = app.query_one("#trajectory-view", app_mod.TrajectoryView)
         await view.wait_until_loaded()
-        first = trajectory_record(PARENT["id"], "bus:1")
-        latest = trajectory_record(PARENT["id"], "bus:2")
+        first = trajectory_record(PARENT["id"], "native:1")
+        latest = trajectory_record(PARENT["id"], "native:2")
         view.state.upsert((first, latest))
         view.state.select(first.record_id)
         view.state.pause_follow()
@@ -2032,7 +2033,7 @@ async def test_trajectory_participant_link_selects_and_stages_target(daemon, tmu
 async def test_exact_trajectory_link_locates_record_and_back_restores_origin(daemon, tmux):
     target_id = "bus:2"
     link = ParticipantLink(CHILD["id"], "recipient", target_record_id=target_id)
-    source = trajectory_record(PARENT["id"], "bus:1", links=(link,))
+    source = trajectory_record(PARENT["id"], "native:1", links=(link,))
     target = trajectory_record(CHILD["id"], target_id)
 
     def snapshot(params):
@@ -2072,6 +2073,7 @@ async def test_exact_trajectory_link_locates_record_and_back_restores_origin(dae
 
         target_view = app.query_one("#trajectory-view", app_mod.TrajectoryView)
         assert target_view.participant_id == CHILD["id"]
+        assert target_view.state.diagnostic_view is DiagnosticView.COORDINATION
         assert target_view.state.selected_id == target_id
         assert target_view.state.detail_id == target_id
         assert any(

@@ -39,6 +39,7 @@ from theater.regie.trajectory.messages import (
     TrajectoryRetryRequested,
 )
 from theater.regie.trajectory.projection import TrajectoryViewProjection
+from theater.regie.trajectory.render.diagnostics import is_raw_theater_bus_record
 from theater.regie.trajectory.render.records import sanitize_text
 from theater.regie.trajectory.search import SearchResult
 from theater.regie.trajectory.state import ParticipantTrajectoryState, TrajectoryStateStore
@@ -546,7 +547,12 @@ class TrajectoryView(Vertical):
         if anchor is None:
             return False
         if self.projection.logical_row_id(record_id) not in self.projection.all_visible_indices:
-            self.state.diagnostic_view = DiagnosticView.ALL
+            record = self.state.records[record_id]
+            self.state.diagnostic_view = (
+                DiagnosticView.COORDINATION
+                if is_raw_theater_bus_record(record)
+                else DiagnosticView.ALL
+            )
             self.state.query = ""
             if self.is_mounted:
                 self.query_one("#trajectory-search", Input).value = ""

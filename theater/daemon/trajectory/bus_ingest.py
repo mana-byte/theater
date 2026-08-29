@@ -7,6 +7,7 @@ import logging
 from collections.abc import Iterable
 
 from theater.constants.daemon import BUS_PARTICIPANT_PAGE_MAX_LIMIT
+from theater.constants.trajectory import TRAJECTORY_THEATER_BUS_RECORD_PREFIX
 from theater.daemon.trajectory.mutations import AddGap, MergeRecords
 from theater.daemon.trajectory.stream import TrajectoryStream
 from theater.daemon.trajectory.theater_events import ALLOWLISTED_BUS_KINDS, project_bus_row
@@ -62,10 +63,15 @@ def update_theater_floor(stream: TrajectoryStream, records: Iterable[TrajectoryR
     if not values:
         return
     floor = min(record.raw_index for record in values)
-    if stream.theater_floor is not None and stream.theater_floor.startswith("bus:"):
+    if stream.theater_floor is not None and stream.theater_floor.startswith(
+        TRAJECTORY_THEATER_BUS_RECORD_PREFIX
+    ):
         with contextlib.suppress(ValueError):
-            floor = min(floor, int(stream.theater_floor.removeprefix("bus:")))
-    stream.theater_floor = f"bus:{floor}"
+            floor = min(
+                floor,
+                int(stream.theater_floor.removeprefix(TRAJECTORY_THEATER_BUS_RECORD_PREFIX)),
+            )
+    stream.theater_floor = f"{TRAJECTORY_THEATER_BUS_RECORD_PREFIX}{floor}"
 
 
 __all__ = ["bus_history", "merge_bus_rows", "project_bus_rows", "update_theater_floor"]

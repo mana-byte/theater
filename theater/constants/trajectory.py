@@ -56,6 +56,9 @@ TRAJECTORY_IDLE_TTL_SECONDS = 5 * 60.0
 TRAJECTORY_CACHE_SWEEP_SECONDS = 30.0
 # Maximum bus rows projected before yielding back to the event loop.
 TRAJECTORY_BUS_DRAIN_BATCH = 256
+# Stable identity of records projected from the daemon coordination bus.
+TRAJECTORY_THEATER_BUS_RECORD_PREFIX = "bus:"
+TRAJECTORY_THEATER_BUS_SOURCE_EPOCH = "theater-bus"
 # Maximum persisted observation rows used to estimate transcript timing.
 TRAJECTORY_OBSERVATION_TIMING_ROW_LIMIT = 800
 # Maximum remembered MCP call identities used to classify result-only records.
@@ -119,6 +122,8 @@ __all__ = [
     "TRAJECTORY_RESPONSE_MAX_BYTES",
     "TRAJECTORY_RESPONSE_SIZING_REQUEST_ID",
     "TRAJECTORY_SOURCE_MAX_BYTES",
+    "TRAJECTORY_THEATER_BUS_RECORD_PREFIX",
+    "TRAJECTORY_THEATER_BUS_SOURCE_EPOCH",
     "TRAJECTORY_TOOLTIP_DELAY_MS",
     "TRAJECTORY_TOOLTIP_SUMMARY_MAX_CELLS",
     "TRAJECTORY_TOOL_RECORD_LIMIT",
