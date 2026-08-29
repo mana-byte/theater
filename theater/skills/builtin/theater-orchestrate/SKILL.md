@@ -86,6 +86,11 @@ Every worker must:
 - never create a report unless the user's requested artifact is itself a report;
 - return only the commit, changed paths, focused checks run, and blockers.
 
+Prefer `response_format` for bounded results the orchestrator will consume mechanically, such as an
+implementation handoff containing the commit, changed paths, focused checks, and blockers. Keep it
+optional for investigations, audits, reviews, debates, and resume paths that cannot carry it. It is
+only a prompt hint plus JSON parsing, not schema validation or evidence that the work is correct.
+
 Yolo approval does not broaden the user's requested scope or authorize destructive or external
 actions unrelated to the task.
 
