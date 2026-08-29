@@ -14,6 +14,10 @@ import inspect
 import logging
 
 from theater import paths, protocol, timing
+from theater.constants.daemon import (
+    TMUX_RESTART_JOB_ERROR_CODE,
+    TMUX_RESTART_TERMINATION_REASON,
+)
 from theater.constants.observability import (
     JOBS_ACTIVE_GAUGE,
     PARTICIPANTS_ADDRESSABLE_GAUGE,
@@ -100,9 +104,14 @@ async def reconcile(daemon) -> None:
 
     for p in daemon.registry.list(include_dead=True):
         if p.status is Status.DEAD:
+            error_code = (
+                TMUX_RESTART_JOB_ERROR_CODE
+                if p.termination_reason == TMUX_RESTART_TERMINATION_REASON
+                else "crashed"
+            )
             running = daemon.store.running_jobs_for_target(p.id)
             for job in running:
-                daemon.jobs.finish(job.handle, state=JobState.CRASHED, error_code="crashed")
+                daemon.jobs.finish(job.handle, state=JobState.CRASHED, error_code=error_code)
 
     for p in daemon.registry.list():
         if p.status is not Status.DEAD:

@@ -267,6 +267,7 @@ async def test_skill_tools_round_trip_through_the_daemon(daemon):
     assert [skill["name"] for skill in listed["skills"]] == [
         "theater-debate",
         "theater-orchestrate",
+        "theater-recover-tmux",
     ]
     assert all("content" not in skill for skill in listed["skills"])
 

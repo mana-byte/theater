@@ -24,11 +24,6 @@ class TmuxReconciliation:
 
     pane_ids: frozenset[str] | None
     server_identity: str | None = None
-    reset_incident: str | None = None
-
-    @property
-    def conclusive(self) -> bool:
-        return self.pane_ids is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,7 +93,6 @@ async def reconcile_tmux_inventory(daemon, *, context: str) -> TmuxReconciliatio
         return TmuxReconciliation(
             pane_ids=inventory.pane_ids,
             server_identity=inventory.server_identity,
-            reset_incident=restart.incident,
         )
 
     daemon.store.stamp_live_tmux_server_identity(inventory.server_identity)

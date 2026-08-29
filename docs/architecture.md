@@ -162,6 +162,14 @@ that id is dead. A live participant's session id is refused even when exact:
 live work goes through `send`, while resume continues dead sessions without two
 processes appending to the same harness session.
 
+Pane identity is scoped to a tmux server epoch. The daemon persists tmux's
+server identity beside each pane-backed participant and reconciles it together
+with a non-empty pane inventory. A changed identity ends participants from the
+previous epoch as `tmux_restart` without retiring their worktrees, crashes their
+active jobs as `tmux_restarted`, and records one shared incident. Empty or failed
+inventories remain inconclusive. The retained incident metadata lets the
+`theater-recover-tmux` skill plan explicit, conservative resume attempts.
+
 ---
 
 ## 4. Transport

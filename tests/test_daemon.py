@@ -854,6 +854,33 @@ async def test_startup_reconciliation_detects_a_tmux_server_restart(daemon, clie
     assert job["error_code"] == TMUX_RESTART_JOB_ERROR_CODE
 
 
+async def test_startup_finishes_jobs_for_an_already_recorded_tmux_restart(
+    daemon, client, monkeypatch
+):
+    from theater.constants.daemon import TMUX_RESTART_JOB_ERROR_CODE
+    from theater.tmux import client as tmux_client
+
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+    daemon.store.record_tmux_server_restart(
+        server_identity="new-server",
+        affected_ids=[record["id"]],
+        newly_owned_ids=[],
+        incident="interrupted-restart",
+        terminated_at=123.0,
+    )
+    monkeypatch.setattr(
+        tmux_client,
+        "observe_inventory",
+        _fake_inventory("new-server", "%new-server"),
+    )
+
+    await daemon._reconcile()
+
+    job = await client.call("jobs.status", handle=record["handle"])
+    assert job["state"] == "crashed"
+    assert job["error_code"] == TMUX_RESTART_JOB_ERROR_CODE
+
+
 async def test_first_tmux_inventory_establishes_baseline_without_terminating(
     daemon, client, monkeypatch
 ):
