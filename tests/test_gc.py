@@ -17,6 +17,7 @@ import json
 import pytest
 
 from theater.config import RetentionSection
+from theater.constants.daemon import TMUX_RESTART_TERMINATION_REASON
 from theater.daemon.gc import SweepResult, sweep
 from theater.daemon.jobs import JobManager, JobState
 from theater.daemon.schema import bus, jobs, participants, touch, tree_kv
@@ -362,6 +363,24 @@ async def test_dead_participant_referenced_as_caller_id_is_kept(store):
     assert store.get_participant("caller") is not None
 
 
+async def test_tmux_restart_participant_waits_for_jobs_retention_after_termination(store):
+    participant = _participant(store, pid="restart")
+    participant.termination_reason = TMUX_RESTART_TERMINATION_REASON
+    participant.termination_incident = "incident-123"
+    participant.terminated_at = now()
+    store.upsert_participant(participant)
+
+    result = await sweep(store, _retention(jobs_days=2))
+    assert result.participants == 0
+    assert store.get_participant(participant.id) is not None
+
+    participant.terminated_at = now() - 3 * _DAY
+    store.upsert_participant(participant)
+    result = await sweep(store, _retention(jobs_days=2))
+    assert result.participants == 1
+    assert store.get_participant(participant.id) is None
+
+
 # ---- Jobs and touch go together -------------------------------------------
 
 
@@ -543,6 +562,15 @@ async def test_batching_loops_until_all_deleted(store):
     assert result.touch == 10
     assert _count(store, jobs) == 0
     assert _count(store, touch) == 0
+
+
+async def test_participant_sweep_honours_small_batches(store):
+    for index in range(5):
+        _participant(store, pid=f"dead-{index}")
+
+    result = await sweep(store, _retention(batch=2))
+    assert result.participants == 5
+    assert _count(store, participants) == 0
 
 
 # ---- Counts ----------------------------------------------------------------

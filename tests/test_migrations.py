@@ -74,6 +74,10 @@ def test_migrations_created_the_alembic_version_table(store):
     col_info = store.conn.exec_driver_sql("PRAGMA table_info(participants)").fetchall()
     col_names = {row[1] for row in col_info}
     assert "resume_floor" in col_names
+    assert "tmux_server_identity" in col_names
+    assert "termination_reason" in col_names
+    assert "termination_incident" in col_names
+    assert "terminated_at" in col_names
 
     usage_cols = store.conn.exec_driver_sql("PRAGMA table_info(usage)").fetchall()
     assert "harness" in {row[1] for row in usage_cols}
@@ -122,6 +126,34 @@ def test_usage_harness_migration_backfills_survivors_and_marks_orphans(theater_h
         engine.dispose()
 
     assert rows == [("gone", "unknown"), ("known", "codex")]
+
+
+def test_tmux_restart_migration_upgrades_from_0018(theater_home):
+    path = paths.db_path()
+    store = Store(path)
+    store.close()
+
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        with engine.connect() as conn:
+            cfg = Config()
+            cfg.set_main_option("script_location", str(MIGRATIONS))
+            cfg.attributes["connection"] = conn
+            command.downgrade(cfg, "0018")
+            before = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(participants)")}
+            assert "tmux_server_identity" not in before
+            command.upgrade(cfg, "head")
+            conn.commit()
+            after = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(participants)")}
+    finally:
+        engine.dispose()
+
+    assert {
+        "tmux_server_identity",
+        "termination_reason",
+        "termination_incident",
+        "terminated_at",
+    } <= after
 
 
 def test_bus_ids_are_never_reused(store):

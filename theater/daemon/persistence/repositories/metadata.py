@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import Connection, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from theater.constants.daemon import SEND_SEQ_META_KEY
@@ -20,9 +20,10 @@ class MetadataRepository:
         row = self._db.conn.execute(select(meta.c.value).where(meta.c.key == key)).first()
         return row[0] if row else None
 
-    def set(self, key: str, value: str) -> None:
+    def set(self, key: str, value: str, *, connection: Connection | None = None) -> None:
         stmt = sqlite_insert(meta).values(key=key, value=value)
-        self._db.conn.execute(
+        conn = self._db.conn if connection is None else connection
+        conn.execute(
             stmt.on_conflict_do_update(
                 index_elements=[meta.c.key],
                 set_={"value": value},

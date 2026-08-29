@@ -2,6 +2,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+import pytest
+
+from theater.constants.daemon import (
+    TMUX_RESTART_TERMINATION_REASON,
+    TMUX_SERVER_IDENTITY_META_KEY,
+)
 from theater.models import Job, JobState, Participant, Status, Tier, now
 
 
@@ -14,6 +20,87 @@ def test_roundtrip(store):
     assert got.harness == "vibe"
     assert got.tier is Tier.SPAWNED
     assert got.tmux_pane == "%1"
+
+
+def test_tmux_restart_diagnosis_roundtrips(store):
+    participant = Participant(
+        harness="vibe",
+        tier=Tier.SPAWNED,
+        tmux_pane="%1",
+        tmux_server_identity="server-before",
+        termination_reason=TMUX_RESTART_TERMINATION_REASON,
+        termination_incident="incident-123",
+        terminated_at=123.0,
+        status=Status.DEAD,
+    )
+    store.upsert_participant(participant)
+
+    got = store.get_participant(participant.id)
+    assert got is not None
+    assert got.tmux_server_identity == "server-before"
+    assert got.termination_reason == TMUX_RESTART_TERMINATION_REASON
+    assert got.termination_incident == "incident-123"
+    assert got.terminated_at == 123.0
+
+
+def test_record_tmux_server_restart_records_diagnosis_before_advancing_identity(store):
+    live = Participant(id="live", harness="vibe", tmux_pane="%1")
+    dead = Participant(id="dead", harness="vibe", tmux_pane="%2", status=Status.DEAD)
+    newly_owned = Participant(id="newly-owned", harness="vibe", tmux_pane="%3")
+    store.upsert_participant(live)
+    store.upsert_participant(dead)
+    store.upsert_participant(newly_owned)
+    store.set_meta(TMUX_SERVER_IDENTITY_META_KEY, "server-before")
+
+    store.record_tmux_server_restart(
+        server_identity="server-after",
+        affected_ids=[live.id, dead.id],
+        newly_owned_ids=[newly_owned.id],
+        incident="incident-123",
+        terminated_at=123.0,
+    )
+
+    live_after = store.get_participant(live.id)
+    dead_after = store.get_participant(dead.id)
+    newly_owned_after = store.get_participant(newly_owned.id)
+    assert live_after is not None
+    assert dead_after is not None
+    assert newly_owned_after is not None
+    assert live_after.status is Status.DEAD
+    assert live_after.termination_reason == TMUX_RESTART_TERMINATION_REASON
+    assert live_after.termination_incident == "incident-123"
+    assert live_after.terminated_at == 123.0
+    assert dead_after.termination_reason is None
+    assert newly_owned_after.status is not Status.DEAD
+    assert newly_owned_after.tmux_server_identity == "server-after"
+    assert store.get_meta(TMUX_SERVER_IDENTITY_META_KEY) == "server-after"
+
+
+def test_record_tmux_server_restart_rolls_back_diagnosis_when_identity_write_fails(
+    store, monkeypatch
+):
+    participant = Participant(id="live", harness="vibe", tmux_pane="%1")
+    store.upsert_participant(participant)
+    store.set_meta(TMUX_SERVER_IDENTITY_META_KEY, "server-before")
+
+    def fail_identity_write(*args, **kwargs):
+        raise RuntimeError("meta write failed")
+
+    monkeypatch.setattr(store._meta, "set", fail_identity_write)
+    with pytest.raises(RuntimeError, match="meta write failed"):
+        store.record_tmux_server_restart(
+            server_identity="server-after",
+            affected_ids=[participant.id],
+            newly_owned_ids=[],
+            incident="incident-123",
+            terminated_at=123.0,
+        )
+
+    restored = store.get_participant(participant.id)
+    assert restored is not None
+    assert restored.status is not Status.DEAD
+    assert restored.termination_reason is None
+    assert store.get_meta(TMUX_SERVER_IDENTITY_META_KEY) == "server-before"
 
 
 def test_upsert_is_idempotent(store):

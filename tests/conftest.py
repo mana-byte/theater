@@ -195,6 +195,7 @@ class FakeTmux:
     def __init__(self) -> None:
         self.windows: list[dict] = []
         self.panes: list[str] = []
+        self.tmux_server_identity = "fake-tmux-server"
         self._next = 0
         #: Panes visible to list_panes. A window created here appears in it,
         #: because a pane that was just made does exist — the delivery gate
@@ -268,6 +269,14 @@ class FakeTmux:
     async def list_panes(self, session=None):
         return list(self.visible_panes)
 
+    async def observe_inventory(self):
+        from theater.tmux.client import TmuxInventory
+
+        return TmuxInventory(
+            server_identity=self.tmux_server_identity,
+            pane_ids=frozenset(p.pane_id for p in self.visible_panes),
+        )
+
     async def run(self, *args, check=True):
         """Answer `list-panes -a -F #{pane_id}`, the only raw call the daemon makes."""
         return "\n".join(p.pane_id for p in self.visible_panes)
@@ -324,6 +333,7 @@ def fake_tmux(request, monkeypatch):
         "sessions",
         "kill_pane",
         "list_panes",
+        "observe_inventory",
         "available",
         "run",
         "deliver_text",

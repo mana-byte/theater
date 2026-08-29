@@ -123,7 +123,11 @@ async def test_reaper_crashes_running_jobs(client, fake_tmux, daemon, monkeypatc
 
     # Simulate the pane vanishing
     monkeypatch.setattr(server_mod.tmux, "available", lambda: True)
-    monkeypatch.setattr(server_mod.tmux, "run", _fake_list_panes("%other"))
+    monkeypatch.setattr(
+        server_mod.tmux,
+        "observe_inventory",
+        _fake_inventory("fake-tmux-server", "%other"),
+    )
     await daemon._reap_once()
 
     job = await client.call("jobs.status", handle=handle)
@@ -255,11 +259,13 @@ async def test_job_created_and_finished_on_bus(client, fake_tmux, daemon):
     assert "job.finished" in kinds
 
 
-def _fake_list_panes(output: str):
-    async def run(*args, **kwargs):
-        return output
+def _fake_inventory(identity: str, *pane_ids: str):
+    from theater.tmux.client import TmuxInventory
 
-    return run
+    async def observe_inventory():
+        return TmuxInventory(server_identity=identity, pane_ids=frozenset(pane_ids))
+
+    return observe_inventory
 
 
 # ---- await returns when ANY job finishes (first-completed semantic) -------

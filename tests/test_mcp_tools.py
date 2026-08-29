@@ -98,6 +98,10 @@ async def test_whoami_answers_who_where_and_reachable():
         "session_id": "ses-me",
         "parent_id": None,
         "addressable": True,
+        "tmux_server_identity": None,
+        "termination_reason": None,
+        "termination_incident": None,
+        "terminated_at": None,
     }
     assert "pid" not in got, "process detail is noise to another agent"
     assert got["name"] == "Arlequin"
@@ -471,6 +475,21 @@ async def test_list_participants_resume_state_in_projection():
     got = await tools.list_participants(s)
     assert got[0]["resume_state"] == "live"
     assert got[1]["resume_state"] == "resumable"
+
+
+async def test_list_participants_projects_tmux_restart_diagnosis():
+    row = {
+        **_RECORD_WITH_RESUME,
+        "tmux_server_identity": "server-before",
+        "termination_reason": "tmux_restart",
+        "termination_incident": "incident-123",
+        "terminated_at": 123.0,
+    }
+    got = await tools.list_participants(resolved(**{"participants.list": [row]}), include_dead=True)
+    assert got[0]["tmux_server_identity"] == "server-before"
+    assert got[0]["termination_reason"] == "tmux_restart"
+    assert got[0]["termination_incident"] == "incident-123"
+    assert got[0]["terminated_at"] == 123.0
 
 
 async def test_list_participants_no_internal_fields_in_projection():

@@ -44,6 +44,26 @@ def test_reconnecting_on_the_same_pane_reuses_the_record(registry):
     assert len(registry.list()) == 1
 
 
+def test_reused_pane_from_another_tmux_server_does_not_reuse_the_record(registry):
+    old = registry.register(
+        harness="vibe",
+        pane="%5",
+        cwd="/tmp",
+        tmux_server_identity="server-before",
+    )
+    successor = registry.register(
+        harness="vibe",
+        pane="%5",
+        cwd="/tmp",
+        tmux_server_identity="server-after",
+    )
+
+    assert successor.id != old.id
+    assert successor.tmux_server_identity == "server-after"
+    assert registry.store.find_by_pane("%5").id == successor.id
+    assert registry.get(old.id).status is Status.DEAD
+
+
 def test_a_dead_pane_does_not_capture_its_successor(registry):
     first = registry.register(harness="vibe", pane="%6", cwd="/tmp")
     registry.mark_dead(first.id)

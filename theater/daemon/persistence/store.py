@@ -26,6 +26,7 @@ from theater.constants.daemon import (
     BUS_KIND_OPERATOR_TRANSCRIPT_BIND,
     BUS_KIND_OPERATOR_TRANSCRIPT_UNBIND,
     BUS_PARTICIPANT_PAGE_MAX_LIMIT,
+    TMUX_SERVER_IDENTITY_META_KEY,
 )
 from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories.bus import BusRepository
@@ -116,6 +117,44 @@ class Store:
 
     def set_status(self, pid: str, status: Status) -> None:
         self._participants.set_status(pid, status)
+
+    def stamp_live_tmux_server_identity(
+        self,
+        identity: str,
+        *,
+        participant_ids: Sequence[str] | None = None,
+    ) -> int:
+        return self._participants.stamp_live_tmux_server_identity(
+            identity,
+            participant_ids=participant_ids,
+        )
+
+    def record_tmux_server_restart(
+        self,
+        *,
+        server_identity: str,
+        affected_ids: Sequence[str],
+        newly_owned_ids: Sequence[str],
+        incident: str,
+        terminated_at: float,
+    ) -> None:
+        with self.engine.begin() as conn:
+            self._participants.mark_tmux_restarted(
+                affected_ids,
+                incident=incident,
+                terminated_at=terminated_at,
+                connection=conn,
+            )
+            self._participants.stamp_live_tmux_server_identity(
+                server_identity,
+                participant_ids=newly_owned_ids,
+                connection=conn,
+            )
+            self._meta.set(
+                TMUX_SERVER_IDENTITY_META_KEY,
+                server_identity,
+                connection=conn,
+            )
 
     def touch(self, pid: str) -> None:
         self._participants.touch(pid)

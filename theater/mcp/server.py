@@ -191,6 +191,12 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         not the name, for any targeting that spans time or has destructive
         consequences, because a recycled name can identify a successor.
 
+        tmux-backed rows include `tmux_server_identity`. A dead row may carry
+        `termination_reason`, `termination_incident`, and `terminated_at`;
+        `termination_reason="tmux_restart"` means the tmux server was
+        replaced, and its shared incident id makes the row a recovery candidate
+        without implying automatic recovery.
+
         `ids` is an optional list of participant ids to fetch — real ids only,
         not names (names are live-only, recyclable aliases). Pass it when you
         need a small number of rows and do not want to pay for the whole table.

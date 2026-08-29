@@ -162,6 +162,39 @@ async def test_list_panes_uses_pane_format(monkeypatch):
     assert argv[i + 1] == client._PANE_FORMAT
 
 
+async def test_inventory_observation_keeps_server_identity_with_panes(monkeypatch):
+    captured: list[list[str]] = []
+
+    async def fake_run(*args: str, check: bool = True) -> str:
+        captured.append(list(args))
+        assert check is True
+        return "123\t%1\n123\t%2\n"
+
+    monkeypatch.setattr(client, "run", fake_run)
+    inventory = await client.observe_inventory()
+    assert inventory is not None
+    assert inventory.server_identity == "123"
+    assert inventory.pane_ids == frozenset({"%1", "%2"})
+    assert captured == [["list-panes", "-a", "-F", "#{pid}\t#{pane_id}"]]
+
+
+async def test_inventory_observation_treats_empty_output_as_inconclusive(monkeypatch):
+    async def fake_run(*args: str, check: bool = True) -> str:
+        return ""
+
+    monkeypatch.setattr(client, "run", fake_run)
+    assert await client.observe_inventory() is None
+
+
+async def test_inventory_observation_rejects_mixed_server_identities(monkeypatch):
+    async def fake_run(*args: str, check: bool = True) -> str:
+        return "123\t%1\n456\t%2\n"
+
+    monkeypatch.setattr(client, "run", fake_run)
+    with pytest.raises(client.TmuxError, match="invalid server inventory"):
+        await client.observe_inventory()
+
+
 # ---- kill_pane / deliver_text: targets are pane ids, not sessions ------
 
 

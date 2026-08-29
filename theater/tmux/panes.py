@@ -27,11 +27,24 @@ in tests/test_tmux_panes.py. Behaviour must be verified by the user.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from theater.constants.tmux import (
     TMUX_BREAK_PANE_PLACEHOLDER_NAME,
     TMUX_BREAK_PANE_WORKAROUND_VERSION,
 )
 from theater.tmux.command import _FORMAT_SEP, _PANE_FORMAT, Pane, TmuxError
+
+_INVENTORY_FORMAT = "#{pid}\t#{pane_id}"
+
+
+@dataclass(frozen=True, slots=True)
+class TmuxInventory:
+    """One non-empty tmux server inventory, tied to its server identity."""
+
+    server_identity: str
+    pane_ids: frozenset[str]
+
 
 # Proxies: delegate to the facade at call time so both panes.run and client.run patches work.
 
@@ -61,6 +74,23 @@ async def list_panes(session: str | None = None) -> list[Pane]:
         scope = ["-s", "-t", target]
     out = await run("list-panes", *scope, "-F", _PANE_FORMAT, check=False)
     return [Pane.parse(line) for line in out.splitlines() if line]
+
+
+async def observe_inventory() -> TmuxInventory | None:
+    """Observe one non-empty server inventory without mixing server epochs."""
+    out = await run("list-panes", "-a", "-F", _INVENTORY_FORMAT, check=True)
+    rows = [line.partition("\t") for line in out.splitlines() if line]
+    if not rows:
+        return None
+    if any(not separator or not identity or not pane_id for identity, separator, pane_id in rows):
+        raise TmuxError("tmux returned an invalid server inventory")
+    identities = {identity for identity, _, _ in rows}
+    if len(identities) != 1:
+        raise TmuxError("tmux returned an invalid server inventory")
+    return TmuxInventory(
+        server_identity=identities.pop(),
+        pane_ids=frozenset(row[2] for row in rows),
+    )
 
 
 async def pane_exists(pane_id: str) -> bool:

@@ -36,6 +36,10 @@ def _summarise(p: dict) -> dict:
         "session_id": p["session_id"],
         "parent_id": p["parent_id"],
         "addressable": p["addressable"],
+        "tmux_server_identity": p.get("tmux_server_identity"),
+        "termination_reason": p.get("termination_reason"),
+        "termination_incident": p.get("termination_incident"),
+        "terminated_at": p.get("terminated_at"),
     }
 
 

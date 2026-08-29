@@ -13,9 +13,8 @@ import contextlib
 import logging
 
 from theater import paths
-from theater.daemon.jobs import JobState
 from theater.daemon.lock import file_id
-from theater.tmux import client as tmux
+from theater.daemon.runtime.tmux_reconcile import reconcile_tmux_inventory
 
 logger = logging.getLogger("theater.daemon")
 
@@ -38,37 +37,8 @@ def socket_lost(daemon) -> bool:
 
 
 async def reap_once(daemon) -> None:
-    """Mark tracked participants dead when their pane is gone."""
-    tracked = [p for p in daemon.registry.list() if p.tmux_pane]
-    if not tracked:
-        return
-    if not tmux.available():
-        return
-    try:
-        out = await tmux.run("list-panes", "-a", "-F", "#{pane_id}", check=True)
-    except Exception as exc:
-        logger.warning("reaper: could not list panes: %s", exc)
-        return
-    alive = set(out.split())
-    if not alive:
-        logger.warning(
-            "reaper: empty pane inventory with %d tracked panes; skipping",
-            len(tracked),
-        )
-        return
-    for p in tracked:
-        if p.tmux_pane not in alive:
-            if p.id in daemon._explicit_kills:
-                continue
-            logger.info("participant %s lost its pane %s", p.id, p.tmux_pane)
-            try:
-                await daemon.spawner.retire(p, delete_branch=False)
-            except Exception:
-                logger.exception("retire failed for %s; marking dead anyway", p.id)
-            daemon.registry.mark_dead(p.id)
-            running = daemon.store.running_jobs_for_target(p.id)
-            for job in running:
-                daemon.jobs.finish(job.handle, state=JobState.CRASHED, error_code="crashed")
+    """Reconcile tracked panes against one server-identity inventory."""
+    await reconcile_tmux_inventory(daemon, context="reaper")
 
 
 async def reap_loop(daemon, *, interval: float) -> None:

@@ -184,7 +184,14 @@ class Registry:
         )
         return self._named(p)
 
-    def attach_pane(self, pid: str, pane: str, *, pane_pid: int | None = None) -> Participant:
+    def attach_pane(
+        self,
+        pid: str,
+        pane: str,
+        *,
+        pane_pid: int | None = None,
+        tmux_server_identity: str | None = None,
+    ) -> Participant:
         """Record where a participant lives, and which process was there.
 
         `pane_pid` is the launch epoch: tmux's `#{pane_pid}`, the process the
@@ -198,6 +205,8 @@ class Registry:
         p = self.get(pid)
         moved = p.tmux_pane != pane
         p.tmux_pane = pane
+        if tmux_server_identity is not None:
+            p.tmux_server_identity = tmux_server_identity
         if pane_pid is not None:
             p.pid = pane_pid
         p.last_activity = now()
@@ -210,11 +219,11 @@ class Registry:
         """Ensure `pane` has one holder.
 
         Two records pointing at one pane means a delivery could reach the wrong
-        agent, so a pane is never shared. tmux does not recycle pane ids, so a
-        second claimant means the seat genuinely changed hands: the user quit
-        one agent and started another in the same pane. The previous occupant
-        has lost its only address, and something else now answers there, so it
-        is gone — not merely unreachable.
+        agent, so a pane is never shared. Within one tmux server, a second
+        claimant means the seat genuinely changed hands: the user quit one
+        agent and started another in the same pane. The previous occupant has
+        lost its only address, and something else now answers there, so it is
+        gone — not merely unreachable.
         """
         prior = self.store.find_by_pane(pane)
         if prior is None or prior.id == keep:
@@ -223,7 +232,7 @@ class Registry:
         self.store.upsert_participant(prior)
         self.mark_dead(prior.id)
 
-    def _claim_pane(self, p: Participant, pane: str) -> None:
+    def _claim_pane(self, p: Participant, pane: str, *, tmux_server_identity: str | None) -> None:
         """Record a self-reported pane, promoting External to Adopted.
 
         Only ever called with a pane in hand. A *missing* pane is not evidence
@@ -232,12 +241,15 @@ class Registry:
         agent straight back to External.
         """
         if p.tmux_pane == pane:
+            if tmux_server_identity is not None:
+                p.tmux_server_identity = tmux_server_identity
             return
         if p.tier is Tier.SPAWNED and p.tmux_pane:
             # We read this pane id from tmux when we made the window; it beats occupant reports.
             return
         self._evict_pane_holder(pane, keep=p.id)
         p.tmux_pane = pane
+        p.tmux_server_identity = tmux_server_identity
         if p.tier is Tier.EXTERNAL:
             p.tier = Tier.ADOPTED
 
@@ -249,6 +261,7 @@ class Registry:
         cwd: str | None,
         session_id: str | None = None,
         claimed_id: str | None = None,
+        tmux_server_identity: str | None = None,
     ) -> Participant:
         """First contact from an MCP server.
 
@@ -267,25 +280,48 @@ class Registry:
         if claimed_id:
             existing = self.store.get_participant(claimed_id)
             if existing is not None:
-                existing.session_id = session_id or existing.session_id
-                existing.cwd = cwd or existing.cwd
-                if pane:
-                    self._claim_pane(existing, pane)
-                # Converge an alias-stored harness on reconnect (guard: normalize() == harness).
-                if normalize(existing.harness) == harness and existing.harness != harness:
-                    existing.harness = harness
-                existing.last_activity = now()
-                self.store.upsert_participant(existing)
-                self.store.bus_append("participant.hello", to_id=existing.id)
-                return self._named(existing)
+                if (
+                    pane
+                    and tmux_server_identity is not None
+                    and existing.tmux_server_identity not in (None, tmux_server_identity)
+                ):
+                    claimed_id = None
+                else:
+                    existing.session_id = session_id or existing.session_id
+                    existing.cwd = cwd or existing.cwd
+                    if pane:
+                        self._claim_pane(
+                            existing,
+                            pane,
+                            tmux_server_identity=tmux_server_identity,
+                        )
+                    # Converge an alias-stored harness on reconnect (guard: normalize() == harness).
+                    if normalize(existing.harness) == harness and existing.harness != harness:
+                        existing.harness = harness
+                    existing.last_activity = now()
+                    self.store.upsert_participant(existing)
+                    self.store.bus_append("participant.hello", to_id=existing.id)
+                    return self._named(existing)
             # A stale id from a previous daemon lifetime; fall through and re-register.
 
         if pane:
             prior = self.store.find_by_pane(pane)
-            if prior is not None:
+            if (
+                prior is not None
+                and tmux_server_identity is not None
+                and prior.tmux_server_identity not in (None, tmux_server_identity)
+            ):
+                self.mark_dead(prior.id)
+                prior = None
+            if prior is not None and (
+                tmux_server_identity is None
+                or prior.tmux_server_identity in (None, tmux_server_identity)
+            ):
                 prior.harness = harness or prior.harness
                 prior.cwd = cwd or prior.cwd
                 prior.session_id = session_id or prior.session_id
+                if tmux_server_identity is not None:
+                    prior.tmux_server_identity = tmux_server_identity
                 prior.status = Status.IDLE
                 prior.last_activity = now()
                 self.store.upsert_participant(prior)
@@ -297,6 +333,7 @@ class Registry:
             harness=harness,
             tier=Tier.ADOPTED if pane else Tier.EXTERNAL,
             tmux_pane=pane,
+            tmux_server_identity=tmux_server_identity if pane else None,
             cwd=cwd,
             session_id=session_id,
             status=Status.IDLE,
@@ -418,6 +455,13 @@ class Registry:
         self._cleanup_participant(pid)
         self._names.pop(pid, None)
         self.store.bus_append("participant.dead", to_id=pid)
+
+    def finalize_tmux_restarted(self, participants: builtins.list[Participant]) -> None:
+        for p in participants:
+            self.store.delete_receipt_token(p.id)
+            self.store.delete_channel_credentials(p.id)
+            self._cleanup_participant(p.id)
+            self._names.pop(p.id, None)
 
     def touch(self, pid: str) -> None:
         self.store.touch(pid)

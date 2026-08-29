@@ -54,11 +54,15 @@ import json
 import logging
 from dataclasses import dataclass
 
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import delete, or_, select, text, update
 
 from theater.config import RetentionSection
 from theater.constants import SECONDS_PER_DAY
-from theater.constants.daemon import BUS_KIND_SEND_REFUSED, TRANSCRIPT_AUDIT_KINDS
+from theater.constants.daemon import (
+    BUS_KIND_SEND_REFUSED,
+    TMUX_RESTART_TERMINATION_REASON,
+    TRANSCRIPT_AUDIT_KINDS,
+)
 from theater.daemon import lineage
 from theater.daemon.schema import bus, jobs, participants, touch, tree_kv
 from theater.daemon.store import Store
@@ -140,7 +144,7 @@ async def sweep(
     )
 
     # Phase 3: participants — after jobs so newly-eligible ones are deleted in the same sweep.
-    part_deleted = _sweep_participants(store, retention.batch)
+    part_deleted = await _sweep_participants(store, cutoff_jobs, retention.batch)
     result = SweepResult(
         bus=result.bus,
         jobs=result.jobs,
@@ -269,12 +273,12 @@ async def _sweep_jobs_and_touch(store: Store, cutoff: float, batch: int) -> tupl
     return total_jobs, total_touch
 
 
-def _sweep_participants(store: Store, batch: int) -> int:
+async def _sweep_participants(store: Store, restart_cutoff: float, batch: int) -> int:
     """Delete dead participants that nothing references (MF3).
 
-    Participants are gated, never aged: a dead participant becomes eligible
-    only once the job sweep has removed every job that references it. The
-    three clauses each protect a different reference:
+    Participants are gated, never aged except restart diagnoses: a tmux-reset
+    row also waits through ``jobs_days`` from ``terminated_at``. The three
+    clauses each protect a different reference:
 
     1. ``target_id`` — a job still in flight against this participant.
     2. ``caller_id`` — a job record that names this participant as the
@@ -288,21 +292,40 @@ def _sweep_participants(store: Store, batch: int) -> int:
        **Do not delete the third clause** — the next person will read it as
        redundant, and it is not.
     """
-    stmt = (
-        delete(participants)
-        .where(participants.c.status == "dead")
-        .where(
-            participants.c.id.not_in(select(jobs.c.target_id).where(jobs.c.target_id.is_not(None)))
-        )
-        .where(participants.c.id.not_in(select(jobs.c.caller_id)))
-        .where(
-            participants.c.id.not_in(
-                select(participants.c.parent_id).where(participants.c.parent_id.is_not(None))
+    total = 0
+    while True:
+        stmt = (
+            select(participants.c.id)
+            .where(participants.c.status == "dead")
+            .where(
+                or_(
+                    participants.c.termination_reason.is_(None),
+                    participants.c.termination_reason != TMUX_RESTART_TERMINATION_REASON,
+                    participants.c.terminated_at <= restart_cutoff,
+                )
             )
+            .where(
+                participants.c.id.not_in(
+                    select(jobs.c.target_id).where(jobs.c.target_id.is_not(None))
+                )
+            )
+            .where(participants.c.id.not_in(select(jobs.c.caller_id)))
+            .where(
+                participants.c.id.not_in(
+                    select(participants.c.parent_id).where(participants.c.parent_id.is_not(None))
+                )
+            )
+            .limit(batch)
         )
-    )
-    result = store.conn.execute(stmt)
-    return result.rowcount
+        ids = [row[0] for row in store.conn.execute(stmt).fetchall()]
+        if not ids:
+            break
+        result = store.conn.execute(delete(participants).where(participants.c.id.in_(ids)))
+        total += result.rowcount
+        await asyncio.sleep(0)
+        if len(ids) < batch:
+            break
+    return total
 
 
 async def _sweep_bus(store: Store, cutoff: float, batch: int, refused_cap: int) -> int:

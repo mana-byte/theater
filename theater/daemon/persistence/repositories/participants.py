@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import Connection, and_, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from theater.constants.daemon import TMUX_RESTART_TERMINATION_REASON
 from theater.daemon.persistence.database import Database
 from theater.daemon.schema import participants
 from theater.models import Participant, Status, Tier, now
@@ -25,6 +26,10 @@ class ParticipantRepository:
             "harness": p.harness,
             "tier": str(p.tier),
             "tmux_pane": p.tmux_pane,
+            "tmux_server_identity": p.tmux_server_identity,
+            "termination_reason": p.termination_reason,
+            "termination_incident": p.termination_incident,
+            "terminated_at": p.terminated_at,
             "cwd": p.cwd,
             "branch": p.branch,
             "session_id": p.session_id,
@@ -129,6 +134,53 @@ class ParticipantRepository:
             .where(participants.c.id == pid)
             .values(status=str(status), last_activity=now())
         )
+
+    def stamp_live_tmux_server_identity(
+        self,
+        identity: str,
+        *,
+        participant_ids: Sequence[str] | None = None,
+        connection: Connection | None = None,
+    ) -> int:
+        if participant_ids is not None and not participant_ids:
+            return 0
+        stmt = (
+            update(participants)
+            .where(participants.c.status != str(Status.DEAD))
+            .where(participants.c.tmux_pane.is_not(None))
+            .where(participants.c.tmux_server_identity.is_(None))
+            .values(tmux_server_identity=identity)
+        )
+        if participant_ids is not None:
+            stmt = stmt.where(participants.c.id.in_(participant_ids))
+        conn = self._db.conn if connection is None else connection
+        result = conn.execute(stmt)
+        return result.rowcount
+
+    def mark_tmux_restarted(
+        self,
+        participant_ids: Sequence[str],
+        *,
+        incident: str,
+        terminated_at: float,
+        connection: Connection | None = None,
+    ) -> int:
+        if not participant_ids:
+            return 0
+        conn = self._db.conn if connection is None else connection
+        result = conn.execute(
+            update(participants)
+            .where(participants.c.id.in_(participant_ids))
+            .where(participants.c.status != str(Status.DEAD))
+            .values(
+                status=str(Status.DEAD),
+                termination_reason=TMUX_RESTART_TERMINATION_REASON,
+                termination_incident=incident,
+                terminated_at=terminated_at,
+                last_activity=terminated_at,
+            )
+        )
+        return result.rowcount
 
     def touch(self, pid: str) -> None:
         self._db.conn.execute(

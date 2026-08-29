@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
 from theater import paths, timing
 from theater.constants.daemon import BUS_KIND_PARTICIPANT_SESSION_BOUNDARY
@@ -41,6 +43,9 @@ from theater.models import BadRequest, Participant, TheaterError
 from theater.observability.catalog import KILL_PANE, KILL_TEARDOWN, SPAWN_LAUNCH, SPAWN_WORKTREE
 from theater.tmux import client as tmux
 
+if TYPE_CHECKING:
+    from theater.daemon.runtime.tmux_reconcile import TmuxReconciliation
+
 logger = logging.getLogger("theater.spawner")
 
 
@@ -64,9 +69,16 @@ class Spawner:
     #: Interval between kill-pane confirmation polls, in seconds.
     KILL_POLL_INTERVAL = SPAWN_KILL_POLL_INTERVAL_SECONDS
 
-    def __init__(self, registry: Registry, *, otel_runtime=None):
+    def __init__(
+        self,
+        registry: Registry,
+        *,
+        otel_runtime=None,
+        reconcile_tmux: Callable[[], Awaitable[TmuxReconciliation]] | None = None,
+    ):
         self.registry = registry
         self.otel_runtime = otel_runtime
+        self._reconcile_tmux = reconcile_tmux
         self._named_locks: dict[str, asyncio.Lock] = {}
 
     def _named_lock(self, repo_root: str) -> asyncio.Lock:
@@ -151,9 +163,20 @@ class Spawner:
             info = await tmux.pane_info(pane)
         except Exception:
             info = None
+        reconciliation = await self._reconcile_tmux() if self._reconcile_tmux is not None else None
+        tmux_server_identity = (
+            reconciliation.server_identity
+            if reconciliation is not None
+            and reconciliation.pane_ids is not None
+            and pane in reconciliation.pane_ids
+            else None
+        )
         try:
             attached = self.registry.attach_pane(
-                participant.id, pane, pane_pid=info.pane_pid if info else None
+                participant.id,
+                pane,
+                pane_pid=info.pane_pid if info else None,
+                tmux_server_identity=tmux_server_identity,
             )
         except BaseException:
             await self.cleanup_reservation(participant)

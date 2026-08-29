@@ -21,6 +21,18 @@ SEND_CLAIM_TTL_SECONDS = 300.0
 #: Meta key for the durable send-sequence counter; persisted, never derived from MAX(jobs).
 SEND_SEQ_META_KEY = "send_seq"
 
+#: Meta key for the last tmux server identity confirmed by a non-empty inventory.
+TMUX_SERVER_IDENTITY_META_KEY = "tmux_server_identity"
+
+#: One diagnostic row emitted for each detected tmux server replacement.
+BUS_KIND_TMUX_SERVER_RESTART = "daemon.tmux_server_restart"
+
+#: Bound the participant ids carried by one tmux server restart diagnostic.
+TMUX_SERVER_RESTART_AFFECTED_IDS_LIMIT = 100
+
+TMUX_RESTART_TERMINATION_REASON = "tmux_restart"
+TMUX_RESTART_JOB_ERROR_CODE = "tmux_restarted"
+
 #: Meta key prefix for per-participant receipt tokens; the participant id is appended.
 RECEIPT_TOKEN_PREFIX = "receipt_token:"
 

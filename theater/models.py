@@ -39,6 +39,10 @@ class Participant:
     harness: str = "unknown"
     tier: Tier = Tier.EXTERNAL
     tmux_pane: str | None = None
+    tmux_server_identity: str | None = None
+    termination_reason: str | None = None
+    termination_incident: str | None = None
+    terminated_at: float | None = None
     cwd: str | None = None
     branch: str | None = None
     session_id: str | None = None
@@ -125,6 +129,10 @@ class Participant:
             harness=mapping["harness"],
             tier=Tier(mapping["tier"]),
             tmux_pane=mapping["tmux_pane"],
+            tmux_server_identity=mapping["tmux_server_identity"],
+            termination_reason=mapping["termination_reason"],
+            termination_incident=mapping["termination_incident"],
+            terminated_at=mapping["terminated_at"],
             cwd=mapping["cwd"],
             branch=mapping["branch"],
             session_id=mapping["session_id"],

@@ -68,6 +68,7 @@ from theater.tmux.options import (  # noqa: F401
     unset_option,
 )
 from theater.tmux.panes import (  # noqa: F401
+    TmuxInventory,
     break_pane,
     display_message,
     ensure_session,
@@ -78,6 +79,7 @@ from theater.tmux.panes import (  # noqa: F401
     move_window_to_index,
     new_window,
     new_window_named,
+    observe_inventory,
     pane_exists,
     pane_info,
     resize_pane,

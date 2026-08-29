@@ -467,6 +467,20 @@ async def test_list_participants_docstring_describes_resume_state(daemon):
         assert value in desc, f"resume_state value {value!r} missing from docstring"
 
 
+async def test_list_participants_docstring_describes_tmux_restart_diagnosis(daemon):
+    tools = {t.name: t.description or "" for t in await build("p1", "vibe").list_tools()}
+    desc = tools["list_participants"].lower()
+    for field in (
+        "tmux_server_identity",
+        "termination_reason",
+        "termination_incident",
+        "terminated_at",
+    ):
+        assert field in desc
+    assert "tmux_restart" in desc
+    assert "recovery candidate" in desc
+
+
 async def test_list_participants_docstring_describes_ids_semantics(daemon):
     """The list_participants docstring must describe the ids filter and its trap."""
     tools = {t.name: t.description or "" for t in await build("p1", "vibe").list_tools()}

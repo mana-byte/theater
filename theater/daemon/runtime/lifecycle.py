@@ -21,9 +21,9 @@ from theater.constants.observability import (
 )
 from theater.daemon.jobs import JobState
 from theater.daemon.lock import file_id
+from theater.daemon.runtime.tmux_reconcile import reconcile_tmux_inventory
 from theater.models import Status
 from theater.observability.metrics import create_active_gauge_sampler
-from theater.tmux import client as tmux
 
 logger = logging.getLogger("theater.daemon")
 
@@ -93,28 +93,10 @@ async def reconcile(daemon) -> None:
     SQLite already holds the participants, jobs, and bus. What is lost on
     restart is the in-memory asyncio Events for jobs and the observer tasks.
     """
-    if not tmux.available():
-        logger.info("tmux unavailable; skipping reconciliation")
+    reconciliation = await reconcile_tmux_inventory(daemon, context="reconcile")
+    pane_ids = reconciliation.pane_ids
+    if pane_ids is None:
         return
-    tracked = [p for p in daemon.registry.list() if p.tmux_pane]
-    try:
-        out = await tmux.run("list-panes", "-a", "-F", "#{pane_id}", check=True)
-        alive_panes = set(out.split())
-    except Exception as exc:
-        logger.warning("reconcile: could not list panes: %s", exc)
-        return
-    if not alive_panes and tracked:
-        logger.warning(
-            "reconcile: empty pane inventory with %d tracked panes; skipping",
-            len(tracked),
-        )
-        return
-
-    for p in daemon.registry.list():
-        if p.tmux_pane and p.tmux_pane not in alive_panes and p.status is not Status.DEAD:
-            logger.info("reconcile: %s lost its pane %s", p.id, p.tmux_pane)
-            await daemon.spawner.retire(p, delete_branch=False)
-            daemon.registry.mark_dead(p.id)
 
     for p in daemon.registry.list(include_dead=True):
         if p.status is Status.DEAD:
@@ -132,7 +114,7 @@ async def reconcile(daemon) -> None:
     logger.info(
         "reconcile complete: %d participants, %d live panes",
         len(daemon.registry.list(include_dead=True)),
-        len(alive_panes),
+        len(pane_ids),
     )
 
 

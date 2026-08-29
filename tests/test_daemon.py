@@ -320,6 +320,7 @@ async def test_spawned_child_hellos_with_its_given_id(client, fake_tmux):
 
 
 async def test_lineage_shows_in_the_tree(client, fake_tmux):
+    fake_tmux.add_pane("%99")
     parent = await client.call("hello", harness="vibe", pane="%99", cwd="/tmp")
     child = await client.call(
         "spawn",
@@ -669,7 +670,11 @@ async def test_a_child_that_loses_its_pane_without_explicit_kill_crashes(
     import theater.daemon.server as server_mod
 
     monkeypatch.setattr(server_mod.tmux, "available", lambda: True)
-    monkeypatch.setattr(server_mod.tmux, "run", _fake_list_panes("%other"))
+    monkeypatch.setattr(
+        server_mod.tmux,
+        "observe_inventory",
+        _fake_inventory("fake-tmux-server", "%other"),
+    )
     await daemon._reap_once()
 
     job = await client.call("jobs.status", handle=handle)
@@ -683,7 +688,11 @@ async def test_the_reaper_notices_a_vanished_pane(daemon, client, fake_tmux, mon
     from theater.tmux import client as tmux_client
 
     monkeypatch.setattr(tmux_client, "available", lambda: True)
-    monkeypatch.setattr(tmux_client, "run", _fake_list_panes("%other"))
+    monkeypatch.setattr(
+        tmux_client,
+        "observe_inventory",
+        _fake_inventory("fake-tmux-server", "%other"),
+    )
     await daemon._reap_once()
 
     dead = await client.call("participants.get", id=record["id"])
@@ -696,7 +705,11 @@ async def test_the_reaper_leaves_live_panes_alone(daemon, client, fake_tmux, mon
     from theater.tmux import client as tmux_client
 
     monkeypatch.setattr(tmux_client, "available", lambda: True)
-    monkeypatch.setattr(tmux_client, "run", _fake_list_panes(record["tmux_pane"]))
+    monkeypatch.setattr(
+        tmux_client,
+        "observe_inventory",
+        _fake_inventory("fake-tmux-server", record["tmux_pane"]),
+    )
     await daemon._reap_once()
 
     alive = await client.call("participants.get", id=record["id"])
@@ -708,21 +721,17 @@ async def test_the_reaper_ignores_an_empty_pane_inventory(daemon, client, fake_t
 
     from theater.tmux import client as tmux_client
 
-    calls = []
-
-    async def empty_inventory(*args, **kwargs):
-        calls.append((args, kwargs))
-        return ""
+    async def empty_inventory():
+        return None
 
     monkeypatch.setattr(tmux_client, "available", lambda: True)
-    monkeypatch.setattr(tmux_client, "run", empty_inventory)
+    monkeypatch.setattr(tmux_client, "observe_inventory", empty_inventory)
     await daemon._reap_once()
 
     alive = await client.call("participants.get", id=record["id"])
     job = await client.call("jobs.status", handle=record["handle"])
     assert alive["status"] != "dead"
     assert job["state"] == "running"
-    assert calls == [(("list-panes", "-a", "-F", "#{pane_id}"), {"check": True})]
 
 
 async def test_the_reaper_ignores_a_failed_pane_inventory(daemon, client, fake_tmux, monkeypatch):
@@ -730,11 +739,11 @@ async def test_the_reaper_ignores_a_failed_pane_inventory(daemon, client, fake_t
 
     from theater.tmux import client as tmux_client
 
-    async def failed_inventory(*args, **kwargs):
+    async def failed_inventory():
         raise tmux_client.TmuxError("socket busy")
 
     monkeypatch.setattr(tmux_client, "available", lambda: True)
-    monkeypatch.setattr(tmux_client, "run", failed_inventory)
+    monkeypatch.setattr(tmux_client, "observe_inventory", failed_inventory)
     await daemon._reap_once()
 
     alive = await client.call("participants.get", id=record["id"])
@@ -749,7 +758,7 @@ async def test_reconcile_ignores_an_empty_pane_inventory(daemon, client, fake_tm
     from theater.tmux import client as tmux_client
 
     monkeypatch.setattr(tmux_client, "available", lambda: True)
-    monkeypatch.setattr(tmux_client, "run", _fake_list_panes(""))
+    monkeypatch.setattr(tmux_client, "observe_inventory", _fake_inventory_empty())
     await daemon._reconcile()
 
     alive = await client.call("participants.get", id=record["id"])
@@ -758,11 +767,188 @@ async def test_reconcile_ignores_an_empty_pane_inventory(daemon, client, fake_tm
     assert job["state"] == "running"
 
 
-def _fake_list_panes(output: str):
-    async def run(*args, **kwargs):
-        return output
+async def test_tmux_server_restart_preserves_worktrees_and_marks_only_previous_owner(
+    daemon, client, monkeypatch
+):
+    from theater.constants.daemon import (
+        BUS_KIND_TMUX_SERVER_RESTART,
+        TMUX_RESTART_JOB_ERROR_CODE,
+        TMUX_RESTART_TERMINATION_REASON,
+    )
+    from theater.tmux import client as tmux_client
 
-    return run
+    old = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+    successor = daemon.registry.register(
+        harness="vibe",
+        pane="%new-server",
+        cwd="/tmp",
+        tmux_server_identity="new-server",
+    )
+    retired: list[str] = []
+
+    async def no_retire(participant, *, delete_branch):
+        retired.append(participant.id)
+
+    monkeypatch.setattr(daemon.spawner, "retire", no_retire)
+    monkeypatch.setattr(
+        tmux_client,
+        "observe_inventory",
+        _fake_inventory("new-server", successor.tmux_pane),
+    )
+
+    await daemon._reap_once()
+
+    rows = await client.call("participants.list", include_dead=True)
+    old_row = next(row for row in rows if row["id"] == old["id"])
+    new_row = next(row for row in rows if row["id"] == successor.id)
+    assert old_row["status"] == "dead"
+    assert old_row["termination_reason"] == TMUX_RESTART_TERMINATION_REASON
+    assert old_row["termination_incident"] is not None
+    assert old_row["terminated_at"] is not None
+    assert new_row["status"] != "dead"
+    assert retired == []
+
+    job = await client.call("jobs.status", handle=old["handle"])
+    assert job["state"] == "crashed"
+    assert job["error_code"] == TMUX_RESTART_JOB_ERROR_CODE
+    incidents = [
+        row for row in await client.call("bus.tail") if row["kind"] == BUS_KIND_TMUX_SERVER_RESTART
+    ]
+    assert len(incidents) == 1
+    assert incidents[0]["payload"] == {
+        "incident": old_row["termination_incident"],
+        "affected_count": 1,
+        "affected_ids": [old["id"]],
+    }
+
+    await daemon._reap_once()
+    incidents = [
+        row for row in await client.call("bus.tail") if row["kind"] == BUS_KIND_TMUX_SERVER_RESTART
+    ]
+    assert len(incidents) == 1
+
+
+async def test_startup_reconciliation_detects_a_tmux_server_restart(daemon, client, monkeypatch):
+    from theater.constants.daemon import (
+        TMUX_RESTART_JOB_ERROR_CODE,
+        TMUX_RESTART_TERMINATION_REASON,
+    )
+    from theater.tmux import client as tmux_client
+
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+    monkeypatch.setattr(
+        tmux_client,
+        "observe_inventory",
+        _fake_inventory("new-server", "%new-server"),
+    )
+
+    await daemon._reconcile()
+
+    row = next(
+        row
+        for row in await client.call("participants.list", include_dead=True)
+        if row["id"] == record["id"]
+    )
+    assert row["termination_reason"] == TMUX_RESTART_TERMINATION_REASON
+    job = await client.call("jobs.status", handle=record["handle"])
+    assert job["error_code"] == TMUX_RESTART_JOB_ERROR_CODE
+
+
+async def test_first_tmux_inventory_establishes_baseline_without_terminating(
+    daemon, client, monkeypatch
+):
+    from theater.constants.daemon import TMUX_SERVER_IDENTITY_META_KEY
+    from theater.daemon.schema import meta
+    from theater.tmux import client as tmux_client
+
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+    participant = daemon.registry.get(record["id"])
+    participant.tmux_server_identity = None
+    daemon.store.upsert_participant(participant)
+    daemon.store.conn.execute(meta.delete().where(meta.c.key == TMUX_SERVER_IDENTITY_META_KEY))
+    monkeypatch.setattr(
+        tmux_client,
+        "observe_inventory",
+        _fake_inventory("new-server", record["tmux_pane"]),
+    )
+
+    await daemon._reap_once()
+
+    row = await client.call("participants.get", id=record["id"])
+    job = await client.call("jobs.status", handle=record["handle"])
+    assert row["status"] != "dead"
+    assert row["tmux_server_identity"] == "new-server"
+    assert job["state"] == "running"
+
+
+async def test_same_server_stamps_identity_less_participant_after_inconclusive_observation(
+    daemon, client, monkeypatch
+):
+    from theater.tmux import client as tmux_client
+
+    async def unavailable_inventory():
+        return None
+
+    monkeypatch.setattr(tmux_client, "observe_inventory", unavailable_inventory)
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+    assert (await client.call("participants.get", id=record["id"]))["tmux_server_identity"] is None
+
+    monkeypatch.setattr(
+        tmux_client,
+        "observe_inventory",
+        _fake_inventory("fake-tmux-server", record["tmux_pane"]),
+    )
+    await daemon._reap_once()
+
+    row = await client.call("participants.get", id=record["id"])
+    assert row["status"] != "dead"
+    assert row["tmux_server_identity"] == "fake-tmux-server"
+
+
+async def test_tmux_restart_classifies_identity_less_participants_by_new_inventory(
+    daemon, client, monkeypatch
+):
+    from theater.constants.daemon import (
+        TMUX_RESTART_TERMINATION_REASON,
+        TMUX_SERVER_IDENTITY_META_KEY,
+    )
+    from theater.tmux import client as tmux_client
+
+    daemon.store.set_meta(TMUX_SERVER_IDENTITY_META_KEY, "server-before")
+    present = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
+    absent = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
+    daemon.registry.attach_pane(present.id, "%new-pane")
+    daemon.registry.attach_pane(absent.id, "%old-pane")
+    monkeypatch.setattr(
+        tmux_client,
+        "observe_inventory",
+        _fake_inventory("server-after", "%new-pane"),
+    )
+
+    await daemon._reap_once()
+
+    present_row = await client.call("participants.get", id=present.id)
+    absent_row = await client.call("participants.get", id=absent.id)
+    assert present_row["status"] != "dead"
+    assert present_row["tmux_server_identity"] == "server-after"
+    assert absent_row["status"] == "dead"
+    assert absent_row["termination_reason"] == TMUX_RESTART_TERMINATION_REASON
+
+
+def _fake_inventory(identity: str, *pane_ids: str):
+    from theater.tmux.client import TmuxInventory
+
+    async def observe_inventory():
+        return TmuxInventory(server_identity=identity, pane_ids=frozenset(pane_ids))
+
+    return observe_inventory
+
+
+def _fake_inventory_empty():
+    async def observe_inventory():
+        return None
+
+    return observe_inventory
 
 
 async def test_reap_isolation_one_failure_does_not_skip_others(
@@ -780,7 +966,11 @@ async def test_reap_isolation_one_failure_does_not_skip_others(
 
     # Both panes vanish — the reaper should mark both dead.
     monkeypatch.setattr(tmux_client, "available", lambda: True)
-    monkeypatch.setattr(tmux_client, "run", _fake_list_panes("%other"))
+    monkeypatch.setattr(
+        tmux_client,
+        "observe_inventory",
+        _fake_inventory("fake-tmux-server", "%other"),
+    )
 
     # Make retire() blow up for the first participant only.
     original_retire = daemon.spawner.retire

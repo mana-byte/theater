@@ -55,6 +55,7 @@ from theater.daemon.runtime import socket as socket_mod
 from theater.daemon.runtime.lifecycle import CLOSE_TIMEOUT, SHUTDOWN_TIMEOUT
 from theater.daemon.runtime.maintenance import REAP_INTERVAL
 from theater.daemon.runtime.socket import MAX_SOCKET_PATH
+from theater.daemon.runtime.tmux_reconcile import reconcile_tmux_inventory
 from theater.daemon.spawning.service import Spawner
 from theater.daemon.store import Store
 from theater.daemon.trajectory import TrajectoryService
@@ -127,7 +128,11 @@ class Daemon:
                 receiver_port_store=self._set_otel_receiver_port,
             )
             self.registry.add_participant_cleanup(self.otel_runtime.drop_participant)
-            self.spawner = Spawner(self.registry, otel_runtime=self.otel_runtime)
+            self.spawner = Spawner(
+                self.registry,
+                otel_runtime=self.otel_runtime,
+                reconcile_tmux=lambda: reconcile_tmux_inventory(self, context="spawn"),
+            )
             self.jobs = JobManager(self.store)
             agent_telemetry = create_agent_telemetry(
                 self.store,

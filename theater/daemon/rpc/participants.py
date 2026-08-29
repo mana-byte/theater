@@ -15,6 +15,7 @@ from theater.daemon import workers
 from theater.daemon.harness_detect import detect_harness, match_binary
 from theater.daemon.rpc.params import _require
 from theater.daemon.rpc.router import method
+from theater.daemon.runtime.tmux_reconcile import reconcile_tmux_inventory
 from theater.harness import HARNESSES, normalize, supports_resume
 from theater.models import (
     BadRequest,
@@ -26,6 +27,15 @@ from theater.models import (
 )
 from theater.provenance import is_trusted_provenance
 from theater.tmux import client as tmux
+
+
+async def _pane_server_identity(daemon, pane: str | None, *, context: str) -> str | None:
+    if pane is None:
+        return None
+    reconciliation = await reconcile_tmux_inventory(daemon, context=context)
+    if reconciliation.pane_ids is None or pane not in reconciliation.pane_ids:
+        return None
+    return reconciliation.server_identity
 
 
 def _resume_state(p: Participant, live_peers: list[Participant]) -> str:
@@ -122,12 +132,15 @@ def _pagination(
 @method("hello")
 async def _hello(daemon, params: dict) -> dict:
     """First contact. Establishes or confirms the caller's identity and tier."""
+    pane = params.get("pane")
+    tmux_server_identity = await _pane_server_identity(daemon, pane, context="hello")
     participant = daemon.registry.register(
         harness=params.get("harness") or "unknown",
-        pane=params.get("pane"),
+        pane=pane,
         cwd=params.get("cwd"),
         session_id=params.get("session_id"),
         claimed_id=params.get("id"),
+        tmux_server_identity=tmux_server_identity,
     )
     return participant.to_dict()
 
@@ -280,13 +293,20 @@ async def _adopt(daemon, params: dict) -> dict:
     )
     if cwd is None:
         cwd = match.cwd
+    tmux_server_identity = await _pane_server_identity(daemon, pane, context="adopt")
     participant = daemon.registry.register(
         harness=harness,
         pane=pane,
         cwd=cwd,
+        tmux_server_identity=tmux_server_identity,
     )
     # The launch epoch is from the shell tmux forked, not the harness.
-    participant = daemon.registry.attach_pane(participant.id, pane, pane_pid=match.pane_pid)
+    participant = daemon.registry.attach_pane(
+        participant.id,
+        pane,
+        pane_pid=match.pane_pid,
+        tmux_server_identity=tmux_server_identity,
+    )
     return participant.to_dict()
 
 
