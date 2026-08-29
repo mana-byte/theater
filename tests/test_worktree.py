@@ -1143,11 +1143,11 @@ async def test_reserve_then_launch_failure_retires_unique_worktree(repo, monkeyp
         wt_path = wt.worktree_path(repo, child_id)
         assert Path(wt_path).exists(), "worktree must exist after reserve"
 
-        # Sabotage tmux.new_window so launch fails.
+        # Sabotage identified tmux window creation so launch fails.
         async def boom(**kwargs):
             raise RuntimeError("tmux exploded")
 
-        monkeypatch.setattr(spawner_mod.tmux, "new_window", boom)
+        monkeypatch.setattr(spawner_mod.tmux, "new_window_with_identity", boom)
 
         with pytest.raises(RuntimeError, match="tmux exploded"):
             await spawner.launch(reservation)
@@ -1215,7 +1215,7 @@ async def test_reserve_then_launch_failure_retires_named_worktree(repo, monkeypa
         async def boom(**kwargs):
             raise RuntimeError("tmux exploded")
 
-        monkeypatch.setattr(spawner_mod.tmux, "new_window", boom)
+        monkeypatch.setattr(spawner_mod.tmux, "new_window_with_identity", boom)
 
         with pytest.raises(RuntimeError, match="tmux exploded"):
             await spawner.launch(reservation)

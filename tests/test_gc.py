@@ -276,7 +276,7 @@ async def test_live_running_job_is_not_marked(store):
     assert job.finished_at is None
 
 
-# ---- MF3: participant gated delete, three clauses -------------------------
+# ---- MF3: participant gated delete, four reference guards -----------------
 
 
 async def test_dead_participant_referenced_as_parent_is_kept(store):
@@ -294,7 +294,7 @@ async def test_dead_participant_referenced_as_parent_is_kept(store):
 
     result = await sweep(store, _retention())
     # The child is dead and unreferenced — it goes. The parent is protected
-    # by the third clause: the child's parent_id is "parent".
+    # by the fourth guard: the child's parent_id is "parent".
     assert store.get_participant("parent") is not None
     # The child may or may not be deleted depending on whether the parent's
     # existence protects it — it does not, because nothing references the child.

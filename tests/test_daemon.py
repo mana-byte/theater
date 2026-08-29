@@ -319,6 +319,15 @@ async def test_spawned_child_hellos_with_its_given_id(client, fake_tmux):
     assert seen["tmux_pane"] == child["tmux_pane"]
 
 
+async def test_hello_refuses_a_pane_absent_from_the_observed_server(client):
+    with pytest.raises(RemoteError) as exc:
+        await client.call("hello", harness="vibe", pane="%404", cwd="/tmp")
+
+    assert exc.value.code == "bad_request"
+    assert "cannot verify tmux ownership" in exc.value.message
+    assert await client.call("participants.list") == []
+
+
 async def test_lineage_shows_in_the_tree(client, fake_tmux):
     fake_tmux.add_pane("%99")
     parent = await client.call("hello", harness="vibe", pane="%99", cwd="/tmp")
@@ -348,6 +357,7 @@ async def test_kill_marks_dead_and_hides(client, fake_tmux):
 
 
 async def test_kill_from_a_caller_who_is_the_parent_succeeds(client, fake_tmux):
+    fake_tmux.add_pane("%80")
     parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
     child = await client.call(
         "spawn",
@@ -364,6 +374,7 @@ async def test_kill_from_a_caller_who_is_the_parent_succeeds(client, fake_tmux):
 
 
 async def test_kill_refuses_a_target_that_is_not_the_callers_child(client, fake_tmux):
+    fake_tmux.add_pane("%80")
     parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
     stranger = await client.call(
         "spawn",
@@ -380,6 +391,7 @@ async def test_kill_refuses_a_target_that_is_not_the_callers_child(client, fake_
 
 
 async def test_kill_refuses_self_kill(client, fake_tmux):
+    fake_tmux.add_pane("%80")
     parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
     with pytest.raises(RemoteError) as exc:
         await client.call("participant.kill", id=parent["id"], caller_id=parent["id"])
@@ -389,6 +401,7 @@ async def test_kill_refuses_self_kill(client, fake_tmux):
 
 
 async def test_kill_on_an_already_dead_child_is_a_no_op(client, fake_tmux):
+    fake_tmux.add_pane("%80")
     parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
     child = await client.call(
         "spawn",
@@ -502,6 +515,7 @@ async def test_kill_finishes_running_jobs_as_killed(client, fake_tmux):
     finishes every still-running job targeting the killed participant with
     state KILLED after spawner.kill_pane succeeds.
     """
+    fake_tmux.add_pane("%80")
     parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
     child = await client.call(
         "spawn",
@@ -529,6 +543,7 @@ async def test_kill_wakes_the_awaiter_immediately(client, fake_tmux):
     await_sessions returns the current job state; a KILLED job must read as
     terminal right away so the parent is not blocked until the reaper runs.
     """
+    fake_tmux.add_pane("%80")
     parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
     child = await client.call(
         "spawn",
@@ -557,6 +572,7 @@ async def test_kill_finishes_jobs_before_removing_worktree(daemon, client, fake_
     """
     from theater.daemon.spawning import service as spawner_mod
 
+    fake_tmux.add_pane("%80")
     parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
     child = await client.call(
         "spawn",
@@ -623,6 +639,7 @@ async def test_kill_of_worktree_child_preserves_non_null_sha_after(
 
     repo_root = _make_repo(tmp_path)
 
+    fake_tmux.add_pane("%80")
     parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
     child = await client.call(
         "spawn",
@@ -892,6 +909,10 @@ async def test_same_server_stamps_identity_less_participant_after_inconclusive_o
 
     monkeypatch.setattr(tmux_client, "observe_inventory", unavailable_inventory)
     record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+    participant = daemon.registry.get(record["id"])
+    participant.tmux_server_identity = None
+    daemon.store.upsert_participant(participant)
+    await daemon._reap_once()
     assert (await client.call("participants.get", id=record["id"]))["tmux_server_identity"] is None
 
     monkeypatch.setattr(
@@ -1390,8 +1411,9 @@ async def test_hello_normalizes_claude_code_to_claude(client):
     assert me["harness"] == "claude"
 
 
-async def test_unknown_harness_name_passes_through(client):
+async def test_unknown_harness_name_passes_through(client, fake_tmux):
     """A genuinely unknown harness is not rejected — just unobservable."""
+    fake_tmux.add_pane("%4")
     me = await client.call("hello", harness="cursor", pane="%4", cwd="/tmp")
     assert me["harness"] == "cursor"
 
@@ -1805,12 +1827,12 @@ async def test_spawn_job_exists_before_pane_launch(client, fake_tmux, daemon):
     then ``_spawn`` created the job — leaving a gap where a fast child could
     finish before the job existed. Now ``reserve`` runs first, the job is
     created, then ``launch`` creates the pane. This test patches
-    ``tmux.new_window`` to assert the job is already RUNNING at the moment
+    ``tmux.new_window_with_identity`` to assert the job is already RUNNING at the moment
     the pane is about to be created.
     """
     from theater.tmux import client as tmux_client
 
-    original_new_window = tmux_client.new_window
+    original_new_window = tmux_client.new_window_with_identity
     captured: dict = {}
 
     async def spy_new_window(*, session, name, cwd, command, env=None, background=True):
@@ -1819,6 +1841,7 @@ async def test_spawn_job_exists_before_pane_launch(client, fake_tmux, daemon):
         pid = env.get("THEATER_ID", "")
         job = daemon.jobs.get(pid)
         captured["job_at_launch"] = job
+        captured["reconcile_lock_held"] = daemon._tmux_reconcile_lock.locked()
         return await original_new_window(
             session=session,
             name=name,
@@ -1833,8 +1856,8 @@ async def test_spawn_job_exists_before_pane_launch(client, fake_tmux, daemon):
     import theater.daemon.spawning.service as spawner_mod
 
     monkeypatch_target = spawner_mod.tmux
-    original = monkeypatch_target.new_window
-    monkeypatch_target.new_window = spy_new_window
+    original = monkeypatch_target.new_window_with_identity
+    monkeypatch_target.new_window_with_identity = spy_new_window
     try:
         record = await client.call(
             "spawn",
@@ -1844,13 +1867,14 @@ async def test_spawn_job_exists_before_pane_launch(client, fake_tmux, daemon):
             cwd="/tmp",
         )
     finally:
-        monkeypatch_target.new_window = original
+        monkeypatch_target.new_window_with_identity = original
 
     job = captured.get("job_at_launch")
-    assert job is not None, "job must exist when tmux.new_window is called"
+    assert job is not None, "job must exist when tmux.new_window_with_identity is called"
     assert job.state == "running"
     assert job.handle == record["handle"]
     assert job.target_id == record["id"]
+    assert captured["reconcile_lock_held"] is True
 
 
 async def test_spawn_launch_failure_leaves_crashed_job_and_dead_participant(
@@ -1865,11 +1889,11 @@ async def test_spawn_launch_failure_leaves_crashed_job_and_dead_participant(
     """
     import theater.daemon.spawning.service as spawner_mod
 
-    # Patch tmux.new_window (on the spawner's tmux module reference) to fail.
+    # Patch the identified window creation on the spawner's tmux module reference.
     async def boom_new_window(**kwargs):
         raise RuntimeError("tmux exploded")
 
-    monkeypatch.setattr(spawner_mod.tmux, "new_window", boom_new_window)
+    monkeypatch.setattr(spawner_mod.tmux, "new_window_with_identity", boom_new_window)
 
     with pytest.raises(RemoteError) as exc:
         await client.call(
@@ -1896,6 +1920,46 @@ async def test_spawn_launch_failure_leaves_crashed_job_and_dead_participant(
     assert job.error_code == "spawn_failed"
 
 
+async def test_spawn_detects_server_reset_even_when_the_pane_id_is_reused(
+    client, daemon, fake_tmux, monkeypatch
+):
+    from theater.tmux import client as tmux_client
+
+    original = tmux_client.new_window_with_identity
+    retired: list[str] = []
+
+    async def reset_after_create(**kwargs):
+        created = await original(**kwargs)
+        fake_tmux.tmux_server_identity = tmux_client.TmuxServerIdentity(
+            "/tmp/fake-tmux", "202", "2"
+        ).value
+        return created
+
+    monkeypatch.setattr(tmux_client, "new_window_with_identity", reset_after_create)
+
+    async def retire(participant, *, delete_branch):
+        retired.append(participant.id)
+
+    monkeypatch.setattr(daemon.spawner, "retire", retire)
+
+    with pytest.raises(RemoteError):
+        await client.call(
+            "spawn",
+            harness="vibe",
+            prompt="say hello",
+            approval="manual",
+            cwd="/tmp",
+        )
+
+    rows = await client.call("participants.list", include_dead=True)
+    assert len(rows) == 1
+    assert rows[0]["termination_reason"] == "tmux_restart"
+    job = await client.call("jobs.status", handle=rows[0]["id"])
+    assert job["state"] == "crashed"
+    assert job["error_code"] == "tmux_restarted"
+    assert retired == []
+
+
 async def test_spawn_launch_failure_retires_worktree(
     client, fake_tmux, daemon, tmp_path, monkeypatch
 ):
@@ -1907,7 +1971,7 @@ async def test_spawn_launch_failure_retires_worktree(
     async def boom_new_window(**kwargs):
         raise RuntimeError("tmux exploded")
 
-    monkeypatch.setattr(spawner_mod.tmux, "new_window", boom_new_window)
+    monkeypatch.setattr(spawner_mod.tmux, "new_window_with_identity", boom_new_window)
 
     with pytest.raises(RemoteError):
         await client.call(
@@ -1959,7 +2023,7 @@ async def test_promptless_spawn_job_running_during_launch(client, fake_tmux, dae
     """
     import theater.daemon.spawning.service as spawner_mod
 
-    original_new_window = spawner_mod.tmux.new_window
+    original_new_window = spawner_mod.tmux.new_window_with_identity
     captured: dict = {}
 
     async def spy_new_window(*, session, name, cwd, command, env=None, background=True):
@@ -1975,7 +2039,7 @@ async def test_promptless_spawn_job_running_during_launch(client, fake_tmux, dae
             background=background,
         )
 
-    spawner_mod.tmux.new_window = spy_new_window
+    spawner_mod.tmux.new_window_with_identity = spy_new_window
     try:
         await client.call(
             "spawn",
@@ -1985,10 +2049,10 @@ async def test_promptless_spawn_job_running_during_launch(client, fake_tmux, dae
             cwd="/tmp",
         )
     finally:
-        spawner_mod.tmux.new_window = original_new_window
+        spawner_mod.tmux.new_window_with_identity = original_new_window
 
     job = captured.get("job_at_launch")
-    assert job is not None, "job must exist when tmux.new_window is called"
+    assert job is not None, "job must exist when tmux.new_window_with_identity is called"
     assert job.state == "running", "promptless spawn job must be RUNNING during launch"
 
 
@@ -2056,7 +2120,7 @@ async def test_promptless_launch_failure_leaves_crashed_job(client, fake_tmux, d
     async def boom_new_window(**kwargs):
         raise RuntimeError("tmux exploded")
 
-    monkeypatch.setattr(spawner_mod.tmux, "new_window", boom_new_window)
+    monkeypatch.setattr(spawner_mod.tmux, "new_window_with_identity", boom_new_window)
 
     with pytest.raises(RemoteError):
         await client.call(
@@ -2370,6 +2434,8 @@ async def test_list_keyset_composes_with_direct_children_and_dead_rows(client, d
 
 
 async def test_list_parent_filter_returns_direct_children_only(client, fake_tmux):
+    fake_tmux.add_pane("%80")
+    fake_tmux.add_pane("%81")
     parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
     child = await client.call(
         "spawn",
@@ -2395,6 +2461,7 @@ async def test_list_parent_filter_returns_direct_children_only(client, fake_tmux
 
 
 async def test_list_parent_filter_composes_with_ids_and_include_dead(client, fake_tmux):
+    fake_tmux.add_pane("%80")
     parent = await client.call("hello", harness="vibe", pane="%80", cwd="/tmp")
     child = await client.call(
         "spawn",

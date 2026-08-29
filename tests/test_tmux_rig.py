@@ -101,6 +101,22 @@ async def test_regie_bootstrap_reuses_its_real_tmux_window(tmux_server, tmp_path
     assert [row for row in rows.splitlines() if row.endswith("\t1")] == [f"{first[1]}\t1"]
 
 
+async def test_new_window_captures_compound_identity_and_pane_pid(tmux_server, tmp_path):
+    created = await client.new_window_with_identity(
+        session=tmux_server,
+        name="identified",
+        cwd=str(tmp_path),
+        command=["sleep", "30"],
+    )
+
+    inventory = await client.observe_inventory()
+    info = await client.pane_info(created.pane_id)
+    assert inventory is not None
+    assert created.server_identity == inventory.server_identity
+    assert info is not None
+    assert created.pane_pid == info.pane_pid
+
+
 async def _session_attached(session: str, expected: str) -> bool:
     attached = await client.run(
         "display-message",

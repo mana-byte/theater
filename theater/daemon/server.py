@@ -128,10 +128,12 @@ class Daemon:
                 receiver_port_store=self._set_otel_receiver_port,
             )
             self.registry.add_participant_cleanup(self.otel_runtime.drop_participant)
+            self._tmux_reconcile_lock = asyncio.Lock()
             self.spawner = Spawner(
                 self.registry,
                 otel_runtime=self.otel_runtime,
                 reconcile_tmux=lambda: reconcile_tmux_inventory(self, context="spawn"),
+                tmux_reconcile_lock=self._tmux_reconcile_lock,
             )
             self.jobs = JobManager(self.store)
             agent_telemetry = create_agent_telemetry(
@@ -168,7 +170,6 @@ class Daemon:
             self._lag: asyncio.Task | None = None
             self._gauge_sampler = None
             self._explicit_kills: set[str] = set()
-            self._tmux_reconcile_lock = asyncio.Lock()
             self._sock_id: tuple[int, int] | None = None
             self._stopping = asyncio.Event()
             self._conns: set[asyncio.Task] = set()

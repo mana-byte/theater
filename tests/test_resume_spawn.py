@@ -232,7 +232,7 @@ async def test_failed_resume_launch_emits_no_boundary(
     async def boom_new_window(**kwargs):
         raise RuntimeError("tmux exploded")
 
-    monkeypatch.setattr(spawner_mod.tmux, "new_window", boom_new_window)
+    monkeypatch.setattr(spawner_mod.tmux, "new_window_with_identity", boom_new_window)
     with pytest.raises(RuntimeError, match="tmux exploded"):
         await spawner.launch(reservation)
 
@@ -826,11 +826,11 @@ async def test_launch_failure_marks_participant_dead(registry, fake_tmux, monkey
     )
     reservation = await spawner.reserve(req)
 
-    # Sabotage tmux.new_window to fail during launch.
+    # Sabotage identified tmux window creation during launch.
     async def boom_new_window(**kwargs):
         raise RuntimeError("tmux exploded")
 
-    monkeypatch.setattr(spawner_mod.tmux, "new_window", boom_new_window)
+    monkeypatch.setattr(spawner_mod.tmux, "new_window_with_identity", boom_new_window)
 
     with pytest.raises(RuntimeError, match="tmux exploded"):
         await spawner.launch(reservation)

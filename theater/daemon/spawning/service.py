@@ -15,7 +15,10 @@ from typing import TYPE_CHECKING
 from sqlalchemy.exc import IntegrityError
 
 from theater import paths, timing
-from theater.constants.daemon import BUS_KIND_PARTICIPANT_SESSION_BOUNDARY
+from theater.constants.daemon import (
+    BUS_KIND_PARTICIPANT_SESSION_BOUNDARY,
+    TMUX_RESTART_TERMINATION_REASON,
+)
 from theater.constants.harness import (
     SPAWN_KILL_POLL_ATTEMPTS,
     SPAWN_KILL_POLL_INTERVAL_SECONDS,
@@ -41,7 +44,7 @@ from theater.daemon.spawning.resume import (
 )
 from theater.harness import get as get_harness
 from theater.harness.base import LaunchPlan, ResumeLaunchOverlay
-from theater.models import BadRequest, Participant, TheaterError
+from theater.models import BadRequest, Participant, Status, TheaterError
 from theater.observability.catalog import KILL_PANE, KILL_TEARDOWN, SPAWN_LAUNCH, SPAWN_WORKTREE
 from theater.tmux import client as tmux
 
@@ -77,10 +80,12 @@ class Spawner:
         *,
         otel_runtime=None,
         reconcile_tmux: Callable[[], Awaitable[TmuxReconciliation]] | None = None,
+        tmux_reconcile_lock: asyncio.Lock | None = None,
     ):
         self.registry = registry
         self.otel_runtime = otel_runtime
         self._reconcile_tmux = reconcile_tmux
+        self._tmux_reconcile_lock = tmux_reconcile_lock
         self._named_locks: dict[str, asyncio.Lock] = {}
 
     def _named_lock(self, repo_root: str) -> asyncio.Lock:
@@ -157,35 +162,20 @@ class Spawner:
         """
         participant = reservation.participant
         try:
-            with timing.span(SPAWN_LAUNCH, id=participant.id, harness=participant.harness):
-                pane = await tmux.new_window(
-                    session=reservation.session,
-                    name=reservation.name,
-                    cwd=reservation.child_cwd,
-                    command=reservation.plan.argv,
-                    env={**reservation.plan.env, "THEATER_ID": participant.id},
-                    background=reservation.req.background,
-                )
+            if self._tmux_reconcile_lock is None:
+                attached = await self._launch_pane(reservation)
+            else:
+                async with self._tmux_reconcile_lock:
+                    attached = await self._launch_pane(reservation)
+            if self._reconcile_tmux is not None:
+                await self._reconcile_tmux()
+                attached = self.registry.get(participant.id)
         except BaseException:
             await self.cleanup_reservation(participant)
             raise
-
-        try:
-            info = await tmux.pane_info(pane)
-        except Exception:
-            info = None
-        reconciliation = await self._reconcile_tmux() if self._reconcile_tmux is not None else None
-        tmux_server_identity = reconciliation.identity_for_pane(pane) if reconciliation else None
-        try:
-            attached = self.registry.attach_pane(
-                participant.id,
-                pane,
-                pane_pid=info.pane_pid if info else None,
-                tmux_server_identity=tmux_server_identity,
-            )
-        except BaseException:
+        if attached.status is Status.DEAD:
             await self.cleanup_reservation(participant)
-            raise
+            raise TheaterError("tmux server restarted or the new pane exited during spawn")
         predecessor = reservation.resume_predecessor
         if predecessor is not None:
             try:
@@ -198,6 +188,24 @@ class Spawner:
             except Exception:
                 logger.exception("could not record resume boundary for %s", participant.id)
         return attached
+
+    async def _launch_pane(self, reservation: Reservation) -> Participant:
+        participant = reservation.participant
+        with timing.span(SPAWN_LAUNCH, id=participant.id, harness=participant.harness):
+            created = await tmux.new_window_with_identity(
+                session=reservation.session,
+                name=reservation.name,
+                cwd=reservation.child_cwd,
+                command=reservation.plan.argv,
+                env={**reservation.plan.env, "THEATER_ID": participant.id},
+                background=reservation.req.background,
+            )
+        return self.registry.attach_pane(
+            participant.id,
+            created.pane_id,
+            pane_pid=created.pane_pid,
+            tmux_server_identity=created.server_identity,
+        )
 
     async def spawn(self, req: SpawnRequest) -> Participant:
         """Reserve then launch in one call."""
@@ -303,7 +311,11 @@ class Spawner:
         return capture_resume_floor(harness, predecessor)
 
     async def cleanup_reservation(self, participant: Participant) -> None:
-        """Idempotent cleanup: retire the worktree and mark the participant DEAD."""
+        """Clean a failed reservation unless a reset diagnosis preserves its worktree."""
+        current = self.registry.store.get_participant(participant.id)
+        if current is not None and current.termination_reason == TMUX_RESTART_TERMINATION_REASON:
+            return
+        participant = current or participant
         try:
             await self.retire(participant, delete_branch=True)
         except BaseException:

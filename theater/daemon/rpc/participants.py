@@ -36,7 +36,10 @@ async def _pane_server_identity(daemon, pane: str | None, *, context: str) -> st
     if pane is None:
         return None
     reconciliation = await reconcile_tmux_inventory(daemon, context=context)
-    return reconciliation.identity_for_pane(pane)
+    identity = reconciliation.identity_for_pane(pane)
+    if identity is None:
+        raise BadRequest(f"cannot verify tmux ownership for pane {pane!r}; retry")
+    return identity
 
 
 def _resume_state(p: Participant, live_peers: list[Participant]) -> str:

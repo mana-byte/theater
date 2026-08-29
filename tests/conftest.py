@@ -14,7 +14,7 @@ from theater.daemon.registry import Registry
 from theater.daemon.server import Daemon
 from theater.daemon.store import Store
 from theater.tmux import client as tmux_client
-from theater.tmux.client import Pane, TmuxServerIdentity
+from theater.tmux.client import CreatedPane, Pane, TmuxServerIdentity
 
 
 @pytest.fixture(autouse=True)
@@ -237,6 +237,11 @@ class FakeTmux:
         )
         return pane
 
+    async def new_window_with_identity(self, **kwargs):
+        pane = await self.new_window(**kwargs)
+        info = next(item for item in self.visible_panes if item.pane_id == pane)
+        return CreatedPane(pane, info.pane_pid, self.tmux_server_identity)
+
     async def ensure_session(self, name, *, cwd=None):
         return name
 
@@ -335,6 +340,7 @@ def fake_tmux(request, monkeypatch):
     # the module once covers every caller.
     for name in (
         "new_window",
+        "new_window_with_identity",
         "ensure_session",
         "sessions",
         "kill_pane",

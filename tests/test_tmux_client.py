@@ -121,6 +121,54 @@ async def test_new_window_returns_pane_id_and_rejects_non_percent(monkeypatch):
         await client.new_window(session="0:", name="x", cwd="/tmp", command=["vibe"])
 
 
+async def test_new_window_with_identity_returns_atomic_pane_facts(monkeypatch):
+    captured: list[list[str]] = []
+
+    async def fake_run(*args: str, check: bool = True) -> str:
+        captured.append(list(args))
+        return "/tmp/tmux-501/default\t123\t456\t%99\t789"
+
+    monkeypatch.setattr(client, "run", fake_run)
+    created = await client.new_window_with_identity(
+        session="0",
+        name="vibe-abc",
+        cwd="/tmp",
+        command=["vibe", "say hello"],
+    )
+
+    assert created == client.CreatedPane(
+        pane_id="%99",
+        pane_pid=789,
+        server_identity=client.TmuxServerIdentity("/tmp/tmux-501/default", "123", "456").value,
+    )
+    assert captured[0][captured[0].index("-F") + 1] == (
+        "#{socket_path}\t#{pid}\t#{start_time}\t#{pane_id}\t#{pane_pid}"
+    )
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "/tmp/tmux\t123\t456\t%99",
+        "/tmp/tmux\t123\t456\tbad\t789",
+        "/tmp/tmux\t123\t456\t%99\tnot-a-pid",
+        "/tmp/tmux\t123\t456\t%99\t0",
+    ],
+)
+async def test_new_window_with_identity_rejects_invalid_output(monkeypatch, output):
+    async def fake_run(*args: str, check: bool = True) -> str:
+        return output
+
+    monkeypatch.setattr(client, "run", fake_run)
+    with pytest.raises(client.TmuxError, match="unexpected identified pane"):
+        await client.new_window_with_identity(
+            session="0",
+            name="vibe-abc",
+            cwd="/tmp",
+            command=["vibe"],
+        )
+
+
 # ---- list_panes --------------------------------------------------------
 
 

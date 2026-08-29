@@ -402,7 +402,8 @@ async def test_whoami_registers_on_first_call(daemon):
     assert [r["id"] for r in rows] == ["chosen-id"]
 
 
-async def test_register_pane_promotes_external_to_adopted(daemon):
+async def test_register_pane_promotes_external_to_adopted(daemon, fake_tmux):
+    fake_tmux.add_pane("%42")
     mcp = build("chosen-id", "vibe")
     assert _payload(await mcp.call_tool("whoami", {}))["tier"] == "external"
 

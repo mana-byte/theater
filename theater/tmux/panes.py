@@ -38,6 +38,7 @@ from theater.constants.tmux import (
 from theater.tmux.command import _FORMAT_SEP, _PANE_FORMAT, Pane, TmuxError
 
 _INVENTORY_FORMAT = "#{socket_path}\t#{pid}\t#{start_time}\t#{pane_id}"
+_NEW_WINDOW_IDENTITY_FORMAT = f"{_INVENTORY_FORMAT}\t#{{pane_pid}}"
 _MAX_IDENTITY_COMPONENT_LENGTH = 256
 _MAX_IDENTITY_LENGTH = 512
 _SAFE_FORMAT_LITERAL = re.compile(r"^[^\s#{}\\,;]+$")
@@ -102,6 +103,13 @@ class TmuxInventory:
 
     def identity_for_pane(self, pane_id: str) -> str | None:
         return self.server_identity if pane_id in self.pane_ids else None
+
+
+@dataclass(frozen=True, slots=True)
+class CreatedPane:
+    pane_id: str
+    pane_pid: int
+    server_identity: str
 
 
 # Proxies: delegate to the facade at call time so both panes.run and client.run patches work.
@@ -228,18 +236,74 @@ async def new_window(
     pane id, which is the whole point: it is how a spawned participant gets an
     identity without any inference.
     """
+    pane = await _new_window_output(
+        session=session,
+        name=name,
+        cwd=cwd,
+        command=command,
+        env=env,
+        background=background,
+        output_format="#{pane_id}",
+    )
+    if not _PANE_ID.fullmatch(pane):
+        raise TmuxError(f"new-window returned an unexpected pane id: {pane!r}")
+    return pane
+
+
+async def new_window_with_identity(
+    *,
+    session: str,
+    name: str,
+    cwd: str,
+    command: list[str],
+    env: dict[str, str] | None = None,
+    background: bool = True,
+) -> CreatedPane:
+    """Create a window and capture its pane and server epoch atomically."""
+    output = await _new_window_output(
+        session=session,
+        name=name,
+        cwd=cwd,
+        command=command,
+        env=env,
+        background=background,
+        output_format=_NEW_WINDOW_IDENTITY_FORMAT,
+    )
+    parts = output.split("\t")
+    if len(parts) != 5 or not all(parts) or not _PANE_ID.fullmatch(parts[3]):
+        raise TmuxError(f"new-window returned an unexpected identified pane: {output!r}")
+    try:
+        pane_pid = int(parts[4])
+    except ValueError:
+        raise TmuxError(f"new-window returned an unexpected identified pane: {output!r}") from None
+    if pane_pid <= 0:
+        raise TmuxError(f"new-window returned an unexpected identified pane: {output!r}")
+    return CreatedPane(
+        pane_id=parts[3],
+        pane_pid=pane_pid,
+        server_identity=TmuxServerIdentity(*parts[:3]).value,
+    )
+
+
+async def _new_window_output(
+    *,
+    session: str,
+    name: str,
+    cwd: str,
+    command: list[str],
+    env: dict[str, str] | None,
+    background: bool,
+    output_format: str,
+) -> str:
     target = session if session.endswith(":") else f"{session}:"
-    args = ["new-window", "-P", "-F", "#{pane_id}", "-t", target, "-n", name, "-c", cwd]
+    args = ["new-window", "-P", "-F", output_format, "-t", target, "-n", name, "-c", cwd]
     if background:
         args.insert(1, "-d")
     for key, value in (env or {}).items():
         args += ["-e", f"{key}={value}"]
     args.append("--")
     args += command
-    pane = await run(*args)
-    if not pane.startswith("%"):
-        raise TmuxError(f"new-window returned an unexpected pane id: {pane!r}")
-    return pane
+    return await run(*args)
 
 
 async def kill_pane(pane_id: str) -> None:

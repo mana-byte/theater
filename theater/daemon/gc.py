@@ -277,19 +277,20 @@ async def _sweep_participants(store: Store, restart_cutoff: float, batch: int) -
     """Delete dead participants that nothing references (MF3).
 
     Participants are gated, never aged except restart diagnoses: a tmux-reset
-    row also waits through ``jobs_days`` from ``terminated_at``. The three
-    clauses each protect a different reference:
+    row also waits through ``jobs_days`` from ``terminated_at``. Four guards
+    protect references:
 
     1. ``target_id`` — a job still in flight against this participant.
     2. ``caller_id`` — a job record that names this participant as the
        caller. If deleted, ``recall.py``'s INNER join from touch to jobs
        would drop rows whose ``caller_id`` is this participant.
-    3. ``parent_id`` — another participant's lineage chain. ``rails.py``
+    3. ``resumed_from_id`` — a live or retained recovery successor's claim.
+    4. ``parent_id`` — another participant's lineage chain. ``rails.py``
        walks ``parent_id`` upward with ``get_participant`` and does not
        filter out dead rows. Deleting a participant in the middle of a
        chain terminates the walk early, depth is under-counted, and a spawn
        the cap should have refused is allowed. The rail fails *open*.
-       **Do not delete the third clause** — the next person will read it as
+       **Do not delete the fourth guard** — the next person will read it as
        redundant, and it is not.
     """
     total = 0
