@@ -328,6 +328,22 @@ async def test_hello_refuses_a_pane_absent_from_the_observed_server(client):
     assert await client.call("participants.list") == []
 
 
+async def test_hello_refuses_a_pane_snapshot_from_another_server(client, fake_tmux, monkeypatch):
+    from theater.tmux import client as tmux_client
+
+    pane = fake_tmux.add_pane("%44")
+
+    async def mismatched_snapshot(pane_id):
+        return tmux_client.TmuxPaneSnapshot(pane, "different-server")
+
+    monkeypatch.setattr(tmux_client, "pane_snapshot", mismatched_snapshot)
+    with pytest.raises(RemoteError) as exc:
+        await client.call("hello", harness="vibe", pane="%44", cwd="/tmp")
+
+    assert exc.value.code == "bad_request"
+    assert await client.call("participants.list") == []
+
+
 async def test_lineage_shows_in_the_tree(client, fake_tmux):
     fake_tmux.add_pane("%99")
     parent = await client.call("hello", harness="vibe", pane="%99", cwd="/tmp")

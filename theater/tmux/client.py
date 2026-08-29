@@ -70,6 +70,7 @@ from theater.tmux.options import (  # noqa: F401
 from theater.tmux.panes import (  # noqa: F401
     CreatedPane,
     TmuxInventory,
+    TmuxPaneSnapshot,
     TmuxServerIdentity,
     break_pane,
     display_message,
@@ -86,6 +87,7 @@ from theater.tmux.panes import (  # noqa: F401
     observe_inventory,
     pane_exists,
     pane_info,
+    pane_snapshot,
     resize_pane,
     select_pane,
     sessions,

@@ -39,6 +39,7 @@ from theater.tmux.command import _FORMAT_SEP, _PANE_FORMAT, Pane, TmuxError
 
 _INVENTORY_FORMAT = "#{socket_path}\t#{pid}\t#{start_time}\t#{pane_id}"
 _NEW_WINDOW_IDENTITY_FORMAT = f"{_INVENTORY_FORMAT}\t#{{pane_pid}}"
+_PANE_SNAPSHOT_FORMAT = f"#{{socket_path}}\t#{{pid}}\t#{{start_time}}\t{_PANE_FORMAT}"
 _MAX_IDENTITY_COMPONENT_LENGTH = 256
 _MAX_IDENTITY_LENGTH = 512
 _SAFE_FORMAT_LITERAL = re.compile(r"^[^\s#{}\\,;]+$")
@@ -112,6 +113,12 @@ class CreatedPane:
     server_identity: str
 
 
+@dataclass(frozen=True, slots=True)
+class TmuxPaneSnapshot:
+    pane: Pane
+    server_identity: str
+
+
 # Proxies: delegate to the facade at call time so both panes.run and client.run patches work.
 
 
@@ -179,6 +186,35 @@ async def pane_info(pane_id: str) -> Pane | None:
         if pane.pane_id == pane_id:
             return pane
     return None
+
+
+async def pane_snapshot(pane_id: str) -> TmuxPaneSnapshot | None:
+    """Read one pane and its server epoch in a single tmux command."""
+    if not _PANE_ID.fullmatch(pane_id):
+        raise TmuxError(f"invalid tmux pane id {pane_id!r}")
+    out = await run(
+        "display-message",
+        "-p",
+        "-t",
+        pane_id,
+        _PANE_SNAPSHOT_FORMAT,
+        check=False,
+    )
+    if not out:
+        return None
+    parts = out.split("\t", 3)
+    if len(parts) != 4 or not all(parts):
+        raise TmuxError("tmux returned an invalid pane snapshot")
+    try:
+        pane = Pane.parse(parts[3])
+    except (TmuxError, ValueError):
+        raise TmuxError("tmux returned an invalid pane snapshot") from None
+    if pane.pane_id != pane_id:
+        raise TmuxError("tmux returned an invalid pane snapshot")
+    return TmuxPaneSnapshot(
+        pane=pane,
+        server_identity=TmuxServerIdentity(*parts[:3]).value,
+    )
 
 
 async def sessions() -> list[str]:

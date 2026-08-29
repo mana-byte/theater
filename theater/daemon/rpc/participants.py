@@ -29,15 +29,15 @@ from theater.provenance import is_trusted_provenance
 from theater.tmux import client as tmux
 
 
-async def _verified_pane_locked(daemon, pane: str, *, context: str):
+async def _verified_pane_locked(daemon, pane: str, *, context: str) -> tuple[tmux.Pane, str]:
     reconciliation = await reconcile_tmux_inventory_locked(daemon, context=context)
     identity = reconciliation.identity_for_pane(pane)
     if identity is None:
         raise BadRequest(f"cannot verify tmux ownership for pane {pane!r}; retry")
-    info = await tmux.pane_info(pane)
-    if info is None:
+    snapshot = await tmux.pane_snapshot(pane)
+    if snapshot is None or snapshot.server_identity != identity:
         raise BadRequest(f"cannot verify tmux ownership for pane {pane!r}; retry")
-    return info, identity
+    return snapshot.pane, identity
 
 
 def _resume_state(p: Participant, live_peers: list[Participant]) -> str:

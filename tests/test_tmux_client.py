@@ -257,6 +257,45 @@ async def test_inventory_observation_rejects_missing_identity_component(monkeypa
         await client.observe_inventory()
 
 
+async def test_pane_snapshot_reads_pane_and_server_identity_atomically(monkeypatch):
+    captured: list[tuple[tuple[str, ...], bool]] = []
+    pane_row = client._FORMAT_SEP.join(
+        ("%42", "789", "/tmp/project", "@7", "main", "agent", "codex")
+    )
+
+    async def fake_run(*args: str, check: bool = True) -> str:
+        captured.append((args, check))
+        return f"/tmp/tmux-501/default\t123\t456\t{pane_row}"
+
+    monkeypatch.setattr(client, "run", fake_run)
+    snapshot = await client.pane_snapshot("%42")
+
+    assert snapshot == client.TmuxPaneSnapshot(
+        pane=client.Pane("%42", 789, "/tmp/project", "@7", "main", "agent", "codex"),
+        server_identity=client.TmuxServerIdentity("/tmp/tmux-501/default", "123", "456").value,
+    )
+    args, check = captured[0]
+    assert args == (
+        "display-message",
+        "-p",
+        "-t",
+        "%42",
+        f"#{{socket_path}}\t#{{pid}}\t#{{start_time}}\t{client._PANE_FORMAT}",
+    )
+    assert check is False
+
+
+async def test_pane_snapshot_rejects_a_different_returned_pane(monkeypatch):
+    pane_row = client._FORMAT_SEP.join(("%43", "789", "/tmp", "@7", "main", "agent", "codex"))
+
+    async def fake_run(*args: str, check: bool = True) -> str:
+        return f"/tmp/tmux\t123\t456\t{pane_row}"
+
+    monkeypatch.setattr(client, "run", fake_run)
+    with pytest.raises(client.TmuxError, match="invalid pane snapshot"):
+        await client.pane_snapshot("%42")
+
+
 # ---- kill_pane / deliver_text: targets are pane ids, not sessions ------
 
 

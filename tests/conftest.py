@@ -14,7 +14,7 @@ from theater.daemon.registry import Registry
 from theater.daemon.server import Daemon
 from theater.daemon.store import Store
 from theater.tmux import client as tmux_client
-from theater.tmux.client import CreatedPane, Pane, TmuxServerIdentity
+from theater.tmux.client import CreatedPane, Pane, TmuxPaneSnapshot, TmuxServerIdentity
 
 
 @pytest.fixture(autouse=True)
@@ -285,6 +285,12 @@ class FakeTmux:
     async def list_panes(self, session=None):
         return list(self.visible_panes)
 
+    async def pane_snapshot(self, pane_id):
+        info = next((p for p in self.visible_panes if p.pane_id == pane_id), None)
+        if info is None:
+            return None
+        return TmuxPaneSnapshot(info, self.tmux_server_identity)
+
     async def observe_inventory(self):
         from theater.tmux.client import TmuxInventory
 
@@ -351,6 +357,7 @@ def fake_tmux(request, monkeypatch):
         "kill_pane",
         "kill_pane_if_identity",
         "list_panes",
+        "pane_snapshot",
         "observe_inventory",
         "available",
         "run",

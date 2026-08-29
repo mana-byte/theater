@@ -111,10 +111,14 @@ async def test_new_window_captures_compound_identity_and_pane_pid(tmux_server, t
 
     inventory = await client.observe_inventory()
     info = await client.pane_info(created.pane_id)
+    snapshot = await client.pane_snapshot(created.pane_id)
     assert inventory is not None
     assert created.server_identity == inventory.server_identity
     assert info is not None
     assert created.pane_pid == info.pane_pid
+    assert snapshot is not None
+    assert snapshot.server_identity == created.server_identity
+    assert snapshot.pane.pane_pid == created.pane_pid
 
 
 async def test_conditional_kill_refuses_a_replaced_pane_process(tmux_server, tmp_path):
