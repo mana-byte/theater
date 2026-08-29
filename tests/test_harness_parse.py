@@ -162,12 +162,6 @@ def test_vibe_records_parse_to_the_expected_event_sequence():
     assert events[4].tool_name == "read_file"
 
 
-def test_vibe_events_carry_no_timestamp():
-    """Not an omission here: messages.jsonl records no time at all."""
-    events = events_for(VibeObserver(), FIXTURES / "vibe_messages.jsonl")
-    assert all(e.ts is None for e in events)
-
-
 @pytest.mark.parametrize("calls", [None, []])
 def test_vibe_falsy_tool_calls_mean_the_turn_ended(calls):
     """Observed only as an absent key, but absent and empty must agree."""

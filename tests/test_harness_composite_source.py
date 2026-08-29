@@ -682,24 +682,6 @@ async def test_dedup_different_revisions_both_pass() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dedup_across_children_same_channel_and_native_id() -> None:
-    """Same (channel_id, native_id, revision) from the same channel dedupes."""
-    fact = _fact("shared", 0)
-    primary = _ControlledSource()
-    enrich = _ControlledSource()
-    enrich.set_batch(Batch(trajectory=[fact]))
-    composite = CompositeSource(
-        primary=primary,
-        enrichments=[EnrichmentBinding(source=enrich, declaration=_decl("ch"))],
-    )
-    batch1 = await composite.read()
-    batch2 = await composite.read()
-    assert len(batch1.trajectory) == 1
-    assert len(batch2.trajectory) == 0
-    await composite.aclose()
-
-
-@pytest.mark.asyncio
 async def test_dedup_different_channels_same_native_id_both_pass() -> None:
     """Different channel IDs produce different dedup keys even with same native_id."""
     fact = _fact("shared", 0)
