@@ -275,7 +275,7 @@ async def test_kill_pane_targets_pane_id_directly(monkeypatch):
     assert argv[argv.index("-t") + 1] == "%42"
 
 
-async def test_conditional_kill_checks_compound_server_identity(monkeypatch):
+async def test_conditional_kill_checks_server_and_pane_process_identity(monkeypatch):
     captured: list[list[str]] = []
 
     async def fake_run(*args: str, check: bool = True) -> str:
@@ -284,12 +284,14 @@ async def test_conditional_kill_checks_compound_server_identity(monkeypatch):
 
     identity = client.TmuxServerIdentity("/tmp/tmux-100/default", "123", "456").value
     monkeypatch.setattr(client, "run", fake_run)
-    assert await client.kill_pane_if_server_identity("%42", identity) is True
+    assert await client.kill_pane_if_identity("%42", identity, 789) is True
     assert captured == [
         [
             "if-shell",
             "-F",
-            "#{&&:#{==:#{socket_path},/tmp/tmux-100/default},#{&&:#{==:#{pid},123},#{==:#{start_time},456}}}",
+            "-t",
+            "%42",
+            "#{&&:#{&&:#{==:#{socket_path},/tmp/tmux-100/default},#{&&:#{==:#{pid},123},#{==:#{start_time},456}}},#{==:#{pane_pid},789}}",
             "display-message -p theater-killed; kill-pane -t %42",
             "display-message -p theater-identity-mismatch",
         ]

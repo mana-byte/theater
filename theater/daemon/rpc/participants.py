@@ -15,10 +15,7 @@ from theater.daemon import workers
 from theater.daemon.harness_detect import detect_harness, match_binary
 from theater.daemon.rpc.params import _require
 from theater.daemon.rpc.router import method
-from theater.daemon.runtime.tmux_reconcile import (
-    reconcile_tmux_inventory,
-    reconcile_tmux_inventory_locked,
-)
+from theater.daemon.runtime.tmux_reconcile import reconcile_tmux_inventory_locked
 from theater.harness import HARNESSES, normalize, supports_resume
 from theater.models import (
     BadRequest,
@@ -32,14 +29,15 @@ from theater.provenance import is_trusted_provenance
 from theater.tmux import client as tmux
 
 
-async def _pane_server_identity(daemon, pane: str | None, *, context: str) -> str | None:
-    if pane is None:
-        return None
-    reconciliation = await reconcile_tmux_inventory(daemon, context=context)
+async def _verified_pane_locked(daemon, pane: str, *, context: str):
+    reconciliation = await reconcile_tmux_inventory_locked(daemon, context=context)
     identity = reconciliation.identity_for_pane(pane)
     if identity is None:
         raise BadRequest(f"cannot verify tmux ownership for pane {pane!r}; retry")
-    return identity
+    info = await tmux.pane_info(pane)
+    if info is None:
+        raise BadRequest(f"cannot verify tmux ownership for pane {pane!r}; retry")
+    return info, identity
 
 
 def _resume_state(p: Participant, live_peers: list[Participant]) -> str:
@@ -135,15 +133,32 @@ def _pagination(
 async def _hello(daemon, params: dict) -> dict:
     """First contact. Establishes or confirms the caller's identity and tier."""
     pane = params.get("pane")
-    tmux_server_identity = await _pane_server_identity(daemon, pane, context="hello")
-    participant = daemon.registry.register(
-        harness=params.get("harness") or "unknown",
-        pane=pane,
-        cwd=params.get("cwd"),
-        session_id=params.get("session_id"),
-        claimed_id=params.get("id"),
-        tmux_server_identity=tmux_server_identity,
-    )
+    if pane is None:
+        participant = daemon.registry.register(
+            harness=params.get("harness") or "unknown",
+            pane=None,
+            cwd=params.get("cwd"),
+            session_id=params.get("session_id"),
+            claimed_id=params.get("id"),
+        )
+    else:
+        if not isinstance(pane, str) or not pane:
+            raise BadRequest("pane must be a non-empty tmux pane id, or absent")
+        async with daemon._tmux_reconcile_lock:
+            info, tmux_server_identity = await _verified_pane_locked(
+                daemon,
+                pane,
+                context="hello",
+            )
+            participant = daemon.registry.register(
+                harness=params.get("harness") or "unknown",
+                pane=pane,
+                pane_pid=info.pane_pid,
+                cwd=params.get("cwd"),
+                session_id=params.get("session_id"),
+                claimed_id=params.get("id"),
+                tmux_server_identity=tmux_server_identity,
+            )
     return participant.to_dict()
 
 
@@ -278,9 +293,12 @@ async def _kill(daemon, params: dict) -> dict:
                 )
             if refreshed.tmux_server_identity != expected_identity:
                 raise BadRequest(f"cannot kill {pid!r}: tmux pane ownership is not verified")
+            if refreshed.pid is None:
+                raise BadRequest(f"cannot kill {pid!r}: tmux pane process is not verified")
             participant = await daemon.spawner.kill_pane(
                 pid,
                 expected_server_identity=expected_identity,
+                expected_pane_pid=refreshed.pid,
             )
 
     # finish is first-terminal-write-wins. The marker tells the reaper to leave this alone.
@@ -292,7 +310,11 @@ async def _kill(daemon, params: dict) -> dict:
     daemon._explicit_kills.add(pid)
     try:
         if not participant.tmux_pane:
-            participant = await daemon.spawner.kill_pane(pid, expected_server_identity=None)
+            participant = await daemon.spawner.kill_pane(
+                pid,
+                expected_server_identity=None,
+                expected_pane_pid=None,
+            )
         # Finish jobs before teardown: job completion hashes files in the worktree.
         for job in daemon.store.running_jobs_for_target(pid):
             daemon.jobs.finish(job.handle, state=JobState.KILLED, error_code="killed")
@@ -311,29 +333,26 @@ async def _adopt(daemon, params: dict) -> dict:
     cwd = params.get("cwd")
     if not tmux.available():
         raise BadRequest("tmux is not available; cannot look up pane")
-    panes = await tmux.list_panes()
-    match = next((p for p in panes if p.pane_id == pane), None)
-    if match is None:
-        raise BadRequest(f"pane {pane!r} not found in tmux")
-    harness = (
-        normalize(override) if override else detect_harness(match.current_command, match.pane_pid)
-    )
-    if cwd is None:
-        cwd = match.cwd
-    tmux_server_identity = await _pane_server_identity(daemon, pane, context="adopt")
-    participant = daemon.registry.register(
-        harness=harness,
-        pane=pane,
-        cwd=cwd,
-        tmux_server_identity=tmux_server_identity,
-    )
-    # The launch epoch is from the shell tmux forked, not the harness.
-    participant = daemon.registry.attach_pane(
-        participant.id,
-        pane,
-        pane_pid=match.pane_pid,
-        tmux_server_identity=tmux_server_identity,
-    )
+    async with daemon._tmux_reconcile_lock:
+        match, tmux_server_identity = await _verified_pane_locked(
+            daemon,
+            pane,
+            context="adopt",
+        )
+        harness = (
+            normalize(override)
+            if override
+            else detect_harness(match.current_command, match.pane_pid)
+        )
+        if cwd is None:
+            cwd = match.cwd
+        participant = daemon.registry.register(
+            harness=harness,
+            pane=pane,
+            pane_pid=match.pane_pid,
+            cwd=cwd,
+            tmux_server_identity=tmux_server_identity,
+        )
     return participant.to_dict()
 
 

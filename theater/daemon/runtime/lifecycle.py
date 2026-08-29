@@ -99,8 +99,6 @@ async def reconcile(daemon) -> None:
     """
     reconciliation = await reconcile_tmux_inventory(daemon, context="reconcile")
     pane_ids = reconciliation.pane_ids
-    if pane_ids is None:
-        return
 
     for p in daemon.registry.list(include_dead=True):
         if p.status is Status.DEAD:
@@ -112,6 +110,9 @@ async def reconcile(daemon) -> None:
             running = daemon.store.running_jobs_for_target(p.id)
             for job in running:
                 daemon.jobs.finish(job.handle, state=JobState.CRASHED, error_code=error_code)
+
+    if pane_ids is None:
+        return
 
     for p in daemon.registry.list():
         if p.status is not Status.DEAD:

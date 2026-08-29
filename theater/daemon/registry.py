@@ -260,6 +260,7 @@ class Registry:
         *,
         harness: str,
         pane: str | None,
+        pane_pid: int | None = None,
         cwd: str | None,
         session_id: str | None = None,
         claimed_id: str | None = None,
@@ -297,6 +298,8 @@ class Registry:
                             pane,
                             tmux_server_identity=tmux_server_identity,
                         )
+                        if existing.tmux_pane == pane and pane_pid is not None:
+                            existing.pid = pane_pid
                     # Converge an alias-stored harness on reconnect (guard: normalize() == harness).
                     if normalize(existing.harness) == harness and existing.harness != harness:
                         existing.harness = harness
@@ -324,6 +327,8 @@ class Registry:
                 prior.session_id = session_id or prior.session_id
                 if tmux_server_identity is not None:
                     prior.tmux_server_identity = tmux_server_identity
+                if pane_pid is not None:
+                    prior.pid = pane_pid
                 prior.status = Status.IDLE
                 prior.last_activity = now()
                 self.store.upsert_participant(prior)
@@ -336,6 +341,7 @@ class Registry:
             tier=Tier.ADOPTED if pane else Tier.EXTERNAL,
             tmux_pane=pane,
             tmux_server_identity=tmux_server_identity if pane else None,
+            pid=pane_pid if pane else None,
             cwd=cwd,
             session_id=session_id,
             status=Status.IDLE,

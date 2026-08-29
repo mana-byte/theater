@@ -445,12 +445,12 @@ async def test_kill_leaves_record_alive_when_pane_survives(client, fake_tmux, mo
 
     # Override the conditional kill so it does not remove the pane, simulating a pane
     # that tmux failed to reap.
-    async def noop_kill(pane_id, expected_identity):
+    async def noop_kill(pane_id, expected_server_identity, expected_pane_pid):
         return True
 
     from theater.tmux import client as tmux_client
 
-    monkeypatch.setattr(tmux_client, "kill_pane_if_server_identity", noop_kill)
+    monkeypatch.setattr(tmux_client, "kill_pane_if_identity", noop_kill)
 
     # Patch asyncio.sleep so the test does not actually wait through the poll
     # interval. The bounded retry runs its full course; only the sleep is
@@ -481,7 +481,7 @@ async def test_kill_succeeds_when_pane_disappears_on_a_later_poll(client, fake_t
     pane_id = record["tmux_pane"]
     poll_count = 0
 
-    async def noop_kill(pid, expected_identity):
+    async def noop_kill(pid, expected_server_identity, expected_pane_pid):
         return True
 
     async def pane_info_delayed(pid):
@@ -493,7 +493,7 @@ async def test_kill_succeeds_when_pane_disappears_on_a_later_poll(client, fake_t
         # Second poll: pane is gone.
         return None
 
-    monkeypatch.setattr(tmux_client, "kill_pane_if_server_identity", noop_kill)
+    monkeypatch.setattr(tmux_client, "kill_pane_if_identity", noop_kill)
     monkeypatch.setattr(tmux_client, "pane_info", pane_info_delayed)
 
     async def noop_sleep(_):
@@ -505,6 +505,20 @@ async def test_kill_succeeds_when_pane_disappears_on_a_later_poll(client, fake_t
     assert result == {"id": record["id"], "killed": True}
     dead = await client.call("participants.get", id=record["id"])
     assert dead["status"] == "dead"
+
+
+async def test_kill_refuses_a_same_server_pane_with_a_replaced_process(client, fake_tmux):
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+    pane_id = record["tmux_pane"]
+    fake_tmux.add_pane(pane_id, pid=record["pid"] + 1)
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call("participant.kill", id=record["id"])
+
+    assert exc.value.code == "error"
+    assert "pane ownership changed" in exc.value.message
+    assert (await client.call("participants.get", id=record["id"]))["status"] != "dead"
+    assert any(p.pane_id == pane_id for p in fake_tmux.visible_panes)
 
 
 async def test_kill_finishes_running_jobs_as_killed(client, fake_tmux):
@@ -872,6 +886,33 @@ async def test_startup_reconciliation_detects_a_tmux_server_restart(daemon, clie
     assert job["error_code"] == TMUX_RESTART_JOB_ERROR_CODE
 
 
+async def test_startup_replays_reset_job_failure_when_inventory_is_inconclusive(
+    daemon, client, monkeypatch
+):
+    from theater.constants.daemon import TMUX_RESTART_JOB_ERROR_CODE
+    from theater.tmux import client as tmux_client
+
+    record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+    participant = daemon.registry.get(record["id"])
+    daemon.store.record_tmux_server_restart(
+        server_identity="server-after",
+        affected_ids=[participant.id],
+        newly_owned_ids=[],
+        incident="incident-before-crash",
+        terminated_at=participant.last_activity + 1,
+    )
+
+    async def unavailable_inventory():
+        return None
+
+    monkeypatch.setattr(tmux_client, "observe_inventory", unavailable_inventory)
+    await daemon._reconcile()
+
+    job = await client.call("jobs.status", handle=record["handle"])
+    assert job["state"] == "crashed"
+    assert job["error_code"] == TMUX_RESTART_JOB_ERROR_CODE
+
+
 async def test_first_tmux_inventory_establishes_baseline_without_terminating(
     daemon, client, monkeypatch
 ):
@@ -969,7 +1010,7 @@ async def test_cli_kill_of_reset_tombstone_never_targets_a_reused_pane(
     retire_calls: list[str] = []
     teardown_calls: list[str] = []
 
-    async def conditional_kill(pane, identity):
+    async def conditional_kill(pane, server_identity, pane_pid):
         kill_calls.append(pane)
         return False
 
@@ -979,7 +1020,7 @@ async def test_cli_kill_of_reset_tombstone_never_targets_a_reused_pane(
     async def teardown(participant):
         teardown_calls.append(participant.id)
 
-    monkeypatch.setattr(tmux_client, "kill_pane_if_server_identity", conditional_kill)
+    monkeypatch.setattr(tmux_client, "kill_pane_if_identity", conditional_kill)
     monkeypatch.setattr(daemon.spawner, "retire", retire)
     monkeypatch.setattr(daemon.spawner, "teardown", teardown)
 

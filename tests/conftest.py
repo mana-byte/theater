@@ -253,8 +253,13 @@ class FakeTmux:
             self.panes.remove(pane_id)
         self.visible_panes = [p for p in self.visible_panes if p.pane_id != pane_id]
 
-    async def kill_pane_if_server_identity(self, pane_id, expected_identity):
-        if expected_identity != self.tmux_server_identity:
+    async def kill_pane_if_identity(self, pane_id, expected_server_identity, expected_pane_pid):
+        info = next((p for p in self.visible_panes if p.pane_id == pane_id), None)
+        if (
+            expected_server_identity != self.tmux_server_identity
+            or info is None
+            or expected_pane_pid != info.pane_pid
+        ):
             return False
         await self.kill_pane(pane_id)
         return True
@@ -344,7 +349,7 @@ def fake_tmux(request, monkeypatch):
         "ensure_session",
         "sessions",
         "kill_pane",
-        "kill_pane_if_server_identity",
+        "kill_pane_if_identity",
         "list_panes",
         "observe_inventory",
         "available",

@@ -76,7 +76,7 @@ from theater.tmux.panes import (  # noqa: F401
     ensure_session,
     join_pane,
     kill_pane,
-    kill_pane_if_server_identity,
+    kill_pane_if_identity,
     kill_window,
     list_panes,
     move_window_to_index,

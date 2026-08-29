@@ -274,9 +274,7 @@ async def test_spawn_records_the_launch_epoch(client, fake_tmux, daemon):
     assert daemon.registry.get(record["id"]).pid == pane.pane_pid
 
 
-async def test_spawn_survives_an_unreadable_epoch(client, fake_tmux, monkeypatch):
-    """The window exists and the harness is starting. Losing the agent over a
-    bookkeeping lookup would be a far worse trade than losing one check."""
+async def test_spawn_captures_epoch_without_a_followup_pane_lookup(client, fake_tmux, monkeypatch):
     from theater.tmux import client as tmux_client
 
     async def broken(session=None):
@@ -285,9 +283,10 @@ async def test_spawn_survives_an_unreadable_epoch(client, fake_tmux, monkeypatch
     monkeypatch.setattr(tmux_client, "list_panes", broken)
 
     record = await client.call("spawn", harness="vibe", prompt="hi", approval="manual", cwd="/tmp")
+    pane = next(p for p in fake_tmux.visible_panes if p.pane_id == record["tmux_pane"])
 
     assert record["tmux_pane"] is not None
-    assert record["pid"] is None
+    assert record["pid"] == pane.pane_pid
 
 
 async def test_adopt_records_the_launch_epoch(client, fake_tmux, daemon):

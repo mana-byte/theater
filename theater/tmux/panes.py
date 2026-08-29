@@ -310,14 +310,23 @@ async def kill_pane(pane_id: str) -> None:
     await run("kill-pane", "-t", pane_id, check=False)
 
 
-async def kill_pane_if_server_identity(pane_id: str, expected_identity: str) -> bool:
-    """Kill a pane only when tmux still reports the expected server identity."""
+async def kill_pane_if_identity(
+    pane_id: str,
+    expected_server_identity: str,
+    expected_pane_pid: int,
+) -> bool:
+    """Kill a pane only while both its server and process epochs still match."""
     if not _PANE_ID.fullmatch(pane_id):
         raise TmuxError(f"invalid tmux pane id {pane_id!r}")
-    condition = TmuxServerIdentity.parse(expected_identity).format_condition()
+    if type(expected_pane_pid) is not int or expected_pane_pid <= 0:
+        raise TmuxError("tmux pane process identity is invalid")
+    server_condition = TmuxServerIdentity.parse(expected_server_identity).format_condition()
+    condition = f"#{{&&:{server_condition},#{{==:#{{pane_pid}},{expected_pane_pid}}}}}"
     result = await run(
         "if-shell",
         "-F",
+        "-t",
+        pane_id,
         condition,
         f"display-message -p {_KILLED}; kill-pane -t {pane_id}",
         f"display-message -p {_MISMATCH}",

@@ -117,6 +117,34 @@ async def test_new_window_captures_compound_identity_and_pane_pid(tmux_server, t
     assert created.pane_pid == info.pane_pid
 
 
+async def test_conditional_kill_refuses_a_replaced_pane_process(tmux_server, tmp_path):
+    created = await client.new_window_with_identity(
+        session=tmux_server,
+        name="conditional-kill",
+        cwd=str(tmp_path),
+        command=["sleep", "30"],
+    )
+
+    assert (
+        await client.kill_pane_if_identity(
+            created.pane_id,
+            created.server_identity,
+            created.pane_pid + 1,
+        )
+        is False
+    )
+    assert await client.pane_exists(created.pane_id)
+    assert (
+        await client.kill_pane_if_identity(
+            created.pane_id,
+            created.server_identity,
+            created.pane_pid,
+        )
+        is True
+    )
+    await _wait_for(lambda: _gone(created.pane_id))
+
+
 async def _session_attached(session: str, expected: str) -> bool:
     attached = await client.run(
         "display-message",

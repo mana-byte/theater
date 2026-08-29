@@ -399,6 +399,7 @@ class Spawner:
         participant_id: str,
         *,
         expected_server_identity: str | None,
+        expected_pane_pid: int | None,
     ) -> Participant:
         """Kill the tmux pane and confirm it is gone."""
         p = self.registry.get(participant_id)
@@ -406,17 +407,20 @@ class Spawner:
             if (
                 expected_server_identity is None
                 or p.tmux_server_identity != expected_server_identity
+                or expected_pane_pid is None
+                or p.pid != expected_pane_pid
             ):
                 raise BadRequest(
                     f"cannot kill {participant_id!r}: tmux pane ownership is not verified"
                 )
             with timing.span(KILL_PANE, id=p.id, pane=p.tmux_pane, harness=p.harness) as sp:
-                if not await tmux.kill_pane_if_server_identity(
+                if not await tmux.kill_pane_if_identity(
                     p.tmux_pane,
                     expected_server_identity,
+                    expected_pane_pid,
                 ):
                     raise TheaterError(
-                        f"cannot kill {participant_id!r}: tmux server changed before pane kill"
+                        f"cannot kill {participant_id!r}: tmux pane ownership changed before kill"
                     )
                 for attempt in range(self.KILL_POLL_ATTEMPTS):
                     sp["attempts"] = attempt + 1
