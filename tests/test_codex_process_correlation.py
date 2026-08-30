@@ -712,7 +712,7 @@ def test_each_native_subagent_marker_blocks_exact_and_operator_attachment(
     root = tmp_path / ".codex" / "sessions"
     project = tmp_path / "project"
     project.mkdir()
-    parent = _rollout(
+    _rollout(
         root,
         SESSION_A,
         project,
@@ -728,7 +728,7 @@ def test_each_native_subagent_marker_blocks_exact_and_operator_attachment(
         text="native child",
         metadata=metadata,
     )
-    hold(monkeypatch, {PID_A: [parent]})
+    hold(monkeypatch, {PID_A: []})
     reader = CodexObserver(root=root, pane_pid=PID_A, session_exact=True)
 
     assert reader.find_transcript(cwd=str(project), session_id=SESSION_C) is None
@@ -738,6 +738,32 @@ def test_each_native_subagent_marker_blocks_exact_and_operator_attachment(
         row for row in reader.transcript_candidates(cwd=str(project)) if row.location == str(child)
     )
     assert listed.rejection_reason == "codex native subagent rollout"
+
+
+def test_rejected_exact_subagent_falls_through_to_parent_process_proof(monkeypatch, tmp_path):
+    root = tmp_path / ".codex" / "sessions"
+    project = tmp_path / "project"
+    project.mkdir()
+    parent = _rollout(
+        root,
+        SESSION_A,
+        project,
+        at="01-19-02",
+        text="parent",
+        metadata={"thread_source": "user", "source": "cli"},
+    )
+    _rollout(
+        root,
+        SESSION_C,
+        project,
+        at="01-20-46",
+        text="native child",
+        metadata={"thread_source": "subagent", "source": {"subagent": {}}},
+    )
+    hold(monkeypatch, {PID_A: [parent]})
+    reader = CodexObserver(root=root, pane_pid=PID_A, session_exact=True)
+
+    assert reader.find_transcript(cwd=str(project), session_id=SESSION_C) == parent.resolve()
 
 
 def test_unknown_metadata_requires_trusted_selection_but_user_fork_remains_eligible(tmp_path):

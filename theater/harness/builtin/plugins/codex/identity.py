@@ -158,9 +158,7 @@ class CodexIdentityMixin:
             return None
         if session_id and self._session_exact:
             hit = self._by_session_id(session_id)
-            if hit is not None:
-                if self._binding_rejection_reason(hit) is not None:
-                    return None
+            if hit is not None and self._binding_rejection_reason(hit) is None:
                 return hit
         held = self.proven_transcript(cwd=cwd)
         if held is not None:
