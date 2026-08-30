@@ -1,11 +1,12 @@
 <div align="center">
 
-<h1>Theater</h1>
-<h3>One stage for every coding agent.</h3>
+<h1>🎭 Theater</h1>
+<h3>Run the whole show from one terminal.</h3>
 <p>
-Run Claude Code, Codex, opencode, and Vibe side by side.<br>
-Delegate across harnesses, watch every turn, and keep the human in control—from
-one tmux-native workspace.
+Let orchestrators direct agents across models, harnesses, worktrees, and
+projects.<br>
+Follow every turn from the régie, step into any session when needed, and keep
+the cast, changes, model choices, and costs under control.
 </p>
 <p>
 <a href="https://github.com/mana-byte/theater/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/mana-byte/theater/actions/workflows/ci.yml/badge.svg"></a>
@@ -26,7 +27,7 @@ lineage, status, panes, trajectories, transcripts, and usage.
 No hosted control plane. No replacement chat UI. Your agents keep their native
 CLIs, permissions, sessions, and terminal panes.
 
-## See it in action
+## 🎬 See it in action
 
 > **Demo video needed (60–90 seconds).** Record a clean 1440p walkthrough that
 > opens `theater`, spawns two different harnesses, stages an agent pane, opens
@@ -50,7 +51,15 @@ CLIs, permissions, sessions, and terminal panes.
 </tr>
 </table>
 
-## Why Theater
+## 🎟️ Practical workflows
+
+| Issue / task | Normal (mono-CLI) | Theater |
+| --- | --- | --- |
+| **🔎 Research across multiple sources** | One agent visits each source sequentially and synthesizes within a single context. | An orchestrator assigns sources to agents in parallel, compares their evidence, resolves contradictions, and acts on the combined findings. |
+| **🧩 Resolve multiple Linear issues** | Work through the backlog one issue at a time, or manually coordinate several terminals and branches. | Give the orchestrator a list of issues; it identifies independent work and spawns agents into isolated worktrees to investigate, implement, and test concurrently. |
+| **🛡️ Review code changes** | One model reviews the change from one perspective. | Multiple state-of-the-art models review independently, debate disputed findings, and challenge one another to produce a more detailed, better-supported review. |
+
+## ✨ Why Theater
 
 | | |
 | --- | --- |
@@ -168,6 +177,49 @@ theater spawn vibe "Document the parser" --approval manual --worktree docs
 - `--worktree NAME` joins an explicit shared worktree and branch.
 - Shared worktrees are collaboration, not isolation: agents must own separate
   files and coordinate Git operations.
+
+## End-to-end example: research to final report
+
+A real project used Theater to turn work history scattered across several
+systems into a sourced internship report:
+
+```text
+Notion ─┐
+Slack ──┤
+Linear ─┼─→ evidence reports ─→ reconciled timeline ─┐
+GitHub ─┘                                            ├─→ section drafts ─→ integration ─→ agent debate ─→ report.typ
+Report criteria ─────────────────────────────────────┘
+```
+
+1. **Load the playbooks.** The lead used Theater's `list_skills` and
+   `load_skill` tools to load `theater-orchestrate` for ownership, supervision,
+   and integration. It later loaded `theater-debate` for the final adversarial
+   review.
+2. **Gather evidence.** The orchestrator spawned four read-only investigators,
+   one each for Notion, Slack, Linear, and GitHub. Each produced a
+   source-specific report from its own isolated worktree.
+3. **Verify the sources.** The reports recorded dates, concrete activity,
+   evidence strength, contradictions, and gaps. Their actual artifacts were
+   inspected before the orchestrator accepted them.
+4. **Reconstruct the timeline.** A synthesis agent reconciled the reports into
+   one chronological dossier, making targeted follow-up queries where sources
+   disagreed instead of inventing a convenient narrative.
+5. **Load the requirements.** The orchestrator fetched the report structure,
+   evaluation criteria, style rules, and confidentiality constraints, then
+   mapped the verified timeline onto those requirements.
+6. **Draft in parallel.** Agents worked on report sections in isolated
+   worktrees. Contributions could overlap: the orchestrator compared them and
+   resolved content or Git conflicts during integration.
+7. **Assemble and debate.** The orchestrator combined the accepted sections
+   into one coherent Typst document, then debated factual, structural, and
+   confidentiality findings with an independent agent. They challenged each
+   other's evidence and resolved substantiated objections before producing
+   `report.typ`.
+
+The human worked primarily with the orchestrator, but never lost access to its
+workers: any investigator, author, or debate peer could be inspected, corrected,
+interrupted, or opened directly in its native pane. The régie also kept the
+model assigned to each task and its cost visible throughout the production.
 
 ## Approval and safety
 
