@@ -56,7 +56,22 @@ class _CodexSource(TranscriptSource):
 
     def commit_attachment(self) -> None:
         super().commit_attachment()
+        self._seed_live_context()
         self._observer._session_exact = self._session_provenance is TranscriptProvenance.EXACT
+
+    def discard_attachment(self) -> None:
+        super().discard_attachment()
+        self._seed_live_context()
+
+    def _seed_live_context(self) -> None:
+        path = self.path
+        if path is None:
+            return
+        try:
+            with path.open("rb") as fh:
+                self._observer._seed_history_context(fh, self.offset)
+        except OSError:
+            return
 
     def _prepare_history_parse(self, fh: BinaryIO, start: int) -> None:
         self._observer._seed_history_context(fh, start)

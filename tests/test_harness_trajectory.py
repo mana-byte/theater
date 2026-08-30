@@ -16,6 +16,7 @@ from theater.harness.builtin.plugins.codex import parser as codex_plugin
 from theater.harness.builtin.plugins.codex.observer import CodexObserver
 from theater.harness.builtin.plugins.codex.values import _codex_usage
 from theater.harness.contracts.trajectory import ParsedRecord
+from theater.pricing import usage_cost_microcents
 from theater.provenance import TranscriptProvenance
 from theater.trajectory.enums import (
     CostProvenance,
@@ -458,6 +459,60 @@ async def test_codex_history_associates_context_model_and_usage_with_the_active_
     assert request.provider == "azure"
     assert request.usage is not None
     assert request.usage.input_tokens == 80
+
+
+async def test_codex_live_attachment_seeds_model_context_for_usage(tmp_path: Path) -> None:
+    path = tmp_path / "rollout.jsonl"
+    records = [
+        {
+            "type": "session_meta",
+            "payload": {"cwd": str(tmp_path), "model_provider": "openai"},
+        },
+        {
+            "type": "turn_context",
+            "payload": {"turn_id": "turn-1", "model": "gpt-5.6-sol"},
+        },
+        {
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "work"},
+        },
+    ]
+    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    observer = CodexObserver(root=tmp_path)
+    source = observer.open_source(
+        cwd=str(tmp_path),
+        known_location=str(path),
+        session_provenance=TranscriptProvenance.OPERATOR,
+    )
+
+    attached = await source.read()
+    assert attached.attached is not None
+    source.commit_attachment()
+
+    usage_record = {
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {
+                "last_token_usage": {
+                    "input_tokens": 100,
+                    "cached_input_tokens": 20,
+                    "output_tokens": 30,
+                    "reasoning_output_tokens": 4,
+                },
+                "total_token_usage": {"input_tokens": 100, "output_tokens": 30},
+            },
+        },
+    }
+    with path.open("a") as transcript:
+        transcript.write(json.dumps(usage_record) + "\n")
+
+    batch = await source.read()
+    usage = next(event.usage for event in batch.events if event.usage is not None)
+
+    assert usage.model == "gpt-5.6-sol"
+    assert usage.provider == "openai"
+    assert usage_cost_microcents(usage) > 0
 
 
 def test_codex_task_complete_preserves_explicit_first_token_time() -> None:
