@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="330" viewBox="0 0 1200 330" role="img" aria-labelledby="title desc">
+  <title id="title">How Theater connects coding agents</title>
+  <desc id="desc">Coding-agent CLIs send outbound MCP requests to the Theater daemon, which manages state and delivers inbound work through tmux while the régie observes the same state.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0c101c"/>
+      <stop offset="1" stop-color="#171329"/>
+    </linearGradient>
+    <linearGradient id="daemon" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#33295f"/>
+      <stop offset="1" stop-color="#1d2140"/>
+    </linearGradient>
+    <marker id="arrow-violet" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10Z" fill="#a691ff"/>
+    </marker>
+    <marker id="arrow-gold" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10Z" fill="#efb86b"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="330" rx="24" fill="url(#bg)"/>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+    <text x="70" y="54" fill="#7f87a4" font-size="13" letter-spacing="2">AGENT CLIs</text>
+    <g transform="translate(55 76)" font-size="14" font-weight="700">
+      <rect width="190" height="42" rx="12" fill="#1a1e30" stroke="#7567cc"/>
+      <circle cx="25" cy="21" r="7" fill="#9c82ff"/><text x="43" y="26" fill="#eceaff">Claude Code</text>
+      <g transform="translate(0 54)"><rect width="190" height="42" rx="12" fill="#1a1e30" stroke="#438eaa"/><circle cx="25" cy="21" r="7" fill="#4bc3d5"/><text x="43" y="26" fill="#eafaff">Codex</text></g>
+      <g transform="translate(0 108)"><rect width="190" height="42" rx="12" fill="#1a1e30" stroke="#b27d45"/><circle cx="25" cy="21" r="7" fill="#efaf5f"/><text x="43" y="26" fill="#fff5e8">opencode</text></g>
+      <g transform="translate(0 162)"><rect width="190" height="42" rx="12" fill="#1a1e30" stroke="#a95778"/><circle cx="25" cy="21" r="7" fill="#ed6a8c"/><text x="43" y="26" fill="#fff0f6">Vibe</text></g>
+    </g>
+
+    <path d="M265 132H437" fill="none" stroke="#a691ff" stroke-width="3" marker-end="url(#arrow-violet)"/>
+    <text x="305" y="115" fill="#a691ff" font-size="12">MCP · outbound</text>
+    <path d="M437 232H265" fill="none" stroke="#efb86b" stroke-width="3" marker-end="url(#arrow-gold)"/>
+    <text x="296" y="254" fill="#efb86b" font-size="12">tmux · inbound</text>
+
+    <g transform="translate(452 78)">
+      <rect width="302" height="184" rx="20" fill="url(#daemon)" stroke="#a691ff" stroke-width="2"/>
+      <text x="151" y="48" text-anchor="middle" fill="#f0edff" font-size="20" font-weight="800" letter-spacing="2">THEATER DAEMON</text>
+      <text x="151" y="82" text-anchor="middle" fill="#b7b2d3" font-size="12">registry · jobs · policy · delivery</text>
+      <rect x="33" y="108" width="104" height="42" rx="10" fill="#141729"/>
+      <text x="85" y="134" text-anchor="middle" fill="#70d6c4" font-size="12">SQLite</text>
+      <rect x="165" y="108" width="104" height="42" rx="10" fill="#141729"/>
+      <text x="217" y="134" text-anchor="middle" fill="#efbd72" font-size="12">tmux</text>
+    </g>
+
+    <path d="M754 170H910" fill="none" stroke="#77809f" stroke-width="3" marker-end="url(#arrow-violet)"/>
+    <path d="M910 202H754" fill="none" stroke="#77809f" stroke-width="3" marker-end="url(#arrow-violet)"/>
+    <text x="788" y="151" fill="#8e96b2" font-size="12">same daemon state</text>
+
+    <g transform="translate(925 104)">
+      <rect width="220" height="132" rx="18" fill="#15192a" stroke="#55c9b6" stroke-width="2"/>
+      <text x="110" y="43" text-anchor="middle" fill="#eafffb" font-size="18" font-weight="800" letter-spacing="2">RÉGIE</text>
+      <text x="110" y="71" text-anchor="middle" fill="#9da5bf" font-size="12">tree · stage · events</text>
+      <text x="110" y="94" text-anchor="middle" fill="#9da5bf" font-size="12">transcripts · usage</text>
+    </g>
+  </g>
+</svg>

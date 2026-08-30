@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520" role="img" aria-labelledby="title desc">
+  <title id="title">Theater coding-agent orchestration</title>
+  <desc id="desc">A stylized terminal stage with a régie sidebar coordinating Claude, Codex, opencode, and Vibe agents.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#080b16"/>
+      <stop offset="0.55" stop-color="#121126"/>
+      <stop offset="1" stop-color="#21132c"/>
+    </linearGradient>
+    <linearGradient id="stage" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1e2339"/>
+      <stop offset="1" stop-color="#101320"/>
+    </linearGradient>
+    <linearGradient id="beam-left" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8c72ff" stop-opacity="0.34"/>
+      <stop offset="1" stop-color="#8c72ff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="beam-right" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f0a65f" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#f0a65f" stop-opacity="0"/>
+    </linearGradient>
+    <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse">
+      <path d="M28 0H0V28" fill="none" stroke="#ffffff" stroke-opacity="0.025"/>
+    </pattern>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="520" rx="28" fill="url(#background)"/>
+  <rect width="1200" height="520" rx="28" fill="url(#grid)"/>
+  <path d="M122 0H380L625 455H350Z" fill="url(#beam-left)"/>
+  <path d="M1075 0H830L610 455H875Z" fill="url(#beam-right)"/>
+  <ellipse cx="660" cy="454" rx="390" ry="34" fill="#9275ff" opacity="0.08" filter="url(#glow)"/>
+
+  <g transform="translate(66 78)">
+    <rect width="318" height="372" rx="18" fill="#0d101d" stroke="#7c6ee6" stroke-opacity="0.7"/>
+    <rect x="1" y="1" width="316" height="48" rx="17" fill="#18172b"/>
+    <circle cx="25" cy="25" r="5" fill="#ed6a8c"/>
+    <circle cx="43" cy="25" r="5" fill="#f1bb69"/>
+    <circle cx="61" cy="25" r="5" fill="#55d6be"/>
+    <text x="91" y="31" fill="#dcd9ff" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="700" letter-spacing="2">RÉGIE</text>
+
+    <path d="M39 91V298M39 112H66M39 171H66M39 230H66M39 289H66" fill="none" stroke="#56516f" stroke-width="2"/>
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+      <g transform="translate(66 89)">
+        <circle cx="10" cy="10" r="10" fill="#9c82ff"/>
+        <text x="30" y="8" fill="#f0efff" font-size="15" font-weight="700">Claude</text>
+        <text x="30" y="27" fill="#8f93ad" font-size="11">reviewing auth flow</text>
+        <circle cx="218" cy="9" r="4" fill="#55d6be" filter="url(#glow)"/>
+      </g>
+      <g transform="translate(66 148)">
+        <circle cx="10" cy="10" r="10" fill="#4bc3d5"/>
+        <text x="30" y="8" fill="#f0efff" font-size="15" font-weight="700">Codex</text>
+        <text x="30" y="27" fill="#8f93ad" font-size="11">implementing parser</text>
+        <circle cx="218" cy="9" r="4" fill="#55d6be" filter="url(#glow)"/>
+      </g>
+      <g transform="translate(66 207)">
+        <circle cx="10" cy="10" r="10" fill="#efaf5f"/>
+        <text x="30" y="8" fill="#f0efff" font-size="15" font-weight="700">opencode</text>
+        <text x="30" y="27" fill="#8f93ad" font-size="11">running focused tests</text>
+        <circle cx="218" cy="9" r="4" fill="#f1bb69"/>
+      </g>
+      <g transform="translate(66 266)">
+        <circle cx="10" cy="10" r="10" fill="#ed6a8c"/>
+        <text x="30" y="8" fill="#f0efff" font-size="15" font-weight="700">Vibe</text>
+        <text x="30" y="27" fill="#8f93ad" font-size="11">awaiting input</text>
+        <circle cx="218" cy="9" r="4" fill="#ed6a8c" filter="url(#glow)"/>
+      </g>
+    </g>
+    <rect x="25" y="328" width="268" height="26" rx="8" fill="#171a2a"/>
+    <text x="39" y="346" fill="#8f93ad" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11">4 agents · 3 working · 1 waiting</text>
+  </g>
+
+  <g transform="translate(421 51)">
+    <rect width="713" height="420" rx="20" fill="url(#stage)" stroke="#d6b173" stroke-opacity="0.65"/>
+    <rect x="1" y="1" width="711" height="50" rx="19" fill="#191b2a"/>
+    <text x="24" y="31" fill="#e8c98b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" font-weight="700" letter-spacing="2">STAGE · CODEX</text>
+    <rect x="588" y="16" width="96" height="22" rx="11" fill="#27243a"/>
+    <circle cx="605" cy="27" r="4" fill="#55d6be" filter="url(#glow)"/>
+    <text x="617" y="31" fill="#b9bdd0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10">WORKING</text>
+
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14">
+      <text x="35" y="92" fill="#6f7897">$ theater spawn codex "Add focused parser tests" --approval edits</text>
+      <text x="35" y="128" fill="#aa9ff1">●</text>
+      <text x="57" y="128" fill="#e8e9f3">Inspecting the parser and its existing fixtures.</text>
+      <rect x="35" y="151" width="642" height="118" rx="10" fill="#0c0f19" stroke="#2d3348"/>
+      <text x="55" y="180" fill="#7dd6c8">tests/test_parser.py</text>
+      <text x="55" y="208" fill="#9aa2bd">+ test_rejects_ambiguous_turn_boundary()</text>
+      <text x="55" y="234" fill="#9aa2bd">+ test_preserves_native_session_identity()</text>
+      <text x="55" y="252" fill="#67708d">  24 passed in 0.31s</text>
+      <text x="35" y="307" fill="#aa9ff1">●</text>
+      <text x="57" y="307" fill="#e8e9f3">The focused suite passes. No unrelated files changed.</text>
+      <rect x="35" y="336" width="642" height="51" rx="10" fill="#111523" stroke="#343a52"/>
+      <text x="55" y="368" fill="#6f7897">› </text>
+      <rect x="73" y="354" width="8" height="19" rx="2" fill="#d9c3ff" filter="url(#glow)"/>
+    </g>
+  </g>
+
+  <path d="M386 142C413 142 401 118 424 118M386 201C411 201 403 189 424 189M386 260C411 260 403 260 424 260M386 319C413 319 401 331 424 331" fill="none" stroke="#9c82ff" stroke-width="2" stroke-dasharray="4 7" opacity="0.75"/>
+</svg>
