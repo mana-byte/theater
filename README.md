@@ -35,20 +35,20 @@ CLIs, permissions, sessions, and terminal panes.
 > frame as `docs/assets/demo-poster.png`, then replace this instruction with a
 > linked poster image headed “Watch the demo”.
 
-### One stage for every agent
-
-<img src="docs/assets/regie-overview.png" alt="Theater régie showing a cross-harness participant tree, a staged Codex pane, and usage by model" width="100%">
-
-Coordinate Claude Code, Codex, opencode, and Vibe from one terminal. The régie
-keeps agent lineage, live descriptions, native panes, and usage visible without
-pulling work out of the tools where it is happening.
-
-### Understand the work, not just the final answer
-
-<img src="docs/assets/trajectory-view.png" alt="Theater trajectory view showing a live agent turn, tool calls, timing, costs, and event details" width="100%">
-
-Open a live trajectory to see the request, model work, tool calls, timing,
-cost, and results as they happen—not just the final response.
+<table>
+<tr>
+<td width="50%" valign="top">
+<a href="docs/assets/regie-overview.png"><img src="docs/assets/regie-overview.png" alt="Theater régie showing a cross-harness participant tree, a staged Codex pane, and usage by model" width="100%"></a>
+<h3 align="center">One stage for every agent</h3>
+<p>Coordinate Claude Code, Codex, opencode, and Vibe from one terminal. Keep agent lineage, live descriptions, native panes, and usage visible.</p>
+</td>
+<td width="50%" valign="top">
+<a href="docs/assets/trajectory-view.png"><img src="docs/assets/trajectory-view.png" alt="Theater trajectory view showing a live agent turn, tool calls, timing, costs, and event details" width="100%"></a>
+<h3 align="center">Understand the work</h3>
+<p>Open a live trajectory to see requests, model work, tool calls, timing, cost, and results as they happen—not just the final response.</p>
+</td>
+</tr>
+</table>
 
 ## Why Theater
 
