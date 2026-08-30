@@ -1,6 +1,6 @@
 [project]
 name = "theater"
-version = "1.0.0rc4"
+version = "1.0.0rc5"
 authors = [{ name = "Manaiki Laut", email = "manaikilaut@gmail.com" }]
 description = "Cross-harness orchestration layer for coding agents"
 readme = "README.md"
