@@ -14,9 +14,11 @@ from theater.harness.contracts.channels import (
 )
 from theater.harness.contracts.manifest import (
     MANIFEST_API_VERSION,
+    ControlManifest,
     HarnessManifest,
     HookChannelManifest,
     IdentityManifest,
+    InterruptPlan,
     LaunchManifest,
     ModelDiscoveryManifest,
     ObservationManifest,
@@ -88,6 +90,9 @@ MANIFEST = HarnessManifest(
         ),
         trajectory_capabilities=OpenCodeObserver.trajectory_capabilities,
         enrichments=(_NATIVE_HOOKS, _NATIVE_OTEL),
+    ),
+    controls=ControlManifest(
+        interrupt=InterruptPlan(keys=("Escape", "Escape"), inter_key_delay_seconds=0.05)
     ),
     models=ModelDiscoveryManifest(discoverer=discover_models),
 )

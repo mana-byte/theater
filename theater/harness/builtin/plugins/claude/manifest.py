@@ -4,7 +4,12 @@ from dataclasses import replace
 from functools import partial
 from pathlib import Path
 
-from theater.harness.contracts.manifest import MANIFEST_API_VERSION, HarnessManifest
+from theater.harness.contracts.manifest import (
+    MANIFEST_API_VERSION,
+    ControlManifest,
+    HarnessManifest,
+    InterruptPlan,
+)
 
 from .launch import LAUNCH, _resume_launch_overlay, _resume_preflight
 from .observation import OBSERVATION, observation_for
@@ -17,6 +22,7 @@ MANIFEST = HarnessManifest(
     aliases=("claude_code", "claude-code", "Claude", "ClaudeCode"),
     launch=LAUNCH,
     observation=OBSERVATION,
+    controls=ControlManifest(interrupt=InterruptPlan(keys=("Escape",))),
 )
 
 

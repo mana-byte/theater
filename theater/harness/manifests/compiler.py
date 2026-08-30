@@ -231,6 +231,7 @@ class _CompiledHarness(Harness):
         self.observer = ManifestHarnessObserver(manifest.observation, harness_name=name)
         self._launch = manifest.launch
         self._models = manifest.models
+        self.controls = manifest.controls
         self.resume_takes_prompt = manifest.launch.resume_takes_prompt
         self.resume_strategy = manifest.launch.resume_strategy
         self.launch_parameter_support = LaunchParameterSupport(

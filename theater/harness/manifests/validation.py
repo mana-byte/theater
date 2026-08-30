@@ -39,9 +39,11 @@ from theater.harness.contracts.channels import (
     SignalOwnership,
 )
 from theater.harness.contracts.manifest import (
+    ControlManifest,
     HarnessManifest,
     HookChannelManifest,
     IdentityManifest,
+    InterruptPlan,
     LaunchManifest,
     LineageManifest,
     ModelDiscoveryManifest,
@@ -60,6 +62,13 @@ _OTEL_ATTRIBUTE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]*$")
 _RESERVED_OTEL_HEADERS = frozenset(
     {"connection", "content-length", "content-type", "host", "transfer-encoding"}
 )
+_TMUX_KEY_NAME = re.compile(
+    r"^(?:(?:C|M|S)-)*(?:[A-Za-z0-9]|Space|Enter|Escape|Tab|BSpace|BTab|DC|Delete|End|Home|"
+    r"IC|Insert|NPage|PPage|PgDn|PgUp|Up|Down|Left|Right|F(?:[1-9]|[12][0-9]|3[0-5])|"
+    r"[!\"#$%&'()*+,./:;<=>?@\[\\\]^_`{|}~])$"
+)
+_INTERRUPT_MAX_KEYS = 4
+_INTERRUPT_MAX_INTER_KEY_DELAY_SECONDS = 1.0
 
 
 class ManifestValidationError(ValueError):
@@ -91,6 +100,7 @@ def validate_manifest(name: str, manifest: HarnessManifest) -> None:
     _validate_binaries(name, manifest)
     _validate_aliases(name, manifest)
     _validate_launch(name, manifest.launch)
+    _validate_controls(name, manifest.controls)
     _validate_observation(name, manifest.observation)
     _validate_models(name, manifest.models)
 
@@ -163,6 +173,46 @@ def _validate_launch(name: str, launch: object) -> None:
     if len(set(launch.approvals)) != len(launch.approvals):
         _fail(name, "launch.approvals", "must not repeat an approval policy")
     _validate_launch_options(name, launch)
+
+
+def _validate_controls(name: str, controls: object) -> None:
+    if not isinstance(controls, ControlManifest):
+        _fail(name, "controls", f"expected ControlManifest, got {type(controls).__name__}")
+    plan = controls.interrupt
+    if plan is None:
+        return
+    if not isinstance(plan, InterruptPlan):
+        _fail(
+            name,
+            "controls.interrupt",
+            f"expected InterruptPlan or null, got {type(plan).__name__}",
+        )
+    if plan._keys_are_text or not isinstance(plan.keys, tuple):
+        _fail(name, "controls.interrupt.keys", "must be a non-empty tuple of tmux key names")
+    if not 1 <= len(plan.keys) <= _INTERRUPT_MAX_KEYS:
+        _fail(
+            name,
+            "controls.interrupt.keys",
+            f"must contain between 1 and {_INTERRUPT_MAX_KEYS} tmux key names",
+        )
+    for index, key in enumerate(plan.keys):
+        if not isinstance(key, str) or not _TMUX_KEY_NAME.fullmatch(key):
+            _fail(
+                name,
+                f"controls.interrupt.keys[{index}]",
+                "must be a bounded tmux key name",
+            )
+    delay = plan.inter_key_delay_seconds
+    if delay is not None and (
+        isinstance(delay, bool)
+        or not isinstance(delay, (int, float))
+        or not 0 <= delay <= _INTERRUPT_MAX_INTER_KEY_DELAY_SECONDS
+    ):
+        _fail(
+            name,
+            "controls.interrupt.inter_key_delay_seconds",
+            f"must be between 0 and {_INTERRUPT_MAX_INTER_KEY_DELAY_SECONDS} seconds, or null",
+        )
 
 
 def _validate_launch_options(name: str, launch: LaunchManifest) -> None:

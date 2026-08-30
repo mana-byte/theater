@@ -35,8 +35,10 @@ from theater.harness.contracts.harness import Harness, LaunchParameterSupport
 from theater.harness.contracts.launch import LaunchPlan, ResumeLaunchOverlay
 from theater.harness.contracts.manifest import (
     MANIFEST_API_VERSION,
+    ControlManifest,
     HarnessManifest,
     IdentityManifest,
+    InterruptPlan,
     LaunchManifest,
     LineageManifest,
     ModelDiscoveryManifest,
@@ -97,6 +99,7 @@ def manifest(
     launch: LaunchManifest | None = None,
     observation: ObservationManifest | None = None,
     models: ModelDiscoveryManifest | None = None,
+    controls: ControlManifest | None = None,
     aliases: tuple[str, ...] = (),
     binaries: frozenset[str] = frozenset(),
 ) -> HarnessManifest:
@@ -116,6 +119,7 @@ def manifest(
             primary=SourceManifest(factory=source, channel=primary_channel()),
             screen=ScreenManifest(classifier=screen),
         ),
+        controls=controls or ControlManifest(),
         models=models,
     )
 
@@ -168,6 +172,75 @@ def test_values_are_frozen_and_copy_collection_inputs() -> None:
         built.binary = "other"  # type: ignore[misc]
     with pytest.raises(AttributeError):
         built.aliases.append("other")
+
+
+def test_interrupt_controls_are_frozen_and_compile_to_the_runtime() -> None:
+    keys = ["Escape"]
+    controls = ControlManifest(interrupt=InterruptPlan(keys=keys))
+    keys.append("Enter")
+
+    compiled = compile_manifest("acme", manifest(controls=controls))
+
+    assert controls.interrupt is not None
+    assert controls.interrupt.keys == ("Escape",)
+    assert compiled.controls is controls
+    with pytest.raises(FrozenInstanceError):
+        controls.interrupt.keys = ("Enter",)  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    ("controls", "path"),
+    [
+        ("not-controls", "controls"),
+        (ControlManifest(interrupt="not-a-plan"), "controls.interrupt"),
+        (ControlManifest(interrupt=InterruptPlan(keys=())), "controls.interrupt.keys"),
+        (ControlManifest(interrupt=InterruptPlan(keys="Escape")), "controls.interrupt.keys"),
+        (
+            ControlManifest(interrupt=InterruptPlan(keys=("Escape",) * 5)),
+            "controls.interrupt.keys",
+        ),
+        (
+            ControlManifest(interrupt=InterruptPlan(keys=("--option",))),
+            "controls.interrupt.keys[0]",
+        ),
+        (
+            ControlManifest(
+                interrupt=InterruptPlan(keys=("Escape",), inter_key_delay_seconds=-0.01)
+            ),
+            "controls.interrupt.inter_key_delay_seconds",
+        ),
+        (
+            ControlManifest(
+                interrupt=InterruptPlan(keys=("Escape",), inter_key_delay_seconds=1.01)
+            ),
+            "controls.interrupt.inter_key_delay_seconds",
+        ),
+    ],
+)
+def test_interrupt_controls_are_validated(controls: object, path: str) -> None:
+    with pytest.raises(ManifestValidationError) as raised:
+        compile_manifest("acme", manifest(controls=controls))  # type: ignore[arg-type]
+
+    assert raised.value.path == path
+
+
+def test_shipped_interrupt_plans_match_native_key_handlers() -> None:
+    from theater.harness.builtin.plugins.claude.manifest import MANIFEST as CLAUDE_MANIFEST
+    from theater.harness.builtin.plugins.codex.manifest import MANIFEST as CODEX_MANIFEST
+    from theater.harness.builtin.plugins.opencode.manifest import MANIFEST as OPENCODE_MANIFEST
+    from theater.harness.builtin.plugins.vibe.manifest import MANIFEST as VIBE_MANIFEST
+
+    assert {
+        "claude": CLAUDE_MANIFEST.controls.interrupt,
+        "codex": CODEX_MANIFEST.controls.interrupt,
+        "opencode": OPENCODE_MANIFEST.controls.interrupt,
+        "vibe": VIBE_MANIFEST.controls.interrupt,
+    } == {
+        "claude": InterruptPlan(keys=("Escape",)),
+        "codex": InterruptPlan(keys=("Escape",)),
+        "opencode": InterruptPlan(keys=("Escape", "Escape"), inter_key_delay_seconds=0.05),
+        "vibe": InterruptPlan(keys=("Escape",)),
+    }
 
 
 def test_channel_capability_requires_explicit_ownership() -> None:

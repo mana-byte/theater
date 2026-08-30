@@ -15,9 +15,11 @@ from theater.harness.contracts.channels import (
 )
 from theater.harness.contracts.manifest import (
     MANIFEST_API_VERSION,
+    ControlManifest,
     HarnessManifest,
     HookChannelManifest,
     IdentityManifest,
+    InterruptPlan,
     LaunchManifest,
     LineageManifest,
     ModelDiscoveryManifest,
@@ -119,6 +121,7 @@ def manifest_for_roots(
             trajectory_capabilities=VibeObserver.trajectory_capabilities,
             enrichments=(_NATIVE_HOOKS, _NATIVE_OTEL),
         ),
+        controls=ControlManifest(interrupt=InterruptPlan(keys=("Escape",))),
         models=ModelDiscoveryManifest(discoverer=discover_models),
     )
 

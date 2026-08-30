@@ -75,6 +75,9 @@ PARTICIPANTS_LIST_MAX_LIMIT = 200
 #: Bus kind for an accepted operator or agent kill request.
 BUS_KIND_PARTICIPANT_KILL_REQUESTED = "participant.kill_requested"
 
+#: Bus kind for an accepted parent request to interrupt a working child.
+BUS_KIND_PARTICIPANT_INTERRUPT_REQUESTED = "participant.interrupt_requested"
+
 #: Bus kind for a new participant crossing a resume/session boundary.
 BUS_KIND_PARTICIPANT_SESSION_BOUNDARY = "participant.session_boundary"
 

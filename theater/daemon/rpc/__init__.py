@@ -11,6 +11,7 @@ from __future__ import annotations
 from theater.daemon.rpc import (  # noqa: F401
     admin,
     hooks,
+    interruption,
     jobs,
     participants,
     recall,

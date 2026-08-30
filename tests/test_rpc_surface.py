@@ -17,6 +17,7 @@ EXPECTED_RPC_METHODS = {
     "jobs.status",
     "models",
     "participant.kill",
+    "participant.interrupt",
     "participant.rename",
     "participant.update",
     "participant.status",

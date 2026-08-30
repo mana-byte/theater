@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from theater.tmux import client
+from theater.tmux import client, delivery
 
 #: This module is the one place that wants the real client: it patches `run`
 #: and `run_sync` underneath the public functions, so the autouse `fake_tmux`
@@ -444,6 +444,29 @@ async def test_deliver_text_omits_s_when_tmux_absent(monkeypatch):
     captured = await _deliver_argv(monkeypatch, "hello")
     paste = next(a for a in captured if a[0] == "paste-buffer")
     assert "-S" not in paste
+
+
+async def test_deliver_keys_uses_declared_inter_key_delay_only_between_keys(monkeypatch):
+    captured: list[list[str]] = []
+    delays: list[float] = []
+
+    async def fake_run(*args: str, check: bool = True) -> str:
+        captured.append(list(args))
+        return ""
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(client, "run", fake_run)
+    monkeypatch.setattr(delivery.asyncio, "sleep", fake_sleep)
+
+    await client.deliver_keys("%7", ("Escape", "Escape"), inter_key_delay_seconds=0.05)
+
+    assert captured == [
+        ["send-keys", "-t", "%7", "Escape"],
+        ["send-keys", "-t", "%7", "Escape"],
+    ]
+    assert delays == [0.05]
 
 
 # ---- display_message ---------------------------------------------------

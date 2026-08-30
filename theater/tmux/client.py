@@ -44,7 +44,7 @@ from theater.tmux.command import (  # noqa: F401
     run,
     run_sync,
 )
-from theater.tmux.delivery import deliver_text  # noqa: F401
+from theater.tmux.delivery import deliver_keys, deliver_text  # noqa: F401
 from theater.tmux.facts import (  # noqa: F401
     _UNPROBED,
     _VERSION_CACHE,

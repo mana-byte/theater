@@ -40,6 +40,7 @@ from theater.harness.contracts.launch import LaunchPlan, ResumeLaunchOverlay
 from theater.models import BadRequest
 
 if TYPE_CHECKING:
+    from theater.harness.contracts.manifest import ControlManifest
     from theater.harness.contracts.observation import HarnessObserver
     from theater.models import Participant
 
@@ -77,6 +78,8 @@ class Harness(ABC):
     resume_strategy: ResumeStrategy = "continue"
     #: Explicit optional launch support compiled from the manifest.
     launch_parameter_support: LaunchParameterSupport = LaunchParameterSupport()
+    #: Explicit native controls compiled from the manifest.
+    controls: ControlManifest | None = None
 
     # ---- launching ------------------------------------------------------
 

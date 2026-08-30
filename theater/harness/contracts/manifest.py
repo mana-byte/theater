@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from theater.constants.harness import (
@@ -57,6 +58,27 @@ class LaunchManifest:
         if isinstance(self.approvals, (str, bytes)):
             raise TypeError("launch.approvals must be a sequence of approval policies")
         object.__setattr__(self, "approvals", tuple(self.approvals))
+
+
+@dataclass(frozen=True, slots=True)
+class InterruptPlan:
+    """A native key sequence that asks a running harness to stop."""
+
+    keys: tuple[str, ...]
+    inter_key_delay_seconds: float | None = None
+    _keys_are_text: bool = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_keys_are_text", isinstance(self.keys, (str, bytes)))
+        if isinstance(self.keys, Sequence):
+            object.__setattr__(self, "keys", tuple(self.keys))
+
+
+@dataclass(frozen=True, slots=True)
+class ControlManifest:
+    """Explicit native controls supported by one harness."""
+
+    interrupt: InterruptPlan | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +215,7 @@ class HarnessManifest:
     icon: str
     launch: LaunchManifest
     observation: ObservationManifest
+    controls: ControlManifest = field(default_factory=ControlManifest)
     binaries: frozenset[str] = frozenset()
     aliases: tuple[str, ...] = ()
     models: ModelDiscoveryManifest | None = None
@@ -209,10 +232,12 @@ class HarnessManifest:
 __all__ = [
     "MANIFEST_API_VERSION",
     "PLUGIN_API_VERSION",
+    "ControlManifest",
     "EnrichmentManifest",
     "HarnessManifest",
     "HookChannelManifest",
     "IdentityManifest",
+    "InterruptPlan",
     "LaunchManifest",
     "LineageManifest",
     "ModelDiscoveryManifest",

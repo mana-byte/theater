@@ -39,6 +39,9 @@ receives.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Sequence
+
 from theater.constants.tmux import TMUX_PASTE_BUFFER_PREFIX, TMUX_RAW_PASTE_MIN_VERSION
 
 
@@ -58,3 +61,18 @@ async def deliver_text(pane_id: str, text: str, *, enter: bool = True) -> None:
         await run("delete-buffer", "-b", buffer, check=False)
     if enter:
         await run("send-keys", "-t", pane_id, "Enter")
+
+
+async def deliver_keys(
+    pane_id: str,
+    keys: Sequence[str],
+    *,
+    inter_key_delay_seconds: float | None = None,
+) -> None:
+    """Deliver a bounded manifest-declared key sequence to a pane."""
+    from theater.tmux.client import run
+
+    for index, key in enumerate(keys):
+        if index and inter_key_delay_seconds is not None:
+            await asyncio.sleep(inter_key_delay_seconds)
+        await run("send-keys", "-t", pane_id, key)
