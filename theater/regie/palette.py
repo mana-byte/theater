@@ -22,6 +22,7 @@ from functools import partial
 from rich.text import Text
 from textual.command import DiscoveryHit, Hit, Hits, Provider
 
+from theater.constants.regie import REGIE_RESUME_PROMPT_CONTEXT_MAX
 from theater.harness import describe, harness_icon
 
 
@@ -171,15 +172,36 @@ def _dead_session_label(row: dict) -> str:
     harness = row.get("harness", "?")
     cwd = row.get("cwd") or ""
     label = f"{icon} {harness} {cwd}"
-    prompt = row.get("spawn_prompt")
-    if prompt:
-        plain = " ".join(prompt.split())
+    description = row.get("description")
+    prompt = _resume_prompt_context(row)
+    second_line = description or prompt
+    if second_line:
+        plain = " ".join(second_line.split())
         if len(plain) > 120:
             plain = plain[:119] + "\u2026"
         label += f"\n{plain}"
     else:
         label += "\n\u00a0"
     return label
+
+
+def _resume_prompt_context(row: dict) -> str | None:
+    """Normalize and bound the historical prompt retained for resume discovery."""
+    prompt = row.get("spawn_prompt")
+    if not prompt:
+        return None
+    plain = " ".join(prompt.split())
+    if len(plain) > REGIE_RESUME_PROMPT_CONTEXT_MAX:
+        return plain[: REGIE_RESUME_PROMPT_CONTEXT_MAX - 1] + "\u2026"
+    return plain or None
+
+
+def _dead_session_search_text(row: dict, display: str) -> str:
+    """Keep a saved prompt searchable when a description owns the visible line."""
+    prompt = _resume_prompt_context(row)
+    if row.get("description") and prompt:
+        return f"{display}\n{' '.join(prompt.split())}"
+    return display
 
 
 def _to_text(display: str) -> Text:
@@ -212,18 +234,24 @@ class ResumeDeadSessionCommands(Provider):
         return [(_dead_session_label(row), partial(callback, row)) for row in self.rows]
 
     async def discover(self) -> Hits:
-        for display, command in self.commands:
-            yield DiscoveryHit(_to_text(display), command, text=display)
+        for row, (display, command) in zip(self.rows, self.commands, strict=False):
+            yield DiscoveryHit(
+                _to_text(display),
+                command,
+                help=_resume_prompt_context(row),
+                text=_dead_session_search_text(row, display),
+            )
 
     async def search(self, query: str) -> Hits:
         matcher = self.matcher(query)
-        for display, command in self.commands:
-            score = matcher.match(display)
+        for row, (display, command) in zip(self.rows, self.commands, strict=False):
+            search_text = _dead_session_search_text(row, display)
+            score = matcher.match(search_text)
             if score > 0:
                 highlighted = matcher.highlight(display)
                 if "\n" in display:
                     highlighted.stylize("dim", display.index("\n") + 1)
-                yield Hit(score, highlighted, command, text=display)
+                yield Hit(score, highlighted, command, text=search_text)
 
 
 class ResumeDeadSessionCommand(Provider):

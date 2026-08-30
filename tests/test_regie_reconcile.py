@@ -13,6 +13,7 @@ real app through Textual's test pilot. No test sleeps.
 from __future__ import annotations
 
 import pytest
+from rich.cells import cell_len
 
 from theater.config import Config, RegieSection
 from theater.regie import app as app_mod
@@ -186,6 +187,77 @@ async def test_same_ids_across_refresh_yield_same_widgets(daemon, tmux):
         assert len(after) == 2
         assert before[0] is after[0]
         assert before[1] is after[1]
+
+
+async def test_description_mode_marquees_only_a_hovered_overflowing_description(daemon, tmux):
+    description = "a durable participant description that is much wider than this sidebar"
+    daemon["answers"]["participants.tree"] = [
+        {**PARENT, "description": description, "children": []}
+    ]
+    app = make_app(participant_detail="description")
+
+    async with app.run_test():
+        leaf = _panel(app)._key_widgets[("p", PARENT["id"])]
+        assert isinstance(leaf, AgentLeaf)
+        assert leaf._marquee_timer is None
+        assert description.startswith(str(leaf.render()).splitlines()[2].lstrip())
+
+        leaf.on_enter(None)  # type: ignore[arg-type]
+        assert leaf._marquee_timer is not None
+        leaf._tick_marquee()
+        assert leaf._marquee_offset == 1
+
+        leaf.set_stage_marker("tmux")
+        assert cell_len(str(leaf.render()).splitlines()[2]) <= leaf.content_size.width
+        leaf.on_leave(None)  # type: ignore[arg-type]
+        assert leaf._marquee_timer is None
+        assert leaf._marquee_offset == 0
+
+
+async def test_cwd_mode_marquees_an_overflowing_hovered_description(daemon, tmux):
+    description = "a durable participant description that is much wider than this sidebar"
+    daemon["answers"]["participants.tree"] = [
+        {**PARENT, "description": description, "children": []}
+    ]
+    app = make_app()
+
+    async with app.run_test():
+        leaf = _panel(app)._key_widgets[("p", PARENT["id"])]
+        assert isinstance(leaf, AgentLeaf)
+        assert "/tmp/proj" in str(leaf.render()).splitlines()[2]
+
+        leaf.on_enter(None)  # type: ignore[arg-type]
+        assert description.startswith(str(leaf.render()).splitlines()[2].lstrip())
+        assert leaf._marquee_timer is not None
+
+
+async def test_cwd_mode_does_not_marquee_a_fitting_hovered_description(daemon, tmux):
+    description = "short description"
+    daemon["answers"]["participants.tree"] = [
+        {**PARENT, "description": description, "children": []}
+    ]
+    app = make_app()
+
+    async with app.run_test():
+        leaf = _panel(app)._key_widgets[("p", PARENT["id"])]
+        assert isinstance(leaf, AgentLeaf)
+        leaf.on_enter(None)  # type: ignore[arg-type]
+        assert description in str(leaf.render()).splitlines()[2]
+        assert leaf._marquee_timer is None
+
+
+async def test_reconciliation_updates_an_existing_leaf_description(daemon, tmux):
+    app = make_app(participant_detail="description")
+    async with app.run_test():
+        panel = _panel(app)
+        leaf = panel._key_widgets[("p", PARENT["id"])]
+        daemon["answers"]["participants.tree"] = [
+            {**PARENT, "description": "updated saved description", "children": []}
+        ]
+        await app._refresh_tree()
+
+        assert panel._key_widgets[("p", PARENT["id"])] is leaf
+        assert "updated saved description" in str(leaf.render()).splitlines()[2]
 
 
 async def test_a_disappeared_participant_is_unmounted(daemon, tmux):

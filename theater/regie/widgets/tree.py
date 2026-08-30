@@ -102,10 +102,13 @@ class TreePanel(VerticalScroll):
 
         # TreePanel.app is RegieApp at runtime; Widget.app is typed App[Any].
         cwd_segments = self.app.settings.regie.cwd_segments  # type: ignore[attr-defined]
+        participant_detail = self.app.settings.regie.participant_detail  # type: ignore[attr-defined]
         ordered_rows: list[tuple[Key, Widget]] = []
         participant_index = 0
         for i, (label, node, key, prefix, cont_prefix) in enumerate(lines):
-            widget = self._reconcile_row(label, node, key, prefix, cont_prefix, cwd_segments, i)
+            widget = self._reconcile_row(
+                label, node, key, prefix, cont_prefix, cwd_segments, participant_detail, i
+            )
             if _is_participant_key(key):
                 widget.set_class(participant_index % 2 == 0, "tree-alt")
                 participant_index += 1
@@ -146,6 +149,7 @@ class TreePanel(VerticalScroll):
         prefix: str,
         cont_prefix: str,
         cwd_segments: int,
+        participant_detail: str,
         index: int = 0,
     ) -> Widget:
         """Update or create the widget for a single row.
@@ -167,7 +171,11 @@ class TreePanel(VerticalScroll):
             widget = self._key_widgets[key]
             if isinstance(widget, AgentLeaf):
                 widget.update_node(
-                    node, prefix=prefix, cont_prefix=cont_prefix, is_first_root=first_root
+                    node,
+                    prefix=prefix,
+                    cont_prefix=cont_prefix,
+                    participant_detail=participant_detail,  # type: ignore[arg-type]
+                    is_first_root=first_root,
                 )
             elif isinstance(widget, Label):
                 widget.update(label)
@@ -179,6 +187,7 @@ class TreePanel(VerticalScroll):
                 cont_prefix=cont_prefix,
                 key=key,
                 cwd_segments=cwd_segments,
+                participant_detail=participant_detail,  # type: ignore[arg-type]
                 is_first_root=first_root,
                 reveal=self._reveals.get(key),
             )

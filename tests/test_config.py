@@ -32,6 +32,7 @@ def test_missing_file_is_not_an_error():
     assert loaded.rails.depth_cap == 3
     assert loaded.observer.poll_interval == 0.25
     assert loaded.regie.theme is None
+    assert loaded.regie.participant_detail == "cwd"
     assert loaded.regie.trajectory_page_size == 30
 
 
@@ -99,6 +100,11 @@ def test_theme_and_favourite_are_plain_strings():
     loaded = cfg.load()
     assert loaded.regie.theme == "nord"
     assert loaded.theater.favourite == "vibe"
+
+
+def test_participant_detail_accepts_description():
+    write('[regie]\nparticipant_detail = "description"\n')
+    assert cfg.load().regie.participant_detail == "description"
 
 
 def test_describe_reports_source_per_key():
@@ -173,6 +179,13 @@ def test_non_string_theme_is_fatal():
     with pytest.raises(cfg.ConfigError) as exc:
         cfg.load()
     assert "must be a string" in str(exc.value)
+
+
+def test_unknown_participant_detail_is_fatal():
+    write('[regie]\nparticipant_detail = "prompt"\n')
+    with pytest.raises(cfg.ConfigError) as exc:
+        cfg.load()
+    assert "participant_detail" in str(exc.value)
 
 
 @pytest.mark.parametrize("sentence", ["", "   "])

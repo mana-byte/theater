@@ -106,6 +106,8 @@ class RegieSection:
     bus_batch: int = field(default=50, metadata={"min": 1})
     #: Trailing cwd segments the tree keeps; applied after ``tilde()``. Minimum 1.
     cwd_segments: int = field(default=2, metadata={"min": 1})
+    #: Detail shown on participant leaves: shortened cwd, or their saved description.
+    participant_detail: str = field(default="cwd", metadata={"choices": ("cwd", "description")})
     #: Read once, used twice (#sidebar style and resize_pane); below 40 they don't fit.
     sidebar_width: int = field(default=52, metadata={"min": 40})
     #: Off by default: the tree is what the régie is for. While hidden the bus is not polled at all.

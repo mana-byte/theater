@@ -87,6 +87,12 @@ REGIE_EMPTY_TREE_HINT = f"{REGIE_EMPTY_TREE_SHORTCUT}{REGIE_EMPTY_TREE_TAIL}"
 #: Leaf spinner/animation timer interval in seconds.
 REGIE_LEAF_SPINNER_INTERVAL = 0.1
 
+#: Hovered overflowing participant-description marquee interval in seconds.
+REGIE_LEAF_MARQUEE_INTERVAL = 0.12
+
+#: Maximum characters retained from a historical spawn prompt in resume palette context.
+REGIE_RESUME_PROMPT_CONTEXT_MAX = 240
+
 #: Delay between startup typing frames, in seconds.
 REGIE_STARTUP_REVEAL_INTERVAL_SECONDS = 0.035
 

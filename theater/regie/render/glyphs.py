@@ -175,6 +175,7 @@ def node_label(
     is_first_root: bool = False,
     overlay: Mapping[LeafCell, OverlayGlyph] | None = None,
     reveal: int | None = None,
+    detail: str | None = None,
 ) -> Content:
     """Three rows of Content for one participant leaf.
 
@@ -200,6 +201,7 @@ def node_label(
 
     ``Content.assemble`` is used rather than line-by-line ``append`` because
     ``Content.append`` returns a new object rather than mutating in place.
+    *detail* replaces the shortened cwd on row 3 when a leaf owns that presentation.
     """
     # Function-level imports avoid layout ↔ glyphs and reveal ↔ glyphs cycles.
     from theater.regie.animations.reveal import clip_parts
@@ -209,7 +211,7 @@ def node_label(
     # Unmanaged panes stuff a tmux pane id into "id" with no name, so fall back to short id.
     sid = node.get("name") or short_id(node.get("id"))
     id_style = _id_style(node)
-    cwd = shorten_path(tilde(node.get("cwd")), keep=cwd_segments)
+    cwd = shorten_path(tilde(node.get("cwd")), keep=cwd_segments) if detail is None else detail
     harness = node.get("harness", "?")
     harness_pulse = node.get("status") == "working"
 

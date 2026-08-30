@@ -65,6 +65,10 @@ bus_batch = 50
 # minimum is 1.
 cwd_segments = 2
 
+# Which participant detail a leaf shows: shortened cwd, or its saved description.
+# Descriptions are static until hovered; only overflowing hovered descriptions scroll.
+participant_detail = "cwd"
+
 # Column width of the sidebar. Read once, used twice: the sidebar's Textual
 # style and the tmux resize when an agent is staged — the two must agree or
 # Textual and tmux tear at the boundary. Below 40, depth-3 rails plus a

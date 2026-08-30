@@ -15,9 +15,18 @@ import pytest
 
 from theater import harness as harness_registry
 from theater.config import Config, TheaterSection
+from theater.constants.regie import REGIE_RESUME_PROMPT_CONTEXT_MAX
 from theater.harness import HARNESSES
 from theater.regie.app import RegieApp
-from theater.regie.palette import SpawnCommand, SpawnHarnessCommands, ViewCommands, entries
+from theater.regie.palette import (
+    ResumeDeadSessionCommands,
+    SpawnCommand,
+    SpawnHarnessCommands,
+    ViewCommands,
+    _dead_session_label,
+    _dead_session_search_text,
+    entries,
+)
 
 
 class FakeApp:
@@ -405,3 +414,53 @@ async def test_an_app_that_cannot_toggle_offers_nothing():
 
 async def test_the_view_provider_is_registered_on_the_app():
     assert ViewCommands in RegieApp.COMMANDS
+
+
+def test_resume_label_prefers_saved_description_to_the_spawn_prompt():
+    row = {
+        "harness": "vibe",
+        "cwd": "/tmp/project",
+        "description": "resume the schema migration",
+        "spawn_prompt": "original detailed spawn request",
+    }
+    assert _dead_session_label(row).split("\n")[1] == "resume the schema migration"
+
+
+async def test_resume_description_keeps_the_original_prompt_searchable():
+    class ResumingApp:
+        def resume_dead_session(self, _row: dict) -> None:
+            pass
+
+    provider = ResumeDeadSessionCommands(FakeScreen(ResumingApp()))
+    provider.rows = [
+        {
+            "harness": "vibe",
+            "cwd": "/tmp/project",
+            "description": "resume the schema migration",
+            "spawn_prompt": "original detailed spawn request",
+        }
+    ]
+    assert [hit async for hit in provider.search("original request")]
+
+
+async def test_resume_prompt_context_is_bounded_for_help_and_search():
+    class ResumingApp:
+        def resume_dead_session(self, _row: dict) -> None:
+            pass
+
+    prompt = "  ".join(["historical"] * (REGIE_RESUME_PROMPT_CONTEXT_MAX + 20))
+    row = {
+        "harness": "vibe",
+        "cwd": "/tmp/project",
+        "description": "resume the schema migration",
+        "spawn_prompt": prompt,
+    }
+    provider = ResumeDeadSessionCommands(FakeScreen(ResumingApp()))
+    provider.rows = [row]
+    display = _dead_session_label(row)
+    search_text = _dead_session_search_text(row, display)
+    hit = await anext(provider.discover())
+
+    assert hit.help is not None and len(hit.help) <= REGIE_RESUME_PROMPT_CONTEXT_MAX
+    assert len(search_text) <= len(display) + REGIE_RESUME_PROMPT_CONTEXT_MAX + 1
+    assert "  " not in hit.help
