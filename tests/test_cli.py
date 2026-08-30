@@ -58,6 +58,31 @@ EXPECTED_COMMANDS = {
     "transcript-receipt",
 }
 
+HIDDEN_HOOK_ARGS = (
+    (
+        "transcript-receipt",
+        "--id",
+        "p-abc123",
+        "--token-file",
+        "/tmp/token",
+        "--strict-exit",
+    ),
+    ("claude-receipt", "--id", "p-abc123", "--token-file", "/tmp/token"),
+    (
+        "harness-event",
+        "tool.finished",
+        "--id",
+        "p-abc123",
+        "--channel",
+        "hooks",
+        "--token-file",
+        "/tmp/token",
+        "--delivery-id",
+        "delivery-1",
+        "--strict-exit",
+    ),
+)
+
 
 def parse(*argv):
     return cli._parser().parse_args(list(argv))
@@ -73,6 +98,38 @@ def test_the_cli_exposes_exactly_these_subcommands():
         action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
     ]
     assert set(subcommands.choices) == EXPECTED_COMMANDS
+
+
+def test_hidden_hook_commands_are_absent_from_top_level_help(capsys):
+    with pytest.raises(SystemExit):
+        parse("--help")
+    out = capsys.readouterr().out
+    assert "==SUPPRESS==" not in out
+    for command, *_ in HIDDEN_HOOK_ARGS:
+        assert command not in out
+
+
+@pytest.mark.parametrize("argv", HIDDEN_HOOK_ARGS)
+def test_hidden_hook_commands_remain_parseable_and_dispatchable(monkeypatch, argv):
+    command = argv[0]
+    parsed = parse(*argv)
+    assert parsed.command == command
+    assert command in cli._COMMANDS
+
+    dispatched = []
+
+    def fake_command(args):
+        dispatched.append(args)
+        return 17
+
+    monkeypatch.setitem(cli._COMMANDS, command, fake_command)
+    monkeypatch.setattr(cli.paths, "ensure_home", lambda: None)
+    monkeypatch.setattr(cli.config, "load", object)
+    monkeypatch.setattr(cli.harness_registry, "install", lambda _: None)
+
+    assert cli.main(list(argv)) == 17
+    assert len(dispatched) == 1
+    assert vars(dispatched[0]) == vars(parsed)
 
 
 # ---- ls -----------------------------------------------------------------

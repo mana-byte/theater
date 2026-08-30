@@ -15,6 +15,36 @@ from theater.constants.cli import TRANSCRIPT_RECEIPT_COMMAND
 from theater.harness import APPROVALS
 
 
+class _HiddenSubParsersAction(argparse._SubParsersAction):
+    """Keep explicitly hidden subcommands out of the parent help output."""
+
+    def __init__(self, *args, **kwargs):
+        self._hidden_names = set()
+        super().__init__(*args, **kwargs)
+
+    @property
+    def metavar(self):
+        if self._metavar is not None:
+            return self._metavar
+        visible = [name for name in self._name_parser_map if name not in self._hidden_names]
+        return f"{{{','.join(visible)}}}"
+
+    @metavar.setter
+    def metavar(self, value):
+        self._metavar = value
+
+    def add_parser(self, name, **kwargs):
+        hidden = kwargs.pop("hidden", False)
+        aliases = kwargs.get("aliases", ())
+        parser = super().add_parser(name, **kwargs)
+        if hidden:
+            self._hidden_names.update((name, *aliases))
+        return parser
+
+    def _get_subactions(self):
+        return (action for action in self._choices_actions if action.dest not in self._hidden_names)
+
+
 def _add_models_parser(sub) -> None:
     """Register `theater models`."""
     models = sub.add_parser("models", help="Show, or discover, the models a spawn may name.")
@@ -102,16 +132,16 @@ def _add_gc_parser(sub) -> None:
 
 def _add_receipt_parser(sub) -> None:
     """Register the hidden hook ingestion commands."""
-    receipt = sub.add_parser(TRANSCRIPT_RECEIPT_COMMAND, help=argparse.SUPPRESS)
+    receipt = sub.add_parser(TRANSCRIPT_RECEIPT_COMMAND, hidden=True)
     receipt.add_argument("--id", required=True)
     receipt.add_argument("--token-file", required=True)
     receipt.add_argument("--strict-exit", action="store_true", help=argparse.SUPPRESS)
 
-    alias = sub.add_parser("claude-receipt", help=argparse.SUPPRESS)
+    alias = sub.add_parser("claude-receipt", hidden=True)
     alias.add_argument("--id", required=True)
     alias.add_argument("--token-file", required=True)
 
-    event = sub.add_parser("harness-event", help=argparse.SUPPRESS)
+    event = sub.add_parser("harness-event", hidden=True)
     event.add_argument("event")
     event.add_argument("--id", required=True)
     event.add_argument("--channel", required=True)
@@ -157,7 +187,7 @@ def _parser() -> argparse.ArgumentParser:
         action="version",
         version=f"theater {__version__}",
     )
-    sub = p.add_subparsers(dest="command", required=False)
+    sub = p.add_subparsers(dest="command", required=False, action=_HiddenSubParsersAction)
 
     _add_process_parsers(sub)
     _add_receipt_parser(sub)
