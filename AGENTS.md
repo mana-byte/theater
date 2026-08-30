@@ -123,7 +123,7 @@ theater/
 │   └── plugins.py      generic loader compatibility facade
 ├── skills/             declarative SKILL.md validation, discovery, immutable registry
 │   └── builtin/        theater-orchestrate/ · theater-debate/
-├── mcp/                server.py (16 agent tools) · session.py · toolsets/
+├── mcp/                server.py (18 agent tools) · session.py · toolsets/
 │   ├── toolsets/       delegation, participants, recall, transcripts, skills
 │   ├── server.py       composition surface — registers @mcp.tool entries
 │   └── tools.py        compatibility facade — re-exports toolsets + session

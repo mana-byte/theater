@@ -55,6 +55,7 @@ async def test_tools_are_registered(daemon):
         "update_participant",
         "await_sessions",
         "send",
+        "interrupt_session",
         "scratchpad_write",
         "scratchpad_get",
         "read_transcript",
@@ -112,6 +113,11 @@ async def test_new_feature_descriptions_reach_their_tools(daemon):
         assert "canonical main repo" in desc
         assert "outside a git repository" in desc
         assert "not durable" in desc
+
+    interrupt = tools["interrupt_session"]
+    assert "direct child" in interrupt
+    assert "does not" in interrupt and "kill" in interrupt
+    assert "human" in interrupt
 
 
 async def test_await_description_communicates_first_any_completion(daemon):
@@ -402,6 +408,24 @@ async def test_participant_metadata_wrappers_forward_to_tool_bodies(monkeypatch)
         "name": None,
         "description": "Updated metadata",
     }
+
+
+async def test_interrupt_wrapper_forwards_to_tool_body(monkeypatch):
+    calls = {}
+
+    async def fake_interrupt(session, **kwargs):
+        calls["interrupt"] = (session, kwargs)
+        return {"interrupted": True}
+
+    monkeypatch.setattr(mcp_tools, "interrupt_session", fake_interrupt)
+
+    mcp = build("p1", "vibe")
+    assert _payload(await mcp.call_tool("interrupt_session", {"target": "child"})) == {
+        "interrupted": True
+    }
+    interrupt_session, kwargs = calls["interrupt"]
+    assert isinstance(interrupt_session, mcp_tools.Session)
+    assert kwargs == {"target": "child"}
 
 
 async def test_new_tool_wrappers_forward_to_tool_bodies(monkeypatch):

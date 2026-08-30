@@ -119,6 +119,12 @@ has completed. Like the rest of the machine-wide participant list, session ids
 follow Theater's single-user trust model; they are routing metadata, not
 authorization tokens.
 
+Participant names are deliberately live-only, recyclable aliases: they make
+current interaction readable without becoming historical identifiers.
+Descriptions are different metadata. They are bounded, persisted with the
+participant row, retained after death for résumé discovery, and inherited by a
+resumed successor unless the caller explicitly replaces or clears them.
+
 Transcript identity has its own provenance ladder:
 
 - `heuristic` — cwd/time or newest matching transcript; useful for candidates,
@@ -664,6 +670,12 @@ break durable observation. Hooks use authenticated ingress and launch-local
 installation only; native OTel uses the separate loopback/authenticated inbound
 channel at `harness/channels/otel/`. Neither may rewrite global hooks or take
 over a user's exporter.
+
+Interactive control also stays manifest-driven. `ControlManifest` declares a
+bounded `InterruptPlan`; the daemon owns lineage, status, pane-identity, and
+human-presence checks, while each plugin owns only the native key sequence its
+TUI understands. Interruption never sets participant status directly—the
+observer remains authoritative.
 
 This inbound harness OTel channel is distinct from `theater/observability/`,
 which exports Theater's own daemon, CLI, and régie telemetry. All four shipped

@@ -172,6 +172,12 @@ the caller made and translates it to native CLI behavior. Declare model,
 reasoning-effort, and resume support truthfully—unsupported requested values
 are refused before the planner runs.
 
+Optional interactive controls belong in `HarnessManifest.controls`. An
+`InterruptPlan` is immutable data: a short validated tmux-key sequence and an
+optional bounded delay between keys. The daemon applies the same lineage,
+status, pane-identity, and human-presence gates for every harness; plugins only
+declare the native keys their own TUI uses.
+
 The example puts the Theater MCP server in the harness's native configuration.
 `theater_binary()` is the public helper for the executable path; the identity
 must be the `theater mcp --id <participant-id>` argv, not an assumed inherited

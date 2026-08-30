@@ -11,6 +11,7 @@ from theater.mcp.session import Session
 from theater.mcp.toolsets.delegation import (
     await_sessions,
     harnesses,
+    interrupt_session,
     models,
     put_child_back_in_the_wound,
     scratchpad_get,
@@ -34,6 +35,7 @@ __all__ = [
     "_summarise",
     "await_sessions",
     "harnesses",
+    "interrupt_session",
     "list_participants",
     "list_skills",
     "load_skill",

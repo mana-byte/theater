@@ -115,7 +115,10 @@ including the participant identity. An agent can then use tools such as:
 
 It can also use `send`, `recall`, and `list_models`. `list_skills` discovers
 optional workflow instructions; `load_skill` loads only the selected skill's
-full content. The normal loop is to
+full content. `spawn_session` can attach a concise durable description and a
+live-only name; `update_participant` changes either later, and
+`interrupt_session` stops a direct child's current turn without killing its
+session. The normal loop is to
 inspect the participant list, spawn a child with an explicit approval mode,
 await its turn, read the transcript, and inspect the repository before keeping
 the work.

@@ -125,9 +125,7 @@ class AgentLeaf(Static):
 
     def _detail(self) -> str:
         description = self._description()
-        if description is not None and (
-            self._participant_detail == "description" or self._hovered
-        ):
+        if description is not None and (self._participant_detail == "description" or self._hovered):
             return description
         return shorten_path(tilde(self._node.get("cwd")), keep=self._cwd_segments)
 

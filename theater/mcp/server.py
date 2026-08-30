@@ -426,6 +426,23 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         )
 
     @mcp.tool()
+    async def interrupt_session(target: str) -> dict:
+        """Ask one direct child to stop its current turn without killing it.
+
+        `target` accepts the child's stable participant id or current live
+        name. The child must be addressable and actively working. If it has
+        already stopped working, this is a harmless no-op. Theater refuses to
+        inject while a human is using the pane and uses the harness plugin's
+        declared interrupt sequence rather than assuming one universal key.
+
+        This can discard an in-progress response or tool call. It does not
+        kill the participant, close its pane, delete its worktree, change its
+        status directly, or wait for confirmation; the observer remains the
+        authority on when the child becomes idle.
+        """
+        return await tools.interrupt_session(session, target=target)
+
+    @mcp.tool()
     async def scratchpad_write(value: str, namespace: str, key: str | None = None) -> dict:
         """Append a string entry to the sibling scratchpad; daemon mints the key.
 

@@ -236,6 +236,19 @@ async def send_prompt(
     return record
 
 
+async def interrupt_session(session: Session, *, target: str) -> dict:
+    """Ask one direct child to stop its current turn without killing it."""
+    if not session._resolved:
+        await session.identify()
+    result = await session.client.call(
+        "participant.interrupt",
+        target=target,
+        caller_id=session.participant_id,
+    )
+    assert isinstance(result, dict)
+    return result
+
+
 async def scratchpad_write(
     session: Session, *, value: str, namespace: str, key: str | None = None
 ) -> dict:

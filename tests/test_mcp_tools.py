@@ -251,6 +251,18 @@ async def test_update_participant_identifies_and_forwards_metadata():
     }
 
 
+async def test_interrupt_session_identifies_and_names_the_caller():
+    s = session(**{"participant.interrupt": {"id": "p-child", "interrupted": True}})
+
+    result = await tools.interrupt_session(s, target="p-child")
+
+    assert result == {"id": "p-child", "interrupted": True}
+    assert s.client.params("participant.interrupt") == {
+        "target": "p-child",
+        "caller_id": "p-me",
+    }
+
+
 async def test_await_names_the_caller_so_a_deadlock_can_be_refused():
     """Waiting on someone who is waiting on you has to be visible to the daemon."""
     s = resolved(**{"jobs.await": []})
