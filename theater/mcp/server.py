@@ -515,15 +515,26 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
     async def put_child_back_in_the_wound(target: str) -> dict:
         """Permanently kill one direct child session.
 
-        **Before every call, ask the user for permission and wait for an
-        explicit yes.** Name every child you intend to kill. Approval applies
-        only to those named children in the current turn: approval to spawn,
-        an earlier approval, or a general request to clean up is not enough.
-        Do not bypass this rule by invoking `theater kill` through a shell.
+        **Before killing any child, ask the user for permission and wait for an
+        explicit yes.** In that request, you — not the user — must name every
+        direct child you intend to kill. A bare `yes` or `confirm` in the
+        user's next message authorizes every child you named. Never ask the
+        user to repeat or paste those names or ids. Make all authorized calls
+        in the assistant turn immediately following confirmation, without
+        asking again between calls.
+
+        Example: ask "May I permanently kill `Alice` and `Bob`?" If the user
+        replies "yes", call this tool for Alice and then Bob immediately. An
+        earlier approval, approval to spawn, or a vague request to clean up is
+        not enough. Do not bypass this rule by invoking `theater kill` through
+        a shell.
 
         target: stable participant id or current live name. Prefer the id:
         dead names cannot resolve, and a recycled name may identify a new
-        participant. Only your direct children are eligible.
+        participant. Only your direct children are eligible. If the requested
+        cleanup includes deeper descendants, explain that ownership limit and
+        coordinate cleanup through their direct parents; do not claim that the
+        user's confirmation syntax is the problem.
 
         Refuses with `no_self_kill`, `not_your_child`, or `not_found`.
         Killing an already-dead child by id is a harmless no-op.

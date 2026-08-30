@@ -177,9 +177,14 @@ async def test_name_semantics_reach_the_tools_that_target_by_name(daemon):
     assert "id" in desc
 
     # put_child_back_in_the_wound: destructive targeting and worktree loss are explicit.
-    desc = tools["put_child_back_in_the_wound"].lower()
+    desc = " ".join(tools["put_child_back_in_the_wound"].lower().split())
     assert "explicit yes" in desc
-    assert "before every call" in desc
+    assert "you — not the user — must name" in desc
+    assert "bare `yes` or `confirm`" in desc
+    assert "never ask the user to repeat or paste" in desc
+    assert "without asking again between calls" in desc
+    assert "deeper descendants" in desc
+    assert "confirmation syntax is the problem" in desc
     assert "worktree=true" in desc
     assert "deletes its branch" in desc
     assert "uncommitted changes" in desc

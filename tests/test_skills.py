@@ -61,6 +61,11 @@ def test_shipped_skills_are_discovered_with_their_exact_content(tmp_path):
     assert skill.source is SkillSource.BUILTIN
     assert skill.content == skill.source_path.read_text(encoding="utf-8")
     assert skill.description.startswith("Orchestrate implementation")
+    compact_content = " ".join(skill.content.split())
+    assert "A bare `yes` or `confirm`" in compact_content
+    assert "never ask the user to repeat or paste" in compact_content
+    assert "without asking again between calls" in compact_content
+    assert "bottom-up coordination" in compact_content
 
 
 def test_shipped_tmux_recovery_skill_has_exact_data_only_package(tmp_path):
