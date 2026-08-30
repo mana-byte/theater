@@ -20,9 +20,12 @@ the cast, changes, model choices, and costs under control.
 </div>
 
 Theater is a local-first orchestration layer for coding-agent CLIs. Agents on
-one machine can discover one another, delegate work, exchange prompts, and
-await results through MCP. The **régie** gives you one live view of their
-lineage, status, panes, trajectories, transcripts, and usage.
+one machine can discover one another, spawn children on any harness, and pick
+the model and reasoning effort each child needs — you can steer that choice
+too, naming the exact model or depth for a given task. Agents delegate work,
+exchange prompts, and await results through MCP. The **régie** gives you one
+live view of their lineage, status, panes, trajectories, transcripts, and
+usage.
 
 No hosted control plane. No replacement chat UI. Your agents keep their native
 CLIs, permissions, sessions, and terminal panes.
