@@ -180,6 +180,8 @@ async def test_name_semantics_reach_the_tools_that_target_by_name(daemon):
     desc = " ".join(tools["put_child_back_in_the_wound"].lower().split())
     assert "explicit yes" in desc
     assert "you — not the user — must name" in desc
+    assert "native ask-user or confirmation tool" in desc
+    assert "highly recommended" in desc
     assert "bare `yes` or `confirm`" in desc
     assert "never ask the user to repeat or paste" in desc
     assert "without asking again between calls" in desc

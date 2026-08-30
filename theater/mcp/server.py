@@ -517,17 +517,20 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
 
         **Before killing any child, ask the user for permission and wait for an
         explicit yes.** In that request, you — not the user — must name every
-        direct child you intend to kill. A bare `yes` or `confirm` in the
-        user's next message authorizes every child you named. Never ask the
-        user to repeat or paste those names or ids. Make all authorized calls
-        in the assistant turn immediately following confirmation, without
+        direct child you intend to kill. When your harness exposes a native
+        ask-user or confirmation tool, using it for this request is highly
+        recommended; otherwise ask in a normal assistant response. A bare
+        `yes` or `confirm`, returned through that native tool or in the user's
+        next message, authorizes every child you named. Never ask the user to
+        repeat or paste those names or ids. Once confirmation arrives, make all
+        authorized calls before sending another assistant response, without
         asking again between calls.
 
         Example: ask "May I permanently kill `Alice` and `Bob`?" If the user
-        replies "yes", call this tool for Alice and then Bob immediately. An
-        earlier approval, approval to spawn, or a vague request to clean up is
-        not enough. Do not bypass this rule by invoking `theater kill` through
-        a shell.
+        replies "yes" through the native question tool or normally, call this
+        tool for Alice and then Bob immediately. An earlier approval, approval
+        to spawn, or a vague request to clean up is not enough. Do not bypass
+        this rule by invoking `theater kill` through a shell.
 
         target: stable participant id or current live name. Prefer the id:
         dead names cannot resolve, and a recycled name may identify a new

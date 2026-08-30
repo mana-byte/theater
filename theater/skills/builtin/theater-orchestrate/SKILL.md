@@ -157,10 +157,12 @@ changes.
 Keep workers and their worktrees available until final review and integration are complete. Never
 kill a participant or remove its worktree while accepted or potentially recoverable work remains
 unintegrated. After the work is complete, name every direct child you intend to kill and ask once.
-A bare `yes` or `confirm` in the user's next reply authorizes every child you named; never ask the
-user to repeat or paste the names or ids. Make those authorized calls in the immediately following
-assistant turn without asking again between calls. Deeper descendants remain owned by their direct
-parents and require bottom-up coordination.
+Using the harness's native ask-user or confirmation tool is highly recommended when one is
+available; otherwise ask in a normal assistant response. A bare `yes` or `confirm`, returned through
+that native tool or in the user's next reply, authorizes every child you named. Never ask the user to
+repeat or paste the names or ids. Once confirmation arrives, make those authorized calls before
+sending another assistant response and without asking again between calls. Deeper descendants
+remain owned by their direct parents and require bottom-up coordination.
 
 ## Finish
 
