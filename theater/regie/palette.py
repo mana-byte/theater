@@ -197,11 +197,15 @@ def _resume_prompt_context(row: dict) -> str | None:
 
 
 def _dead_session_search_text(row: dict, display: str) -> str:
-    """Keep a saved prompt searchable when a description owns the visible line."""
-    prompt = _resume_prompt_context(row)
-    if row.get("description") and prompt:
-        return f"{display}\n{' '.join(prompt.split())}"
+    """Search only visible resume context; prompts are description fallbacks."""
     return display
+
+
+def _dead_session_help(row: dict) -> str | None:
+    """Show historical prompt help only when no saved description supersedes it."""
+    if row.get("description"):
+        return None
+    return _resume_prompt_context(row)
 
 
 def _to_text(display: str) -> Text:
@@ -238,7 +242,7 @@ class ResumeDeadSessionCommands(Provider):
             yield DiscoveryHit(
                 _to_text(display),
                 command,
-                help=_resume_prompt_context(row),
+                help=_dead_session_help(row),
                 text=_dead_session_search_text(row, display),
             )
 

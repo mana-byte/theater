@@ -306,7 +306,6 @@ class TreePanel(VerticalScroll):
             widget = self._key_widgets.get(key)
             if widget is None:
                 continue
-            widget.remove_class("tree-cursor")
             widget.remove_class("tree-staged")
             widget.remove_class("tree-trajectory-staged")
             pane_matches = staged_pane is not None and node.get("tmux_pane") == staged_pane
@@ -327,8 +326,9 @@ class TreePanel(VerticalScroll):
                     widget.set_stage_marker("trajectory")
                 else:
                     widget.set_stage_marker(None)
-            if i == cursor:
-                widget.add_class("tree-cursor")
+                widget.set_cursor(i == cursor)
+            else:
+                widget.set_class(i == cursor, "tree-cursor")
 
     def set_overlays(self, overlays: dict[Key, LeafOverlay]) -> None:
         """Put the send trace on the leaves that carry it, clear the rest.

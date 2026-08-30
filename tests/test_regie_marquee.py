@@ -12,13 +12,17 @@ def test_clip_cells_never_splits_a_wide_character():
     assert clip_cells("界abc", 3) == "界a"
 
 
-def test_marquee_is_bounded_and_moves_right_to_left():
-    first = marquee_cells("description", 5, 0)
-    later = marquee_cells("description", 5, 1)
-    assert first == "descr"
-    assert later == "escri"
-    assert cell_len(first) <= 5
-    assert cell_len(later) <= 5
+def test_marquee_is_bounded_and_scrolls_continuously_left_across_three_spaces():
+    frames = [marquee_cells("abcd", 3, frame, pause_frames=1) for frame in range(8)]
+    assert frames == ["abc", "bcd", "cd ", "d  ", "   ", "  a", " ab", "abc"]
+    assert all(cell_len(frame) <= 3 for frame in frames)
+
+
+def test_marquee_pauses_before_starting_and_after_each_full_cycle():
+    assert [marquee_cells("abcd", 3, frame) for frame in range(8)] == ["abc"] * 8
+    assert marquee_cells("abcd", 3, 8) == "bcd"
+    assert [marquee_cells("abcd", 3, frame) for frame in range(14, 22)] == ["abc"] * 8
+    assert marquee_cells("abcd", 3, 22) == "bcd"
 
 
 def test_fitting_text_is_stable_at_every_offset():

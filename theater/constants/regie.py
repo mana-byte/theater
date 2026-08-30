@@ -90,6 +90,12 @@ REGIE_LEAF_SPINNER_INTERVAL = 0.1
 #: Hovered overflowing participant-description marquee interval in seconds.
 REGIE_LEAF_MARQUEE_INTERVAL = 0.12
 
+#: Stationary frames before a participant-description marquee starts or repeats.
+REGIE_LEAF_MARQUEE_PAUSE_FRAMES = 8
+
+#: Blank cells separating the end and beginning of a participant-description marquee.
+REGIE_LEAF_MARQUEE_GAP_CELLS = 3
+
 #: Maximum characters retained from a historical spawn prompt in resume palette context.
 REGIE_RESUME_PROMPT_CONTEXT_MAX = 240
 

@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from rich.cells import cell_len
 
+from theater.constants.regie import (
+    REGIE_LEAF_MARQUEE_GAP_CELLS,
+    REGIE_LEAF_MARQUEE_PAUSE_FRAMES,
+)
+
 
 def clip_cells(text: str, width: int) -> str:
     """Return the leading whole characters that fit in *width* terminal cells."""
@@ -23,22 +28,24 @@ def overflows_cells(text: str, width: int) -> bool:
     return cell_len(text) > max(0, width)
 
 
-def marquee_cells(text: str, width: int, offset: int, *, gap: int = 3) -> str:
-    """Return one right-to-left scrolling window, never wider than *width* cells."""
+def marquee_cells(
+    text: str,
+    width: int,
+    frame: int,
+    *,
+    pause_frames: int = REGIE_LEAF_MARQUEE_PAUSE_FRAMES,
+) -> str:
+    """Return one paused, continuous left-moving window bounded to *width* cells."""
     if width <= 0:
         return ""
     if not overflows_cells(text, width):
         return clip_cells(text, width)
 
-    track = text + " " * max(1, gap)
-    track_width = cell_len(track)
-    start = max(0, offset) % track_width
-    index = 0
-    consumed = 0
-    while consumed < start:
-        size = cell_len(track[index])
-        consumed += size
-        index = (index + 1) % len(track)
+    track = text + " " * REGIE_LEAF_MARQUEE_GAP_CELLS
+    pause = max(1, pause_frames)
+    cycle_frames = pause + len(track) - 1
+    phase = max(0, frame) % cycle_frames
+    index = 0 if phase < pause else phase - pause + 1
 
     remaining = width
     pieces: list[str] = []

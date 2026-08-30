@@ -197,7 +197,9 @@ async def test_description_mode_marquees_only_a_hovered_overflowing_description(
     app = make_app(participant_detail="description")
 
     async with app.run_test():
-        leaf = _panel(app)._key_widgets[("p", PARENT["id"])]
+        panel = _panel(app)
+        panel.apply_cursor(-1, None)
+        leaf = panel._key_widgets[("p", PARENT["id"])]
         assert isinstance(leaf, AgentLeaf)
         assert leaf._marquee_timer is None
         assert description.startswith(str(leaf.render()).splitlines()[2].lstrip())
@@ -222,13 +224,40 @@ async def test_cwd_mode_marquees_an_overflowing_hovered_description(daemon, tmux
     app = make_app()
 
     async with app.run_test():
-        leaf = _panel(app)._key_widgets[("p", PARENT["id"])]
+        panel = _panel(app)
+        panel.apply_cursor(-1, None)
+        leaf = panel._key_widgets[("p", PARENT["id"])]
         assert isinstance(leaf, AgentLeaf)
         assert "/tmp/proj" in str(leaf.render()).splitlines()[2]
 
         leaf.on_enter(None)  # type: ignore[arg-type]
         assert description.startswith(str(leaf.render()).splitlines()[2].lstrip())
         assert leaf._marquee_timer is not None
+
+
+async def test_cwd_mode_marquees_an_overflowing_keyboard_selected_description(daemon, tmux):
+    description = "a durable participant description that is much wider than this sidebar"
+    daemon["answers"]["participants.tree"] = [
+        {**PARENT, "description": description, "children": []}
+    ]
+    app = make_app()
+
+    async with app.run_test():
+        panel = _panel(app)
+        leaf = panel._key_widgets[("p", PARENT["id"])]
+        assert isinstance(leaf, AgentLeaf)
+
+        panel.apply_cursor(-1, None)
+        assert "/tmp/proj" in str(leaf.render()).splitlines()[2]
+
+        panel.apply_cursor(0, None)
+        assert description.startswith(str(leaf.render()).splitlines()[2].lstrip())
+        assert leaf._marquee_timer is not None
+
+        panel.apply_cursor(-1, None)
+        assert "/tmp/proj" in str(leaf.render()).splitlines()[2]
+        assert leaf._marquee_timer is None
+        assert leaf._marquee_offset == 0
 
 
 async def test_cwd_mode_does_not_marquee_a_fitting_hovered_description(daemon, tmux):
@@ -258,6 +287,34 @@ async def test_reconciliation_updates_an_existing_leaf_description(daemon, tmux)
 
         assert panel._key_widgets[("p", PARENT["id"])] is leaf
         assert "updated saved description" in str(leaf.render()).splitlines()[2]
+
+
+async def test_reconciliation_does_not_restart_an_unchanged_description_marquee(daemon, tmux):
+    description = "a durable participant description that is much wider than this sidebar"
+    daemon["answers"]["participants.tree"] = [
+        {**PARENT, "description": description, "last_activity": 1.0, "children": []}
+    ]
+    app = make_app()
+
+    async with app.run_test():
+        panel = _panel(app)
+        leaf = panel._key_widgets[("p", PARENT["id"])]
+        assert isinstance(leaf, AgentLeaf)
+        assert leaf._marquee_timer is not None
+        for _ in range(6):
+            leaf._tick_marquee()
+        timer = leaf._marquee_timer
+        rendered = str(leaf.render())
+
+        daemon["answers"]["participants.tree"] = [
+            {**PARENT, "description": description, "last_activity": 2.0, "children": []}
+        ]
+        await app._refresh_tree()
+
+        assert panel._key_widgets[("p", PARENT["id"])] is leaf
+        assert leaf._marquee_offset == 6
+        assert leaf._marquee_timer is timer
+        assert str(leaf.render()) == rendered
 
 
 async def test_a_disappeared_participant_is_unmounted(daemon, tmux):

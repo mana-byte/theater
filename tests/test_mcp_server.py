@@ -119,6 +119,11 @@ async def test_new_feature_descriptions_reach_their_tools(daemon):
     assert "does not" in interrupt and "kill" in interrupt
     assert "human" in interrupt
 
+    update = tools["update_participant"]
+    assert "task at hand" in update and "highly recommended" in update
+    assert "parent supplied" in update and "leave it unchanged" in update
+    assert "when missing" in update and "materially changes" in update
+
 
 async def test_await_description_communicates_first_any_completion(daemon):
     """The await_sessions description must say it returns on the FIRST terminal

@@ -350,7 +350,10 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         live-only, case-insensitively unique alias and cannot be cleared.
         `description` is durable; use an empty string to clear it, or a short,
         plain, specific, non-verbose single-line summary up to 160 Unicode
-        codepoints. Descriptions help users understand the participant list.
+        codepoints. Keeping your own description aligned with the task at hand
+        is highly recommended. If a parent supplied an accurate description,
+        leave it unchanged. Set it when missing, and update it only when the
+        task materially changes or it becomes inaccurate.
         """
         return await tools.update_participant(
             session,

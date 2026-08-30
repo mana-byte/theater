@@ -423,10 +423,12 @@ def test_resume_label_prefers_saved_description_to_the_spawn_prompt():
         "description": "resume the schema migration",
         "spawn_prompt": "original detailed spawn request",
     }
-    assert _dead_session_label(row).split("\n")[1] == "resume the schema migration"
+    label = _dead_session_label(row)
+    assert label.split("\n")[1] == "resume the schema migration"
+    assert "original detailed spawn request" not in label
 
 
-async def test_resume_description_keeps_the_original_prompt_searchable():
+async def test_resume_description_hides_the_original_prompt_from_help_and_search():
     class ResumingApp:
         def resume_dead_session(self, _row: dict) -> None:
             pass
@@ -440,7 +442,19 @@ async def test_resume_description_keeps_the_original_prompt_searchable():
             "spawn_prompt": "original detailed spawn request",
         }
     ]
-    assert [hit async for hit in provider.search("original request")]
+    hit = await anext(provider.discover())
+    assert hit.help is None
+    assert [hit async for hit in provider.search("original request")] == []
+
+
+def test_resume_label_falls_back_to_spawn_prompt_without_a_description():
+    row = {
+        "harness": "vibe",
+        "cwd": "/tmp/project",
+        "description": None,
+        "spawn_prompt": "original detailed spawn request",
+    }
+    assert _dead_session_label(row).split("\n")[1] == "original detailed spawn request"
 
 
 async def test_resume_prompt_context_is_bounded_for_help_and_search():
@@ -452,7 +466,7 @@ async def test_resume_prompt_context_is_bounded_for_help_and_search():
     row = {
         "harness": "vibe",
         "cwd": "/tmp/project",
-        "description": "resume the schema migration",
+        "description": None,
         "spawn_prompt": prompt,
     }
     provider = ResumeDeadSessionCommands(FakeScreen(ResumingApp()))
@@ -462,5 +476,5 @@ async def test_resume_prompt_context_is_bounded_for_help_and_search():
     hit = await anext(provider.discover())
 
     assert hit.help is not None and len(hit.help) <= REGIE_RESUME_PROMPT_CONTEXT_MAX
-    assert len(search_text) <= len(display) + REGIE_RESUME_PROMPT_CONTEXT_MAX + 1
+    assert search_text == display
     assert "  " not in hit.help

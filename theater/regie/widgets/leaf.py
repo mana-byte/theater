@@ -91,6 +91,7 @@ class AgentLeaf(Static):
         self._marquee_timer: Timer | None = None
         self._marquee_offset = 0
         self._hovered = False
+        self._cursor_selected = False
         self._stage_marker: StageMarker | None = None
         #: Heavy line glyphs a tree-route animation is drawing on this leaf.
         self._overlay: LeafOverlay | None = None
@@ -125,7 +126,11 @@ class AgentLeaf(Static):
 
     def _detail(self) -> str:
         description = self._description()
-        if description is not None and (self._participant_detail == "description" or self._hovered):
+        if description is not None and (
+            self._participant_detail == "description"
+            or self._hovered
+            or self._cursor_selected
+        ):
             return description
         return shorten_path(tilde(self._node.get("cwd")), keep=self._cwd_segments)
 
@@ -138,7 +143,7 @@ class AgentLeaf(Static):
     def _should_marquee(self) -> bool:
         width = self._detail_width()
         return (
-            self._hovered
+            (self._hovered or self._cursor_selected)
             and self._description() is not None
             and width is not None
             and overflows_cells(self._detail(), width)
@@ -203,6 +208,7 @@ class AgentLeaf(Static):
         """Stop activity while this leaf remains mounted only to shrink away."""
         self.set_overlay(None)
         self.set_stage_marker(None)
+        self._cursor_selected = False
         self.remove_class("tree-cursor")
         self.remove_class("tree-staged")
         self.remove_class("tree-trajectory-staged")
@@ -247,6 +253,16 @@ class AgentLeaf(Static):
         else:
             self._stop_marquee()
 
+    def set_cursor(self, selected: bool) -> None:
+        """Apply keyboard selection and synchronize its description marquee."""
+        if selected == self._cursor_selected:
+            return
+        self._stop_marquee()
+        self._cursor_selected = selected
+        self.set_class(selected, "tree-cursor")
+        self.update(self._render_label(), layout=False)
+        self._sync_marquee()
+
     def update_node(
         self,
         node: dict,
@@ -262,13 +278,13 @@ class AgentLeaf(Static):
         depending on whether the participant is now WORKING. The timer
         surviving across refreshes is the whole point of reconciliation.
         """
-        changed = (
-            node != self._node
-            or prefix != self._prefix
+        detail_changed = (
+            node.get("description") != self._node.get("description")
+            or node.get("cwd") != self._node.get("cwd")
             or cont_prefix != self._cont_prefix
             or participant_detail != self._participant_detail
         )
-        if changed:
+        if detail_changed:
             self._stop_marquee()
         self._node = node
         self._prefix = prefix
@@ -320,6 +336,7 @@ class AgentLeaf(Static):
         self._hovered = False
         self._stop_marquee()
         self.update(self._render_label(), layout=False)
+        self._sync_marquee()
 
     def on_resize(self, _event: events.Resize) -> None:
         self._stop_marquee()
