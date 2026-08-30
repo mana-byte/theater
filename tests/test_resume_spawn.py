@@ -186,6 +186,53 @@ async def test_resume_reaches_plan_launch(registry, resume_harness, monkeypatch)
     assert boundary["payload"] == {"reason": "resume", "predecessor_id": predecessor.id}
 
 
+async def test_resume_inherits_description_but_not_name(registry, resume_harness, monkeypatch):
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
+    predecessor = _trusted_resume(registry, harness="resume-spawn-test")
+    predecessor = registry.get(predecessor.id)
+    predecessor.description = "Preserve this purpose"
+    registry.store.upsert_participant(predecessor)
+    spawner = Spawner(registry)
+
+    successor = await spawner.spawn(
+        SpawnRequest(
+            harness="resume-spawn-test",
+            prompt="do thing",
+            cwd="/tmp",
+            approval="edits",
+            resume="sess-abc",
+            name="New-Live-Name",
+        )
+    )
+
+    assert successor.description == "Preserve this purpose"
+    assert successor.name == "New-Live-Name"
+
+
+async def test_resume_empty_description_clears_inherited_value(
+    registry, resume_harness, monkeypatch
+):
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
+    predecessor = _trusted_resume(registry, harness="resume-spawn-test")
+    predecessor = registry.get(predecessor.id)
+    predecessor.description = "Clear this purpose"
+    registry.store.upsert_participant(predecessor)
+    spawner = Spawner(registry)
+
+    successor = await spawner.spawn(
+        SpawnRequest(
+            harness="resume-spawn-test",
+            prompt="do thing",
+            cwd="/tmp",
+            approval="edits",
+            resume="sess-abc",
+            description="",
+        )
+    )
+
+    assert successor.description is None
+
+
 async def test_failed_resume_reserve_emits_no_boundary(registry, resume_harness, monkeypatch):
     monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
     predecessor = _trusted_resume(registry, harness="resume-spawn-test")
@@ -210,6 +257,34 @@ async def test_failed_resume_reserve_emits_no_boundary(registry, resume_harness,
         row["kind"] == BUS_KIND_PARTICIPANT_SESSION_BOUNDARY and row["from_id"] == predecessor.id
         for row in registry.store.bus_tail(limit=100)
     )
+
+
+async def test_failed_reservation_releases_its_supplied_name(registry, resume_harness, monkeypatch):
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
+    spawner = Spawner(registry)
+    monkeypatch.setattr(
+        spawner,
+        "_build_plan",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("plan exploded")),
+    )
+
+    with pytest.raises(RuntimeError, match="plan exploded"):
+        await spawner.reserve(
+            SpawnRequest(
+                harness="resume-spawn-test",
+                prompt="do thing",
+                cwd="/tmp",
+                approval="edits",
+                name="Released-Name",
+            )
+        )
+
+    replacement = registry.create_spawned(
+        harness="resume-spawn-test",
+        cwd="/tmp",
+        name="Released-Name",
+    )
+    assert replacement.name == "Released-Name"
 
 
 async def test_failed_resume_launch_emits_no_boundary(

@@ -242,6 +242,35 @@ async def _rename(daemon, params: dict) -> dict:
     return daemon.registry.rename(pid, name).to_dict()
 
 
+@method("participant.update")
+async def _update(daemon, params: dict) -> dict:
+    caller_id = _require(params, "caller_id")
+    if not isinstance(caller_id, str):
+        raise BadRequest("caller_id must be a participant id")
+    raw_target = params.get("target")
+    if raw_target is not None and (not isinstance(raw_target, str) or not raw_target):
+        raise BadRequest("target must be a non-empty participant id or live name, or null")
+    name = params.get("name")
+    description = params.get("description")
+    if name is None and description is None:
+        raise BadRequest("participant.update requires at least one of name or description")
+
+    caller = daemon.registry.resolve(caller_id)
+    target = daemon.registry.resolve(raw_target if raw_target is not None else caller.id)
+    if target.status is Status.DEAD:
+        raise BadRequest(f"cannot update participant {target.id!r}: it is dead")
+    if caller.id not in (target.id, target.parent_id):
+        raise NotYourChild(
+            f"refusing to update {target.id!r}: its parent is "
+            f"{target.parent_id!r}, not you ({caller.id!r})"
+        )
+    return daemon.registry.update_metadata(
+        target.id,
+        name=name,
+        description=description,
+    ).to_dict()
+
+
 @method("participant.status")
 async def _status(daemon, params: dict) -> dict:
     pid = _require(params, "id")

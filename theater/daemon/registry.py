@@ -18,6 +18,7 @@ import builtins
 from collections.abc import Callable
 
 from theater import names
+from theater.constants.daemon import BUS_KIND_PARTICIPANT_METADATA_CHANGED
 from theater.daemon import lineage
 from theater.daemon.store import Store
 from theater.harness import normalize
@@ -29,6 +30,7 @@ from theater.models import (
     Status,
     Tier,
     new_id,
+    normalize_participant_description,
     now,
 )
 
@@ -149,6 +151,8 @@ class Registry:
         pid: str | None = None,
         has_prompt: bool | None = None,
         resumed_from_id: str | None = None,
+        name: str | None = None,
+        description: str | None = None,
     ) -> Participant:
         """Reserve an id before the pane exists.
 
@@ -171,8 +175,19 @@ class Registry:
             parent_id=parent_id,
             resumed_from_id=resumed_from_id,
             status=Status.IDLE,
+            description=(
+                normalize_participant_description(description) if description is not None else None
+            ),
         )
-        self.store.upsert_participant(p)
+        if name is not None:
+            self._validate_name(p.id, name)
+            self._names[p.id] = name
+            p.name = name
+        try:
+            self.store.upsert_participant(p)
+        except BaseException:
+            self._names.pop(p.id, None)
+            raise
         self.store.bus_append(
             "participant.created",
             to_id=p.id,
@@ -356,6 +371,23 @@ class Registry:
 
     # ---- naming control ------------------------------------------------
 
+    def _validate_name(self, participant_id: str, value: str) -> None:
+        """Validate a live-only name without changing its owner."""
+        if not isinstance(value, str) or not names.is_valid_name(value):
+            raise BadRequest(
+                f"invalid name {value!r}: must match ^[A-Za-z][A-Za-z0-9_-]"
+                f"{{0,23}}$ (e.g. Arlequin, Scapin-2)"
+            )
+        if len(value) == 12 and all(c in "0123456789abcdef" for c in value.casefold()):
+            raise BadRequest(
+                f"name {value!r} looks like a participant id; "
+                "choose a name that cannot be confused with one"
+            )
+        self.list()
+        for other_id, other_name in self._names.items():
+            if other_id != participant_id and other_name.casefold() == value.casefold():
+                raise NameTaken(f"name {value!r} is taken by participant {other_id!r}")
+
     def rename(self, pid: str, new_name: str) -> Participant:
         """Assign or change a participant's runtime name.
 
@@ -381,27 +413,53 @@ class Registry:
         if new_name == self._names.get(p.id, ""):
             return p
 
-        if not names.is_valid_name(new_name):
-            raise BadRequest(
-                f"invalid name {new_name!r}: must match ^[A-Za-z][A-Za-z0-9_-]"
-                f"{{0,23}}$ (e.g. Arlequin, Scapin-2)"
-            )
-
-        # A 12-char pure-hex name is indistinguishable from a participant id.
-        if len(new_name) == 12 and all(c in "0123456789abcdef" for c in new_name.casefold()):
-            raise BadRequest(
-                f"name {new_name!r} looks like a participant id; "
-                f"choose a name that cannot be confused with one"
-            )
-
-        for other_id, other_name in self._names.items():
-            if other_id != p.id and other_name.casefold() == new_name.casefold():
-                raise NameTaken(f"name {new_name!r} is taken by participant {other_id!r}")
+        self._validate_name(p.id, new_name)
 
         self._names[p.id] = new_name
         p.name = new_name
         self.store.bus_append("participant.renamed", to_id=p.id, payload={"name": new_name})
         return p
+
+    def update_metadata(
+        self,
+        pid: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+    ) -> Participant:
+        """Update supplied participant metadata after validating every field."""
+        if name is None and description is None:
+            raise BadRequest(
+                "supply at least one of name or description to update participant metadata"
+            )
+        p = self.resolve(pid)
+        if p.status is Status.DEAD:
+            raise BadRequest(f"cannot update participant {pid!r}: it is dead")
+
+        normalized_description = (
+            normalize_participant_description(description)
+            if description is not None
+            else p.description
+        )
+        if name is not None:
+            self._validate_name(p.id, name)
+
+        changed: list[str] = []
+        if description is not None and normalized_description != p.description:
+            p.description = normalized_description
+            self.store.upsert_participant(p)
+            changed.append("description")
+        if name is not None and name != self._names.get(p.id):
+            self._names[p.id] = name
+            p.name = name
+            changed.append("name")
+        if changed:
+            self.store.bus_append(
+                BUS_KIND_PARTICIPANT_METADATA_CHANGED,
+                to_id=p.id,
+                payload={"fields": changed},
+            )
+        return self._named(p)
 
     def resolve(self, token: str) -> Participant:
         """Find a participant by id or by name (case-insensitive).

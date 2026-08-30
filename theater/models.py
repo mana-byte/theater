@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import unicodedata
 import uuid
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
@@ -60,6 +61,8 @@ class Participant:
     status: Status = Status.IDLE
     last_activity: float = field(default_factory=now)
     created_at: float = field(default_factory=now)
+    #: Durable, user-facing summary of this participant's purpose.
+    description: str | None = None
     # Live-only alias; never persisted. Use the id for cross-time targeting — names recycle.
     name: str | None = None
 
@@ -148,6 +151,7 @@ class Participant:
             status=status,
             last_activity=mapping["last_activity"],
             created_at=mapping["created_at"],
+            description=mapping["description"],
         )
 
 
@@ -334,3 +338,25 @@ class NameTaken(TheaterError):
     """
 
     code = "name_taken"
+
+
+def normalize_participant_description(value: str) -> str | None:
+    """Normalize a participant description or explain why it is unsafe to store."""
+    from theater.constants.limits import PARTICIPANT_DESCRIPTION_MAX_CODEPOINTS
+
+    if not isinstance(value, str):
+        raise BadRequest("description must be a string or null")
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if any(
+        character in "\r\n\u0085\u2028\u2029" or unicodedata.category(character) == "Cc"
+        for character in normalized
+    ):
+        raise BadRequest("description must be one line and contain no control characters")
+    if len(normalized) > PARTICIPANT_DESCRIPTION_MAX_CODEPOINTS:
+        raise BadRequest(
+            "description must be at most "
+            f"{PARTICIPANT_DESCRIPTION_MAX_CODEPOINTS} Unicode codepoints; shorten it"
+        )
+    return normalized

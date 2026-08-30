@@ -14,6 +14,7 @@ from theater.mcp import tools
 RECORD = {
     "id": "p-me",
     "name": "Arlequin",
+    "description": "Coordinate the implementation",
     "harness": "vibe",
     "tier": "spawned",
     "status": "idle",
@@ -90,6 +91,7 @@ async def test_whoami_answers_who_where_and_reachable():
     assert got == {
         "id": "p-me",
         "name": "Arlequin",
+        "description": "Coordinate the implementation",
         "harness": "vibe",
         "tier": "spawned",
         "status": "idle",
@@ -202,6 +204,21 @@ async def test_spawn_forwards_empty_response_format():
     assert s.client.params("spawn")["response_format"] is response_format
 
 
+async def test_spawn_forwards_participant_metadata():
+    s = resolved()
+    await tools.spawn_session(
+        s,
+        harness="vibe",
+        prompt="work",
+        approval="manual",
+        name="Metadata-Child",
+        description="Implement participant metadata",
+    )
+    params = s.client.params("spawn")
+    assert params["name"] == "Metadata-Child"
+    assert params["description"] == "Implement participant metadata"
+
+
 async def test_spawn_defaults_the_cwd_to_this_process():
     s = resolved()
     await tools.spawn_session(s, harness="vibe", prompt="hi", approval="manual")
@@ -215,6 +232,23 @@ async def test_register_pane_settles_identity_on_the_pane_it_was_told():
     assert s.client.params("hello")["pane"] == "%12"
     assert (s.participant_id, s._resolved) == ("p-adopted", True)
     assert adopted["session_id"] == "ses-me"
+
+
+async def test_update_participant_identifies_and_forwards_metadata():
+    s = session(**{"participant.update": {**RECORD, "description": "Updated"}})
+    updated = await tools.update_participant(
+        s,
+        target="p-child",
+        name="Metadata-Child",
+        description="Updated",
+    )
+    assert updated["description"] == "Updated"
+    assert s.client.params("participant.update") == {
+        "caller_id": "p-me",
+        "target": "p-child",
+        "name": "Metadata-Child",
+        "description": "Updated",
+    }
 
 
 async def test_await_names_the_caller_so_a_deadlock_can_be_refused():

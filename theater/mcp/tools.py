@@ -18,7 +18,13 @@ from theater.mcp.toolsets.delegation import (
     send_prompt,
     spawn_session,
 )
-from theater.mcp.toolsets.participants import _summarise, list_participants, register_pane, whoami
+from theater.mcp.toolsets.participants import (
+    _summarise,
+    list_participants,
+    register_pane,
+    update_participant,
+    whoami,
+)
 from theater.mcp.toolsets.recall import recall, recall_read
 from theater.mcp.toolsets.skills import list_skills, load_skill
 from theater.mcp.toolsets.transcripts import read_transcript
@@ -41,5 +47,6 @@ __all__ = [
     "scratchpad_write",
     "send_prompt",
     "spawn_session",
+    "update_participant",
     "whoami",
 ]

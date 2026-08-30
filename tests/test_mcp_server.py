@@ -52,6 +52,7 @@ async def test_tools_are_registered(daemon):
         "load_skill",
         "spawn_session",
         "register_pane",
+        "update_participant",
         "await_sessions",
         "send",
         "scratchpad_write",
@@ -198,6 +199,19 @@ async def test_spawn_session_worktree_schema_accepts_name_bool_or_null(daemon):
     schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
     worktree = schema["spawn_session"]["properties"]["worktree"]
     assert {entry["type"] for entry in worktree["anyOf"]} == {"string", "boolean", "null"}
+
+
+async def test_participant_metadata_schemas_are_optional_and_nullable(daemon):
+    schema = {t.name: t.input_schema for t in await build("p1", "vibe").list_tools()}
+
+    spawn = schema["spawn_session"]
+    assert {"name", "description"} <= set(spawn["properties"])
+    assert "name" not in spawn["required"]
+    assert "description" not in spawn["required"]
+
+    update = schema["update_participant"]
+    assert set(update["properties"]) == {"target", "name", "description"}
+    assert update.get("required", []) == []
 
 
 def _assert_nullable_object_schema(prop: dict) -> None:
@@ -347,6 +361,47 @@ async def test_response_format_wrappers_forward_to_tool_bodies(monkeypatch):
     assert isinstance(send_session, mcp_tools.Session)
     assert spawn_kwargs["response_format"] == spawn_format
     assert send_kwargs["response_format"] == send_format
+
+
+async def test_participant_metadata_wrappers_forward_to_tool_bodies(monkeypatch):
+    calls = {}
+
+    async def fake_spawn(session, **kwargs):
+        calls["spawn"] = (session, kwargs)
+        return {"ok": "spawn"}
+
+    async def fake_update(session, **kwargs):
+        calls["update"] = (session, kwargs)
+        return {"ok": "update"}
+
+    monkeypatch.setattr(mcp_tools, "spawn_session", fake_spawn)
+    monkeypatch.setattr(mcp_tools, "update_participant", fake_update)
+
+    mcp = build("p1", "vibe")
+    assert _payload(
+        await mcp.call_tool(
+            "spawn_session",
+            {
+                "harness": "vibe",
+                "approval": "edits",
+                "name": "Metadata-Child",
+                "description": "Implement metadata",
+            },
+        )
+    ) == {"ok": "spawn"}
+    assert _payload(
+        await mcp.call_tool(
+            "update_participant",
+            {"target": "child", "description": "Updated metadata"},
+        )
+    ) == {"ok": "update"}
+    assert calls["spawn"][1]["name"] == "Metadata-Child"
+    assert calls["spawn"][1]["description"] == "Implement metadata"
+    assert calls["update"][1] == {
+        "target": "child",
+        "name": None,
+        "description": "Updated metadata",
+    }
 
 
 async def test_new_tool_wrappers_forward_to_tool_bodies(monkeypatch):

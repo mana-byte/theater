@@ -78,6 +78,8 @@ async def spawn_session(
     model: str | None = None,
     reasoning_effort: str | None = None,
     resume: str | None = None,
+    name: str | None = None,
+    description: str | None = None,
 ) -> dict:
     """Create a child agent in a new tmux window and return its record.
 
@@ -148,6 +150,8 @@ async def spawn_session(
         model=model,
         reasoning_effort=reasoning_effort,
         resume=resume,
+        name=name,
+        description=description,
         response_format=response_format,
     )
     assert isinstance(record, dict)

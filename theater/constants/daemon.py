@@ -78,6 +78,9 @@ BUS_KIND_PARTICIPANT_KILL_REQUESTED = "participant.kill_requested"
 #: Bus kind for a new participant crossing a resume/session boundary.
 BUS_KIND_PARTICIPANT_SESSION_BOUNDARY = "participant.session_boundary"
 
+#: Bounded participant metadata update; payload names fields, never description prose.
+BUS_KIND_PARTICIPANT_METADATA_CHANGED = "participant.metadata_changed"
+
 #: Bus kind for the start of an announced jobs.await wait.
 BUS_KIND_JOB_AWAIT_START = "job.await.start"
 

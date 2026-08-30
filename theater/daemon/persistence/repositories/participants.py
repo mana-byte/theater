@@ -43,6 +43,7 @@ class ParticipantRepository:
             "status": str(p.status),
             "last_activity": p.last_activity,
             "created_at": p.created_at,
+            "description": p.description,
         }
 
     def upsert(self, p: Participant) -> None:

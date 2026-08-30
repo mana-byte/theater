@@ -106,6 +106,9 @@ class Spawner:
         resume_predecessor, resume_overlay = self._validate_before_create(req, harness)
         if resume_overlay is not None and resume_overlay.cwd is not None:
             req = replace(req, cwd=resume_overlay.cwd)
+        description = req.description
+        if description is None and resume_predecessor is not None:
+            description = resume_predecessor.description
         try:
             participant = self.registry.create_spawned(
                 harness=req.harness,
@@ -113,6 +116,8 @@ class Spawner:
                 parent_id=req.parent_id,
                 has_prompt=bool(req.prompt),
                 resumed_from_id=resume_predecessor.id if resume_predecessor is not None else None,
+                name=req.name,
+                description=description,
             )
         except IntegrityError:
             if resume_predecessor is None:

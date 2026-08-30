@@ -205,6 +205,62 @@ def test_rename_rejects_a_name_with_a_space(registry):
         registry.rename(p.id, "bad name")
 
 
+def test_spawned_metadata_is_normalized_and_name_is_reserved_before_a_pane(registry):
+    participant = registry.create_spawned(
+        harness="vibe",
+        cwd="/tmp",
+        name="Metadata-Child",
+        description="  Focused metadata work  ",
+    )
+
+    assert participant.name == "Metadata-Child"
+    assert participant.description == "Focused metadata work"
+    assert registry.resolve("metadata-child").id == participant.id
+    assert not [
+        row
+        for row in registry.store.bus_tail(limit=20)
+        if row["kind"] == "participant.renamed" and row["to_id"] == participant.id
+    ]
+    assert Registry(registry.store).get(participant.id).name != "Metadata-Child"
+
+
+@pytest.mark.parametrize("description", ["two\nlines", "bad\x00control", "x" * 161])
+def test_spawned_description_rejects_unsafe_or_long_text(registry, description):
+    with pytest.raises(BadRequest):
+        registry.create_spawned(harness="vibe", cwd="/tmp", description=description)
+
+
+def test_metadata_update_is_atomic_and_emits_one_bounded_event(registry):
+    participant = registry.create_spawned(harness="vibe", cwd="/tmp")
+    previous_name = participant.name
+
+    with pytest.raises(BadRequest, match="one line"):
+        registry.update_metadata(
+            participant.id,
+            name="Metadata-Child",
+            description="bad\nsummary",
+        )
+
+    unchanged = registry.get(participant.id)
+    assert unchanged.name == previous_name
+    assert unchanged.description is None
+
+    updated = registry.update_metadata(
+        participant.id,
+        name="Metadata-Child",
+        description="  Explain the migration  ",
+    )
+    assert (updated.name, updated.description) == ("Metadata-Child", "Explain the migration")
+
+    events = [
+        row
+        for row in registry.store.bus_tail(limit=20)
+        if row["kind"] == "participant.metadata_changed" and row["to_id"] == participant.id
+    ]
+    assert len(events) == 1
+    assert events[0]["payload"] == {"fields": ["description", "name"]}
+
+
 def test_resolve_finds_by_id(registry):
     p = registry.register(harness="vibe", pane="%1", cwd="/tmp")
     found = registry.resolve(p.id)

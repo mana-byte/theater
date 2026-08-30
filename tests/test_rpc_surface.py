@@ -18,6 +18,7 @@ EXPECTED_RPC_METHODS = {
     "models",
     "participant.kill",
     "participant.rename",
+    "participant.update",
     "participant.status",
     "participants.get",
     "participants.list",

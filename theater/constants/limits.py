@@ -11,3 +11,6 @@ from __future__ import annotations
 
 #: Below this the daemon spends more time waking up than working; 0.0001 spins a core.
 MIN_INTERVAL = 0.01
+
+#: Maximum Unicode codepoints in a participant's durable description.
+PARTICIPANT_DESCRIPTION_MAX_CODEPOINTS = 160

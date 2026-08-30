@@ -65,6 +65,76 @@ async def test_usage_summary_rpc_returns_all_three_windows(client, monkeypatch):
     }
 
 
+async def test_participant_update_is_scoped_atomic_and_bounded(client, daemon):
+    parent = await client.call("hello", id="parent", harness="vibe", cwd="/tmp")
+    child = daemon.registry.create_spawned(
+        harness="vibe",
+        cwd="/tmp",
+        parent_id=parent["id"],
+    )
+    sibling = daemon.registry.create_spawned(harness="vibe", cwd="/tmp")
+    original_name = child.name
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call("participant.update", caller_id=parent["id"])
+    assert exc.value.code == "bad_request"
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "participant.update",
+            caller_id=parent["id"],
+            target=child.id,
+            name="Metadata-Child",
+            description="bad\nsummary",
+        )
+    assert exc.value.code == "bad_request"
+    unchanged = daemon.registry.get(child.id)
+    assert (unchanged.name, unchanged.description) == (original_name, None)
+
+    updated = await client.call(
+        "participant.update",
+        caller_id=parent["id"],
+        target=child.name,
+        name="Metadata-Child",
+        description="  Implement metadata  ",
+    )
+    assert (updated["name"], updated["description"]) == ("Metadata-Child", "Implement metadata")
+    events = [
+        row
+        for row in await client.call("bus.tail", limit=50)
+        if row["kind"] == "participant.metadata_changed" and row["to_id"] == child.id
+    ]
+    assert len(events) == 1
+    assert events[0]["payload"] == {"fields": ["description", "name"]}
+
+    cleared = await client.call(
+        "participant.update",
+        caller_id=parent["id"],
+        description="",
+    )
+    assert cleared["id"] == parent["id"]
+    assert cleared["description"] is None
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "participant.update",
+            caller_id=parent["id"],
+            target=sibling.id,
+            description="not yours",
+        )
+    assert exc.value.code == "not_your_child"
+
+    daemon.registry.mark_dead(child.id)
+    with pytest.raises(RemoteError) as exc:
+        await client.call(
+            "participant.update",
+            caller_id=parent["id"],
+            target=child.id,
+            description="too late",
+        )
+    assert exc.value.code == "bad_request"
+
+
 async def test_usage_summary_uses_local_calendar_period_boundaries(
     client, monkeypatch, paris_timezone
 ):

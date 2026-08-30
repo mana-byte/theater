@@ -42,6 +42,7 @@ participants = Table(
     Column("status", Text, nullable=False),
     Column("last_activity", REAL, nullable=False),
     Column("created_at", REAL, nullable=False),
+    Column("description", Text),
 )
 
 Index("idx_participants_pane", participants.c.tmux_pane)

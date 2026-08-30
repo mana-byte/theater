@@ -21,7 +21,7 @@ MIGRATIONS = Path(__file__).parent.parent / "migrations"
 BASELINE = "0001"
 
 #: The latest revision. A legacy DB is stamped at BASELINE then upgraded here.
-HEAD = "0021"
+HEAD = "0022"
 
 
 def _set_pragmas(dbapi_connection, _record) -> None:

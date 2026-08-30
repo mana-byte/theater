@@ -108,6 +108,12 @@ worktree: if True, create a git worktree for the child with its own
           remains, and the name cannot be recreated until the retained
           branch is integrated as appropriate and deleted by the user.
           Cannot be combined with resume.
+name:      optional live-only alias. It is case-insensitively unique while the
+           child lives, is never persisted, and is not inherited on resume.
+description: highly recommended for user clarity: a short, plain, specific,
+           non-verbose summary of the child's purpose (maximum 160 Unicode
+           codepoints). It is durable and is inherited by resume unless an
+           explicit replacement or empty string is supplied.
 base_branch: the branch to base the worktree on. Defaults to current HEAD.
 resume:    a session id, from `recall`, to resume instead of starting cold.
            Also accepts a Theater participant id: if the value matches a
@@ -300,6 +306,8 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         model: str | None = None,
         reasoning_effort: str | None = None,
         resume: str | None = None,
+        name: str | None = None,
+        description: str | None = None,
     ) -> dict:
         return await tools.spawn_session(
             session,
@@ -313,6 +321,8 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
             model=model,
             reasoning_effort=reasoning_effort,
             resume=resume,
+            name=name,
+            description=description,
         )
 
     @mcp.tool()
@@ -325,6 +335,29 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         until Theater's observer discovers your transcript.
         """
         return await tools.register_pane(session, pane=pane)
+
+    @mcp.tool()
+    async def update_participant(
+        target: str | None = None,
+        name: str | None = None,
+        description: str | None = None,
+    ) -> dict:
+        """Update your metadata or one direct child's metadata.
+
+        `target` defaults to yourself and accepts a stable participant id or a
+        current live name. You may update only yourself or a direct child;
+        dead targets are refused. Supply at least one field. `name` is a
+        live-only, case-insensitively unique alias and cannot be cleared.
+        `description` is durable; use an empty string to clear it, or a short,
+        plain, specific, non-verbose single-line summary up to 160 Unicode
+        codepoints. Descriptions help users understand the participant list.
+        """
+        return await tools.update_participant(
+            session,
+            target=target,
+            name=name,
+            description=description,
+        )
 
     @mcp.tool()
     async def await_sessions(

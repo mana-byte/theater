@@ -80,6 +80,7 @@ def test_migrations_created_the_alembic_version_table(store):
     assert "termination_incident" in col_names
     assert "terminated_at" in col_names
     assert "resumed_from_id" in col_names
+    assert "description" in col_names
 
     usage_cols = store.conn.exec_driver_sql("PRAGMA table_info(usage)").fetchall()
     assert "harness" in {row[1] for row in usage_cols}
@@ -182,6 +183,33 @@ def test_resume_claim_migration_upgrades_from_0019(theater_home):
 
     assert "resumed_from_id" in after
     assert "uq_participants_live_resumed_from" in indexes
+
+
+def test_participant_description_migration_preserves_existing_rows_as_null(theater_home):
+    path = paths.db_path()
+    store = Store(path)
+    store.close()
+
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        with engine.connect() as conn:
+            cfg = Config()
+            cfg.set_main_option("script_location", str(MIGRATIONS))
+            cfg.attributes["connection"] = conn
+            command.downgrade(cfg, "0021")
+            conn.exec_driver_sql(
+                "INSERT INTO participants (id, harness, tier, status, last_activity, created_at) "
+                "VALUES ('survivor', 'vibe', 'external', 'idle', 1.0, 1.0)"
+            )
+            command.upgrade(cfg, "head")
+            conn.commit()
+            row = conn.exec_driver_sql(
+                "SELECT id, description FROM participants WHERE id = 'survivor'"
+            ).one()
+    finally:
+        engine.dispose()
+
+    assert row == ("survivor", None)
 
 
 def test_bus_ids_are_never_reused(store):

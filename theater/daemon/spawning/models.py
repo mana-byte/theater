@@ -33,6 +33,10 @@ class SpawnRequest:
     reasoning_effort: str | None = None
     #: Opaque session id to resume; None means start cold.
     resume: str | None = None
+    #: Live-only alias for this participant; never inherited by a resume.
+    name: str | None = None
+    #: Durable summary; a resumed participant inherits only when this is None.
+    description: str | None = None
     #: Raw serialized JSON response-format hint; only launch-time traps are enforced here.
     response_format: str | None = None
 

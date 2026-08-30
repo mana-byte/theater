@@ -49,6 +49,8 @@ async def _spawn(daemon, params: dict) -> dict:
         model=params.get("model"),
         reasoning_effort=params.get("reasoning_effort"),
         resume=params.get("resume"),
+        name=params.get("name"),
+        description=params.get("description"),
         response_format=response_format,
     )
     rails = daemon.config.rails

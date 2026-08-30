@@ -28,6 +28,7 @@ def _summarise(p: dict) -> dict:
     return {
         "id": p["id"],
         "name": p["name"],
+        "description": p["description"],
         "harness": p["harness"],
         "tier": p["tier"],
         "status": p["status"],
@@ -94,4 +95,25 @@ async def register_pane(session: Session, *, pane: str) -> dict:
     assert isinstance(record, dict)
     session.participant_id = record["id"]
     session._resolved = True
+    return _summarise(record)
+
+
+async def update_participant(
+    session: Session,
+    *,
+    target: str | None = None,
+    name: str | None = None,
+    description: str | None = None,
+) -> dict:
+    """Update this participant or one direct child through the daemon."""
+    if not session._resolved:
+        await session.identify()
+    record = await session.client.call(
+        "participant.update",
+        caller_id=session.participant_id,
+        target=target,
+        name=name,
+        description=description,
+    )
+    assert isinstance(record, dict)
     return _summarise(record)

@@ -14,7 +14,13 @@ from theater.models import Job, JobState, Participant, Status, Tier, now
 
 
 def test_roundtrip(store):
-    p = Participant(harness="vibe", tier=Tier.SPAWNED, tmux_pane="%1", cwd="/tmp")
+    p = Participant(
+        harness="vibe",
+        tier=Tier.SPAWNED,
+        tmux_pane="%1",
+        cwd="/tmp",
+        description="Run focused participant tests",
+    )
     store.upsert_participant(p)
 
     got = store.get_participant(p.id)
@@ -22,6 +28,7 @@ def test_roundtrip(store):
     assert got.harness == "vibe"
     assert got.tier is Tier.SPAWNED
     assert got.tmux_pane == "%1"
+    assert got.description == "Run focused participant tests"
 
 
 def test_tmux_restart_diagnosis_roundtrips(store):
@@ -191,6 +198,7 @@ def test_reopening_does_not_wipe_state(store, theater_home):
         session_correlation="heuristic",
         transcript_domain="/tmp/vibe-root",
         transcript_location="/tmp/vibe-root/session/messages.jsonl",
+        description="Survives a daemon restart",
     )
     store.upsert_participant(p)
     store.close()
@@ -202,6 +210,7 @@ def test_reopening_does_not_wipe_state(store, theater_home):
     assert restored.session_correlation == "heuristic"
     assert restored.transcript_domain == "/tmp/vibe-root"
     assert restored.transcript_location == "/tmp/vibe-root/session/messages.jsonl"
+    assert restored.description == "Survives a daemon restart"
     again.close()
 
 
@@ -240,6 +249,7 @@ def test_name_is_never_persisted_to_sqlite(store):
     assert raw is not None
     assert raw.name is None
     assert "name" not in participants_table.c
+    assert "description" in participants_table.c
 
 
 def test_usage_is_deduplicated_and_aggregated(store):
