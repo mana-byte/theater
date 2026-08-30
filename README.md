@@ -35,20 +35,20 @@ CLIs, permissions, sessions, and terminal panes.
 > frame as `docs/assets/demo-poster.png`, then replace this instruction with a
 > linked poster image headed “Watch the demo”.
 
-> **Screenshot needed — régie overview.** Use the Nord theme at roughly
-> 1600×1000. Show four named agents with descriptions, at least two harnesses,
-> the participant tree, usage footer, and one useful staged pane. Save it as
-> `docs/assets/regie-overview.png` and place it here at full width.
+### One stage for every agent
 
-> **Screenshot needed — trajectory view.** Show a real multi-step turn with a
-> request, tool calls, timing, and files—not fixture data. Save it as
-> `docs/assets/trajectory-view.png` and place it beside a short “Understand the
-> work, not just the final answer” caption.
+<img src="docs/assets/regie-overview.png" alt="Theater régie showing a cross-harness participant tree, a staged Codex pane, and usage by model" width="100%">
 
-> **Screenshot needed — command palette.** Capture the resume-session palette
-> with concise participant descriptions and no sensitive prompt content. Save
-> it as `docs/assets/resume-palette.png` and place it beside the trajectory
-> screenshot in a two-column table.
+Coordinate Claude Code, Codex, opencode, and Vibe from one terminal. The régie
+keeps agent lineage, live descriptions, native panes, and usage visible without
+pulling work out of the tools where it is happening.
+
+### Understand the work, not just the final answer
+
+<img src="docs/assets/trajectory-view.png" alt="Theater trajectory view showing a live agent turn, tool calls, timing, costs, and event details" width="100%">
+
+Open a live trajectory to see the request, model work, tool calls, timing,
+cost, and results as they happen—not just the final response.
 
 ## Why Theater
 
