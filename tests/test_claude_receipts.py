@@ -312,7 +312,8 @@ async def test_claude_receipt_rejects_dead_expired_token_and_cleans_it_up(
     cwd = tmp_path / "repo"
     cwd.mkdir()
     _spawn_claude(daemon, cwd, pid="p-claude", token="secret")
-    token_file = tmp_path / "token"
+    token_file = paths.observation_dir("claude", "p-claude") / "receipt-token"
+    token_file.parent.mkdir(parents=True, exist_ok=True)
     token_file.write_text("secret")
     daemon.store.set_meta(
         "receipt_token:p-claude",
@@ -643,7 +644,8 @@ async def test_same_cwd_competitor_cannot_claim_unbound_foreign_receipt(
 def test_live_receipt_tokens_ignore_legacy_expiry(registry, tmp_path):
     cwd = tmp_path / "repo"
     cwd.mkdir()
-    token_file = tmp_path / "token"
+    token_file = paths.observation_dir("claude", "p-claude") / "receipt-token"
+    token_file.parent.mkdir(parents=True, exist_ok=True)
     token_file.write_text("secret")
     p = registry.create_spawned(harness="claude", cwd=str(cwd), pid="p-claude")
     registry.store.set_meta(
@@ -660,7 +662,8 @@ def test_live_receipt_tokens_ignore_legacy_expiry(registry, tmp_path):
 def test_mark_dead_removes_receipt_token_file(registry, tmp_path):
     cwd = tmp_path / "repo"
     cwd.mkdir()
-    token_file = tmp_path / "token"
+    token_file = paths.observation_dir("claude", "p-claude") / "receipt-token"
+    token_file.parent.mkdir(parents=True, exist_ok=True)
     token_file.write_text("secret")
     p = registry.create_spawned(harness="claude", cwd=str(cwd), pid="p-claude")
     registry.store.set_receipt_token(p.id, "secret", token_path=str(token_file))
@@ -675,7 +678,8 @@ async def test_gc_removes_orphaned_receipt_tokens(store, tmp_path):
     from theater.config import RetentionSection
     from theater.daemon.gc import sweep
 
-    token_file = tmp_path / "token"
+    token_file = paths.observation_dir("claude", "missing") / "receipt-token"
+    token_file.parent.mkdir(parents=True, exist_ok=True)
     token_file.write_text("secret")
     store.set_receipt_token("missing", "secret", token_path=str(token_file))
 
@@ -691,7 +695,8 @@ async def test_gc_removes_dead_participant_receipt_tokens(registry, tmp_path):
 
     cwd = tmp_path / "repo"
     cwd.mkdir()
-    token_file = tmp_path / "token"
+    token_file = paths.observation_dir("claude", "p-claude") / "receipt-token"
+    token_file.parent.mkdir(parents=True, exist_ok=True)
     token_file.write_text("secret")
     p = registry.create_spawned(harness="claude", cwd=str(cwd), pid="p-claude")
     registry.store.set_receipt_token(p.id, "secret", token_path=str(token_file))

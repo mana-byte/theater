@@ -30,7 +30,9 @@ from theater.constants.daemon import (
     TMUX_SERVER_IDENTITY_META_KEY,
     TMUX_SERVER_RESTART_AFFECTED_IDS_LIMIT,
 )
+from theater.daemon.artifacts import OwnedArtifact
 from theater.daemon.persistence.database import Database
+from theater.daemon.persistence.repositories.artifacts import ArtifactRepository
 from theater.daemon.persistence.repositories.bus import BusRepository
 from theater.daemon.persistence.repositories.channels import ChannelCredentialRepository
 from theater.daemon.persistence.repositories.jobs import JobRepository
@@ -64,6 +66,7 @@ class Store:
         self.conn = self._db.conn
 
         self._participants = ParticipantRepository(self._db)
+        self._artifacts = ArtifactRepository(self._db)
         self._jobs = JobRepository(self._db)
         self._bus = BusRepository(self._db)
         self._meta = MetadataRepository(self._db)
@@ -106,6 +109,20 @@ class Store:
             after=after,
             limit=limit,
         )
+
+    def add_participant_artifacts(
+        self, participant_id: str, artifacts: Sequence[OwnedArtifact]
+    ) -> None:
+        self._artifacts.add_many(participant_id, artifacts)
+
+    def participant_artifacts(self, participant_id: str) -> tuple[OwnedArtifact, ...]:
+        return self._artifacts.list_for(participant_id)
+
+    def participant_artifact_owner_ids(self) -> tuple[str, ...]:
+        return self._artifacts.owner_ids()
+
+    def delete_participant_artifacts(self, participant_id: str, *, connection=None) -> int:
+        return self._artifacts.delete_for(participant_id, connection=connection)
 
     def list_recent_dead(
         self, *, limit: int = 20, exclude_session_ids: set[str] | None = None

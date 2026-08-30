@@ -103,6 +103,7 @@ theater/
 │   ├── registry.py     tier assignment, pane eviction, lineage
 │   ├── jobs.py         JobManager, one asyncio.Event per handle
 │   ├── gc.py           retention sweep: bus, jobs+touch, dead participants
+│   ├── artifacts.py    validated participant-owned files and GC cleanup
 │   ├── rails.py        depth / cycle / budget guards
 │   ├── recall.py / recall_read.py  path-touch history + segment reader (v2)
 │   ├── schema.py       the one place table columns are declared

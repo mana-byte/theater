@@ -13,6 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from theater import paths
+from theater.daemon.artifacts import artifacts_for_plan
 from theater.daemon.spawning.models import SpawnRequest
 from theater.harness import get as get_harness
 from theater.harness import plan_launch
@@ -36,6 +37,7 @@ __all__ = [
     "install_hook_plan",
     "install_otel_plan",
     "record_launch_identity",
+    "record_plan_artifacts",
     "validate_receipt_plan",
     "write_plan_files",
 ]
@@ -393,6 +395,14 @@ def record_launch_identity(
                     channel=channel,
                     credential=credential,
                 )
+
+
+def record_plan_artifacts(participant: Participant, plan: LaunchPlan, registry) -> None:
+    """Persist ownership before any launch-plan file is written."""
+    registry.store.add_participant_artifacts(
+        participant.id,
+        artifacts_for_plan(plan, participant),
+    )
 
 
 def write_plan_files(plan: LaunchPlan) -> None:

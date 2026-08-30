@@ -13,15 +13,28 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
+from theater import paths
 from theater.config import RetentionSection
 from theater.constants.daemon import TMUX_RESTART_TERMINATION_REASON
+from theater.daemon import artifacts as artifacts_module
+from theater.daemon import gc as gc_module
+from theater.daemon.artifacts import (
+    ArtifactKind,
+    OwnedArtifact,
+    artifacts_for_plan,
+    remove_secret_file,
+)
 from theater.daemon.gc import SweepResult, sweep
 from theater.daemon.jobs import JobManager, JobState
-from theater.daemon.schema import bus, jobs, participants, touch, tree_kv
-from theater.models import Job, Participant, Status, Tier, now
+from theater.daemon.registry import Registry
+from theater.daemon.schema import bus, jobs, participant_artifacts, participants, touch, tree_kv
+from theater.harness.contracts.channels import ChannelKind
+from theater.harness.contracts.launch import LaunchPlan
+from theater.models import BadRequest, Job, Participant, Status, Tier, now
 from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
 # ---- helpers ---------------------------------------------------------------
@@ -166,6 +179,43 @@ def _count(store, table) -> int:
     from sqlalchemy import func, select
 
     return store.conn.execute(select(func.count()).select_from(table)).scalar()
+
+
+def _materialize_participant_artifacts(store, participant: Participant) -> tuple[Path, ...]:
+    observation = paths.observation_dir(participant.harness, participant.id)
+    entries = (
+        (paths.mcp_config_path(participant.id), ArtifactKind.FILE),
+        (paths.mcp_config_dir() / f"{participant.id}.opencode.mjs", ArtifactKind.FILE),
+        (paths.launch_artifacts_dir() / f"{participant.id}.settings.json", ArtifactKind.FILE),
+        (observation, ArtifactKind.DIRECTORY),
+        (observation / "receipt-token", ArtifactKind.FILE),
+        (observation / "hook.token", ArtifactKind.FILE),
+        (paths.participant_artifacts_dir(participant.id), ArtifactKind.DIRECTORY),
+    )
+    for path, kind in entries:
+        if kind is ArtifactKind.DIRECTORY:
+            path.mkdir(parents=True, exist_ok=True)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(path.name)
+    store.add_participant_artifacts(
+        participant.id,
+        tuple(OwnedArtifact(path, kind) for path, kind in entries),
+    )
+    store.set_receipt_token(
+        participant.id,
+        "receipt-secret",
+        token_path=str(observation / "receipt-token"),
+    )
+    store.set_channel_credential(
+        participant.id,
+        harness=participant.harness,
+        kind=ChannelKind.HOOK,
+        channel_id="native-hooks",
+        token="channel-secret",
+        token_path=str(observation / "hook.token"),
+    )
+    return tuple(path for path, _kind in entries)
 
 
 # ---- MF1: running job survives, and finish() still works -------------------
@@ -591,6 +641,253 @@ async def test_participant_sweep_honours_small_batches(store):
     result = await sweep(store, _retention(batch=2))
     assert result.participants == 5
     assert _count(store, participants) == 0
+
+
+async def test_invalid_artifact_owner_does_not_starve_later_participants(store):
+    blocked_id = "000000000001"
+    later_id = "000000000002"
+    _participant(store, pid=blocked_id)
+    store.conn.execute(
+        participant_artifacts.insert().values(
+            participant_id=blocked_id,
+            path=str(paths.mcp_config_path(blocked_id)),
+            kind="corrupt",
+        )
+    )
+    _participant(store, pid=later_id)
+
+    result = await sweep(store, _retention(batch=1))
+
+    assert result.participants == 1
+    assert store.get_participant(blocked_id) is not None
+    assert store.get_participant(later_id) is None
+    assert store.participant_artifact_owner_ids() == (blocked_id,)
+    with pytest.raises(ValueError):
+        store.participant_artifacts(blocked_id)
+
+
+async def test_retained_dead_participant_keeps_nonsecret_artifacts(store):
+    participant = _participant(store, pid="abcdef123456", status=Status.IDLE)
+    artifact_paths = _materialize_participant_artifacts(store, participant)
+    Registry(store).mark_dead(participant.id)
+    assert not (
+        paths.observation_dir(participant.harness, participant.id) / "receipt-token"
+    ).exists()
+    assert not (paths.observation_dir(participant.harness, participant.id) / "hook.token").exists()
+    _participant(store, pid="child", parent_id=participant.id, status=Status.IDLE)
+
+    result = await sweep(store, _retention())
+
+    assert result.participants == 0
+    assert store.get_participant(participant.id) is not None
+    assert paths.mcp_config_path(participant.id).exists()
+    assert (paths.mcp_config_dir() / f"{participant.id}.opencode.mjs").exists()
+    assert (paths.launch_artifacts_dir() / f"{participant.id}.settings.json").exists()
+    assert paths.observation_dir(participant.harness, participant.id).exists()
+    assert not (
+        paths.observation_dir(participant.harness, participant.id) / "receipt-token"
+    ).exists()
+    assert not (paths.observation_dir(participant.harness, participant.id) / "hook.token").exists()
+    assert paths.participant_artifacts_dir(participant.id).exists()
+    assert all(
+        path.exists() for path in artifact_paths if path.name not in {"receipt-token", "hook.token"}
+    )
+
+
+async def test_retained_dead_row_cleans_secret_credentials_after_crash(store):
+    participant = _participant(store, pid="abcdef123456")
+    _materialize_participant_artifacts(store, participant)
+    store.set_status(participant.id, Status.DEAD)
+    _participant(store, pid="child", parent_id=participant.id, status=Status.IDLE)
+
+    receipt = paths.observation_dir(participant.harness, participant.id) / "receipt-token"
+    channel = paths.observation_dir(participant.harness, participant.id) / "hook.token"
+    assert receipt.exists() and channel.exists()
+
+    result = await sweep(store, _retention())
+
+    assert result.participants == 0
+    assert store.get_participant(participant.id) is not None
+    assert not receipt.exists() and not channel.exists()
+    assert store.get_meta(f"receipt_token:{participant.id}") is None
+    assert store.get_meta(f"channel_credential:{participant.id}:hook:native-hooks") is None
+    assert paths.mcp_config_path(participant.id).exists()
+    assert paths.observation_dir(participant.harness, participant.id).exists()
+
+
+async def test_eligible_participant_removes_all_owned_artifacts(store):
+    participant = _participant(store, pid="abcdef123456")
+    artifact_paths = _materialize_participant_artifacts(store, participant)
+
+    result = await sweep(store, _retention())
+
+    assert result.participants == 1
+    assert store.get_participant(participant.id) is None
+    assert all(not path.exists() for path in artifact_paths)
+    assert store.get_meta(f"receipt_token:{participant.id}") is None
+    assert store.participant_artifact_owner_ids() == ()
+
+
+def test_launch_artifact_paths_are_owned_and_follow_runtime_home(
+    theater_home, monkeypatch, tmp_path
+):
+    runtime_home = tmp_path / "runtime-home"
+    monkeypatch.setenv("THEATER_HOME", str(runtime_home))
+    paths.ensure_home()
+    participant = Participant(id="abcdef123456", harness="custom", tier=Tier.SPAWNED)
+
+    valid = LaunchPlan(files={paths.mcp_config_path(participant.id): "{}"}, argv=[])
+    owned = artifacts_for_plan(valid, participant)
+    assert paths.mcp_config_path(participant.id) in {artifact.path for artifact in owned}
+
+    outside = tmp_path / "user-file"
+    with pytest.raises(BadRequest):
+        artifacts_for_plan(LaunchPlan(files={outside: "unsafe"}, argv=[]), participant)
+
+    other = paths.mcp_config_dir() / "fedcba654321.json"
+    with pytest.raises(BadRequest):
+        artifacts_for_plan(LaunchPlan(files={other: "unsafe"}, argv=[]), participant)
+
+    foreign_observation = paths.observation_dir("other", participant.id) / "marker"
+    with pytest.raises(BadRequest):
+        artifacts_for_plan(LaunchPlan(files={foreign_observation: "unsafe"}, argv=[]), participant)
+
+
+def test_secret_cleanup_uses_runtime_home_and_refuses_symlink_parents(monkeypatch, tmp_path):
+    runtime_home = tmp_path / "runtime-home"
+    monkeypatch.setenv("THEATER_HOME", str(runtime_home))
+    paths.ensure_home()
+    participant_id = "abcdef123456"
+    legitimate = paths.observation_dir("custom", participant_id) / "receipt-token"
+    legitimate.parent.mkdir(parents=True, exist_ok=True)
+    legitimate.write_text("secret")
+
+    remove_secret_file(legitimate, owner_id=participant_id)
+
+    assert not legitimate.exists()
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "token"
+    target.write_text("secret")
+    linked_parent = paths.observations_dir() / "custom" / "linked"
+    linked_parent.parent.mkdir(parents=True, exist_ok=True)
+    linked_parent.symlink_to(outside, target_is_directory=True)
+
+    remove_secret_file(linked_parent / "token", owner_id=participant_id)
+
+    assert target.exists()
+
+
+async def test_secret_cleanup_refuses_external_paths_but_removes_metadata(store, tmp_path):
+    receipt = tmp_path / "receipt-token"
+    channel = tmp_path / "channel-token"
+    receipt.write_text("secret")
+    channel.write_text("secret")
+    store.set_receipt_token("missing", "receipt", token_path=str(receipt))
+    store.set_channel_credential(
+        "missing",
+        harness="custom",
+        kind=ChannelKind.HOOK,
+        channel_id="hooks",
+        token="channel",
+        token_path=str(channel),
+    )
+
+    await sweep(store, _retention())
+
+    assert receipt.exists() and channel.exists()
+    assert store.get_meta("receipt_token:missing") is None
+    assert store.get_meta("channel_credential:missing:hook:hooks") is None
+
+
+async def test_failed_artifact_cleanup_keeps_ownership_for_retry(store, monkeypatch):
+    participant = _participant(store, pid="abcdef123456")
+    artifact_paths = _materialize_participant_artifacts(store, participant)
+    target = paths.mcp_config_path(participant.id).resolve(strict=False)
+    original_remove = artifacts_module._remove_one
+    failed = False
+
+    def fail_once(artifact):
+        nonlocal failed
+        if artifact.path == target and not failed:
+            failed = True
+            raise OSError("temporarily busy")
+        return original_remove(artifact)
+
+    monkeypatch.setattr(artifacts_module, "_remove_one", fail_once)
+    first = await sweep(store, _retention())
+
+    assert first.participants == 1
+    assert store.get_participant(participant.id) is None
+    assert target.exists()
+    assert store.participant_artifacts(participant.id)
+
+    monkeypatch.setattr(artifacts_module, "_remove_one", original_remove)
+    second = await sweep(store, _retention())
+
+    assert second.participants == 0
+    assert not target.exists()
+    assert all(not path.exists() for path in artifact_paths)
+    assert store.participant_artifact_owner_ids() == ()
+
+
+async def test_legacy_orphans_are_cleaned_without_broad_globs(store):
+    owner_id = "fedcba654321"
+    observation = paths.observation_dir("legacy", owner_id)
+    owned = (
+        paths.mcp_config_path(owner_id),
+        paths.mcp_config_dir() / f"{owner_id}.opencode.mjs",
+        paths.launch_artifacts_dir() / f"{owner_id}.settings.json",
+        observation,
+    )
+    for path in owned:
+        if path.suffix:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("legacy")
+        else:
+            path.mkdir(parents=True, exist_ok=True)
+            (path / "messages.jsonl").write_text("durable")
+    unrelated = paths.mcp_config_dir() / "not-a-participant.json"
+    unrelated.write_text("keep")
+
+    await sweep(store, _retention())
+
+    assert all(not path.exists() for path in owned)
+    assert unrelated.exists()
+
+
+async def test_legacy_orphan_rechecks_owner_before_cleanup(store, monkeypatch):
+    owner_id = "fedcba654321"
+    legacy = paths.mcp_config_path(owner_id)
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("legacy")
+    original_to_thread = gc_module.workers.to_thread
+
+    async def race_to_thread(fn, /, *args, label, **kwargs):
+        result = await original_to_thread(fn, *args, label=label, **kwargs)
+        if fn is gc_module.orphan_paths:
+            _participant(store, pid=owner_id, status=Status.IDLE)
+        return result
+
+    monkeypatch.setattr(gc_module.workers, "to_thread", race_to_thread)
+
+    await sweep(store, _retention())
+
+    assert store.get_participant(owner_id) is not None
+    assert legacy.exists()
+
+
+async def test_participant_artifact_cleanup_honours_batches(store):
+    for index in range(5):
+        participant = _participant(store, pid=f"{index + 1:012x}")
+        _materialize_participant_artifacts(store, participant)
+
+    result = await sweep(store, _retention(batch=2))
+
+    assert result.participants == 5
+    assert _count(store, participants) == 0
+    assert store.participant_artifact_owner_ids() == ()
 
 
 # ---- Counts ----------------------------------------------------------------

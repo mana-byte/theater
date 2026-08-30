@@ -152,6 +152,16 @@ Index(
     tree_kv.c.repo_root,
 )
 
+participant_artifacts = Table(
+    "participant_artifacts",
+    metadata,
+    Column("participant_id", Text, primary_key=True),
+    Column("path", Text, primary_key=True),
+    Column("kind", Text, nullable=False),
+)
+
+Index("idx_participant_artifacts_participant", participant_artifacts.c.participant_id)
+
 # Named shared worktrees: key is (repo_root, name); only Theater-created worktrees appear here.
 named_worktrees = Table(
     "named_worktrees",

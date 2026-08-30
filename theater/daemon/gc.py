@@ -16,7 +16,9 @@ The sweep runs in six phases, in this order:
 3. **Participants** — the three-clause gated delete. After the jobs phase,
    so a participant whose last job just went becomes eligible in the same
    sweep.
-4. **Receipt tokens** — remove expired/orphaned Claude hook tokens from meta.
+4. **Participant artifacts** — remove generated files and observation roots
+   only for participants whose rows were deleted, then clean orphaned metadata
+   and legacy files in bounded work.
 5. **scratchpad** — delete rows whose spawn tree has no live participant.
    Computes the roots of all live participants through lineage.root_of()
    and retains those, deleting everything else in bounded batches.
@@ -63,7 +65,14 @@ from theater.constants.daemon import (
     TMUX_RESTART_TERMINATION_REASON,
     TRANSCRIPT_AUDIT_KINDS,
 )
-from theater.daemon import lineage
+from theater.daemon import lineage, workers
+from theater.daemon.artifacts import (
+    baseline_artifacts,
+    cleanup_orphan_paths,
+    cleanup_orphan_recorded,
+    cleanup_participant,
+    orphan_paths,
+)
 from theater.daemon.schema import bus, jobs, participants, touch, tree_kv
 from theater.daemon.store import Store
 from theater.models import now
@@ -96,10 +105,9 @@ async def sweep(
 ) -> SweepResult:
     """Run all six GC phases in order, returning per-phase row counts.
 
-    ``sweep`` is async for one reason only: between batches it calls
-    ``await asyncio.sleep(0)`` to yield the event loop, so a long sweep
-    does not starve the daemon's status polling or await wakes. There is
-    no I/O wait — the Store is synchronous on purpose.
+    ``sweep`` yields between batches and offloads filesystem cleanup, so a
+    long sweep does not starve the daemon's status polling or await wakes.
+    Store access remains synchronous and on the daemon's event-loop thread.
 
     ``live_handles`` is the set of handles the running daemon's
     ``JobManager`` still holds in ``self._events``. A stale-running sweep
@@ -144,7 +152,9 @@ async def sweep(
     )
 
     # Phase 3: participants — after jobs so newly-eligible ones are deleted in the same sweep.
-    part_deleted = await _sweep_participants(store, cutoff_jobs, retention.batch)
+    part_deleted, deleted_participant_ids = await _sweep_participants(
+        store, cutoff_jobs, retention.batch
+    )
     result = SweepResult(
         bus=result.bus,
         jobs=result.jobs,
@@ -155,7 +165,8 @@ async def sweep(
     )
     await asyncio.sleep(0)
 
-    # Phase 4: receipt tokens — after participant cleanup so orphans vanish in the same pass.
+    # Phase 4: participant artifacts and orphaned credentials.
+    await _sweep_artifact_orphans(store, retention.batch, exclude=deleted_participant_ids)
     store.cleanup_receipt_tokens()
     store.cleanup_channel_credentials()
     await asyncio.sleep(0)
@@ -273,7 +284,9 @@ async def _sweep_jobs_and_touch(store: Store, cutoff: float, batch: int) -> tupl
     return total_jobs, total_touch
 
 
-async def _sweep_participants(store: Store, restart_cutoff: float, batch: int) -> int:
+async def _sweep_participants(
+    store: Store, restart_cutoff: float, batch: int
+) -> tuple[int, frozenset[str]]:
     """Delete dead participants that nothing references (MF3).
 
     Participants are gated, never aged except restart diagnoses: a tmux-reset
@@ -294,46 +307,179 @@ async def _sweep_participants(store: Store, restart_cutoff: float, batch: int) -
        redundant, and it is not.
     """
     total = 0
+    deleted_ids: set[str] = set()
+    after_id: str | None = None
     while True:
-        stmt = (
-            select(participants.c.id)
-            .where(participants.c.status == "dead")
-            .where(
-                or_(
-                    participants.c.termination_reason.is_(None),
-                    participants.c.termination_reason != TMUX_RESTART_TERMINATION_REASON,
-                    participants.c.terminated_at <= restart_cutoff,
-                )
-            )
-            .where(
-                participants.c.id.not_in(
-                    select(jobs.c.target_id).where(jobs.c.target_id.is_not(None))
-                )
-            )
-            .where(participants.c.id.not_in(select(jobs.c.caller_id)))
-            .where(
-                participants.c.id.not_in(
-                    select(participants.c.resumed_from_id).where(
-                        participants.c.resumed_from_id.is_not(None)
-                    )
-                )
-            )
-            .where(
-                participants.c.id.not_in(
-                    select(participants.c.parent_id).where(participants.c.parent_id.is_not(None))
-                )
-            )
-            .limit(batch)
-        )
+        filters = list(_eligible_participant_filters(restart_cutoff))
+        if after_id is not None:
+            filters.append(participants.c.id > after_id)
+        stmt = select(participants.c.id).where(*filters).order_by(participants.c.id).limit(batch)
         ids = [row[0] for row in store.conn.execute(stmt).fetchall()]
         if not ids:
             break
-        result = store.conn.execute(delete(participants).where(participants.c.id.in_(ids)))
-        total += result.rowcount
-        await asyncio.sleep(0)
+
+        for participant_id in ids:
+            participant = store.get_participant(participant_id)
+            if participant is None:
+                continue
+            try:
+                store.add_participant_artifacts(
+                    participant_id,
+                    baseline_artifacts(participant),
+                )
+                recorded = store.participant_artifacts(participant_id)
+            except (OSError, TypeError, ValueError) as exc:
+                logger.warning(
+                    "participant artifact ownership for %s cannot be read; retaining "
+                    "row for retry: %s",
+                    participant_id,
+                    exc,
+                )
+                continue
+
+            with store.engine.begin() as conn:
+                deleted = conn.execute(
+                    delete(participants)
+                    .where(participants.c.id == participant_id)
+                    .where(*_eligible_participant_filters(restart_cutoff))
+                ).rowcount
+            if deleted:
+                total += deleted
+                deleted_ids.add(participant_id)
+            else:
+                logger.warning(
+                    "participant %s became referenced before row deletion; retaining row",
+                    participant_id,
+                )
+                continue
+            try:
+                failures = await workers.to_thread(
+                    cleanup_participant,
+                    participant,
+                    recorded,
+                    label="gc.participant_artifacts",
+                )
+            except Exception as exc:
+                failures = (f"unexpected cleanup failure: {exc}",)
+            if failures:
+                logger.warning(
+                    "participant artifact cleanup deferred for %s; retry on the next GC: %s",
+                    participant_id,
+                    "; ".join(failures),
+                )
+            else:
+                store.delete_participant_artifacts(participant_id)
+            await asyncio.sleep(0)
+
+        after_id = ids[-1]
         if len(ids) < batch:
             break
-    return total
+    return total, frozenset(deleted_ids)
+
+
+def _eligible_participant_filters(restart_cutoff: float):
+    """Return the four reference guards for participant retention."""
+    return (
+        participants.c.status == "dead",
+        or_(
+            participants.c.termination_reason.is_(None),
+            participants.c.termination_reason != TMUX_RESTART_TERMINATION_REASON,
+            participants.c.terminated_at <= restart_cutoff,
+        ),
+        participants.c.id.not_in(select(jobs.c.target_id).where(jobs.c.target_id.is_not(None))),
+        participants.c.id.not_in(select(jobs.c.caller_id)),
+        participants.c.id.not_in(
+            select(participants.c.resumed_from_id).where(
+                participants.c.resumed_from_id.is_not(None)
+            )
+        ),
+        participants.c.id.not_in(
+            select(participants.c.parent_id).where(participants.c.parent_id.is_not(None))
+        ),
+    )
+
+
+async def _sweep_artifact_orphans(
+    store: Store,
+    batch: int,
+    *,
+    exclude: frozenset[str] = frozenset(),
+) -> None:
+    """Retry recorded or legacy artifacts whose participant row is absent."""
+    retained_ids = frozenset(
+        participant.id for participant in store.list_participants(include_dead=True)
+    )
+    owner_ids = [
+        owner_id
+        for owner_id in store.participant_artifact_owner_ids()
+        if owner_id not in retained_ids and owner_id not in exclude
+    ]
+    for offset in range(0, len(owner_ids), batch):
+        for owner_id in owner_ids[offset : offset + batch]:
+            if store.get_participant(owner_id) is not None:
+                continue
+            try:
+                recorded = store.participant_artifacts(owner_id)
+            except (OSError, TypeError, ValueError) as exc:
+                logger.warning(
+                    "orphaned artifact ownership for %s cannot be read; retrying: %s",
+                    owner_id,
+                    exc,
+                )
+                continue
+            try:
+                failures = await workers.to_thread(
+                    cleanup_orphan_recorded,
+                    owner_id,
+                    recorded,
+                    label="gc.orphan_artifacts",
+                )
+            except Exception as exc:
+                failures = (f"unexpected cleanup failure: {exc}",)
+            if failures:
+                logger.warning(
+                    "orphaned artifact cleanup deferred for %s; retry on the next GC: %s",
+                    owner_id,
+                    "; ".join(failures),
+                )
+                continue
+            store.delete_participant_artifacts(owner_id)
+            await asyncio.sleep(0)
+
+    try:
+        candidates = await workers.to_thread(
+            orphan_paths,
+            retained_ids | exclude,
+            label="gc.discover_legacy_artifacts",
+        )
+    except Exception as exc:
+        logger.warning(
+            "legacy participant artifact discovery deferred; retry on the next GC: %s", exc
+        )
+        return
+    for offset in range(0, len(candidates), batch):
+        candidates_batch = tuple(
+            candidate
+            for candidate in candidates[offset : offset + batch]
+            if store.get_participant(candidate[1]) is None
+        )
+        if not candidates_batch:
+            await asyncio.sleep(0)
+            continue
+        try:
+            failures = await workers.to_thread(
+                cleanup_orphan_paths,
+                candidates_batch,
+                label="gc.legacy_artifacts",
+            )
+        except Exception as exc:
+            failures = (f"unexpected cleanup failure: {exc}",)
+        if failures:
+            logger.warning(
+                "legacy participant artifact cleanup deferred; retry on the next GC: %s",
+                "; ".join(failures),
+            )
+        await asyncio.sleep(0)
 
 
 async def _sweep_bus(store: Store, cutoff: float, batch: int, refused_cap: int) -> int:

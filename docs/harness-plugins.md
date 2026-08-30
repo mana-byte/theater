@@ -154,6 +154,12 @@ is a path-to-secret-text mapping written mode 0600. `session_id` is an exact
 native session id a planner has minted or otherwise knows before launch.
 `transcript_domain` is a stable namespace used for transcript collision policy.
 
+Launch files must stay in Theater-owned participant storage. External plugins
+should use `context.config_path` or derive same-participant siblings with
+`context.config_path.with_suffix(...)`; arbitrary project and user paths are
+rejected before anything is written. Theater records those owned paths so GC
+can retry their removal after the participant itself is no longer retained.
+
 The daemon, not a plugin, populates `receipt_token`, writes a declared
 `receipt_token_path`, and creates `channel_credentials`. A planner may declare
 the token path for a proven launch-local transcript receipt, but never receives

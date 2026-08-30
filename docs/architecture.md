@@ -300,6 +300,15 @@ target or caller, no surviving participant as parent. That gate means they
 become collectable as a consequence of the job sweep rather than on a timer of
 their own, and it is why `recall` never joins to a row that is gone.
 
+Generated launch files and observation trees follow the participant retention
+gate. Their validated Theater-owned paths are recorded before launch files are
+written, then removed off the event loop when the participant row becomes
+collectable. Failed removals retain their ownership rows for the next sweep;
+legacy artifacts are discovered only inside dedicated Theater roots and are
+rechecked against current participant rows before deletion. Receipt and native
+channel secrets are stricter: death removes them immediately, with GC retaining
+the crash-recovery cleanup path.
+
 `VACUUM` is not run in the background at any interval. It rewrites the whole
 file under an exclusive lock, and an hourly lock over a growing file is a worse
 problem than a large file; it is `theater gc --vacuum`, on purpose and by hand.
@@ -777,7 +786,8 @@ theater/
 │   ├── server.py       lifecycle only: socket, pidfile, wiring
 │   ├── registry.py     tier assignment, pane eviction, lineage
 │   ├── jobs.py         JobManager, asyncio.Event per handle
-│   ├── gc.py           retention sweep: bus, jobs+touch, participants
+│   ├── artifacts.py    validated participant-owned files and cleanup
+│   ├── gc.py           retention sweep: bus, jobs+touch, participants, artifacts
 │   ├── rails.py        depth, cycle, and budget guards
 │   ├── recall.py · recall_read.py   path-touch history and segment reader
 │   ├── schema.py       table metadata, the one place columns are declared

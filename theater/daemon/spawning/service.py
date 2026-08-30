@@ -33,6 +33,7 @@ from theater.daemon.spawning.planning import (
     install_hook_plan,
     install_otel_plan,
     record_launch_identity,
+    record_plan_artifacts,
     validate_receipt_plan,
     write_plan_files,
 )
@@ -128,6 +129,8 @@ class Spawner:
                 plan = replace(plan, receipt_token=minted_token)
             plan = self._install_hook_plan(plan, participant, harness.observer)
             plan = self._install_otel_plan(plan, participant, harness.observer)
+            paths.ensure_home()
+            self._record_plan_artifacts(participant, plan)
             with timing.span(SPAWN_WORKTREE, id=participant.id, kind=req.worktree or None):
                 child_cwd = await self._prepare_worktree(req, participant)
             self._record_launch_identity(participant, plan, harness.observer)
@@ -136,7 +139,6 @@ class Spawner:
                 participant.resume_floor = self._capture_resume_floor(harness, resume_predecessor)
                 self.registry.store.upsert_participant(participant)
 
-            paths.ensure_home()
             self._write_plan_files(plan)
 
             session = await self._resolve_session(req.tmux_session, child_cwd)
@@ -289,6 +291,10 @@ class Spawner:
             runtime=self.otel_runtime,
             observer=observer,
         )
+
+    def _record_plan_artifacts(self, participant: Participant, plan: LaunchPlan) -> None:
+        """Persist launch artifact ownership before file writes."""
+        record_plan_artifacts(participant, plan, self.registry)
 
     def _resolve_resume_reference(self, req: SpawnRequest) -> SpawnRequest:
         """Resume reference resolution via the resume module."""

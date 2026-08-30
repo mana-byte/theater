@@ -30,7 +30,7 @@ from .constants import CLAUDE_RECEIPT_EVENTS
 
 def _claude_settings_path(participant_id: str) -> Path:
     """Launch-specific Claude settings for receipt hooks."""
-    return paths.home() / "claude" / f"{participant_id}.settings.json"
+    return paths.launch_artifacts_dir() / f"{participant_id}.settings.json"
 
 
 def _receipt_hook_command(participant_id: str, token_path: Path) -> str:

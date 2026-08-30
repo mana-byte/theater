@@ -63,6 +63,7 @@ def test_migrations_created_the_alembic_version_table(store):
         "bus",
         "budgets",
         "tree_kv",
+        "participant_artifacts",
         "named_worktrees",
         "usage",
     } <= tables

@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
-from pathlib import Path
 
 from sqlalchemy import delete, select, update
 
 from theater.constants.daemon import RECEIPT_TOKEN_PREFIX as _RECEIPT_TOKEN_PREFIX
+from theater.daemon.artifacts import remove_secret_file
 from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories.metadata import MetadataRepository
 from theater.daemon.persistence.repositories.participants import ParticipantRepository
@@ -75,8 +74,7 @@ class ReceiptRepository:
         payload = self._token_payload(participant_id)
         token_path = payload.get("token_path") if payload is not None else None
         if isinstance(token_path, str) and token_path:
-            with contextlib.suppress(OSError):
-                Path(token_path).unlink(missing_ok=True)
+            remove_secret_file(token_path, owner_id=participant_id)
         self._db.conn.execute(
             delete(meta).where(meta.c.key == f"{_RECEIPT_TOKEN_PREFIX}{participant_id}")
         )

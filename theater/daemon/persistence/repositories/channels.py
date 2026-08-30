@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
 from dataclasses import dataclass
-from pathlib import Path
 
 from sqlalchemy import delete, select
 
 from theater.constants.daemon import CHANNEL_CREDENTIAL_PREFIX
+from theater.daemon.artifacts import remove_secret_file
 from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories.metadata import MetadataRepository
 from theater.daemon.persistence.repositories.participants import ParticipantRepository
@@ -109,7 +108,7 @@ class ChannelCredentialRepository:
         for key, raw in rows:
             if not key.startswith(prefix):
                 continue
-            self._unlink_token(raw)
+            self._unlink_token(raw, participant_id)
             self._db.conn.execute(delete(meta).where(meta.c.key == key))
 
     def cleanup(self) -> int:
@@ -133,15 +132,15 @@ class ChannelCredentialRepository:
         return f"{CHANNEL_CREDENTIAL_PREFIX}{participant_id}:{kind.value}:{channel_id}"
 
     @staticmethod
-    def _unlink_token(raw: str) -> None:
+    def _unlink_token(raw: str, participant_id: str) -> None:
         try:
             payload = json.loads(raw)
         except ValueError:
             return
         token_path = payload.get("token_path") if isinstance(payload, dict) else None
-        if isinstance(token_path, str) and token_path:
-            with contextlib.suppress(OSError):
-                Path(token_path).unlink(missing_ok=True)
+        if not isinstance(token_path, str) or not token_path:
+            return
+        remove_secret_file(token_path, owner_id=participant_id)
 
 
 __all__ = ["ChannelCredentialRecord", "ChannelCredentialRepository"]

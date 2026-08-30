@@ -63,9 +63,24 @@ def mcp_config_path(participant_id: str) -> Path:
     return mcp_config_dir() / f"{participant_id}.json"
 
 
+def launch_artifacts_dir() -> Path:
+    """Theater-owned launch-local configuration files."""
+    return home() / "claude"
+
+
+def participant_artifacts_dir(participant_id: str) -> Path:
+    """Generic launch-artifact space for one participant."""
+    return home() / "artifacts" / participant_id
+
+
+def observations_dir() -> Path:
+    """Root for participant-scoped observation state."""
+    return home() / "observations"
+
+
 def observation_dir(harness: str, participant_id: str) -> Path:
     """Process-correlation state owned by one launched harness instance."""
-    return home() / "observations" / harness / participant_id
+    return observations_dir() / harness / participant_id
 
 
 def config_path() -> Path:
@@ -94,7 +109,9 @@ def ensure_home() -> Path:
     logs_dir().mkdir(parents=True, exist_ok=True)
     regie_logs_dir().mkdir(parents=True, exist_ok=True)
     mcp_config_dir().mkdir(parents=True, exist_ok=True)
-    (root / "observations").mkdir(parents=True, exist_ok=True)
+    launch_artifacts_dir().mkdir(parents=True, exist_ok=True)
+    (root / "artifacts").mkdir(parents=True, exist_ok=True)
+    observations_dir().mkdir(parents=True, exist_ok=True)
     harnesses_dir().mkdir(parents=True, exist_ok=True)
     skills_dir().mkdir(parents=True, exist_ok=True)
     return root
