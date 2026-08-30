@@ -42,12 +42,11 @@ class ArtifactRepository:
                     path=str(path),
                     kind=artifact.kind.value,
                 )
-                .on_conflict_do_update(
+                .on_conflict_do_nothing(
                     index_elements=[
                         participant_artifacts.c.participant_id,
                         participant_artifacts.c.path,
-                    ],
-                    set_={"kind": artifact.kind.value},
+                    ]
                 )
             )
 

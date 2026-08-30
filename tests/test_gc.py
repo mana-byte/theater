@@ -650,7 +650,9 @@ async def test_invalid_artifact_owner_does_not_starve_later_participants(store):
     store.conn.execute(
         participant_artifacts.insert().values(
             participant_id=blocked_id,
-            path=str(paths.mcp_config_path(blocked_id)),
+            # Match the repository's canonical key even when /tmp is a symlink
+            # (as on macOS), so baseline insertion cannot hide the corrupt row.
+            path=str(paths.mcp_config_path(blocked_id).resolve(strict=False)),
             kind="corrupt",
         )
     )
