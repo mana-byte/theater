@@ -32,12 +32,7 @@ CLIs, permissions, sessions, and terminal panes.
 
 ## 🎬 See it in action
 
-> **Demo video needed (60–90 seconds).** Record a clean 1440p walkthrough that
-> opens `theater`, spawns two different harnesses, stages an agent pane, opens
-> trajectory detail, interrupts a turn, and resumes a previous session. Hide
-> personal paths and tokens. Upload the video as a GitHub asset, save a poster
-> frame as `docs/assets/demo-poster.png`, then replace this instruction with a
-> linked poster image headed “Watch the demo”.
+https://github.com/user-attachments/assets/c6a7d3f4-5d31-4ad6-93f3-8fdd391c5c5b
 
 <table>
 <tr>
