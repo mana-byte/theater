@@ -13,6 +13,7 @@ from theater.harness.contracts.source import Attachment, Batch, StreamPoint
 from theater.harness.contracts.trajectory import ParsedRecord, TrajectoryFact
 from theater.harness.source import TranscriptSource
 from theater.harness.transcript.discovery import stateful_history_reader
+from theater.resume_floor import decode_floor
 
 from .constants import PI_READ_BYTES, PI_RECORD_BYTES, PI_RECORDS_PER_BATCH
 
@@ -64,11 +65,14 @@ class PiTranscriptSource(TranscriptSource):
         _observer: PiObserver
 
     def __init__(self, *args, **kwargs) -> None:
+        self._usage_floor = kwargs.pop("usage_floor", None)
         super().__init__(*args, **kwargs)
         self._backlog: list[tuple[bytes, int]] = []
         self._partial = b""
         self._partial_offset: int | None = None
         self._dropping_oversized = False
+        #: Initial restart reconciliation parses only usage through this byte offset.
+        self._usage_only_until: int | None = None
 
     def commit_attachment(self) -> None:
         super().commit_attachment()
@@ -90,11 +94,13 @@ class PiTranscriptSource(TranscriptSource):
 
     def revoke_attachment(self) -> None:
         super().revoke_attachment()
+        self._usage_only_until = None
         self._clear_live_buffers()
         self._observer._reset_turn_context()
 
     def _detach(self) -> None:
         super()._detach()
+        self._usage_only_until = None
         self._clear_live_buffers()
         self._observer._reset_turn_context()
 
@@ -121,21 +127,94 @@ class PiTranscriptSource(TranscriptSource):
             return None
         size, lines, mtime, last_line, dev, ino = await asyncio.to_thread(_attachment_point, path)
         session_id = self._observer.session_id(path)
+        cursor = self._replay_cursor(size=size, lines=lines, dev=dev, ino=ino)
+        offset, index = (size, lines) if cursor is None else cursor[:2]
+        usage_only = cursor is not None and cursor[2]
         last_event: Event | None = None
-        if last_line is not None:
+        if cursor is None and last_line is not None:
             parsed = self._parse_record(last_line, max(0, lines - 1), clip_text=True)
             semantic = [event for event in parsed.events if not event.usage_only]
             last_event = semantic[-1] if semantic else None
-        self._pending = (path, size, lines, mtime, session_id)
+        self._usage_only_until = size if usage_only else None
+        self._pending = (path, offset, index, mtime, session_id)
         return Attachment(
             location=str(path),
             session_id=session_id,
-            skipped=lines,
+            # A usage-only reconciliation intentionally skips all control
+            # records even while it replays their accounting payloads.
+            skipped=lines if usage_only else index,
             last_event=last_event,
             point=StreamPoint(records=lines, size=size, dev=dev, ino=ino),
             correlation=self.correlation_for(path, session_id),
             collision_domain=self.collision_domain,
         )
+
+    def _replay_cursor(
+        self,
+        *,
+        size: int,
+        lines: int,
+        dev: int | None,
+        ino: int | None,
+    ) -> tuple[int, int, bool] | None:
+        """Return ``(offset, record_index, usage_only)`` for a safe replay.
+
+        Pi sessions are participant-isolated, so a cold launch and a `/new`
+        rotation may safely replay records written before the watcher attached.
+        A resumed stream instead starts at its persisted pre-launch boundary.
+        On daemon restart, only usage is replayed: control events have already
+        been observed, but a stable usage key lets the durable ledger recover
+        records written during downtime exactly once.
+        """
+        if not self._exact_attachments:
+            return None
+        if self.path is not None:
+            # Pi's normal `/new` rotation creates a fresh session in this
+            # isolated domain.  The candidate locator rejects pre-launch
+            # sessions, so this path is safe to read from zero.
+            return (0, 0, False)
+        floor_cursor = self._floor_cursor(size=size, lines=lines, dev=dev, ino=ino)
+        if floor_cursor is None:
+            return None
+        offset, index = floor_cursor
+        if self._known_location is not None:
+            return (offset, index, True)
+        return (offset, index, False)
+
+    def _floor_cursor(
+        self,
+        *,
+        size: int,
+        lines: int,
+        dev: int | None,
+        ino: int | None,
+    ) -> tuple[int, int] | None:
+        """Return the cold or validated resumed cursor; fail closed otherwise."""
+        if self._usage_floor is None:
+            return (0, 0)
+        floor = decode_floor(self._usage_floor)
+        if floor is None:
+            return None
+        floor_size, floor_records, floor_dev, floor_ino = (
+            floor.size,
+            floor.records,
+            floor.dev,
+            floor.ino,
+        )
+        if (
+            floor_size is None
+            or floor_records is None
+            or floor_dev is None
+            or floor_ino is None
+            or dev is None
+            or ino is None
+        ):
+            return None
+        if floor_dev != dev or floor_ino != ino:
+            return None
+        if size < floor_size or lines < floor_records:
+            return None
+        return (floor_size, floor_records)
 
     def _drain(self) -> Batch:
         if self._backlog:
@@ -145,6 +224,7 @@ class PiTranscriptSource(TranscriptSource):
         stat = path.stat()
         if stat.st_size < offset or (stat.st_size == offset and stat.st_mtime_ns != mtime):
             offset = index = 0
+            self._usage_only_until = None
             self._clear_live_buffers()
             self._observer._reset_turn_context()
         if stat.st_size == offset:
@@ -217,9 +297,12 @@ class PiTranscriptSource(TranscriptSource):
                 raw.decode("utf-8", errors="replace"), self.index, clip_text=True
             )
             decorated = self._decorate_parsed(parsed, source_offset)
-            events.extend(decorated.events)
-            trajectory.extend(decorated.trajectory)
-            trajectory_events.extend(decorated.baseline_events)
+            if self._usage_only_until is not None and source_offset < self._usage_only_until:
+                events.extend(self._usage_only(event) for event in decorated.events if event.usage)
+            else:
+                events.extend(decorated.events)
+                trajectory.extend(decorated.trajectory)
+                trajectory_events.extend(decorated.baseline_events)
             self.index += 1
         return Batch(
             events=events,
@@ -233,3 +316,15 @@ class PiTranscriptSource(TranscriptSource):
         self._partial = b""
         self._partial_offset = None
         self._dropping_oversized = False
+
+    @staticmethod
+    def _usage_only(event: Event) -> Event:
+        """Keep restart accounting off the bus and out of turn completion."""
+        assert event.usage is not None
+        return Event(
+            kind=event.kind,
+            ts=event.ts,
+            raw_index=event.raw_index,
+            usage=event.usage,
+            source_offset=event.source_offset,
+        )

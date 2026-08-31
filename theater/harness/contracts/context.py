@@ -19,6 +19,8 @@ class ParticipantObservationContext:
     session_provenance: str | TranscriptProvenance | None = TranscriptProvenance.HEURISTIC
     known_location: str | None = None
     transcript_domain: str | None = None
+    #: Durable stream boundary used by accounting reconciliation after a resume.
+    usage_floor: str | None = None
     pane_pid: int | None = None
     participant_scoped: bool = True
 
@@ -27,7 +29,7 @@ class ParticipantObservationContext:
             raise TypeError("participant observation context participant_id must be a string")
         if not self.participant_id.strip():
             raise ValueError("participant observation context participant_id must not be blank")
-        for name in ("cwd", "session_id", "known_location", "transcript_domain"):
+        for name in ("cwd", "session_id", "known_location", "transcript_domain", "usage_floor"):
             value = getattr(self, name)
             if value is not None and not isinstance(value, str):
                 raise TypeError(f"participant observation context {name} must be a string or null")

@@ -141,7 +141,9 @@ class Spawner:
             self._record_launch_identity(participant, plan, harness.observer)
 
             if resume_predecessor is not None:
-                participant.resume_floor = self._capture_resume_floor(harness, resume_predecessor)
+                floor = self._capture_resume_floor(harness, resume_predecessor)
+                participant.resume_floor = floor
+                participant.usage_floor = floor
                 self.registry.store.upsert_participant(participant)
 
             self._write_plan_files(plan)

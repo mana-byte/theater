@@ -55,6 +55,12 @@ class Participant:
     transcript_location: str | None = None
     #: Persisted resume floor: predecessor's stream position at last safe pre-launch. None for cold.
     resume_floor: str | None = None
+    #: Immutable accounting boundary captured with a resumed session's launch floor.
+    #:
+    #: ``resume_floor`` is cleared once it has served its completion-inference
+    #: purpose.  Usage reconciliation needs the same boundary across daemon
+    #: restarts, so it deliberately has its own durable field.
+    usage_floor: str | None = None
     resumed_from_id: str | None = None
     parent_id: str | None = None
     pid: int | None = None
@@ -117,6 +123,7 @@ class Participant:
         d.pop("transcript_domain", None)
         d.pop("transcript_location", None)
         d.pop("resume_floor", None)
+        d.pop("usage_floor", None)
         d.pop("resumed_from_id", None)
         d["tier"] = str(self.tier)
         d["status"] = str(self.status)
@@ -145,6 +152,7 @@ class Participant:
             transcript_domain=mapping["transcript_domain"],
             transcript_location=mapping["transcript_location"],
             resume_floor=mapping["resume_floor"],
+            usage_floor=mapping["usage_floor"],
             resumed_from_id=mapping["resumed_from_id"],
             parent_id=mapping["parent_id"],
             pid=mapping["pid"],

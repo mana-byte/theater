@@ -60,7 +60,7 @@ def _blocks(value: object, block_type: str) -> list[dict]:
     return [block for block in value if isinstance(block, dict) and block.get("type") == block_type]
 
 
-def _usage(message: dict, entry_id: str | None) -> TokenUsage | None:
+def _usage(message: dict, entry_id: str | None, index: int) -> TokenUsage | None:
     raw = message.get("usage")
     if not isinstance(raw, dict):
         return None
@@ -77,7 +77,10 @@ def _usage(message: dict, entry_id: str | None) -> TokenUsage | None:
         reasoning_output_tokens=nonnegative_int(raw.get("reasoning")),
         cost_usd=cost,
         cost_provenance=provenance,
-        idempotency_key=entry_id,
+        # Pi normally assigns an entry id.  An append-only record coordinate
+        # remains deterministic when it does not, which keeps restart
+        # reconciliation idempotent instead of silently double-counting.
+        idempotency_key=entry_id or f"record:{index}",
     )
 
 
@@ -260,7 +263,7 @@ class PiParserMixin:
         raw = _content_text(message.get("content"))
         calls = _blocks(message.get("content"), "toolCall")
         thinking = _blocks(message.get("content"), "thinking")
-        usage = _usage(message, entry_id)
+        usage = _usage(message, entry_id, index)
         self._last_model = message.get("model") if isinstance(message.get("model"), str) else None
         self._last_provider = (
             message.get("provider") if isinstance(message.get("provider"), str) else None
@@ -417,7 +420,7 @@ class PiParserMixin:
         call_id = message.get("toolCallId") if isinstance(message.get("toolCallId"), str) else None
         failed = message.get("isError") is True
         status = TrajectoryStatus.ERROR if failed else TrajectoryStatus.COMPLETED
-        usage = _usage(message, entry_id)
+        usage = _usage(message, entry_id, index)
         event = Event(
             kind=EventKind.TOOL_RESULT,
             text=clipper(clip_text)(raw),
@@ -462,7 +465,13 @@ class PiParserMixin:
         timestamp: float | None,
     ) -> ParsedRecord:
         summary = record.get("summary") if isinstance(record.get("summary"), str) else ""
-        usage = _usage(record, entry_id)
+        usage = _usage(record, entry_id, index)
+        if usage is not None:
+            usage = replace(
+                usage,
+                model=usage.model or self._last_model,
+                provider=usage.provider or self._last_provider,
+            )
         fact = _pi_fact(
             kind=TrajectoryKind.CONTEXT,
             summary=summary or str(record.get("type")),
@@ -481,7 +490,20 @@ class PiParserMixin:
         facts = [fact]
         if usage is not None:
             facts.append(self._usage_fact(usage, index, 1, self._active_turn_id, timestamp))
-        return ParsedRecord(trajectory=tuple(facts), trajectory_events=())
+        return ParsedRecord(
+            events=(
+                Event(
+                    kind=EventKind.ASSISTANT,
+                    ts=timestamp,
+                    raw_index=index,
+                    usage=usage,
+                ),
+            )
+            if usage is not None
+            else (),
+            trajectory=tuple(facts),
+            trajectory_events=(),
+        )
 
     @staticmethod
     def _usage_fact(
