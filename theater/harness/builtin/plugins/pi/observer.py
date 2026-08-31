@@ -280,7 +280,7 @@ class PiObserver(PiParserMixin, TranscriptObserver):
             return None
         if not isinstance(value, dict) or value.get("version") != PI_SWITCH_MARKER_VERSION:
             return None
-        if value.get("reason") not in {"new", "resume", "fork"}:
+        if value.get("reason") not in {"new", "resume", "fork", "startup-fork"}:
             return None
         location_raw = value.get("location")
         previous_raw = value.get("previous_location")
@@ -288,7 +288,9 @@ class PiObserver(PiParserMixin, TranscriptObserver):
             return None
         location = canonical(Path(location_raw))
         previous = canonical(Path(previous_raw))
-        if not location.is_relative_to(root) or not previous.is_relative_to(root):
+        if not location.is_relative_to(root):
+            return None
+        if value["reason"] != "startup-fork" and not previous.is_relative_to(root):
             return None
         if current is not None and previous != canonical(current):
             return None
@@ -297,6 +299,10 @@ class PiObserver(PiParserMixin, TranscriptObserver):
         header = _header(location)
         if header is None or _header_cwd(header) != str(Path(cwd).expanduser().resolve()):
             return None
+        if value["reason"] == "startup-fork":
+            parent = header.get("parentSession")
+            if not isinstance(parent, str) or canonical(Path(parent)) != previous:
+                return None
         offset = _optional_nonnegative_int(value.get("offset"))
         records = _optional_nonnegative_int(value.get("records"))
         dev = _optional_nonnegative_int(value.get("dev"))
@@ -315,6 +321,10 @@ class PiObserver(PiParserMixin, TranscriptObserver):
             dev=dev,
             ino=ino,
         )
+
+    def is_fork_transcript(self, transcript: Path) -> bool:
+        header = _header(transcript)
+        return header is not None and isinstance(header.get("parentSession"), str)
 
     def find_switch_transcript(self, *, cwd: str, current: Path) -> Path | None:
         boundary = self.switch_boundary(cwd=cwd, current=current)

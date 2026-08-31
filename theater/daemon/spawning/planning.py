@@ -50,6 +50,9 @@ def build_plan(
 ) -> LaunchPlan:
     """Construct the launch plan and merge the resume overlay, if any."""
     config_path = paths.mcp_config_path(participant.id)
+    resume_reference = req.resume
+    if overlay is not None and overlay.resume_reference is not None:
+        resume_reference = overlay.resume_reference
     plan = plan_launch(
         req.harness,
         participant_id=participant.id,
@@ -58,7 +61,7 @@ def build_plan(
         approval=req.approval,
         model=req.model,
         reasoning_effort=req.reasoning_effort,
-        resume=req.resume,
+        resume=resume_reference,
     )
     if overlay is None:
         return plan

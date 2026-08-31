@@ -22,8 +22,8 @@ def participant_root(participant_id: str) -> Path:
 
 
 def plan_launch(context: LaunchContext) -> LaunchPlan:
-    """Give Pi an exact session id and a launch-local Theater MCP endpoint."""
-    session_id = context.resume or context.participant_id
+    """Give Pi an isolated session id and a launch-local Theater MCP endpoint."""
+    session_id = context.participant_id
     session_dir = participant_root(context.participant_id)
     config = {
         "mcpServers": {
@@ -39,22 +39,24 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
         str(_THEATER_MCP_BRIDGE),
         "--session-id",
         session_id,
+        "--session-dir",
+        str(session_dir),
+    ]
+    if context.resume is not None:
+        # The resume overlay replaces the native id with the authenticated
+        # predecessor transcript path. Pi copies it into this participant's
+        # new isolated session rather than continuing the predecessor file.
+        argv += ["--fork", context.resume]
+    argv += [
         "--theater-mcp-config",
         str(context.config_path),
     ]
     files = {context.config_path: json.dumps(config, indent=2) + "\n"}
     env: dict[str, str] = dict(PI_LAUNCH_ENV)
-    if context.resume is None:
-        argv[5:5] = ["--session-dir", str(session_dir)]
-        files[session_dir / PI_ISOLATION_MARKER] = marker_text(
-            participant_id=context.participant_id,
-            transcript_domain=session_dir,
-        )
-    else:
-        # The resume overlay replaces this isolated fallback with the trusted
-        # predecessor domain. Pi's own environment is only consulted because
-        # a resumed invocation deliberately omits --session-dir.
-        env["PI_CODING_AGENT_SESSION_DIR"] = str(session_dir)
+    files[session_dir / PI_ISOLATION_MARKER] = marker_text(
+        participant_id=context.participant_id,
+        transcript_domain=session_dir,
+    )
     if context.model:
         argv += ["--model", context.model]
     if context.reasoning_effort:
@@ -71,7 +73,7 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
 
 
 def resume_launch_overlay(context: ResumeContext) -> ResumeLaunchOverlay:
-    """Reuse only an authenticated predecessor Pi session directory."""
+    """Fork only an authenticated predecessor Pi transcript."""
     predecessor = context.predecessor
     if predecessor.session_id is None:
         raise BadRequest("cannot resume Pi session safely: predecessor has no native session id")
@@ -98,18 +100,26 @@ def resume_launch_overlay(context: ResumeContext) -> ResumeLaunchOverlay:
             "Theater session lineage. Rebind or migrate it into its own isolated Pi domain, "
             "then retry."
         )
-    if predecessor.transcript_location is not None:
-        try:
-            Path(predecessor.transcript_location).resolve().relative_to(domain)
-        except (OSError, ValueError) as exc:
-            raise BadRequest(
-                "cannot resume Pi session safely: predecessor transcript location is outside its "
-                "isolated transcript domain"
-            ) from exc
+    if predecessor.transcript_location is None:
+        raise BadRequest(
+            "cannot resume Pi session safely: predecessor has no attached transcript to fork"
+        )
+    location = Path(predecessor.transcript_location)
+    try:
+        resolved_location = location.resolve(strict=True)
+        resolved_location.relative_to(domain)
+    except (OSError, ValueError) as exc:
+        raise BadRequest(
+            "cannot resume Pi session safely: predecessor transcript location is missing or "
+            "outside its isolated transcript domain"
+        ) from exc
+    if location.is_symlink() or not resolved_location.is_file():
+        raise BadRequest(
+            "cannot resume Pi session safely: predecessor transcript location is not a regular file"
+        )
     return ResumeLaunchOverlay(
-        env={**PI_LAUNCH_ENV, "PI_CODING_AGENT_SESSION_DIR": str(domain)},
-        transcript_domain=str(domain),
         cwd=predecessor.cwd,
+        resume_reference=str(resolved_location),
     )
 
 

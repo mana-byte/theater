@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from theater.daemon.spawner import Spawner, SpawnRequest
 from theater.daemon.store import Store
 from theater.daemon.trajectory.project import fact_to_record
 from theater.harness.base import APPROVALS
@@ -17,7 +18,11 @@ from theater.harness.builtin.plugins.pi.constants import (
     PI_SWITCH_MARKER,
     PI_SWITCH_MARKER_VERSION,
 )
-from theater.harness.builtin.plugins.pi.launch import plan_launch, resume_launch_overlay
+from theater.harness.builtin.plugins.pi.launch import (
+    participant_root,
+    plan_launch,
+    resume_launch_overlay,
+)
 from theater.harness.builtin.plugins.pi.manifest import MANIFEST
 from theater.harness.builtin.plugins.pi.observer import PiObserver
 from theater.harness.builtin.plugins.pi.screen import classify_screen
@@ -30,15 +35,22 @@ from theater.trajectory.enums import TrajectoryKind, TrajectoryLane
 
 
 def _session(
-    *, session_id: str, cwd: Path, timestamp: str = "2026-08-31T12:00:00.000Z"
+    *,
+    session_id: str,
+    cwd: Path,
+    timestamp: str = "2026-08-31T12:00:00.000Z",
+    parent_session: Path | None = None,
 ) -> dict[str, object]:
-    return {
+    session: dict[str, object] = {
         "type": "session",
         "version": 3,
         "id": session_id,
         "timestamp": timestamp,
         "cwd": str(cwd),
     }
+    if parent_session is not None:
+        session["parentSession"] = str(parent_session.resolve())
+    return session
 
 
 def _message(entry_id: str, message: dict[str, object]) -> dict[str, object]:
@@ -86,6 +98,27 @@ def _mark_switch(
                 "records": records,
                 "dev": dev,
                 "ino": ino,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _mark_startup_fork(
+    root: Path, *, previous: Path, target: Path, offset: int | None = None
+) -> None:
+    stat = target.stat()
+    (root / PI_SWITCH_MARKER).write_text(
+        json.dumps(
+            {
+                "version": PI_SWITCH_MARKER_VERSION,
+                "reason": "startup-fork",
+                "location": str(target.resolve()),
+                "previous_location": str(previous.resolve()),
+                "offset": stat.st_size if offset is None else offset,
+                "dev": stat.st_dev,
+                "ino": stat.st_ino,
             }
         )
         + "\n",
@@ -141,6 +174,51 @@ def test_pi_launch_isolated_session_config_and_all_approval_modes(tmp_path, monk
     assert plan.env["PI_CACHE_RETENTION"] == "long"
     assert plan.env["PI_SKIP_VERSION_CHECK"] == "1"
     assert plan.env["PI_TELEMETRY"] == "0"
+
+
+async def test_pi_resume_spawn_forks_to_fresh_native_identity_and_domain(
+    tmp_path, monkeypatch, registry, fake_tmux
+) -> None:
+    monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    predecessor = registry.register(
+        harness="pi", pane=None, cwd=str(workdir), session_id="old-native-id"
+    )
+    predecessor.session_correlation = "exact"
+    domain = participant_root(predecessor.id)
+    cold_plan = plan_launch(LaunchContext(predecessor.id, "", tmp_path / "old-config.json", "yolo"))
+    domain.mkdir(parents=True)
+    marker = domain / PI_ISOLATION_MARKER
+    marker.write_text(cold_plan.files[marker], encoding="utf-8")
+    transcript = domain / "old.jsonl"
+    _append(transcript, _session(session_id="old-native-id", cwd=workdir))
+    predecessor.transcript_domain = str(domain.resolve())
+    predecessor.transcript_location = str(transcript.resolve())
+    registry.store.upsert_participant(predecessor)
+    registry.mark_dead(predecessor.id)
+
+    successor = await Spawner(registry).spawn(
+        SpawnRequest(
+            harness="pi",
+            prompt="continue",
+            cwd=str(tmp_path / "ignored-cwd"),
+            approval="yolo",
+            resume="old-native-id",
+        )
+    )
+
+    command = fake_tmux.windows[-1]["command"]
+    successor_domain = participant_root(successor.id)
+    assert command[command.index("--session-id") + 1] == successor.id
+    assert command[command.index("--session-dir") + 1] == str(successor_domain)
+    assert command[command.index("--fork") + 1] == str(transcript.resolve())
+    assert successor.session_id == successor.id
+    assert successor.transcript_domain == str(successor_domain.resolve())
+    assert successor.resumed_from_id == predecessor.id
+    assert successor.cwd == str(workdir)
+    assert successor_domain != domain
 
 
 def test_pi_source_waits_until_the_initial_session_file_exists(tmp_path) -> None:
@@ -273,6 +351,8 @@ def test_pi_bridge_records_session_switch_boundaries_independently_of_mcp_owners
     assert 'pi.on("session_start"' in bridge
     assert 'pi.on("session_shutdown"' in bridge
     assert "writeSwitchMarker(event.reason" in bridge
+    assert 'reason: "startup-fork"' in bridge
+    assert "if (startupFork) writeStartupForkMarker(startupFork, ctx);" in bridge
     assert bridge.index("registerTranscriptSwitches(pi);") < bridge.index(
         "const bridgeLease = acquireBridge();"
     )
@@ -923,6 +1003,128 @@ def test_pi_fork_switch_skips_copied_history_and_observes_only_new_records(tmp_p
     assert [event.usage.input_tokens for event in batch.events if event.usage] == [7]
 
 
+def test_pi_startup_fork_waits_for_boundary_and_never_replays_copied_history(tmp_path) -> None:
+    workdir = tmp_path / "work"
+    predecessor_root = tmp_path / "predecessor"
+    successor_root = tmp_path / "successor"
+    workdir.mkdir()
+    predecessor_root.mkdir()
+    successor_root.mkdir()
+    predecessor = predecessor_root / "old.jsonl"
+    copied = _message(
+        "copied-assistant",
+        {
+            "role": "assistant",
+            "content": "already accounted",
+            "stopReason": "stop",
+            "usage": {"input": 100, "output": 1},
+        },
+    )
+    _append(predecessor, _session(session_id="old", cwd=workdir), copied)
+    fork = successor_root / "fork.jsonl"
+    _append(
+        fork,
+        _session(session_id="successor", cwd=workdir, parent_session=predecessor),
+        copied,
+    )
+    copied_offset = fork.stat().st_size
+    source = PiObserver(root=successor_root, isolated=True).open_source(
+        cwd=str(workdir), session_id="successor"
+    )
+
+    # Pi creates the file before extension session_start writes the boundary.
+    assert asyncio.run(source.read()).waiting is True
+
+    unrelated = predecessor_root / "unrelated.jsonl"
+    _append(unrelated, _session(session_id="unrelated", cwd=workdir))
+    _mark_startup_fork(
+        successor_root,
+        previous=unrelated,
+        target=fork,
+        offset=copied_offset,
+    )
+    assert asyncio.run(source.read()).waiting is True
+
+    _mark_startup_fork(
+        successor_root,
+        previous=predecessor,
+        target=fork,
+        offset=copied_offset,
+    )
+    _append(
+        fork,
+        _message(
+            "new-assistant",
+            {
+                "role": "assistant",
+                "content": "new work",
+                "stopReason": "stop",
+                "usage": {"input": 7, "output": 1},
+            },
+        ),
+    )
+    attached = asyncio.run(source.read()).attached
+    assert attached is not None
+    assert attached.session_id == "successor"
+    assert attached.skipped == 2
+    source.commit_attachment()
+
+    batch = asyncio.run(source.read())
+    assert [event.text for event in batch.events if event.text] == ["new work"]
+    assert [event.usage.input_tokens for event in batch.events if event.usage] == [7]
+
+
+def test_pi_startup_fork_restart_reconciles_only_successor_usage(tmp_path) -> None:
+    workdir = tmp_path / "work"
+    predecessor_root = tmp_path / "predecessor"
+    successor_root = tmp_path / "successor"
+    workdir.mkdir()
+    predecessor_root.mkdir()
+    successor_root.mkdir()
+    predecessor = predecessor_root / "old.jsonl"
+    copied = _message(
+        "copied-assistant",
+        {
+            "role": "assistant",
+            "content": "already accounted",
+            "stopReason": "stop",
+            "usage": {"input": 100, "output": 1},
+        },
+    )
+    _append(predecessor, _session(session_id="old", cwd=workdir), copied)
+    fork = successor_root / "fork.jsonl"
+    _append(
+        fork,
+        _session(session_id="successor", cwd=workdir, parent_session=predecessor),
+        copied,
+    )
+    _mark_startup_fork(successor_root, previous=predecessor, target=fork)
+    _append(
+        fork,
+        _message(
+            "new-assistant",
+            {
+                "role": "assistant",
+                "content": "new work",
+                "stopReason": "stop",
+                "usage": {"input": 7, "output": 1},
+            },
+        ),
+    )
+    restarted = PiObserver(root=successor_root, isolated=True).open_source(
+        cwd=str(workdir),
+        session_id="successor",
+        known_location=str(fork),
+    )
+
+    assert asyncio.run(restarted.read()).attached is not None
+    restarted.commit_attachment()
+    batch = asyncio.run(restarted.read())
+    assert [event.usage.input_tokens for event in batch.events if event.usage] == [7]
+    assert all(event.usage_only for event in batch.events)
+    assert batch.trajectory == ()
+
+
 def test_pi_existing_resume_switch_attaches_at_switch_eof(tmp_path) -> None:
     workdir = tmp_path / "work"
     sessions = tmp_path / "sessions"
@@ -1166,7 +1368,7 @@ def test_pi_oversized_record_is_dropped_without_stalling_following_records(tmp_p
     assert [(event.kind, event.text) for event in batch.events] == [(EventKind.USER, "survived")]
 
 
-def test_pi_history_reader_keeps_live_turn_context_and_resume_reuses_session_dir(
+def test_pi_history_reader_keeps_live_turn_context_and_resume_forks_into_new_session_dir(
     tmp_path, monkeypatch
 ) -> None:
     monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
@@ -1202,13 +1404,15 @@ def test_pi_history_reader_keeps_live_turn_context_and_resume_reuses_session_dir
     domain.mkdir(parents=True)
     marker = domain / PI_ISOLATION_MARKER
     marker.write_text(cold_plan.files[marker], encoding="utf-8")
+    predecessor_transcript = domain / "native-id.jsonl"
+    _append(predecessor_transcript, _session(session_id="native-id", cwd=workdir))
     predecessor = Participant(
         id="predecessor",
         harness="pi",
         cwd=str(workdir),
         session_id="native-id",
         transcript_domain=str(domain),
-        transcript_location=str(domain / "native-id.jsonl"),
+        transcript_location=str(predecessor_transcript),
         session_correlation="exact",
         status=Status.DEAD,
     )
@@ -1216,13 +1420,21 @@ def test_pi_history_reader_keeps_live_turn_context_and_resume_reuses_session_dir
         ResumeContext(predecessor=predecessor, trusted_session_owners=(predecessor,))
     )
     resumed = plan_launch(
-        LaunchContext("successor", "continue", tmp_path / "resume.json", "yolo", resume="native-id")
+        LaunchContext(
+            "successor",
+            "continue",
+            tmp_path / "resume.json",
+            "yolo",
+            resume=overlay.resume_reference,
+        )
     )
 
-    assert resumed.session_id == "native-id"
-    assert "--session-dir" not in resumed.argv
-    assert overlay.env["PI_CODING_AGENT_SESSION_DIR"] == str(domain.resolve())
-    assert overlay.env["PI_OFFLINE"] == "1"
-    assert overlay.env["PI_CACHE_RETENTION"] == "long"
-    assert overlay.transcript_domain == str(domain.resolve())
+    successor_domain = participant_root("successor")
+    assert resumed.session_id == "successor"
+    assert resumed.argv[resumed.argv.index("--session-dir") + 1] == str(successor_domain)
+    assert resumed.argv[resumed.argv.index("--fork") + 1] == str(predecessor_transcript.resolve())
+    assert resumed.transcript_domain == str(successor_domain.resolve())
+    assert successor_domain / PI_ISOLATION_MARKER in resumed.files
+    assert overlay.resume_reference == str(predecessor_transcript.resolve())
+    assert overlay.transcript_domain is None
     assert overlay.cwd == str(workdir)

@@ -71,7 +71,9 @@ class _OverlayHarness(Harness):
         self.observer = _Obs()
 
     seen_plan_env: dict | None = None
+    seen_resume: str | None = None
     resume_cwd: str | None = None
+    resume_reference: str | None = None
 
     def plan_launch(
         self,
@@ -85,6 +87,7 @@ class _OverlayHarness(Harness):
     ) -> LaunchPlan:
         plan = LaunchPlan(argv=["overlay-test"], env={"PLAN_KEY": "plan"})
         self.seen_plan_env = dict(plan.env)
+        self.seen_resume = resume
         return plan
 
     def resume_launch_overlay(self, *, predecessor, trusted_session_owners):
@@ -92,6 +95,7 @@ class _OverlayHarness(Harness):
             env={"OVERLAY_KEY": "overlay", "PLAN_KEY": "overlay-wins"},
             transcript_domain="/tmp/overlay-domain",
             cwd=self.resume_cwd,
+            resume_reference=self.resume_reference,
         )
 
 
@@ -203,6 +207,27 @@ async def test_overlay_cwd_replaces_request_before_reservation(
 
     assert fake_tmux.windows[-1]["cwd"] == str(authoritative)
     assert registry.get(spawned.id).cwd == str(authoritative)
+
+
+async def test_overlay_resume_reference_replaces_only_the_planner_input(
+    registry, overlay_harness, monkeypatch, fake_tmux
+):
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
+    overlay_harness.resume_reference = "/trusted/native/transcript.jsonl"
+    predecessor = _trusted_predecessor(registry, harness="overlay-test")
+
+    spawned = await Spawner(registry).spawn(
+        SpawnRequest(
+            harness="overlay-test",
+            prompt="",
+            cwd="/tmp",
+            approval="edits",
+            resume="sess-abc",
+        )
+    )
+
+    assert overlay_harness.seen_resume == "/trusted/native/transcript.jsonl"
+    assert registry.get(spawned.id).resumed_from_id == predecessor.id
 
 
 # ---- point 1: base default — empty overlay for domainless, refuse domain ----

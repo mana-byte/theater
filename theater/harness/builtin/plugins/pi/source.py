@@ -376,6 +376,19 @@ class PiTranscriptSource(TranscriptSource):
             return None
         if self.path is not None:
             return self._rotation_cursor(path)
+        if self._observer.is_fork_transcript(path):
+            if not self._cwd:
+                return None
+            boundary = self._observer.switch_boundary(cwd=self._cwd)
+            if boundary is None or boundary.reason != "startup-fork" or boundary.location != path:
+                # Pi creates the fork file before extension session_start
+                # records the copied-history boundary. Never race ahead and
+                # replay the copied prefix while that handoff is pending.
+                return _WAIT_FOR_SWITCH
+            cursor = _switch_cursor(path, boundary)
+            if cursor is None:
+                return _WAIT_FOR_SWITCH
+            return (*cursor, self._known_location is not None)
         floor_cursor = self._floor_cursor(size=size, lines=lines, dev=dev, ino=ino)
         if floor_cursor is None:
             return None
