@@ -1510,9 +1510,17 @@ def test_mcp_serves_the_id_it_was_given(monkeypatch):
 
     monkeypatch.setattr(runtime_mod, "configure", lambda **kw: _FakeHandle())
     seen: list = []
-    monkeypatch.setattr(server_mod, "main", lambda pid, harness: seen.append((pid, harness)))
+    monkeypatch.setattr(
+        server_mod,
+        "main",
+        lambda pid, harness, toolset: seen.append((pid, harness, toolset)),
+    )
     assert cli.cmd_mcp(parse("mcp", "--id", "p-abc", "--harness", "vibe")) == 0
-    assert seen == [("p-abc", "vibe")]
+    assert seen == [("p-abc", "vibe", "all")]
+
+
+def test_mcp_accepts_the_internal_toolset_switch():
+    assert parse("mcp", "--toolset", "wait").toolset == "wait"
 
 
 # ---- main ----------------------------------------------------------------

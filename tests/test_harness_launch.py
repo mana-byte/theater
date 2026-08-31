@@ -32,8 +32,26 @@ def test_vibe_carries_the_id_in_an_env_override(tmp_path):
     assert list(plan.files) == [Path(plan.env["VIBE_SESSION_LOGGING__SAVE_DIR"]) / ISOLATION_MARKER]
 
     servers = json.loads(plan.env["VIBE_MCP_SERVERS"])
-    assert servers[0]["name"] == "theater"
-    assert servers[0]["args"] == ["mcp", "--id", "abc123"]
+    assert [server["name"] for server in servers] == ["theater", "theater_wait"]
+    assert servers[0]["args"] == [
+        "mcp",
+        "--id",
+        "abc123",
+        "--harness",
+        "vibe",
+        "--toolset",
+        "control",
+    ]
+    assert servers[1]["args"] == [
+        "mcp",
+        "--id",
+        "abc123",
+        "--harness",
+        "vibe",
+        "--toolset",
+        "wait",
+    ]
+    assert servers[0]["command"] == servers[1]["command"]
 
 
 def test_vibe_cold_spawn_always_gets_an_isolated_transcript_domain(tmp_path, monkeypatch):
@@ -96,7 +114,8 @@ def test_vibe_outlasts_a_full_length_await(tmp_path):
     )
 
     servers = json.loads(plan.env["VIBE_MCP_SERVERS"])
-    assert servers[0]["tool_timeout_sec"] > MAX_AWAIT
+    assert len(servers) == 2
+    assert all(server["tool_timeout_sec"] > MAX_AWAIT for server in servers)
 
 
 def test_codex_carries_the_id_in_a_config_override(tmp_path):

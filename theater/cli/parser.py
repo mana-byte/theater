@@ -173,6 +173,12 @@ def _add_process_parsers(sub) -> None:
     mcp = sub.add_parser("mcp", help="Run the per-agent MCP server on stdio.")
     mcp.add_argument("--id", dest="participant_id", default=None)
     mcp.add_argument("--harness", default="unknown")
+    mcp.add_argument(
+        "--toolset",
+        choices=("all", "control", "wait"),
+        default="all",
+        help=argparse.SUPPRESS,
+    )
 
 
 def _parser() -> argparse.ArgumentParser:

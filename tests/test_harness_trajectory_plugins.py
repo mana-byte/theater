@@ -12,6 +12,7 @@ from test_harness_opencode import Recorder
 from theater.harness import EventKind
 from theater.harness.builtin.plugins.opencode.constants import LIVE_TRAJECTORY_STATE_LIMIT
 from theater.harness.builtin.plugins.opencode.mcp import catalog_path
+from theater.harness.builtin.plugins.vibe.trajectory import _vibe_named_mcp_identity
 from theater.trajectory import ContentFormat, TimingProvenance, TrajectoryKind, TrajectoryStatus
 from theater.trajectory.capabilities import TrajectoryFeature
 
@@ -421,6 +422,45 @@ def test_vibe_extracts_theater_mcp_identity_without_classifying_it() -> None:
     assert result.kind is TrajectoryKind.TOOL_RESULT
     assert (call.mcp_server, call.mcp_tool) == ("theater", "send")
     assert (result.mcp_server, result.mcp_tool) == ("theater", "send")
+
+
+def test_vibe_canonicalizes_the_wait_only_theater_server() -> None:
+    observer = VibeObserver()
+    call = observer.parse_record(
+        json.dumps(
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "function": {"name": "theater_wait_await_sessions", "arguments": "{}"},
+                    }
+                ],
+            }
+        ),
+        0,
+    ).trajectory[-1]
+    result = observer.parse_record(
+        json.dumps(
+            {
+                "role": "tool",
+                "name": "theater_wait_await_sessions",
+                "tool_call_id": "call-1",
+                "content": "done",
+            }
+        ),
+        1,
+    ).trajectory[0]
+
+    assert (call.mcp_server, call.mcp_tool) == ("theater", "await_sessions")
+    assert (result.mcp_server, result.mcp_tool) == ("theater", "await_sessions")
+
+
+def test_vibe_canonicalizes_the_wait_alias_in_named_mcp_results() -> None:
+    assert _vibe_named_mcp_identity("theater_wait_await_sessions", "await_sessions") == (
+        "theater",
+        "await_sessions",
+    )
 
 
 def test_vibe_extracts_native_mcp_identity_from_presentation_and_result() -> None:

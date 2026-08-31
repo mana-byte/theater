@@ -29,7 +29,7 @@ from theater.trajectory.enums import (
 )
 from theater.trajectory.records import Timing, TrajectoryFailure, TrajectoryUsage
 
-from .constants import _READ_TOOLS, _WRITE_TOOLS
+from .constants import _READ_TOOLS, _WRITE_TOOLS, VIBE_WAIT_MCP_SERVER_NAME
 
 
 def _extract_paths(
@@ -82,7 +82,11 @@ def _vibe_named_mcp_identity(value: object, tool: object) -> tuple[str, str] | N
     suffix = f"_{tool}"
     if not value.endswith(suffix):
         return None
-    server = _vibe_identifier(value[: -len(suffix)])
+    server_name = value[: -len(suffix)]
+    # Normalize Vibe's wait alias to Theater.
+    server = (
+        SERVER_NAME if server_name == VIBE_WAIT_MCP_SERVER_NAME else _vibe_identifier(server_name)
+    )
     tool_id = _vibe_identifier(tool)
     return (server, tool_id) if server is not None and tool_id is not None else None
 
@@ -93,10 +97,13 @@ def _vibe_mcp_identity(
     presentation: object = None,
     result: object = None,
 ) -> tuple[str, str] | None:
-    prefix = f"{SERVER_NAME}_"
-    if isinstance(value, str) and value.startswith(prefix):
-        tool = _vibe_identifier(value.removeprefix(prefix))
-        return (SERVER_NAME, tool) if tool is not None else None
+    if isinstance(value, str):
+        # Check the longer alias first.
+        for server_name in (VIBE_WAIT_MCP_SERVER_NAME, SERVER_NAME):
+            prefix = f"{server_name}_"
+            if value.startswith(prefix):
+                tool = _vibe_identifier(value.removeprefix(prefix))
+                return (SERVER_NAME, tool) if tool is not None else None
 
     if isinstance(result, dict):
         output = result.get("output")

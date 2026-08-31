@@ -29,6 +29,7 @@ from .constants import (
     VIBE_HOME_ENV,
     VIBE_MCP_SERVERS_ENV,
     VIBE_SESSION_LOGGING_SAVE_DIR_ENV,
+    VIBE_WAIT_MCP_SERVER_NAME,
 )
 from .identity import participant_root
 from .isolation import _canonical, isolation_marker_text, validate_isolated_domain
@@ -49,10 +50,18 @@ def plan_launch(
             "name": SERVER_NAME,
             "transport": "stdio",
             "command": theater_binary(),
-            "args": ["mcp", "--id", participant_id],
+            "args": ["mcp", "--id", participant_id, "--harness", "vibe", "--toolset", "control"],
             # Vibe's 60s default cuts off `await_sessions` before the daemon's 300s ceiling.
             "tool_timeout_sec": MCP_TOOL_TIMEOUT,
-        }
+        },
+        {
+            # Separate config keeps cancelled waits from blocking control RPCs.
+            "name": VIBE_WAIT_MCP_SERVER_NAME,
+            "transport": "stdio",
+            "command": theater_binary(),
+            "args": ["mcp", "--id", participant_id, "--harness", "vibe", "--toolset", "wait"],
+            "tool_timeout_sec": MCP_TOOL_TIMEOUT,
+        },
     ]
     argv = ["vibe"]
     if approval == "yolo":

@@ -65,7 +65,7 @@ def cmd_mcp(args) -> int:
         harness_registry.install(settings)
         from theater.mcp.server import main
 
-        main(args.participant_id, args.harness)
+        main(args.participant_id, args.harness, args.toolset)
     finally:
         runtime_handle.shutdown()
     return 0

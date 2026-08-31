@@ -16,6 +16,7 @@ from theater.client import DaemonClient
 from theater.daemon.server import Daemon
 from theater.mcp import tools as mcp_tools
 from theater.mcp.server import build
+from theater.models import JobState
 
 
 @pytest.fixture
@@ -63,6 +64,37 @@ async def test_tools_are_registered(daemon):
         "recall",
         "recall_read",
     }
+
+
+async def test_control_and_wait_toolsets_partition_the_mcp_surface(daemon):
+    control = {tool.name for tool in await build("p1", "vibe", "control").list_tools()}
+    wait = {tool.name for tool in await build("p1", "vibe", "wait").list_tools()}
+
+    assert "await_sessions" not in control
+    assert wait == {"await_sessions"}
+    assert control | wait == {tool.name for tool in await build("p1", "vibe").list_tools()}
+
+
+async def test_wait_toolset_reuses_the_control_participant_identity(daemon):
+    control = build("p1", "vibe", "control")
+    assert _payload(await control.call_tool("whoami", {}))["id"] == "p1"
+    daemon.jobs.create(handle="done", caller_id="p1", target_id=None, kind="test")
+    daemon.jobs.finish("done", state=JobState.DONE)
+
+    wait = build("p1", "vibe", "wait")
+    result = _payload(await wait.call_tool("await_sessions", {"handles": ["done"]}))
+    assert len(result) == 1
+    assert result[0]["handle"] == "done"
+    assert result[0]["state"] == "done"
+
+    async with DaemonClient(autostart=False) as client:
+        rows = await client.call("participants.list")
+    assert [row["id"] for row in rows] == ["p1"]
+
+
+def test_mcp_toolset_must_be_known():
+    with pytest.raises(ValueError, match="unknown MCP toolset"):
+        build("p1", "vibe", "unknown")
 
 
 async def test_every_tool_is_documented(daemon):

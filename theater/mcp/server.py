@@ -1,9 +1,10 @@
 """The stdio MCP server every participant runs.
 
-One process per agent. Its whole job is to translate tool calls into daemon RPCs
-on behalf of exactly one participant, whose id arrives on argv:
+One process per participant lane. Its whole job is to translate tool calls into
+daemon RPCs on behalf of exactly one participant, whose id arrives on argv.
+Vibe uses separate control and wait lanes:
 
-    theater mcp --id <participant-id> [--harness vibe]
+    theater mcp --id <participant-id> [--harness vibe] [--toolset all]
 
 argv, not the environment, because the MCP SDK strips everything outside a
 six-variable allowlist when it launches a stdio server
@@ -41,6 +42,36 @@ before you trust it.
 
 Use list_skills to discover optional skills, then load_skill only for an exact selected skill.
 """
+
+_TOOLSETS = frozenset({"all", "control", "wait"})
+_WAIT_TOOL = "await_sessions"
+
+
+def _instructions(toolset: str) -> str:
+    """Return guidance appropriate to the server's deliberately small surface."""
+    if toolset == "control":
+        return (
+            f"{INSTRUCTIONS}\n\n"
+            "For Vibe, await_sessions is intentionally on the separate "
+            "theater_wait MCP server. Use theater_wait_await_sessions so a "
+            "cancelled long wait cannot delay control calls such as interrupt_session."
+        )
+    if toolset == "wait":
+        return (
+            "This is Theater's wait-only MCP server for Vibe. It exposes only "
+            "await_sessions; use the theater MCP server for every other Theater operation."
+        )
+    return INSTRUCTIONS
+
+
+def _includes_tool(toolset: str, name: str) -> bool:
+    """Select the toolset's exposed tools."""
+    if toolset == "all":
+        return True
+    if toolset == "control":
+        return name != _WAIT_TOOL
+    return name == _WAIT_TOOL
+
 
 SPAWN_DOC = """Start a new agent in its own tmux window as your child.
 
@@ -152,15 +183,32 @@ def _spawn_description() -> str:
     return SPAWN_DOC.format(harnesses=", ".join(names) or "no harnesses registered")
 
 
-def build(participant_id: str | None = None, harness: str = "unknown") -> MCPServer:
+def build(
+    participant_id: str | None = None,
+    harness: str = "unknown",
+    toolset: str = "all",
+) -> MCPServer:
+    if toolset not in _TOOLSETS:
+        choices = ", ".join(sorted(_TOOLSETS))
+        raise ValueError(f"unknown MCP toolset {toolset!r}; expected one of: {choices}")
     session = Session(
         participant_id=participant_id or os.environ.get("THEATER_ID"),
         harness=harness,
         client=DaemonClient(),
     )
-    mcp = MCPServer(HARNESS_MCP_SERVER_NAME, instructions=INSTRUCTIONS)
+    mcp = MCPServer(HARNESS_MCP_SERVER_NAME, instructions=_instructions(toolset))
 
-    @mcp.tool()
+    def mcp_tool(*, description: str | None = None):
+        """Register a tool when it belongs to this lane."""
+
+        def decorator(fn):
+            if _includes_tool(toolset, fn.__name__):
+                return mcp.tool(description=description)(fn)
+            return fn
+
+        return decorator
+
+    @mcp_tool()
     async def whoami() -> dict:
         """Identify yourself: your id, harness session id, tier, cwd and status.
 
@@ -171,7 +219,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         """
         return await tools.whoami(session)
 
-    @mcp.tool()
+    @mcp_tool()
     async def list_participants(
         include_dead: bool = False,
         ids: list[str] | None = None,
@@ -243,7 +291,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
             after_id=after_id,
         )
 
-    @mcp.tool()
+    @mcp_tool()
     async def list_harnesses() -> list[dict]:
         """The CLIs you can pass to spawn_session as `harness`, on this machine.
 
@@ -254,7 +302,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         """
         return await tools.harnesses(session)
 
-    @mcp.tool()
+    @mcp_tool()
     async def list_models() -> list[dict]:
         """The models spawn_session will accept for each harness, on this machine.
 
@@ -275,7 +323,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         """
         return await tools.models(session)
 
-    @mcp.tool()
+    @mcp_tool()
     async def list_skills() -> dict:
         """List skill metadata first, before choosing one to load.
 
@@ -285,7 +333,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         """
         return await tools.list_skills(session)
 
-    @mcp.tool()
+    @mcp_tool()
     async def load_skill(name: str) -> dict:
         """Load the full instructions for one exact skill selected from list_skills.
 
@@ -294,7 +342,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         """
         return await tools.load_skill(session, name=name)
 
-    @mcp.tool(description=_spawn_description())
+    @mcp_tool(description=_spawn_description())
     async def spawn_session(
         harness: str,
         approval: str,
@@ -325,7 +373,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
             description=description,
         )
 
-    @mcp.tool()
+    @mcp_tool()
     async def register_pane(pane: str) -> dict:
         """Tell Theater which tmux pane you occupy, making you addressable.
 
@@ -336,7 +384,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         """
         return await tools.register_pane(session, pane=pane)
 
-    @mcp.tool()
+    @mcp_tool()
     async def update_participant(
         target: str | None = None,
         name: str | None = None,
@@ -362,7 +410,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
             description=description,
         )
 
-    @mcp.tool()
+    @mcp_tool()
     async def await_sessions(
         handles: list[str], max_wait: float = RPC_DEFAULT_MAX_WAIT_SECONDS
     ) -> list[dict]:
@@ -398,7 +446,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         """
         return await tools.await_sessions(session, handles=handles, max_wait=max_wait)
 
-    @mcp.tool()
+    @mcp_tool()
     async def send(target_id: str, prompt: str, response_format: dict | None = None) -> dict:
         """Send a prompt to an already-running agent mid-session.
 
@@ -428,7 +476,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
             response_format=response_format,
         )
 
-    @mcp.tool()
+    @mcp_tool()
     async def interrupt_session(target: str) -> dict:
         """Ask one direct child to stop its current turn without killing it.
 
@@ -445,7 +493,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         """
         return await tools.interrupt_session(session, target=target)
 
-    @mcp.tool()
+    @mcp_tool()
     async def scratchpad_write(value: str, namespace: str, key: str | None = None) -> dict:
         """Append a string entry to the sibling scratchpad; daemon mints the key.
 
@@ -471,7 +519,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
             key=key,
         )
 
-    @mcp.tool()
+    @mcp_tool()
     async def scratchpad_get(namespace: str, keys: list[str] | None = None) -> dict:
         """Read entries from the sibling scratchpad.
 
@@ -486,7 +534,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         """
         return await tools.scratchpad_get(session, namespace=namespace, keys=keys)
 
-    @mcp.tool()
+    @mcp_tool()
     async def read_transcript(target: str, cursor: str | None = None) -> dict:
         """Read a bounded transcript page and continue toward older content.
 
@@ -511,7 +559,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         """
         return await tools.read_transcript(session, target=target, cursor=cursor)
 
-    @mcp.tool()
+    @mcp_tool()
     async def put_child_back_in_the_wound(target: str) -> dict:
         """Permanently kill one direct child session.
 
@@ -554,7 +602,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         """
         return await tools.put_child_back_in_the_wound(session, target=target)
 
-    @mcp.tool()
+    @mcp_tool()
     async def recall(paths: list[str], depth: int = 5) -> dict:
         """Who last changed these files, when, and on whose orders.
 
@@ -590,7 +638,7 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
         """
         return await tools.recall(session, paths=paths, depth=depth)
 
-    @mcp.tool()
+    @mcp_tool()
     async def recall_read(segment_id: str) -> dict:
         """Open one point of a recall timeline: the full story behind it.
 
@@ -616,5 +664,9 @@ def build(participant_id: str | None = None, harness: str = "unknown") -> MCPSer
     return mcp
 
 
-def main(participant_id: str | None = None, harness: str = "unknown") -> None:
-    build(participant_id, harness).run(transport="stdio")
+def main(
+    participant_id: str | None = None,
+    harness: str = "unknown",
+    toolset: str = "all",
+) -> None:
+    build(participant_id, harness, toolset).run(transport="stdio")
