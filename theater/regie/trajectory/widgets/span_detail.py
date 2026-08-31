@@ -468,9 +468,7 @@ class SpanDetailPanel(Vertical):
         self._details = self._build_details(tab)
         self._sync_chrome()
         keep_rendered_content = (
-            preserve_scroll
-            and self._details is not None
-            and self._details.tab is previous_tab
+            preserve_scroll and self._details is not None and self._details.tab is previous_tab
         )
         # A live update can change the selected record's request or paired
         # tool while its detail is already on screen. Keep that content until

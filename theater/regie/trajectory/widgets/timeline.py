@@ -148,15 +148,11 @@ class Timeline(ScrollView):
         self._lane_visual_segments: dict[
             TimelineLane, tuple[tuple[int, int, TimelineSpan], ...]
         ] = dict.fromkeys(self._LANES, ())
-        self._lane_visual_ends: dict[TimelineLane, tuple[int, ...]] = dict.fromkeys(
-            self._LANES, ()
+        self._lane_visual_ends: dict[TimelineLane, tuple[int, ...]] = dict.fromkeys(self._LANES, ())
+        self._lane_hit_segments: dict[TimelineLane, tuple[tuple[int, int, TimelineSpan], ...]] = (
+            dict.fromkeys(self._LANES, ())
         )
-        self._lane_hit_segments: dict[
-            TimelineLane, tuple[tuple[int, int, TimelineSpan], ...]
-        ] = dict.fromkeys(self._LANES, ())
-        self._lane_hit_ends: dict[TimelineLane, tuple[int, ...]] = dict.fromkeys(
-            self._LANES, ()
-        )
+        self._lane_hit_ends: dict[TimelineLane, tuple[int, ...]] = dict.fromkeys(self._LANES, ())
         self._turn_boundaries: tuple[int, ...] = ()
         self._scroll_offset = max(0, int(scroll_offset))
         self._viewport_width = 0

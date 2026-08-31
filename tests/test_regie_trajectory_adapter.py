@@ -155,9 +155,7 @@ def test_empty_snapshot_rebuilds_indexes_after_replacing_loaded_records() -> Non
     assert not state.groups
     assert not state.request_index.by_id
     assert not state.tool_index.ordered
-    assert all(
-        not projection.record_ids for projection in state.diagnostic_index.by_view.values()
-    )
+    assert all(not projection.record_ids for projection in state.diagnostic_index.by_view.values())
 
 
 def test_runtime_state_counts_compact_utf8_wire_bytes() -> None:
