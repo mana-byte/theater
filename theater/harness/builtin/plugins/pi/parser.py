@@ -66,7 +66,10 @@ def _usage(message: dict, entry_id: str | None, index: int) -> TokenUsage | None
         return None
     total_cost = raw.get("cost")
     total_cost = total_cost.get("total") if isinstance(total_cost, dict) else None
-    cost, provenance = reported_cost(total_cost, strict_positive=False)
+    # Pi uses zero as a placeholder when its provider/model configuration has
+    # no price metadata.  Treating that as a reported price prevents Theater's
+    # catalog estimator from running for otherwise billable token usage.
+    cost, provenance = reported_cost(total_cost, strict_positive=True)
     return TokenUsage(
         model=message.get("model") if isinstance(message.get("model"), str) else None,
         provider=message.get("provider") if isinstance(message.get("provider"), str) else None,
