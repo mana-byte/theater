@@ -123,19 +123,20 @@ def disabling(*names: str) -> cfg.Config:
 
 def test_a_plugin_joins_the_registry(local_dir):
     write_plugin(local_dir)
-    assert install(local_dir) == ["acme", "claude", "codex", "opencode", "vibe"]
+    assert install(local_dir) == ["acme", "claude", "codex", "opencode", "pi", "vibe"]
     assert harness_registry.get("acme").binary == "acme"
     assert harness_registry.harness_icon("acme") == "@"
 
 
 def test_the_shiped_adapters_are_plugins_too(local_dir):
     """No built-in tier: every adapter comes through the same loader."""
-    assert install(local_dir) == ["claude", "codex", "opencode", "vibe"]
+    assert install(local_dir) == ["claude", "codex", "opencode", "pi", "vibe"]
     rows = {r["name"]: r for r in harness_registry.describe()}
     assert rows["vibe"]["source"] == "shipped"
     assert rows["claude"]["source"] == "shipped"
     assert rows["codex"]["source"] == "shipped"
     assert rows["opencode"]["source"] == "shipped"
+    assert rows["pi"]["source"] == "shipped"
 
 
 def test_a_plugin_plans_its_own_launch(local_dir):
@@ -155,7 +156,7 @@ def test_a_plugin_plans_its_own_launch(local_dir):
 def test_installing_twice_is_the_same_as_once(local_dir):
     write_plugin(local_dir)
     install(local_dir)
-    assert install(local_dir) == ["acme", "claude", "codex", "opencode", "vibe"]
+    assert install(local_dir) == ["acme", "claude", "codex", "opencode", "pi", "vibe"]
 
 
 def test_installing_an_empty_directory_drops_the_plugin(local_dir, tmp_path):
@@ -226,7 +227,7 @@ def test_a_broken_local_plugin_does_not_stop_start_up(local_dir):
     pkg.mkdir()
     (pkg / MANIFEST_FILENAME).write_text("raise ValueError('boom')")
     write_plugin(local_dir)
-    assert install(local_dir) == ["acme", "claude", "codex", "opencode", "vibe"]
+    assert install(local_dir) == ["acme", "claude", "codex", "opencode", "pi", "vibe"]
 
 
 def test_a_broken_local_plugin_is_listed_as_broken(local_dir):
@@ -262,7 +263,7 @@ def test_a_local_manifest_that_calls_sys_exit_does_not_stop_start_up(local_dir):
     pkg.mkdir()
     (pkg / MANIFEST_FILENAME).write_text("import sys; sys.exit(1)")
     write_plugin(local_dir)
-    assert install(local_dir) == ["acme", "claude", "codex", "opencode", "vibe"]
+    assert install(local_dir) == ["acme", "claude", "codex", "opencode", "pi", "vibe"]
 
 
 def test_a_local_manifest_that_calls_sys_exit_is_listed_as_broken(local_dir):
@@ -417,7 +418,7 @@ def test_two_truncated_spellings_of_same_harness_are_accepted(local_dir, shipped
 
 
 def test_a_disabled_harness_is_absent(local_dir):
-    assert install(local_dir, disabling("vibe")) == ["claude", "codex", "opencode"]
+    assert install(local_dir, disabling("vibe")) == ["claude", "codex", "opencode", "pi"]
     assert "vibe" not in harness_registry.HARNESSES
 
 
@@ -431,7 +432,7 @@ def test_a_disabled_harness_is_not_offered_by_the_palette(local_dir):
 
     install(local_dir, disabling("vibe"))
     offered = [name for _, name, _ in entries(harness_registry.describe())]
-    assert offered == ["claude", "codex", "opencode"]
+    assert offered == ["claude", "codex", "opencode", "pi"]
 
 
 def test_a_disabled_harness_still_draws_in_the_tree(local_dir):
@@ -444,6 +445,7 @@ def test_disabling_something_that_is_not_there_is_not_an_error(local_dir):
         "claude",
         "codex",
         "opencode",
+        "pi",
         "vibe",
     ]
 

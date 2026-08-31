@@ -22,7 +22,7 @@ from theater.daemon.server import Daemon
 from theater.mcp.server import build
 
 #: The adapters Theater ships. Every one must reach an agent.
-SHIPPED = {"claude", "codex", "opencode", "vibe"}
+SHIPPED = {"claude", "codex", "opencode", "pi", "vibe"}
 
 
 @pytest.fixture
@@ -156,7 +156,11 @@ async def test_spawning_a_listed_harness_is_accepted(daemon, fake_tmux, all_inst
         child = _payload(
             await mcp.call_tool(
                 "spawn_session",
-                {"harness": name, "prompt": "", "approval": "manual"},
+                {
+                    "harness": name,
+                    "prompt": "",
+                    "approval": "yolo" if name == "pi" else "manual",
+                },
             )
         )
         assert child["harness"] == name
