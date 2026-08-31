@@ -330,19 +330,19 @@ class CompositeSource(Source):
             return None
         return await self._primary.probe_identity_loss()
 
-    def accounting_checkpoint(self) -> str | None:
-        return None if self._primary is None else self._primary.accounting_checkpoint()
+    def source_checkpoint(self) -> str | None:
+        return None if self._primary is None else self._primary.source_checkpoint()
 
-    def pending_accounting_checkpoint(self) -> str | None:
-        return None if self._primary is None else self._primary.pending_accounting_checkpoint()
+    def pending_source_checkpoint(self) -> str | None:
+        return None if self._primary is None else self._primary.pending_source_checkpoint()
 
-    def acknowledge_accounting_checkpoint(self) -> None:
+    def acknowledge_source_checkpoint(self) -> None:
         if self._primary is not None:
-            self._primary.acknowledge_accounting_checkpoint()
+            self._primary.acknowledge_source_checkpoint()
 
-    def rollback_accounting_checkpoint(self) -> None:
+    def rollback_source_checkpoint(self) -> None:
         if self._primary is not None:
-            self._primary.rollback_accounting_checkpoint()
+            self._primary.rollback_source_checkpoint()
 
     def commit_attachment(self) -> None:
         if self._primary is None:

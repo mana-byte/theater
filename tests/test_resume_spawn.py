@@ -980,7 +980,7 @@ async def test_resume_persists_floor_on_successor(registry, resume_harness, monk
     reloaded = registry.store.get_participant(spawned.id)
     assert reloaded.resume_floor is not None
     assert reloaded.resume_floor != UNKNOWN_FLOOR
-    assert reloaded.usage_floor == reloaded.resume_floor
+    assert reloaded.source_checkpoint is None
 
 
 async def test_resume_floor_unknown_when_transcript_missing(
@@ -1005,7 +1005,7 @@ async def test_resume_floor_unknown_when_transcript_missing(
     spawned = await spawner.spawn(req)
     reloaded = registry.store.get_participant(spawned.id)
     assert reloaded.resume_floor == UNKNOWN_FLOOR
-    assert reloaded.usage_floor == UNKNOWN_FLOOR
+    assert reloaded.source_checkpoint is None
 
 
 async def test_cold_spawn_has_no_floor(registry, resume_harness, monkeypatch):
@@ -1021,7 +1021,7 @@ async def test_cold_spawn_has_no_floor(registry, resume_harness, monkeypatch):
     spawned = await spawner.spawn(req)
     reloaded = registry.store.get_participant(spawned.id)
     assert reloaded.resume_floor is None
-    assert reloaded.usage_floor is None
+    assert reloaded.source_checkpoint is None
 
 
 async def test_resume_floor_unknown_when_file_unreadable(
@@ -1047,7 +1047,7 @@ async def test_resume_floor_unknown_when_file_unreadable(
     spawned = await spawner.spawn(req)
     reloaded = registry.store.get_participant(spawned.id)
     assert reloaded.resume_floor == UNKNOWN_FLOOR
-    assert reloaded.usage_floor == UNKNOWN_FLOOR
+    assert reloaded.source_checkpoint is None
 
 
 # ---- resume by Theater participant id ------------------------------------

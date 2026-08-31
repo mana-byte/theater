@@ -19,10 +19,8 @@ class ParticipantObservationContext:
     session_provenance: str | TranscriptProvenance | None = TranscriptProvenance.HEURISTIC
     known_location: str | None = None
     transcript_domain: str | None = None
-    #: Durable stream boundary used by accounting reconciliation after a resume.
-    usage_floor: str | None = None
-    #: Source-specific checkpoint after the last batch persisted by the daemon.
-    usage_checkpoint: str | None = None
+    #: Opaque source cursor durably acknowledged by the daemon.
+    source_checkpoint: str | None = None
     pane_pid: int | None = None
     participant_scoped: bool = True
 
@@ -36,8 +34,7 @@ class ParticipantObservationContext:
             "session_id",
             "known_location",
             "transcript_domain",
-            "usage_floor",
-            "usage_checkpoint",
+            "source_checkpoint",
         ):
             value = getattr(self, name)
             if value is not None and not isinstance(value, str):

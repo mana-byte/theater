@@ -182,8 +182,7 @@ class PiTranscriptSource(TranscriptSource):
         _observer: PiObserver
 
     def __init__(self, *args, **kwargs) -> None:
-        self._usage_floor = kwargs.pop("usage_floor", None)
-        self._usage_checkpoint = kwargs.pop("usage_checkpoint", None)
+        self._source_checkpoint = kwargs.pop("source_checkpoint", None)
         super().__init__(*args, **kwargs)
         self._backlog: list[tuple[bytes, int]] = []
         self._partial = b""
@@ -194,8 +193,8 @@ class PiTranscriptSource(TranscriptSource):
         self._pending_usage_only_until: int | None = None
         self._pending_checkpoint: str | None = None
         self._acknowledged_checkpoint: str | None = (
-            self._usage_checkpoint
-            if _decode_checkpoint(self._usage_checkpoint) is not None
+            self._source_checkpoint
+            if _decode_checkpoint(self._source_checkpoint) is not None
             else None
         )
         self._stream_dev: int | None = None
@@ -259,19 +258,19 @@ class PiTranscriptSource(TranscriptSource):
         self._clear_live_buffers()
         self._observer._reset_turn_context()
 
-    def accounting_checkpoint(self) -> str | None:
+    def source_checkpoint(self) -> str | None:
         return self._acknowledged_checkpoint
 
-    def pending_accounting_checkpoint(self) -> str | None:
+    def pending_source_checkpoint(self) -> str | None:
         return self._pending_checkpoint
 
-    def acknowledge_accounting_checkpoint(self) -> None:
+    def acknowledge_source_checkpoint(self) -> None:
         if self._pending_checkpoint is not None:
             self._acknowledged_checkpoint = self._pending_checkpoint
-            self._usage_checkpoint = self._pending_checkpoint
+            self._source_checkpoint = self._pending_checkpoint
             self._pending_checkpoint = None
 
-    def rollback_accounting_checkpoint(self) -> None:
+    def rollback_source_checkpoint(self) -> None:
         """Re-read an unpersisted batch from the most recent durable point."""
         checkpoint = _decode_checkpoint(self._acknowledged_checkpoint) or _decode_checkpoint(
             self._pending_checkpoint
@@ -356,17 +355,11 @@ class PiTranscriptSource(TranscriptSource):
     ) -> tuple[int, int, bool] | _WaitForSwitch | None:
         """Return ``(offset, record_index, usage_only)`` for a safe replay.
 
-        Pi sessions are participant-isolated, so a cold launch and a `/new`
-        rotation may safely replay records written before the watcher attached.
-        A resumed stream instead starts at its persisted pre-launch boundary.
-        On daemon restart, only usage is replayed: control events have already
-        been observed, but a stable usage key lets the durable ledger recover
-        records written during downtime exactly once.
+        Cold and `/new` sessions replay from their trusted boundary. Restarts
+        replay only usage from the durable checkpoint.
         """
-        checkpoint = _decode_checkpoint(self._usage_checkpoint)
-        if self._usage_checkpoint is not None:
-            if checkpoint is None:
-                return None
+        checkpoint = _decode_checkpoint(self._source_checkpoint)
+        if checkpoint is not None:
             if _checkpoint_matches(checkpoint, path, size=size, lines=lines, dev=dev, ino=ino):
                 return (checkpoint[1], checkpoint[2], True)
             if checkpoint[0] != str(path):
@@ -379,7 +372,7 @@ class PiTranscriptSource(TranscriptSource):
         if self._observer.is_fork_transcript(path):
             if not self._cwd:
                 return None
-            boundary = self._observer.switch_boundary(cwd=self._cwd)
+            boundary = self._observer.switch_boundary(cwd=self._cwd, target=path)
             if boundary is None or boundary.reason != "startup-fork" or boundary.location != path:
                 # Pi creates the fork file before extension session_start
                 # records the copied-history boundary. Never race ahead and
@@ -389,7 +382,13 @@ class PiTranscriptSource(TranscriptSource):
             if cursor is None:
                 return _WAIT_FOR_SWITCH
             return (*cursor, self._known_location is not None)
-        floor_cursor = self._floor_cursor(size=size, lines=lines, dev=dev, ino=ino)
+        floor_cursor = self._floor_cursor(
+            self._source_checkpoint,
+            size=size,
+            lines=lines,
+            dev=dev,
+            ino=ino,
+        )
         if floor_cursor is None:
             return None
         offset, index = floor_cursor
@@ -401,7 +400,7 @@ class PiTranscriptSource(TranscriptSource):
         """Honor Pi's explicit switch boundary; unknown rotations attach at EOF."""
         if self.path is None or not self._cwd:
             return None
-        boundary = self._observer.switch_boundary(cwd=self._cwd, current=self.path)
+        boundary = self._observer.switch_boundary(cwd=self._cwd, current=self.path, target=path)
         if boundary is None or boundary.location != path:
             return None
         if boundary.reason == "new":
@@ -414,6 +413,7 @@ class PiTranscriptSource(TranscriptSource):
 
     def _floor_cursor(
         self,
+        raw: str | None,
         *,
         size: int,
         lines: int,
@@ -421,9 +421,9 @@ class PiTranscriptSource(TranscriptSource):
         ino: int | None,
     ) -> tuple[int, int] | None:
         """Return the cold or validated resumed cursor; fail closed otherwise."""
-        if self._usage_floor is None:
+        if raw is None:
             return (0, 0)
-        floor = decode_floor(self._usage_floor)
+        floor = decode_floor(raw)
         if floor is None:
             return None
         floor_size, floor_records, floor_dev, floor_ino = (
