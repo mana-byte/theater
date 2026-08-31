@@ -31,7 +31,8 @@ from theater.harness.contracts.events import EventKind
 from theater.harness.contracts.observation import ScreenConfidence, ScreenKind
 from theater.models import Participant, Status
 from theater.resume_floor import UNKNOWN_FLOOR, encode_floor
-from theater.trajectory.enums import TrajectoryKind, TrajectoryLane
+from theater.trajectory.enums import TrajectoryKind, TrajectoryLane, TrajectoryStatus
+from theater.trajectory.tools import tool_operations_for_records
 
 
 def _session(
@@ -415,15 +416,50 @@ def test_pi_parser_pairs_tools_projects_usage_and_ends_the_turn(tmp_path) -> Non
     )
 
     assert user.events[0].turn_id == "user-1"
+    assert user.trajectory[0].status is TrajectoryStatus.COMPLETED
     assert [event.kind for event in tool_call.events] == [EventKind.TOOL_CALL]
     assert tool_call.trajectory[-1].kind is TrajectoryKind.TOOL_CALL
     assert tool_call.trajectory[-1].call_id == "call-1"
+    assistant = next(fact for fact in tool_call.trajectory if fact.kind is TrajectoryKind.ASSISTANT)
+    assert assistant.status is TrajectoryStatus.COMPLETED
+    assert tool_call.trajectory[-1].status is TrajectoryStatus.PENDING
     assert tool_result.events[0].kind is EventKind.TOOL_RESULT
     assert tool_result.trajectory[0].call_id == "call-1"
+    assert tool_result.trajectory[0].status is TrajectoryStatus.COMPLETED
+    tool_records = tuple(
+        fact_to_record(fact, participant_id="pi-child", source_epoch="epoch")
+        for parsed in (tool_call, tool_result)
+        for fact in parsed.trajectory
+        if fact.kind in {TrajectoryKind.TOOL_CALL, TrajectoryKind.TOOL_RESULT}
+    )
+    assert tool_operations_for_records(tool_records)[0].status is TrajectoryStatus.COMPLETED
     assert terminal.events[-1].turn_end is True
     assert terminal.events[-1].usage is not None
     assert terminal.events[-1].usage.input_tokens == 7
-    assert any(fact.kind is TrajectoryKind.USAGE for fact in terminal.trajectory)
+    assert all(fact.status is TrajectoryStatus.COMPLETED for fact in terminal.trajectory)
+
+
+@pytest.mark.parametrize(
+    ("stop_reason", "expected"),
+    [
+        ("error", TrajectoryStatus.ERROR),
+        ("aborted", TrajectoryStatus.INTERRUPTED),
+        (None, TrajectoryStatus.UNKNOWN),
+    ],
+)
+def test_pi_parser_preserves_non_success_assistant_statuses(
+    tmp_path, stop_reason, expected
+) -> None:
+    message: dict[str, object] = {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "partial"}],
+    }
+    if stop_reason is not None:
+        message["stopReason"] = stop_reason
+
+    parsed = PiObserver(root=tmp_path).parse_record(json.dumps(_message("assistant-1", message)), 1)
+
+    assert parsed.trajectory[0].status is expected
 
 
 @pytest.mark.parametrize(
@@ -529,7 +565,7 @@ def test_pi_theater_tools_project_to_theater_activity(tmp_path) -> None:
 
 def test_pi_summary_usage_is_durable_and_inherits_the_active_model(tmp_path) -> None:
     observer = PiObserver(root=tmp_path)
-    observer.parse_record(
+    model_change = observer.parse_record(
         json.dumps(
             {
                 "type": "model_change",
@@ -540,6 +576,7 @@ def test_pi_summary_usage_is_durable_and_inherits_the_active_model(tmp_path) -> 
         ),
         1,
     )
+    assert model_change.trajectory[0].status is TrajectoryStatus.COMPLETED
 
     summary = observer.parse_record(
         json.dumps(
@@ -559,7 +596,7 @@ def test_pi_summary_usage_is_durable_and_inherits_the_active_model(tmp_path) -> 
     assert summary.events[0].usage.idempotency_key == "compact-1"
     assert summary.events[0].usage.model == "gpt-5.6"
     assert summary.events[0].usage.provider == "openai"
-    assert any(fact.kind is TrajectoryKind.USAGE for fact in summary.trajectory)
+    assert all(fact.status is TrajectoryStatus.COMPLETED for fact in summary.trajectory)
 
     branch = observer.parse_record(
         json.dumps(
@@ -575,6 +612,7 @@ def test_pi_summary_usage_is_durable_and_inherits_the_active_model(tmp_path) -> 
     assert branch.events[0].usage_only is True
     assert branch.events[0].usage is not None
     assert branch.events[0].usage.input_tokens == 4
+    assert all(fact.status is TrajectoryStatus.COMPLETED for fact in branch.trajectory)
 
 
 def test_pi_cold_isolated_source_replays_pre_attach_usage_without_an_attach_completion(
