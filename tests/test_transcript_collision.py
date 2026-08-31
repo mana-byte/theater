@@ -48,6 +48,7 @@ from theater.harness.observation import ScreenConfidence, ScreenKind, ScreenRead
 from theater.harness.source import Attachment, Batch, History, Source
 from theater.models import BadRequest, Status, Tier, TranscriptIdentityLost
 from theater.provenance import TranscriptProvenance
+from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
 
 class _StagedSource(Source):
@@ -106,10 +107,8 @@ def _make_session(root: Path, short: str, cwd: str, *, text: str = "hello") -> P
     return messages
 
 
-def _make_claude_transcript(root: Path, sid: str, cwd: str, *, text: str) -> Path:
-    project = root / "-project"
-    project.mkdir(parents=True, exist_ok=True)
-    path = project / f"{sid}.jsonl"
+def _write_claude_transcript(path: Path, *, sid: str, cwd: str, text: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "\n".join(
             [
@@ -130,6 +129,10 @@ def _make_claude_transcript(root: Path, sid: str, cwd: str, *, text: str) -> Pat
         encoding="utf-8",
     )
     return path
+
+
+def _make_claude_transcript(root: Path, sid: str, cwd: str, *, text: str) -> Path:
+    return _write_claude_transcript(root / "-project" / f"{sid}.jsonl", sid=sid, cwd=cwd, text=text)
 
 
 # ---- Fix 2: find_transcript logs when multiple session dirs match --------
@@ -1525,6 +1528,55 @@ async def test_identity_loss_evidence_session_id_matching_another_live_participa
         session_id="shared-session-id",
     )
     assert observer._evidence_is_bound_to_another_live_participant(participant.id, evidence)
+
+
+async def test_vanished_exact_pin_relocation_matching_a_live_siblings_session_id_is_rejected(
+    collision_registry, tmp_path
+):
+    """A same-session-id relocation candidate (see test_transcript_source.py's
+    self-heal tests) must still be rejected when that session id already
+    belongs to a different live participant, even at an unrelated path --
+    and the source must reach quarantine on the next poll rather than retry
+    the same rejected candidate forever."""
+    root = tmp_path / "projects"
+    cwd = str(tmp_path / "work")
+    Path(cwd).mkdir(parents=True)
+    original = _write_claude_transcript(
+        root / "-a" / "shared-sid.jsonl", sid="shared-sid", cwd=cwd, text="hello"
+    )
+
+    harness = ClaudeCodeHarness(root=root)
+    observer = Observer(collision_registry, {"claude": harness})
+
+    participant = collision_registry.register(harness="claude", pane="%1", cwd=cwd)
+    participant = _trust_pin(collision_registry, participant, original, provenance="exact")
+    participant.session_id = "shared-sid"
+    collision_registry.store.upsert_participant(participant)
+    source = await _accept_bound_source(observer, harness, participant)
+
+    # A live sibling already owns this exact session id, at an unrelated
+    # location -- not the relocation target itself, which is the point: the
+    # existing path-ownership check alone would not catch this.
+    sibling = collision_registry.register(harness="claude", pane="%2", cwd=str(tmp_path / "other"))
+    sibling.session_id = "shared-sid"
+    sibling.session_correlation = "exact"
+    collision_registry.store.upsert_participant(sibling)
+
+    # The harness relocates the pinned file elsewhere under the same root.
+    relocated = root / "-b" / "shared-sid.jsonl"
+    relocated.parent.mkdir(parents=True)
+    original.rename(relocated)
+
+    first = await source.read()
+    assert first.attached is not None, "the relocation must actually be found and staged"
+    assert first.attached.location == str(relocated)
+
+    assert observer._accept_attachment(participant.id, source, first) is False
+
+    second = await source.read()
+    assert second.error_code == TRANSCRIPT_IDENTITY_LOST_CODE, (
+        "a rejected relocation must reach quarantine on the next poll, not retry forever"
+    )
 
 
 async def test_identity_loss_confirmation_requires_two_windows_with_same_location(

@@ -175,6 +175,18 @@ class TranscriptObserver(HarnessObserver):
         """
         return None
 
+    def exact_relocation_candidate(self, *, session_id: str) -> Path | None:
+        """A uniquely-resolved replacement for a vanished trusted pin.
+
+        Unlike :meth:`identity_loss_candidate`, a path returned here *is*
+        committable: it must already be proven to carry this exact session
+        id, not merely guessed from cwd or recency. The default is no such
+        recovery — an observer opts in only when it can resolve the id to
+        zero-or-one file, never more, so an ambiguous result still falls
+        through to the ordinary manual-recovery quarantine.
+        """
+        return None
+
     def stream_floor(self, location: str) -> StreamPoint | None:
         """Capture the stream position of a file-backed transcript.
 

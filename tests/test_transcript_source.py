@@ -225,6 +225,121 @@ async def test_missing_transcript_root_is_source_unavailable_not_identity_loss(r
     assert s.path == path
 
 
+# ---- exact-session relocation (the harness renamed its own file) ----------
+
+
+async def test_vanished_exact_pin_self_heals_onto_its_renamed_file(root, workdir):
+    """Claude relocates its transcript's directory on a cwd change mid-session.
+
+    Same file, same session id, new path: this must resolve on the very first
+    poll after the rename, without ever reaching identity loss or requiring
+    an operator `bind`.
+    """
+    path = transcript(root, "aaa", workdir, record("hello"))
+    s = source(
+        root, workdir, session_id="aaa", session_provenance="exact", known_location=str(path)
+    )
+    await attach(s)
+
+    (root / "-work2").mkdir()
+    new_path = root / "-work2" / "aaa.jsonl"
+    path.rename(new_path)
+
+    healed = await s.read()
+    assert healed.error_code is None
+    assert healed.attached is not None
+    assert healed.attached.location == str(new_path)
+    assert healed.attached.correlation == "exact"
+
+    # Prove completed recovery, not just a staged candidate: commit and read
+    # again to confirm the source is genuinely tailing the new file now.
+    s.commit_attachment()
+    assert s.path == new_path
+    with new_path.open("a", encoding="utf-8") as fh:
+        fh.write(record("after the move") + "\n")
+    assert [e.text for e in (await s.read()).events] == ["after the move"]
+
+
+async def test_vanished_exact_pin_with_no_replacement_still_quarantines(root, workdir):
+    """No candidate anywhere: today's manual-recovery quarantine is unchanged."""
+    path = transcript(root, "aaa", workdir, record("hello"))
+    s = source(
+        root, workdir, session_id="aaa", session_provenance="exact", known_location=str(path)
+    )
+    await attach(s)
+    path.unlink()
+
+    assert (await s.read()).error_code is None
+
+    confirmed = await s.read()
+    assert confirmed.error_code == TRANSCRIPT_IDENTITY_LOST_CODE
+    assert confirmed.attached is None
+
+
+async def test_vanished_exact_pin_with_duplicate_candidates_fails_closed(root, workdir):
+    """Two files claiming the same session id must never be guessed between."""
+    path = transcript(root, "aaa", workdir, record("hello"))
+    s = source(
+        root, workdir, session_id="aaa", session_provenance="exact", known_location=str(path)
+    )
+    await attach(s)
+
+    (root / "-work2").mkdir()
+    (root / "-work3").mkdir()
+    replacement = root / "-work2" / "aaa.jsonl"
+    path.rename(replacement)
+    (root / "-work3" / "aaa.jsonl").write_text(replacement.read_text(), encoding="utf-8")
+
+    assert (await s.read()).error_code is None
+
+    confirmed = await s.read()
+    assert confirmed.error_code == TRANSCRIPT_IDENTITY_LOST_CODE, (
+        "an ambiguous same-session-id match must fail closed, not pick either file"
+    )
+
+
+async def test_vanished_exact_pin_self_heals_even_if_its_old_directory_is_gone(root, workdir):
+    """A true rename can leave the old, now-empty project directory removed.
+
+    That removal must not be mistaken for the transcript root itself going
+    unavailable before the relocation lookup — which checks the harness's
+    own root, not the old directory — gets a chance to run.
+    """
+    path = transcript(root, "aaa", workdir, record("hello"))
+    s = source(
+        root, workdir, session_id="aaa", session_provenance="exact", known_location=str(path)
+    )
+    await attach(s)
+
+    (root / "-work2").mkdir()
+    new_path = root / "-work2" / "aaa.jsonl"
+    path.rename(new_path)
+    path.parent.rmdir()  # the harness cleaned up its now-empty old directory
+
+    healed = await s.read()
+    assert healed.error_code is None
+    assert healed.attached is not None
+    assert healed.attached.location == str(new_path)
+
+
+async def test_vanished_operator_pin_never_attempts_exact_relocation(root, workdir):
+    """Only a source whose own session id is itself proven exact may self-heal."""
+    path = transcript(root, "aaa", workdir, record("hello"))
+    s = source(
+        root, workdir, session_id="aaa", session_provenance="operator", known_location=str(path)
+    )
+    await attach(s)
+
+    (root / "-work2").mkdir()
+    path.rename(root / "-work2" / "aaa.jsonl")
+
+    assert (await s.read()).error_code is None
+    confirmed = await s.read()
+    assert confirmed.error_code == TRANSCRIPT_IDENTITY_LOST_CODE, (
+        "an operator-bound pin is trusted but not exact; it must still require a manual rebind"
+    )
+
+
 # ---- rotation -------------------------------------------------------------
 
 

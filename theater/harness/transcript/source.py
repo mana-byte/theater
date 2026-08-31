@@ -93,45 +93,52 @@ class TranscriptSource(Source):
         self._pending: tuple[Path, int, int, int, str | None] | None = None
         #: Trusted pin must be absent twice before ENOENT becomes identity loss.
         self._missing_trusted_pin_once: Path | None = None
+        #: One same-exact-session relocation lookup per missing-pin episode.
+        self._relocation_attempted = False
 
     async def read(self) -> Batch:
         self._require_decision()
         if self.path is None:
             if reason := self._trusted_known_location_unavailable_reason():
                 assert self._known_location is not None
-                return self._confirmed_missing_pin_batch(self._known_location, reason)
+                return await self._confirmed_missing_pin_batch(self._known_location, reason)
             try:
                 attached = await self._attach()
             except OSError as exc:
                 if self._known_location_is_trusted() and exc.errno == errno.ENOENT:
                     assert self._known_location is not None
-                    return self._confirmed_missing_pin_batch(
+                    return await self._confirmed_missing_pin_batch(
                         self._known_location,
                         f"trusted transcript pin {str(self._known_location)!r} "
                         "no longer exists on disk",
                     )
                 self._missing_trusted_pin_once = None
+                self._relocation_attempted = False
                 return self._source_unavailable_batch(exc)
             self._missing_trusted_pin_once = None
+            self._relocation_attempted = False
             return Batch(attached=attached) if attached else Batch(waiting=True)
         try:
             batch = self._drain()
         except OSError as exc:
             if self._path_is_trusted_pin(self.path) and exc.errno == errno.ENOENT:
-                return self._confirmed_missing_pin_batch(
+                return await self._confirmed_missing_pin_batch(
                     self.path,
                     f"trusted transcript pin {str(self.path)!r} no longer exists on disk",
                 )
             if exc.errno == errno.ENOENT:
                 # Heuristic transcript deleted or rotated; drop back to searching.
                 self._missing_trusted_pin_once = None
+                self._relocation_attempted = False
                 self._known_location = None
                 self._detach()
                 return Batch(waiting=True)
             self._missing_trusted_pin_once = None
+            self._relocation_attempted = False
             return self._source_unavailable_batch(exc)
         else:
             self._missing_trusted_pin_once = None
+            self._relocation_attempted = False
             return batch
 
     async def refresh(self) -> Batch:
@@ -570,19 +577,61 @@ class TranscriptSource(Source):
             error=f"transcript source is unavailable: {exc}",
         )
 
-    def _confirmed_missing_pin_batch(self, path: Path, reason: str) -> Batch:
-        """Require consecutive pin absence while its containing root is healthy."""
+    async def _confirmed_missing_pin_batch(self, path: Path, reason: str) -> Batch:
+        """Require consecutive pin absence, checked against a healthy root.
+
+        On the first sighting of a missing episode, before anything else, try
+        exactly one same-exact-session relocation lookup: the harness may have
+        renamed this exact file out from under a trusted pin (a mid-
+        conversation cwd change, for Claude) rather than having actually lost
+        it, and a true rename can leave *path*'s own now-empty containing
+        directory removed by the harness itself on the very first poll after
+        it happens. That removal must not be mistaken for the root going
+        unavailable before the lookup — which is checked against the
+        harness's own transcript root, not *path*'s parent — gets a chance to
+        run. Both trackers are updated *before* the lookup runs (not after),
+        so a rejected candidate still reaches identity loss on the very next
+        poll instead of retrying the same rejected relocation forever. An
+        ambiguous or absent result — or a rejected attachment — falls through
+        to the ordinary consecutive-absence handling below, exactly as before
+        this lookup existed.
+        """
+        first_sighting = self._missing_trusted_pin_once != path
+        if first_sighting:
+            self._missing_trusted_pin_once = path
+            self._relocation_attempted = False
+        if not self._relocation_attempted:
+            self._relocation_attempted = True
+            replacement = await self._exact_relocation(path)
+            if replacement is not None:
+                attached = await self._attach(replacement)
+                if attached is not None:
+                    return Batch(attached=attached)
         root = self._domain_root or path.parent
         try:
             if not root.is_dir():
                 raise NotADirectoryError(errno.ENOTDIR, "transcript root is unavailable", root)
         except OSError as exc:
             self._missing_trusted_pin_once = None
+            self._relocation_attempted = False
             return self._source_unavailable_batch(exc)
-        if self._missing_trusted_pin_once == path:
-            return self._identity_lost_batch(reason)
-        self._missing_trusted_pin_once = path
-        return Batch(waiting=True)
+        return Batch(waiting=True) if first_sighting else self._identity_lost_batch(reason)
+
+    async def _exact_relocation(self, missing: Path) -> Path | None:
+        """A harness-verified replacement for *missing*, or ``None``.
+
+        Only offered when this source's own session id is itself proven
+        exact (not merely a guess), so the lookup can never launder a
+        heuristic id into an unearned self-heal.
+        """
+        if self._session_id is None or self._session_provenance is not TranscriptProvenance.EXACT:
+            return None
+        candidate = await asyncio.to_thread(
+            self._observer.exact_relocation_candidate, session_id=self._session_id
+        )
+        if candidate is None or candidate == missing or not self._inside_domain(candidate):
+            return None
+        return candidate
 
     def _trusted_pin_is_being_replaced_by_guess(self, path: Path, session_id: str | None) -> bool:
         return (

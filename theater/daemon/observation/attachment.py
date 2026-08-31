@@ -12,7 +12,11 @@ import contextlib
 import logging
 
 from theater.constants.observation import CORRELATION_AMBIGUOUS_CODE
-from theater.daemon.observation.identity import has_cwd_competitor, trusted_dead_owner_blocks
+from theater.daemon.observation.identity import (
+    has_cwd_competitor,
+    session_id_bound_to_another_live,
+    trusted_dead_owner_blocks,
+)
 from theater.daemon.registry import Registry
 from theater.harness.source import Attachment, Batch, Source, SourceContractError
 from theater.models import Status
@@ -125,6 +129,25 @@ class AttachmentManager:
                         decided = True
                         self._handle_attachment_ambiguity(pid, attached, handle_source_error_fn)
                         return False
+            if session_id_bound_to_another_live(
+                pid,
+                attached.session_id,
+                self._bound_transcripts,
+                self._binding_sessions,
+                self.store,
+                self.registry,
+            ):
+                logger.warning(
+                    "refusing transcript %s for %s: session id %s is already claimed by "
+                    "another live participant",
+                    attached.location,
+                    pid,
+                    attached.session_id,
+                )
+                source.discard_attachment()
+                decided = True
+                self._handle_attachment_ambiguity(pid, attached, handle_source_error_fn)
+                return False
             source.commit_attachment()
             decided = True
         except Exception:

@@ -90,6 +90,22 @@ def _missing_resume_transcript(session_id: str, root: Path) -> NoReturn:
     )
 
 
+def unique_relocation_candidate(*, root: Path, session_id: str) -> Path | None:
+    """The one file this exact session id now lives at, or ``None``.
+
+    A non-throwing wrapper around :func:`materialized_resume_transcript`'s
+    validated enumeration: zero matches (not yet materialized, or genuinely
+    gone) and more than one match (an unresolved collision) both come back as
+    ``None`` rather than raising, because a vanished-pin recovery attempt must
+    fail closed onto the ordinary quarantine path, not surface a resume-style
+    error.
+    """
+    try:
+        return materialized_resume_transcript(root=root, session_id=session_id, known_location=None)
+    except BadRequest:
+        return None
+
+
 def _current_transcript_cwd(path: Path, session_id: str) -> str:
     suffix = _resume_cwd_suffix(path, session_id)
     for raw in reversed(_complete_suffix_lines(suffix)):
@@ -275,6 +291,9 @@ class ClaudeIdentity:
         return self._discovery.identity_loss_candidate(
             cwd=cwd, current=current, current_mtime_ns=current_mtime_ns, after=after
         )
+
+    def exact_relocation_candidate(self, *, session_id: str) -> Path | None:
+        return unique_relocation_candidate(root=self.root, session_id=session_id)
 
     def admit_operator_candidate(
         self,
