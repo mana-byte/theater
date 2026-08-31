@@ -6,7 +6,10 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+
 from theater.daemon.store import Store
+from theater.daemon.trajectory.project import fact_to_record
 from theater.harness.base import APPROVALS
 from theater.harness.builtin.plugins.pi.constants import (
     PI_ISOLATION_MARKER,
@@ -23,7 +26,7 @@ from theater.harness.contracts.events import EventKind
 from theater.harness.contracts.observation import ScreenConfidence, ScreenKind
 from theater.models import Participant, Status
 from theater.resume_floor import UNKNOWN_FLOOR, encode_floor
-from theater.trajectory.enums import TrajectoryKind
+from theater.trajectory.enums import TrajectoryKind, TrajectoryLane
 
 
 def _session(
@@ -341,6 +344,107 @@ def test_pi_parser_pairs_tools_projects_usage_and_ends_the_turn(tmp_path) -> Non
     assert terminal.events[-1].usage is not None
     assert terminal.events[-1].usage.input_tokens == 7
     assert any(fact.kind is TrajectoryKind.USAGE for fact in terminal.trajectory)
+
+
+@pytest.mark.parametrize(
+    ("name", "identity"),
+    [
+        ("grafana__query_prometheus", ("grafana", "query_prometheus")),
+        ("bash", (None, None)),
+        ("__missing_server", (None, None)),
+        ("missing_tool__", (None, None)),
+    ],
+)
+def test_pi_parser_identifies_mcp_tool_calls_and_results(tmp_path, name, identity) -> None:
+    observer = PiObserver(root=tmp_path)
+    call = observer.parse_record(
+        json.dumps(
+            _message(
+                "assistant-1",
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "toolCall",
+                            "id": "call-1",
+                            "name": name,
+                            "arguments": {},
+                        }
+                    ],
+                    "stopReason": "toolUse",
+                },
+            )
+        ),
+        1,
+    )
+    result = observer.parse_record(
+        json.dumps(
+            _message(
+                "result-1",
+                {
+                    "role": "toolResult",
+                    "toolCallId": "call-1",
+                    "toolName": name,
+                    "content": [{"type": "text", "text": "ok"}],
+                },
+            )
+        ),
+        2,
+    )
+
+    assert (call.trajectory[-1].mcp_server, call.trajectory[-1].mcp_tool) == identity
+    assert (result.trajectory[0].mcp_server, result.trajectory[0].mcp_tool) == identity
+
+
+def test_pi_theater_tools_project_to_theater_activity(tmp_path) -> None:
+    observer = PiObserver(root=tmp_path)
+    call = observer.parse_record(
+        json.dumps(
+            _message(
+                "assistant-1",
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "toolCall",
+                            "id": "call-1",
+                            "name": "theater__whoami",
+                            "arguments": {},
+                        }
+                    ],
+                    "stopReason": "toolUse",
+                },
+            )
+        ),
+        1,
+    ).trajectory[-1]
+    result = observer.parse_record(
+        json.dumps(
+            _message(
+                "result-1",
+                {
+                    "role": "toolResult",
+                    "toolCallId": "call-1",
+                    "toolName": "theater__whoami",
+                    "content": [{"type": "text", "text": "ok"}],
+                },
+            )
+        ),
+        2,
+    ).trajectory[0]
+
+    call_record = fact_to_record(call, participant_id="pi-child", source_epoch="epoch")
+    result_record = fact_to_record(result, participant_id="pi-child", source_epoch="epoch")
+    assert (call_record.kind, call_record.lane, call_record.summary) == (
+        TrajectoryKind.THEATER_CALL,
+        TrajectoryLane.THEATER,
+        "whoami",
+    )
+    assert (result_record.kind, result_record.lane, result_record.summary) == (
+        TrajectoryKind.THEATER_RESULT,
+        TrajectoryLane.THEATER,
+        "whoami completed",
+    )
 
 
 def test_pi_summary_usage_is_durable_and_inherits_the_active_model(tmp_path) -> None:

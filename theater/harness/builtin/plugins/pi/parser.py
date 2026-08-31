@@ -29,6 +29,18 @@ _pi_fact = fact_builder(
 _TERMINAL_STOPS = {"stop", "length", "error", "aborted"}
 
 
+def _pi_mcp_identity(value: object) -> tuple[str, str] | None:
+    """Decode the ``server__tool`` names emitted by Pi MCP extensions."""
+    if not isinstance(value, str):
+        return None
+    server, separator, tool = value.partition("__")
+    if not separator:
+        return None
+    server_id = trajectory_identifier(server)
+    tool_id = trajectory_identifier(tool)
+    return (server_id, tool_id) if server_id is not None and tool_id is not None else None
+
+
 def _record_id(record: dict) -> str | None:
     return trajectory_identifier(record.get("id"), overflow_prefix="pi")
 
@@ -377,6 +389,8 @@ class PiParserMixin:
         for call in calls:
             call_id = call.get("id") if isinstance(call.get("id"), str) else None
             name = call.get("name") if isinstance(call.get("name"), str) else None
+            mcp_identity = _pi_mcp_identity(name)
+            mcp_server, mcp_tool = mcp_identity or (None, None)
             arguments = call.get("arguments")
             facts.append(
                 _pi_fact(
@@ -387,6 +401,8 @@ class PiParserMixin:
                     event_ordinal=len(facts),
                     turn_id=turn_id,
                     call_id=call_id,
+                    mcp_server=mcp_server,
+                    mcp_tool=mcp_tool,
                     status=TrajectoryStatus.UNKNOWN,
                     timing=_timing(timestamp),
                     details=tuple(
@@ -420,6 +436,8 @@ class PiParserMixin:
         turn_id = self._active_turn_id
         raw = _content_text(message.get("content"))
         name = message.get("toolName") if isinstance(message.get("toolName"), str) else None
+        mcp_identity = _pi_mcp_identity(name)
+        mcp_server, mcp_tool = mcp_identity or (None, None)
         call_id = message.get("toolCallId") if isinstance(message.get("toolCallId"), str) else None
         failed = message.get("isError") is True
         status = TrajectoryStatus.ERROR if failed else TrajectoryStatus.COMPLETED
@@ -441,6 +459,8 @@ class PiParserMixin:
             raw_index=index,
             turn_id=turn_id,
             call_id=call_id,
+            mcp_server=mcp_server,
+            mcp_tool=mcp_tool,
             status=status,
             timing=_timing(timestamp),
             failure=tool_failure(status, raw or "Pi tool failed"),
