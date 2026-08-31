@@ -652,18 +652,22 @@ class Observer:
         turns: TurnAccumulator,
     ) -> bool:
         """Apply one source batch, then durably acknowledge its accounting point."""
-        result = self._reducer.apply(
-            pid,
-            batch,
-            clock,
-            turns,
-            answer_turn_fn=self._answer_turn,
-            settle_fn=self._settle,
-            turn_result_fn=self._turn_result,
-        )
+        try:
+            result = self._reducer.apply(
+                pid,
+                batch,
+                clock,
+                turns,
+                answer_turn_fn=self._answer_turn,
+                settle_fn=self._settle,
+                turn_result_fn=self._turn_result,
+            )
+            if checkpoint := source.pending_accounting_checkpoint():
+                self.store.set_usage_checkpoint(pid, checkpoint)
+        except Exception:
+            source.rollback_accounting_checkpoint()
+            raise
         source.acknowledge_accounting_checkpoint()
-        if checkpoint := source.accounting_checkpoint():
-            self.store.set_usage_checkpoint(pid, checkpoint)
         return result
 
     @staticmethod

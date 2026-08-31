@@ -61,12 +61,32 @@ def _header_cwd(value: dict) -> str:
     return str(Path(value["cwd"]).expanduser().resolve())
 
 
+def _file_started(stat: os.stat_result) -> float | None:
+    """Return an immutable creation time when the platform exposes one."""
+    started = getattr(stat, "st_birthtime", None)
+    return float(started) if isinstance(started, (int, float)) else None
+
+
 def _session_started(header: dict, stat: os.stat_result) -> float:
     """Use Pi's immutable session timestamp, not ctime which changes on append."""
     started = iso_epoch(header.get("timestamp"))
     if started is not None:
         return started
-    return float(getattr(stat, "st_birthtime", stat.st_ctime))
+    # Linux has no creation time in stat.  ctime is deliberately not a
+    # fallback: an append mutates it, allowing an old transcript to masquerade
+    # as a newly created session.
+    return _file_started(stat) or 0.0
+
+
+def _started_after(
+    header: dict, stat: os.stat_result, after: float, *, allow_resume_switch: bool
+) -> bool:
+    if _session_started(header, stat) >= after:
+        return True
+    # A Pi resume can create a new file whose header preserves the original
+    # session timestamp.  Its immutable file creation time is explicit enough
+    # to accept only for the resumed participant, never for a cold launch.
+    return allow_resume_switch and (_file_started(stat) or 0.0) >= after
 
 
 class PiObserver(PiParserMixin, TranscriptObserver):
@@ -219,6 +239,28 @@ class PiObserver(PiParserMixin, TranscriptObserver):
             candidates.append((stat.st_mtime_ns, canonical(path)))
         return max(candidates, default=(0, None))[1]
 
+    def find_resume_transcript(self, *, cwd: str, after: float) -> Path | None:
+        """Locate a resumed Pi stream, allowing a post-launch replacement file."""
+        root = self._source_root(cwd)
+        if not _safe_directory(root):
+            return None
+        wanted_cwd = str(Path(cwd).expanduser().resolve())
+        candidates: list[tuple[int, Path]] = []
+        for path in root.glob("*.jsonl"):
+            if path.is_symlink():
+                continue
+            header = _header(path)
+            if header is None or _header_cwd(header) != wanted_cwd:
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if not _started_after(header, stat, after, allow_resume_switch=True):
+                continue
+            candidates.append((stat.st_mtime_ns, canonical(path)))
+        return max(candidates, default=(0, None))[1]
+
     def session_id(self, transcript: Path) -> str | None:
         header = _header(transcript)
         return header["id"] if header is not None else None
@@ -232,6 +274,18 @@ class PiObserver(PiParserMixin, TranscriptObserver):
         except OSError:
             return 0.0
         return _session_started(header, stat)
+
+    def session_started_after(
+        self, transcript: Path, after: float, *, allow_resume_switch: bool = False
+    ) -> bool:
+        header = _header(transcript)
+        if header is None:
+            return False
+        try:
+            stat = transcript.stat()
+        except OSError:
+            return False
+        return _started_after(header, stat, after, allow_resume_switch=allow_resume_switch)
 
     def transcript_candidates(
         self,
