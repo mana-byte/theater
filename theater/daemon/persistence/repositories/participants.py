@@ -198,7 +198,7 @@ class ParticipantRepository:
         )
 
     def set_usage_checkpoint(self, pid: str, checkpoint: str) -> None:
-        """Persist a source-acknowledged accounting cursor if it advanced."""
+        """Persist a source-prepared accounting cursor before acknowledging it."""
         self._db.conn.execute(
             update(participants)
             .where(participants.c.id == pid)

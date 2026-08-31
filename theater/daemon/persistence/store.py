@@ -210,7 +210,7 @@ class Store:
         self._participants.clear_resume_floor(pid)
 
     def set_usage_checkpoint(self, pid: str, checkpoint: str) -> None:
-        """Persist a source-acknowledged accounting cursor."""
+        """Persist a source-prepared accounting cursor."""
         self._participants.set_usage_checkpoint(pid, checkpoint)
 
     def reparent_participant(self, pid: str, *, new_parent_id: str) -> None:

@@ -602,9 +602,11 @@ def test_pi_restart_resumes_from_the_current_accounting_checkpoint(tmp_path) -> 
     restarted.commit_attachment()
     batch = asyncio.run(restarted.read())
     assert [event.usage.input_tokens for event in batch.events if event.usage] == [7]
+    assert all(event.usage_only for event in batch.events)
+    assert batch.trajectory == ()
 
 
-def test_pi_rotation_replays_only_a_session_started_after_the_participant(tmp_path) -> None:
+def test_pi_resume_new_restart_replays_only_the_post_floor_usage(tmp_path) -> None:
     workdir = tmp_path / "work"
     sessions = tmp_path / "sessions"
     workdir.mkdir()
@@ -623,17 +625,24 @@ def test_pi_rotation_replays_only_a_session_started_after_the_participant(tmp_pa
             },
         ),
     )
-    source = PiObserver(root=sessions, isolated=True).open_source(
-        cwd=str(workdir), session_id="old", after=1_700_000_000
+    observer = PiObserver(root=sessions, isolated=True)
+    floor = observer.stream_floor(str(old))
+    assert floor is not None
+    source = observer.open_source(
+        cwd=str(workdir),
+        session_id="old",
+        after=1_800_000_000,
+        usage_floor=encode_floor(floor),
     )
     assert asyncio.run(source.read()).attached is not None
     source.commit_attachment()
-    asyncio.run(source.read())
+    source.acknowledge_accounting_checkpoint()
+    assert asyncio.run(source.read()).events == ()
 
     fresh = sessions / "fresh.jsonl"
     _append(
         fresh,
-        _session(session_id="fresh", cwd=workdir, timestamp="2026-01-01T00:00:00.000Z"),
+        _session(session_id="fresh", cwd=workdir, timestamp="2028-01-01T00:00:00.000Z"),
         _message(
             "new-a",
             {
@@ -671,13 +680,14 @@ def test_pi_rotation_replays_only_a_session_started_after_the_participant(tmp_pa
         session_id="fresh",
         known_location=str(fresh),
         usage_checkpoint=checkpoint,
-        after=1_700_000_000,
+        after=1_800_000_000,
     )
     assert asyncio.run(restarted.read()).attached is not None
     restarted.commit_attachment()
-    assert [
-        event.usage.input_tokens for event in asyncio.run(restarted.read()).events if event.usage
-    ] == [9]
+    restarted_batch = asyncio.run(restarted.read())
+    assert [event.usage.input_tokens for event in restarted_batch.events if event.usage] == [9]
+    assert all(event.usage_only for event in restarted_batch.events)
+    assert restarted_batch.trajectory == ()
 
     _append(
         old,
@@ -692,6 +702,131 @@ def test_pi_rotation_replays_only_a_session_started_after_the_participant(tmp_pa
         ),
     )
     assert asyncio.run(source.refresh()).attached is None
+
+
+def test_pi_retries_an_unacknowledged_usage_batch_before_advancing(tmp_path) -> None:
+    workdir = tmp_path / "work"
+    sessions = tmp_path / "sessions"
+    workdir.mkdir()
+    sessions.mkdir()
+    transcript = sessions / "native-id.jsonl"
+    _append(transcript, _session(session_id="native-id", cwd=workdir))
+    source = PiObserver(root=sessions, isolated=True).open_source(
+        cwd=str(workdir), session_id="native-id"
+    )
+    assert asyncio.run(source.read()).attached is not None
+    source.commit_attachment()
+    source.acknowledge_accounting_checkpoint()
+
+    _append(
+        transcript,
+        _message(
+            "lost",
+            {
+                "role": "assistant",
+                "content": "must retry",
+                "stopReason": "stop",
+                "usage": {"input": 5, "output": 1},
+            },
+        ),
+    )
+    failed = asyncio.run(source.read())
+    assert [event.usage.input_tokens for event in failed.events if event.usage] == [5]
+
+    source.rollback_accounting_checkpoint()
+    _append(
+        transcript,
+        _message(
+            "later",
+            {
+                "role": "assistant",
+                "content": "later",
+                "stopReason": "stop",
+                "usage": {"input": 7, "output": 1},
+            },
+        ),
+    )
+    retried = asyncio.run(source.read())
+    assert [event.usage.input_tokens for event in retried.events if event.usage] == [5, 7]
+
+
+def test_pi_rejected_rotation_keeps_the_active_stream_identity(tmp_path) -> None:
+    workdir = tmp_path / "work"
+    sessions = tmp_path / "sessions"
+    workdir.mkdir()
+    sessions.mkdir()
+    old = sessions / "old.jsonl"
+    _append(old, _session(session_id="old", cwd=workdir))
+    source = PiObserver(root=sessions, isolated=True).open_source(
+        cwd=str(workdir), session_id="old"
+    )
+    assert asyncio.run(source.read()).attached is not None
+    source.commit_attachment()
+    source.acknowledge_accounting_checkpoint()
+
+    _append(
+        old,
+        _message(
+            "old-a",
+            {
+                "role": "assistant",
+                "content": "old",
+                "stopReason": "stop",
+                "usage": {"input": 5, "output": 1},
+            },
+        ),
+    )
+    asyncio.run(source.read())
+    source.acknowledge_accounting_checkpoint()
+
+    fresh = sessions / "fresh.jsonl"
+    _append(fresh, _session(session_id="fresh", cwd=workdir))
+    rotation = asyncio.run(source.refresh())
+    assert rotation.attached is not None
+    source.discard_attachment()
+
+    _append(
+        old,
+        _message(
+            "old-b",
+            {
+                "role": "assistant",
+                "content": "still old",
+                "stopReason": "stop",
+                "usage": {"input": 7, "output": 1},
+            },
+        ),
+    )
+    assert [
+        event.usage.input_tokens for event in asyncio.run(source.read()).events if event.usage
+    ] == [7]
+    source.acknowledge_accounting_checkpoint()
+    checkpoint = source.accounting_checkpoint()
+    assert checkpoint is not None
+
+    _append(
+        old,
+        _message(
+            "old-c",
+            {
+                "role": "assistant",
+                "content": "after restart",
+                "stopReason": "stop",
+                "usage": {"input": 9, "output": 1},
+            },
+        ),
+    )
+    restarted = PiObserver(root=sessions, isolated=True).open_source(
+        cwd=str(workdir),
+        session_id="old",
+        known_location=str(old),
+        usage_checkpoint=checkpoint,
+    )
+    assert asyncio.run(restarted.read()).attached is not None
+    restarted.commit_attachment()
+    assert [
+        event.usage.input_tokens for event in asyncio.run(restarted.read()).events if event.usage
+    ] == [9]
 
 
 def test_pi_adopted_source_attaches_at_eof(tmp_path) -> None:

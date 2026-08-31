@@ -129,6 +129,7 @@ def test_source_accounting_checkpoint_is_persisted_only_after_apply_succeeds(reg
 
         def __init__(self) -> None:
             self.acknowledged = False
+            self.rolled_back = False
 
         async def read(self) -> Batch:
             return Batch()
@@ -136,17 +137,25 @@ def test_source_accounting_checkpoint_is_persisted_only_after_apply_succeeds(reg
         def accounting_checkpoint(self) -> str | None:
             return self.checkpoint if self.acknowledged else None
 
+        def pending_accounting_checkpoint(self) -> str | None:
+            return self.checkpoint
+
         def acknowledge_accounting_checkpoint(self) -> None:
             self.acknowledged = True
+
+        def rollback_accounting_checkpoint(self) -> None:
+            self.rolled_back = True
 
     participant = registry.register(harness="vibe", pane=None, cwd="/tmp")
     observer = Observer(registry, harnesses={})
     source = CheckpointSource()
+    apply = observer._reducer.apply
 
     assert observer._apply_source_batch(
         participant.id, source, Batch(progressed=True), QuietClock(), TurnAccumulator()
     )
     assert source.acknowledged is True
+    assert source.rolled_back is False
     assert registry.get(participant.id).usage_checkpoint == source.checkpoint
 
     failing_source = CheckpointSource()
@@ -160,6 +169,26 @@ def test_source_accounting_checkpoint_is_persisted_only_after_apply_succeeds(reg
             participant.id, failing_source, Batch(progressed=True), QuietClock(), TurnAccumulator()
         )
     assert failing_source.acknowledged is False
+    assert failing_source.rolled_back is True
+    assert registry.get(participant.id).usage_checkpoint == source.checkpoint
+
+    persistence_failure = CheckpointSource()
+    monkeypatch.setattr(observer._reducer, "apply", apply)
+
+    def fail_persistence(*_args, **_kwargs):
+        raise RuntimeError("checkpoint persistence failed")
+
+    monkeypatch.setattr(observer.store, "set_usage_checkpoint", fail_persistence)
+    with pytest.raises(RuntimeError, match="checkpoint persistence failed"):
+        observer._apply_source_batch(
+            participant.id,
+            persistence_failure,
+            Batch(progressed=True),
+            QuietClock(),
+            TurnAccumulator(),
+        )
+    assert persistence_failure.acknowledged is False
+    assert persistence_failure.rolled_back is True
     assert registry.get(participant.id).usage_checkpoint == source.checkpoint
 
 

@@ -355,11 +355,19 @@ class Source(ABC):
         return ()
 
     def accounting_checkpoint(self) -> str | None:
-        """Return the source point safe to persist after a successful batch."""
+        """Return the last accounting point acknowledged as durable."""
+        return None
+
+    def pending_accounting_checkpoint(self) -> str | None:
+        """Return the current batch's point, ready to persist after reduction succeeds."""
         return None
 
     def acknowledge_accounting_checkpoint(self) -> None:
-        """Advance the source's durable-accounting point after batch persistence."""
+        """Mark the current batch's accounting point as durably persisted."""
+        return
+
+    def rollback_accounting_checkpoint(self) -> None:
+        """Rewind an unacknowledged accounting batch after reduction or persistence fails."""
         return
 
     def commit_attachment(self) -> None:

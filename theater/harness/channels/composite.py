@@ -333,9 +333,16 @@ class CompositeSource(Source):
     def accounting_checkpoint(self) -> str | None:
         return None if self._primary is None else self._primary.accounting_checkpoint()
 
+    def pending_accounting_checkpoint(self) -> str | None:
+        return None if self._primary is None else self._primary.pending_accounting_checkpoint()
+
     def acknowledge_accounting_checkpoint(self) -> None:
         if self._primary is not None:
             self._primary.acknowledge_accounting_checkpoint()
+
+    def rollback_accounting_checkpoint(self) -> None:
+        if self._primary is not None:
+            self._primary.rollback_accounting_checkpoint()
 
     def commit_attachment(self) -> None:
         if self._primary is None:

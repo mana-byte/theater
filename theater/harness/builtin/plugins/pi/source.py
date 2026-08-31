@@ -139,14 +139,20 @@ class PiTranscriptSource(TranscriptSource):
         #: Initial restart reconciliation parses only usage through this byte offset.
         self._usage_only_until: int | None = None
         self._pending_checkpoint: str | None = None
-        self._acknowledged_checkpoint: str | None = None
+        self._acknowledged_checkpoint: str | None = (
+            self._usage_checkpoint
+            if _decode_checkpoint(self._usage_checkpoint) is not None
+            else None
+        )
         self._stream_dev: int | None = None
         self._stream_ino: int | None = None
+        self._pending_stream_dev: int | None = None
+        self._pending_stream_ino: int | None = None
 
     def commit_attachment(self) -> None:
         super().commit_attachment()
-        self._acknowledged_checkpoint = self._pending_checkpoint
-        self._pending_checkpoint = None
+        self._stream_dev, self._stream_ino = self._pending_stream_dev, self._pending_stream_ino
+        self._pending_stream_dev = self._pending_stream_ino = None
         self._clear_live_buffers()
         self._seed_live_context()
 
@@ -159,9 +165,21 @@ class PiTranscriptSource(TranscriptSource):
             decorate=self._decorate_parsed,
         )
 
+    async def _locate(self, *, session_id: str | None) -> Path | None:
+        """Use creation evidence when a resumed Pi session changes transcript files."""
+        if session_id is not None or self._usage_floor is None or self._after is None:
+            return await super()._locate(session_id=session_id)
+        if not self._cwd:
+            return None
+        path = await asyncio.to_thread(
+            self._observer.find_resume_transcript, cwd=self._cwd, after=self._after
+        )
+        return path if path is not None and self._inside_domain(path) else None
+
     def discard_attachment(self) -> None:
         super().discard_attachment()
         self._pending_checkpoint = None
+        self._pending_stream_dev = self._pending_stream_ino = None
         self._seed_live_context()
 
     def revoke_attachment(self) -> None:
@@ -169,6 +187,7 @@ class PiTranscriptSource(TranscriptSource):
         self._usage_only_until = None
         self._pending_checkpoint = None
         self._acknowledged_checkpoint = None
+        self._pending_stream_dev = self._pending_stream_ino = None
         self._clear_live_buffers()
         self._observer._reset_turn_context()
 
@@ -178,16 +197,45 @@ class PiTranscriptSource(TranscriptSource):
         self._pending_checkpoint = None
         self._acknowledged_checkpoint = None
         self._stream_dev = self._stream_ino = None
+        self._pending_stream_dev = self._pending_stream_ino = None
         self._clear_live_buffers()
         self._observer._reset_turn_context()
 
     def accounting_checkpoint(self) -> str | None:
         return self._acknowledged_checkpoint
 
+    def pending_accounting_checkpoint(self) -> str | None:
+        return self._pending_checkpoint
+
     def acknowledge_accounting_checkpoint(self) -> None:
         if self._pending_checkpoint is not None:
             self._acknowledged_checkpoint = self._pending_checkpoint
             self._pending_checkpoint = None
+
+    def rollback_accounting_checkpoint(self) -> None:
+        """Re-read an unpersisted batch from the most recent durable point."""
+        checkpoint = _decode_checkpoint(self._acknowledged_checkpoint) or _decode_checkpoint(
+            self._pending_checkpoint
+        )
+        self._pending_checkpoint = None
+        self._clear_live_buffers()
+        if checkpoint is None or self.path is None:
+            return
+        location, offset, records, dev, ino = checkpoint
+        if location != str(self.path):
+            self._detach()
+            return
+        try:
+            stat = self.path.stat()
+        except OSError:
+            self._detach()
+            return
+        if stat.st_dev != dev or stat.st_ino != ino or stat.st_size < offset:
+            self._detach()
+            return
+        self.offset, self.index, self.mtime = offset, records, stat.st_mtime_ns
+        self._stream_dev, self._stream_ino = dev, ino
+        self._seed_live_context()
 
     def _seed_live_context(self) -> None:
         if self.path is None:
@@ -221,7 +269,7 @@ class PiTranscriptSource(TranscriptSource):
             semantic = [event for event in parsed.events if not event.usage_only]
             last_event = semantic[-1] if semantic else None
         self._usage_only_until = size if usage_only else None
-        self._stream_dev, self._stream_ino = dev, ino
+        self._pending_stream_dev, self._pending_stream_ino = dev, ino
         self._pending_checkpoint = _encode_checkpoint(path, offset, index, dev, ino)
         self._pending = (path, offset, index, mtime, session_id)
         return Attachment(
@@ -259,7 +307,7 @@ class PiTranscriptSource(TranscriptSource):
             if checkpoint is None:
                 return None
             if _checkpoint_matches(checkpoint, path, size=size, lines=lines, dev=dev, ino=ino):
-                return (checkpoint[1], checkpoint[2], False)
+                return (checkpoint[1], checkpoint[2], True)
             if checkpoint[0] != str(path):
                 return self._rotation_cursor(path)
             return None
@@ -277,7 +325,9 @@ class PiTranscriptSource(TranscriptSource):
 
     def _rotation_cursor(self, path: Path) -> tuple[int, int, bool] | None:
         """Replay a new `/new` stream, but never import an older `/resume` target."""
-        if self._after is None or self._observer.session_started(path) >= self._after:
+        if self._after is None or self._observer.session_started_after(
+            path, self._after, allow_resume_switch=self._usage_floor is not None
+        ):
             return (0, 0, False)
         return None
 
