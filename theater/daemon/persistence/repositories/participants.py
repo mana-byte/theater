@@ -37,8 +37,7 @@ class ParticipantRepository:
             "transcript_domain": p.transcript_domain,
             "transcript_location": p.transcript_location,
             "resume_floor": p.resume_floor,
-            "usage_floor": p.usage_floor,
-            "usage_checkpoint": p.usage_checkpoint,
+            "source_checkpoint": p.source_checkpoint,
             "resumed_from_id": p.resumed_from_id,
             "parent_id": p.parent_id,
             "pid": p.pid,
@@ -197,13 +196,12 @@ class ParticipantRepository:
             update(participants).where(participants.c.id == pid).values(resume_floor=None)
         )
 
-    def set_usage_checkpoint(self, pid: str, checkpoint: str) -> None:
-        """Persist a source-prepared accounting cursor before acknowledging it."""
+    def set_source_checkpoint(self, pid: str, checkpoint: str) -> None:
         self._db.conn.execute(
             update(participants)
             .where(participants.c.id == pid)
-            .where(participants.c.usage_checkpoint.is_not(checkpoint))
-            .values(usage_checkpoint=checkpoint)
+            .where(participants.c.source_checkpoint.is_not(checkpoint))
+            .values(source_checkpoint=checkpoint)
         )
 
     def reparent(self, pid: str, *, new_parent_id: str) -> None:

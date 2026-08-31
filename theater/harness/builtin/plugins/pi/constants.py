@@ -6,6 +6,7 @@ PI_BINARY = "pi"
 PI_SESSIONS_DIRNAME = "sessions"
 PI_ISOLATION_MARKER = ".theater-pi-source"
 PI_SWITCH_MARKER = ".theater-pi-switch.json"
+PI_SWITCHES_DIRNAME = ".theater-pi-switches"
 PI_MARKER_KEY = "pi-domain-marker.key"
 PI_MARKER_VERSION = 1
 PI_SWITCH_MARKER_BYTES = 16 * 1024

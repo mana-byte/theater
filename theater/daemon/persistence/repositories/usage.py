@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from sqlalchemy import ColumnElement, case, distinct, func, select, update
+from sqlalchemy import ColumnElement, case, distinct, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from theater.daemon.persistence.database import Database
@@ -53,20 +53,7 @@ class UsageRepository:
                 index_elements=[usage.c.participant_id, usage.c.usage_key]
             )
         result = self._db.conn.execute(statement)
-        inserted = result.rowcount > 0
-        if not inserted and usage_key is not None and cost_microcents > 0:
-            # A parser may learn that a native zero was only an "unknown price"
-            # placeholder after this immutable usage event was first recorded.
-            # Repair only the missing cost; never rewrite tokens or report the
-            # replay as new usage to telemetry consumers.
-            self._db.conn.execute(
-                update(usage)
-                .where(usage.c.participant_id == participant_id)
-                .where(usage.c.usage_key == usage_key)
-                .where(usage.c.cost_microcents == 0)
-                .values(cost_microcents=cost_microcents)
-            )
-        return inserted
+        return result.rowcount > 0
 
     def totals(self, *, since: float | None = None) -> dict:
         """Sum of all token and cost columns across the usage table."""

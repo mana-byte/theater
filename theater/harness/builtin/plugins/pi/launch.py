@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from theater import paths
@@ -34,7 +35,13 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
         }
     }
     argv = [
-        "pi",
+        sys.executable,
+        "-m",
+        "theater.harness.builtin.plugins.pi.bootstrap",
+    ]
+    if context.resume is None:
+        argv += ["--theater-cold-session-id", session_id]
+    argv += [
         "--extension",
         str(_THEATER_MCP_BRIDGE),
         "--session-id",

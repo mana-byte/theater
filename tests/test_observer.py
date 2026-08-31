@@ -121,7 +121,7 @@ def kinds(store, prefix="agent."):
     return [row["kind"] for row in store.bus_tail(limit=500) if row["kind"].startswith(prefix)]
 
 
-def test_source_accounting_checkpoint_is_persisted_only_after_apply_succeeds(registry, monkeypatch):
+def test_source_checkpoint_is_persisted_only_after_apply_succeeds(registry, monkeypatch):
     """A restart may skip only records whose reducer effects are durable."""
 
     class CheckpointSource(Source):
@@ -135,31 +135,31 @@ def test_source_accounting_checkpoint_is_persisted_only_after_apply_succeeds(reg
         async def read(self) -> Batch:
             return Batch()
 
-        def accounting_checkpoint(self) -> str | None:
+        def source_checkpoint(self) -> str | None:
             return self.checkpoint if self.acknowledged else None
 
-        def pending_accounting_checkpoint(self) -> str | None:
+        def pending_source_checkpoint(self) -> str | None:
             return self.checkpoint if self.pending else None
 
-        def acknowledge_accounting_checkpoint(self) -> None:
+        def acknowledge_source_checkpoint(self) -> None:
             self.acknowledged = True
             self.pending = False
 
-        def rollback_accounting_checkpoint(self) -> None:
+        def rollback_source_checkpoint(self) -> None:
             self.rolled_back = True
 
     participant = registry.register(harness="vibe", pane=None, cwd="/tmp")
     observer = Observer(registry, harnesses={})
     source = CheckpointSource()
     apply = observer._reducer.apply
-    persist_checkpoint = observer.store.set_usage_checkpoint
+    persist_checkpoint = observer.store.set_source_checkpoint
 
     assert observer._apply_source_batch(
         participant.id, source, Batch(progressed=True), QuietClock(), TurnAccumulator()
     )
     assert source.acknowledged is True
     assert source.rolled_back is False
-    assert registry.get(participant.id).usage_checkpoint == source.checkpoint
+    assert registry.get(participant.id).source_checkpoint == source.checkpoint
 
     failing_source = CheckpointSource()
 
@@ -173,7 +173,7 @@ def test_source_accounting_checkpoint_is_persisted_only_after_apply_succeeds(reg
         )
     assert failing_source.acknowledged is False
     assert failing_source.rolled_back is True
-    assert registry.get(participant.id).usage_checkpoint == source.checkpoint
+    assert registry.get(participant.id).source_checkpoint == source.checkpoint
 
     persistence_failure = CheckpointSource()
     monkeypatch.setattr(observer._reducer, "apply", apply)
@@ -181,7 +181,7 @@ def test_source_accounting_checkpoint_is_persisted_only_after_apply_succeeds(reg
     def fail_persistence(*_args, **_kwargs):
         raise RuntimeError("checkpoint persistence failed")
 
-    monkeypatch.setattr(observer.store, "set_usage_checkpoint", fail_persistence)
+    monkeypatch.setattr(observer.store, "set_source_checkpoint", fail_persistence)
     persistence_batch = Batch(
         events=(Event(kind=EventKind.ASSISTANT, text="apply exactly once"),), progressed=True
     )
@@ -195,11 +195,11 @@ def test_source_accounting_checkpoint_is_persisted_only_after_apply_succeeds(reg
     assert persistence_failure.acknowledged is False
     assert persistence_failure.rolled_back is False
     assert persistence_failure.pending is True
-    assert registry.get(participant.id).usage_checkpoint == source.checkpoint
+    assert registry.get(participant.id).source_checkpoint == source.checkpoint
     assert kinds(registry.store).count("agent.assistant") == 1
 
-    monkeypatch.setattr(observer.store, "set_usage_checkpoint", persist_checkpoint)
-    assert observer._persist_pending_accounting_checkpoint(participant.id, persistence_failure)
+    monkeypatch.setattr(observer.store, "set_source_checkpoint", persist_checkpoint)
+    assert observer._persist_pending_source_checkpoint(participant.id, persistence_failure)
     assert persistence_failure.acknowledged is True
     assert persistence_failure.pending is False
     assert kinds(registry.store).count("agent.assistant") == 1

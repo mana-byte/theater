@@ -380,7 +380,7 @@ class Observer:
                         self._attachments._reset_watch_state.discard(pid)
                         clock = QuietClock()
                         turns = TurnAccumulator()
-                    if not self._persist_pending_accounting_checkpoint(pid, source):
+                    if not self._persist_pending_source_checkpoint(pid, source):
                         await self._sleep(self.poll)
                         continue
                     if opened_durable and self.transcript_identity_lost(pid):
@@ -505,8 +505,7 @@ class Observer:
                 session_provenance=normalize_provenance(p.session_correlation),
                 known_location=p.transcript_location,
                 transcript_domain=p.transcript_domain,
-                usage_floor=p.usage_floor,
-                usage_checkpoint=p.usage_checkpoint,
+                source_checkpoint=p.source_checkpoint,
                 pane_pid=p.live_pid,
             )
         bindings: tuple[EnrichmentBinding, ...] = ()
@@ -666,22 +665,21 @@ class Observer:
                 turn_result_fn=self._turn_result,
             )
         except Exception:
-            source.rollback_accounting_checkpoint()
+            source.rollback_source_checkpoint()
             raise
-        self._persist_pending_accounting_checkpoint(pid, source)
+        self._persist_pending_source_checkpoint(pid, source)
         return result
 
-    def _persist_pending_accounting_checkpoint(self, pid: str, source: Source) -> bool:
-        """Retry checkpoint durability without applying the source batch twice."""
-        checkpoint = source.pending_accounting_checkpoint()
+    def _persist_pending_source_checkpoint(self, pid: str, source: Source) -> bool:
+        checkpoint = source.pending_source_checkpoint()
         if checkpoint is None:
             return True
         try:
-            self.store.set_usage_checkpoint(pid, checkpoint)
+            self.store.set_source_checkpoint(pid, checkpoint)
         except Exception:
-            logger.exception("persisting accounting checkpoint for %s failed", pid)
+            logger.exception("persisting source checkpoint for %s failed", pid)
             return False
-        source.acknowledge_accounting_checkpoint()
+        source.acknowledge_source_checkpoint()
         return True
 
     @staticmethod

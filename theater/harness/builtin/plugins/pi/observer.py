@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ from .constants import (
     PI_SWITCH_MARKER,
     PI_SWITCH_MARKER_BYTES,
     PI_SWITCH_MARKER_VERSION,
+    PI_SWITCHES_DIRNAME,
 )
 from .isolation import canonical, validate_domain
 from .launch import participant_root
@@ -143,8 +145,7 @@ class PiObserver(PiParserMixin, TranscriptObserver):
         after: float | None = None,
         session_provenance: str | TranscriptProvenance | None = None,
         known_location: str | None = None,
-        usage_floor: str | None = None,
-        usage_checkpoint: str | None = None,
+        source_checkpoint: str | None = None,
     ) -> Source:
         root = self._source_root(cwd)
         reader = self if root == self.root else PiObserver(root=root, isolated=self.isolated)
@@ -158,8 +159,7 @@ class PiObserver(PiParserMixin, TranscriptObserver):
             session_provenance=session_provenance,
             collision_domain=str(root),
             known_location=known_location,
-            usage_floor=usage_floor,
-            usage_checkpoint=usage_checkpoint,
+            source_checkpoint=source_checkpoint,
         )
 
     def open_source_for(
@@ -172,8 +172,7 @@ class PiObserver(PiParserMixin, TranscriptObserver):
         session_provenance: str | TranscriptProvenance | None = None,
         known_location: str | None = None,
         transcript_domain: str | None = None,
-        usage_floor: str | None = None,
-        usage_checkpoint: str | None = None,
+        source_checkpoint: str | None = None,
     ) -> Source:
         domain = (
             canonical(Path(transcript_domain))
@@ -181,19 +180,17 @@ class PiObserver(PiParserMixin, TranscriptObserver):
             else participant_root(participant_id)
         )
         marker = validate_domain(domain, participant_id=participant_id)
-        # A resumed participant intentionally reads its predecessor's signed
-        # isolated domain.  Only its durable accounting boundary authorizes
-        # that owner mismatch; cold participants still require their own
-        # marker so a signed sibling domain cannot be adopted by accident.
-        if marker is not None or (usage_floor is not None and validate_domain(domain) is not None):
+        # A migrated checkpoint may still reference a predecessor-owned domain.
+        if marker is not None or (
+            source_checkpoint is not None and validate_domain(domain) is not None
+        ):
             return PiObserver(root=domain, isolated=True).open_source(
                 cwd=cwd,
                 session_id=session_id,
                 after=after,
                 session_provenance=session_provenance,
                 known_location=known_location,
-                usage_floor=usage_floor,
-                usage_checkpoint=usage_checkpoint,
+                source_checkpoint=source_checkpoint,
             )
         return self.open_source(
             cwd=cwd,
@@ -201,8 +198,7 @@ class PiObserver(PiParserMixin, TranscriptObserver):
             after=after,
             session_provenance=session_provenance,
             known_location=known_location,
-            usage_floor=usage_floor,
-            usage_checkpoint=usage_checkpoint,
+            source_checkpoint=source_checkpoint,
         )
 
     def open_source_context(self, context: ParticipantObservationContext) -> Source:
@@ -214,8 +210,7 @@ class PiObserver(PiParserMixin, TranscriptObserver):
             session_provenance=context.session_provenance,
             known_location=context.known_location,
             transcript_domain=context.transcript_domain,
-            usage_floor=context.usage_floor,
-            usage_checkpoint=context.usage_checkpoint,
+            source_checkpoint=context.source_checkpoint,
         )
 
     def find_transcript(
@@ -253,13 +248,18 @@ class PiObserver(PiParserMixin, TranscriptObserver):
         return max(candidates, default=(0, None))[1]
 
     def switch_boundary(  # noqa: PLR0912
-        self, *, cwd: str, current: Path | None = None
+        self, *, cwd: str, current: Path | None = None, target: Path | None = None
     ) -> PiSwitchBoundary | None:
         """Read the bounded handoff written by Theater's bundled Pi extension."""
         root = self._source_root(cwd)
         if not _safe_directory(root):
             return None
         marker = root / PI_SWITCH_MARKER
+        if target is not None:
+            digest = hashlib.sha256(str(canonical(target)).encode()).hexdigest()
+            archived = root / PI_SWITCHES_DIRNAME / f"{digest}.json"
+            if archived.is_file() and not archived.is_symlink():
+                marker = archived
         try:
             marker_stat = marker.lstat()
             if (

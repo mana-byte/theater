@@ -9,7 +9,8 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
@@ -22,6 +23,7 @@ const MAX_FRAME_CHARS = 1024 * 1024;
 const IDLE_STATUS_KEY = "theater.pi.idle";
 const IDLE_STATUS_TEXT = "Theater: idle";
 const SWITCH_MARKER = ".theater-pi-switch.json";
+const SWITCHES_DIR = ".theater-pi-switches";
 const SWITCH_MARKER_VERSION = 1;
 
 function acquireBridge(): symbol | undefined {
@@ -82,6 +84,19 @@ function forkFlag(argv: string[]): string | undefined {
 	return undefined;
 }
 
+function writeSwitchDocument(root: string, location: string, document: object): void {
+	const body = `${JSON.stringify(document)}\n`;
+	const marker = join(root, SWITCH_MARKER);
+	const directory = join(root, SWITCHES_DIR);
+	mkdirSync(directory, { recursive: true, mode: 0o700 });
+	const digest = createHash("sha256").update(location).digest("hex");
+	for (const path of [join(directory, `${digest}.json`), marker]) {
+		const temporary = `${path}.${process.pid}.tmp`;
+		writeFileSync(temporary, body, { encoding: "utf8", mode: 0o600 });
+		renameSync(temporary, path);
+	}
+}
+
 function writeStartupForkMarker(source: string, ctx: ExtensionContext): void {
 	const target = ctx.sessionManager.getSessionFile();
 	if (!target) return;
@@ -90,22 +105,15 @@ function writeStartupForkMarker(source: string, ctx: ExtensionContext): void {
 	if (dirname(location) !== root) return;
 	const stat = statSync(location);
 	if (!stat.isFile()) return;
-	const marker = join(root, SWITCH_MARKER);
-	const temporary = `${marker}.${process.pid}.tmp`;
-	writeFileSync(
-		temporary,
-		`${JSON.stringify({
-			version: SWITCH_MARKER_VERSION,
-			reason: "startup-fork",
-			location,
-			previous_location: resolve(source),
-			offset: stat.size,
-			dev: stat.dev,
-			ino: stat.ino,
-		})}\n`,
-		{ encoding: "utf8", mode: 0o600 },
-	);
-	renameSync(temporary, marker);
+	writeSwitchDocument(root, location, {
+		version: SWITCH_MARKER_VERSION,
+		reason: "startup-fork",
+		location,
+		previous_location: resolve(source),
+		offset: stat.size,
+		dev: stat.dev,
+		ino: stat.ino,
+	});
 }
 
 function writeSwitchMarker(
@@ -141,23 +149,16 @@ function writeSwitchMarker(
 	}
 	if (offset === undefined && records === undefined) return;
 
-	const marker = join(root, SWITCH_MARKER);
-	const temporary = `${marker}.${process.pid}.tmp`;
-	writeFileSync(
-		temporary,
-		`${JSON.stringify({
-			version: SWITCH_MARKER_VERSION,
-			reason,
-			location,
-			previous_location: previous,
-			offset,
-			records,
-			dev,
-			ino,
-		})}\n`,
-		{ encoding: "utf8", mode: 0o600 },
-	);
-	renameSync(temporary, marker);
+	writeSwitchDocument(root, location, {
+		version: SWITCH_MARKER_VERSION,
+		reason,
+		location,
+		previous_location: previous,
+		offset,
+		records,
+		dev,
+		ino,
+	});
 }
 
 function registerTranscriptSwitches(pi: ExtensionAPI): void {

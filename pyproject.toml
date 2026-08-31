@@ -47,6 +47,7 @@ packages = ["theater"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts" = "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts"
+"theater/harness/builtin/plugins/pi/pi_startup_filter.cjs" = "theater/harness/builtin/plugins/pi/pi_startup_filter.cjs"
 
 [dependency-groups]
 dev = [

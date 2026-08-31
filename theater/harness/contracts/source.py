@@ -354,20 +354,20 @@ class Source(ABC):
         """Return immutable participant-scoped channel health."""
         return ()
 
-    def accounting_checkpoint(self) -> str | None:
-        """Return the last accounting point acknowledged as durable."""
+    def source_checkpoint(self) -> str | None:
+        """Return the last source point acknowledged as durable."""
         return None
 
-    def pending_accounting_checkpoint(self) -> str | None:
-        """Return the current batch's point, ready to persist after reduction succeeds."""
+    def pending_source_checkpoint(self) -> str | None:
+        """Return the current batch's point after reduction succeeds."""
         return None
 
-    def acknowledge_accounting_checkpoint(self) -> None:
-        """Mark the current batch's accounting point as durably persisted."""
+    def acknowledge_source_checkpoint(self) -> None:
+        """Mark the current source point as durable."""
         return
 
-    def rollback_accounting_checkpoint(self) -> None:
-        """Rewind an unacknowledged accounting batch after reduction fails."""
+    def rollback_source_checkpoint(self) -> None:
+        """Rewind an unacknowledged source batch after reduction fails."""
         return
 
     def commit_attachment(self) -> None:

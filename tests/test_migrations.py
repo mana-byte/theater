@@ -75,8 +75,9 @@ def test_migrations_created_the_alembic_version_table(store):
     col_info = store.conn.exec_driver_sql("PRAGMA table_info(participants)").fetchall()
     col_names = {row[1] for row in col_info}
     assert "resume_floor" in col_names
-    assert "usage_floor" in col_names
-    assert "usage_checkpoint" in col_names
+    assert "source_checkpoint" in col_names
+    assert "usage_floor" not in col_names
+    assert "usage_checkpoint" not in col_names
     assert "tmux_server_identity" in col_names
     assert "termination_reason" in col_names
     assert "termination_incident" in col_names
@@ -214,6 +215,34 @@ def test_participant_description_migration_preserves_existing_rows_as_null(theat
     assert row == ("survivor", None)
 
 
+def test_source_checkpoint_migration_preserves_the_latest_pi_cursor(theater_home):
+    path = paths.db_path()
+    store = Store(path)
+    store.upsert_participant(Participant(id="checkpoint", harness="pi"))
+    store.close()
+
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        with engine.connect() as conn:
+            cfg = Config()
+            cfg.set_main_option("script_location", str(MIGRATIONS))
+            cfg.attributes["connection"] = conn
+            command.downgrade(cfg, "0024")
+            conn.exec_driver_sql(
+                "UPDATE participants SET usage_floor = 'floor', "
+                "usage_checkpoint = 'cursor' WHERE id = 'checkpoint'"
+            )
+            command.upgrade(cfg, "head")
+            conn.commit()
+            row = conn.exec_driver_sql(
+                "SELECT source_checkpoint FROM participants WHERE id = 'checkpoint'"
+            ).one()
+    finally:
+        engine.dispose()
+
+    assert row == ("cursor",)
+
+
 def test_bus_ids_are_never_reused(store):
     """AUTOINCREMENT, not bare rowid: `bus_tail(after_id=)` is a cursor."""
     first = store.bus_append("a")
@@ -283,13 +312,13 @@ def test_a_legacy_database_is_adopted_not_rebuilt(theater_home):
         part_cols = store.conn.exec_driver_sql("PRAGMA table_info(participants)").fetchall()
         part_col_names = {row[1] for row in part_cols}
         assert "resume_floor" in part_col_names
-        assert "usage_floor" in part_col_names
-        assert "usage_checkpoint" in part_col_names
+        assert "source_checkpoint" in part_col_names
+        assert "usage_floor" not in part_col_names
+        assert "usage_checkpoint" not in part_col_names
         # Legacy rows get NULL for resume_floor — cold spawn behaviour.
         survivor = store.get_participant("abc")
         assert survivor.resume_floor is None
-        assert survivor.usage_floor is None
-        assert survivor.usage_checkpoint is None
+        assert survivor.source_checkpoint is None
 
         # A job created on a legacy row round-trips with null structured fields.
         store.conn.exec_driver_sql(
