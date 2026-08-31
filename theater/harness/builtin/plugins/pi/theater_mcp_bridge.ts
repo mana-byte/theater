@@ -15,16 +15,20 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 const OWNER = Symbol.for("theater.pi.mcp-bridge.owner");
-const ownsBridge = !(globalThis as Record<symbol, boolean | undefined>)[OWNER];
 const STARTUP_TIMEOUT_MS = 10_000;
 const MAX_FRAME_CHARS = 1024 * 1024;
 
-if (ownsBridge) {
-	(globalThis as Record<symbol, boolean | undefined>)[OWNER] = true;
+function acquireBridge(): symbol | undefined {
+	const owners = globalThis as Record<symbol, symbol | undefined>;
+	if (owners[OWNER] !== undefined) return undefined;
+	const lease = Symbol("theater.pi.mcp-bridge.lease");
+	owners[OWNER] = lease;
+	return lease;
 }
 
-function releaseBridge(): void {
-	if (ownsBridge) delete (globalThis as Record<symbol, boolean | undefined>)[OWNER];
+function releaseBridge(lease: symbol): void {
+	const owners = globalThis as Record<symbol, symbol | undefined>;
+	if (owners[OWNER] === lease) delete owners[OWNER];
 }
 
 interface ServerConfig {
@@ -275,14 +279,19 @@ function toolName(name: string): string {
 }
 
 export default async function theaterMcpBridge(pi: ExtensionAPI) {
-	if (!ownsBridge) return;
+	const bridgeLease = acquireBridge();
+	if (bridgeLease === undefined) return;
 	pi.registerFlag("theater-mcp-config", {
 		description: "Launch-local Theater stdio MCP configuration",
 		type: "string",
 	});
 	const configPath = configFlag(process.argv) ?? pi.getFlag("theater-mcp-config");
-	if (configPath === undefined) return;
+	if (configPath === undefined) {
+		releaseBridge(bridgeLease);
+		return;
+	}
 	if (typeof configPath !== "string" || !configPath.trim()) {
+		releaseBridge(bridgeLease);
 		throw new Error("--theater-mcp-config requires a configuration path");
 	}
 
@@ -293,6 +302,7 @@ export default async function theaterMcpBridge(pi: ExtensionAPI) {
 		discovered = await client.listTools();
 	} catch (error) {
 		await client.close();
+		releaseBridge(bridgeLease);
 		throw new Error(`required Theater MCP startup failed: ${(error as Error).message}`);
 	}
 	for (const tool of discovered) {
@@ -319,14 +329,10 @@ export default async function theaterMcpBridge(pi: ExtensionAPI) {
 			},
 		});
 	}
-	pi.on("session_shutdown", async (event) => {
-		// Pi reuses a loaded extension instance for /new, /resume, and /fork.
-		// Closing the client there would leave the replacement session with the
-		// same registered tools backed by a closed subprocess. A reload creates
-		// fresh extension instances, while quit ends this process, so only those
-		// two cases relinquish this process-wide bridge lease.
-		if (event.reason !== "reload" && event.reason !== "quit") return;
+	pi.on("session_shutdown", async () => {
+		// Each replacement creates a fresh extension instance. Tear down this
+		// instance before the next factory acquires a new process-wide lease.
 		await client.close();
-		releaseBridge();
+		releaseBridge(bridgeLease);
 	});
 }
