@@ -6,6 +6,7 @@ import asyncio
 import json
 from pathlib import Path
 
+from theater.daemon.store import Store
 from theater.harness.base import APPROVALS
 from theater.harness.builtin.plugins.pi.constants import PI_ISOLATION_MARKER, PI_RECORD_BYTES
 from theater.harness.builtin.plugins.pi.launch import plan_launch, resume_launch_overlay
@@ -16,6 +17,7 @@ from theater.harness.contracts.callbacks import LaunchContext, ResumeContext, Sc
 from theater.harness.contracts.events import EventKind
 from theater.harness.contracts.observation import ScreenConfidence, ScreenKind
 from theater.models import Participant, Status
+from theater.resume_floor import UNKNOWN_FLOOR, encode_floor
 from theater.trajectory.enums import TrajectoryKind
 
 
@@ -277,6 +279,255 @@ def test_pi_parser_pairs_tools_projects_usage_and_ends_the_turn(tmp_path) -> Non
     assert terminal.events[-1].usage is not None
     assert terminal.events[-1].usage.input_tokens == 7
     assert any(fact.kind is TrajectoryKind.USAGE for fact in terminal.trajectory)
+
+
+def test_pi_summary_usage_is_durable_and_inherits_the_active_model(tmp_path) -> None:
+    observer = PiObserver(root=tmp_path)
+    observer.parse_record(
+        json.dumps(
+            {
+                "type": "model_change",
+                "id": "model-1",
+                "modelId": "gpt-5.6",
+                "provider": "openai",
+            }
+        ),
+        1,
+    )
+
+    summary = observer.parse_record(
+        json.dumps(
+            {
+                "type": "compaction",
+                "id": "compact-1",
+                "summary": "compacted",
+                "usage": {"input": 12, "output": 3, "cost": {"total": 0.01}},
+            }
+        ),
+        2,
+    )
+
+    assert len(summary.events) == 1
+    assert summary.events[0].usage_only is True
+    assert summary.events[0].usage is not None
+    assert summary.events[0].usage.idempotency_key == "compact-1"
+    assert summary.events[0].usage.model == "gpt-5.6"
+    assert summary.events[0].usage.provider == "openai"
+    assert any(fact.kind is TrajectoryKind.USAGE for fact in summary.trajectory)
+
+
+def test_pi_cold_isolated_source_replays_pre_attach_usage_without_an_attach_completion(
+    tmp_path,
+) -> None:
+    workdir = tmp_path / "work"
+    sessions = tmp_path / "sessions"
+    workdir.mkdir()
+    sessions.mkdir()
+    transcript = sessions / "native-id.jsonl"
+    _append(
+        transcript,
+        _session(session_id="native-id", cwd=workdir),
+        _message(
+            "assistant-1",
+            {
+                "role": "assistant",
+                "model": "gpt-5.6",
+                "content": "done",
+                "stopReason": "stop",
+                "usage": {"input": 11, "output": 2},
+            },
+        ),
+    )
+    source = PiObserver(root=sessions, isolated=True).open_source(
+        cwd=str(workdir), session_id="native-id"
+    )
+
+    attached = asyncio.run(source.read()).attached
+    assert attached is not None
+    assert attached.skipped == 0
+    assert attached.last_event is None
+    source.commit_attachment()
+
+    batch = asyncio.run(source.read())
+    usage = [event.usage for event in batch.events if event.usage is not None]
+    assert [event.input_tokens for event in usage] == [11]
+
+
+def test_pi_resumed_source_starts_at_the_durable_usage_floor(tmp_path) -> None:
+    workdir = tmp_path / "work"
+    sessions = tmp_path / "sessions"
+    workdir.mkdir()
+    sessions.mkdir()
+    transcript = sessions / "native-id.jsonl"
+    _append(
+        transcript,
+        _session(session_id="native-id", cwd=workdir),
+        _message(
+            "assistant-before",
+            {
+                "role": "assistant",
+                "content": "old",
+                "stopReason": "stop",
+                "usage": {"input": 100, "output": 1},
+            },
+        ),
+    )
+    observer = PiObserver(root=sessions, isolated=True)
+    floor = observer.stream_floor(str(transcript))
+    assert floor is not None
+    _append(
+        transcript,
+        _message(
+            "assistant-after",
+            {
+                "role": "assistant",
+                "content": "new",
+                "stopReason": "stop",
+                "usage": {"input": 7, "output": 2},
+            },
+        ),
+    )
+    source = observer.open_source(
+        cwd=str(workdir), session_id="native-id", usage_floor=encode_floor(floor)
+    )
+
+    attached = asyncio.run(source.read()).attached
+    assert attached is not None
+    assert attached.skipped == floor.records
+    assert attached.last_event is None
+    source.commit_attachment()
+
+    batch = asyncio.run(source.read())
+    usage = [event.usage for event in batch.events if event.usage is not None]
+    assert [event.input_tokens for event in usage] == [7]
+
+
+def test_pi_unknown_resume_usage_floor_fails_closed(tmp_path) -> None:
+    workdir = tmp_path / "work"
+    sessions = tmp_path / "sessions"
+    workdir.mkdir()
+    sessions.mkdir()
+    transcript = sessions / "native-id.jsonl"
+    _append(
+        transcript,
+        _session(session_id="native-id", cwd=workdir),
+        _message(
+            "assistant-old",
+            {
+                "role": "assistant",
+                "content": "old",
+                "stopReason": "stop",
+                "usage": {"input": 100, "output": 1},
+            },
+        ),
+    )
+    source = PiObserver(root=sessions, isolated=True).open_source(
+        cwd=str(workdir), session_id="native-id", usage_floor=UNKNOWN_FLOOR
+    )
+
+    attached = asyncio.run(source.read()).attached
+    assert attached is not None
+    assert attached.skipped == 2
+    source.commit_attachment()
+    assert asyncio.run(source.read()).events == ()
+
+
+def test_pi_restart_replays_only_usage_from_a_known_isolated_transcript(tmp_path) -> None:
+    workdir = tmp_path / "work"
+    sessions = tmp_path / "sessions"
+    workdir.mkdir()
+    sessions.mkdir()
+    transcript = sessions / "native-id.jsonl"
+    _append(
+        transcript,
+        _session(session_id="native-id", cwd=workdir),
+        _message(
+            "assistant-1",
+            {
+                "role": "assistant",
+                "content": "done",
+                "stopReason": "stop",
+                "usage": {"input": 5, "output": 1},
+            },
+        ),
+    )
+    source = PiObserver(root=sessions, isolated=True).open_source(
+        cwd=str(workdir), session_id="native-id", known_location=str(transcript)
+    )
+
+    attached = asyncio.run(source.read()).attached
+    assert attached is not None
+    assert attached.last_event is None
+    source.commit_attachment()
+
+    batch = asyncio.run(source.read())
+    assert len(batch.events) == 1
+    assert batch.events[0].usage_only is True
+    assert batch.events[0].usage is not None
+    assert batch.events[0].usage.input_tokens == 5
+    assert batch.trajectory == ()
+
+
+def test_pi_restart_usage_reconciliation_is_idempotent_in_the_durable_ledger(tmp_path) -> None:
+    workdir = tmp_path / "work"
+    sessions = tmp_path / "sessions"
+    workdir.mkdir()
+    sessions.mkdir()
+    transcript = sessions / "native-id.jsonl"
+    _append(
+        transcript,
+        _session(session_id="native-id", cwd=workdir),
+        _message(
+            "assistant-1",
+            {
+                "role": "assistant",
+                "content": "done",
+                "stopReason": "stop",
+                "usage": {"input": 5, "output": 1},
+            },
+        ),
+    )
+
+    first = PiObserver(root=sessions, isolated=True).open_source(
+        cwd=str(workdir), session_id="native-id"
+    )
+    assert asyncio.run(first.read()).attached is not None
+    first.commit_attachment()
+    initial = asyncio.run(first.read())
+
+    restarted = PiObserver(root=sessions, isolated=True).open_source(
+        cwd=str(workdir), session_id="native-id", known_location=str(transcript)
+    )
+    assert asyncio.run(restarted.read()).attached is not None
+    restarted.commit_attachment()
+    catchup = asyncio.run(restarted.read())
+
+    store = Store(tmp_path / "theater.db")
+    try:
+        participant = Participant(id="participant", harness="pi", session_id="native-id")
+        store.upsert_participant(participant)
+        for batch in (initial, catchup):
+            for event in batch.events:
+                if event.usage is None:
+                    continue
+                usage = event.usage
+                assert store.record_usage(
+                    participant_id=participant.id,
+                    tree_root_id=participant.id,
+                    usage_key=f"{participant.session_id}:{usage.idempotency_key}",
+                    ts=event.ts or 0,
+                    model=usage.model,
+                    harness="pi",
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    cache_creation_input_tokens=usage.cache_creation_input_tokens,
+                    cache_read_input_tokens=usage.cache_read_input_tokens,
+                    reasoning_output_tokens=usage.reasoning_output_tokens,
+                    cost_microcents=0,
+                ) is (batch is initial)
+        assert store.usage_totals()["input_tokens"] == 5
+    finally:
+        store.close()
 
 
 def test_pi_oversized_record_is_dropped_without_stalling_following_records(tmp_path) -> None:

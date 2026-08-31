@@ -516,6 +516,7 @@ class Observer:
                 session_provenance=normalize_provenance(p.session_correlation),
                 known_location=p.transcript_location,
                 transcript_domain=p.transcript_domain,
+                usage_floor=p.usage_floor,
                 pane_pid=p.live_pid,
             )
         bindings: tuple[EnrichmentBinding, ...] = ()

@@ -37,6 +37,7 @@ class ParticipantRepository:
             "transcript_domain": p.transcript_domain,
             "transcript_location": p.transcript_location,
             "resume_floor": p.resume_floor,
+            "usage_floor": p.usage_floor,
             "resumed_from_id": p.resumed_from_id,
             "parent_id": p.parent_id,
             "pid": p.pid,
