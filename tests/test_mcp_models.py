@@ -23,7 +23,7 @@ from theater.daemon.server import Daemon
 from theater.mcp.server import build
 
 #: The adapters Theater ships. Every one takes a model.
-SHIPPED = {"claude", "codex", "opencode", "vibe"}
+SHIPPED = {"claude", "codex", "opencode", "pi", "vibe"}
 
 #: A config the daemon is started with, standing in for one a human wrote.
 ALLOWED = {"vibe": ["opus-5", "medium-3"], "claude": ["sonnet-4"]}
