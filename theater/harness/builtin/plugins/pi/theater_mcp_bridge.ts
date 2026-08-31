@@ -11,12 +11,14 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { readFile } from "node:fs/promises";
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 const OWNER = Symbol.for("theater.pi.mcp-bridge.owner");
 const STARTUP_TIMEOUT_MS = 10_000;
 const MAX_FRAME_CHARS = 1024 * 1024;
+const IDLE_STATUS_KEY = "theater.pi.idle";
+const IDLE_STATUS_TEXT = "Theater: idle";
 
 function acquireBridge(): symbol | undefined {
 	const owners = globalThis as Record<symbol, symbol | undefined>;
@@ -29,6 +31,33 @@ function acquireBridge(): symbol | undefined {
 function releaseBridge(lease: symbol): void {
 	const owners = globalThis as Record<symbol, symbol | undefined>;
 	if (owners[OWNER] === lease) delete owners[OWNER];
+}
+
+function clearIdleStatus(ctx: ExtensionContext): void {
+	ctx.ui.setStatus(IDLE_STATUS_KEY, undefined);
+}
+
+function showIdleStatus(ctx: ExtensionContext): void {
+	if (ctx.isIdle()) ctx.ui.setStatus(IDLE_STATUS_KEY, IDLE_STATUS_TEXT);
+}
+
+function registerIdleStatus(pi: ExtensionAPI): void {
+	// Pi's status lifecycle, rather than its static screen chrome, is the
+	// authority for an idle reading.  `agent_settled` includes retries,
+	// compaction/retry, and queued continuations.
+	pi.on("session_start", (_event, ctx) => showIdleStatus(ctx));
+	pi.on("before_agent_start", (_event, ctx) => clearIdleStatus(ctx));
+	pi.on("agent_start", (_event, ctx) => clearIdleStatus(ctx));
+	pi.on("agent_settled", (_event, ctx) => showIdleStatus(ctx));
+
+	// These operations can run without an agent lifecycle event.  Clear first
+	// so a custom or hidden working indicator cannot leave an old idle marker
+	// on the screen, then restore only when Pi itself reports it is idle.
+	pi.on("session_before_compact", (_event, ctx) => clearIdleStatus(ctx));
+	pi.on("session_compact", (_event, ctx) => showIdleStatus(ctx));
+	pi.on("session_before_tree", (_event, ctx) => clearIdleStatus(ctx));
+	pi.on("session_tree", (_event, ctx) => showIdleStatus(ctx));
+	pi.on("session_shutdown", (_event, ctx) => clearIdleStatus(ctx));
 }
 
 interface ServerConfig {
@@ -280,7 +309,12 @@ function toolName(name: string): string {
 
 export default async function theaterMcpBridge(pi: ExtensionAPI) {
 	const bridgeLease = acquireBridge();
-	if (bridgeLease === undefined) return;
+	if (bridgeLease === undefined) {
+		// A user-local copy may own the MCP connection.  The status protocol is
+		// independent and still belongs to this Theater-launched Pi session.
+		if (configFlag(process.argv)?.trim()) registerIdleStatus(pi);
+		return;
+	}
 	pi.registerFlag("theater-mcp-config", {
 		description: "Launch-local Theater stdio MCP configuration",
 		type: "string",
@@ -294,6 +328,7 @@ export default async function theaterMcpBridge(pi: ExtensionAPI) {
 		releaseBridge(bridgeLease);
 		throw new Error("--theater-mcp-config requires a configuration path");
 	}
+	registerIdleStatus(pi);
 
 	const client = new TheaterClient(await loadConfig(configPath));
 	let discovered: Tool[];

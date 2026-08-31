@@ -134,7 +134,38 @@ def test_pi_header_identity_does_not_depend_on_the_filename(tmp_path) -> None:
 
 
 def test_pi_screen_classifier_is_conservative_and_never_raises() -> None:
-    assert classify_screen(ScreenContext(capture="Esc to interrupt")).kind is ScreenKind.WORKING
+    assert classify_screen(ScreenContext(capture="Esc to interrupt")).kind is ScreenKind.UNKNOWN
+    assert (
+        classify_screen(
+            ScreenContext(
+                capture=(
+                    "escape interrupt · ctrl+c/ctrl+d clear/exit\n"
+                    "0.0%/1.0M (auto) (mistral) zai-glm-5-2 • high"
+                )
+            )
+        ).kind
+        is ScreenKind.UNKNOWN
+    )
+    idle = classify_screen(ScreenContext(capture="0.0%/1.0M\nTheater: idle"))
+    assert idle.kind is ScreenKind.PROMPT
+    assert idle.confidence is ScreenConfidence.HIGH
+    # A stale idle marker must never beat a real status indicator.
+    assert (
+        classify_screen(ScreenContext(capture="⠋ Working...\n0.0%/1.0M\nTheater: idle")).kind
+        is ScreenKind.WORKING
+    )
+    # Extension widgets can displace Pi's loader far above the footer.
+    assert (
+        classify_screen(
+            ScreenContext(capture="⠙ Retrying (1/3)\n" + "widget\n" * 12 + "footer")
+        ).kind
+        is ScreenKind.WORKING
+    )
+    # Only the final footer-status line can carry the idle marker.
+    assert (
+        classify_screen(ScreenContext(capture="Theater: idle\nassistant prose")).kind
+        is ScreenKind.UNKNOWN
+    )
     prompt = classify_screen(ScreenContext(capture="\n❯"))
     assert prompt.kind is ScreenKind.PROMPT
     assert prompt.confidence is ScreenConfidence.LOW
@@ -151,6 +182,33 @@ def test_pi_bridge_uses_an_instance_lease_for_every_session_lifecycle() -> None:
     assert "const bridgeLease = acquireBridge();" in bridge
     assert "if (owners[OWNER] === lease) delete owners[OWNER];" in bridge
     assert "await client.close();\n\t\treleaseBridge(bridgeLease);" in bridge
+
+
+def test_pi_bridge_marks_only_pi_confirmed_idle_states() -> None:
+    bridge = (
+        Path(__file__).parents[1] / "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts"
+    ).read_text(encoding="utf-8")
+
+    assert 'const IDLE_STATUS_TEXT = "Theater: idle";' in bridge
+    assert "ctx.ui.setStatus(IDLE_STATUS_KEY, undefined);" in bridge
+    assert "if (ctx.isIdle()) ctx.ui.setStatus(IDLE_STATUS_KEY, IDLE_STATUS_TEXT);" in bridge
+    for event in (
+        "session_start",
+        "before_agent_start",
+        "agent_start",
+        "agent_settled",
+        "session_before_compact",
+        "session_compact",
+        "session_before_tree",
+        "session_tree",
+        "session_shutdown",
+    ):
+        assert f'pi.on("{event}"' in bridge
+    # Registering the status protocol cannot depend on owning the MCP bridge:
+    # a user-local bridge may already hold that process-wide lease.
+    duplicate_lease = bridge.index("if (bridgeLease === undefined)")
+    duplicate_status = bridge.index("registerIdleStatus(pi);", duplicate_lease)
+    assert duplicate_status > duplicate_lease
 
 
 def test_pi_parser_pairs_tools_projects_usage_and_ends_the_turn(tmp_path) -> None:
