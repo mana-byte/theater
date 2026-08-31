@@ -45,6 +45,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["theater"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts" = "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts"
+
 [dependency-groups]
 dev = [
     "mypy>=2.3.0",
