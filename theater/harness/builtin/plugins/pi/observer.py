@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from theater.harness.contracts.callbacks import (
@@ -18,7 +19,13 @@ from theater.harness.observation import ScreenKind, ScreenReading, TranscriptObs
 from theater.provenance import TranscriptProvenance
 from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFeature
 
-from .constants import PI_HEADER_BYTES, PI_SESSIONS_DIRNAME
+from .constants import (
+    PI_HEADER_BYTES,
+    PI_SESSIONS_DIRNAME,
+    PI_SWITCH_MARKER,
+    PI_SWITCH_MARKER_BYTES,
+    PI_SWITCH_MARKER_VERSION,
+)
 from .isolation import canonical, validate_domain
 from .launch import participant_root
 from .parser import PiParserMixin
@@ -78,15 +85,21 @@ def _session_started(header: dict, stat: os.stat_result) -> float:
     return _file_started(stat) or 0.0
 
 
-def _started_after(
-    header: dict, stat: os.stat_result, after: float, *, allow_resume_switch: bool
-) -> bool:
-    if _session_started(header, stat) >= after:
-        return True
-    # A Pi resume can create a new file whose header preserves the original
-    # session timestamp.  Its immutable file creation time is explicit enough
-    # to accept only for the resumed participant, never for a cold launch.
-    return allow_resume_switch and (_file_started(stat) or 0.0) >= after
+def _optional_nonnegative_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+@dataclass(frozen=True, slots=True)
+class PiSwitchBoundary:
+    """A Pi-authored session replacement and its pre-existing history boundary."""
+
+    location: Path
+    previous_location: Path
+    reason: str
+    offset: int | None
+    records: int | None
+    dev: int | None
+    ino: int | None
 
 
 class PiObserver(PiParserMixin, TranscriptObserver):
@@ -239,27 +252,73 @@ class PiObserver(PiParserMixin, TranscriptObserver):
             candidates.append((stat.st_mtime_ns, canonical(path)))
         return max(candidates, default=(0, None))[1]
 
-    def find_resume_transcript(self, *, cwd: str, after: float) -> Path | None:
-        """Locate a resumed Pi stream, allowing a post-launch replacement file."""
+    def switch_boundary(  # noqa: PLR0912
+        self, *, cwd: str, current: Path | None = None
+    ) -> PiSwitchBoundary | None:
+        """Read the bounded handoff written by Theater's bundled Pi extension."""
         root = self._source_root(cwd)
         if not _safe_directory(root):
             return None
-        wanted_cwd = str(Path(cwd).expanduser().resolve())
-        candidates: list[tuple[int, Path]] = []
-        for path in root.glob("*.jsonl"):
-            if path.is_symlink():
-                continue
-            header = _header(path)
-            if header is None or _header_cwd(header) != wanted_cwd:
-                continue
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            if not _started_after(header, stat, after, allow_resume_switch=True):
-                continue
-            candidates.append((stat.st_mtime_ns, canonical(path)))
-        return max(candidates, default=(0, None))[1]
+        marker = root / PI_SWITCH_MARKER
+        try:
+            marker_stat = marker.lstat()
+            if (
+                marker.is_symlink()
+                or not marker.is_file()
+                or marker_stat.st_size > PI_SWITCH_MARKER_BYTES
+            ):
+                return None
+            with marker.open("rb") as stream:
+                raw = stream.read(PI_SWITCH_MARKER_BYTES + 1)
+        except OSError:
+            return None
+        if len(raw) > PI_SWITCH_MARKER_BYTES:
+            return None
+        try:
+            value = json.loads(raw)
+        except (UnicodeDecodeError, ValueError):
+            return None
+        if not isinstance(value, dict) or value.get("version") != PI_SWITCH_MARKER_VERSION:
+            return None
+        if value.get("reason") not in {"new", "resume", "fork"}:
+            return None
+        location_raw = value.get("location")
+        previous_raw = value.get("previous_location")
+        if not isinstance(location_raw, str) or not isinstance(previous_raw, str):
+            return None
+        location = canonical(Path(location_raw))
+        previous = canonical(Path(previous_raw))
+        if not location.is_relative_to(root) or not previous.is_relative_to(root):
+            return None
+        if current is not None and previous != canonical(current):
+            return None
+        if location == previous or location.is_symlink() or not location.is_file():
+            return None
+        header = _header(location)
+        if header is None or _header_cwd(header) != str(Path(cwd).expanduser().resolve()):
+            return None
+        offset = _optional_nonnegative_int(value.get("offset"))
+        records = _optional_nonnegative_int(value.get("records"))
+        dev = _optional_nonnegative_int(value.get("dev"))
+        ino = _optional_nonnegative_int(value.get("ino"))
+        if value["reason"] == "new":
+            offset = records = 0
+            dev = ino = None
+        elif (offset is None and records is None) or (dev is None) != (ino is None):
+            return None
+        return PiSwitchBoundary(
+            location=location,
+            previous_location=previous,
+            reason=value["reason"],
+            offset=offset,
+            records=records,
+            dev=dev,
+            ino=ino,
+        )
+
+    def find_switch_transcript(self, *, cwd: str, current: Path) -> Path | None:
+        boundary = self.switch_boundary(cwd=cwd, current=current)
+        return None if boundary is None else boundary.location
 
     def session_id(self, transcript: Path) -> str | None:
         header = _header(transcript)
@@ -274,18 +333,6 @@ class PiObserver(PiParserMixin, TranscriptObserver):
         except OSError:
             return 0.0
         return _session_started(header, stat)
-
-    def session_started_after(
-        self, transcript: Path, after: float, *, allow_resume_switch: bool = False
-    ) -> bool:
-        header = _header(transcript)
-        if header is None:
-            return False
-        try:
-            stat = transcript.stat()
-        except OSError:
-            return False
-        return _started_after(header, stat, after, allow_resume_switch=allow_resume_switch)
 
     def transcript_candidates(
         self,

@@ -367,7 +367,7 @@ class Source(ABC):
         return
 
     def rollback_accounting_checkpoint(self) -> None:
-        """Rewind an unacknowledged accounting batch after reduction or persistence fails."""
+        """Rewind an unacknowledged accounting batch after reduction fails."""
         return
 
     def commit_attachment(self) -> None:

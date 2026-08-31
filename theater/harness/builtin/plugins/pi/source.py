@@ -19,7 +19,14 @@ from theater.resume_floor import decode_floor
 from .constants import PI_READ_BYTES, PI_RECORD_BYTES, PI_RECORDS_PER_BATCH
 
 if TYPE_CHECKING:
-    from .observer import PiObserver
+    from .observer import PiObserver, PiSwitchBoundary
+
+
+class _WaitForSwitch:
+    pass
+
+
+_WAIT_FOR_SWITCH = _WaitForSwitch()
 
 
 def _checkpoint_int(value: object) -> int | None:
@@ -122,6 +129,52 @@ def _attachment_point(path: Path) -> tuple[int, int, int, str | None, int | None
     return size, lines, stat.st_mtime_ns, last_line, stat.st_dev, stat.st_ino
 
 
+def _switch_cursor(path: Path, boundary: PiSwitchBoundary) -> tuple[int, int] | None:
+    """Resolve and validate a Pi-authored history boundary without unbounded buffering."""
+    try:
+        with path.open("rb") as stream:
+            stat = os.fstat(stream.fileno())
+            if boundary.dev is not None and (
+                stat.st_dev != boundary.dev or stat.st_ino != boundary.ino
+            ):
+                return None
+            if boundary.offset is not None:
+                if stat.st_size < boundary.offset:
+                    return None
+                remaining = boundary.offset
+                records = 0
+                last = b""
+                while remaining:
+                    chunk = stream.read(min(PI_READ_BYTES, remaining))
+                    if not chunk:
+                        return None
+                    remaining -= len(chunk)
+                    records += chunk.count(b"\n")
+                    last = chunk[-1:]
+                if boundary.offset and last != b"\n":
+                    return None
+                if boundary.records is not None and records != boundary.records:
+                    return None
+                return boundary.offset, records
+            assert boundary.records is not None
+            if boundary.records == 0:
+                return 0, 0
+            offset = records = 0
+            while chunk := stream.read(PI_READ_BYTES):
+                newlines = chunk.count(b"\n")
+                if records + newlines >= boundary.records:
+                    wanted = boundary.records - records
+                    newline = -1
+                    for _ in range(wanted):
+                        newline = chunk.find(b"\n", newline + 1)
+                    return offset + newline + 1, boundary.records
+                records += newlines
+                offset += len(chunk)
+    except OSError:
+        return None
+    return None
+
+
 class PiTranscriptSource(TranscriptSource):
     """A TranscriptSource with bounded reads and oversized-record recovery."""
 
@@ -138,6 +191,7 @@ class PiTranscriptSource(TranscriptSource):
         self._dropping_oversized = False
         #: Initial restart reconciliation parses only usage through this byte offset.
         self._usage_only_until: int | None = None
+        self._pending_usage_only_until: int | None = None
         self._pending_checkpoint: str | None = None
         self._acknowledged_checkpoint: str | None = (
             self._usage_checkpoint
@@ -151,6 +205,8 @@ class PiTranscriptSource(TranscriptSource):
 
     def commit_attachment(self) -> None:
         super().commit_attachment()
+        self._usage_only_until = self._pending_usage_only_until
+        self._pending_usage_only_until = None
         self._stream_dev, self._stream_ino = self._pending_stream_dev, self._pending_stream_ino
         self._pending_stream_dev = self._pending_stream_ino = None
         self._clear_live_buffers()
@@ -166,25 +222,26 @@ class PiTranscriptSource(TranscriptSource):
         )
 
     async def _locate(self, *, session_id: str | None) -> Path | None:
-        """Use creation evidence when a resumed Pi session changes transcript files."""
-        if session_id is not None or self._usage_floor is None or self._after is None:
-            return await super()._locate(session_id=session_id)
-        if not self._cwd:
-            return None
-        path = await asyncio.to_thread(
-            self._observer.find_resume_transcript, cwd=self._cwd, after=self._after
-        )
-        return path if path is not None and self._inside_domain(path) else None
+        """Prefer the exact switch handoff emitted by Theater's bundled extension."""
+        if session_id is None and self.path is not None and self._cwd:
+            path = await asyncio.to_thread(
+                self._observer.find_switch_transcript, cwd=self._cwd, current=self.path
+            )
+            if path is not None:
+                return path if self._inside_domain(path) else None
+        return await super()._locate(session_id=session_id)
 
     def discard_attachment(self) -> None:
         super().discard_attachment()
         self._pending_checkpoint = None
+        self._pending_usage_only_until = None
         self._pending_stream_dev = self._pending_stream_ino = None
         self._seed_live_context()
 
     def revoke_attachment(self) -> None:
         super().revoke_attachment()
         self._usage_only_until = None
+        self._pending_usage_only_until = None
         self._pending_checkpoint = None
         self._acknowledged_checkpoint = None
         self._pending_stream_dev = self._pending_stream_ino = None
@@ -194,6 +251,7 @@ class PiTranscriptSource(TranscriptSource):
     def _detach(self) -> None:
         super()._detach()
         self._usage_only_until = None
+        self._pending_usage_only_until = None
         self._pending_checkpoint = None
         self._acknowledged_checkpoint = None
         self._stream_dev = self._stream_ino = None
@@ -210,6 +268,7 @@ class PiTranscriptSource(TranscriptSource):
     def acknowledge_accounting_checkpoint(self) -> None:
         if self._pending_checkpoint is not None:
             self._acknowledged_checkpoint = self._pending_checkpoint
+            self._usage_checkpoint = self._pending_checkpoint
             self._pending_checkpoint = None
 
     def rollback_accounting_checkpoint(self) -> None:
@@ -261,6 +320,8 @@ class PiTranscriptSource(TranscriptSource):
         size, lines, mtime, last_line, dev, ino = await asyncio.to_thread(_attachment_point, path)
         session_id = self._observer.session_id(path)
         cursor = self._replay_cursor(path, size=size, lines=lines, dev=dev, ino=ino)
+        if isinstance(cursor, _WaitForSwitch):
+            return None
         offset, index = (size, lines) if cursor is None else cursor[:2]
         usage_only = cursor is not None and cursor[2]
         last_event: Event | None = None
@@ -268,7 +329,7 @@ class PiTranscriptSource(TranscriptSource):
             parsed = self._parse_record(last_line, max(0, lines - 1), clip_text=True)
             semantic = [event for event in parsed.events if not event.usage_only]
             last_event = semantic[-1] if semantic else None
-        self._usage_only_until = size if usage_only else None
+        self._pending_usage_only_until = size if usage_only else None
         self._pending_stream_dev, self._pending_stream_ino = dev, ino
         self._pending_checkpoint = _encode_checkpoint(path, offset, index, dev, ino)
         self._pending = (path, offset, index, mtime, session_id)
@@ -292,7 +353,7 @@ class PiTranscriptSource(TranscriptSource):
         lines: int,
         dev: int | None,
         ino: int | None,
-    ) -> tuple[int, int, bool] | None:
+    ) -> tuple[int, int, bool] | _WaitForSwitch | None:
         """Return ``(offset, record_index, usage_only)`` for a safe replay.
 
         Pi sessions are participant-isolated, so a cold launch and a `/new`
@@ -323,13 +384,20 @@ class PiTranscriptSource(TranscriptSource):
             return (offset, index, True)
         return (offset, index, False)
 
-    def _rotation_cursor(self, path: Path) -> tuple[int, int, bool] | None:
-        """Replay a new `/new` stream, but never import an older `/resume` target."""
-        if self._after is None or self._observer.session_started_after(
-            path, self._after, allow_resume_switch=self._usage_floor is not None
-        ):
+    def _rotation_cursor(self, path: Path) -> tuple[int, int, bool] | _WaitForSwitch | None:
+        """Honor Pi's explicit switch boundary; unknown rotations attach at EOF."""
+        if self.path is None or not self._cwd:
+            return None
+        boundary = self._observer.switch_boundary(cwd=self._cwd, current=self.path)
+        if boundary is None or boundary.location != path:
+            return None
+        if boundary.reason == "new":
             return (0, 0, False)
-        return None
+        cursor = _switch_cursor(path, boundary)
+        if cursor is None:
+            return _WAIT_FOR_SWITCH
+        offset, records = cursor
+        return (offset, records, False)
 
     def _floor_cursor(
         self,

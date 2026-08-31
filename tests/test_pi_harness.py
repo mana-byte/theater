@@ -8,7 +8,12 @@ from pathlib import Path
 
 from theater.daemon.store import Store
 from theater.harness.base import APPROVALS
-from theater.harness.builtin.plugins.pi.constants import PI_ISOLATION_MARKER, PI_RECORD_BYTES
+from theater.harness.builtin.plugins.pi.constants import (
+    PI_ISOLATION_MARKER,
+    PI_RECORD_BYTES,
+    PI_SWITCH_MARKER,
+    PI_SWITCH_MARKER_VERSION,
+)
 from theater.harness.builtin.plugins.pi.launch import plan_launch, resume_launch_overlay
 from theater.harness.builtin.plugins.pi.manifest import MANIFEST
 from theater.harness.builtin.plugins.pi.observer import PiObserver
@@ -46,6 +51,43 @@ def _append(path: Path, *records: dict[str, object]) -> None:
     with path.open("a", encoding="utf-8") as stream:
         for record in records:
             stream.write(json.dumps(record) + "\n")
+
+
+def _mark_switch(
+    root: Path,
+    *,
+    previous: Path,
+    target: Path,
+    reason: str,
+    offset: int | None = None,
+    records: int | None = None,
+) -> None:
+    if reason == "new":
+        offset = records = 0
+        dev = ino = None
+    elif target.exists():
+        stat = target.stat()
+        offset = stat.st_size if offset is None else offset
+        records = None
+        dev, ino = stat.st_dev, stat.st_ino
+    else:
+        dev = ino = None
+    (root / PI_SWITCH_MARKER).write_text(
+        json.dumps(
+            {
+                "version": PI_SWITCH_MARKER_VERSION,
+                "reason": reason,
+                "location": str(target.resolve()),
+                "previous_location": str(previous.resolve()),
+                "offset": offset,
+                "records": records,
+                "dev": dev,
+                "ino": ino,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def test_pi_launch_isolated_session_config_and_all_approval_modes(tmp_path, monkeypatch) -> None:
@@ -210,9 +252,23 @@ def test_pi_bridge_marks_only_pi_confirmed_idle_states() -> None:
         assert f'pi.on("{event}"' in bridge
     # Registering the status protocol cannot depend on owning the MCP bridge:
     # a user-local bridge may already hold that process-wide lease.
-    duplicate_lease = bridge.index("if (bridgeLease === undefined)")
-    duplicate_status = bridge.index("registerIdleStatus(pi);", duplicate_lease)
-    assert duplicate_status > duplicate_lease
+    assert bridge.index("registerIdleStatus(pi);") < bridge.index(
+        "const bridgeLease = acquireBridge();"
+    )
+
+
+def test_pi_bridge_records_session_switch_boundaries_independently_of_mcp_ownership() -> None:
+    bridge = (
+        Path(__file__).parents[1] / "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts"
+    ).read_text(encoding="utf-8")
+
+    assert 'const SWITCH_MARKER = ".theater-pi-switch.json";' in bridge
+    assert 'pi.on("session_start"' in bridge
+    assert 'pi.on("session_shutdown"' in bridge
+    assert "writeSwitchMarker(event.reason" in bridge
+    assert bridge.index("registerTranscriptSwitches(pi);") < bridge.index(
+        "const bridgeLease = acquireBridge();"
+    )
 
 
 def test_pi_parser_pairs_tools_projects_usage_and_ends_the_turn(tmp_path) -> None:
@@ -653,6 +709,7 @@ def test_pi_resume_new_restart_replays_only_the_post_floor_usage(tmp_path) -> No
             },
         ),
     )
+    _mark_switch(sessions, previous=old, target=fresh, reason="new")
     rotated = asyncio.run(source.refresh())
     assert rotated.attached is not None
     source.commit_attachment()
@@ -704,6 +761,113 @@ def test_pi_resume_new_restart_replays_only_the_post_floor_usage(tmp_path) -> No
     assert asyncio.run(source.refresh()).attached is None
 
 
+def test_pi_fork_switch_skips_copied_history_and_observes_only_new_records(tmp_path) -> None:
+    workdir = tmp_path / "work"
+    sessions = tmp_path / "sessions"
+    workdir.mkdir()
+    sessions.mkdir()
+    old = sessions / "old.jsonl"
+    copied = _message(
+        "copied-assistant",
+        {
+            "role": "assistant",
+            "content": "already accounted",
+            "stopReason": "stop",
+            "usage": {"input": 100, "output": 1},
+        },
+    )
+    _append(old, _session(session_id="old", cwd=workdir), copied)
+    source = PiObserver(root=sessions, isolated=True).open_source(
+        cwd=str(workdir), session_id="old", after=1_800_000_000
+    )
+    assert asyncio.run(source.read()).attached is not None
+    source.commit_attachment()
+    source.acknowledge_accounting_checkpoint()
+    assert [
+        event.usage.input_tokens for event in asyncio.run(source.read()).events if event.usage
+    ] == [100]
+    source.acknowledge_accounting_checkpoint()
+
+    fork = sessions / "fork.jsonl"
+    _mark_switch(sessions, previous=old, target=fork, reason="fork", records=2)
+    _append(
+        fork,
+        _session(session_id="fork", cwd=workdir),
+        copied,
+        _message(
+            "new-assistant",
+            {
+                "role": "assistant",
+                "content": "new work",
+                "stopReason": "stop",
+                "usage": {"input": 7, "output": 1},
+            },
+        ),
+    )
+
+    attached = asyncio.run(source.refresh()).attached
+    assert attached is not None
+    assert attached.session_id == "fork"
+    assert attached.skipped == 2
+    source.commit_attachment()
+    batch = asyncio.run(source.read())
+    assert [event.text for event in batch.events if event.text] == ["new work"]
+    assert [event.usage.input_tokens for event in batch.events if event.usage] == [7]
+
+
+def test_pi_existing_resume_switch_attaches_at_switch_eof(tmp_path) -> None:
+    workdir = tmp_path / "work"
+    sessions = tmp_path / "sessions"
+    workdir.mkdir()
+    sessions.mkdir()
+    current = sessions / "current.jsonl"
+    target = sessions / "existing.jsonl"
+    _append(current, _session(session_id="current", cwd=workdir))
+    _append(
+        target,
+        _session(session_id="existing", cwd=workdir, timestamp="2020-01-01T00:00:00.000Z"),
+        _message(
+            "historical",
+            {
+                "role": "assistant",
+                "content": "historical",
+                "stopReason": "stop",
+                "usage": {"input": 100, "output": 1},
+            },
+        ),
+    )
+    source = PiObserver(root=sessions, isolated=True).open_source(
+        cwd=str(workdir), session_id="current", after=1_800_000_000
+    )
+    assert asyncio.run(source.read()).attached is not None
+    source.commit_attachment()
+    source.acknowledge_accounting_checkpoint()
+    asyncio.run(source.read())
+    source.acknowledge_accounting_checkpoint()
+
+    _mark_switch(sessions, previous=current, target=target, reason="resume", records=2)
+    _append(
+        target,
+        _message(
+            "new-on-resume",
+            {
+                "role": "assistant",
+                "content": "after resume",
+                "stopReason": "stop",
+                "usage": {"input": 13, "output": 2},
+            },
+        ),
+    )
+    attached = asyncio.run(source.refresh()).attached
+    assert attached is not None
+    assert attached.session_id == "existing"
+    assert attached.skipped == 2
+    source.commit_attachment()
+    batch = asyncio.run(source.read())
+    assert [event.text for event in batch.events if event.text] == ["after resume"]
+    assert [event.usage.input_tokens for event in batch.events if event.usage] == [13]
+
+
 def test_pi_retries_an_unacknowledged_usage_batch_before_advancing(tmp_path) -> None:
     workdir = tmp_path / "work"
     sessions = tmp_path / "sessions"
@@ -750,7 +914,7 @@ def test_pi_retries_an_unacknowledged_usage_batch_before_advancing(tmp_path) -> 
     assert [event.usage.input_tokens for event in retried.events if event.usage] == [5, 7]
 
 
-def test_pi_rejected_rotation_keeps_the_active_stream_identity(tmp_path) -> None:
+def test_pi_rejected_rotation_keeps_all_active_stream_state(tmp_path, monkeypatch) -> None:
     workdir = tmp_path / "work"
     sessions = tmp_path / "sessions"
     workdir.mkdir()
@@ -780,7 +944,21 @@ def test_pi_rejected_rotation_keeps_the_active_stream_identity(tmp_path) -> None
     source.acknowledge_accounting_checkpoint()
 
     fresh = sessions / "fresh.jsonl"
-    _append(fresh, _session(session_id="fresh", cwd=workdir))
+    _append(
+        fresh,
+        _session(session_id="fresh", cwd=workdir),
+        _message(
+            "candidate-history",
+            {
+                "role": "assistant",
+                "content": "x" * 2_000,
+                "stopReason": "stop",
+                "usage": {"input": 100, "output": 1},
+            },
+        ),
+    )
+    _mark_switch(sessions, previous=old, target=fresh, reason="new")
+    monkeypatch.setattr(source, "_replay_cursor", lambda *_args, **_kwargs: (0, 0, True))
     rotation = asyncio.run(source.refresh())
     assert rotation.attached is not None
     source.discard_attachment()
@@ -797,9 +975,10 @@ def test_pi_rejected_rotation_keeps_the_active_stream_identity(tmp_path) -> None
             },
         ),
     )
-    assert [
-        event.usage.input_tokens for event in asyncio.run(source.read()).events if event.usage
-    ] == [7]
+    continued = asyncio.run(source.read())
+    assert [event.text for event in continued.events if event.text] == ["still old"]
+    assert [event.usage.input_tokens for event in continued.events if event.usage] == [7]
+    assert all(not event.usage_only for event in continued.events)
     source.acknowledge_accounting_checkpoint()
     checkpoint = source.accounting_checkpoint()
     assert checkpoint is not None

@@ -380,6 +380,9 @@ class Observer:
                         self._attachments._reset_watch_state.discard(pid)
                         clock = QuietClock()
                         turns = TurnAccumulator()
+                    if not self._persist_pending_accounting_checkpoint(pid, source):
+                        await self._sleep(self.poll)
+                        continue
                     if opened_durable and self.transcript_identity_lost(pid):
                         self._sweep_identity_lost_grace(pid)
                         await self._screen_only(pid, observer, clock)
@@ -651,7 +654,7 @@ class Observer:
         clock: QuietClock,
         turns: TurnAccumulator,
     ) -> bool:
-        """Apply one source batch, then durably acknowledge its accounting point."""
+        """Apply once, then persist its cursor without replaying applied semantics."""
         try:
             result = self._reducer.apply(
                 pid,
@@ -662,13 +665,24 @@ class Observer:
                 settle_fn=self._settle,
                 turn_result_fn=self._turn_result,
             )
-            if checkpoint := source.pending_accounting_checkpoint():
-                self.store.set_usage_checkpoint(pid, checkpoint)
         except Exception:
             source.rollback_accounting_checkpoint()
             raise
-        source.acknowledge_accounting_checkpoint()
+        self._persist_pending_accounting_checkpoint(pid, source)
         return result
+
+    def _persist_pending_accounting_checkpoint(self, pid: str, source: Source) -> bool:
+        """Retry checkpoint durability without applying the source batch twice."""
+        checkpoint = source.pending_accounting_checkpoint()
+        if checkpoint is None:
+            return True
+        try:
+            self.store.set_usage_checkpoint(pid, checkpoint)
+        except Exception:
+            logger.exception("persisting accounting checkpoint for %s failed", pid)
+            return False
+        source.acknowledge_accounting_checkpoint()
+        return True
 
     @staticmethod
     def _has_semantic_progress(batch: Batch) -> bool:
