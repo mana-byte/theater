@@ -354,6 +354,14 @@ class Source(ABC):
         """Return immutable participant-scoped channel health."""
         return ()
 
+    def accounting_checkpoint(self) -> str | None:
+        """Return the source point safe to persist after a successful batch."""
+        return None
+
+    def acknowledge_accounting_checkpoint(self) -> None:
+        """Advance the source's durable-accounting point after batch persistence."""
+        return
+
     def commit_attachment(self) -> None:
         """Adopt the attachment most recently returned by ``read``/``refresh``.
 

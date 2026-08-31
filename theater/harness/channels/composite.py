@@ -330,6 +330,13 @@ class CompositeSource(Source):
             return None
         return await self._primary.probe_identity_loss()
 
+    def accounting_checkpoint(self) -> str | None:
+        return None if self._primary is None else self._primary.accounting_checkpoint()
+
+    def acknowledge_accounting_checkpoint(self) -> None:
+        if self._primary is not None:
+            self._primary.acknowledge_accounting_checkpoint()
+
     def commit_attachment(self) -> None:
         if self._primary is None:
             raise _source_contract_error("commit_attachment")

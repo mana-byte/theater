@@ -38,6 +38,7 @@ class ParticipantRepository:
             "transcript_location": p.transcript_location,
             "resume_floor": p.resume_floor,
             "usage_floor": p.usage_floor,
+            "usage_checkpoint": p.usage_checkpoint,
             "resumed_from_id": p.resumed_from_id,
             "parent_id": p.parent_id,
             "pid": p.pid,
@@ -194,6 +195,15 @@ class ParticipantRepository:
         """Clear the resume floor column without touching any other field."""
         self._db.conn.execute(
             update(participants).where(participants.c.id == pid).values(resume_floor=None)
+        )
+
+    def set_usage_checkpoint(self, pid: str, checkpoint: str) -> None:
+        """Persist a source-acknowledged accounting cursor if it advanced."""
+        self._db.conn.execute(
+            update(participants)
+            .where(participants.c.id == pid)
+            .where(participants.c.usage_checkpoint.is_not(checkpoint))
+            .values(usage_checkpoint=checkpoint)
         )
 
     def reparent(self, pid: str, *, new_parent_id: str) -> None:

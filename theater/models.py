@@ -61,6 +61,8 @@ class Participant:
     #: purpose.  Usage reconciliation needs the same boundary across daemon
     #: restarts, so it deliberately has its own durable field.
     usage_floor: str | None = None
+    #: Last Pi transcript point whose records finished durable accounting.
+    usage_checkpoint: str | None = None
     resumed_from_id: str | None = None
     parent_id: str | None = None
     pid: int | None = None
@@ -124,6 +126,7 @@ class Participant:
         d.pop("transcript_location", None)
         d.pop("resume_floor", None)
         d.pop("usage_floor", None)
+        d.pop("usage_checkpoint", None)
         d.pop("resumed_from_id", None)
         d["tier"] = str(self.tier)
         d["status"] = str(self.status)
@@ -153,6 +156,7 @@ class Participant:
             transcript_location=mapping["transcript_location"],
             resume_floor=mapping["resume_floor"],
             usage_floor=mapping["usage_floor"],
+            usage_checkpoint=mapping["usage_checkpoint"],
             resumed_from_id=mapping["resumed_from_id"],
             parent_id=mapping["parent_id"],
             pid=mapping["pid"],

@@ -121,6 +121,48 @@ def kinds(store, prefix="agent."):
     return [row["kind"] for row in store.bus_tail(limit=500) if row["kind"].startswith(prefix)]
 
 
+def test_source_accounting_checkpoint_is_persisted_only_after_apply_succeeds(registry, monkeypatch):
+    """A restart may skip only records whose reducer effects are durable."""
+
+    class CheckpointSource(Source):
+        checkpoint = '{"location":"/tmp/pi.jsonl","offset":42}'
+
+        def __init__(self) -> None:
+            self.acknowledged = False
+
+        async def read(self) -> Batch:
+            return Batch()
+
+        def accounting_checkpoint(self) -> str | None:
+            return self.checkpoint if self.acknowledged else None
+
+        def acknowledge_accounting_checkpoint(self) -> None:
+            self.acknowledged = True
+
+    participant = registry.register(harness="vibe", pane=None, cwd="/tmp")
+    observer = Observer(registry, harnesses={})
+    source = CheckpointSource()
+
+    assert observer._apply_source_batch(
+        participant.id, source, Batch(progressed=True), QuietClock(), TurnAccumulator()
+    )
+    assert source.acknowledged is True
+    assert registry.get(participant.id).usage_checkpoint == source.checkpoint
+
+    failing_source = CheckpointSource()
+
+    def fail_apply(*_args, **_kwargs):
+        raise RuntimeError("reducer failed")
+
+    monkeypatch.setattr(observer._reducer, "apply", fail_apply)
+    with pytest.raises(RuntimeError, match="reducer failed"):
+        observer._apply_source_batch(
+            participant.id, failing_source, Batch(progressed=True), QuietClock(), TurnAccumulator()
+        )
+    assert failing_source.acknowledged is False
+    assert registry.get(participant.id).usage_checkpoint == source.checkpoint
+
+
 async def test_new_records_reach_the_bus_as_normalized_events(registry, vibe_tree, observing):
     p = registry.register(harness="vibe", pane=None, cwd=str(vibe_tree["project"]))
     assert await until(lambda: "agent.transcript" in kinds(registry.store))
