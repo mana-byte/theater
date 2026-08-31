@@ -9,8 +9,10 @@ from pathlib import Path
 from theater.harness.builtin.plugins.pi.constants import PI_ISOLATION_MARKER, PI_RECORD_BYTES
 from theater.harness.builtin.plugins.pi.launch import plan_launch, resume_launch_overlay
 from theater.harness.builtin.plugins.pi.observer import PiObserver
-from theater.harness.contracts.callbacks import LaunchContext, ResumeContext
+from theater.harness.builtin.plugins.pi.screen import classify_screen
+from theater.harness.contracts.callbacks import LaunchContext, ResumeContext, ScreenContext
 from theater.harness.contracts.events import EventKind
+from theater.harness.contracts.observation import ScreenConfidence, ScreenKind
 from theater.models import Participant, Status
 from theater.trajectory.enums import TrajectoryKind
 
@@ -58,6 +60,8 @@ def test_pi_launch_isolated_session_config_and_yolo_only(tmp_path, monkeypatch) 
     session_dir = tmp_path / "theater-home" / "observations" / "pi" / "pi-child" / "sessions"
     assert plan.argv == [
         "pi",
+        "--extension",
+        str(Path(__file__).parents[1] / "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts"),
         "--session-id",
         "pi-child",
         "--session-dir",
@@ -124,6 +128,14 @@ def test_pi_header_identity_does_not_depend_on_the_filename(tmp_path) -> None:
     assert observer.find_transcript(cwd=str(workdir), session_id="native-id") == (
         transcript.resolve()
     )
+
+
+def test_pi_screen_classifier_is_conservative_and_never_raises() -> None:
+    assert classify_screen(ScreenContext(capture="Esc to interrupt")).kind is ScreenKind.WORKING
+    prompt = classify_screen(ScreenContext(capture="\n❯"))
+    assert prompt.kind is ScreenKind.PROMPT
+    assert prompt.confidence is ScreenConfidence.LOW
+    assert classify_screen(ScreenContext(capture="agent prose only")).kind is ScreenKind.UNKNOWN
 
 
 def test_pi_parser_pairs_tools_projects_usage_and_ends_the_turn(tmp_path) -> None:

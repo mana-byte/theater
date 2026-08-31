@@ -13,6 +13,8 @@ from theater.models import BadRequest
 from .constants import PI_ISOLATION_MARKER, PI_SESSIONS_DIRNAME
 from .isolation import canonical, marker_text, validate_domain
 
+_THEATER_MCP_BRIDGE = Path(__file__).with_name("theater_mcp_bridge.ts")
+
 
 def participant_root(participant_id: str) -> Path:
     """The Theater-owned Pi session directory for one participant."""
@@ -33,6 +35,8 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
     }
     argv = [
         "pi",
+        "--extension",
+        str(_THEATER_MCP_BRIDGE),
         "--session-id",
         session_id,
         "--theater-mcp-config",
@@ -41,7 +45,7 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
     files = {context.config_path: json.dumps(config, indent=2) + "\n"}
     env: dict[str, str] = {}
     if context.resume is None:
-        argv[3:3] = ["--session-dir", str(session_dir)]
+        argv[5:5] = ["--session-dir", str(session_dir)]
         files[session_dir / PI_ISOLATION_MARKER] = marker_text(
             participant_id=context.participant_id,
             transcript_domain=session_dir,

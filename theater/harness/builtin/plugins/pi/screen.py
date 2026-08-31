@@ -12,5 +12,5 @@ def classify_screen(context: ScreenContext) -> ScreenReading:
     if any("esc" in line and "interrupt" in line for line in lines):
         return ScreenReading(kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH)
     if lines and lines[-1] in {">", "›", "❯"}:
-        return ScreenReading(kind=ScreenKind.PROMPT, confidence=ScreenConfidence.MEDIUM)
+        return ScreenReading(kind=ScreenKind.PROMPT, confidence=ScreenConfidence.LOW)
     return ScreenReading(kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW)
