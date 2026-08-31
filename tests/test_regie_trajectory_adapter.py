@@ -5,11 +5,12 @@ import json
 import pytest
 
 from theater.regie.trajectory.models import decode_delta, decode_page
-from theater.regie.trajectory.state import TrajectoryStateStore
+from theater.regie.trajectory.state import ParticipantTrajectoryState, TrajectoryStateStore
 from theater.trajectory import (
     ContentFormat,
     DetailField,
     PanelState,
+    PanelStateInfo,
     TrajectoryDelta,
     TrajectoryPage,
     TrajectoryRecord,
@@ -111,6 +112,52 @@ def test_runtime_state_rejects_mixed_participant_and_keeps_revision_precedence()
     assert state.records["r1"].summary == "new"
     with pytest.raises(TrajectoryValidationError):
         state.upsert([other])
+
+
+def test_runtime_state_skips_rebuilding_indexes_for_unchanged_upserts(monkeypatch) -> None:
+    state = TrajectoryStateStore().get("p1")
+    item = TrajectoryRecord.from_wire(wire_record("r1"))
+    state.upsert([item])
+    rebuilds = 0
+    original_rebuild = ParticipantTrajectoryState._rebuild_groups
+
+    def count_rebuild(self: ParticipantTrajectoryState) -> None:
+        nonlocal rebuilds
+        rebuilds += 1
+        original_rebuild(self)
+
+    monkeypatch.setattr(ParticipantTrajectoryState, "_rebuild_groups", count_rebuild)
+
+    assert state.upsert([item]) == (0, 0)
+    assert rebuilds == 0
+
+
+def test_runtime_state_repairs_tail_selection_for_unchanged_upserts() -> None:
+    state = TrajectoryStateStore().get("p1")
+    item = TrajectoryRecord.from_wire(wire_record("r1"))
+    state.upsert([item])
+    state.selected_id = None
+
+    assert state.upsert([item]) == (0, 0)
+    assert state.selected_id == "r1"
+
+
+def test_empty_snapshot_rebuilds_indexes_after_replacing_loaded_records() -> None:
+    state = TrajectoryStateStore().get("p1")
+    item = TrajectoryRecord.from_wire(wire_record("r1", kind="tool_call"))
+    state.upsert([item])
+    assert state.groups
+    assert state.tool_index.ordered
+
+    state.apply_snapshot(TrajectoryPage(PanelStateInfo(PanelState.READY), records=()))
+
+    assert not state.records
+    assert not state.groups
+    assert not state.request_index.by_id
+    assert not state.tool_index.ordered
+    assert all(
+        not projection.record_ids for projection in state.diagnostic_index.by_view.values()
+    )
 
 
 def test_runtime_state_counts_compact_utf8_wire_bytes() -> None:

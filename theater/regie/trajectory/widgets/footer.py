@@ -198,17 +198,31 @@ class TrajectoryFooter(Horizontal):
         text-style: bold;
     }}
     TrajectoryFooter.-compact Button {{
+        width: 3;
         min-width: 3;
         padding: 0 1;
         margin-left: 0;
     }}
+    TrajectoryFooter.-compact #trajectory-page-previous,
+    TrajectoryFooter.-compact #trajectory-page-next {{
+        width: 3;
+        min-width: 3;
+        padding: 0 1;
+    }}
+    TrajectoryFooter.-compact #trajectory-page {{
+        width: 13;
+        min-width: 13;
+    }}
     TrajectoryFooter.-compact #trajectory-view-action {{
-        width: 12;
+        width: 10;
         min-width: 10;
         margin-left: 0;
     }}
     TrajectoryFooter.-compact #trajectory-state {{ display: none; }}
-    TrajectoryFooter.-narrow #trajectory-status {{ display: none; }}
+    TrajectoryFooter.-narrow #trajectory-page-previous,
+    TrajectoryFooter.-narrow #trajectory-page,
+    TrajectoryFooter.-narrow #trajectory-page-next,
+    TrajectoryFooter.-narrow #trajectory-status,
     TrajectoryFooter.-narrow #trajectory-page-range {{ display: none; }}
     """
 
@@ -248,6 +262,12 @@ class TrajectoryFooter(Horizontal):
             compact=True,
         )
         yield Button("↓ Live", id="trajectory-follow-action", compact=True, flat=True)
+
+    def on_mount(self) -> None:
+        # Initial resize can occur before this widget is mounted. Apply its
+        # compact labels once the controls exist so their explicit widths win.
+        self._update_actions()
+        self.refresh(layout=True)
 
     def _update_actions(self) -> None:
         search = self.query_one("#trajectory-search-action", Button)
@@ -381,13 +401,16 @@ class TrajectoryFooter(Horizontal):
 
     def on_resize(self, event: events.Resize) -> None:
         compact = event.size.width < TRAJECTORY_FOOTER_COMPACT_WIDTH
-        narrow = event.size.width < TRAJECTORY_FOOTER_NARROW_WIDTH
+        narrow = event.size.width <= TRAJECTORY_FOOTER_NARROW_WIDTH
         changed = compact != self._compact
+        narrow_changed = narrow != self.has_class("-narrow")
         self._compact = compact
         self.set_class(compact, "-compact")
         self.set_class(narrow, "-narrow")
         if changed and self.is_mounted:
             self._update_actions()
+        if changed or narrow_changed:
+            self.refresh(layout=True)
 
     def on_button_pressed(self, message: Button.Pressed) -> None:
         actions = {

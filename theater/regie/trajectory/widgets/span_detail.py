@@ -437,6 +437,7 @@ class SpanDetailPanel(Vertical):
         request: TrajectoryRequest | None = None,
         tab: InspectorTab = InspectorTab.SUMMARY,
     ) -> InspectorTab:
+        previous_tab = self._details.tab if self._details is not None else None
         if self._record is None or self._record.record_id != record.record_id:
             self._collapsed_json_paths.clear()
         if (
@@ -466,7 +467,22 @@ class SpanDetailPanel(Vertical):
         self._request = request
         self._details = self._build_details(tab)
         self._sync_chrome()
-        self._schedule_reflow(scroll_y, force=True, loading=True)
+        keep_rendered_content = (
+            preserve_scroll
+            and self._details is not None
+            and self._details.tab is previous_tab
+        )
+        # A live update can change the selected record's request or paired
+        # tool while its detail is already on screen. Keep that content until
+        # the next refresh writes its replacement; clearing it here exposes a
+        # blank/loading frame on every incoming span. A different record or
+        # effective tab still loads normally so stale detail is never shown as
+        # current.
+        self._schedule_reflow(
+            scroll_y,
+            force=True,
+            loading=not keep_rendered_content,
+        )
         return self.tab
 
     def set_tab(self, tab: InspectorTab) -> InspectorTab:

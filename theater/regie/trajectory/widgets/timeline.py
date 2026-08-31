@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
 from collections.abc import Sequence
+from heapq import heappop, heappush
 from typing import ClassVar
 
 from rich.segment import Segment
@@ -144,11 +145,18 @@ class Timeline(ScrollView):
         self._duration_mode = duration_mode
         self._layout = build_timeline_layout((), OrderMode.ORDER)
         self._span_by_id: dict[str, TimelineSpan] = {}
-        self._lane_spans: dict[TimelineLane, tuple[TimelineSpan, ...]] = dict.fromkeys(
+        self._lane_visual_segments: dict[
+            TimelineLane, tuple[tuple[int, int, TimelineSpan], ...]
+        ] = dict.fromkeys(self._LANES, ())
+        self._lane_visual_ends: dict[TimelineLane, tuple[int, ...]] = dict.fromkeys(
             self._LANES, ()
         )
-        self._lane_starts: dict[TimelineLane, tuple[int, ...]] = dict.fromkeys(self._LANES, ())
-        self._lane_max_ends: dict[TimelineLane, tuple[int, ...]] = dict.fromkeys(self._LANES, ())
+        self._lane_hit_segments: dict[
+            TimelineLane, tuple[tuple[int, int, TimelineSpan], ...]
+        ] = dict.fromkeys(self._LANES, ())
+        self._lane_hit_ends: dict[TimelineLane, tuple[int, ...]] = dict.fromkeys(
+            self._LANES, ()
+        )
         self._turn_boundaries: tuple[int, ...] = ()
         self._scroll_offset = max(0, int(scroll_offset))
         self._viewport_width = 0
@@ -259,27 +267,35 @@ class Timeline(ScrollView):
         paints_spans = row == TIMELINE_LANE_HEIGHT // 2
         base_style = self._component("rail" if paints_spans else "track")
         styles = [base_style] * width
-        spans = self._lane_spans[lane]
-        first = bisect_right(self._lane_max_ends[lane], start)
-        last = bisect_left(self._lane_starts[lane], start + width)
         if paints_spans:
-            visible_spans = spans[first:last]
-            highlighted_id = self._highlighted_id()
-            for span in sorted(
-                visible_spans,
-                key=lambda item: (item.record_id == highlighted_id, -item.width),
-            ):
+            segments = self._lane_visual_segments[lane]
+            ends = self._lane_visual_ends[lane]
+            index = bisect_right(ends, start)
+            end = start + width
+            while index < len(segments):
+                segment_start, segment_end, span = segments[index]
+                if segment_start >= end:
+                    break
                 record = self._records_by_id.get(span.record_id)
-                if record is None:
-                    continue
-                style = self._span_style(record)
-                span_start = span.x if span.record_id == highlighted_id else span.visual_start
-                span_end = span.end if span.record_id == highlighted_id else span.visual_end
-                for x in range(
-                    max(0, span_start - start),
-                    min(width, span_end - start),
-                ):
-                    styles[x] = style
+                if record is not None:
+                    style = self._span_style(record)
+                    for x in range(
+                        max(0, segment_start - start),
+                        min(width, segment_end - start),
+                    ):
+                        styles[x] = style
+                index += 1
+            highlighted_id = self._highlighted_id()
+            highlighted = self._span_by_id.get(highlighted_id or "")
+            if highlighted is not None and highlighted.lane is lane:
+                record = self._records_by_id.get(highlighted.record_id)
+                if record is not None:
+                    style = self._span_style(record)
+                    for x in range(
+                        max(0, highlighted.x - start),
+                        min(width, highlighted.end - start),
+                    ):
+                        styles[x] = style
         first_boundary = bisect_left(self._turn_boundaries, start)
         last_boundary = bisect_left(self._turn_boundaries, start + width)
         boundary_style = self._component("turn")
@@ -332,15 +348,61 @@ class Timeline(ScrollView):
                     key=lambda span: span.x,
                 )
             )
-            starts = tuple(span.x for span in spans)
-            furthest = 0
-            max_ends: list[int] = []
-            for span in spans:
-                furthest = max(furthest, span.end)
-                max_ends.append(furthest)
-            self._lane_spans[lane] = spans
-            self._lane_starts[lane] = starts
-            self._lane_max_ends[lane] = tuple(max_ends)
+            visual_segments = self._winning_segments(spans, visual=True, prefer_later=True)
+            self._lane_visual_segments[lane] = visual_segments
+            self._lane_visual_ends[lane] = tuple(segment[1] for segment in visual_segments)
+            hit_segments = self._winning_segments(spans, visual=False, prefer_later=False)
+            self._lane_hit_segments[lane] = hit_segments
+            self._lane_hit_ends[lane] = tuple(segment[1] for segment in hit_segments)
+
+    @staticmethod
+    def _winning_segments(
+        spans: tuple[TimelineSpan, ...],
+        *,
+        visual: bool,
+        prefer_later: bool,
+    ) -> tuple[tuple[int, int, TimelineSpan], ...]:
+        """Precompute the visible winner for each non-overlapping span range."""
+        intervals = sorted(
+            (
+                (
+                    span.visual_start if visual else span.x,
+                    span.visual_end if visual else span.end,
+                    ordinal,
+                    span,
+                )
+                for ordinal, span in enumerate(spans)
+                if (span.visual_start if visual else span.x)
+                < (span.visual_end if visual else span.end)
+            ),
+            key=lambda item: (item[0], item[1], item[2]),
+        )
+        if not intervals:
+            return ()
+        positions = sorted(
+            {edge for start, end, _ordinal, _span in intervals for edge in (start, end)}
+        )
+        active: list[tuple[int, int, int, int, TimelineSpan]] = []
+        segments: list[tuple[int, int, TimelineSpan]] = []
+        next_interval = 0
+        previous: int | None = None
+        for position in positions:
+            if previous is not None and previous < position and active:
+                winner = active[0][-1]
+                if segments and segments[-1][1] == previous and segments[-1][2] == winner:
+                    segment_start, _segment_end, _span = segments[-1]
+                    segments[-1] = (segment_start, position, winner)
+                else:
+                    segments.append((previous, position, winner))
+            while next_interval < len(intervals) and intervals[next_interval][0] == position:
+                _start, end, ordinal, span = intervals[next_interval]
+                tie_breaker = -ordinal if prefer_later else ordinal
+                heappush(active, (span.width, -span.x, tie_breaker, end, span))
+                next_interval += 1
+            while active and active[0][3] <= position:
+                heappop(active)
+            previous = position
+        return tuple(segments)
 
     def _visible_anchor(self) -> tuple[str, int] | None:
         candidates = [span for span in self._layout.spans if span.end > self._scroll_offset]
@@ -405,8 +467,8 @@ class Timeline(ScrollView):
             self.refresh()
         return self._scroll_offset
 
-    def scroll_to_tail(self) -> int:
-        return self.set_scroll_offset(self.tail_offset)
+    def scroll_to_tail(self, *, repaint: bool = True) -> int:
+        return self.set_scroll_offset(self.tail_offset, repaint=repaint)
 
     def scroll_span_into_view(self, record_id: str | None) -> int:
         span = self._span_by_id.get(record_id or "")
@@ -427,19 +489,13 @@ class Timeline(ScrollView):
         if chart_x < 0:
             return None
         lane, _row = lane_row
-        spans = self._lane_spans[lane]
-        index = bisect_right(self._lane_starts[lane], chart_x) - 1
-        matches: list[TimelineSpan] = []
-        while index >= 0:
-            if self._lane_max_ends[lane][index] <= chart_x:
-                break
-            span = spans[index]
-            if span.x <= chart_x < span.end:
-                matches.append(span)
-            index -= 1
-        if not matches:
+        segments = self._lane_hit_segments[lane]
+        index = bisect_right(self._lane_hit_ends[lane], chart_x)
+        if index >= len(segments):
             return None
-        span = min(matches, key=lambda item: (item.width, -item.x))
+        segment_start, segment_end, span = segments[index]
+        if not segment_start <= chart_x < segment_end:
+            return None
         return self._records_by_id.get(span.record_id)
 
     def hover_anchor(self, record_id: str | None) -> Offset | None:

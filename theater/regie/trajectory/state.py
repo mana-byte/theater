@@ -165,6 +165,16 @@ class ParticipantTrajectoryState:
             self.records.values(), self.request_index, self.tool_index, self.analysis_index
         )
 
+    def _repair_unchanged_records(self) -> None:
+        """Keep no-op upserts consistent with snapshot and tail invariants."""
+        if not self.records:
+            self._rebuild_groups()
+            return
+        if self.selected_id is None and self.follow_tail:
+            display_records = self.display_records
+            if display_records:
+                self.selected_id = display_records[-1].record_id
+
     def row_anchor(self, record_id: str | None) -> str | None:
         """Resolve a tool member to its canonical ledger row anchor."""
         if record_id is None:
@@ -222,6 +232,12 @@ class ParticipantTrajectoryState:
                 self.records[record.record_id] = record
                 added += 1
             self.loaded_bytes += _record_size(record)
+        # Follow polling commonly repeats a cursor with no newer revisions.
+        # Validation above is still performed, but avoid re-sorting and
+        # rebuilding every derived index when nothing actually changed.
+        if not added and not updated:
+            self._repair_unchanged_records()
+            return added, updated
         if older_added:
             self.records = OrderedDict(
                 [(record.record_id, record) for record in older_added] + list(self.records.items())

@@ -129,6 +129,17 @@ class TrajectoryView(Vertical):
         height: {TIMELINE_HEIGHT};
         min-height: {TIMELINE_HEIGHT};
     }}
+    TrajectoryView.-compact-height > #trajectory-overview {{
+        display: none;
+    }}
+    TrajectoryView.-compact-height > #trajectory-timeline {{
+        height: 6 !important;
+        min-height: 6 !important;
+    }}
+    TrajectoryView.-short-height > #trajectory-timeline {{
+        height: 4 !important;
+        min-height: 4 !important;
+    }}
     TrajectoryView > #trajectory-filters {{
         display: none;
     }}
@@ -188,6 +199,7 @@ class TrajectoryView(Vertical):
         self._search_refresh_pending = False
         self._load_worker: Worker[TrajectoryPage | None] | None = None
         self._retiring = False
+        self._responsive_timeline_height: int | None = None
 
     def compose(self) -> ComposeResult:
         yield TrajectoryOverviewStrip(id="trajectory-overview")
@@ -213,6 +225,7 @@ class TrajectoryView(Vertical):
     def _finish_mount(self) -> None:
         if self._retiring or not self.is_attached:
             return
+        self._sync_responsive_height(self.size.height)
         self._refresh()
         self._sync_search_drawer(animate=False)
         if self.state.search_open:
@@ -232,13 +245,30 @@ class TrajectoryView(Vertical):
         if self._load_worker is not None and not self._load_worker.is_finished:
             self._load_worker.cancel()
 
-    def on_resize(self, _event: events.Resize) -> None:
+    def on_resize(self, event: events.Resize) -> None:
+        self._sync_responsive_height(event.size.height)
         if not self.is_mounted:
             return
         card = self.query_one("#trajectory-hover-card", TimelineHoverCard)
         card.fit_to_viewport(self.content_region.width)
         if card.record_id is not None:
             self.call_after_refresh(self._show_timeline_hover, card.record_id)
+
+    def _sync_responsive_height(self, height: int) -> None:
+        compact = height < 30
+        short = height < 22
+        self.set_class(compact, "-compact-height")
+        self.set_class(short, "-short-height")
+        if not self.is_attached:
+            return
+        timeline_height = 4 if short else 6 if compact else TIMELINE_HEIGHT
+        if timeline_height == self._responsive_timeline_height:
+            return
+        timeline = self.query_one("#trajectory-timeline", Timeline)
+        timeline.styles.height = timeline_height
+        timeline.styles.min_height = timeline_height
+        self._responsive_timeline_height = timeline_height
+        self.refresh(layout=True)
 
     def _controller_state_changed(self, state: ParticipantTrajectoryState) -> None:
         if state.participant_id != self.participant_id:
@@ -304,14 +334,15 @@ class TrajectoryView(Vertical):
             scroll_offset=timeline_offset,
         )
         if self.state.follow_tail:
-            timeline.scroll_to_tail()
+            timeline.scroll_to_tail(repaint=False)
         hover_card = self.query_one("#trajectory-hover-card", TimelineHoverCard)
         if hover_card.record_id is not None and hover_card.record_id == self.state.hovered_id:
             self._show_timeline_hover(hover_card.record_id)
         else:
             hover_card.hide()
         self.state.timeline_scroll = timeline.horizontal_offset
-        if not insight_view:
+        detail_open = self.state.detail_id is not None
+        if not insight_view and not detail_open:
             ledger.update_rows(
                 records,
                 self.projection.ledger_page.result,
@@ -327,7 +358,7 @@ class TrajectoryView(Vertical):
         breadcrumb.update_context(record, request=request, tool=tool)
         self._sync_detail_panel()
         self._sync_filter_panel(update_options=True)
-        if self.state.follow_tail and not insight_view:
+        if self.state.follow_tail and not insight_view and not detail_open:
             ledger.scroll_to_record(self.state.selected_id)
         self._update_status()
 
@@ -836,7 +867,10 @@ class TrajectoryView(Vertical):
         self.state.focus_region = self._content_region()
         if not self.is_mounted:
             return
-        self._sync_detail_panel()
+        # The ledger is intentionally left untouched while hidden. Catch it up
+        # once when returning from the detail panel instead of rebuilding it for
+        # every live update behind the panel.
+        self._refresh(recompute=False)
         if self.state.focus_region is FocusRegion.INSIGHTS:
             insights = self.query_one("#trajectory-insights", InsightsPanel)
             insights.set_selected(record_id)

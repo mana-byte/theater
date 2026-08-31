@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from textual.app import App, ComposeResult
 from textual.coordinate import Coordinate
 from textual.widgets import Button, DataTable, Input, RichLog, Select, SelectionList
@@ -184,6 +185,45 @@ async def test_surface_uses_fixed_timeline_and_virtualized_ledger() -> None:
         assert len(view.query("#trajectory-inspector")) == 0
         assert view.styles.padding.left == TRAJECTORY_HORIZONTAL_PADDING
         assert view.styles.padding.right == TRAJECTORY_HORIZONTAL_PADDING
+
+
+@pytest.mark.parametrize("width", (80, 64, 58, 57))
+async def test_footer_controls_stay_inside_compact_trajectory_width(width: int) -> None:
+    app = Host()
+    async with app.run_test(size=(width, 30)) as pilot:
+        view = await add_records(app)
+        await pilot.pause()
+        footer = view.query_one(TrajectoryFooter)
+
+        for control in footer.children:
+            if control.display:
+                assert control.region.right <= footer.region.right, (
+                    f"{width=}, {footer.classes=}, {footer.region=}, "
+                    f"{control.id=}, {control.region=}, {control.styles.width=}, "
+                    f"{control.styles.min_width=}, {getattr(control, 'label', None)=}"
+                )
+
+
+@pytest.mark.parametrize(("height", "timeline_height"), ((24, 6), (20, 4)))
+async def test_short_terminal_keeps_ledger_and_footer_in_view(
+    height: int, timeline_height: int
+) -> None:
+    app = Host()
+    async with app.run_test(size=(80, height)) as pilot:
+        view = await add_records(app)
+        await pilot.pause()
+        overview = view.query_one(TrajectoryOverviewStrip)
+        timeline = view.query_one(Timeline)
+        ledger = view.query_one(Ledger)
+        footer = view.query_one(TrajectoryFooter)
+
+        assert not overview.display
+        assert timeline.region.height == timeline_height, (
+            f"{view.classes=}, {timeline.styles.height=}, {timeline.styles.min_height=}"
+        )
+        assert ledger.region.height >= LEDGER_HEADER_HEIGHT + 1
+        assert ledger.region.bottom <= footer.region.y
+        assert footer.region.bottom <= view.content_region.bottom
 
 
 async def test_pointer_hover_expands_only_the_active_ledger_span(monkeypatch) -> None:

@@ -371,6 +371,79 @@ async def test_timeline_hover_grows_span_without_markers() -> None:
         assert styles[other.x] != highlighted
 
 
+async def test_timeline_precomputes_dense_overlap_paint_and_hit_segments() -> None:
+    records = [
+        record(
+            f"r{index}",
+            index=index,
+            timing={"start": 1.0, "end": 2.0, "provenance": "source"},
+        )
+        for index in range(256)
+    ]
+    app = Host()
+    async with app.run_test(size=(100, 30)):
+        view = await populate(app, records)
+        timeline = view.query_one(Timeline)
+        timeline.update_records(records, duration_mode=True)
+
+        assert len(timeline._lane_visual_segments[TimelineLane.MODEL]) == 1
+        assert len(timeline._lane_hit_segments[TimelineLane.MODEL]) == 1
+        model_middle = 1 + list(TrajectoryLane).index(TrajectoryLane.MODEL) * TIMELINE_LANE_HEIGHT
+        assert timeline._record_at(TIMELINE_LABEL_WIDTH, model_middle) == records[0]
+
+        timeline.set_hovered(records[-1].record_id)
+        strip = timeline._lane_strip(TimelineLane.MODEL, 0, 12)
+        highlighted = timeline._lane_style(TrajectoryLane.MODEL, highlighted=True)
+        styles = [segment.style for segment in strip._segments for _ in range(len(segment.text))]
+        assert all(style == highlighted for style in styles)
+
+
+async def test_tail_refresh_avoids_a_second_timeline_repaint(monkeypatch) -> None:
+    app = Host()
+    async with app.run_test(size=(100, 30)):
+        view = await populate(app, [record("r1")])
+        timeline = view.query_one(Timeline)
+        refreshes = 0
+        original_refresh = timeline.refresh
+
+        def count_refresh(*args, **kwargs):
+            nonlocal refreshes
+            refreshes += 1
+            return original_refresh(*args, **kwargs)
+
+        monkeypatch.setattr(timeline, "refresh", count_refresh)
+        view._refresh(recompute=False)
+
+        assert refreshes == 1
+
+
+async def test_live_updates_defer_hidden_ledger_work_until_details_close(monkeypatch) -> None:
+    app = Host()
+    async with app.run_test(size=(100, 30)):
+        view = await populate(app, [record("r1")])
+        view._open_details("r1")
+        ledger = view.query_one(Ledger)
+        updates = 0
+        original_update_rows = ledger.update_rows
+
+        def count_update_rows(*args, **kwargs):
+            nonlocal updates
+            updates += 1
+            return original_update_rows(*args, **kwargs)
+
+        monkeypatch.setattr(ledger, "update_rows", count_update_rows)
+        view.state.upsert([record("r2", index=2, turn_id=None)])
+        view._refresh()
+
+        assert updates == 0
+        assert view.state.detail_id == "r1"
+
+        view._close_details()
+
+        assert updates == 1
+        assert ledger.get_row_index("record:r2") is not None
+
+
 async def test_timeline_uses_two_rows_per_lane_and_marks_new_turns() -> None:
     records = [
         record("first", index=0, turn_id="turn-1"),
@@ -1034,9 +1107,10 @@ async def test_span_detail_tab_and_content_update_without_rebuilding_ledger(monk
         ],
     )
     app = Host()
-    async with app.run_test(size=(80, 24)):
+    async with app.run_test(size=(80, 24)) as pilot:
         view = await populate(app, [item])
         view._open_details("r1")
+        await pilot.pause()
         ledger = view.query_one(Ledger)
         panel = view.query_one(SpanDetailPanel)
         rebuilds = 0
@@ -1049,6 +1123,7 @@ async def test_span_detail_tab_and_content_update_without_rebuilding_ledger(monk
 
         monkeypatch.setattr(ledger, "_rebuild", count_rebuild)
         panel.set_tab(InspectorTab.OUTPUT)
+        await pilot.pause()
 
         assert rebuilds == 0
         assert panel.tab is InspectorTab.OUTPUT
@@ -1068,6 +1143,10 @@ async def test_span_detail_tab_and_content_update_without_rebuilding_ledger(monk
         view._refresh()
         assert rebuilds == 0
         assert "output: updated" in panel.copy_text
+        await pilot.pause()
+        await pilot.pause()
+        log = panel.query_one("#trajectory-span-detail-content-output", RichLog)
+        assert "updated" in "\n".join(strip.text for strip in log.lines)
 
 
 async def test_span_detail_preserves_scroll_during_live_request_updates() -> None:
@@ -1093,9 +1172,15 @@ async def test_span_detail_preserves_scroll_during_live_request_updates() -> Non
         log.scroll_to(y=20, animate=False, force=True)
         await pilot.pause()
         scroll_y = float(log.scroll_y)
+        rendered_lines = tuple(log.lines)
 
         view.state.upsert([record("r2", index=2, request_id="request-1")])
         view._refresh()
+
+        # The replacement is deferred until after refresh. Live request updates
+        # must not blank the active detail log or flash its loading layer.
+        assert tuple(log.lines) == rendered_lines
+        assert not panel.query_one("#trajectory-span-detail-loading").display
         await pilot.pause()
 
         assert scroll_y > 0
