@@ -23,6 +23,10 @@ if (ownsBridge) {
 	(globalThis as Record<symbol, boolean | undefined>)[OWNER] = true;
 }
 
+function releaseBridge(): void {
+	if (ownsBridge) delete (globalThis as Record<symbol, boolean | undefined>)[OWNER];
+}
+
 interface ServerConfig {
 	command: string;
 	args: string[];
@@ -315,5 +319,14 @@ export default async function theaterMcpBridge(pi: ExtensionAPI) {
 			},
 		});
 	}
-	pi.on("session_shutdown", async () => client.close());
+	pi.on("session_shutdown", async (event) => {
+		// Pi reuses a loaded extension instance for /new, /resume, and /fork.
+		// Closing the client there would leave the replacement session with the
+		// same registered tools backed by a closed subprocess. A reload creates
+		// fresh extension instances, while quit ends this process, so only those
+		// two cases relinquish this process-wide bridge lease.
+		if (event.reason !== "reload" && event.reason !== "quit") return;
+		await client.close();
+		releaseBridge();
+	});
 }

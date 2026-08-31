@@ -138,6 +138,17 @@ def test_pi_screen_classifier_is_conservative_and_never_raises() -> None:
     assert classify_screen(ScreenContext(capture="agent prose only")).kind is ScreenKind.UNKNOWN
 
 
+def test_pi_bridge_only_releases_its_process_owner_on_real_teardown() -> None:
+    """Session replacement reuses cached Pi extension instances and clients."""
+    bridge = (
+        Path(__file__).parents[1] / "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts"
+    ).read_text(encoding="utf-8")
+
+    assert 'pi.on("session_shutdown", async (event) => {' in bridge
+    assert 'if (event.reason !== "reload" && event.reason !== "quit") return;' in bridge
+    assert "await client.close();\n\t\treleaseBridge();" in bridge
+
+
 def test_pi_parser_pairs_tools_projects_usage_and_ends_the_turn(tmp_path) -> None:
     observer = PiObserver(root=tmp_path)
     user = observer.parse_record(
