@@ -29,6 +29,17 @@ _pi_fact = fact_builder(
 _TERMINAL_STOPS = {"stop", "length", "error", "aborted"}
 
 
+def _assistant_status(stop_reason: object) -> TrajectoryStatus:
+    """Classify one durable Pi assistant message, independently of turn completion."""
+    if stop_reason == "error":
+        return TrajectoryStatus.ERROR
+    if stop_reason == "aborted":
+        return TrajectoryStatus.INTERRUPTED
+    if stop_reason in {"stop", "length", "toolUse"}:
+        return TrajectoryStatus.COMPLETED
+    return TrajectoryStatus.UNKNOWN
+
+
 def _pi_mcp_identity(value: object) -> tuple[str, str] | None:
     """Decode the ``server__tool`` names emitted by Pi MCP extensions."""
     if not isinstance(value, str):
@@ -153,6 +164,7 @@ class PiParserMixin:
                     _pi_fact(
                         kind=TrajectoryKind.CONTEXT,
                         summary=f"model: {model or 'unknown'}",
+                        status=TrajectoryStatus.COMPLETED,
                         native_id=entry_id,
                         raw_index=index,
                         timing=_timing(timestamp),
@@ -177,6 +189,7 @@ class PiParserMixin:
                     _pi_fact(
                         kind=TrajectoryKind.CONTEXT,
                         summary=f"thinking: {level or 'unknown'}",
+                        status=TrajectoryStatus.COMPLETED,
                         native_id=entry_id,
                         raw_index=index,
                         timing=_timing(timestamp),
@@ -237,6 +250,7 @@ class PiParserMixin:
             fact = _pi_fact(
                 kind=TrajectoryKind.USER,
                 summary=raw,
+                status=TrajectoryStatus.COMPLETED,
                 native_id=entry_id,
                 raw_index=index,
                 turn_id=turn_id,
@@ -284,6 +298,7 @@ class PiParserMixin:
             message.get("provider") if isinstance(message.get("provider"), str) else None
         )
         stop_reason = message.get("stopReason")
+        assistant_status = _assistant_status(stop_reason)
         terminal = not calls and stop_reason in _TERMINAL_STOPS
         events: list[Event] = []
         if raw:
@@ -353,15 +368,7 @@ class PiParserMixin:
                 raw_index=index,
                 turn_id=turn_id,
                 timing=_timing(timestamp),
-                status=(
-                    TrajectoryStatus.ERROR
-                    if stop_reason == "error"
-                    else TrajectoryStatus.INTERRUPTED
-                    if stop_reason == "aborted"
-                    else TrajectoryStatus.COMPLETED
-                    if terminal
-                    else TrajectoryStatus.UNKNOWN
-                ),
+                status=assistant_status,
                 details=tuple(
                     detail
                     for detail in (
@@ -383,6 +390,7 @@ class PiParserMixin:
                         raw_index=index,
                         event_ordinal=len(facts),
                         turn_id=turn_id,
+                        status=assistant_status,
                         timing=_timing(timestamp),
                     )
                 )
@@ -403,7 +411,7 @@ class PiParserMixin:
                     call_id=call_id,
                     mcp_server=mcp_server,
                     mcp_tool=mcp_tool,
-                    status=TrajectoryStatus.UNKNOWN,
+                    status=TrajectoryStatus.PENDING,
                     timing=_timing(timestamp),
                     details=tuple(
                         detail
@@ -498,6 +506,7 @@ class PiParserMixin:
         fact = _pi_fact(
             kind=TrajectoryKind.CONTEXT,
             summary=summary or str(record.get("type")),
+            status=TrajectoryStatus.COMPLETED,
             native_id=entry_id,
             raw_index=index,
             timing=_timing(timestamp),
@@ -539,6 +548,7 @@ class PiParserMixin:
         return _pi_fact(
             kind=TrajectoryKind.USAGE,
             summary=usage.model or "model usage",
+            status=TrajectoryStatus.COMPLETED,
             native_id=f"{usage.idempotency_key}:usage" if usage.idempotency_key else None,
             raw_index=index,
             event_ordinal=ordinal,
