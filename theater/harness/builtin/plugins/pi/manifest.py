@@ -5,6 +5,7 @@ from __future__ import annotations
 from functools import partial
 from pathlib import Path
 
+from theater.harness.base import APPROVALS
 from theater.harness.contracts.channels import (
     ChannelCapability,
     ChannelDeclaration,
@@ -73,7 +74,7 @@ def manifest_for_root(root: Path | None = None) -> HarnessManifest:
         aliases=("pi-agent", "pi_agent", "Pi"),
         launch=LaunchManifest(
             planner=plan_launch,
-            approvals=("yolo",),
+            approvals=APPROVALS,
             supports_model=True,
             supports_reasoning_effort=True,
             supports_resume=True,

@@ -6,8 +6,10 @@ import asyncio
 import json
 from pathlib import Path
 
+from theater.harness.base import APPROVALS
 from theater.harness.builtin.plugins.pi.constants import PI_ISOLATION_MARKER, PI_RECORD_BYTES
 from theater.harness.builtin.plugins.pi.launch import plan_launch, resume_launch_overlay
+from theater.harness.builtin.plugins.pi.manifest import MANIFEST
 from theater.harness.builtin.plugins.pi.observer import PiObserver
 from theater.harness.builtin.plugins.pi.screen import classify_screen
 from theater.harness.contracts.callbacks import LaunchContext, ResumeContext, ScreenContext
@@ -42,7 +44,7 @@ def _append(path: Path, *records: dict[str, object]) -> None:
             stream.write(json.dumps(record) + "\n")
 
 
-def test_pi_launch_isolated_session_config_and_yolo_only(tmp_path, monkeypatch) -> None:
+def test_pi_launch_isolated_session_config_and_all_approval_modes(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
     config_path = tmp_path / "mcp.json"
 
@@ -85,6 +87,7 @@ def test_pi_launch_isolated_session_config_and_yolo_only(tmp_path, monkeypatch) 
         "--harness",
         "pi",
     ]
+    assert MANIFEST.launch.approvals == APPROVALS
 
 
 def test_pi_source_waits_until_the_initial_session_file_exists(tmp_path) -> None:
