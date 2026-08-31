@@ -9,7 +9,9 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -19,6 +21,8 @@ const STARTUP_TIMEOUT_MS = 10_000;
 const MAX_FRAME_CHARS = 1024 * 1024;
 const IDLE_STATUS_KEY = "theater.pi.idle";
 const IDLE_STATUS_TEXT = "Theater: idle";
+const SWITCH_MARKER = ".theater-pi-switch.json";
+const SWITCH_MARKER_VERSION = 1;
 
 function acquireBridge(): symbol | undefined {
 	const owners = globalThis as Record<symbol, symbol | undefined>;
@@ -58,6 +62,85 @@ function registerIdleStatus(pi: ExtensionAPI): void {
 	pi.on("session_before_tree", (_event, ctx) => clearIdleStatus(ctx));
 	pi.on("session_tree", (_event, ctx) => showIdleStatus(ctx));
 	pi.on("session_shutdown", (_event, ctx) => clearIdleStatus(ctx));
+}
+
+function removeSwitchMarker(ctx: ExtensionContext): void {
+	const marker = join(resolve(ctx.sessionManager.getSessionDir()), SWITCH_MARKER);
+	try {
+		unlinkSync(marker);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
+}
+
+function writeSwitchMarker(
+	reason: "new" | "resume" | "fork",
+	previousLocation: string | undefined,
+	targetLocation: string | undefined,
+	ctx: ExtensionContext,
+	records?: number,
+): void {
+	if (!previousLocation || !targetLocation) return;
+	const root = resolve(ctx.sessionManager.getSessionDir());
+	const location = resolve(targetLocation);
+	const previous = resolve(previousLocation);
+	if (dirname(location) !== root || dirname(previous) !== root || location === previous) return;
+
+	let offset: number | undefined;
+	let dev: number | undefined;
+	let ino: number | undefined;
+	if (reason === "new") {
+		offset = 0;
+		records = 0;
+	} else {
+		try {
+			const stat = statSync(location);
+			if (!stat.isFile()) return;
+			offset = stat.size;
+			records = undefined;
+			dev = stat.dev;
+			ino = stat.ino;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT" || records === undefined) throw error;
+		}
+	}
+	if (offset === undefined && records === undefined) return;
+
+	const marker = join(root, SWITCH_MARKER);
+	const temporary = `${marker}.${process.pid}.tmp`;
+	writeFileSync(
+		temporary,
+		`${JSON.stringify({
+			version: SWITCH_MARKER_VERSION,
+			reason,
+			location,
+			previous_location: previous,
+			offset,
+			records,
+			dev,
+			ino,
+		})}\n`,
+		{ encoding: "utf8", mode: 0o600 },
+	);
+	renameSync(temporary, marker);
+}
+
+function registerTranscriptSwitches(pi: ExtensionAPI): void {
+	pi.on("session_start", (event, ctx) => {
+		if (event.reason === "startup") {
+			removeSwitchMarker(ctx);
+			return;
+		}
+		if (event.reason === "reload") return;
+		const target = ctx.sessionManager.getSessionFile();
+		const records = event.reason === "new" ? 0 : ctx.sessionManager.getEntries().length + 1;
+		writeSwitchMarker(event.reason, event.previousSessionFile, target, ctx, records);
+	});
+	pi.on("session_shutdown", (event, ctx) => {
+		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
+			writeSwitchMarker(event.reason, ctx.sessionManager.getSessionFile(), event.targetSessionFile, ctx);
+		}
+	});
 }
 
 interface ServerConfig {
@@ -308,18 +391,22 @@ function toolName(name: string): string {
 }
 
 export default async function theaterMcpBridge(pi: ExtensionAPI) {
+	const launchConfigPath = configFlag(process.argv);
+	if (launchConfigPath?.trim()) {
+		registerIdleStatus(pi);
+		registerTranscriptSwitches(pi);
+	}
 	const bridgeLease = acquireBridge();
 	if (bridgeLease === undefined) {
 		// A user-local copy may own the MCP connection.  The status protocol is
 		// independent and still belongs to this Theater-launched Pi session.
-		if (configFlag(process.argv)?.trim()) registerIdleStatus(pi);
 		return;
 	}
 	pi.registerFlag("theater-mcp-config", {
 		description: "Launch-local Theater stdio MCP configuration",
 		type: "string",
 	});
-	const configPath = configFlag(process.argv) ?? pi.getFlag("theater-mcp-config");
+	const configPath = launchConfigPath ?? pi.getFlag("theater-mcp-config");
 	if (configPath === undefined) {
 		releaseBridge(bridgeLease);
 		return;
@@ -328,7 +415,10 @@ export default async function theaterMcpBridge(pi: ExtensionAPI) {
 		releaseBridge(bridgeLease);
 		throw new Error("--theater-mcp-config requires a configuration path");
 	}
-	registerIdleStatus(pi);
+	if (!launchConfigPath) {
+		registerIdleStatus(pi);
+		registerTranscriptSwitches(pi);
+	}
 
 	const client = new TheaterClient(await loadConfig(configPath));
 	let discovered: Tool[];

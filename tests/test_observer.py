@@ -130,6 +130,7 @@ def test_source_accounting_checkpoint_is_persisted_only_after_apply_succeeds(reg
         def __init__(self) -> None:
             self.acknowledged = False
             self.rolled_back = False
+            self.pending = True
 
         async def read(self) -> Batch:
             return Batch()
@@ -138,10 +139,11 @@ def test_source_accounting_checkpoint_is_persisted_only_after_apply_succeeds(reg
             return self.checkpoint if self.acknowledged else None
 
         def pending_accounting_checkpoint(self) -> str | None:
-            return self.checkpoint
+            return self.checkpoint if self.pending else None
 
         def acknowledge_accounting_checkpoint(self) -> None:
             self.acknowledged = True
+            self.pending = False
 
         def rollback_accounting_checkpoint(self) -> None:
             self.rolled_back = True
@@ -150,6 +152,7 @@ def test_source_accounting_checkpoint_is_persisted_only_after_apply_succeeds(reg
     observer = Observer(registry, harnesses={})
     source = CheckpointSource()
     apply = observer._reducer.apply
+    persist_checkpoint = observer.store.set_usage_checkpoint
 
     assert observer._apply_source_batch(
         participant.id, source, Batch(progressed=True), QuietClock(), TurnAccumulator()
@@ -179,17 +182,27 @@ def test_source_accounting_checkpoint_is_persisted_only_after_apply_succeeds(reg
         raise RuntimeError("checkpoint persistence failed")
 
     monkeypatch.setattr(observer.store, "set_usage_checkpoint", fail_persistence)
-    with pytest.raises(RuntimeError, match="checkpoint persistence failed"):
-        observer._apply_source_batch(
-            participant.id,
-            persistence_failure,
-            Batch(progressed=True),
-            QuietClock(),
-            TurnAccumulator(),
-        )
+    persistence_batch = Batch(
+        events=(Event(kind=EventKind.ASSISTANT, text="apply exactly once"),), progressed=True
+    )
+    assert observer._apply_source_batch(
+        participant.id,
+        persistence_failure,
+        persistence_batch,
+        QuietClock(),
+        TurnAccumulator(),
+    )
     assert persistence_failure.acknowledged is False
-    assert persistence_failure.rolled_back is True
+    assert persistence_failure.rolled_back is False
+    assert persistence_failure.pending is True
     assert registry.get(participant.id).usage_checkpoint == source.checkpoint
+    assert kinds(registry.store).count("agent.assistant") == 1
+
+    monkeypatch.setattr(observer.store, "set_usage_checkpoint", persist_checkpoint)
+    assert observer._persist_pending_accounting_checkpoint(participant.id, persistence_failure)
+    assert persistence_failure.acknowledged is True
+    assert persistence_failure.pending is False
+    assert kinds(registry.store).count("agent.assistant") == 1
 
 
 async def test_new_records_reach_the_bus_as_normalized_events(registry, vibe_tree, observing):
