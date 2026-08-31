@@ -13,6 +13,7 @@ from theater.harness.contracts.callbacks import (
 )
 from theater.harness.contracts.context import ParticipantObservationContext
 from theater.harness.contracts.source import Source, TranscriptCandidate
+from theater.harness.normalization.timing import iso_epoch
 from theater.harness.observation import ScreenKind, ScreenReading, TranscriptObserver
 from theater.provenance import TranscriptProvenance
 from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFeature
@@ -60,6 +61,14 @@ def _header_cwd(value: dict) -> str:
     return str(Path(value["cwd"]).expanduser().resolve())
 
 
+def _session_started(header: dict, stat: os.stat_result) -> float:
+    """Use Pi's immutable session timestamp, not ctime which changes on append."""
+    started = iso_epoch(header.get("timestamp"))
+    if started is not None:
+        return started
+    return float(getattr(stat, "st_birthtime", stat.st_ctime))
+
+
 class PiObserver(PiParserMixin, TranscriptObserver):
     """Observe Pi JSONL sessions, including deliberate `/new` rotations."""
 
@@ -102,6 +111,7 @@ class PiObserver(PiParserMixin, TranscriptObserver):
         session_provenance: str | TranscriptProvenance | None = None,
         known_location: str | None = None,
         usage_floor: str | None = None,
+        usage_checkpoint: str | None = None,
     ) -> Source:
         root = self._source_root(cwd)
         reader = self if root == self.root else PiObserver(root=root, isolated=self.isolated)
@@ -116,6 +126,7 @@ class PiObserver(PiParserMixin, TranscriptObserver):
             collision_domain=str(root),
             known_location=known_location,
             usage_floor=usage_floor,
+            usage_checkpoint=usage_checkpoint,
         )
 
     def open_source_for(
@@ -129,6 +140,7 @@ class PiObserver(PiParserMixin, TranscriptObserver):
         known_location: str | None = None,
         transcript_domain: str | None = None,
         usage_floor: str | None = None,
+        usage_checkpoint: str | None = None,
     ) -> Source:
         domain = (
             canonical(Path(transcript_domain))
@@ -148,6 +160,7 @@ class PiObserver(PiParserMixin, TranscriptObserver):
                 session_provenance=session_provenance,
                 known_location=known_location,
                 usage_floor=usage_floor,
+                usage_checkpoint=usage_checkpoint,
             )
         return self.open_source(
             cwd=cwd,
@@ -156,6 +169,7 @@ class PiObserver(PiParserMixin, TranscriptObserver):
             session_provenance=session_provenance,
             known_location=known_location,
             usage_floor=usage_floor,
+            usage_checkpoint=usage_checkpoint,
         )
 
     def open_source_context(self, context: ParticipantObservationContext) -> Source:
@@ -168,6 +182,7 @@ class PiObserver(PiParserMixin, TranscriptObserver):
             known_location=context.known_location,
             transcript_domain=context.transcript_domain,
             usage_floor=context.usage_floor,
+            usage_checkpoint=context.usage_checkpoint,
         )
 
     def find_transcript(
@@ -199,7 +214,7 @@ class PiObserver(PiParserMixin, TranscriptObserver):
                 stat = path.stat()
             except OSError:
                 continue
-            if after is not None and stat.st_ctime < after:
+            if after is not None and _session_started(header, stat) < after:
                 continue
             candidates.append((stat.st_mtime_ns, canonical(path)))
         return max(candidates, default=(0, None))[1]
@@ -207,6 +222,16 @@ class PiObserver(PiParserMixin, TranscriptObserver):
     def session_id(self, transcript: Path) -> str | None:
         header = _header(transcript)
         return header["id"] if header is not None else None
+
+    def session_started(self, transcript: Path) -> float:
+        header = _header(transcript)
+        if header is None:
+            return 0.0
+        try:
+            stat = transcript.stat()
+        except OSError:
+            return 0.0
+        return _session_started(header, stat)
 
     def transcript_candidates(
         self,
@@ -229,7 +254,7 @@ class PiObserver(PiParserMixin, TranscriptObserver):
             except OSError:
                 continue
             reason = None
-            if after is not None and stat.st_ctime < after:
+            if after is not None and _session_started(header, stat) < after:
                 reason = "created before participant floor"
             elif expected_cwd is not None and _header_cwd(header) != expected_cwd:
                 reason = "cwd mismatch"
@@ -261,7 +286,7 @@ class PiObserver(PiParserMixin, TranscriptObserver):
         if header is None:
             raise ValueError("harness shape mismatch")
         stat = path.stat()
-        if after is not None and stat.st_ctime < after:
+        if after is not None and _session_started(header, stat) < after:
             raise ValueError("created before participant floor")
         if cwd is not None and _header_cwd(header) != str(Path(cwd).expanduser().resolve()):
             raise ValueError("cwd mismatch")

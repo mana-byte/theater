@@ -21,6 +21,8 @@ class ParticipantObservationContext:
     transcript_domain: str | None = None
     #: Durable stream boundary used by accounting reconciliation after a resume.
     usage_floor: str | None = None
+    #: Source-specific checkpoint after the last batch persisted by the daemon.
+    usage_checkpoint: str | None = None
     pane_pid: int | None = None
     participant_scoped: bool = True
 
@@ -29,7 +31,14 @@ class ParticipantObservationContext:
             raise TypeError("participant observation context participant_id must be a string")
         if not self.participant_id.strip():
             raise ValueError("participant observation context participant_id must not be blank")
-        for name in ("cwd", "session_id", "known_location", "transcript_domain", "usage_floor"):
+        for name in (
+            "cwd",
+            "session_id",
+            "known_location",
+            "transcript_domain",
+            "usage_floor",
+            "usage_checkpoint",
+        ):
             value = getattr(self, name)
             if value is not None and not isinstance(value, str):
                 raise TypeError(f"participant observation context {name} must be a string or null")

@@ -2671,7 +2671,8 @@ async def test_list_resume_state_owned_by_live_beats_untrusted(client, daemon):
 
 
 async def test_list_no_internal_fields_exposed(client):
-    """session_correlation, transcript_domain, transcript_location, resume_floor, usage_floor
+    """session_correlation, transcript_domain, transcript_location, resume_floor, usage_floor,
+    usage_checkpoint
     must not appear in any row returned by participants.list."""
     await client.call("hello", harness="vibe", pane="%1", cwd="/tmp")
     rows = await client.call("participants.list")
@@ -2681,6 +2682,7 @@ async def test_list_no_internal_fields_exposed(client):
         assert "transcript_location" not in row
         assert "resume_floor" not in row
         assert "usage_floor" not in row
+        assert "usage_checkpoint" not in row
 
 
 async def test_workers_shutdown_drains_before_returning(daemon):

@@ -209,6 +209,10 @@ class Store:
         """Clear the resume floor column without touching any other field."""
         self._participants.clear_resume_floor(pid)
 
+    def set_usage_checkpoint(self, pid: str, checkpoint: str) -> None:
+        """Persist a source-acknowledged accounting cursor."""
+        self._participants.set_usage_checkpoint(pid, checkpoint)
+
     def reparent_participant(self, pid: str, *, new_parent_id: str) -> None:
         """Set the parent_id of a participant."""
         self._participants.reparent(pid, new_parent_id=new_parent_id)

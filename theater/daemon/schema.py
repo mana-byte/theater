@@ -37,6 +37,7 @@ participants = Table(
     Column("transcript_location", Text),
     Column("resume_floor", Text),
     Column("usage_floor", Text),
+    Column("usage_checkpoint", Text),
     Column("resumed_from_id", Text),
     Column("parent_id", Text),
     Column("pid", Integer),

@@ -405,15 +405,7 @@ class Observer:
                         continue
                     self._capture_trajectory(pid, batch)
                     self._failures.clear_source_error_on_progress(pid, batch)
-                    if self._reducer.apply(
-                        pid,
-                        batch,
-                        clock,
-                        turns,
-                        answer_turn_fn=self._answer_turn,
-                        settle_fn=self._settle,
-                        turn_result_fn=self._turn_result,
-                    ):
+                    if self._apply_source_batch(pid, source, batch, clock, turns):
                         self._reducer.unblock_on_semantic_progress(pid, batch)
                         await self._reducer.on_progress(pid, observer, batch, clock)
                     else:
@@ -428,14 +420,8 @@ class Observer:
                                 p, b, finish_fn=self._finish
                             ),
                             accept_attachment_fn=self._accept_attachment,
-                            apply_fn=lambda p, b, c, t: self._reducer.apply(
-                                p,
-                                b,
-                                c,
-                                t,
-                                answer_turn_fn=self._answer_turn,
-                                settle_fn=self._settle,
-                                turn_result_fn=self._turn_result,
+                            apply_fn=lambda p, b, c, t: self._apply_source_batch(
+                                p, source, b, c, t
                             ),
                             on_progress_fn=self._reducer.on_progress,
                             evidence_bound_fn=self._evidence_is_bound_to_another_live_participant,
@@ -517,6 +503,7 @@ class Observer:
                 known_location=p.transcript_location,
                 transcript_domain=p.transcript_domain,
                 usage_floor=p.usage_floor,
+                usage_checkpoint=p.usage_checkpoint,
                 pane_pid=p.live_pid,
             )
         bindings: tuple[EnrichmentBinding, ...] = ()
@@ -656,6 +643,29 @@ class Observer:
             turn_result_fn=self._turn_result,
         )
 
+    def _apply_source_batch(
+        self,
+        pid: str,
+        source: Source,
+        batch: Batch,
+        clock: QuietClock,
+        turns: TurnAccumulator,
+    ) -> bool:
+        """Apply one source batch, then durably acknowledge its accounting point."""
+        result = self._reducer.apply(
+            pid,
+            batch,
+            clock,
+            turns,
+            answer_turn_fn=self._answer_turn,
+            settle_fn=self._settle,
+            turn_result_fn=self._turn_result,
+        )
+        source.acknowledge_accounting_checkpoint()
+        if checkpoint := source.accounting_checkpoint():
+            self.store.set_usage_checkpoint(pid, checkpoint)
+        return result
+
     @staticmethod
     def _has_semantic_progress(batch: Batch) -> bool:
         return Reducer.has_semantic_progress(batch)
@@ -720,15 +730,7 @@ class Observer:
                 p, b, finish_fn=self._finish
             ),
             accept_attachment_fn=self._accept_attachment,
-            apply_fn=lambda p, b, c, t: self._reducer.apply(
-                p,
-                b,
-                c,
-                t,
-                answer_turn_fn=self._answer_turn,
-                settle_fn=self._settle,
-                turn_result_fn=self._turn_result,
-            ),
+            apply_fn=lambda p, b, c, t: self._apply_source_batch(p, source, b, c, t),
             on_progress_fn=self._reducer.on_progress,
             evidence_bound_fn=self._evidence_is_bound_to_another_live_participant,
             confirm_identity_loss_fn=self._confirm_identity_loss,

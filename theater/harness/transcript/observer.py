@@ -110,6 +110,7 @@ def open_participant_source(
     known_location: str | None = None,
     transcript_domain: str | None = None,
     usage_floor: str | None = None,
+    usage_checkpoint: str | None = None,
     pane_pid: int | None = None,
 ) -> Source:
     """Compatibility dispatch for the optional participant-aware hook.
@@ -139,6 +140,7 @@ def open_participant_source(
         known_location=known_location,
         transcript_domain=transcript_domain,
         usage_floor=usage_floor,
+        usage_checkpoint=usage_checkpoint,
         pane_pid=pane_pid,
     )
     if factory := _explicit_context_factory(observer):

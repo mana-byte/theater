@@ -76,6 +76,7 @@ def test_migrations_created_the_alembic_version_table(store):
     col_names = {row[1] for row in col_info}
     assert "resume_floor" in col_names
     assert "usage_floor" in col_names
+    assert "usage_checkpoint" in col_names
     assert "tmux_server_identity" in col_names
     assert "termination_reason" in col_names
     assert "termination_incident" in col_names
@@ -283,10 +284,12 @@ def test_a_legacy_database_is_adopted_not_rebuilt(theater_home):
         part_col_names = {row[1] for row in part_cols}
         assert "resume_floor" in part_col_names
         assert "usage_floor" in part_col_names
+        assert "usage_checkpoint" in part_col_names
         # Legacy rows get NULL for resume_floor — cold spawn behaviour.
         survivor = store.get_participant("abc")
         assert survivor.resume_floor is None
         assert survivor.usage_floor is None
+        assert survivor.usage_checkpoint is None
 
         # A job created on a legacy row round-trips with null structured fields.
         store.conn.exec_driver_sql(
