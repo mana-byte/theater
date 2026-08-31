@@ -134,6 +134,10 @@ def test_pi_launch_isolated_session_config_and_all_approval_modes(tmp_path, monk
         "pi",
     ]
     assert MANIFEST.launch.approvals == APPROVALS
+    assert plan.env["PI_OFFLINE"] == "1"
+    assert plan.env["PI_CACHE_RETENTION"] == "long"
+    assert plan.env["PI_SKIP_VERSION_CHECK"] == "1"
+    assert plan.env["PI_TELEMETRY"] == "0"
 
 
 def test_pi_source_waits_until_the_initial_session_file_exists(tmp_path) -> None:
@@ -1114,5 +1118,7 @@ def test_pi_history_reader_keeps_live_turn_context_and_resume_reuses_session_dir
     assert resumed.session_id == "native-id"
     assert "--session-dir" not in resumed.argv
     assert overlay.env["PI_CODING_AGENT_SESSION_DIR"] == str(domain.resolve())
+    assert overlay.env["PI_OFFLINE"] == "1"
+    assert overlay.env["PI_CACHE_RETENTION"] == "long"
     assert overlay.transcript_domain == str(domain.resolve())
     assert overlay.cwd == str(workdir)

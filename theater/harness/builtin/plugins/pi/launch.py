@@ -10,7 +10,7 @@ from theater.harness.contracts.callbacks import LaunchContext, ResumeContext
 from theater.harness.contracts.launch import LaunchPlan, ResumeLaunchOverlay, theater_binary
 from theater.models import BadRequest
 
-from .constants import PI_ISOLATION_MARKER, PI_SESSIONS_DIRNAME
+from .constants import PI_ISOLATION_MARKER, PI_LAUNCH_ENV, PI_SESSIONS_DIRNAME
 from .isolation import canonical, marker_text, validate_domain
 
 _THEATER_MCP_BRIDGE = Path(__file__).with_name("theater_mcp_bridge.ts")
@@ -43,7 +43,7 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
         str(context.config_path),
     ]
     files = {context.config_path: json.dumps(config, indent=2) + "\n"}
-    env: dict[str, str] = {}
+    env: dict[str, str] = dict(PI_LAUNCH_ENV)
     if context.resume is None:
         argv[5:5] = ["--session-dir", str(session_dir)]
         files[session_dir / PI_ISOLATION_MARKER] = marker_text(
@@ -107,7 +107,7 @@ def resume_launch_overlay(context: ResumeContext) -> ResumeLaunchOverlay:
                 "isolated transcript domain"
             ) from exc
     return ResumeLaunchOverlay(
-        env={"PI_CODING_AGENT_SESSION_DIR": str(domain)},
+        env={**PI_LAUNCH_ENV, "PI_CODING_AGENT_SESSION_DIR": str(domain)},
         transcript_domain=str(domain),
         cwd=predecessor.cwd,
     )
