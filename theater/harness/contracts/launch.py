@@ -103,12 +103,21 @@ class ResumeLaunchOverlay:
     - ``cwd``: an authoritative working directory for the successor launch.
       ``None`` keeps the requested cwd. Core applies a non-None value before
       creating the successor participant or planning its launch.
+    - ``resume_reference``: an alternate native resume reference handed to
+      ``plan_launch``. ``None`` preserves the requested native session id.
+      This lets a harness resume by a trusted transcript path when its CLI
+      cannot resolve that transcript inside the successor's isolated domain.
     """
 
     env: Mapping[str, str] = field(default_factory=dict)
     transcript_domain: str | None = None
     cwd: str | None = None
+    resume_reference: str | None = None
 
     def __post_init__(self) -> None:
         if self.cwd is not None and (not isinstance(self.cwd, str) or not self.cwd.strip()):
             raise TypeError("resume launch cwd must be a non-blank string or None")
+        if self.resume_reference is not None and (
+            not isinstance(self.resume_reference, str) or not self.resume_reference.strip()
+        ):
+            raise TypeError("resume launch reference must be a non-blank string or None")

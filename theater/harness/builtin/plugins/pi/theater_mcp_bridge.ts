@@ -73,6 +73,41 @@ function removeSwitchMarker(ctx: ExtensionContext): void {
 	}
 }
 
+function forkFlag(argv: string[]): string | undefined {
+	for (let index = 0; index < argv.length; index += 1) {
+		const value = argv[index];
+		if (value.startsWith("--fork=")) return value.slice("--fork=".length);
+		if (value === "--fork") return argv[index + 1];
+	}
+	return undefined;
+}
+
+function writeStartupForkMarker(source: string, ctx: ExtensionContext): void {
+	const target = ctx.sessionManager.getSessionFile();
+	if (!target) return;
+	const root = resolve(ctx.sessionManager.getSessionDir());
+	const location = resolve(target);
+	if (dirname(location) !== root) return;
+	const stat = statSync(location);
+	if (!stat.isFile()) return;
+	const marker = join(root, SWITCH_MARKER);
+	const temporary = `${marker}.${process.pid}.tmp`;
+	writeFileSync(
+		temporary,
+		`${JSON.stringify({
+			version: SWITCH_MARKER_VERSION,
+			reason: "startup-fork",
+			location,
+			previous_location: resolve(source),
+			offset: stat.size,
+			dev: stat.dev,
+			ino: stat.ino,
+		})}\n`,
+		{ encoding: "utf8", mode: 0o600 },
+	);
+	renameSync(temporary, marker);
+}
+
 function writeSwitchMarker(
 	reason: "new" | "resume" | "fork",
 	previousLocation: string | undefined,
@@ -126,9 +161,11 @@ function writeSwitchMarker(
 }
 
 function registerTranscriptSwitches(pi: ExtensionAPI): void {
+	const startupFork = forkFlag(process.argv);
 	pi.on("session_start", (event, ctx) => {
 		if (event.reason === "startup") {
-			removeSwitchMarker(ctx);
+			if (startupFork) writeStartupForkMarker(startupFork, ctx);
+			else removeSwitchMarker(ctx);
 			return;
 		}
 		if (event.reason === "reload") return;
