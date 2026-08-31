@@ -11,6 +11,7 @@ from textual.widgets import Button, Label, Select
 from theater.constants.regie_trajectory import (
     TRAJECTORY_FOOTER_COMPACT_WIDTH,
     TRAJECTORY_FOOTER_HEIGHT,
+    TRAJECTORY_FOOTER_MICRO_WIDTH,
     TRAJECTORY_FOOTER_NARROW_WIDTH,
 )
 from theater.regie.trajectory.enums import DiagnosticView, OrderMode
@@ -224,6 +225,9 @@ class TrajectoryFooter(Horizontal):
     TrajectoryFooter.-narrow #trajectory-page-next,
     TrajectoryFooter.-narrow #trajectory-status,
     TrajectoryFooter.-narrow #trajectory-page-range {{ display: none; }}
+    TrajectoryFooter.-micro #trajectory-search-action,
+    TrajectoryFooter.-micro #trajectory-mode-action,
+    TrajectoryFooter.-micro #trajectory-view-action {{ display: none; }}
     """
 
     def __init__(self, **kwargs) -> None:
@@ -402,14 +406,17 @@ class TrajectoryFooter(Horizontal):
     def on_resize(self, event: events.Resize) -> None:
         compact = event.size.width < TRAJECTORY_FOOTER_COMPACT_WIDTH
         narrow = event.size.width <= TRAJECTORY_FOOTER_NARROW_WIDTH
+        micro = event.size.width < TRAJECTORY_FOOTER_MICRO_WIDTH
         changed = compact != self._compact
         narrow_changed = narrow != self.has_class("-narrow")
+        micro_changed = micro != self.has_class("-micro")
         self._compact = compact
         self.set_class(compact, "-compact")
         self.set_class(narrow, "-narrow")
+        self.set_class(micro, "-micro")
         if changed and self.is_mounted:
             self._update_actions()
-        if changed or narrow_changed:
+        if changed or narrow_changed or micro_changed:
             self.refresh(layout=True)
 
     def on_button_pressed(self, message: Button.Pressed) -> None:

@@ -8,6 +8,7 @@ from textual.widgets import Button, DataTable, Input, RichLog, Select, Selection
 from theater.constants.regie_trajectory import (
     LEDGER_HEADER_HEIGHT,
     SEARCH_HEIGHT,
+    TIMELINE_HEIGHT,
     TIMELINE_LANE_HEIGHT,
     TRAJECTORY_FOOTER_HEIGHT,
     TRAJECTORY_HORIZONTAL_PADDING,
@@ -187,7 +188,7 @@ async def test_surface_uses_fixed_timeline_and_virtualized_ledger() -> None:
         assert view.styles.padding.right == TRAJECTORY_HORIZONTAL_PADDING
 
 
-@pytest.mark.parametrize("width", (80, 64, 58, 57))
+@pytest.mark.parametrize("width", (80, 64, 58, 57, 23, 10))
 async def test_footer_controls_stay_inside_compact_trajectory_width(width: int) -> None:
     app = Host()
     async with app.run_test(size=(width, 30)) as pilot:
@@ -204,9 +205,9 @@ async def test_footer_controls_stay_inside_compact_trajectory_width(width: int) 
                 )
 
 
-@pytest.mark.parametrize(("height", "timeline_height"), ((24, 6), (20, 4)))
+@pytest.mark.parametrize(("height", "timeline_visible"), ((24, True), (20, False)))
 async def test_short_terminal_keeps_ledger_and_footer_in_view(
-    height: int, timeline_height: int
+    height: int, timeline_visible: bool
 ) -> None:
     app = Host()
     async with app.run_test(size=(80, height)) as pilot:
@@ -218,9 +219,9 @@ async def test_short_terminal_keeps_ledger_and_footer_in_view(
         footer = view.query_one(TrajectoryFooter)
 
         assert not overview.display
-        assert timeline.region.height == timeline_height, (
-            f"{view.classes=}, {timeline.styles.height=}, {timeline.styles.min_height=}"
-        )
+        assert timeline.display is timeline_visible
+        if timeline_visible:
+            assert timeline.region.height == TIMELINE_HEIGHT
         assert ledger.region.height >= LEDGER_HEADER_HEIGHT + 1
         assert ledger.region.bottom <= footer.region.y
         assert footer.region.bottom <= view.content_region.bottom

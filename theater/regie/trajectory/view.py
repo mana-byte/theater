@@ -132,13 +132,8 @@ class TrajectoryView(Vertical):
     TrajectoryView.-compact-height > #trajectory-overview {{
         display: none;
     }}
-    TrajectoryView.-compact-height > #trajectory-timeline {{
-        height: 6 !important;
-        min-height: 6 !important;
-    }}
     TrajectoryView.-short-height > #trajectory-timeline {{
-        height: 4 !important;
-        min-height: 4 !important;
+        display: none;
     }}
     TrajectoryView > #trajectory-filters {{
         display: none;
@@ -199,7 +194,6 @@ class TrajectoryView(Vertical):
         self._search_refresh_pending = False
         self._load_worker: Worker[TrajectoryPage | None] | None = None
         self._retiring = False
-        self._responsive_timeline_height: int | None = None
 
     def compose(self) -> ComposeResult:
         yield TrajectoryOverviewStrip(id="trajectory-overview")
@@ -255,20 +249,10 @@ class TrajectoryView(Vertical):
             self.call_after_refresh(self._show_timeline_hover, card.record_id)
 
     def _sync_responsive_height(self, height: int) -> None:
-        compact = height < 30
-        short = height < 22
-        self.set_class(compact, "-compact-height")
-        self.set_class(short, "-short-height")
-        if not self.is_attached:
-            return
-        timeline_height = 4 if short else 6 if compact else TIMELINE_HEIGHT
-        if timeline_height == self._responsive_timeline_height:
-            return
-        timeline = self.query_one("#trajectory-timeline", Timeline)
-        timeline.styles.height = timeline_height
-        timeline.styles.min_height = timeline_height
-        self._responsive_timeline_height = timeline_height
-        self.refresh(layout=True)
+        changed = self._set_class(self, "-compact-height", height < 30)
+        changed = self._set_class(self, "-short-height", height < 22) or changed
+        if changed and self.is_attached:
+            self.refresh(layout=True)
 
     def _controller_state_changed(self, state: ParticipantTrajectoryState) -> None:
         if state.participant_id != self.participant_id:
