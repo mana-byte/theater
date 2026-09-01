@@ -66,13 +66,14 @@ async def test_tools_are_registered(daemon):
     }
 
 
-async def test_control_and_wait_toolsets_partition_the_mcp_surface(daemon):
-    control = {tool.name for tool in await build("p1", "vibe", "control").list_tools()}
-    wait = {tool.name for tool in await build("p1", "vibe", "wait").list_tools()}
+@pytest.mark.parametrize("harness", ["codex", "vibe"])
+async def test_control_and_wait_toolsets_partition_the_mcp_surface(daemon, harness):
+    control = {tool.name for tool in await build("p1", harness, "control").list_tools()}
+    wait = {tool.name for tool in await build("p1", harness, "wait").list_tools()}
 
     assert "await_sessions" not in control
     assert wait == {"await_sessions"}
-    assert control | wait == {tool.name for tool in await build("p1", "vibe").list_tools()}
+    assert control | wait == {tool.name for tool in await build("p1", harness).list_tools()}
 
 
 async def test_wait_toolset_reuses_the_control_participant_identity(daemon):

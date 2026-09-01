@@ -16,10 +16,33 @@ from theater.harness.transcript.discovery import root_domain_overlay
 
 from .observer import CodexObserver
 
+_WAIT_SERVER_NAME = f"{SERVER_NAME}_wait"
+
 
 def plan_launch(context: LaunchContext) -> LaunchPlan:
     command = json.dumps(theater_binary())
-    args = json.dumps(["mcp", "--id", context.participant_id])
+    control_args = json.dumps(
+        [
+            "mcp",
+            "--id",
+            context.participant_id,
+            "--harness",
+            "codex",
+            "--toolset",
+            "control",
+        ]
+    )
+    wait_args = json.dumps(
+        [
+            "mcp",
+            "--id",
+            context.participant_id,
+            "--harness",
+            "codex",
+            "--toolset",
+            "wait",
+        ]
+    )
     argv = ["codex"]
     if context.resume is not None:
         argv.append("fork")
@@ -28,7 +51,11 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
         "-c",
         f"mcp_servers.{SERVER_NAME}.command={command}",
         "-c",
-        f"mcp_servers.{SERVER_NAME}.args={args}",
+        f"mcp_servers.{SERVER_NAME}.args={control_args}",
+        "-c",
+        f"mcp_servers.{_WAIT_SERVER_NAME}.command={command}",
+        "-c",
+        f"mcp_servers.{_WAIT_SERVER_NAME}.args={wait_args}",
     ]
     if context.model:
         argv += ["--model", context.model]
