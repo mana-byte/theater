@@ -35,7 +35,7 @@ async def test_set_buffer_passes_literal_text_after_double_dash(monkeypatch):
 
     await client.set_buffer("-literal\ntext")
 
-    assert captured == [["set-buffer", "--", "-literal\ntext"]]
+    assert captured == [["set-buffer", "-w", "--", "-literal\ntext"]]
 
 
 # ---- new_window --------------------------------------------------------
