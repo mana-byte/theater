@@ -82,6 +82,7 @@ from theater.constants.regie import (
     REGIE_USAGE_POLL_INTERVAL_SECONDS,
 )
 from theater.constants.trajectory import TRAJECTORY_TOOLTIP_DELAY_MS
+from theater.harness import describe
 from theater.observability import lag_monitor
 from theater.observability.logging import log_exception
 from theater.regie.animations.footer import (  # noqa: F401
@@ -1568,17 +1569,48 @@ class RegieApp(App):
         """
         self.run_worker(self._spawn_harness(harness), exclusive=False)
 
+    def _palette_approval(self, harness: str) -> str | None:
+        """Choose the palette's safe approval policy from the advertised manifest."""
+        rows = describe() if self.harnesses is None else self.harnesses
+        row = next((candidate for candidate in rows if candidate.get("name") == harness), None)
+        advertised = row.get("approvals") if row is not None else None
+        approvals = (
+            advertised
+            if isinstance(advertised, list)
+            and all(isinstance(policy, str) for policy in advertised)
+            else []
+        )
+
+        if "manual" in approvals:
+            return "manual"
+        if len(approvals) == 1 and isinstance(approvals[0], str):
+            return approvals[0]
+
+        if approvals:
+            detail = f"multiple policies without manual ({', '.join(approvals)})"
+        else:
+            detail = "no supported approval policy"
+        self.notify(
+            f"Cannot start {harness}: it advertises {detail}; the palette will not choose one.",
+            title="Approval policy unavailable",
+            severity="warning",
+        )
+        return None
+
     async def _spawn_harness(self, harness: str) -> None:
         self._focus_tree()
         if not self._client:
+            return
+        approval = self._palette_approval(harness)
+        if approval is None:
             return
         try:
             await self._client.call(
                 "spawn",
                 harness=harness,
-                # No prompt/parent: palette starts a CLI; manual adds no approval flags.
+                # No prompt/parent: the palette starts a bare CLI.
                 prompt="",
-                approval="manual",
+                approval=approval,
                 cwd=str(Path.cwd()),
                 # By name, only ours: new window goes in the user's session, not the fallback.
                 tmux_session=self.my_session_name,
@@ -1638,13 +1670,17 @@ class RegieApp(App):
         self._focus_tree()
         if self._client is None:
             return
+        harness = row["harness"]
+        approval = self._palette_approval(harness)
+        if approval is None:
+            return
         try:
             await self._client.call(
                 "spawn",
-                harness=row["harness"],
+                harness=harness,
                 prompt="",
                 cwd=row["cwd"],
-                approval="manual",
+                approval=approval,
                 resume=row["session_id"],
                 worktree=False,
                 tmux_session=self.my_session_name,

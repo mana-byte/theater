@@ -43,6 +43,7 @@ def project_plugin(
             "package_path": str(plugin.path),
             "manifest_path": str(plugin.path / "manifest.py"),
             "manifest_api_version": manifest.api_version,
+            "approvals": list(manifest.launch.approvals),
             "primary_channel": None if primary is None else _channel(primary.channel),
             "channels": channels,
             "runtime": _runtime(
