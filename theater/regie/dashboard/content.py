@@ -93,4 +93,6 @@ def harness_availability_content(rows: list[dict] | None) -> Content:
             else REGIE_DASHBOARD_HARNESS_UNAVAILABLE_STYLE
         )
         parts.append((f"{glyph} {name}", style))
+        if name == "pi":
+            parts.append((" β", "$warning dim"))
     return Content.assemble(*parts) if parts else Content.assemble("")

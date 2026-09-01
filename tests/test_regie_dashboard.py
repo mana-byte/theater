@@ -127,6 +127,15 @@ def test_harness_availability_uses_compact_marks_and_muted_failures():
     ]
 
 
+def test_pi_harness_availability_shows_beta_flag():
+    content = harness_availability_content(
+        [{"name": "pi", "installed": True, "error": None}]
+    )
+
+    assert str(content) == "✓ pi β"
+    assert [span.style for span in content.spans] == ["$success", "$warning dim"]
+
+
 def test_cycling_text_types_in_holds_and_types_out():
     controller = CyclingTextController(
         [("hello ", ("world", "$accent bold"))], hold=5.0, char_interval=0.1
