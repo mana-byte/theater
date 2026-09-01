@@ -15,7 +15,6 @@ import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { joinErrorText, registerLifecycleMarkers } from "./bridge_lifecycle.ts";
 import { Type } from "typebox";
 
 const OWNER = Symbol.for("theater.pi.mcp-bridge.owner");
@@ -26,6 +25,108 @@ const IDLE_STATUS_TEXT = "Theater: idle";
 const SWITCH_MARKER = ".theater-pi-switch.json";
 const SWITCHES_DIR = ".theater-pi-switches";
 const SWITCH_MARKER_VERSION = 1;
+
+// --- Durable lifecycle markers (inlined; see tests/pi_bridge_lifecycle_helpers.ts) ---
+//
+// Pi does NOT expose auto_retry_start to extensions (internal _emit only) and the
+// extension agent_end event drops willRetry, so there is no extension-visible
+// signal that reliably distinguishes a retried error from a final one.  We do NOT
+// emit retry-scheduled: inferring it from a message_end error would misclassify
+// final errors and strand the turn open.  The parser defers error/length/aborted
+// terminals itself and releases exactly one turn_end on settled.
+const LIFECYCLE_CUSTOM_TYPE = "theater:lifecycle";
+const LIFECYCLE_VERSION = 1;
+const LIFECYCLE_PHASE = {
+	compactionWillRetry: "compaction-will-retry",
+	settled: "settled",
+} as const;
+type LifecyclePhase = (typeof LIFECYCLE_PHASE)[keyof typeof LIFECYCLE_PHASE];
+interface LifecycleExtras {
+	readonly reason?: string;
+}
+function lifecycleData(phase: LifecyclePhase, extra: LifecycleExtras = {}): {
+	readonly version: number;
+	readonly phase: LifecyclePhase;
+	readonly reason?: string;
+} {
+	const data: { version: number; phase: LifecyclePhase; reason?: string } = {
+		version: LIFECYCLE_VERSION,
+		phase,
+	};
+	if (extra.reason !== undefined) data.reason = extra.reason;
+	return data;
+}
+
+// Process-global guard so two extension copies (Theater's shipped copy plus a
+// user-local copy) cannot double-register lifecycle handlers.  Distinct from
+// the MCP lease owner (OWNER) and released on session_shutdown so a fresh
+// extension runtime can register after the owner tears down.
+const LIFECYCLE_REGISTERED = Symbol.for("theater.pi.lifecycle.registered");
+function acquireLifecycleGuard(): boolean {
+	const owners = globalThis as Record<symbol, boolean | undefined>;
+	if (owners[LIFECYCLE_REGISTERED]) return false;
+	owners[LIFECYCLE_REGISTERED] = true;
+	return true;
+}
+function releaseLifecycleGuard(): void {
+	const owners = globalThis as Record<symbol, boolean | undefined>;
+	delete owners[LIFECYCLE_REGISTERED];
+}
+
+// Minimal structural view of the Pi extension API touched by the markers.
+interface LifecycleExtensionApi {
+	appendEntry(customType: string, data?: unknown): void;
+	on(event: "session_before_compact", handler: (event: { willRetry: unknown }, ctx: unknown) => void): void;
+	on(event: "agent_settled", handler: (event: unknown, ctx: unknown) => void): void;
+	on(event: "session_shutdown", handler: (event: unknown, ctx: unknown) => void): void;
+}
+function writeMarker(pi: LifecycleExtensionApi, phase: LifecyclePhase, extra?: LifecycleExtras): void {
+	try {
+		pi.appendEntry(LIFECYCLE_CUSTOM_TYPE, lifecycleData(phase, extra));
+	} catch {
+		// A session-store failure must not crash Pi or break the turn; the parser
+		// tolerates a missing marker by leaving the existing terminal handling.
+	}
+}
+function registerLifecycleMarkers(pi: LifecycleExtensionApi): void {
+	if (!acquireLifecycleGuard()) return;
+	// Overflow-recovery compaction retries the interrupted turn afterwards;
+	// threshold/manual compaction does not.  Only the retry case hints the parser.
+	pi.on("session_before_compact", (event) => {
+		if (event.willRetry === true) {
+			writeMarker(pi, LIFECYCLE_PHASE.compactionWillRetry, { reason: "overflow" });
+		}
+	});
+	// agent_settled is the authoritative "turn is really done" signal that lets
+	// the parser release any pending terminal candidate.
+	pi.on("agent_settled", () => {
+		writeMarker(pi, LIFECYCLE_PHASE.settled);
+	});
+	// Release the guard on shutdown so a fresh extension runtime can register.
+	pi.on("session_shutdown", () => {
+		releaseLifecycleGuard();
+	});
+}
+
+// --- Actionable MCP error text ---
+//
+// Join the textual content a failing MCP tool returned instead of discarding
+// it for a generic message; generic fallback only when the text is empty.
+interface ToolResultContent {
+	readonly type: string;
+	readonly text?: string;
+	[key: string]: unknown;
+}
+function joinErrorText(content: ToolResultContent[] | undefined, toolName: string): string {
+	const parts: string[] = [];
+	if (Array.isArray(content)) {
+		for (const item of content) {
+			if (typeof item?.text === "string" && item.text.trim()) parts.push(item.text);
+		}
+	}
+	if (parts.length > 0) return parts.join("\n");
+	return `Theater tool ${toolName} returned an error`;
+}
 
 function acquireBridge(): symbol | undefined {
 	const owners = globalThis as Record<symbol, symbol | undefined>;
@@ -466,6 +567,10 @@ export default async function theaterMcpBridge(pi: ExtensionAPI) {
 		client = new TheaterClient(await loadConfig(configPath));
 		await client.initialize();
 		const discovered = await client.listTools();
+		// Narrow to a defined client for the execute closure: the outer `client`
+		// binding stays `| undefined` for the teardown paths, but every tool
+		// registered below captures this non-undefined reference.
+		const activeClient = client;
 		for (const tool of discovered) {
 			pi.registerTool({
 				name: toolName(tool.name),
@@ -476,7 +581,7 @@ export default async function theaterMcpBridge(pi: ExtensionAPI) {
 				async execute(_id, params, signal) {
 					if (signal?.aborted) return { content: [{ type: "text", text: "Cancelled" }], details: {} };
 					try {
-						const result = await client.callTool(tool.name, params, signal);
+						const result = await activeClient.callTool(tool.name, params, signal);
 						const content = (result.content ?? []).map((item) => ({
 							type: "text" as const,
 							text: item.text ?? JSON.stringify(item),

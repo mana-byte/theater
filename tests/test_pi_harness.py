@@ -463,7 +463,7 @@ def test_pi_bridge_persists_durable_lifecycle_markers_before_acquiring_the_mcp_l
         Path(__file__).parents[1] / "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts"
     ).read_text(encoding="utf-8")
     helper = (
-        Path(__file__).parents[1] / "theater/harness/builtin/plugins/pi/bridge_lifecycle.ts"
+        Path(__file__).parent / "pi_bridge_lifecycle_helpers.ts"
     ).read_text(encoding="utf-8")
 
     # The durable lifecycle wire contract: type=custom, customType=theater:lifecycle.
@@ -498,6 +498,14 @@ def test_pi_bridge_persists_durable_lifecycle_markers_before_acquiring_the_mcp_l
     assert "releaseLifecycleGuard();" in helper
     # No message_end handler: a final error must not be misclassified as retry.
     assert 'pi.on("message_end"' not in helper
+    # The bridge inlines the same helper logic (it cannot import a separate
+    # module without a wheel force-include).  Assert the bridge carries the
+    # matching constants and functions so the helper copy cannot drift.
+    assert 'const LIFECYCLE_CUSTOM_TYPE = "theater:lifecycle";' in bridge
+    assert "const LIFECYCLE_VERSION = 1;" in bridge
+    assert "function registerLifecycleMarkers(" in bridge
+    assert "function joinErrorText(" in bridge
+    assert 'Symbol.for("theater.pi.lifecycle.registered")' in bridge
 
 
 def test_pi_bridge_preserves_actionable_mcp_error_text_instead_of_a_generic_message() -> None:
@@ -505,7 +513,7 @@ def test_pi_bridge_preserves_actionable_mcp_error_text_instead_of_a_generic_mess
         Path(__file__).parents[1] / "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts"
     ).read_text(encoding="utf-8")
     helper = (
-        Path(__file__).parents[1] / "theater/harness/builtin/plugins/pi/bridge_lifecycle.ts"
+        Path(__file__).parent / "pi_bridge_lifecycle_helpers.ts"
     ).read_text(encoding="utf-8")
 
     # The old generic throw is gone; the failing tool's text is preserved.
@@ -535,37 +543,51 @@ def test_pi_bridge_releases_the_mcp_lease_on_every_setup_failure() -> None:
 
 
 def test_pi_bridge_lifecycle_helpers_behave_under_jiti() -> None:
-    """Run the Node/jiti behavior suite for bridge_lifecycle.ts.
+    """Run the Node/jiti behavior suite for the inlined bridge helpers.
 
-    The bridge's pure helpers (marker shape, duplicate-registration guard,
-    marker emission, exception-safe writes, actionable error text) are covered
-    by an executable TypeScript test loaded with jiti.  This asserts that suite
-    passes so the contract is checked at run time, not only by source substrings.
+    The bridge inlines its lifecycle/error helpers (no separate runtime
+    module, so no wheel force-include is needed).  The deterministic suite at
+    tests/pi_bridge_lifecycle.ts imports the test-only pure helpers at
+    tests/pi_bridge_lifecycle_helpers.ts and is loaded with jiti so it runs
+    without typebox or the Pi type package.  jiti is resolved portably from
+    the installed `pi` executable's package tree via Node's require.resolve;
+    no host-specific absolute path is hard-coded.  The test skips cleanly
+    when node, pi, or jiti is unavailable in the sandbox.
     """
     suite = Path(__file__).parent / "pi_bridge_lifecycle.ts"
     assert suite.is_file(), f"missing jiti behavior suite: {suite}"
-    jiti = (
-        Path("/Users/manaiki.laut/.local/share/fnm/node-versions/v22.20.0/installation")
-        / "lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.cjs"
-    )
-    assert jiti.is_file(), f"jiti not installed at expected path: {jiti}"
     node = shutil.which("node")
-    if node is None:
-        pytest.skip("node not on PATH in this sandbox")
+    pi_bin = shutil.which("pi")
+    if node is None or pi_bin is None:
+        pytest.skip("node or pi not on PATH in this sandbox")
+    # Resolve jiti from the pi package's node_modules at run time so the test
+    # never depends on a hard-coded install path.  The Node snippet resolves
+    # the pi bin to its real package directory, then require.resolve("jiti")
+    # from there, and finally loads the behavior suite through jiti.
+    resolve_script = (
+        "const {createRequire} = require('node:module');"
+        "const fs = require('node:fs');"
+        "const path = require('node:path');"
+        f"const piBin = {pi_bin!r};"
+        "const real = fs.realpathSync(piBin);"
+        "const piPkg = path.dirname(path.dirname(real));"
+        "const piRequire = createRequire(piPkg + '/package.json');"
+        "const jitiPath = piRequire.resolve('jiti');"
+        "const jiti = require(jitiPath);"
+        f"jiti(null, {{}})({str(suite)!r});"
+    )
     result = subprocess.run(
-        [
-            node,
-            "-e",
-            f"require({str(jiti)!r})(null, {{}})({str(suite)!r});",
-        ],
+        [node, "-e", resolve_script],
         capture_output=True,
         text=True,
         timeout=30,
         check=False,
     )
-    # Node may not be on PATH in every sandbox; skip rather than fail when absent.
-    if result.returncode != 0 and "not found" in (result.stderr + result.stdout).lower():
-        pytest.skip("node/jiti unavailable in this sandbox")
+    out = (result.stdout + result.stderr).lower()
+    if result.returncode != 0 and (
+        "not found" in out or "cannot find module" in out or "enoent" in out
+    ):
+        pytest.skip("node/pi/jiti unavailable in this sandbox")
     assert result.returncode == 0, (
         f"jiti behavior suite failed (rc={result.returncode}):\n{result.stdout}\n{result.stderr}"
     )
