@@ -73,6 +73,16 @@ def _message(entry_id: str, message: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _lifecycle(phase: str, entry_id: str = "life-1") -> dict[str, object]:
+    return {
+        "type": "custom",
+        "id": entry_id,
+        "timestamp": "2026-08-31T12:00:02.000Z",
+        "customType": "theater:lifecycle",
+        "data": {"version": 1, "phase": phase},
+    }
+
+
 def _append(path: Path, *records: dict[str, object]) -> None:
     with path.open("a", encoding="utf-8") as stream:
         for record in records:
@@ -779,6 +789,10 @@ def test_pi_parser_derives_assistant_timing_from_inner_start_and_outer_completio
     assert timing.duration_ms == pytest.approx((timing.end - timing.start) * 1_000)
     # Directly assert the end is the outer (completion) timestamp, not just self-consistent.
     assert timing.end == 1788254919.296  # 2026-09-01T09:28:39.296Z
+    # Control Event.ts must prefer the outer (completion) timestamp, not the
+    # inner generation-start, so the bus stamp is the moment Pi finalized.
+    assert parsed.events
+    assert parsed.events[0].ts == 1788254919.296
 
 
 def test_pi_parser_anchors_tool_call_start_at_containing_assistant_completion(tmp_path) -> None:
@@ -919,6 +933,505 @@ def test_pi_parser_drops_interval_when_outer_precedes_inner(tmp_path) -> None:
     assert assistant.timing.start == 1788254919.379
     assert assistant.timing.end is None
     assert assistant.timing.duration_ms is None
+
+
+def test_pi_parser_extracts_reasoning_from_thinking_blocks(tmp_path) -> None:
+    # Pi ThinkingContent is {"type":"thinking","thinking":str,...}; the parser
+    # previously read only "text" (a TextContent field), so REASONING facts were
+    # always empty.
+    observer = PiObserver(root=tmp_path)
+    parsed = observer.parse_record(
+        json.dumps(
+            _message(
+                "assistant-1",
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "answer"},
+                        {"type": "thinking", "thinking": "I should inspect the tree first."},
+                        {"type": "thinking"},  # redacted / empty
+                        {"type": "thinking", "thinking": ""},  # explicit empty
+                    ],
+                    "stopReason": "stop",
+                },
+            )
+        ),
+        1,
+    )
+    reasoning = [fact for fact in parsed.trajectory if fact.kind is TrajectoryKind.REASONING]
+    assert [fact.summary for fact in reasoning] == ["I should inspect the tree first."]
+    assistant = next(fact for fact in parsed.trajectory if fact.kind is TrajectoryKind.ASSISTANT)
+    assert assistant.summary == "answer"
+
+
+def test_pi_parser_error_response_defers_turn_end_until_settled_marker(tmp_path) -> None:
+    observer = PiObserver(root=tmp_path)
+    user = observer.parse_record(
+        json.dumps(_message("user-1", {"role": "user", "content": "do it"})), 1
+    )
+    error = observer.parse_record(
+        json.dumps(
+            _message(
+                "assistant-1",
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": ""}],
+                    "stopReason": "error",
+                    "errorMessage": "overloaded",
+                },
+            )
+        ),
+        2,
+    )
+    # The error must not close the turn yet (no turn_end), though it still
+    # emits its error content/trajectory facts.
+    assert not any(event.turn_end for event in error.events)
+    assert [event.kind for event in error.events] == [EventKind.ERROR]
+    assert error.trajectory[0].status is TrajectoryStatus.ERROR
+    assert observer._pending_terminal_turn_id == "user-1"
+    settled = observer.parse_record(json.dumps(_lifecycle("settled")), 3)
+    assert [event.kind for event in settled.events] == [EventKind.ASSISTANT]
+    assert settled.events[0].turn_end is True
+    assert settled.events[0].turn_id == "user-1"
+    # No duplicate assistant text, usage, or trajectory facts on the marker.
+    assert settled.events[0].text == ""
+    assert settled.events[0].usage is None
+    assert settled.trajectory == ()
+    assert observer._pending_terminal is False
+    assert observer._pending_terminal_turn_id is None
+    assert observer._active_turn_id is None
+    _ = user
+
+
+def test_pi_parser_error_then_retry_marker_has_no_turn_end(tmp_path) -> None:
+    observer = PiObserver(root=tmp_path)
+    observer.parse_record(json.dumps(_message("user-1", {"role": "user", "content": "do it"})), 1)
+    error = observer.parse_record(
+        json.dumps(
+            _message(
+                "assistant-1",
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": ""}],
+                    "stopReason": "error",
+                    "errorMessage": "overloaded",
+                },
+            )
+        ),
+        2,
+    )
+    assert not any(event.turn_end for event in error.events)
+    assert observer._pending_terminal_turn_id == "user-1"
+    # A retry-scheduled marker is an informational no-op: it signals continued
+    # work, not its success. Compaction may still fail and then settled must
+    # close, so the pending terminal is retained.
+    retry = observer.parse_record(json.dumps(_lifecycle("retry-scheduled")), 3)
+    assert not retry.events
+    assert observer._pending_terminal is True
+    assert observer._pending_terminal_turn_id == "user-1"
+    assert observer._active_turn_id == "user-1"
+
+
+def test_pi_parser_settled_marker_may_arrive_in_a_later_parse_record_call(tmp_path) -> None:
+    observer = PiObserver(root=tmp_path)
+    observer.parse_record(json.dumps(_message("user-1", {"role": "user", "content": "do it"})), 1)
+    observer.parse_record(
+        json.dumps(
+            _message(
+                "assistant-1",
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": ""}],
+                    "stopReason": "error",
+                    "errorMessage": "overloaded",
+                },
+            )
+        ),
+        2,
+    )
+    # Simulate drain batches arriving later: a tool result then the marker.
+    tool_result = observer.parse_record(
+        json.dumps(
+            _message(
+                "tool-1",
+                {
+                    "role": "toolResult",
+                    "toolCallId": "call-1",
+                    "toolName": "bash",
+                    "content": [{"type": "text", "text": "ok"}],
+                },
+            )
+        ),
+        3,
+    )
+    assert tool_result.events[0].kind is EventKind.TOOL_RESULT
+    settled = observer.parse_record(json.dumps(_lifecycle("settled")), 4)
+    assert settled.events[0].turn_end is True
+    assert settled.events[0].turn_id == "user-1"
+    assert observer._pending_terminal is False
+    assert observer._pending_terminal_turn_id is None
+
+
+def test_pi_parser_length_plus_compaction_marker_stays_open(tmp_path) -> None:
+    observer = PiObserver(root=tmp_path)
+    observer.parse_record(
+        json.dumps(_message("user-1", {"role": "user", "content": "long task"})), 1
+    )
+    length = observer.parse_record(
+        json.dumps(
+            _message(
+                "assistant-1",
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "partial..."}],
+                    "stopReason": "length",
+                },
+            )
+        ),
+        2,
+    )
+    # length is recoverable (compact-and-retry); must not close.
+    assert not any(event.turn_end for event in length.events)
+    assert observer._pending_terminal_turn_id == "user-1"
+    assert observer._pending_terminal is True
+    compaction = observer.parse_record(json.dumps(_lifecycle("compaction-will-retry")), 3)
+    assert not compaction.events
+    # compaction-will-retry is informational: compaction may still fail, so the
+    # pending terminal is retained until settled.
+    assert observer._pending_terminal is True
+    assert observer._pending_terminal_turn_id == "user-1"
+    assert observer._active_turn_id == "user-1"
+
+
+def test_pi_parser_retry_success_closes_once_and_clears_pending(tmp_path) -> None:
+    observer = PiObserver(root=tmp_path)
+    observer.parse_record(json.dumps(_message("user-1", {"role": "user", "content": "do it"})), 1)
+    observer.parse_record(
+        json.dumps(
+            _message(
+                "assistant-1",
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": ""}],
+                    "stopReason": "error",
+                    "errorMessage": "overloaded",
+                },
+            )
+        ),
+        2,
+    )
+    assert observer._pending_terminal_turn_id == "user-1"
+    # A later successful stop closes normally and clears the stale pending state.
+    success = observer.parse_record(
+        json.dumps(
+            _message(
+                "assistant-2",
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "done"}],
+                    "stopReason": "stop",
+                },
+            )
+        ),
+        3,
+    )
+    assert success.events[-1].turn_end is True
+    assert observer._pending_terminal is False
+    assert observer._pending_terminal_turn_id is None
+    assert observer._active_turn_id is None
+    # A subsequent settled marker with no pending terminal is a no-op.
+    redundant = observer.parse_record(json.dumps(_lifecycle("settled")), 4)
+    assert not redundant.events
+
+
+def test_pi_parser_malformed_lifecycle_marker_ignored(tmp_path) -> None:
+    observer = PiObserver(root=tmp_path)
+    observer.parse_record(json.dumps(_message("user-1", {"role": "user", "content": "do it"})), 1)
+    observer.parse_record(
+        json.dumps(
+            _message(
+                "assistant-1",
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": ""}],
+                    "stopReason": "error",
+                    "errorMessage": "overloaded",
+                },
+            )
+        ),
+        2,
+    )
+    for malformed in (
+        {
+            "type": "custom",
+            "customType": "theater:lifecycle",
+            "data": {"version": 2, "phase": "settled"},
+        },
+        {
+            "type": "custom",
+            "customType": "theater:lifecycle",
+            "data": {"version": 1, "phase": "unknown"},
+        },
+        {"type": "custom", "customType": "other", "data": {"version": 1, "phase": "settled"}},
+        {"type": "custom", "customType": "theater:lifecycle", "data": "not-a-dict"},
+        {"type": "custom", "customType": "theater:lifecycle"},
+        {
+            "type": "message",
+            "customType": "theater:lifecycle",
+            "data": {"version": 1, "phase": "settled"},
+        },
+    ):
+        parsed = observer.parse_record(json.dumps(malformed), 3)
+        assert not parsed.events
+        assert parsed.trajectory == ()
+    # The pending terminal is untouched by malformed markers.
+    assert observer._pending_terminal_turn_id == "user-1"
+
+
+def test_pi_parser_aborted_partial_calls_are_interrupted_not_pending(tmp_path) -> None:
+    observer = PiObserver(root=tmp_path)
+    observer.parse_record(json.dumps(_message("user-1", {"role": "user", "content": "do it"})), 1)
+    parsed = observer.parse_record(
+        json.dumps(
+            _message(
+                "assistant-1",
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "toolCall",
+                            "id": "call-1",
+                            "name": "bash",
+                            "arguments": {},
+                        }
+                    ],
+                    "stopReason": "aborted",
+                    "errorMessage": "user cancelled",
+                },
+            )
+        ),
+        2,
+    )
+    # Aborted defers the turn_end (a settled marker will release it).
+    assert not any(event.turn_end for event in parsed.events)
+    call = next(f for f in parsed.trajectory if f.kind is TrajectoryKind.TOOL_CALL)
+    assert call.status is TrajectoryStatus.INTERRUPTED
+    assert observer._pending_terminal_turn_id == "user-1"
+    settled = observer.parse_record(json.dumps(_lifecycle("settled")), 3)
+    assert settled.events[0].turn_end is True
+
+
+def test_pi_parser_error_partial_calls_are_error_not_pending(tmp_path) -> None:
+    observer = PiObserver(root=tmp_path)
+    observer.parse_record(json.dumps(_message("user-1", {"role": "user", "content": "do it"})), 1)
+    parsed = observer.parse_record(
+        json.dumps(
+            _message(
+                "assistant-1",
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "toolCall",
+                            "id": "call-1",
+                            "name": "bash",
+                            "arguments": {},
+                        }
+                    ],
+                    "stopReason": "error",
+                    "errorMessage": "overloaded",
+                },
+            )
+        ),
+        2,
+    )
+    assert not any(event.turn_end for event in parsed.events)
+    call = next(f for f in parsed.trajectory if f.kind is TrajectoryKind.TOOL_CALL)
+    assert call.status is TrajectoryStatus.ERROR
+
+
+def test_pi_parser_length_with_calls_marks_calls_error(tmp_path) -> None:
+    # A recoverable length response is discarded by Pi's agent-core and retried;
+    # its toolCall blocks never execute, so they must be ERROR, not PENDING.
+    observer = PiObserver(root=tmp_path)
+    observer.parse_record(json.dumps(_message("user-1", {"role": "user", "content": "do it"})), 1)
+    parsed = observer.parse_record(
+        json.dumps(
+            _message(
+                "assistant-1",
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "partial"},
+                        {
+                            "type": "toolCall",
+                            "id": "call-1",
+                            "name": "bash",
+                            "arguments": {},
+                        },
+                    ],
+                    "stopReason": "length",
+                },
+            )
+        ),
+        2,
+    )
+    assert not any(event.turn_end for event in parsed.events)
+    call = next(f for f in parsed.trajectory if f.kind is TrajectoryKind.TOOL_CALL)
+    assert call.status is TrajectoryStatus.ERROR
+    assert observer._pending_terminal_turn_id == "user-1"
+
+
+def test_pi_parser_reset_turn_context_clears_lifecycle_state(tmp_path) -> None:
+    observer = PiObserver(root=tmp_path)
+    observer.parse_record(json.dumps(_message("user-1", {"role": "user", "content": "do it"})), 1)
+    observer.parse_record(
+        json.dumps(
+            _message(
+                "assistant-1",
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": ""}],
+                    "stopReason": "error",
+                    "errorMessage": "overloaded",
+                },
+            )
+        ),
+        2,
+    )
+    assert observer._pending_terminal is True
+    assert observer._pending_terminal_turn_id == "user-1"
+    observer._reset_turn_context()
+    assert observer._pending_terminal is False
+    assert observer._pending_terminal_turn_id is None
+    assert observer._active_turn_id is None
+
+
+def test_pi_parser_history_seeding_reconstructs_lifecycle_state(tmp_path) -> None:
+    import io
+
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    transcript = tmp_path / "native-id.jsonl"
+    _append(
+        transcript,
+        _session(session_id="native-id", cwd=workdir),
+        _message("user-1", {"role": "user", "content": "do it"}),
+        _message(
+            "assistant-1",
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": ""}],
+                "stopReason": "error",
+                "errorMessage": "overloaded",
+            },
+        ),
+        _lifecycle("settled"),
+        _message("user-2", {"role": "user", "content": "next"}),
+    )
+    observer = PiObserver(root=tmp_path)
+    # Seeding from just before the second user message replays the settled marker
+    # and the error, leaving no stale pending terminal across the gap.
+    offset = transcript.stat().st_size
+    stream = io.BufferedReader(io.BytesIO(transcript.read_bytes()))
+    observer._seed_history_context(stream, offset)
+    assert observer._pending_terminal is False
+    assert observer._pending_terminal_turn_id is None
+    # The last user message reopens the active turn.
+    assert observer._active_turn_id == "user-2"
+
+
+def test_pi_parser_history_seeding_deferred_without_settled_keeps_pending(tmp_path) -> None:
+    import io
+
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    transcript = tmp_path / "native-id.jsonl"
+    _append(
+        transcript,
+        _session(session_id="native-id", cwd=workdir),
+        _message("user-1", {"role": "user", "content": "do it"}),
+        _message(
+            "assistant-1",
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": ""}],
+                "stopReason": "error",
+                "errorMessage": "overloaded",
+            },
+        ),
+    )
+    observer = PiObserver(root=tmp_path)
+    offset = transcript.stat().st_size
+    stream = io.BufferedReader(io.BytesIO(transcript.read_bytes()))
+    observer._seed_history_context(stream, offset)
+    # No settled marker arrived in history: the deferred terminal is retained.
+    assert observer._pending_terminal is True
+    assert observer._pending_terminal_turn_id == "user-1"
+
+
+def test_pi_parser_compaction_will_retry_then_settled_closes_without_later_assistant(
+    tmp_path,
+) -> None:
+    # Compaction may fail and then agent_settled fires with no later assistant
+    # response. The pending terminal from the length response must still close.
+    observer = PiObserver(root=tmp_path)
+    observer.parse_record(
+        json.dumps(_message("user-1", {"role": "user", "content": "long task"})), 1
+    )
+    length = observer.parse_record(
+        json.dumps(
+            _message(
+                "assistant-1",
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "partial..."}],
+                    "stopReason": "length",
+                },
+            )
+        ),
+        2,
+    )
+    assert observer._pending_terminal is True
+    compaction = observer.parse_record(json.dumps(_lifecycle("compaction-will-retry")), 3)
+    assert not compaction.events
+    # The informational compaction marker did NOT clear the pending terminal.
+    assert observer._pending_terminal is True
+    settled = observer.parse_record(json.dumps(_lifecycle("settled")), 4)
+    assert settled.events[0].turn_end is True
+    assert settled.events[0].turn_id == "user-1"
+    assert observer._pending_terminal is False
+    assert observer._pending_terminal_turn_id is None
+    _ = length
+
+
+def test_pi_parser_anonymous_assistant_record_settled_closes_with_turn_id_none(tmp_path) -> None:
+    # An assistant record with no entry id still defers; the pending candidate
+    # is tracked by presence, not by the (possibly None) turn id, so settled
+    # still releases one synthetic turn_end. The turn id is the active turn's,
+    # which may itself be None when there was no preceding user record.
+    observer = PiObserver(root=tmp_path)
+    record = {
+        "type": "message",
+        "timestamp": "2026-08-31T12:00:01.000Z",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": ""}],
+            "stopReason": "error",
+            "errorMessage": "overloaded",
+        },
+    }
+    parsed = observer.parse_record(json.dumps(record), 1)
+    assert not any(event.turn_end for event in parsed.events)
+    assert observer._pending_terminal is True
+    # No preceding user record => active turn id is None, but pending is True.
+    assert observer._pending_terminal_turn_id is None
+    settled = observer.parse_record(json.dumps(_lifecycle("settled")), 2)
+    assert settled.events[0].turn_end is True
+    assert settled.events[0].turn_id is None
+    assert observer._pending_terminal is False
+    assert observer._pending_terminal_turn_id is None
+    _ = parsed
 
 
 def test_pi_theater_tools_project_to_theater_activity(tmp_path) -> None:

@@ -26,7 +26,17 @@ _pi_fact = fact_builder(
     source="pi",
     identifier=lambda value: trajectory_identifier(value, overflow_prefix="pi"),
 )
-_TERMINAL_STOPS = {"stop", "length", "error", "aborted"}
+# stopReason values that end a response. ``stop`` is a genuine finish with
+# no tool calls: the turn closes immediately, as it always has. ``toolUse``
+# keeps the turn open (tools will run). ``error``/``length`` are retryable by
+# Pi's agent-core (auto-retry or compact-and-retry) and ``aborted`` is a user
+# cancellation -- none of these three may close a Theater turn from the
+# assistant record alone; see the lifecycle marker handling below.
+_IMMEDIATE_CLOSE_STOPS = {"stop"}
+_DEFERRED_CLOSE_STOPS = {"error", "length", "aborted"}
+_LIFECYCLE_CUSTOM_TYPE = "theater:lifecycle"
+_LIFECYCLE_VERSION = 1
+_LIFECYCLE_PHASES = frozenset({"retry-scheduled", "compaction-will-retry", "settled"})
 
 
 def _assistant_status(stop_reason: object) -> TrajectoryStatus:
@@ -38,6 +48,20 @@ def _assistant_status(stop_reason: object) -> TrajectoryStatus:
     if stop_reason in {"stop", "length", "toolUse"}:
         return TrajectoryStatus.COMPLETED
     return TrajectoryStatus.UNKNOWN
+
+
+def _tool_call_status(stop_reason: object, deferred_close: bool) -> TrajectoryStatus:
+    """Status for toolCall blocks in an assistant response.
+
+    A normal ``stop`` or ``toolUse`` leaves calls PENDING (they will execute or
+    were a normal request). An ``error``/``length``/``aborted`` response is
+    discarded by Pi's agent-core before any toolCall blocks execute, so those
+    calls must be terminal: INTERRUPTED for a user-cancelled ``aborted``, ERROR
+    for a retryable ``error``/``length``, never PENDING.
+    """
+    if not deferred_close:
+        return TrajectoryStatus.PENDING
+    return TrajectoryStatus.INTERRUPTED if stop_reason == "aborted" else TrajectoryStatus.ERROR
 
 
 def _pi_mcp_identity(value: object) -> tuple[str, str] | None:
@@ -54,6 +78,30 @@ def _pi_mcp_identity(value: object) -> tuple[str, str] | None:
 
 def _record_id(record: dict) -> str | None:
     return trajectory_identifier(record.get("id"), overflow_prefix="pi")
+
+
+def _lifecycle_phase(record: dict) -> str | None:
+    """Decode a durable Theater lifecycle custom entry, or return ``None``.
+
+    Pi's SessionManager persists custom entries as ``{"type":"custom",
+    "customType":<str>, "data":<obj>, ...}`` JSONL records that do not
+    participate in LLM context. Theater's bundled extension writes
+    ``theater:lifecycle`` markers so the parser can tell a final error/length
+    assistant response (the agent-core will retry or compact-and-retry) from
+    a genuinely settled one. Unknown/malformed markers return ``None`` and
+    never raise.
+    """
+    if record.get("type") != "custom":
+        return None
+    if record.get("customType") != _LIFECYCLE_CUSTOM_TYPE:
+        return None
+    data = record.get("data")
+    if not isinstance(data, dict):
+        return None
+    if data.get("version") != _LIFECYCLE_VERSION:
+        return None
+    phase = data.get("phase")
+    return phase if isinstance(phase, str) and phase in _LIFECYCLE_PHASES else None
 
 
 def _timestamp(record: dict, message: dict | None = None) -> float | None:
@@ -75,6 +123,17 @@ def _content_text(value: object) -> str:
         for block in value
         if isinstance(block, dict) and isinstance(block.get("text"), str)
     )
+
+
+def _thinking_text(block: dict) -> str:
+    """Extract reasoning from a Pi ThinkingContent block.
+
+    Pi's thinking block carries its content in the ``thinking`` field, not
+    ``text`` (which belongs to TextContent). The field may be absent or empty
+    when the provider redacts reasoning, so we never fabricate content.
+    """
+    value = block.get("thinking")
+    return value if isinstance(value, str) else ""
 
 
 def _blocks(value: object, block_type: str) -> list[dict]:
@@ -167,6 +226,21 @@ def _interval_timing(start: float | None, end: float | None) -> Timing | None:
     return Timing(end=end, provenance=TimingProvenance.SOURCE)
 
 
+def _event_timestamp(inner: float | None, outer: float | None) -> float | None:
+    """Control Event.ts for assistant records: prefer outer completion.
+
+    Pi writes two timestamps per assistant message: the inner
+    ``message.timestamp`` (generation start) and the outer ``record.timestamp``
+    (completion/persistence). Bus and trajectory events should stamp the moment
+    the record was finalized, so the outer timestamp wins when present and the
+    inner is the fallback. This keeps Event.ts independent of the Trajectory
+    Timing interval, which is built separately from both timestamps.
+    """
+    if outer is not None:
+        return outer
+    return inner
+
+
 def _tool_call_timing(assistant_outer: float | None) -> Timing | None:
     """Anchor a tool call at the containing assistant message's completion time.
 
@@ -185,11 +259,21 @@ class PiParserMixin:
     _active_turn_id: str | None
     _last_model: str | None
     _last_provider: str | None
+    #: A deferred terminal assistant response (error/length/aborted) whose turn
+    #: cannot close until a durable ``theater:lifecycle`` marker confirms Pi
+    #: has settled. Carried across ``parse_record`` calls and drain batches.
+    #: Presence is tracked separately from the optional turn id: a deferred
+    #: assistant record may have no entry id, and ``turn_id is None`` must not
+    #: be read as "no pending terminal".
+    _pending_terminal: bool
+    _pending_terminal_turn_id: str | None
 
     def _reset_turn_context(self) -> None:
         self._active_turn_id = None
         self._last_model = None
         self._last_provider = None
+        self._pending_terminal = False
+        self._pending_terminal_turn_id = None
 
     def _seed_history_context(self, stream: BinaryIO, start: int) -> None:
         self._reset_turn_context()
@@ -269,6 +353,9 @@ class PiParserMixin:
             )
         if record_type in {"compaction", "branch_summary"}:
             return self._summary_record(record, index, entry_id, timestamp)
+        phase = _lifecycle_phase(record)
+        if phase is not None:
+            return self._lifecycle_record(phase, index, entry_id, timestamp)
         if record_type != "message" or not isinstance((message := record.get("message")), dict):
             return ParsedRecord()
         return self._message_record(record, message, index, entry_id, clip_text)
@@ -283,20 +370,94 @@ class PiParserMixin:
                 record.get("provider") if isinstance(record.get("provider"), str) else None
             )
             return
+        phase = _lifecycle_phase(record)
+        if phase is not None:
+            # Reconstruct lifecycle state from bounded history so a restart or
+            # reattach cannot carry a stale deferred terminal across the gap.
+            # retry-scheduled/compaction-will-retry are informational: they signal
+            # continued work, not its success. Compaction may still fail and then
+            # agent_settled must close, so they must not clear the pending
+            # terminal candidate.
+            if phase == "settled":
+                self._pending_terminal = False
+                self._pending_terminal_turn_id = None
+                self._active_turn_id = None
+            return
         if record_type != "message" or not isinstance((message := record.get("message")), dict):
             return
         role = message.get("role")
         if role == "user":
             self._active_turn_id = _record_id(record)
-        elif role == "assistant" and not _blocks(message.get("content"), "toolCall"):
-            self._active_turn_id = None
-        if role == "assistant":
+            self._pending_terminal = False
+            self._pending_terminal_turn_id = None
+        elif role == "assistant":
+            stop_reason = message.get("stopReason")
+            calls = _blocks(message.get("content"), "toolCall")
+            if stop_reason in _IMMEDIATE_CLOSE_STOPS and not calls:
+                # A normal stop closes the turn and clears any deferred terminal.
+                self._active_turn_id = None
+                self._pending_terminal = False
+                self._pending_terminal_turn_id = None
+            elif stop_reason in _DEFERRED_CLOSE_STOPS:
+                # Retain the deferred terminal candidate tied to the active turn.
+                self._pending_terminal = True
+                self._pending_terminal_turn_id = self._active_turn_id
+            # toolUse and unknown stops leave the active turn open; a later
+            # assistant record replaces the deferred candidate only via the
+            # explicit close/defer branches above.
             self._last_model = (
                 message.get("model") if isinstance(message.get("model"), str) else None
             )
             self._last_provider = (
                 message.get("provider") if isinstance(message.get("provider"), str) else None
             )
+
+    def _lifecycle_record(
+        self,
+        phase: str,
+        index: int,
+        entry_id: str | None,
+        timestamp: float | None,
+    ) -> ParsedRecord:
+        """Resolve a deferred terminal turn on a durable lifecycle marker.
+
+        ``retry-scheduled`` and ``compaction-will-retry`` are informational
+        no-ops: they signal continued work, not its success. Compaction may
+        fail and then ``agent_settled`` must still close the turn, so clearing
+        the pending terminal here would lose the final ``turn_end``. They are
+        accepted (validated phase) but do not change lifecycle state.
+
+        ``settled`` releases a retained deferred terminal as exactly one
+        synthetic ``turn_end`` control event with no duplicated assistant text,
+        usage, or trajectory facts, then clears the active turn. A settled
+        marker with no pending terminal is a no-op (a normal stop already
+        closed the turn). The pending turn id is optional -- a deferred
+        assistant record with no entry id closes with ``turn_id=None``.
+        """
+        if phase in {"retry-scheduled", "compaction-will-retry"}:
+            return ParsedRecord()
+        if phase != "settled":
+            return ParsedRecord()
+        if not self._pending_terminal:
+            # A normal stop already closed the turn; the marker is redundant.
+            return ParsedRecord()
+        turn_id = self._pending_terminal_turn_id
+        self._pending_terminal = False
+        self._pending_terminal_turn_id = None
+        self._active_turn_id = None
+        return ParsedRecord(
+            events=(
+                Event(
+                    kind=EventKind.ASSISTANT,
+                    ts=timestamp,
+                    turn_end=True,
+                    turn_id=turn_id,
+                    raw_index=index,
+                ),
+            ),
+            trajectory=(),
+            trajectory_events=(),
+        )
 
     def _message_record(
         self,
@@ -340,9 +501,7 @@ class PiParserMixin:
         if role == "assistant":
             inner = _message_timestamp(message)
             outer = _record_timestamp(record)
-            return self._assistant_record(
-                record, message, index, entry_id, inner, outer, timestamp, clip_text
-            )
+            return self._assistant_record(record, message, index, entry_id, inner, outer, clip_text)
         if role == "toolResult":
             return self._tool_result_record(record, message, index, entry_id, timestamp, clip_text)
         return ParsedRecord()
@@ -355,7 +514,6 @@ class PiParserMixin:
         entry_id: str | None,
         inner: float | None,
         outer: float | None,
-        event_ts: float | None,
         clip_text: bool,
     ) -> ParsedRecord:
         del record
@@ -370,7 +528,22 @@ class PiParserMixin:
         )
         stop_reason = message.get("stopReason")
         assistant_status = _assistant_status(stop_reason)
-        terminal = not calls and stop_reason in _TERMINAL_STOPS
+        # Event.ts prefers the outer (completion) timestamp so the bus stamp is the
+        # moment Pi finalized the record, independent of the Trajectory interval.
+        event_ts = _event_timestamp(inner, outer)
+        # Determine the turn-close policy from the durable stop reason. A normal
+        # ``stop`` with no tool calls closes the turn immediately, as it always
+        # has. ``error``/``length``/``aborted`` are retryable or cancellable and
+        # must not close from the assistant record alone: the parser retains a
+        # pending terminal candidate and only a durable ``theater:lifecycle"
+        # settled marker releases it. ``toolUse`` and unknown stops keep the
+        # turn open (tools will run).
+        immediate_close = stop_reason in _IMMEDIATE_CLOSE_STOPS and not calls
+        deferred_close = stop_reason in _DEFERRED_CLOSE_STOPS
+        # error/length/aborted responses may carry partial toolCall blocks that
+        # the agent-core never executes (it discards the response and retries,
+        # or cancels). Those calls must be terminal, never PENDING.
+        call_status = _tool_call_status(stop_reason, deferred_close)
         events: list[Event] = []
         if raw:
             events.append(
@@ -405,7 +578,7 @@ class PiParserMixin:
                 )
             )
         error = message.get("errorMessage") if isinstance(message.get("errorMessage"), str) else ""
-        if terminal and error and not raw:
+        if deferred_close and error and not raw:
             events.append(
                 Event(
                     kind=EventKind.ERROR,
@@ -416,7 +589,7 @@ class PiParserMixin:
                     raw_index=index,
                 )
             )
-        if terminal:
+        if immediate_close:
             if events:
                 events[-1] = replace(events[-1], turn_end=True)
             else:
@@ -430,6 +603,13 @@ class PiParserMixin:
                     )
                 )
             self._active_turn_id = None
+            self._pending_terminal = False
+            self._pending_terminal_turn_id = None
+        elif deferred_close:
+            # Retain the deferred terminal candidate; a lifecycle marker decides.
+            self._pending_terminal = True
+            self._pending_terminal_turn_id = turn_id
+        # toolUse and unknown stops leave the active turn open.
 
         facts: list[TrajectoryFact] = [
             _pi_fact(
@@ -451,7 +631,7 @@ class PiParserMixin:
             )
         ]
         for block in thinking:
-            text = _content_text([block])
+            text = _thinking_text(block)
             if text:
                 facts.append(
                     _pi_fact(
@@ -482,7 +662,7 @@ class PiParserMixin:
                     call_id=call_id,
                     mcp_server=mcp_server,
                     mcp_tool=mcp_tool,
-                    status=TrajectoryStatus.PENDING,
+                    status=call_status,
                     timing=_tool_call_timing(outer),
                     details=tuple(
                         detail
