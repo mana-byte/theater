@@ -74,6 +74,7 @@ from theater.regie.trajectory.widgets.overview import TrajectoryOverviewStrip
 from theater.regie.trajectory.widgets.search import TrajectorySearchInput
 from theater.regie.trajectory.widgets.span_detail import (
     SpanDetailClosed,
+    SpanDetailCopyRequested,
     SpanDetailPanel,
     SpanDetailParticipantLinkClicked,
     SpanDetailRecordLinkClicked,
@@ -1326,6 +1327,9 @@ class TrajectoryView(Vertical):
 
     def on_span_detail_tab_changed(self, message: SpanDetailTabChanged) -> None:
         self.state.detail_tab = message.tab
+
+    def on_span_detail_copy_requested(self, message: SpanDetailCopyRequested) -> None:
+        self.run_worker(self._copy(message.text), name="trajectory-copy")
 
     def on_span_detail_closed(self, _message: SpanDetailClosed) -> None:
         self._close_details()
