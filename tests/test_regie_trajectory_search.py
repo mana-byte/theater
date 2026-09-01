@@ -117,6 +117,28 @@ def test_full_history_hits_remain_searchable_in_tools_view() -> None:
     assert projection.search_result.record_ids == ("remote-tool",)
 
 
+def test_completed_full_history_search_replaces_loaded_matches_with_one_result_page() -> None:
+    state = ParticipantTrajectoryState("p1")
+    state.upsert((record("loaded", "grafana from loaded window"),))
+    remote = record("best", "grafana exact result")
+    state.query = "grafana"
+    state.apply_search(
+        TrajectorySearchResult(
+            query="grafana",
+            records=(remote,),
+            scanned_records=1_000,
+            matched_records=40,
+            truncated=True,
+        )
+    )
+
+    projection = TrajectoryViewProjection(state, page_size=30)
+    projection.refresh(state, page_size=30)
+
+    assert projection.search_result.record_ids == ("best",)
+    assert projection.ledger_page.count == 1
+
+
 def test_filters_retain_nested_headers_and_report_counts() -> None:
     records = [
         record("input", "ask", lane="input", kind="user", step_id="s1"),

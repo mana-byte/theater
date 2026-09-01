@@ -111,6 +111,7 @@ class ParticipantTrajectoryState:
     filters_open: bool = False
     search_records: OrderedDict[str, TrajectoryRecord] = field(default_factory=OrderedDict)
     search_query: str = ""
+    search_result_ready: bool = False
     searching_full_history: bool = False
     search_complete: bool = False
     search_error: str = ""
@@ -149,9 +150,13 @@ class ParticipantTrajectoryState:
 
     @property
     def remote_search_records(self) -> tuple[TrajectoryRecord, ...]:
-        if not self.query or self.search_query != self.query:
+        if not self.search_result_active:
             return ()
         return tuple(self.search_records.values())
+
+    @property
+    def search_result_active(self) -> bool:
+        return bool(self.query and self.search_result_ready and self.search_query == self.query)
 
     def record_for_id(self, record_id: str | None) -> TrajectoryRecord | None:
         if record_id is None:
@@ -207,6 +212,7 @@ class ParticipantTrajectoryState:
     def begin_search(self, query: str) -> None:
         self.search_query = query
         self.search_records.clear()
+        self.search_result_ready = False
         self.searching_full_history = bool(query.strip())
         self.search_complete = False
         self.search_error = ""
@@ -219,10 +225,9 @@ class ParticipantTrajectoryState:
             return
         self.search_query = result.query
         self.search_records = OrderedDict(
-            (record.record_id, record)
-            for record in deterministic_record_order(result.records)
-            if record.record_id not in self.records
+            (record.record_id, record) for record in deterministic_record_order(result.records)
         )
+        self.search_result_ready = True
         self.searching_full_history = False
         self.search_complete = result.complete
         self.search_error = result.message
@@ -235,6 +240,7 @@ class ParticipantTrajectoryState:
             return
         self.search_query = query
         self.search_records.clear()
+        self.search_result_ready = False
         self.searching_full_history = False
         self.search_complete = False
         self.search_error = message

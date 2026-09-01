@@ -137,7 +137,7 @@ async def test_controller_applies_full_history_search_hits() -> None:
     assert state.search_complete is True
     assert query.calls[-1] == (
         "trajectory.search",
-        {"id": "p1", "query": "grafna", "limit": 200},
+        {"id": "p1", "query": "grafna", "limit": 30},
     )
     await controller.close()
 

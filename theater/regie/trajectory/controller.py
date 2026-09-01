@@ -11,6 +11,7 @@ from typing import Protocol
 from theater.constants.trajectory import (
     TRAJECTORY_FOLLOW_TIMEOUT_SECONDS,
     TRAJECTORY_PAGE_RECORD_LIMIT,
+    TRAJECTORY_SEARCH_RESULT_LIMIT,
 )
 from theater.regie.trajectory.models import (
     decode_delta,
@@ -258,7 +259,7 @@ class TrajectoryController:
                     "trajectory.search",
                     id=participant_id,
                     query=query,
-                    limit=self.page_limit,
+                    limit=min(self.state_store.page_size, TRAJECTORY_SEARCH_RESULT_LIMIT),
                 )
             )
             _validate_search_result(result, participant_id, query)

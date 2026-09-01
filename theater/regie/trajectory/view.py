@@ -367,7 +367,11 @@ class TrajectoryView(Vertical):
                 selected_id=self.state.selected_id,
                 hovered_id=self.state.hovered_id,
                 order_mode=self.state.order_mode,
-                has_older=self.state.has_older and self.projection.ledger_page.index == 0,
+                has_older=(
+                    self.state.has_older
+                    and not self.state.search_result_active
+                    and self.projection.ledger_page.index == 0
+                ),
                 loading_older=self.state.loading_older and self.projection.ledger_page.index == 0,
                 retry_message=self.state.retry_message if self.state.retry_kind else None,
                 position_offset=self.projection.ledger_page.first_item - 1,
@@ -422,11 +426,14 @@ class TrajectoryView(Vertical):
             int(visible_count > 0) if insight_view else self.projection.ledger_page.first_item
         )
         last_item = visible_count if insight_view else self.projection.ledger_page.last_item
+        result_page_active = self.state.search_result_active
         footer.update_state(
             status=status,
             message=footer_message,
             record_count=(
-                len(self.state.tool_index.ordered)
+                len(self.projection.search_result.row_ids)
+                if result_page_active
+                else len(self.state.tool_index.ordered)
                 + sum(
                     record.record_id not in self.state.tool_index.by_record_id
                     for record in self.projection.ordered_records
