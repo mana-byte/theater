@@ -484,6 +484,7 @@ def test_a_plugin_shows_up_in_describe(local_dir):
     assert rows["acme"]["source"] == "local"
     assert rows["acme"]["error"] is None
     assert rows["acme"]["manifest_api_version"] == 1
+    assert rows["acme"]["approvals"] == ["manual"]
     assert rows["acme"]["package_path"] == str(local_dir / "acme")
     assert rows["acme"]["primary_channel"] is None
     assert rows["acme"]["runtime"] == {"state": "inactive", "participants": []}
@@ -494,6 +495,7 @@ def test_describe_projects_validated_manifest_channels_and_unavailability(local_
     row = {row["name"]: row for row in harness_registry.describe()}["vibe"]
 
     assert row["manifest_path"].endswith("vibe/manifest.py")
+    assert row["approvals"] == ["manual", "edits", "yolo"]
     assert row["primary_channel"] == {
         "id": "transcript",
         "kind": "transcript",
@@ -608,7 +610,8 @@ def test_broken_plugin_has_no_fake_manifest_diagnostics(local_dir):
 
     row = {row["name"]: row for row in harness_registry.describe()}["broken"]
     assert row["error"] is not None
-    assert not {"manifest_api_version", "package_path", "channels", "runtime"} & row.keys()
+    absent = {"manifest_api_version", "package_path", "approvals", "channels", "runtime"}
+    assert not absent & row.keys()
 
 
 # ---- legacy file migration diagnostic ------------------------------------

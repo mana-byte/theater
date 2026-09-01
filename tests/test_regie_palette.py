@@ -288,6 +288,15 @@ async def test_a_palette_spawn_carries_no_prompt(spawning_app):
     assert params["approval"] == "manual"
 
 
+async def test_a_palette_spawn_uses_the_only_advertised_approval(spawning_app):
+    app, client = spawning_app
+    app.harnesses = [{"name": "pi", "approvals": ["yolo"]}]
+
+    await app._spawn_harness("pi")
+
+    assert _spawn_params(client)["approval"] == "yolo"
+
+
 async def test_a_palette_spawn_lands_in_the_session_the_user_is_looking_at(
     spawning_app,
 ):
@@ -316,6 +325,32 @@ async def test_a_refused_spawn_does_not_take_the_app_down(monkeypatch):
     app._client = Refusing()
     await app._spawn_harness("claude")
     assert reported and "not on PATH" in reported[0]
+
+
+@pytest.mark.parametrize("approvals", [[], ["edits", "yolo"]])
+async def test_a_palette_spawn_refuses_without_a_unique_policy(
+    spawning_app, approvals, monkeypatch
+):
+    app, client = spawning_app
+    app.harnesses = [{"name": "pi", "approvals": approvals}]
+    reported: list[str] = []
+    monkeypatch.setattr(app, "notify", lambda message, **kwargs: reported.append(message))
+
+    await app._spawn_harness("pi")
+
+    assert not any(method == "spawn" for method, _ in client.calls)
+    assert reported and "Cannot start pi" in reported[0]
+
+
+async def test_a_palette_resume_uses_the_only_advertised_approval(spawning_app):
+    app, client = spawning_app
+    app.harnesses = [{"name": "pi", "approvals": ["yolo"]}]
+
+    await app._resume_dead_session({"harness": "pi", "cwd": "/tmp/project", "session_id": "pi-1"})
+
+    params = _spawn_params(client)
+    assert params["approval"] == "yolo"
+    assert params["resume"] == "pi-1"
 
 
 # ---- the app asks the daemon for the list -------------------------------
