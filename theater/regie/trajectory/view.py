@@ -40,7 +40,7 @@ from theater.regie.trajectory.messages import (
 )
 from theater.regie.trajectory.projection import TrajectoryViewProjection
 from theater.regie.trajectory.render.diagnostics import is_raw_theater_bus_record
-from theater.regie.trajectory.render.records import sanitize_text
+from theater.regie.trajectory.render.records import POINT_EVENT_KINDS, sanitize_text
 from theater.regie.trajectory.search import SearchResult
 from theater.regie.trajectory.state import ParticipantTrajectoryState, TrajectoryStateStore
 from theater.regie.trajectory.widgets.breadcrumb import TrajectoryBreadcrumb
@@ -316,6 +316,7 @@ class TrajectoryView(Vertical):
             selected_id=self.state.selected_id,
             duration_mode=self.state.order_mode is OrderMode.DURATION,
             scroll_offset=timeline_offset,
+            timing_for=self._timing_for,
         )
         if self.state.follow_tail:
             timeline.scroll_to_tail(repaint=False)
@@ -1104,6 +1105,37 @@ class TrajectoryView(Vertical):
             if timing is not None:
                 return timing, "request"
         return self.state.records[record_id].timing, None
+
+    def _timing_for(self, record_id: str) -> Timing | None:
+        """Resolve a derived operation/request interval for a record member.
+
+        The timeline's Duration mode consumes this when a record's own timing
+        carries only part of its interval (e.g. a Vibe tool call with start but
+        no end), so split-source spans are laid out by their derived operation
+        interval instead of silently falling back to sequence mode.
+
+        Returns only DERIVED operation/request timing — never the record's own
+        timing, which `_interval` already evaluates first under the
+        `supports_duration_interval` gate. Point events are excluded from the
+        request fallback so a request-wide interval is not duplicated across
+        members that have no duration to plot.
+        """
+        record = self.state.records.get(record_id)
+        if record is None:
+            return None
+        operation_id = self.state.tool_index.by_record_id.get(record_id)
+        if operation_id is not None:
+            timing = self.state.tool_index.by_id[operation_id].timing
+            if timing is not None:
+                return timing
+        if record.kind in POINT_EVENT_KINDS:
+            return None
+        request_id = self.state.request_index.by_record_id.get(record_id)
+        if request_id is not None:
+            timing = self.state.request_index.by_id[request_id].timing
+            if timing is not None:
+                return timing
+        return None
 
     def on_timeline_span_clicked(self, message: TimelineSpanClicked) -> None:
         self._update_follow_for_selection(message.record_id)
