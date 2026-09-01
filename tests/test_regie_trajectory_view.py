@@ -459,28 +459,48 @@ async def test_details_replace_only_the_ledger_and_close_back_to_the_list() -> N
         assert app.focused is ledger
 
 
-async def test_span_detail_text_supports_mouse_selection_and_clipboard_copy() -> None:
-    app = Host()
+async def test_span_detail_copy_button_copies_active_tab() -> None:
+    copied: list[str] = []
+    app = Host(copied=copied)
     async with app.run_test(size=(100, 30)) as pilot:
-        await add_records(app)
+        view = await add_records(app)
+        record = view.state.records["r2"]
+        view.state.upsert(
+            [
+                TrajectoryRecord.from_wire(
+                    {
+                        **record.to_wire(),
+                        "revision": record.revision + 1,
+                        "details": [
+                            *record.to_wire()["details"],
+                            {
+                                "name": "reasoning",
+                                "format": "text",
+                                "value": {"text": "because", "omitted_bytes": 0},
+                            },
+                        ],
+                    }
+                )
+            ]
+        )
+        view._refresh()
         await pilot.press("enter")
         await pilot.pause()
 
-        log = app.query_one("#trajectory-span-detail-content-summary", RichLog)
-        content_x = log.content_region.x - log.region.x
-        content_y = log.content_region.y - log.region.y
-        await pilot.mouse_down(log, offset=(content_x, content_y))
-        await pilot.mouse_up(log, offset=(content_x + 5, content_y))
+        panel = app.query_one(SpanDetailPanel)
+        button = panel.query_one("#trajectory-span-detail-copy", Button)
+        summary = panel.copy_text
+        panel.set_tab(InspectorTab.REASONING)
         await pilot.pause()
+        active_tab = panel.query_one("#trajectory-span-detail-tabs Tab.-active")
+        reasoning = panel.copy_text
+        assert reasoning != summary
+        assert button.region.y == active_tab.region.y
+        assert active_tab.region.right <= button.region.x
 
-        assert app.screen.get_selected_text() == "assist"
-        selected_style = next(iter(log.render_line(0))).style
-        assert selected_style is not None
-        assert selected_style.bgcolor == app.screen.get_component_rich_style(
-            "screen--selection"
-        ).bgcolor
-        app.screen.action_copy_text()
-        assert app._clipboard == "assist"
+        await pilot.click(button)
+        await pilot.pause()
+        assert copied == [reasoning]
 
 
 async def test_timeline_click_replaces_the_open_span_detail() -> None:
