@@ -46,6 +46,7 @@ from theater.trajectory import (
     TrajectoryOverview,
     TrajectoryPage,
     TrajectoryRecord,
+    TrajectorySearchResult,
     TrajectoryStatus,
     TrajectoryValidationError,
     deterministic_record_order,
@@ -108,6 +109,14 @@ class ParticipantTrajectoryState:
     loading: bool = True
     search_open: bool = False
     filters_open: bool = False
+    search_records: OrderedDict[str, TrajectoryRecord] = field(default_factory=OrderedDict)
+    search_query: str = ""
+    searching_full_history: bool = False
+    search_complete: bool = False
+    search_error: str = ""
+    search_scanned_records: int = 0
+    search_matched_records: int = 0
+    search_truncated: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.participant_id, str) or not self.participant_id:
@@ -136,7 +145,18 @@ class ParticipantTrajectoryState:
 
     @property
     def selected_record(self) -> TrajectoryRecord | None:
-        return self.records.get(self.selected_id) if self.selected_id is not None else None
+        return self.record_for_id(self.selected_id)
+
+    @property
+    def remote_search_records(self) -> tuple[TrajectoryRecord, ...]:
+        if not self.query or self.search_query != self.query:
+            return ()
+        return tuple(self.search_records.values())
+
+    def record_for_id(self, record_id: str | None) -> TrajectoryRecord | None:
+        if record_id is None:
+            return None
+        return self.records.get(record_id) or self.search_records.get(record_id)
 
     def _set_panel(self, panel: PanelStateInfo) -> None:
         self.panel = panel
@@ -182,7 +202,42 @@ class ParticipantTrajectoryState:
         operation_id = self.tool_index.by_record_id.get(record_id)
         if operation_id is not None:
             return self.tool_index.anchor_by_id.get(operation_id)
-        return record_id if record_id in self.records else None
+        return record_id if self.record_for_id(record_id) is not None else None
+
+    def begin_search(self, query: str) -> None:
+        self.search_query = query
+        self.search_records.clear()
+        self.searching_full_history = bool(query.strip())
+        self.search_complete = False
+        self.search_error = ""
+        self.search_scanned_records = 0
+        self.search_matched_records = 0
+        self.search_truncated = False
+
+    def apply_search(self, result: TrajectorySearchResult) -> None:
+        if result.query != self.query:
+            return
+        self.search_query = result.query
+        self.search_records = OrderedDict(
+            (record.record_id, record)
+            for record in deterministic_record_order(result.records)
+            if record.record_id not in self.records
+        )
+        self.searching_full_history = False
+        self.search_complete = result.complete
+        self.search_error = result.message
+        self.search_scanned_records = result.scanned_records
+        self.search_matched_records = result.matched_records
+        self.search_truncated = result.truncated
+
+    def fail_search(self, query: str, message: str) -> None:
+        if query != self.query:
+            return
+        self.search_query = query
+        self.search_records.clear()
+        self.searching_full_history = False
+        self.search_complete = False
+        self.search_error = message
 
     def _trim(self, *, evict_newest: bool) -> None:
         while (
@@ -408,7 +463,7 @@ class ParticipantTrajectoryState:
         if record_id is None:
             self.selected_id = None
             return True
-        if record_id not in self.records:
+        if self.record_for_id(record_id) is None:
             return False
         self.selected_id = record_id
         return True
@@ -418,6 +473,7 @@ class ParticipantTrajectoryState:
         resync_pending = self.retry_kind == "resync"
         resync_message = self.retry_message
         self.query = ""
+        self.begin_search("")
         self.lane_filters.clear()
         self.kind_filters.clear()
         self.status_filters.clear()

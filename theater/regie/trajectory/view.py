@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import inspect
 from bisect import bisect_left, bisect_right
@@ -194,6 +195,7 @@ class TrajectoryView(Vertical):
         self.projection = TrajectoryViewProjection(self.state, self.state_store.page_size)
         self._search_refresh_pending = False
         self._load_worker: Worker[TrajectoryPage | None] | None = None
+        self._search_worker: Worker[None] | None = None
         self._retiring = False
 
     def compose(self) -> ComposeResult:
@@ -239,6 +241,8 @@ class TrajectoryView(Vertical):
             self._unsubscribe = None
         if self._load_worker is not None and not self._load_worker.is_finished:
             self._load_worker.cancel()
+        if self._search_worker is not None and not self._search_worker.is_finished:
+            self._search_worker.cancel()
 
     def on_resize(self, event: events.Resize) -> None:
         self._sync_responsive_height(event.size.height)
@@ -362,6 +366,7 @@ class TrajectoryView(Vertical):
             pieces.append(f"↓ {self.state.new_count} new events · G to follow")
         if self.state.loading_older:
             pieces.append("loading older")
+        self._append_search_status(pieces)
         if self.state.retry_kind:
             pieces.append("retry available")
         if self.state.reload_required:
@@ -415,6 +420,16 @@ class TrajectoryView(Vertical):
             follow_tail=self.state.follow_tail,
             new_count=self.state.new_count,
         )
+
+    def _append_search_status(self, pieces: list[str]) -> None:
+        if self.state.searching_full_history:
+            pieces.append("searching full history…")
+        elif self.state.search_error:
+            pieces.append(self.state.search_error)
+        elif self.state.query and self.state.search_complete:
+            pieces.append(f"searched {self.state.search_scanned_records} records")
+            if self.state.search_truncated:
+                pieces.append("search results bounded")
 
     @property
     def search_result(self) -> SearchResult:
@@ -533,7 +548,7 @@ class TrajectoryView(Vertical):
         panel = self.query_one("#trajectory-span-detail", SpanDetailPanel)
         insight_view = self.state.diagnostic_view in INSIGHT_VIEWS
         record_id = self.state.row_anchor(self.state.detail_id)
-        record = self.state.records.get(record_id or "")
+        record = self.state.record_for_id(record_id)
         if record is None:
             self.state.detail_id = None
             self._set_class(ledger, "-hidden", insight_view)
@@ -558,13 +573,14 @@ class TrajectoryView(Vertical):
 
     def select_and_reveal_record(self, record_id: str) -> bool:
         """Select and open a loaded record without requesting more trajectory data."""
-        if record_id not in self.state.records:
+        if self.state.record_for_id(record_id) is None:
             return False
         anchor = self.state.row_anchor(record_id)
         if anchor is None:
             return False
         if self.projection.logical_row_id(record_id) not in self.projection.all_visible_indices:
-            record = self.state.records[record_id]
+            record = self.state.record_for_id(record_id)
+            assert record is not None
             self.state.diagnostic_view = (
                 DiagnosticView.COORDINATION
                 if is_raw_theater_bus_record(record)
@@ -1036,7 +1052,24 @@ class TrajectoryView(Vertical):
 
     def _refresh_search(self) -> None:
         self._search_refresh_pending = False
+        self.state.begin_search(self.state.query)
         self._refresh()
+        if self._search_worker is not None and not self._search_worker.is_finished:
+            self._search_worker.cancel()
+        if self.controller is not None and self.state.query.strip():
+            query = self.state.query
+            self._search_worker = self.run_worker(
+                self._search_full_history(query),
+                name="trajectory-search",
+                group="trajectory-search",
+                exclusive=True,
+            )
+
+    async def _search_full_history(self, query: str) -> None:
+        await asyncio.sleep(0.15)
+        if self.state.query != query or self.controller is None:
+            return
+        await self.controller.search_full_history(query, self.participant_id)
 
     def on_input_blurred(self, event: Input.Blurred) -> None:
         if event.input.id == "trajectory-search":
@@ -1086,7 +1119,7 @@ class TrajectoryView(Vertical):
         card = self.query_one("#trajectory-hover-card", TimelineHoverCard)
         timeline = self.query_one("#trajectory-timeline", Timeline)
         card.fit_to_viewport(self.content_region.width)
-        record = self.state.records.get(record_id or "")
+        record = self.state.record_for_id(record_id)
         anchor = timeline.hover_anchor(record_id)
         if record is None or anchor is None:
             card.hide()
@@ -1105,7 +1138,8 @@ class TrajectoryView(Vertical):
             timing = self.state.request_index.by_id[request_id].timing
             if timing is not None:
                 return timing, "request"
-        return self.state.records[record_id].timing, None
+        record = self.state.record_for_id(record_id)
+        return (record.timing, None) if record is not None else (None, None)
 
     def _timing_for(self, record_id: str) -> Timing | None:
         """Resolve a derived operation/request interval for a record member.
@@ -1121,7 +1155,7 @@ class TrajectoryView(Vertical):
         request fallback so a request-wide interval is not duplicated across
         members that have no duration to plot.
         """
-        record = self.state.records.get(record_id)
+        record = self.state.record_for_id(record_id)
         if record is None:
             return None
         operation_id = self.state.tool_index.by_record_id.get(record_id)

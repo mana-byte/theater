@@ -375,6 +375,49 @@ async def test_snapshot_paginates_older_history_without_gaps(source_opener):
     await service.aclose()
 
 
+async def test_search_scans_full_history_without_warming_stream(source_opener):
+    participant = _participant("p")
+    source = _PagedSource(
+        {
+            None: HistoryPage(
+                location="/tmp/p",
+                events=(_event("recent", 20),),
+                cursor="live",
+                older_cursor="older",
+                has_older=True,
+                provenance="operator",
+            ),
+            "older": HistoryPage(
+                location="/tmp/p",
+                trajectory=(
+                    TrajectoryFact(
+                        TrajectoryKind.TOOL_CALL,
+                        summary="query metrics",
+                        native_id="grafana-call",
+                        raw_index=3,
+                        mcp_server="grafana",
+                        mcp_tool="query_prometheus",
+                    ),
+                ),
+                trajectory_events=(),
+                cursor="live",
+                provenance="operator",
+            ),
+        }
+    )
+    source_opener[participant.id] = source
+    service = TrajectoryService(_Store(), _Registry([participant]), _Observer())
+
+    result = await service.search(participant.id, query="grafna", limit=20)
+
+    assert [record.mcp_server for record in result.records] == ["grafana"]
+    assert result.complete is True
+    assert result.scanned_records == 2
+    assert source.calls == [None, "older"]
+    assert service.streams == {}
+    await service.aclose()
+
+
 async def test_live_records_require_trusted_identity_and_recover_after_trusted_attach(
     source_opener,
 ):

@@ -19,75 +19,14 @@ from theater.trajectory import (
     TrajectoryRecord,
     TrajectoryRequest,
     TrajectoryStatus,
+    fuzzy_subsequence_score,
+    record_search_score,
+    record_search_text,
 )
 from theater.trajectory.tools import TrajectoryToolOperation
 
 CacheKey = TypeVar("CacheKey")
 CacheValue = TypeVar("CacheValue")
-
-
-def fuzzy_subsequence_score(query: str, candidate: str) -> int | None:
-    """Return a stable match score, or None when query is not an ordered subsequence."""
-    query = query.casefold().strip()
-    candidate = candidate.casefold()
-    if not query:
-        return 0
-    position = 0
-    score = 0
-    previous = -2
-    for character in query:
-        found = candidate.find(character, position)
-        if found < 0:
-            return None
-        score += 1
-        if found == previous + 1:
-            score += 4
-        if found == 0 or candidate[found - 1].isspace() or candidate[found - 1] in "-_/:.":
-            score += 3
-        score += max(0, 2 - found // 24)
-        previous = found
-        position = found + 1
-    return score
-
-
-def record_search_text(record: TrajectoryRecord) -> str:
-    """Build searchable text only from already bounded record fields."""
-    values = [
-        record.record_id,
-        record.participant_id,
-        record.source,
-        record.summary,
-        record.turn_id or "",
-        record.step_id or "",
-        record.call_id or "",
-        record.parent_call_id or "",
-        record.request_id or "",
-        record.mcp_server or "",
-        record.mcp_tool or "",
-    ]
-    if record.usage is not None:
-        values.extend(
-            (
-                record.usage.request_id or "",
-                record.usage.provider or "",
-                record.usage.model or "",
-                record.usage.cost_provenance.value,
-            )
-        )
-    if record.failure is not None:
-        values.extend(
-            (
-                record.failure.category.value,
-                record.failure.code or "",
-                record.failure.detail,
-            )
-        )
-    values.extend((record.retry_of_record_id or "", str(record.retry_attempt or "")))
-    values.extend(field.name for field in record.details)
-    values.extend(field.preview.text for field in record.details)
-    values.extend(link.participant_id for link in record.links)
-    values.extend(link.relation for link in record.links)
-    return " ".join(values)
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,7 +84,7 @@ class SearchCache:
     def score(self, record: TrajectoryRecord, query: str) -> int | None:
         key = (record.record_id, record.revision, query)
         if key not in self.query_scores:
-            self.query_scores[key] = fuzzy_subsequence_score(query, self.searchable(record))
+            self.query_scores[key] = record_search_score(record, query)
             self._trim(self.query_scores)
         return self.query_scores[key]
 
@@ -362,7 +301,7 @@ def search_records(  # noqa: PLR0912, PLR0915
         score = (
             cache.score(record, normalized_query)
             if cache is not None
-            else fuzzy_subsequence_score(normalized_query, record_search_text(record))
+            else record_search_score(record, normalized_query)
         )
         if score is None:
             continue
@@ -584,7 +523,7 @@ def base_request_entries(
 
 def matches_query(record: TrajectoryRecord, query: str) -> bool:
     """Test one bounded record without changing chronology or filters."""
-    return fuzzy_subsequence_score(query, record_search_text(record)) is not None
+    return record_search_score(record, query) is not None
 
 
 __all__ = [
