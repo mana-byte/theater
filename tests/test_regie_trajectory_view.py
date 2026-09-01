@@ -602,6 +602,7 @@ async def test_clicking_span_detail_text_copies_active_tab() -> None:
 
         panel = app.query_one(SpanDetailPanel)
         log = panel.query_one("#trajectory-span-detail-content-summary", RichLog)
+        assert log.tooltip is None
         content_x = log.content_region.x - log.region.x
         content_y = log.content_region.y - log.region.y
         await pilot.click(log, offset=(content_x, content_y))

@@ -97,7 +97,6 @@ class _DetailRichLog(RichLog):
     def __init__(self, *, copy_text: Callable[[], str], **kwargs) -> None:
         super().__init__(**kwargs)
         self._copy_text = copy_text
-        self.tooltip = "Click text to copy current tab"
 
     def on_click(self, event: events.Click) -> None:
         if event.button != 1:
