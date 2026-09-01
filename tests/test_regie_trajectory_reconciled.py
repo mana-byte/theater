@@ -9,6 +9,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.color import Color
 from textual.coordinate import Coordinate
+from textual.geometry import Size
 from textual.widgets import Button, Input, RichLog, Select, SelectionList, Tab
 
 from theater.constants.regie_trajectory import (
@@ -1351,3 +1352,157 @@ def test_canonical_timing_fields_are_used() -> None:
     assert timing.start == 1
     assert timing.end == 2
     assert timing.duration_ms == 1000
+
+
+def test_duration_mode_uses_derived_timing_for_split_source_records() -> None:
+    """Duration mode must use the derived operation interval when a record's own
+    timing is incomplete.
+
+    Vibe tool calls carry only a start and tool results only a duration_ms, so
+    neither record independently satisfies supports_duration_interval. The
+    tool index derives a complete interval from the pair; the timeline must
+    consume that derived timing instead of silently falling back to sequence
+    mode.
+    """
+    call = record(
+        "call",
+        index=0,
+        lane="tools",
+        kind="tool_call",
+        call_id="tool",
+        timing={"start": 1.0, "provenance": "observed"},
+    )
+    result = record(
+        "result",
+        index=1,
+        lane="tools",
+        kind="tool_result",
+        call_id="tool",
+        timing={"duration_ms": 500.0, "provenance": "observed"},
+    )
+    records = (call, result)
+
+    # Without a derived-timing resolver: no record has a usable own interval,
+    # so Duration mode falls back to sequence layout (the bug).
+    fallback = build_timeline_layout(records, OrderMode.DURATION)
+    assert not fallback.has_timing
+    assert all(not span.timed for span in fallback.spans)
+
+    # The tool index derives a complete interval (start=1.0, end=1.5) from the
+    # call's start and the result's duration_ms.
+    derived = Timing(start=1.0, end=1.5, duration_ms=500.0, provenance=TimingProvenance.OBSERVED)
+    timing_for = {"call": derived, "result": derived}.get
+
+    laid = build_timeline_layout(records, OrderMode.DURATION, timing_for=timing_for)
+    assert laid.has_timing
+    assert all(span.timed for span in laid.spans)
+    # The two records share the same operation interval, so they occupy the
+    # same width band rather than the equal-width sequence fallback.
+    assert laid.span_for("call").width == laid.span_for("result").width
+
+
+def test_duration_mode_resolver_does_not_time_a_derived_provenance_record() -> None:
+    """The resolver must not bypass supports_duration_interval for own timing.
+
+    A DERIVED-provenance record is rejected by the own-timing gate. The resolver
+    must not hand back the record's own timing through a fallback, or such a
+    record would be plotted as timed despite being ineligible.
+    """
+    derived_only = record(
+        "derived",
+        index=0,
+        timing={"duration_ms": 10, "provenance": "derived"},
+    )
+    records = (derived_only,)
+
+    # A resolver that returns the record's own timing (the bug shape) would
+    # silently time it. The view's _timing_for returns None for records with no
+    # tool/request membership, so this is the contract the timeline relies on.
+    laid = build_timeline_layout(records, OrderMode.DURATION, timing_for=lambda _id: None)
+    assert not laid.has_timing
+    assert all(not span.timed for span in laid.spans)
+
+
+def test_duration_mode_resolver_skips_point_event_request_members() -> None:
+    """Point events must not inherit a request-wide interval from the resolver.
+
+    A request spans a user message, model turns, and tool calls. Point events
+    (USER/SYSTEM) are members of the request but have no duration to plot; the
+    resolver must skip them so they do not render as duplicate timed bars.
+    """
+    user = record(
+        "user",
+        index=0,
+        kind="user",
+        request_id="request",
+    )
+    model = record(
+        "model",
+        index=1,
+        request_id="request",
+        timing={"start": 1.0, "end": 2.0, "provenance": "source"},
+    )
+    records = (user, model)
+
+    # The request carries a derived interval; the model record already has its
+    # own usable interval, so only the user point event would be a candidate
+    # for the resolver. The view's _timing_for skips point events.
+    request_timing = Timing(
+        start=1.0, end=2.0, duration_ms=1000.0, provenance=TimingProvenance.DERIVED
+    )
+    timing_for = {"user": None, "model": None}.get  # point event skipped
+    laid = build_timeline_layout(records, OrderMode.DURATION, timing_for=timing_for)
+    # model is timed by its own interval; user stays untimed.
+    assert laid.has_timing
+    assert laid.span_for("model").timed
+    assert not laid.span_for("user").timed
+
+
+async def test_timeline_resize_preserves_timing_for_resolver() -> None:
+    """on_resize must re-supply timing_for so Duration mode survives a resize.
+
+    Regression: on_resize rebuilt via update_records without forwarding the
+    resolver, reverting a timed Duration layout to the sequence fallback.
+    """
+    call = record(
+        "call",
+        index=0,
+        lane="tools",
+        kind="tool_call",
+        call_id="tool",
+        timing={"start": 1.0, "provenance": "observed"},
+    )
+    result = record(
+        "result",
+        index=1,
+        lane="tools",
+        kind="tool_result",
+        call_id="tool",
+        timing={"duration_ms": 500.0, "provenance": "observed"},
+    )
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await populate(app, [call, result])
+        view.state.order_mode = OrderMode.DURATION
+        view._refresh()
+        timeline = view.query_one(Timeline)
+        await pilot.pause()
+        assert timeline.projection.has_timing, (
+            "Duration mode should be timed via the derived resolver"
+        )
+
+        # Resize the timeline narrower; on_resize rebuilds the layout.
+        old_width = timeline._available_cells()
+        timeline._viewport_width = max(1, old_width // 2)
+        timeline.on_resize(
+            type(
+                "E",
+                (),
+                {"size": Size(timeline._viewport_width, timeline.size.height)},
+            )()
+        )
+        await pilot.pause()
+
+        assert timeline.projection.has_timing, (
+            "timing_for must survive on_resize; Duration mode must not fall back"
+        )

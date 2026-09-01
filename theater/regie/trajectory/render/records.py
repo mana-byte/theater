@@ -159,7 +159,7 @@ def tooltip_text(
         phase = "ended" if timing.end is not None and timing_scope is not None else "at"
         scope = f"{timing_scope} " if timing_scope else ""
         metrics.append(f"{scope}{phase} {event_stamp(timestamp)} · {qualifier}")
-    elif record.kind in _POINT_EVENT_KINDS:
+    elif record.kind in POINT_EVENT_KINDS:
         metrics.append("point event")
     else:
         metrics.append(f"{timing_scope + ' ' if timing_scope else ''}duration unavailable")
@@ -180,7 +180,7 @@ def tooltip_text(
     return "\n".join(_bounded_tooltip_line(line) for line in (heading, summary, detail))
 
 
-_POINT_EVENT_KINDS = frozenset(
+POINT_EVENT_KINDS = frozenset(
     {
         TrajectoryKind.USER,
         TrajectoryKind.SYSTEM,
@@ -226,6 +226,7 @@ def details_size(record: TrajectoryRecord) -> int:
 __all__ = [
     "KIND_GLYPHS",
     "LANE_GLYPHS",
+    "POINT_EVENT_KINDS",
     "TOOLTIP_DELAY",
     "compact_cost",
     "compact_number",

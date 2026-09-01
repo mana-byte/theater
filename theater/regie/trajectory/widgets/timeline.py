@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from heapq import heappop, heappush
 from typing import ClassVar
 
@@ -31,7 +31,7 @@ from theater.regie.trajectory.render.timeline import (
     build_timeline_layout,
     timeline_lane,
 )
-from theater.trajectory import TrajectoryRecord, TrajectoryStatus
+from theater.trajectory import Timing, TrajectoryRecord, TrajectoryStatus
 
 
 class TimelineSpanHovered(Message):
@@ -143,6 +143,7 @@ class Timeline(ScrollView):
         self._selected_id = selected_id
         self._matched_ids: frozenset[str] = frozenset()
         self._duration_mode = duration_mode
+        self._timing_for: Callable[[str], Timing | None] | None = None
         self._layout = build_timeline_layout((), OrderMode.ORDER)
         self._span_by_id: dict[str, TimelineSpan] = {}
         self._lane_visual_segments: dict[
@@ -416,6 +417,7 @@ class Timeline(ScrollView):
         selected_id: str | None = None,
         duration_mode: bool = False,
         scroll_offset: int | None = None,
+        timing_for: Callable[[str], Timing | None] | None = None,
     ) -> None:
         old_anchor = self._visible_anchor()
         old_offset = self._scroll_offset
@@ -429,11 +431,13 @@ class Timeline(ScrollView):
         self._selected_id = selected_id
         self._hovered_id = hovered_id if hovered_id in self._records_by_id else None
         self._duration_mode = duration_mode
+        self._timing_for = timing_for
         mode = OrderMode.DURATION if duration_mode else OrderMode.ORDER
         self._layout = build_timeline_layout(
             self._records,
             mode,
             minimum_width=self._available_cells(),
+            timing_for=timing_for,
         )
         self._index_spans()
         if selected_id in self._span_indices:
@@ -566,6 +570,7 @@ class Timeline(ScrollView):
                 hovered_id=self._hovered_id,
                 selected_id=self._selected_id,
                 duration_mode=self._duration_mode,
+                timing_for=self._timing_for,
             )
             if was_at_tail:
                 self.scroll_to_tail()

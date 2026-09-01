@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from math import ceil
 
@@ -13,7 +14,7 @@ from theater.constants.regie_trajectory import (
 )
 from theater.regie.trajectory.enums import OrderMode, TimelineLane
 from theater.regie.trajectory.render.records import supports_duration_interval
-from theater.trajectory import TrajectoryLane, TrajectoryRecord
+from theater.trajectory import Timing, TrajectoryLane, TrajectoryRecord
 
 
 def timeline_lane(record: TrajectoryRecord) -> TimelineLane:
@@ -91,20 +92,38 @@ def _sequence_layout(records: tuple[TrajectoryRecord, ...], minimum_width: int) 
     )
 
 
-def _interval(record: TrajectoryRecord) -> tuple[float, float] | None:
+def _interval(
+    record: TrajectoryRecord,
+    timing_for: Callable[[str], Timing | None] | None = None,
+) -> tuple[float, float] | None:
     timing = record.timing
-    if timing is None or timing.start is None or not supports_duration_interval(record):
-        return None
-    end = timing.end
-    if end is None and timing.duration_ms is not None:
-        end = timing.start + timing.duration_ms / 1_000
-    if end is None or end < timing.start:
-        return None
-    return timing.start, end
+    if timing is not None and timing.start is not None and supports_duration_interval(record):
+        end = timing.end
+        if end is None and timing.duration_ms is not None:
+            end = timing.start + timing.duration_ms / 1_000
+        if end is not None and end >= timing.start:
+            return timing.start, end
+    # A tool call/result or request member may carry only part of its interval;
+    # the tool/request index already derives a complete operation interval from the
+    # paired records. Use that derived timing so Duration mode does not silently
+    # fall back to sequence mode for split-source records (e.g. Vibe tool calls).
+    if timing_for is not None:
+        derived = timing_for(record.record_id)
+        if derived is not None and derived.start is not None:
+            derived_end = derived.end
+            if derived_end is None and derived.duration_ms is not None:
+                derived_end = derived.start + derived.duration_ms / 1_000
+            if derived_end is not None and derived_end >= derived.start:
+                return derived.start, derived_end
+    return None
 
 
-def _duration_layout(records: tuple[TrajectoryRecord, ...], minimum_width: int) -> TimelineLayout:
-    raw = [(record, interval) for record in records if (interval := _interval(record))]
+def _duration_layout(
+    records: tuple[TrajectoryRecord, ...],
+    minimum_width: int,
+    timing_for: Callable[[str], Timing | None] | None = None,
+) -> TimelineLayout:
+    raw = [(record, interval) for record in records if (interval := _interval(record, timing_for))]
     if not raw:
         fallback = _sequence_layout(records, minimum_width)
         return TimelineLayout(
@@ -183,10 +202,11 @@ def build_timeline_layout(
     mode: OrderMode,
     *,
     minimum_width: int = 1,
+    timing_for: Callable[[str], Timing | None] | None = None,
 ) -> TimelineLayout:
     minimum_width = max(1, int(minimum_width))
     if mode is OrderMode.DURATION:
-        return _duration_layout(records, minimum_width)
+        return _duration_layout(records, minimum_width, timing_for)
     return _sequence_layout(records, minimum_width)
 
 
