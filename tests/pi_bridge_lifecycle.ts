@@ -1,17 +1,17 @@
-// Deterministic behavior tests for bridge_lifecycle.ts.
+// Deterministic behavior tests for the Pi bridge lifecycle/error helpers.
 //
-// Loaded with jiti so the TypeScript is transpiled on the fly.  This module
-// imports only bridge_lifecycle.ts (no external runtime dependencies), so no
-// typebox or @earendil-works/pi-coding-agent resolution is needed.  The
-// bridge_lifecycle path is resolved relative to this file via import.meta.url,
-// so it works from any checkout/worktree and never hard-codes an absolute path.
+// The bridge inlines this same logic into theater_mcp_bridge.ts (it cannot
+// import a separate module without a wheel force-include).  This suite imports
+// the test-only pure helpers at ./pi_bridge_lifecycle_helpers.ts (no external
+// dependencies), so jiti runs it without typebox or the Pi type package.  A
+// source-contract test in test_pi_harness.py asserts the bridge contains the
+// matching logic so the two cannot silently drift.
 //
-// Run shape (used by tests/test_pi_harness.py::test_pi_bridge_lifecycle_helpers_behave_under_jiti):
+// Run shape (tests/test_pi_harness.py::test_pi_bridge_lifecycle_helpers_behave_under_jiti):
 //   node -e 'require(<jiti.cjs>)(null, {})(<this file>)'
 // Exit code is non-zero on the first failing assertion; stdout lists each check.
 
 import assert from "node:assert/strict";
-import { fileURLToPath } from "node:url";
 
 import {
 	LIFECYCLE_CUSTOM_TYPE,
@@ -22,10 +22,7 @@ import {
 	releaseLifecycleGuard,
 	registerLifecycleMarkers,
 	joinErrorText,
-} from "../theater/harness/builtin/plugins/pi/bridge_lifecycle.ts";
-
-// Sanity: the relative import resolved (guards against a path regression).
-void fileURLToPath(import.meta.url);
+} from "./pi_bridge_lifecycle_helpers.ts";
 
 let checks = 0;
 function check(name: string, fn: () => void): void {
@@ -39,7 +36,6 @@ function check(name: string, fn: () => void): void {
 	}
 }
 
-/** Record every appendEntry call and every registered handler. */
 function fakePi(): {
 	entries: { customType: string; data: unknown }[];
 	api: {
@@ -85,7 +81,6 @@ check("lifecycleData merges reason without mutating input", () => {
 	const extra = { reason: "overflow" };
 	const data = lifecycleData(LIFECYCLE_PHASE.compactionWillRetry, extra);
 	assert.equal(data.reason, "overflow");
-	// Input untouched.
 	assert.deepEqual(extra, { reason: "overflow" });
 });
 
@@ -113,7 +108,6 @@ check("registerLifecycleMarkers registers handlers on first call", () => {
 });
 
 check("registerLifecycleMarkers is a no-op on a second copy (guard taken)", () => {
-	// Guard is already taken from the previous check (process-global Symbol.for).
 	const { api, hasHandler } = fakePi();
 	registerLifecycleMarkers(api);
 	assert.equal(hasHandler("session_before_compact"), false);
@@ -163,13 +157,10 @@ check("session_shutdown releases the guard so a fresh runtime can register", () 
 	releaseLifecycleGuard();
 	const first = fakePi();
 	registerLifecycleMarkers(first.api);
-	// Guard taken: a second register while the first owns it is a no-op.
 	const second = fakePi();
 	registerLifecycleMarkers(second.api);
 	assert.equal(second.hasHandler("agent_settled"), false);
-	// On shutdown the owner releases the guard...
 	first.fire("session_shutdown", {});
-	// ...so a fresh runtime can now register its own handlers.
 	const third = fakePi();
 	registerLifecycleMarkers(third.api);
 	assert.equal(third.hasHandler("agent_settled"), true);
@@ -181,10 +172,7 @@ check("a final assistant error writes no marker (no message_end handler)", () =>
 	releaseLifecycleGuard();
 	const { api, entries, fire, hasHandler } = fakePi();
 	registerLifecycleMarkers(api);
-	// There is no message_end handler to misclassify a final error as retry.
 	assert.equal(hasHandler("message_end"), false);
-	// Firing an error message_end (if it existed) would do nothing here; the
-	// only terminal-releasing marker is settled.
 	fire("agent_settled", {});
 	assert.equal(entries.length, 1);
 	assert.equal((entries[0].data as { phase: string }).phase, "settled");
