@@ -43,7 +43,11 @@ class TrajectoryViewProjection:
         recompute: bool = True,
     ) -> tuple[TrajectoryRecord, ...]:
         if recompute or not self.ordered_records:
-            records = (*state.display_records, *state.remote_search_records)
+            records = (
+                state.remote_search_records
+                if state.search_result_active
+                else tuple(state.display_records)
+            )
             if state.diagnostic_view is DiagnosticView.ALL:
                 records = tuple(
                     record for record in records if not is_raw_theater_bus_record(record)
