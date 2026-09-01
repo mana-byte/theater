@@ -6,7 +6,11 @@ import asyncio
 import logging
 import time
 
-from theater.constants.daemon import BUS_KIND_JOB_AWAIT_END, BUS_KIND_JOB_AWAIT_START
+from theater.constants.daemon import (
+    BUS_KIND_JOB_AWAIT_END,
+    BUS_KIND_JOB_AWAIT_START,
+    SEND_SUPERSEDED_ERROR_CODE,
+)
 
 # Definitions re-exported by the methods facade; runtime reads the facade for legacy patches.
 from theater.constants.daemon import (
@@ -43,6 +47,11 @@ def _await_announce_after() -> float:
 
 
 _JOB_ERROR_MESSAGES = {
+    SEND_SUPERSEDED_ERROR_CODE: (
+        "A newer prompt was accepted after this send's delivery claim expired. This handle was "
+        "closed so it cannot consume the newer prompt's completion; await the newer send handle "
+        "instead."
+    ),
     "transcript_correlation_failed": (
         "Theater could not correlate this participant with its transcript. "
         "The agent may still be alive and working; do not retry the task, and inspect "
@@ -65,8 +74,17 @@ _JOB_ERROR_MESSAGES = {
 }
 
 
+def _job_to_dict(job: Job) -> dict:
+    """Serialize a job with the actionable explanation for known terminal errors."""
+    row = job.to_dict()
+    message = _JOB_ERROR_MESSAGES.get(job.error_code or "")
+    if message is not None:
+        row["error"] = message
+    return row
+
+
 @method("jobs.await")
-async def _jobs_await(daemon, params: dict) -> list[dict]:  # noqa: PLR0912
+async def _jobs_await(daemon, params: dict) -> list[dict]:
     """Wait for one or more jobs to finish, up to max_wait seconds.
 
     A handle nobody knows is an error, not an empty list. `await_jobs`
@@ -154,14 +172,7 @@ async def _jobs_await(daemon, params: dict) -> list[dict]:  # noqa: PLR0912
             jobs=jobs,
         )
     assert jobs is not None
-    rows = []
-    for job in jobs:
-        row = job.to_dict()
-        message = _JOB_ERROR_MESSAGES.get(job.error_code or "")
-        if message is not None:
-            row["error"] = message
-        rows.append(row)
-    return rows
+    return [_job_to_dict(job) for job in jobs]
 
 
 async def _await_announced(
@@ -265,4 +276,4 @@ async def _jobs_status(daemon, params: dict) -> dict:
     job = daemon.jobs.get(handle)
     if job is None:
         raise BadRequest(f"no job {handle!r}")
-    return job.to_dict()
+    return _job_to_dict(job)
