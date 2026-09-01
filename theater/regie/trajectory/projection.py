@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+from theater.regie.trajectory.analysis import build_analysis_index
 from theater.regie.trajectory.enums import DiagnosticView
-from theater.regie.trajectory.render.diagnostics import ordering_for_projection
+from theater.regie.trajectory.render.diagnostics import (
+    build_diagnostic_index,
+    is_raw_theater_bus_record,
+    ordering_for_projection,
+)
 from theater.regie.trajectory.render.ordering import TrajectoryOrdering, build_ordering
 from theater.regie.trajectory.render.pagination import LedgerPage, paginate_search_result
+from theater.regie.trajectory.render.requests import build_request_index
+from theater.regie.trajectory.render.tools import build_tool_index
 from theater.regie.trajectory.search import FilterCounts, SearchCache, SearchResult, search_records
 from theater.regie.trajectory.state import ParticipantTrajectoryState
 from theater.trajectory import TrajectoryGroup, TrajectoryRecord
@@ -36,10 +43,11 @@ class TrajectoryViewProjection:
         recompute: bool = True,
     ) -> tuple[TrajectoryRecord, ...]:
         if recompute or not self.ordered_records:
-            records = tuple(state.display_records)
+            records = (*state.display_records, *state.remote_search_records)
             if state.diagnostic_view is DiagnosticView.ALL:
-                default_ids = state.diagnostic_index.projection_for(DiagnosticView.ALL).record_ids
-                records = tuple(record for record in records if record.record_id in default_ids)
+                records = tuple(
+                    record for record in records if not is_raw_theater_bus_record(record)
+                )
             ordering = build_ordering(records, state.groups)
             self._recompute_search(state, ordering.records, ordering)
         self._sync_page(state, page_size)
@@ -47,12 +55,16 @@ class TrajectoryViewProjection:
 
     def _make_search_key(self, state: ParticipantTrajectoryState) -> tuple[object, ...]:
         record_key = tuple((record.record_id, record.revision) for record in state.records.values())
+        remote_key = tuple(
+            (record.record_id, record.revision) for record in state.remote_search_records
+        )
         groups = tuple(self._group_signature(group) for group in state.groups)
         requests = tuple(
             (request.request_id, request.record_ids) for request in state.request_index.ordered
         )
         return (
             record_key,
+            remote_key,
             state.query,
             frozenset(state.lane_filters),
             frozenset(state.kind_filters),
@@ -88,8 +100,22 @@ class TrajectoryViewProjection:
         if key == self.search_key:
             return
         self.search_key = key
-        projection = state.diagnostic_index.projection_for(state.diagnostic_view)
+        request_index = state.request_index
+        tool_index = state.tool_index
+        diagnostic_index = state.diagnostic_index
+        if state.remote_search_records:
+            request_index = build_request_index(records)
+            tool_index = build_tool_index(records)
+            analysis_index = build_analysis_index(records, request_index, tool_index)
+            diagnostic_index = build_diagnostic_index(
+                records,
+                request_index,
+                tool_index,
+                analysis_index,
+            )
+        projection = diagnostic_index.projection_for(state.diagnostic_view)
         diagnostic_ordering = ordering_for_projection(records, projection)
+        candidate_ids = projection.record_ids
         self.search_result = search_records(
             records,
             query=state.query,
@@ -100,9 +126,9 @@ class TrajectoryViewProjection:
             groups=state.groups,
             cache=self.search_cache,
             ordering=diagnostic_ordering or ordering,
-            request_index=state.request_index,
-            tool_index=state.tool_index,
-            candidate_ids=projection.record_ids,
+            request_index=request_index,
+            tool_index=tool_index,
+            candidate_ids=candidate_ids,
             show_request_headers=False,
         )
         self.all_visible_ids = self.search_result.row_ids

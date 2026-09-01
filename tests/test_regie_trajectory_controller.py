@@ -112,6 +112,37 @@ async def test_controller_decodes_exact_record_location() -> None:
 
 
 @pytest.mark.asyncio
+async def test_controller_applies_full_history_search_hits() -> None:
+    def query_handler(method: str, _params: dict[str, object]) -> object:
+        if method == "trajectory.snapshot":
+            return page("p1", "recent")
+        return {
+            "query": "grafna",
+            "records": [wire_record("old-grafana", participant_id="p1")],
+            "scanned_records": 900,
+            "matched_records": 1,
+            "complete": True,
+        }
+
+    query = FakeClient(query_handler)
+    follow = FakeClient(lambda _method, _params: {})
+    controller = TrajectoryController(query, follow)
+    await controller.open("p1", start_follow=False)
+
+    await controller.search_full_history("grafna", "p1")
+
+    state = controller.state_for("p1")
+    assert [record.record_id for record in state.remote_search_records] == ["old-grafana"]
+    assert state.search_scanned_records == 900
+    assert state.search_complete is True
+    assert query.calls[-1] == (
+        "trajectory.search",
+        {"id": "p1", "query": "grafna", "limit": 200},
+    )
+    await controller.close()
+
+
+@pytest.mark.asyncio
 async def test_generation_guard_rejects_old_participant_result() -> None:
     release_a = asyncio.Event()
 

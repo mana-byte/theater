@@ -13,6 +13,8 @@ from theater.constants.trajectory import (
     TRAJECTORY_IDENTIFIER_MAX_BYTES,
     TRAJECTORY_OLDER_CURSOR_LIMIT,
     TRAJECTORY_PAGE_RECORD_LIMIT,
+    TRAJECTORY_SEARCH_QUERY_MAX_BYTES,
+    TRAJECTORY_SEARCH_RESULT_LIMIT,
     TRAJECTORY_THEATER_BUS_RECORD_PREFIX,
 )
 from theater.daemon.trajectory.cache import CacheStream, RecordChange, TrajectoryCache
@@ -37,6 +39,7 @@ from theater.daemon.trajectory.responses import (
     stale_page,
 )
 from theater.daemon.trajectory.runtime import TrajectoryRuntime
+from theater.daemon.trajectory.search import search_history
 from theater.daemon.trajectory.stream import TrajectoryStream
 from theater.daemon.trajectory.theater_events import ALLOWLISTED_BUS_KINDS, project_bus_row
 from theater.models import BadRequest, NotFound, Participant
@@ -46,6 +49,7 @@ from theater.trajectory import (
     TrajectoryPage,
     TrajectoryParticipantState,
     TrajectoryRecord,
+    TrajectorySearchResult,
 )
 from theater.trajectory.location import TrajectoryLocation, TrajectoryLocationResolution
 
@@ -72,6 +76,7 @@ class TrajectoryService:
         self._older_tokens: dict[str, _OlderState] = {}
         self._stream_tokens: dict[str, deque[str]] = {}
         self._follower_tasks: set[asyncio.Task] = set()
+        self._search_tasks: dict[str, asyncio.Task[TrajectorySearchResult]] = {}
         self._closed = False
 
     @property
@@ -136,6 +141,42 @@ class TrajectoryService:
             TrajectoryLocationResolution.EXACT,
             record=record,
         )
+
+    async def search(
+        self,
+        participant_token: str,
+        *,
+        query: str,
+        limit: int = TRAJECTORY_SEARCH_RESULT_LIMIT,
+    ) -> TrajectorySearchResult:
+        """Search complete durable history without changing warm stream state."""
+        self._runtime.set_loop()
+        validate_participant_token(participant_token, "trajectory.search")
+        validate_bounded_string(query, "query", TRAJECTORY_SEARCH_QUERY_MAX_BYTES)
+        if not query.strip():
+            raise BadRequest("trajectory.search parameter 'query' must contain visible text")
+        limit = validate_limit(limit, "trajectory.search")
+        participant = self._resolve(participant_token, missing=True)
+        if participant is None:
+            return TrajectorySearchResult(
+                query=query,
+                complete=False,
+                message="participant is missing; refresh the participant tree",
+            )
+        previous = self._search_tasks.get(participant.id)
+        if previous is not None and not previous.done():
+            previous.cancel()
+        task = asyncio.create_task(
+            search_history(self._runtime, participant, query=query, limit=limit)
+        )
+        self._search_tasks[participant.id] = task
+        try:
+            return await task
+        finally:
+            if not task.done():
+                task.cancel()
+            if self._search_tasks.get(participant.id) is task:
+                self._search_tasks.pop(participant.id, None)
 
     async def snapshot(
         self,
@@ -303,6 +344,7 @@ class TrajectoryService:
             return
         self._closed = True
         tasks = [task for task in self._follower_tasks if not task.done()]
+        tasks.extend(task for task in self._search_tasks.values() if not task.done())
         for task in tasks:
             task.cancel()
         if tasks:
@@ -310,6 +352,7 @@ class TrajectoryService:
         await self._runtime.aclose()
         self._older_tokens.clear()
         self._stream_tokens.clear()
+        self._search_tasks.clear()
 
     shutdown = aclose
 

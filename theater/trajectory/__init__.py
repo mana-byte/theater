@@ -67,6 +67,14 @@ from theater.trajectory.requests import (
     TrajectoryRequestIdentity,
     requests_for_records,
 )
+from theater.trajectory.search import (
+    TrajectorySearchResult,
+    fuzzy_subsequence_score,
+    ranked_records,
+    record_search_fields,
+    record_search_score,
+    record_search_text,
+)
 from theater.trajectory.tools import (
     TrajectoryToolIdentity,
     TrajectoryToolOperation,
@@ -107,6 +115,7 @@ __all__ = [
     "TrajectoryRecord",
     "TrajectoryRequest",
     "TrajectoryRequestIdentity",
+    "TrajectorySearchResult",
     "TrajectorySlowOperation",
     "TrajectoryStatus",
     "TrajectorySupport",
@@ -122,9 +131,14 @@ __all__ = [
     "deterministic_record_order",
     "escape_rich_text",
     "fallback_record_id",
+    "fuzzy_subsequence_score",
     "group_records",
     "merge_records",
     "newer_record",
+    "ranked_records",
+    "record_search_fields",
+    "record_search_score",
+    "record_search_text",
     "requests_for_records",
     "sanitize_text",
     "tool_operations_for_records",

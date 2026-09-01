@@ -12,7 +12,12 @@ from theater.constants.trajectory import (
     TRAJECTORY_FOLLOW_TIMEOUT_SECONDS,
     TRAJECTORY_PAGE_RECORD_LIMIT,
 )
-from theater.regie.trajectory.models import decode_delta, decode_location, decode_page
+from theater.regie.trajectory.models import (
+    decode_delta,
+    decode_location,
+    decode_page,
+    decode_search_result,
+)
 from theater.regie.trajectory.state import ParticipantTrajectoryState, TrajectoryStateStore
 from theater.trajectory import (
     PanelState,
@@ -71,6 +76,15 @@ def _validate_delta(delta: TrajectoryDelta, participant_id: str) -> None:
 def _validate_stream(expected: str | None, actual: str | None, noun: str) -> None:
     if actual != expected:
         raise TrajectoryValidationError(f"{noun} stream does not match active stream")
+
+
+def _validate_search_result(result, participant_id: str, query: str) -> None:
+    if any(record.participant_id != participant_id for record in result.records):
+        raise TrajectoryValidationError(
+            "trajectory search contains a record for another participant"
+        )
+    if result.query != query:
+        raise TrajectoryValidationError("trajectory search query does not match request")
 
 
 class TrajectoryController:
@@ -220,6 +234,44 @@ class TrajectoryController:
         if location.requested_record_id != record_id:
             raise TrajectoryValidationError("trajectory location record does not match target")
         return location
+
+    async def search_full_history(
+        self,
+        query: str,
+        participant_id: str | None = None,
+    ) -> None:
+        """Fetch bounded global hits while rejecting stale query responses."""
+        participant_id = participant_id or self._active_participant
+        if participant_id is None or participant_id != self._active_participant or self._closed:
+            return
+        state = self.state_for(participant_id)
+        state.query = query
+        state.begin_search(query)
+        self._publish(state)
+        if not query.strip():
+            return
+        generation = self._generation
+        try:
+            result = decode_search_result(
+                await self._call(
+                    self.query_client,
+                    "trajectory.search",
+                    id=participant_id,
+                    query=query,
+                    limit=self.page_limit,
+                )
+            )
+            _validate_search_result(result, participant_id, query)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if self._is_current(participant_id, generation) and state.query == query:
+                state.fail_search(query, str(exc) or "Full-history search failed.")
+                self._publish(state)
+            return
+        if self._is_current(participant_id, generation) and state.query == query:
+            state.apply_search(result)
+            self._publish(state)
 
     async def load_older(self, participant_id: str | None = None) -> TrajectoryPage | None:
         """Request exactly one older page; this method never chain-loads."""

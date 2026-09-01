@@ -28,6 +28,10 @@ TRAJECTORY_MAX_PAGE_GROUPS = 200
 TRAJECTORY_MAX_COVERAGE_GAPS = 64
 # Maximum records requested in one trajectory page or follow batch.
 TRAJECTORY_PAGE_RECORD_LIMIT = 200
+# Maximum records returned by one full-history trajectory search.
+TRAJECTORY_SEARCH_RESULT_LIMIT = 200
+# Maximum encoded bytes in one full-history search query.
+TRAJECTORY_SEARCH_QUERY_MAX_BYTES = 512
 # Maximum encoded bytes in one trajectory response.
 TRAJECTORY_RESPONSE_MAX_BYTES = 1 << 20
 # Largest signed 64-bit request id used to size trajectory response envelopes.
@@ -121,6 +125,8 @@ __all__ = [
     "TRAJECTORY_REQUEST_RECORD_LIMIT",
     "TRAJECTORY_RESPONSE_MAX_BYTES",
     "TRAJECTORY_RESPONSE_SIZING_REQUEST_ID",
+    "TRAJECTORY_SEARCH_QUERY_MAX_BYTES",
+    "TRAJECTORY_SEARCH_RESULT_LIMIT",
     "TRAJECTORY_SOURCE_MAX_BYTES",
     "TRAJECTORY_THEATER_BUS_RECORD_PREFIX",
     "TRAJECTORY_THEATER_BUS_SOURCE_EPOCH",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from theater.regie.trajectory.enums import DiagnosticView
+from theater.regie.trajectory.projection import TrajectoryViewProjection
 from theater.regie.trajectory.render.pagination import paginate_search_result
 from theater.regie.trajectory.search import (
     TrajectoryFilters,
@@ -7,13 +9,16 @@ from theater.regie.trajectory.search import (
     record_search_text,
     search_records,
 )
+from theater.regie.trajectory.state import ParticipantTrajectoryState
 from theater.trajectory import (
     GroupKind,
     TrajectoryKind,
     TrajectoryLane,
     TrajectoryRecord,
+    TrajectorySearchResult,
     TrajectoryStatus,
     group_records,
+    ranked_records,
 )
 
 
@@ -72,6 +77,44 @@ def test_search_uses_mcp_identity() -> None:
     )
 
     assert search_records([item], query="prometheus").record_ids == ("mcp-call",)
+
+
+def test_search_tolerates_typo_and_ranks_structural_identity_first() -> None:
+    structural = TrajectoryRecord.from_wire(
+        {
+            **record("structural", "query metrics").to_wire(),
+            "mcp_server": "grafana",
+            "mcp_tool": "query_prometheus",
+        }
+    )
+    incidental = record("incidental", "grafana appeared in a long result")
+
+    ranked = ranked_records((incidental, structural), "grafna")
+
+    assert [item.record_id for item, _score in ranked] == ["structural", "incidental"]
+    assert search_records((structural,), query="grafna prometheus").record_ids == ("structural",)
+    assert not search_records((structural,), query="grafna loki").record_ids
+
+
+def test_full_history_hits_remain_searchable_in_tools_view() -> None:
+    item = TrajectoryRecord.from_wire(
+        {
+            **record("remote-tool", "query metrics").to_wire(),
+            "lane": "tools",
+            "kind": "tool_call",
+            "mcp_server": "grafana",
+            "mcp_tool": "query_prometheus",
+        }
+    )
+    state = ParticipantTrajectoryState("p1")
+    state.query = "grafna"
+    state.apply_search(TrajectorySearchResult(query="grafna", records=(item,)))
+    state.diagnostic_view = DiagnosticView.TOOLS
+
+    projection = TrajectoryViewProjection(state, page_size=30)
+    projection.refresh(state, page_size=30)
+
+    assert projection.search_result.record_ids == ("remote-tool",)
 
 
 def test_filters_retain_nested_headers_and_report_counts() -> None:

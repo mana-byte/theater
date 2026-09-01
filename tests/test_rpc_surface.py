@@ -41,6 +41,7 @@ EXPECTED_RPC_METHODS = {
     "trajectory.close",
     "trajectory.follow",
     "trajectory.locate",
+    "trajectory.search",
     "trajectory.snapshot",
     "transcript.bind",
     "transcript.candidates",

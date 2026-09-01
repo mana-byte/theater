@@ -7,6 +7,8 @@ from theater.constants.trajectory import (
     TRAJECTORY_FOLLOW_TIMEOUT_SECONDS,
     TRAJECTORY_IDENTIFIER_MAX_BYTES,
     TRAJECTORY_PAGE_RECORD_LIMIT,
+    TRAJECTORY_SEARCH_QUERY_MAX_BYTES,
+    TRAJECTORY_SEARCH_RESULT_LIMIT,
 )
 from theater.daemon.rpc.router import method
 from theater.daemon.trajectory.params import (
@@ -65,6 +67,21 @@ async def _trajectory_locate(daemon, params: dict) -> dict:
     participant_id = rpc_required_identifier(params, "id", method_name)
     record_id = rpc_required_identifier(params, "record_id", method_name)
     return daemon.trajectory.locate(participant_id, record_id).to_wire()
+
+
+@method("trajectory.search")
+async def _trajectory_search(daemon, params: dict) -> dict:
+    method_name = "trajectory.search"
+    participant_id = rpc_required_identifier(params, "id", method_name)
+    query = rpc_required_bounded_string(
+        params,
+        "query",
+        method_name,
+        TRAJECTORY_SEARCH_QUERY_MAX_BYTES,
+    )
+    limit = validate_limit(params.get("limit", TRAJECTORY_SEARCH_RESULT_LIMIT), method_name)
+    result = await daemon.trajectory.search(participant_id, query=query, limit=limit)
+    return result.to_wire()
 
 
 __all__ = []

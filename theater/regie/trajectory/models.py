@@ -27,6 +27,7 @@ from theater.trajectory import (
     TrajectoryOverview,
     TrajectoryPage,
     TrajectoryRecord,
+    TrajectorySearchResult,
     TrajectoryStatus,
     TrajectoryUpsert,
     TrajectoryUsage,
@@ -61,6 +62,15 @@ def decode_location(value: object) -> TrajectoryLocation:
         return value
     _reject_oversized(value, "trajectory location")
     return TrajectoryLocation.from_wire(value)
+
+
+def decode_search_result(value: object) -> TrajectorySearchResult:
+    """Decode one bounded full-history search response."""
+    if isinstance(value, TrajectorySearchResult):
+        _reject_oversized(value.to_wire(), "trajectory search result")
+        return value
+    _reject_oversized(value, "trajectory search result")
+    return TrajectorySearchResult.from_wire(value)
 
 
 def _reject_oversized(value: object, label: str) -> None:
@@ -108,4 +118,5 @@ __all__ = [
     "decode_delta",
     "decode_location",
     "decode_page",
+    "decode_search_result",
 ]
