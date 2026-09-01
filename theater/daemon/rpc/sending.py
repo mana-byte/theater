@@ -7,7 +7,7 @@ import logging
 from collections.abc import Callable
 from typing import NoReturn
 
-from theater.constants.daemon import BUS_KIND_SEND_REFUSED
+from theater.constants.daemon import BUS_KIND_SEND_REFUSED, SEND_SUPERSEDED_ERROR_CODE
 
 # Definition re-exported by the methods facade; runtime reads the facade for legacy patches.
 from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS as SEND_CLAIM_TTL  # noqa: F401
@@ -268,19 +268,35 @@ async def _send(daemon, params: dict) -> dict:
 
     _check_transcript_send_preflight(daemon, target, refuse)
 
-    # Busy is any running job that carried a prompt; past SEND_CLAIM_TTL it no longer blocks.
+    # There must be no await from this snapshot through reservation. Completion
+    # consumes the oldest running job, so a replacement must close every expired
+    # prompt-bearing predecessor before it creates its own reservation.
     stale = now() - _send_claim_ttl()
-    if [
-        j
-        for j in daemon.store.running_jobs_for_target(target_id)
-        if j.prompt and j.created_at > stale
-    ]:
+    running_prompt_jobs = [
+        job for job in daemon.store.running_jobs_for_target(target_id) if job.prompt
+    ]
+    expired_jobs = [job for job in running_prompt_jobs if job.created_at <= stale]
+
+    for job in expired_jobs:
+        daemon.jobs.finish(
+            job.handle,
+            state=JobState.CRASHED,
+            result=(
+                f"Send to participant {target_id!r} was superseded after its delivery claim "
+                "expired; it cannot receive the response to the newer prompt. Await the "
+                "newer send handle instead."
+            ),
+            error_code=SEND_SUPERSEDED_ERROR_CODE,
+        )
+
+    if any(job.created_at > stale for job in running_prompt_jobs):
         refuse(
             Busy(f"participant {target_id!r} has a running send job"),
             reason="busy",
         )
 
-    # Reserve before typing: the check above and this create must not be separated by an await.
+    # Reserve before typing: the stale/fresh classification, closure, busy
+    # refusal, and this create must not be separated by an await.
     handle = f"{target_id}#{daemon._next_send_seq()}"
     daemon.jobs.create(
         handle=handle,
