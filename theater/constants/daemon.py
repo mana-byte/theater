@@ -18,6 +18,9 @@ RPC_AWAIT_ANNOUNCE_DELAY_SECONDS = 0.25
 #: How long a running send job keeps its exclusive claim on a pane; past this it no longer blocks.
 SEND_CLAIM_TTL_SECONDS = 300.0
 
+#: Job failure code when a replacement send supersedes an expired send claim.
+SEND_SUPERSEDED_ERROR_CODE = "send_superseded"
+
 #: Meta key for the durable send-sequence counter; persisted, never derived from MAX(jobs).
 SEND_SEQ_META_KEY = "send_seq"
 

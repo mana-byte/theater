@@ -263,18 +263,19 @@ async def test_send_to_busy_target_rejected(client, fake_tmux, daemon):
 
 
 async def test_send_allowed_after_job_exceeds_ttl(client, fake_tmux, daemon, monkeypatch):
-    """A running send job older than SEND_CLAIM_TTL no longer blocks the pane.
+    """A replacement closes an expired prompt job before reserving itself.
 
     The prompt may never have reached the agent (a human cleared the
     composer), and the rescue timer cannot fire on an active participant.
-    Past the TTL the job loses its reservation — it is not finished, the
-    observer may still answer it, but a new send is accepted.
+    Past the TTL a replacement can proceed, but the predecessor must be
+    terminal so FIFO completion cannot consume it.
     """
     import theater.daemon.rpc.sending as sending_mod
+    from theater.constants.daemon import SEND_SUPERSEDED_ERROR_CODE
     from theater.daemon.rpc.sending import SEND_CLAIM_TTL
 
     target = await _target(client, daemon)
-    await client.call("send", target=target["id"], prompt="first")
+    job1 = await client.call("send", target=target["id"], prompt="first")
 
     # Drive the clock: the send handler computes `stale = now() - SEND_CLAIM_TTL`
     # and rejects jobs whose created_at is newer than that. By advancing `now`
@@ -283,19 +284,31 @@ async def test_send_allowed_after_job_exceeds_ttl(client, fake_tmux, daemon, mon
     real_now = sending_mod.now()
     monkeypatch.setattr(sending_mod, "now", lambda: real_now + SEND_CLAIM_TTL + 1)
 
-    # The stale job no longer blocks; a new send is accepted.
+    # The stale job is closed before the new one reserves the pane.
     job2 = await client.call("send", target=target["id"], prompt="second")
     assert job2["state"] == "running"
+    predecessor = await client.call("jobs.status", handle=job1["handle"])
+    awaited = await client.call("jobs.await", handles=[job1["handle"]], max_wait=1.0)
+    assert predecessor["state"] == "crashed"
+    assert predecessor["error_code"] == SEND_SUPERSEDED_ERROR_CODE
+    assert "superseded" in predecessor["result"].lower()
+    assert "newer send handle" in predecessor["error"]
+    assert awaited[0]["error_code"] == SEND_SUPERSEDED_ERROR_CODE
+    assert "newer send handle" in awaited[0]["error"]
+    assert [job.handle for job in daemon.store.running_jobs_for_target(target["id"])] == [
+        job2["handle"]
+    ]
     assert len(fake_tmux.sent) == 2
     assert fake_tmux.sent[1] == ("%1", "second")
 
 
 async def test_send_ttl_reads_compatibility_facade(client, fake_tmux, daemon, monkeypatch):
     import theater.daemon.rpc.sending as sending_mod
+    from theater.constants.daemon import SEND_SUPERSEDED_ERROR_CODE
     from theater.daemon import methods
 
     target = await _target(client, daemon)
-    await client.call("send", target=target["id"], prompt="first")
+    old = await client.call("send", target=target["id"], prompt="first")
 
     real_now = sending_mod.now()
     monkeypatch.setattr(methods, "SEND_CLAIM_TTL", 0.1)
@@ -303,6 +316,107 @@ async def test_send_ttl_reads_compatibility_facade(client, fake_tmux, daemon, mo
 
     job = await client.call("send", target=target["id"], prompt="second")
     assert job["state"] == "running"
+    assert daemon.jobs.get(old["handle"]).error_code == SEND_SUPERSEDED_ERROR_CODE
+
+
+async def test_send_ttl_supersedes_every_expired_prompt_job(client, fake_tmux, daemon, monkeypatch):
+    import theater.daemon.rpc.sending as sending_mod
+    from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS, SEND_SUPERSEDED_ERROR_CODE
+
+    target = await _target(client, daemon)
+    for handle in ("expired-1", "expired-2"):
+        daemon.jobs.create(
+            handle=handle,
+            caller_id="cli",
+            target_id=target["id"],
+            kind="send",
+            prompt=handle,
+            cwd="/tmp",
+        )
+
+    real_now = sending_mod.now()
+    monkeypatch.setattr(sending_mod, "now", lambda: real_now + SEND_CLAIM_TTL_SECONDS + 1)
+
+    successor = await client.call("send", target=target["id"], prompt="successor")
+
+    for handle in ("expired-1", "expired-2"):
+        job = daemon.jobs.get(handle)
+        assert job is not None
+        assert job.state == JobState.CRASHED
+        assert job.error_code == SEND_SUPERSEDED_ERROR_CODE
+    assert [job.handle for job in daemon.store.running_jobs_for_target(target["id"])] == [
+        successor["handle"]
+    ]
+
+
+async def test_send_ttl_supersedes_expired_job_before_refusing_fresh_job(
+    client, fake_tmux, daemon, monkeypatch
+):
+    import theater.daemon.jobs as jobs_mod
+    import theater.daemon.rpc.sending as sending_mod
+    from theater.constants.daemon import SEND_CLAIM_TTL_SECONDS, SEND_SUPERSEDED_ERROR_CODE
+
+    target = await _target(client, daemon)
+    expired = daemon.jobs.create(
+        handle="expired",
+        caller_id="cli",
+        target_id=target["id"],
+        kind="send",
+        prompt="expired",
+        cwd="/tmp",
+    )
+    current = sending_mod.now() + SEND_CLAIM_TTL_SECONDS + 1
+    monkeypatch.setattr(jobs_mod, "now", lambda: current)
+    fresh = daemon.jobs.create(
+        handle="fresh",
+        caller_id="cli",
+        target_id=target["id"],
+        kind="send",
+        prompt="fresh",
+        cwd="/tmp",
+    )
+    monkeypatch.setattr(sending_mod, "now", lambda: current)
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call("send", target=target["id"], prompt="another")
+
+    assert exc.value.code == "busy"
+    assert fake_tmux.sent == []
+    expired_after = daemon.jobs.get(expired.handle)
+    assert expired_after.state == JobState.CRASHED
+    assert expired_after.error_code == SEND_SUPERSEDED_ERROR_CODE
+    assert daemon.jobs.get(fresh.handle).state == JobState.RUNNING
+    rows = daemon.store.conn.execute(
+        jobs.select().where(jobs.c.target_id == target["id"])
+    ).fetchall()
+    assert {row._mapping["handle"] for row in rows} == {expired.handle, fresh.handle}
+    assert [job.handle for job in daemon.store.running_jobs_for_target(target["id"])] == [
+        fresh.handle
+    ]
+
+
+async def test_send_ttl_leaves_expired_blank_prompt_job_running(
+    client, fake_tmux, daemon, monkeypatch
+):
+    import theater.daemon.rpc.sending as sending_mod
+    from theater.daemon.rpc.sending import SEND_CLAIM_TTL
+
+    target = await _target(client, daemon)
+    blank = daemon.jobs.create(
+        handle="blank",
+        caller_id="cli",
+        target_id=target["id"],
+        kind="send",
+        prompt="",
+        cwd="/tmp",
+    )
+    real_now = sending_mod.now()
+    monkeypatch.setattr(sending_mod, "now", lambda: real_now + SEND_CLAIM_TTL + 1)
+
+    successor = await client.call("send", target=target["id"], prompt="successor")
+
+    assert daemon.jobs.get(blank.handle).state == JobState.RUNNING
+    assert daemon.jobs.get(successor["handle"]).state == JobState.RUNNING
 
 
 async def test_send_then_await_result(client, fake_tmux, daemon):
