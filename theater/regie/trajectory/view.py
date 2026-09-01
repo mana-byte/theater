@@ -1117,6 +1117,8 @@ class TrajectoryView(Vertical):
             self._sync_selection()
             if detail_open:
                 self._sync_detail_panel()
+        if message.open_details:
+            self._open_details(message.record_id)
 
     def on_timeline_scrolled(self, message: TimelineScrolled) -> None:
         self.state.timeline_scroll = message.offset
