@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import ClassVar
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
@@ -91,6 +93,32 @@ class _DetailRichLog(RichLog):
     """Rich detail content without RichLog's incomplete selection affordance."""
 
     ALLOW_SELECT: ClassVar[bool] = False
+
+    def __init__(self, *, copy_text: Callable[[], str], **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._copy_text = copy_text
+        self.tooltip = "Click text to copy current tab"
+
+    def on_click(self, event: events.Click) -> None:
+        if event.button != 1:
+            return
+        meta = event.style.meta
+        if (
+            DETAIL_JSON_TOGGLE_META in meta
+            or participant_link_from_meta(meta) is not None
+            or DETAIL_PARTICIPANT_META in meta
+            or DETAIL_RECORD_TARGET_META in meta
+        ):
+            return
+        scroll_x, scroll_y = map(int, self.scroll_offset)
+        content_x = int(event.screen_x) - self.content_region.x + scroll_x
+        content_y = int(event.screen_y) - self.content_region.y + scroll_y
+        if not 0 <= content_y < len(self.lines):
+            return
+        if not 0 <= content_x < cell_len(self.lines[content_y].text.rstrip(" ")):
+            return
+        event.stop()
+        self.post_message(SpanDetailCopyRequested(self._copy_text()))
 
 
 class SpanDetailPanel(Vertical):
@@ -291,6 +319,7 @@ class SpanDetailPanel(Vertical):
                 for tab in InspectorTab:
                     with TabPane(tab.value.replace("_", " ").title(), id=self._pane_id(tab)):
                         yield _DetailRichLog(
+                            copy_text=lambda: self.copy_text,
                             id=self._log_id(tab),
                             min_width=1,
                             wrap=True,
