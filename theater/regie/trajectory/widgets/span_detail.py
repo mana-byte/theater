@@ -4,14 +4,11 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from rich.segment import Segment
 from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
-from textual.selection import Selection
-from textual.strip import Strip
 from textual.widget import Widget
 from textual.widgets import Button, Label, LoadingIndicator, RichLog, TabbedContent, TabPane
 
@@ -42,6 +39,14 @@ from theater.trajectory.tools import TrajectoryToolOperation
 
 class SpanDetailClosed(Message):
     """The detail panel requested a return to the span list."""
+
+
+class SpanDetailCopyRequested(Message):
+    """The active detail tab requested copying."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        self.text = text
 
 
 class SpanDetailTabChanged(Message):
@@ -82,40 +87,10 @@ class _DetailLoadingIndicator(LoadingIndicator):
         self.auto_refresh = 1 / 16 if active else None
 
 
-class _SelectableRichLog(RichLog):
-    """RichLog with Textual's missing selection extraction and offsets."""
+class _DetailRichLog(RichLog):
+    """Rich detail content without RichLog's incomplete selection affordance."""
 
-    def get_selection(self, selection: Selection) -> tuple[str, str] | None:
-        text = "\n".join(line.text.rstrip(" ") for line in self.lines)
-        return selection.extract(text), "\n"
-
-    def render_line(self, y: int) -> Strip:
-        scroll_x, scroll_y = map(int, self.scroll_offset)
-        content_y = scroll_y + y
-        width = self.scrollable_content_region.width
-        line = self._render_line(content_y, scroll_x, width).apply_style(self.rich_style)
-        selection = self.text_selection
-        if selection is not None and (span := selection.get_span(content_y)) is not None:
-            start, end = span
-            visible_start = max(scroll_x, start)
-            visible_end = scroll_x + line.cell_length if end == -1 else min(scroll_x + width, end)
-            if visible_start < visible_end:
-                local_start = visible_start - scroll_x
-                local_end = visible_end - scroll_x
-                selection_style = self.screen.get_component_rich_style("screen--selection")
-                selected = line.crop(local_start, local_end)
-                selected = Strip(
-                    Segment.apply_style(selected, post_style=selection_style),
-                    selected.cell_length,
-                )
-                line = Strip.join(
-                    (
-                        line.crop(0, local_start),
-                        selected,
-                        line.crop(local_end),
-                    )
-                )
-        return line.apply_offsets(scroll_x, content_y)
+    ALLOW_SELECT: ClassVar[bool] = False
 
 
 class SpanDetailPanel(Vertical):
@@ -185,7 +160,7 @@ class SpanDetailPanel(Vertical):
         width: 1fr;
         height: 1fr;
         min-height: 0;
-        layers: detail-content detail-loading;
+        layers: detail-content detail-action detail-loading;
     }
     SpanDetailPanel #trajectory-span-detail-tabs {
         layer: detail-content;
@@ -195,7 +170,30 @@ class SpanDetailPanel(Vertical):
     }
     SpanDetailPanel ContentTabs {
         height: 3;
+        padding-right: 12;
         background: $foreground 3%;
+    }
+    SpanDetailPanel #trajectory-span-detail-copy {
+        position: absolute;
+        dock: right;
+        layer: detail-action;
+        width: 12;
+        min-width: 12;
+        height: 3;
+        border: none !important;
+        color: $text-muted;
+        background: $background;
+    }
+    SpanDetailPanel #trajectory-span-detail-copy.-style-flat:hover,
+    SpanDetailPanel #trajectory-span-detail-copy.-style-flat:focus {
+        color: $text;
+        background: $accent 15%;
+        tint: transparent;
+    }
+    SpanDetailPanel #trajectory-span-detail-copy.-style-flat.-active {
+        color: $text;
+        background: $accent 20%;
+        tint: transparent;
     }
     SpanDetailPanel Tab {
         height: 3;
@@ -292,13 +290,19 @@ class SpanDetailPanel(Vertical):
             with TabbedContent(id="trajectory-span-detail-tabs"):
                 for tab in InspectorTab:
                     with TabPane(tab.value.replace("_", " ").title(), id=self._pane_id(tab)):
-                        yield _SelectableRichLog(
+                        yield _DetailRichLog(
                             id=self._log_id(tab),
                             min_width=1,
                             wrap=True,
                             markup=False,
                             highlight=False,
                         )
+            yield Button(
+                "Copy tab",
+                id="trajectory-span-detail-copy",
+                compact=True,
+                flat=True,
+            )
             yield _DetailLoadingIndicator(id="trajectory-span-detail-loading")
 
     @property
@@ -558,6 +562,10 @@ class SpanDetailPanel(Vertical):
             self.set_tab(tab)
 
     def on_button_pressed(self, message: Button.Pressed) -> None:
+        if message.button.id == "trajectory-span-detail-copy":
+            message.stop()
+            self.post_message(SpanDetailCopyRequested(self.copy_text))
+            return
         if message.button.id != "trajectory-span-detail-close":
             return
         message.stop()
@@ -612,6 +620,7 @@ class SpanDetailPanel(Vertical):
 
 __all__ = [
     "SpanDetailClosed",
+    "SpanDetailCopyRequested",
     "SpanDetailPanel",
     "SpanDetailParticipantLinkClicked",
     "SpanDetailRecordLinkClicked",
