@@ -15,6 +15,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { joinErrorText, registerLifecycleMarkers } from "./bridge_lifecycle.ts";
 import { Type } from "typebox";
 
 const OWNER = Symbol.for("theater.pi.mcp-bridge.owner");
@@ -433,6 +434,7 @@ export default async function theaterMcpBridge(pi: ExtensionAPI) {
 	if (launchConfigPath?.trim()) {
 		registerIdleStatus(pi);
 		registerTranscriptSwitches(pi);
+		registerLifecycleMarkers(pi);
 	}
 	const bridgeLease = acquireBridge();
 	if (bridgeLease === undefined) {
@@ -456,46 +458,59 @@ export default async function theaterMcpBridge(pi: ExtensionAPI) {
 	if (!launchConfigPath) {
 		registerIdleStatus(pi);
 		registerTranscriptSwitches(pi);
+		registerLifecycleMarkers(pi);
 	}
 
-	const client = new TheaterClient(await loadConfig(configPath));
-	let discovered: Tool[];
+	let client: TheaterClient | undefined;
 	try {
+		client = new TheaterClient(await loadConfig(configPath));
 		await client.initialize();
-		discovered = await client.listTools();
-	} catch (error) {
-		await client.close();
-		releaseBridge(bridgeLease);
-		throw new Error(`required Theater MCP startup failed: ${(error as Error).message}`);
-	}
-	for (const tool of discovered) {
-		pi.registerTool({
-			name: toolName(tool.name),
-			label: `theater/${tool.name}`,
-			description: tool.description ?? `Theater MCP tool ${tool.name}`,
-			promptSnippet: `Theater: ${tool.description ?? tool.name}`,
-			parameters: Type.Unsafe(tool.inputSchema),
-			async execute(_id, params, signal) {
-				if (signal?.aborted) return { content: [{ type: "text", text: "Cancelled" }], details: {} };
-				try {
-					const result = await client.callTool(tool.name, params, signal);
-					const content = (result.content ?? []).map((item) => ({
-						type: "text" as const,
-						text: item.text ?? JSON.stringify(item),
-					}));
-					if (result.isError) throw new Error(`Theater tool ${tool.name} returned an error`);
-					return { content, details: { tool: tool.name } };
-				} catch (error) {
+		const discovered = await client.listTools();
+		for (const tool of discovered) {
+			pi.registerTool({
+				name: toolName(tool.name),
+				label: `theater/${tool.name}`,
+				description: tool.description ?? `Theater MCP tool ${tool.name}`,
+				promptSnippet: `Theater: ${tool.description ?? tool.name}`,
+				parameters: Type.Unsafe(tool.inputSchema),
+				async execute(_id, params, signal) {
 					if (signal?.aborted) return { content: [{ type: "text", text: "Cancelled" }], details: {} };
-					throw error;
-				}
-			},
-		});
+					try {
+						const result = await client.callTool(tool.name, params, signal);
+						const content = (result.content ?? []).map((item) => ({
+							type: "text" as const,
+							text: item.text ?? JSON.stringify(item),
+						}));
+						if (result.isError) {
+							// Preserve the actionable text the server returned rather
+							// than replacing it with a generic message.  A failed
+							// tool is still a failure: the joined text becomes the
+							// thrown error so Pi surfaces the real reason.
+							throw new Error(joinErrorText(result.content, tool.name));
+						}
+						return { content, details: { tool: tool.name } };
+					} catch (error) {
+						if (signal?.aborted) return { content: [{ type: "text", text: "Cancelled" }], details: {} };
+						throw error;
+					}
+				},
+			});
+		}
+	} catch (error) {
+		// Any setup failure — config read/parse, process startup, tool listing,
+		// or tool registration — must not strand the process-wide lease.  Close
+		// the client when one was created and release exactly once, then rethrow
+		// with the original context.
+		if (client) await client.close();
+		releaseBridge(bridgeLease);
+		throw error instanceof Error
+			? error
+			: new Error(`required Theater MCP startup failed: ${String(error)}`);
 	}
 	pi.on("session_shutdown", async () => {
 		// Each replacement creates a fresh extension instance. Tear down this
 		// instance before the next factory acquires a new process-wide lease.
-		await client.close();
+		if (client) await client.close();
 		releaseBridge(bridgeLease);
 	});
 }
