@@ -821,9 +821,10 @@ class TrajectoryView(Vertical):
 
     def action_tail(self) -> None:
         self.state.resume_follow()
-        visible = self.projection.all_visible_ids
-        self.state.select(visible[-1] if visible else None)
-        self._refresh(recompute=False)
+        self.state.hovered_id = None
+        self.state.detail_id = None
+        self.state.focus_region = self._content_region()
+        self._refresh()
         if self.controller is not None:
             self.run_worker(
                 self.controller.resume_follow(self.participant_id), name="trajectory-follow"
