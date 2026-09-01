@@ -133,9 +133,17 @@ def test_codex_carries_the_id_in_a_config_override(tmp_path):
     # whole plan is argv.
     assert plan.files == {} and plan.env == {}
     # `-c` values are parsed as TOML, so both sides must be valid TOML literals.
-    assert 'mcp_servers.theater.args=["mcp", "--id", "abc123"]' in plan.argv
-    command = next(a for a in plan.argv if a.startswith("mcp_servers.theater.command="))
-    assert command.endswith('"') and '="' in command
+    assert (
+        'mcp_servers.theater.args=["mcp", "--id", "abc123", "--harness", '
+        '"codex", "--toolset", "control"]'
+    ) in plan.argv
+    assert (
+        'mcp_servers.theater_wait.args=["mcp", "--id", "abc123", "--harness", '
+        '"codex", "--toolset", "wait"]'
+    ) in plan.argv
+    commands = [a for a in plan.argv if a.startswith("mcp_servers.") and ".command=" in a]
+    assert len(commands) == 2
+    assert all(command.endswith('"') and '="' in command for command in commands)
 
 
 @pytest.mark.parametrize(

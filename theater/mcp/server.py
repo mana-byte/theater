@@ -2,9 +2,9 @@
 
 One process per participant lane. Its whole job is to translate tool calls into
 daemon RPCs on behalf of exactly one participant, whose id arrives on argv.
-Vibe uses separate control and wait lanes:
+Harnesses may use separate control and wait lanes:
 
-    theater mcp --id <participant-id> [--harness vibe] [--toolset all]
+    theater mcp --id <participant-id> [--harness <name>] [--toolset all]
 
 argv, not the environment, because the MCP SDK strips everything outside a
 six-variable allowlist when it launches a stdio server
@@ -52,13 +52,13 @@ def _instructions(toolset: str) -> str:
     if toolset == "control":
         return (
             f"{INSTRUCTIONS}\n\n"
-            "For Vibe, await_sessions is intentionally on the separate "
-            "theater_wait MCP server. Use theater_wait_await_sessions so a "
+            "await_sessions is intentionally on the separate "
+            "theater_wait MCP server. Use await_sessions from theater_wait so a "
             "cancelled long wait cannot delay control calls such as interrupt_session."
         )
     if toolset == "wait":
         return (
-            "This is Theater's wait-only MCP server for Vibe. It exposes only "
+            "This is Theater's wait-only MCP server. It exposes only "
             "await_sessions; use the theater MCP server for every other Theater operation."
         )
     return INSTRUCTIONS
