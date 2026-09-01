@@ -548,6 +548,30 @@ async def test_details_replace_only_the_ledger_and_close_back_to_the_list() -> N
         assert app.focused is ledger
 
 
+async def test_span_detail_text_supports_mouse_selection_and_clipboard_copy() -> None:
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await add_records(app)
+        await pilot.press("enter")
+        await pilot.pause()
+
+        log = app.query_one("#trajectory-span-detail-content-summary", RichLog)
+        content_x = log.content_region.x - log.region.x
+        content_y = log.content_region.y - log.region.y
+        await pilot.mouse_down(log, offset=(content_x, content_y))
+        await pilot.mouse_up(log, offset=(content_x + 5, content_y))
+        await pilot.pause()
+
+        assert app.screen.get_selected_text() == "assist"
+        selected_style = next(iter(log.render_line(0))).style
+        assert selected_style is not None
+        assert selected_style.bgcolor == app.screen.get_component_rich_style(
+            "screen--selection"
+        ).bgcolor
+        app.screen.action_copy_text()
+        assert app._clipboard == "assist"
+
+
 async def test_timeline_click_replaces_the_open_span_detail() -> None:
     app = Host()
     async with app.run_test(size=(100, 30)) as pilot:
@@ -574,6 +598,30 @@ async def test_timeline_click_replaces_the_open_span_detail() -> None:
         assert panel.copy_text.endswith("second")
         assert not panel.has_class("-hidden")
         assert view.query_one(Ledger).has_class("-hidden")
+
+
+async def test_timeline_double_click_opens_related_span_detail() -> None:
+    app = Host()
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = await add_records(app)
+        record = view.state.records["r1"]
+        timeline = view.query_one(Timeline)
+        anchor = timeline.hover_anchor(record.record_id)
+        assert anchor is not None
+        lane_y = tuple(TrajectoryLane).index(record.lane) * TIMELINE_LANE_HEIGHT + 1
+
+        await pilot.double_click(
+            timeline,
+            offset=(anchor.x - timeline.region.x, lane_y),
+        )
+        await pilot.pause()
+
+        panel = view.query_one(SpanDetailPanel)
+        assert view.state.detail_id == record.record_id
+        assert view.state.focus_region is FocusRegion.DETAIL
+        assert panel.record_id == record.record_id
+        assert not panel.has_class("-hidden")
+        assert app.focused is panel
 
 
 async def test_span_detail_keeps_full_bounded_content_scrollable() -> None:

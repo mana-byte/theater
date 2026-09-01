@@ -45,9 +45,10 @@ class TimelineSpanHovered(Message):
 class TimelineSpanClicked(Message):
     """Pointer selected one timeline span."""
 
-    def __init__(self, record_id: str | None) -> None:
+    def __init__(self, record_id: str | None, *, open_details: bool = False) -> None:
         super().__init__()
         self.record_id = record_id
+        self.open_details = open_details
 
 
 class TimelineScrolled(Message):
@@ -589,7 +590,7 @@ class Timeline(ScrollView):
         self._set_hover(record)
         self._selected_id = record.record_id
         self.refresh()
-        self.post_message(TimelineSpanClicked(record.record_id))
+        self.post_message(TimelineSpanClicked(record.record_id, open_details=event.chain >= 2))
 
     def on_mouse_scroll_left(self, event: events.MouseScrollLeft) -> None:
         event.stop()

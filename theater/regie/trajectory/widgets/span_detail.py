@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from rich.segment import Segment
 from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
+from textual.selection import Selection
+from textual.strip import Strip
 from textual.widget import Widget
 from textual.widgets import Button, Label, LoadingIndicator, RichLog, TabbedContent, TabPane
 
@@ -77,6 +80,42 @@ class _DetailLoadingIndicator(LoadingIndicator):
     def set_active(self, active: bool) -> None:
         self.display = active
         self.auto_refresh = 1 / 16 if active else None
+
+
+class _SelectableRichLog(RichLog):
+    """RichLog with Textual's missing selection extraction and offsets."""
+
+    def get_selection(self, selection: Selection) -> tuple[str, str] | None:
+        text = "\n".join(line.text.rstrip(" ") for line in self.lines)
+        return selection.extract(text), "\n"
+
+    def render_line(self, y: int) -> Strip:
+        scroll_x, scroll_y = map(int, self.scroll_offset)
+        content_y = scroll_y + y
+        width = self.scrollable_content_region.width
+        line = self._render_line(content_y, scroll_x, width).apply_style(self.rich_style)
+        selection = self.text_selection
+        if selection is not None and (span := selection.get_span(content_y)) is not None:
+            start, end = span
+            visible_start = max(scroll_x, start)
+            visible_end = scroll_x + line.cell_length if end == -1 else min(scroll_x + width, end)
+            if visible_start < visible_end:
+                local_start = visible_start - scroll_x
+                local_end = visible_end - scroll_x
+                selection_style = self.screen.get_component_rich_style("screen--selection")
+                selected = line.crop(local_start, local_end)
+                selected = Strip(
+                    Segment.apply_style(selected, post_style=selection_style),
+                    selected.cell_length,
+                )
+                line = Strip.join(
+                    (
+                        line.crop(0, local_start),
+                        selected,
+                        line.crop(local_end),
+                    )
+                )
+        return line.apply_offsets(scroll_x, content_y)
 
 
 class SpanDetailPanel(Vertical):
@@ -253,7 +292,7 @@ class SpanDetailPanel(Vertical):
             with TabbedContent(id="trajectory-span-detail-tabs"):
                 for tab in InspectorTab:
                     with TabPane(tab.value.replace("_", " ").title(), id=self._pane_id(tab)):
-                        yield RichLog(
+                        yield _SelectableRichLog(
                             id=self._log_id(tab),
                             min_width=1,
                             wrap=True,
