@@ -412,7 +412,7 @@ def test_pi_bridge_uses_an_instance_lease_for_every_session_lifecycle() -> None:
     assert "function acquireBridge(): symbol | undefined" in bridge
     assert "const bridgeLease = acquireBridge();" in bridge
     assert "if (owners[OWNER] === lease) delete owners[OWNER];" in bridge
-    assert "await client.close();\n\t\treleaseBridge(bridgeLease);" in bridge
+    assert "if (client) await client.close();\n\t\treleaseBridge(bridgeLease);" in bridge
 
 
 def test_pi_bridge_marks_only_pi_confirmed_idle_states() -> None:
@@ -456,6 +456,121 @@ def test_pi_bridge_records_session_switch_boundaries_independently_of_mcp_owners
     assert bridge.index("registerTranscriptSwitches(pi);") < bridge.index(
         "const bridgeLease = acquireBridge();"
     )
+
+
+def test_pi_bridge_persists_durable_lifecycle_markers_before_acquiring_the_mcp_lease() -> None:
+    bridge = (
+        Path(__file__).parents[1] / "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts"
+    ).read_text(encoding="utf-8")
+    helper = (
+        Path(__file__).parents[1] / "theater/harness/builtin/plugins/pi/bridge_lifecycle.ts"
+    ).read_text(encoding="utf-8")
+
+    # The durable lifecycle wire contract: type=custom, customType=theater:lifecycle.
+    assert 'LIFECYCLE_CUSTOM_TYPE = "theater:lifecycle"' in helper
+    assert "LIFECYCLE_VERSION = 1" in helper
+    # The phases the parser consumes.  retry-scheduled is deliberately absent:
+    # Pi exposes no extension-visible event that reliably signals a retry, so
+    # fabricating it would misclassify final errors and strand the turn.
+    assert '"retry-scheduled"' not in helper
+    assert "retryScheduled" not in helper
+    assert '"compaction-will-retry"' in helper
+    assert '"settled"' in helper
+    # The bridge wires lifecycle registration ahead of the MCP lease so markers
+    # survive when a user-local copy owns the connection.
+    assert "registerLifecycleMarkers(pi);" in bridge
+    first_register = bridge.index("registerLifecycleMarkers(pi);")
+    assert first_register < bridge.index("const bridgeLease = acquireBridge();")
+    # A distinct process-global guard keeps two extension copies from
+    # double-registering lifecycle handlers (separate from the MCP lease owner).
+    assert 'Symbol.for("theater.pi.lifecycle.registered")' in helper
+    assert 'Symbol.for("theater.pi.mcp-bridge.owner")' in bridge
+    # Markers go through pi.appendEntry (the documented extension persistence
+    # API), and a write failure must not propagate to crash Pi.
+    assert "pi.appendEntry(LIFECYCLE_CUSTOM_TYPE" in helper
+    assert "} catch {" in helper
+    # session_before_compact markers are gated on willRetry (overflow recovery
+    # retries the turn; manual/threshold compaction does not).
+    assert "event.willRetry === true" in helper
+    # The guard releases on session_shutdown so a fresh extension runtime
+    # (reload/replacement) can register after the owner tears down.
+    assert 'pi.on("session_shutdown", () => {' in helper
+    assert "releaseLifecycleGuard();" in helper
+    # No message_end handler: a final error must not be misclassified as retry.
+    assert 'pi.on("message_end"' not in helper
+
+
+def test_pi_bridge_preserves_actionable_mcp_error_text_instead_of_a_generic_message() -> None:
+    bridge = (
+        Path(__file__).parents[1] / "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts"
+    ).read_text(encoding="utf-8")
+    helper = (
+        Path(__file__).parents[1] / "theater/harness/builtin/plugins/pi/bridge_lifecycle.ts"
+    ).read_text(encoding="utf-8")
+
+    # The old generic throw is gone; the failing tool's text is preserved.
+    assert "throw new Error(`Theater tool ${tool.name} returned an error`)" not in bridge
+    assert "throw new Error(joinErrorText(result.content, tool.name));" in bridge
+    # joinErrorText joins nonempty text items and falls back only when empty.
+    assert "joinErrorText" in helper
+    assert "return `Theater tool ${toolName} returned an error`" in helper
+
+
+def test_pi_bridge_releases_the_mcp_lease_on_every_setup_failure() -> None:
+    bridge = (
+        Path(__file__).parents[1] / "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts"
+    ).read_text(encoding="utf-8")
+
+    # A single try/catch wraps config read/parse, client initialize/listTools,
+    # and the registerTool loop; every failure path closes the client and
+    # releases the lease exactly once.
+    assert "let client: TheaterClient | undefined;" in bridge
+    assert "if (client) await client.close();\n\t\treleaseBridge(bridgeLease);" in bridge
+    # Missing config path releases the lease and returns cleanly.
+    assert "if (configPath === undefined) {\n\t\treleaseBridge(bridgeLease);" in bridge
+    # A blank config path releases the lease before throwing.
+    assert "!configPath.trim()) {\n\t\treleaseBridge(bridgeLease);" in bridge
+    # The rethrown error preserves the original context.
+    assert "error instanceof Error" in bridge
+
+
+def test_pi_bridge_lifecycle_helpers_behave_under_jiti() -> None:
+    """Run the Node/jiti behavior suite for bridge_lifecycle.ts.
+
+    The bridge's pure helpers (marker shape, duplicate-registration guard,
+    marker emission, exception-safe writes, actionable error text) are covered
+    by an executable TypeScript test loaded with jiti.  This asserts that suite
+    passes so the contract is checked at run time, not only by source substrings.
+    """
+    suite = Path(__file__).parent / "pi_bridge_lifecycle.ts"
+    assert suite.is_file(), f"missing jiti behavior suite: {suite}"
+    jiti = (
+        Path("/Users/manaiki.laut/.local/share/fnm/node-versions/v22.20.0/installation")
+        / "lib/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.cjs"
+    )
+    assert jiti.is_file(), f"jiti not installed at expected path: {jiti}"
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not on PATH in this sandbox")
+    result = subprocess.run(
+        [
+            node,
+            "-e",
+            f"require({str(jiti)!r})(null, {{}})({str(suite)!r});",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    # Node may not be on PATH in every sandbox; skip rather than fail when absent.
+    if result.returncode != 0 and "not found" in (result.stderr + result.stdout).lower():
+        pytest.skip("node/jiti unavailable in this sandbox")
+    assert result.returncode == 0, (
+        f"jiti behavior suite failed (rc={result.returncode}):\n{result.stdout}\n{result.stderr}"
+    )
+    assert "19 checks run" in result.stdout
+    assert "not ok -" not in result.stdout
 
 
 def test_pi_parser_pairs_tools_projects_usage_and_ends_the_turn(tmp_path) -> None:
