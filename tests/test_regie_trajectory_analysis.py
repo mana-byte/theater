@@ -253,6 +253,13 @@ def test_waterfall_uses_turn_records_when_harness_has_no_request_identity() -> N
         ("model activity", True),
         ("tool-call", False),
     ]
+    scope_timing = waterfall.rows[0].timing
+    assert scope_timing is not None
+    assert scope_timing.provenance is TimingProvenance.DERIVED
+    # tool-call start=2, tool-result duration 250ms => end=2.25; min start=2, max end=2.25
+    assert scope_timing.start == 2
+    assert scope_timing.end == 2.25
+    assert scope_timing.duration_ms == 250
 
 
 def test_file_activity_preserves_every_operation_per_path_in_chronological_order() -> None:
@@ -411,7 +418,7 @@ def test_analysis_projects_delegation_resources_failures_and_retry_chains() -> N
 
 def test_insight_tables_use_requested_row_heights() -> None:
     index = _index(())
-    visible = frozenset()
+    visible: frozenset[str] = frozenset()
 
     assert build_insight_table(DiagnosticView.WATERFALL, index, visible).row_height == 1
     assert build_insight_table(DiagnosticView.RESOURCES, index, visible).row_height == 1

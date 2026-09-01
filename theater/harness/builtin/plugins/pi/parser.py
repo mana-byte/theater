@@ -116,6 +116,71 @@ def _timing(timestamp: float | None) -> Timing | None:
     )
 
 
+def _record_timestamp(record: dict) -> float | None:
+    """The outer ``record.timestamp`` — when Pi persisted the entry on ``message_end``.
+
+    Pi writes two timestamps per message: an inner ``message.timestamp`` set by
+    pi-ai when the pending response object is created (≈ generation start) and
+    an outer ``record.timestamp`` set by the session manager on ``message_end``
+    persistence (≈ completion). Both are source-native but Pi does not document
+    them as start/end, so callers that pair them mark the interval ``DERIVED``.
+    """
+    return iso_epoch(record.get("timestamp"))
+
+
+def _message_timestamp(message: dict | None) -> float | None:
+    """The inner ``message.timestamp`` — set by pi-ai at pending-response creation.
+
+    Unlike ``_timestamp``, this does NOT fall back to the outer ``record.timestamp``;
+    it returns ``None`` when the inner timestamp is absent so the caller can tell the
+    two apart and build the correct interval (outer-only must become
+    ``Timing(end=outer, SOURCE)``, not a zero-width ``start=end=outer`` interval).
+    """
+    if not isinstance(message, dict):
+        return None
+    value = message.get("timestamp")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value) / 1_000
+    return None
+
+
+def _interval_timing(start: float | None, end: float | None) -> Timing | None:
+    """Build a ``DERIVED`` interval from Pi's inner (start) and outer (end) timestamps.
+
+    Falls back to a single-endpoint ``SOURCE`` timing when only one timestamp is
+    present, so partial or malformed records keep the existing point semantics
+    instead of fabricating an interval. The inner timestamp is treated as the
+    start (not the end) so we never repeat the original mislabeling bug.
+    """
+    if start is None and end is None:
+        return None
+    if start is not None and end is not None and end >= start:
+        return Timing(
+            start=start,
+            end=end,
+            duration_ms=(end - start) * 1_000,
+            provenance=TimingProvenance.DERIVED,
+        )
+    if start is not None:
+        return Timing(start=start, provenance=TimingProvenance.SOURCE)
+    assert end is not None
+    return Timing(end=end, provenance=TimingProvenance.SOURCE)
+
+
+def _tool_call_timing(assistant_outer: float | None) -> Timing | None:
+    """Anchor a tool call at the containing assistant message's completion time.
+
+    The tool call lives in the same assistant record as the ``toolCall`` block,
+    so the assistant's outer (completion) timestamp is the closest durable
+    anchor for "the model emitted this call." Marked ``DERIVED`` because the
+    interval semantics (call starts when the assistant completes) are inferred
+    by Theater, not reported by Pi.
+    """
+    if assistant_outer is None:
+        return None
+    return Timing(start=assistant_outer, provenance=TimingProvenance.DERIVED)
+
+
 class PiParserMixin:
     _active_turn_id: str | None
     _last_model: str | None
@@ -273,7 +338,11 @@ class PiParserMixin:
                 trajectory_events=(),
             )
         if role == "assistant":
-            return self._assistant_record(record, message, index, entry_id, timestamp, clip_text)
+            inner = _message_timestamp(message)
+            outer = _record_timestamp(record)
+            return self._assistant_record(
+                record, message, index, entry_id, inner, outer, timestamp, clip_text
+            )
         if role == "toolResult":
             return self._tool_result_record(record, message, index, entry_id, timestamp, clip_text)
         return ParsedRecord()
@@ -284,7 +353,9 @@ class PiParserMixin:
         message: dict,
         index: int,
         entry_id: str | None,
-        timestamp: float | None,
+        inner: float | None,
+        outer: float | None,
+        event_ts: float | None,
         clip_text: bool,
     ) -> ParsedRecord:
         del record
@@ -307,7 +378,7 @@ class PiParserMixin:
                     kind=EventKind.ASSISTANT,
                     text=clipper(clip_text)(raw),
                     raw_text=raw,
-                    ts=timestamp,
+                    ts=event_ts,
                     turn_id=turn_id,
                     raw_index=index,
                 )
@@ -318,7 +389,7 @@ class PiParserMixin:
                 Event(
                     kind=EventKind.TOOL_CALL,
                     tool_name=name,
-                    ts=timestamp,
+                    ts=event_ts,
                     turn_id=turn_id,
                     raw_index=index,
                 )
@@ -327,7 +398,7 @@ class PiParserMixin:
             events.append(
                 Event(
                     kind=EventKind.ASSISTANT,
-                    ts=timestamp,
+                    ts=event_ts,
                     turn_id=turn_id,
                     raw_index=index,
                     usage=usage,
@@ -340,7 +411,7 @@ class PiParserMixin:
                     kind=EventKind.ERROR,
                     text=clipper(clip_text)(error),
                     raw_text=error,
-                    ts=timestamp,
+                    ts=event_ts,
                     turn_id=turn_id,
                     raw_index=index,
                 )
@@ -352,7 +423,7 @@ class PiParserMixin:
                 events.append(
                     Event(
                         kind=EventKind.ASSISTANT,
-                        ts=timestamp,
+                        ts=event_ts,
                         turn_end=True,
                         turn_id=turn_id,
                         raw_index=index,
@@ -367,7 +438,7 @@ class PiParserMixin:
                 native_id=entry_id,
                 raw_index=index,
                 turn_id=turn_id,
-                timing=_timing(timestamp),
+                timing=_interval_timing(inner, outer),
                 status=assistant_status,
                 details=tuple(
                     detail
@@ -391,7 +462,7 @@ class PiParserMixin:
                         event_ordinal=len(facts),
                         turn_id=turn_id,
                         status=assistant_status,
-                        timing=_timing(timestamp),
+                        timing=_interval_timing(inner, outer),
                     )
                 )
         for call in calls:
@@ -412,7 +483,7 @@ class PiParserMixin:
                     mcp_server=mcp_server,
                     mcp_tool=mcp_tool,
                     status=TrajectoryStatus.PENDING,
-                    timing=_timing(timestamp),
+                    timing=_tool_call_timing(outer),
                     details=tuple(
                         detail
                         for detail in (
@@ -428,7 +499,9 @@ class PiParserMixin:
                 )
             )
         if usage is not None:
-            facts.append(self._usage_fact(usage, index, len(facts), turn_id, timestamp))
+            facts.append(
+                self._usage_fact(usage, index, len(facts), turn_id, inner, outer, interval=True)
+            )
         return ParsedRecord(events=tuple(events), trajectory=tuple(facts), trajectory_events=())
 
     def _tool_result_record(
@@ -544,6 +617,9 @@ class PiParserMixin:
         ordinal: int,
         turn_id: str | None,
         timestamp: float | None,
+        outer: float | None = None,
+        *,
+        interval: bool = False,
     ) -> TrajectoryFact:
         return _pi_fact(
             kind=TrajectoryKind.USAGE,
@@ -553,6 +629,6 @@ class PiParserMixin:
             raw_index=index,
             event_ordinal=ordinal,
             turn_id=turn_id,
-            timing=_timing(timestamp),
+            timing=_interval_timing(timestamp, outer) if interval else _timing(timestamp),
             usage=trajectory_usage_from_token_usage(usage),
         )

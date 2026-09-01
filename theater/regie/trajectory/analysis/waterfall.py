@@ -131,6 +131,35 @@ def _scope_timing(requests: tuple[TrajectoryRequest, ...]) -> Timing | None:
     )
 
 
+def _record_scope_timing(
+    records: tuple[TrajectoryRecord, ...],
+    operations: tuple[TrajectoryToolOperation, ...],
+) -> Timing | None:
+    """Derive a turn-scope interval from record and tool-operation timings.
+
+    Harnesses without request identity (notably Pi) still produce per-record
+    intervals. Aggregate those into a single ``DERIVED`` scope timing so the
+    waterfall can render a turn-scope bar instead of ``None``.
+    """
+    intervals: list[tuple[float, float]] = []
+    for record in records:
+        if (interval := timing_interval(record.timing)) is not None:
+            intervals.append(interval)
+    for operation in operations:
+        if (interval := timing_interval(operation.timing)) is not None:
+            intervals.append(interval)
+    if not intervals:
+        return None
+    start = min(interval[0] for interval in intervals)
+    end = max(interval[1] for interval in intervals)
+    return Timing(
+        start=start,
+        end=end,
+        duration_ms=(end - start) * 1_000,
+        provenance=TimingProvenance.DERIVED,
+    )
+
+
 def _scope_status(requests: tuple[TrajectoryRequest, ...]) -> TrajectoryStatus:
     for statuses in (_FAILED_STATUSES, _ACTIVE_STATUSES):
         if match := next(
@@ -277,7 +306,11 @@ def build_waterfalls(
         anchor = (
             request_anchor(scope_requests[0]) if scope_requests else _scope_anchor(scope_records)
         )
-        scope_timing = _scope_timing(scope_requests) if scope_requests else None
+        scope_timing = (
+            _scope_timing(scope_requests)
+            if scope_requests
+            else _record_scope_timing(scope_records, operations)
+        )
         label = _scope_label(scope_requests, scope_records)
         status = (
             _scope_status(scope_requests) if scope_requests else _record_scope_status(scope_records)
