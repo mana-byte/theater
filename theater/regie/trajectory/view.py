@@ -13,7 +13,7 @@ from textual.app import ComposeResult
 from textual.await_remove import AwaitRemove
 from textual.containers import Vertical
 from textual.widget import Widget
-from textual.widgets import Input, Select
+from textual.widgets import Input, LoadingIndicator, Select
 from textual.worker import Worker, WorkerCancelled, WorkerFailed
 
 from theater.constants.regie_trajectory import (
@@ -101,6 +101,16 @@ from theater.trajectory import (
 from theater.trajectory.location import TrajectoryLocationResolution
 
 
+class _SearchLoadingIndicator(LoadingIndicator):
+    def _on_mount(self, event: events.Mount) -> None:
+        super()._on_mount(event)
+        self.auto_refresh = None
+
+    def set_active(self, active: bool) -> None:
+        self.display = active
+        self.auto_refresh = 1 / 16 if active else None
+
+
 class TrajectoryView(Vertical):
     """A fixed timeline, viewport ledger, and filter chooser."""
 
@@ -120,7 +130,7 @@ class TrajectoryView(Vertical):
     TrajectoryView > #trajectory-timeline,
     TrajectoryView > #trajectory-header,
     TrajectoryView > #trajectory-overview,
-    TrajectoryView > #trajectory-ledger,
+    TrajectoryView > #trajectory-ledger-stack,
     TrajectoryView > #trajectory-insights,
     TrajectoryView > #trajectory-span-detail,
     TrajectoryView > #trajectory-footer {{
@@ -143,10 +153,26 @@ class TrajectoryView(Vertical):
     TrajectoryView > #trajectory-filters.-open {{
         display: block;
     }}
-    TrajectoryView > #trajectory-ledger {{
+    TrajectoryView > #trajectory-ledger-stack {{
         width: 1fr;
         height: 1fr;
         min-height: 0;
+        layers: ledger-content ledger-loading;
+    }}
+    TrajectoryView > #trajectory-ledger-stack > #trajectory-ledger {{
+        layer: ledger-content;
+        width: 1fr;
+        height: 1fr;
+        min-height: 0;
+    }}
+    TrajectoryView > #trajectory-ledger-stack > #trajectory-search-loading {{
+        display: none;
+        position: absolute;
+        layer: ledger-loading;
+        width: 1fr;
+        height: 1fr;
+        color: $accent;
+        background: $background;
     }}
     TrajectoryView > #trajectory-insights {{
         width: 1fr;
@@ -203,7 +229,9 @@ class TrajectoryView(Vertical):
         yield TrajectoryHeader(id="trajectory-header")
         yield Timeline(id="trajectory-timeline")
         yield FilterPanel(id="trajectory-filters", classes="-hidden")
-        yield Ledger(id="trajectory-ledger")
+        with Vertical(id="trajectory-ledger-stack"):
+            yield Ledger(id="trajectory-ledger")
+            yield _SearchLoadingIndicator(id="trajectory-search-loading")
         yield InsightsPanel(id="trajectory-insights", classes="-hidden")
         yield SpanDetailPanel(id="trajectory-span-detail", classes="-hidden")
         yield TrajectoryFooter(id="trajectory-footer")
@@ -344,6 +372,7 @@ class TrajectoryView(Vertical):
                 retry_message=self.state.retry_message if self.state.retry_kind else None,
                 position_offset=self.projection.ledger_page.first_item - 1,
             )
+        self._sync_search_loading()
         record, request, tool = self._selection_context()
         breadcrumb.update_context(record, request=request, tool=tool)
         self._sync_detail_panel()
@@ -544,6 +573,7 @@ class TrajectoryView(Vertical):
 
     def _sync_detail_panel(self) -> None:
         ledger = self.query_one("#trajectory-ledger", Ledger)
+        ledger_stack = self.query_one("#trajectory-ledger-stack", Vertical)
         insights = self.query_one("#trajectory-insights", InsightsPanel)
         panel = self.query_one("#trajectory-span-detail", SpanDetailPanel)
         insight_view = self.state.diagnostic_view in INSIGHT_VIEWS
@@ -552,6 +582,7 @@ class TrajectoryView(Vertical):
         if record is None:
             self.state.detail_id = None
             self._set_class(ledger, "-hidden", insight_view)
+            self._set_class(ledger_stack, "-hidden", insight_view)
             self._set_class(insights, "-hidden", not insight_view)
             self._set_class(panel, "-hidden", True)
             if self.state.focus_region is FocusRegion.DETAIL:
@@ -562,6 +593,7 @@ class TrajectoryView(Vertical):
         tool = self.state.tool_index.by_id.get(operation_id) if operation_id is not None else None
         self.state.detail_id = record_id
         self._set_class(ledger, "-hidden", True)
+        self._set_class(ledger_stack, "-hidden", True)
         self._set_class(insights, "-hidden", True)
         self._set_class(panel, "-hidden", False)
         self.state.detail_tab = panel.set_span(
@@ -782,6 +814,8 @@ class TrajectoryView(Vertical):
             self._sync_search_drawer(animate=not was_open)
         self._sync_filter_panel()
         self._update_status()
+        if self.state.query.strip() and not self.state.search_complete:
+            self._refresh_search()
         if self.is_mounted:
             self._focus_search()
 
@@ -803,6 +837,10 @@ class TrajectoryView(Vertical):
         self.state.search_open = False
         if was_open:
             self._sync_search_drawer(animate=animate)
+        if self._search_worker is not None and not self._search_worker.is_finished:
+            self._search_worker.cancel()
+        self.state.searching_full_history = False
+        self._sync_search_loading()
         if restore_focus:
             self.focus_region(self.state.focus_region)
 
@@ -1052,7 +1090,7 @@ class TrajectoryView(Vertical):
 
     def _refresh_search(self) -> None:
         self._search_refresh_pending = False
-        self.state.begin_search(self.state.query)
+        self.state.begin_search(self.state.query if self.controller is not None else "")
         self._refresh()
         if self._search_worker is not None and not self._search_worker.is_finished:
             self._search_worker.cancel()
@@ -1064,6 +1102,13 @@ class TrajectoryView(Vertical):
                 group="trajectory-search",
                 exclusive=True,
             )
+
+    def _sync_search_loading(self) -> None:
+        if not self.is_mounted:
+            return
+        self.query_one("#trajectory-search-loading", _SearchLoadingIndicator).set_active(
+            self.state.search_open and self.state.searching_full_history
+        )
 
     async def _search_full_history(self, query: str) -> None:
         await asyncio.sleep(0.15)

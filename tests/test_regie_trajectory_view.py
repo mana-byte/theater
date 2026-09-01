@@ -3,7 +3,15 @@ from __future__ import annotations
 import pytest
 from textual.app import App, ComposeResult
 from textual.coordinate import Coordinate
-from textual.widgets import Button, DataTable, Input, RichLog, Select, SelectionList
+from textual.widgets import (
+    Button,
+    DataTable,
+    Input,
+    LoadingIndicator,
+    RichLog,
+    Select,
+    SelectionList,
+)
 
 from theater.constants.regie_trajectory import (
     LEDGER_HEADER_HEIGHT,
@@ -750,3 +758,24 @@ async def test_search_drawer_slides_for_keyboard_and_footer_actions() -> None:
         assert view.state.filters_open
         assert search.styles.visibility == "hidden"
         assert search.offset.y == -SEARCH_HEIGHT
+
+
+async def test_full_history_search_spinner_stops_when_search_closes() -> None:
+    app = Host()
+    async with app.run_test(size=(100, 30)):
+        view = await add_records(app)
+        indicator = view.query_one("#trajectory-search-loading", LoadingIndicator)
+        assert not indicator.display
+
+        view.state.search_open = True
+        view.state.searching_full_history = True
+        view._sync_search_loading()
+
+        assert indicator.display
+        assert indicator.auto_refresh is not None
+
+        view._close_search(restore_focus=False, animate=False)
+
+        assert not indicator.display
+        assert indicator.auto_refresh is None
+        assert not view.state.searching_full_history
