@@ -15,7 +15,6 @@ import pytest
 from theater.daemon.spawner import Spawner, SpawnRequest
 from theater.daemon.store import Store
 from theater.daemon.trajectory.project import fact_to_record
-from theater.harness.base import APPROVALS
 from theater.harness.builtin.plugins.pi import bootstrap
 from theater.harness.builtin.plugins.pi.constants import (
     PI_ISOLATION_MARKER,
@@ -143,7 +142,7 @@ def _write_switch_marker(root: Path, target: Path, value: dict[str, object]) -> 
     (archive / f"{digest}.json").write_text(body, encoding="utf-8")
 
 
-def test_pi_launch_isolated_session_config_and_all_approval_modes(tmp_path, monkeypatch) -> None:
+def test_pi_launch_advertises_only_yolo_and_builds_isolated_argv(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
     config_path = tmp_path / "mcp.json"
 
@@ -190,11 +189,55 @@ def test_pi_launch_isolated_session_config_and_all_approval_modes(tmp_path, monk
         "--harness",
         "pi",
     ]
-    assert MANIFEST.launch.approvals == APPROVALS
+    # Pi has no Theater-enforced permission prompt or sandbox, so the launch
+    # contract must advertise only the behavior plan_launch produces.
+    assert MANIFEST.launch.approvals == ("yolo",)
     assert plan.env["PI_OFFLINE"] == "1"
     assert plan.env["PI_CACHE_RETENTION"] == "long"
     assert plan.env["PI_SKIP_VERSION_CHECK"] == "1"
     assert plan.env["PI_TELEMETRY"] == "0"
+
+
+def test_pi_launch_argv_is_independent_of_approval_and_manifest_rejects_other_modes(
+    tmp_path, monkeypatch
+) -> None:
+    # plan_launch never reads context.approval, so the produced argv must be
+    # identical for every approval value. The manifest gate is the only thing
+    # that enforces the contract, and it must reject manual/edits because Pi
+    # has no Theater-enforced permission prompt or sandbox for them.
+    from theater.harness.manifests.compiler import compile_manifest
+    from theater.models import BadRequest
+
+    monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
+    config_path = tmp_path / "mcp.json"
+    base = plan_launch(
+        LaunchContext(
+            participant_id="pi-child",
+            prompt="inspect this",
+            config_path=config_path,
+            approval="yolo",
+        )
+    ).argv
+    for approval in ("manual", "edits", "yolo"):
+        plan = plan_launch(
+            LaunchContext(
+                participant_id="pi-child",
+                prompt="inspect this",
+                config_path=config_path,
+                approval=approval,
+            )
+        )
+        assert plan.argv == base
+
+    harness = compile_manifest("pi", MANIFEST)
+    for rejected in ("manual", "edits"):
+        with pytest.raises(BadRequest, match="approval must be one of yolo"):
+            harness.plan_launch(
+                participant_id="pi-child",
+                prompt="inspect this",
+                config_path=config_path,
+                approval=rejected,
+            )
 
 
 def test_pi_bootstrap_suppresses_only_the_expected_cold_warning(monkeypatch) -> None:

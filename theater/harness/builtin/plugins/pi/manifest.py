@@ -5,7 +5,6 @@ from __future__ import annotations
 from functools import partial
 from pathlib import Path
 
-from theater.harness.base import APPROVALS
 from theater.harness.contracts.channels import (
     ChannelCapability,
     ChannelDeclaration,
@@ -74,7 +73,11 @@ def manifest_for_root(root: Path | None = None) -> HarnessManifest:
         aliases=("pi-agent", "pi_agent", "Pi"),
         launch=LaunchManifest(
             planner=plan_launch,
-            approvals=APPROVALS,
+            # Pi has no Theater-enforced permission prompt or sandbox: it runs
+            # with its tools available and Theater injects no approval keystrokes.
+            # Advertising manual/edits would promise unenforced safety, so the
+            # launch contract admits only the behavior plan_launch produces.
+            approvals=("yolo",),
             supports_model=True,
             supports_reasoning_effort=True,
             supports_resume=True,
