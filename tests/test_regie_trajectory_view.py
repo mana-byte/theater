@@ -30,9 +30,12 @@ from theater.regie.trajectory.widgets.timeline import Timeline
 from theater.trajectory import (
     PanelState,
     PanelStateInfo,
+    TrajectoryDelta,
     TrajectoryLane,
     TrajectoryPage,
+    TrajectoryParticipantState,
     TrajectoryRecord,
+    TrajectoryUpsert,
 )
 
 
@@ -138,6 +141,92 @@ async def test_enter_live_tail_selects_final_page_and_clears_transient_details()
         assert view.state.ledger_page == 2
         assert view.state.hovered_id is None
         assert view.state.detail_id is None
+
+
+async def test_action_tail_selects_latest_span_after_pause() -> None:
+    """Clicking the Paused/live button (action_tail) must jump to the latest span.
+
+    Regression: action_tail left detail_id pointing at the old detailed span and
+    called _refresh(recompute=False), so when new spans arrived while paused the
+    surface stayed on the old span instead of jumping to the live tail.
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)):
+        view = app.query_one(TrajectoryView)
+        view.state_store.page_size = 1
+        view.state.panel = PanelStateInfo(
+            PanelState.READY, participant_state=TrajectoryParticipantState.LIVE
+        )
+        view.state.stream_id = "stream-p1"
+        view.state.cursor = "c1"
+        view.state.upsert([make_record("r1", "first"), make_record("r2", "second")])
+        view._refresh()
+        assert view.state.selected_id == "r2"
+
+        view.state.pause_follow()
+        view.state.select("r1")
+        view._refresh()
+        assert not view.state.follow_tail
+
+        # A new span arrives via the follow loop while paused.
+        view.state.apply_follow(
+            TrajectoryDelta(
+                stream_id="stream-p1",
+                cursor="c2",
+                upserts=(TrajectoryUpsert(record=make_record("r3", "third")),),
+            )
+        )
+        view._refresh()
+        assert view.state.selected_id == "r1"
+        assert view.state.new_count == 1
+
+        view.action_tail()
+
+        assert view.state.follow_tail
+        assert view.state.selected_id == "r3"
+        assert view.state.detail_id is None
+        assert view.state.hovered_id is None
+
+
+async def test_action_tail_clears_open_detail_to_reach_live_tail() -> None:
+    """Paused/live with the span detail open must close it and show the live tail.
+
+    Regression: action_tail did not clear detail_id, so _sync_detail_panel kept
+    rendering the old span and the ledger stayed hidden (detail_open skips both
+    ledger.update_rows and ledger.scroll_to_record).
+    """
+    app = Host()
+    async with app.run_test(size=(100, 30)):
+        view = app.query_one(TrajectoryView)
+        view.state_store.page_size = 1
+        view.state.panel = PanelStateInfo(
+            PanelState.READY, participant_state=TrajectoryParticipantState.LIVE
+        )
+        view.state.stream_id = "stream-p1"
+        view.state.cursor = "c1"
+        view.state.upsert([make_record("r1", "first"), make_record("r2", "second")])
+        view._refresh()
+        view.state.detail_id = "r2"
+        view.state.pause_follow()
+        view.state.select("r1")
+        view._refresh()
+
+        view.state.apply_follow(
+            TrajectoryDelta(
+                stream_id="stream-p1",
+                cursor="c2",
+                upserts=(TrajectoryUpsert(record=make_record("r3", "third")),),
+            )
+        )
+        view._refresh()
+        assert view.state.new_count == 1
+
+        view.action_tail()
+
+        assert view.state.follow_tail
+        assert view.state.selected_id == "r3"
+        assert view.state.detail_id is None
+        assert view.state.hovered_id is None
 
 
 async def test_surface_uses_fixed_timeline_and_virtualized_ledger() -> None:
