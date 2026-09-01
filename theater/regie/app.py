@@ -1174,6 +1174,8 @@ class RegieApp(App):
             await tmux.set_buffer(text)
         except Exception as exc:
             self.notify(f"copy failed: {exc}", severity="error")
+        else:
+            self.notify("copied")
 
     async def on_trajectory_participant_selected(
         self,

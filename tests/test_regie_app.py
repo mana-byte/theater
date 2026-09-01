@@ -2096,10 +2096,11 @@ async def test_exact_trajectory_link_locates_record_and_back_restores_origin(dae
 
 
 async def test_trajectory_copy_uses_tmux_buffer(daemon, tmux):
-    app, _ = make_app()
+    app, notes = make_app()
     async with app.run_test():
         await app._copy_trajectory("bounded detail")
     assert ("buffer", "bounded detail") in tmux
+    assert ("copied", "information") in notes
 
 
 async def test_quit_closes_main_query_and_follow_clients(daemon, tmux):
