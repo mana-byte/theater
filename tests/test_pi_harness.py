@@ -472,9 +472,7 @@ def test_pi_bridge_persists_durable_lifecycle_markers_before_acquiring_the_mcp_l
     bridge = (
         Path(__file__).parents[1] / "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts"
     ).read_text(encoding="utf-8")
-    helper = (
-        Path(__file__).parent / "pi_bridge_lifecycle_helpers.ts"
-    ).read_text(encoding="utf-8")
+    helper = (Path(__file__).parent / "pi_bridge_lifecycle_helpers.ts").read_text(encoding="utf-8")
 
     # The durable lifecycle wire contract: type=custom, customType=theater:lifecycle.
     assert 'LIFECYCLE_CUSTOM_TYPE = "theater:lifecycle"' in helper
@@ -522,9 +520,7 @@ def test_pi_bridge_preserves_actionable_mcp_error_text_instead_of_a_generic_mess
     bridge = (
         Path(__file__).parents[1] / "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts"
     ).read_text(encoding="utf-8")
-    helper = (
-        Path(__file__).parent / "pi_bridge_lifecycle_helpers.ts"
-    ).read_text(encoding="utf-8")
+    helper = (Path(__file__).parent / "pi_bridge_lifecycle_helpers.ts").read_text(encoding="utf-8")
 
     # The old generic throw is gone; the failing tool's text is preserved.
     assert "throw new Error(`Theater tool ${tool.name} returned an error`)" not in bridge
