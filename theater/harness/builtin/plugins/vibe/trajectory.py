@@ -307,17 +307,6 @@ class VibeTrajectoryMixin:
         content = _vibe_text(record.get("content"))
         calls = record.get("tool_calls") or []
         facts: list[TrajectoryFact] = []
-        if content or message_id is not None or not calls:
-            facts.append(
-                _vibe_fact(
-                    kind=TrajectoryKind.ASSISTANT,
-                    summary=content,
-                    native_id=message_id,
-                    raw_index=index,
-                    event_ordinal=len(facts),
-                    turn_id=turn_id,
-                )
-            )
         reasoning = record.get("reasoning_content")
         if isinstance(reasoning, str) and reasoning:
             reasoning_id = record.get("reasoning_message_id")
@@ -326,6 +315,17 @@ class VibeTrajectoryMixin:
                     kind=TrajectoryKind.REASONING,
                     summary=reasoning,
                     native_id=reasoning_id if isinstance(reasoning_id, str) else None,
+                    raw_index=index,
+                    event_ordinal=len(facts),
+                    turn_id=turn_id,
+                )
+            )
+        if content or message_id is not None or not calls:
+            facts.append(
+                _vibe_fact(
+                    kind=TrajectoryKind.ASSISTANT,
+                    summary=content,
+                    native_id=message_id,
                     raw_index=index,
                     event_ordinal=len(facts),
                     turn_id=turn_id,

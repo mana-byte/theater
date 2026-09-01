@@ -73,12 +73,19 @@ def test_vibe_parse_record_preserves_control_events_and_source_timestamps() -> N
 def test_vibe_facts_keep_ids_reasoning_and_tool_pairing() -> None:
     observer = VibeObserver()
     records = [json.loads(line) for line in FIXTURE.read_text().splitlines()]
+    assistant_facts = observer.parse_record(json.dumps(records[2]), 2).facts
     facts = [
         fact
         for index, record in enumerate(records)
         for fact in observer.parse_record(json.dumps(record), index).facts
     ]
 
+    assert [fact.kind for fact in assistant_facts] == [
+        TrajectoryKind.REASONING,
+        TrajectoryKind.ASSISTANT,
+        TrajectoryKind.TOOL_CALL,
+    ]
+    assert [fact.event_ordinal for fact in assistant_facts] == [0, 1, 2]
     assert any(
         fact.kind is TrajectoryKind.REASONING
         and fact.native_id == "25417c9d-d468-4619-a15b-a499dff0cea5"
