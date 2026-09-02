@@ -1447,9 +1447,6 @@ def test_duration_mode_resolver_skips_point_event_request_members() -> None:
     # The request carries a derived interval; the model record already has its
     # own usable interval, so only the user point event would be a candidate
     # for the resolver. The view's _timing_for skips point events.
-    request_timing = Timing(
-        start=1.0, end=2.0, duration_ms=1000.0, provenance=TimingProvenance.DERIVED
-    )
     timing_for = {"user": None, "model": None}.get  # point event skipped
     laid = build_timeline_layout(records, OrderMode.DURATION, timing_for=timing_for)
     # model is timed by its own interval; user stays untimed.
