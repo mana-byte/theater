@@ -30,12 +30,47 @@ def _reset_version_cache():
     client.reset_version_cache()
 
 
-async def test_set_buffer_passes_literal_text_after_double_dash(monkeypatch):
-    captured = _capture(monkeypatch)
+async def test_set_buffer_streams_large_literal_text_over_stdin(monkeypatch):
+    captured: list[tuple[list[str], str | None]] = []
 
-    await client.set_buffer("-literal\ntext")
+    async def fake_run(*args: str, check: bool = True, input_text: str | None = None) -> str:
+        captured.append((list(args), input_text))
+        return ""
 
-    assert captured == [["set-buffer", "-w", "--", "-literal\ntext"]]
+    monkeypatch.setattr(client, "run", fake_run)
+    text = "-literal\n" + "x" * (32 * 1024)
+
+    await client.set_buffer(text)
+
+    assert captured == [(["load-buffer", "-w", "-"], text)]
+
+
+async def test_run_encodes_input_text_and_opens_a_stdin_pipe(monkeypatch):
+    from theater.tmux import command
+
+    communicated: list[bytes | None] = []
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self, value: bytes | None = None) -> tuple[bytes, bytes]:
+            communicated.append(value)
+            return b"", b""
+
+    spawned: list[tuple[tuple[str, ...], dict]] = []
+
+    async def create_subprocess_exec(*args: str, **kwargs):
+        spawned.append((args, kwargs))
+        return Process()
+
+    monkeypatch.setattr(command, "_require", lambda: None)
+    monkeypatch.setattr(command.asyncio, "create_subprocess_exec", create_subprocess_exec)
+
+    await command.run("load-buffer", "-w", "-", input_text="café")
+
+    assert spawned[0][0] == ("tmux", "load-buffer", "-w", "-")
+    assert spawned[0][1]["stdin"] is command.asyncio.subprocess.PIPE
+    assert communicated == ["café".encode()]
 
 
 # ---- new_window --------------------------------------------------------

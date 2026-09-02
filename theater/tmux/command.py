@@ -101,17 +101,23 @@ def run_sync(*args: str, check: bool = True) -> str:
     return proc.stdout.rstrip("\n")
 
 
-async def run(*args: str, check: bool = True) -> str:
+async def run(*args: str, check: bool = True, input_text: str | None = None) -> str:
     _require()
     with timing.span(TMUX_COMMAND, command=args[0]) as sp:
         proc = await asyncio.create_subprocess_exec(
             "tmux",
             *args,
+            stdin=asyncio.subprocess.PIPE if input_text is not None else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            out, err = await asyncio.wait_for(proc.communicate(), timeout=_run_timeout())
+            communicate = (
+                proc.communicate(input_text.encode("utf-8"))
+                if input_text is not None
+                else proc.communicate()
+            )
+            out, err = await asyncio.wait_for(communicate, timeout=_run_timeout())
         except TimeoutError:
             proc.kill()
             raise TmuxError(f"tmux {' '.join(args)} timed out") from None
