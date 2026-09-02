@@ -73,6 +73,23 @@ def _message(entry_id: str, message: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _bash_execution(
+    entry_id: str = "bash-1", *, exit_code: int | None = 0, cancelled: bool = False
+) -> dict[str, object]:
+    return _message(
+        entry_id,
+        {
+            "role": "bashExecution",
+            "command": "git push",
+            "output": "done",
+            "exitCode": exit_code,
+            "cancelled": cancelled,
+            "truncated": False,
+            "timestamp": 1788349677604,
+        },
+    )
+
+
 def _lifecycle(phase: str, entry_id: str = "life-1") -> dict[str, object]:
     return {
         "type": "custom",
@@ -359,6 +376,92 @@ def test_pi_source_waits_until_the_initial_session_file_exists(tmp_path) -> None
         stream.write("\n")
     batch = asyncio.run(source.read())
     assert [(event.kind, event.text) for event in batch.events] == [(EventKind.USER, "hello")]
+
+
+def test_pi_source_reports_completed_direct_bash_as_idle(tmp_path) -> None:
+    sessions = tmp_path / "sessions"
+    workdir = tmp_path / "work"
+    sessions.mkdir()
+    workdir.mkdir()
+    transcript = sessions / "native-id.jsonl"
+    _append(transcript, _session(session_id="native-id", cwd=workdir))
+    source = PiObserver(root=sessions, isolated=True).open_source(
+        cwd=str(workdir), session_id="native-id"
+    )
+    assert asyncio.run(source.read()).attached is not None
+    source.commit_attachment()
+    asyncio.run(source.read())
+
+    _append(transcript, _bash_execution())
+    batch = asyncio.run(source.read())
+
+    assert batch.status is Status.IDLE
+    assert not batch.events
+    assert not batch.trajectory
+
+
+@pytest.mark.parametrize(
+    ("records", "expected_status"),
+    [
+        (
+            (
+                _bash_execution(),
+                _message("user-1", {"role": "user", "content": "continue"}),
+            ),
+            None,
+        ),
+        (
+            (
+                _message("user-1", {"role": "user", "content": "continue"}),
+                _bash_execution(),
+            ),
+            Status.IDLE,
+        ),
+    ],
+)
+def test_pi_source_resolves_direct_bash_status_in_record_order(
+    tmp_path, records, expected_status
+) -> None:
+    sessions = tmp_path / "sessions"
+    workdir = tmp_path / "work"
+    sessions.mkdir()
+    workdir.mkdir()
+    transcript = sessions / "native-id.jsonl"
+    _append(transcript, _session(session_id="native-id", cwd=workdir))
+    source = PiObserver(root=sessions, isolated=True).open_source(
+        cwd=str(workdir), session_id="native-id"
+    )
+    assert asyncio.run(source.read()).attached is not None
+    source.commit_attachment()
+    asyncio.run(source.read())
+
+    _append(transcript, *records)
+    batch = asyncio.run(source.read())
+
+    assert batch.status is expected_status
+    assert [event.kind for event in batch.events] == [EventKind.USER]
+
+
+def test_pi_attachment_restores_completed_direct_bash_status(tmp_path) -> None:
+    sessions = tmp_path / "sessions"
+    workdir = tmp_path / "work"
+    sessions.mkdir()
+    workdir.mkdir()
+    transcript = sessions / "native-id.jsonl"
+    _append(
+        transcript,
+        _session(session_id="native-id", cwd=workdir),
+        _bash_execution(),
+    )
+    source = PiObserver(root=sessions, isolated=True).open_source(
+        cwd=str(workdir), session_id="native-id"
+    )
+
+    attached = asyncio.run(source.read()).attached
+
+    assert attached is not None
+    assert attached.last_event is None
+    assert attached.status is Status.IDLE
 
 
 def test_pi_header_identity_does_not_depend_on_the_filename(tmp_path) -> None:
@@ -679,6 +782,22 @@ def test_pi_parser_pairs_tools_projects_usage_and_ends_the_turn(tmp_path) -> Non
     assert terminal.events[-1].usage is not None
     assert terminal.events[-1].usage.input_tokens == 7
     assert all(fact.status is TrajectoryStatus.COMPLETED for fact in terminal.trajectory)
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "cancelled"),
+    [(0, False), (1, False), (None, True)],
+)
+def test_pi_parser_treats_completed_direct_bash_as_idle_without_a_turn(
+    tmp_path, exit_code, cancelled
+) -> None:
+    parsed = PiObserver(root=tmp_path).parse_record(
+        json.dumps(_bash_execution(exit_code=exit_code, cancelled=cancelled)), 1
+    )
+
+    assert parsed.status is Status.IDLE
+    assert parsed.events == ()
+    assert parsed.trajectory == ()
 
 
 @pytest.mark.parametrize(

@@ -31,6 +31,7 @@ from theater.harness.contracts.source import (
 from theater.harness.contracts.trajectory import ParsedRecord, TrajectoryFact
 from theater.harness.transcript.attachment import attach_point
 from theater.harness.transcript.history import HistoryPageError, HistoryReader
+from theater.models import Status
 from theater.provenance import (
     TranscriptProvenance,
     is_trusted_provenance,
@@ -537,7 +538,15 @@ class TranscriptSource(Source):
                     for event in parsed.trajectory_events
                 )
             ),
+            status=parsed.status,
         )
+
+    @staticmethod
+    def _advance_status_hint(current: Status | None, parsed: ParsedRecord) -> Status | None:
+        """Resolve record-local status evidence in transcript order."""
+        if any(not event.usage_only for event in parsed.events):
+            current = None
+        return parsed.status if parsed.status is not None else current
 
     # ---- internals ------------------------------------------------------
 
@@ -750,16 +759,19 @@ class TranscriptSource(Source):
         size, lines, mtime, last_line, dev, ino = await asyncio.to_thread(attach_point, path)
         session_id = self._observer.session_id(path)
         last_event: Event | None = None
+        status: Status | None = None
         if last_line is not None:
             parsed = self._parse_record(last_line, lines - 1, clip_text=True)
             semantic = [event for event in parsed.events if not event.usage_only]
             last_event = semantic[-1] if semantic else None
+            status = parsed.status
         self._pending = (path, size, lines, mtime, session_id)
         return Attachment(
             location=str(path),
             session_id=session_id,
             skipped=lines,
             last_event=last_event,
+            status=status,
             point=StreamPoint(records=lines, size=size, dev=dev, ino=ino),
             correlation=self.correlation_for(path, session_id),
             collision_domain=self.collision_domain,
@@ -801,6 +813,7 @@ class TranscriptSource(Source):
         events: list[Event] = []
         trajectory: list[TrajectoryFact] = []
         trajectory_events: list[Event] = []
+        status: Status | None = None
         for raw in head.split(b"\n"):
             line = raw.decode("utf-8", errors="replace")
             parsed = self._parse_record(line, index, clip_text=True)
@@ -808,6 +821,7 @@ class TranscriptSource(Source):
             events.extend(decorated.events)
             trajectory.extend(decorated.trajectory)
             trajectory_events.extend(decorated.baseline_events)
+            status = self._advance_status_hint(status, decorated)
             record_offset += len(raw) + 1
             index += 1
 
@@ -816,6 +830,7 @@ class TranscriptSource(Source):
         return Batch(
             events=events,
             progressed=progressed,
+            status=status,
             trajectory=trajectory,
             trajectory_events=trajectory_events,
         )

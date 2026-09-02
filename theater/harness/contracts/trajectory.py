@@ -11,6 +11,7 @@ from theater.constants.trajectory import (
     TRAJECTORY_SOURCE_MAX_BYTES,
 )
 from theater.harness.contracts.events import Event
+from theater.models import Status
 from theater.trajectory.content import (
     ContentPreview,
     DetailField,
@@ -102,6 +103,8 @@ class ParsedRecord:
     trajectory: Sequence[TrajectoryFact] = ()
     #: None projects all control events; an explicit sequence can suppress duplicate views.
     trajectory_events: Sequence[Event] | None = None
+    #: Authoritative harness status carried by a record that is not an agent turn event.
+    status: Status | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "events", tuple(self.events))
@@ -116,6 +119,8 @@ class ParsedRecord:
             not isinstance(event, Event) for event in self.trajectory_events
         ):
             raise TrajectoryValidationError("trajectory events must contain Event values")
+        if self.status is not None and not isinstance(self.status, Status):
+            raise TrajectoryValidationError("parsed status must be a Status value or null")
 
     @property
     def facts(self) -> tuple[TrajectoryFact, ...]:

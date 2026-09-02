@@ -18,6 +18,7 @@ from theater.harness.normalization.values import (
     optional_trajectory_detail,
     trajectory_identifier,
 )
+from theater.models import Status
 from theater.trajectory.content import ContentFormat
 from theater.trajectory.enums import TimingProvenance, TrajectoryKind, TrajectoryStatus
 from theater.trajectory.records import Timing
@@ -504,6 +505,12 @@ class PiParserMixin:
             return self._assistant_record(record, message, index, entry_id, inner, outer, clip_text)
         if role == "toolResult":
             return self._tool_result_record(record, message, index, entry_id, timestamp, clip_text)
+        if role == "bashExecution":
+            # Pi persists this only after a direct ``!``/``!!`` command has
+            # finished. If it overlaps an agent run, Pi defers the record until
+            # that run is settling. This is authoritative idle evidence, but
+            # not an agent turn boundary and must not complete a send job.
+            return ParsedRecord(status=Status.IDLE)
         return ParsedRecord()
 
     def _assistant_record(

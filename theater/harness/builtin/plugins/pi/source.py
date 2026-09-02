@@ -14,6 +14,7 @@ from theater.harness.contracts.source import Attachment, Batch, StreamPoint
 from theater.harness.contracts.trajectory import ParsedRecord, TrajectoryFact
 from theater.harness.source import TranscriptSource
 from theater.harness.transcript.discovery import stateful_history_reader
+from theater.models import Status
 from theater.resume_floor import decode_floor
 
 from .constants import PI_READ_BYTES, PI_RECORD_BYTES, PI_RECORDS_PER_BATCH
@@ -324,10 +325,14 @@ class PiTranscriptSource(TranscriptSource):
         offset, index = (size, lines) if cursor is None else cursor[:2]
         usage_only = cursor is not None and cursor[2]
         last_event: Event | None = None
-        if cursor is None and last_line is not None:
+        status: Status | None = None
+        if last_line is not None:
             parsed = self._parse_record(last_line, max(0, lines - 1), clip_text=True)
-            semantic = [event for event in parsed.events if not event.usage_only]
-            last_event = semantic[-1] if semantic else None
+            if cursor is None:
+                semantic = [event for event in parsed.events if not event.usage_only]
+                last_event = semantic[-1] if semantic else None
+            if not usage_only:
+                status = parsed.status
         self._pending_usage_only_until = size if usage_only else None
         self._pending_stream_dev, self._pending_stream_ino = dev, ino
         self._pending_checkpoint = _encode_checkpoint(path, offset, index, dev, ino)
@@ -339,6 +344,7 @@ class PiTranscriptSource(TranscriptSource):
             # records even while it replays their accounting payloads.
             skipped=lines if usage_only else index,
             last_event=last_event,
+            status=status,
             point=StreamPoint(records=lines, size=size, dev=dev, ino=ino),
             correlation=self.correlation_for(path, session_id),
             collision_domain=self.collision_domain,
@@ -525,6 +531,7 @@ class PiTranscriptSource(TranscriptSource):
         events: list[Event] = []
         trajectory: list[TrajectoryFact] = []
         trajectory_events: list[Event] = []
+        status: Status | None = None
         next_checkpoint: str | None = None
         for raw, source_offset in records:
             parsed: ParsedRecord = self._parse_record(
@@ -537,6 +544,7 @@ class PiTranscriptSource(TranscriptSource):
                 events.extend(decorated.events)
                 trajectory.extend(decorated.trajectory)
                 trajectory_events.extend(decorated.baseline_events)
+                status = self._advance_status_hint(status, decorated)
             self.index += 1
             assert self.path is not None
             next_checkpoint = _encode_checkpoint(
@@ -551,6 +559,7 @@ class PiTranscriptSource(TranscriptSource):
         return Batch(
             events=events,
             progressed=bool(records),
+            status=status,
             trajectory=trajectory,
             trajectory_events=trajectory_events,
         )

@@ -1915,6 +1915,59 @@ def test_resume_floor_suppresses_attach_status_and_completion(registry):
     assert reloaded.resume_floor == floor_raw
 
 
+def test_attachment_status_settles_participant_without_completing_job(registry):
+    observer, _screen, _clock, p, jobs = poised(registry)
+    registry.set_status(p.id, Status.WORKING)
+    attached = Attachment(
+        location="/tmp/transcript.jsonl",
+        status=Status.IDLE,
+        point=StreamPoint(records=5, size=100, dev=10, ino=20),
+    )
+
+    observer._on_attach(p.id, attached)
+
+    assert registry.get(p.id).status is Status.IDLE
+    assert jobs.get("h1").state == "running"
+
+
+def test_resume_floor_suppresses_stale_attachment_status(registry):
+    observer, _screen, _clock, p, jobs = poised(registry)
+    p.status = Status.WORKING
+    p.resume_floor = UNKNOWN_FLOOR
+    registry.store.upsert_participant(p)
+    attached = Attachment(
+        location="/tmp/transcript.jsonl",
+        status=Status.IDLE,
+        point=StreamPoint(records=5, size=100, dev=10, ino=20),
+    )
+
+    observer._on_attach(p.id, attached)
+
+    reloaded = registry.store.get_participant(p.id)
+    assert reloaded.status is Status.WORKING
+    assert reloaded.resume_floor == UNKNOWN_FLOOR
+    assert jobs.get("h1").state == "running"
+
+
+def test_post_floor_attachment_status_settles_and_clears_floor(registry):
+    observer, _screen, _clock, p, jobs = poised(registry)
+    p.status = Status.WORKING
+    p.resume_floor = encode_floor(StreamPoint(records=3, size=60, dev=10, ino=20))
+    registry.store.upsert_participant(p)
+    attached = Attachment(
+        location="/tmp/transcript.jsonl",
+        status=Status.IDLE,
+        point=StreamPoint(records=4, size=80, dev=10, ino=20),
+    )
+
+    observer._on_attach(p.id, attached)
+
+    reloaded = registry.store.get_participant(p.id)
+    assert reloaded.status is Status.IDLE
+    assert reloaded.resume_floor is None
+    assert jobs.get("h1").state == "running"
+
+
 def test_structured_floor_suppresses_at_equal_records(registry):
     """A structured floor at equal records suppresses — not strictly beyond.
 

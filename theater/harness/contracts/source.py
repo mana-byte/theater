@@ -120,6 +120,10 @@ class Attachment:
     that record is carried — every shipped parser puts a turn boundary on the
     final event of a record, so nothing is lost, but a parser that did
     otherwise would have its boundary missed at attach time only.
+
+    ``status`` is the corresponding source-authoritative status when the final
+    native record conveys state without representing an agent turn. It changes
+    participant state only; unlike ``last_event``, it cannot complete a job.
     """
 
     location: str
@@ -132,6 +136,7 @@ class Attachment:
     correlation: str = str(TranscriptProvenance.HEURISTIC)
     #: Heuristic collision namespace used to isolate competing source domains.
     collision_domain: str | None = None
+    status: Status | None = None
 
 
 @dataclass(frozen=True, slots=True)

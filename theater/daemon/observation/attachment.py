@@ -262,20 +262,44 @@ class AttachmentManager:
             attached.skipped,
         )
         floor_raw = p.resume_floor if p is not None else None
-        if attached.last_event is not None and not floor_is_present(floor_raw):
-            settle_from_event_fn(pid, attached.last_event)
-        elif attached.last_event is not None and floor_is_present(floor_raw):
+        self._apply_attachment_evidence(
+            pid,
+            attached,
+            floor_raw=floor_raw,
+            settle_fn=settle_fn,
+            settle_from_event_fn=settle_from_event_fn,
+        )
+
+    def _apply_attachment_evidence(
+        self,
+        pid: str,
+        attached: Attachment,
+        *,
+        floor_raw: str | None,
+        settle_fn,
+        settle_from_event_fn,
+    ) -> None:
+        """Apply attach-time state only when it is newer than the resume floor."""
+        has_status_evidence = attached.last_event is not None or attached.status is not None
+        if not has_status_evidence:
+            return
+        has_floor = floor_is_present(floor_raw)
+        if has_floor:
             floor = decode_floor(floor_raw)
-            if floor_authorises_completion(floor, floor_raw=floor_raw, point=attached.point):
-                settle_from_event_fn(pid, attached.last_event)
-                self.store.clear_resume_floor(pid)
-            else:
+            if not floor_authorises_completion(floor, floor_raw=floor_raw, point=attached.point):
                 logger.info(
                     "resume floor suppresses attach-derived status for %s (floor=%s, point=%s)",
                     pid,
                     floor_raw,
                     attached.point,
                 )
+                return
+        if attached.last_event is not None:
+            settle_from_event_fn(pid, attached.last_event)
+        if attached.status is not None:
+            settle_fn(pid, attached.status)
+        if has_floor:
+            self.store.clear_resume_floor(pid)
 
     def release_transcript(self, pid: str) -> None:
         """Drop a participant's claim on its transcript, if it still holds it."""
