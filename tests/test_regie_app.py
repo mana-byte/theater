@@ -189,7 +189,10 @@ def daemon(monkeypatch):
             "participants.tree": [dict(PARENT, children=[dict(CHILD)])],
             "participants.unmanaged": [],
             "bus.tail": [],
-            "harnesses": [{"name": "vibe"}, {"name": "claude"}],
+            "harnesses": [
+                {"name": "vibe", "approvals": ["manual", "edits", "yolo"]},
+                {"name": "claude", "approvals": ["manual", "edits", "yolo"]},
+            ],
             "usage_summary": {
                 "period": _ECHO_PERIOD,
                 "all_time": {"input_tokens": 11, "output_tokens": 7},
@@ -406,7 +409,10 @@ async def test_mount_fills_the_tree_and_the_bus(daemon, tmux):
     async with app.run_test():
         assert len(app.tree_lines) == 2  # parent and child
         assert app.bus_cursor == 1
-        assert app.harnesses == [{"name": "vibe"}, {"name": "claude"}]
+        assert app.harnesses == [
+            {"name": "vibe", "approvals": ["manual", "edits", "yolo"]},
+            {"name": "claude", "approvals": ["manual", "edits", "yolo"]},
+        ]
         # The panel holds one Label per line, and knows which node each is.
         panel = app.query_one("#tree-panel", app_mod.TreePanel)
         assert len(panel.children) == 2
