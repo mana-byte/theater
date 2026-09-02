@@ -368,7 +368,6 @@ class CodexTrajectoryMixin:
                 "task_started",
                 "context_compacted",
                 "turn_context",
-                CODEX_THREAD_SETTINGS_EVENT_TYPE,
             ):
                 status = (
                     TrajectoryStatus.RUNNING

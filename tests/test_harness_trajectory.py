@@ -383,6 +383,61 @@ def test_codex_facts_include_rollout_items_calls_parent_ids_reasoning_usage_and_
     assert complete.timing.duration_ms == 9000
 
 
+def test_codex_thread_settings_seed_usage_without_adding_trajectory_noise() -> None:
+    observer = CodexObserver()
+    settings = observer.parse_record(
+        json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "thread_settings_applied",
+                    "thread_settings": {
+                        "model": "gpt-5.6-sol",
+                        "model_provider_id": "azure",
+                    },
+                },
+            }
+        ),
+        0,
+    )
+
+    assert settings.trajectory == ()
+
+    usage = observer.parse_record(
+        json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 100,
+                            "cached_input_tokens": 20,
+                            "output_tokens": 30,
+                        }
+                    },
+                },
+            }
+        ),
+        1,
+    ).trajectory[0]
+    context = observer.parse_record(
+        json.dumps(
+            {
+                "type": "turn_context",
+                "payload": {"turn_id": "turn-1", "model": "gpt-5.6-sol"},
+            }
+        ),
+        2,
+    ).trajectory[0]
+
+    assert usage.usage is not None
+    assert usage.usage.model == "gpt-5.6-sol"
+    assert usage.usage.provider == "azure"
+    assert context.kind is TrajectoryKind.CONTEXT
+    assert context.summary == "turn context: gpt-5.6-sol"
+
+
 async def test_codex_history_associates_context_model_and_usage_with_the_active_turn(
     tmp_path: Path,
 ) -> None:
