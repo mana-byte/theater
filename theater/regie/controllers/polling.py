@@ -1,6 +1,7 @@
 """Daemon polling state and decisions for tree, bus, and animation.
 
-``PollingController`` owns the two bus cursors plus animation priming state.
+``PollingController`` owns the two bus cursors, animation priming state, and
+the short-lived unmanaged-pane cache.
 The app passes its connected ``DaemonClient`` per call so the controller never
 holds a reference to it. It returns explicit typed results and decisions so
 the app can perform all Textual/RichLog rendering and reactive tree assignment
@@ -21,10 +22,12 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from time import monotonic
 from typing import Any
 
 from theater.client import DaemonClient
 from theater.config import RegieSection
+from theater.constants.regie import REGIE_UNMANAGED_POLL_INTERVAL_SECONDS
 from theater.regie.render.layout import Key
 
 logger = logging.getLogger("theater.regie")
@@ -84,7 +87,7 @@ class AnimEvent:
 
 
 class PollingController:
-    """Owns bus/anim cursors and animation priming; receives client per call.
+    """Own polling cursors, priming, and pane cache; receive a client per call.
 
     The app constructs this with the loaded ``RegieSection`` for interval/batch
     settings and passes its ``DaemonClient`` to each poll method. The controller
@@ -98,6 +101,23 @@ class PollingController:
         self.anim_cursor: int = 0
         #: Whether the animation poll has seen the log once (prime-only first).
         self._anim_primed: bool = False
+        self._unmanaged: list[dict] | None = None
+        self._unmanaged_polled_at: float | None = None
+
+    @staticmethod
+    def _managed_panes(tree: list[dict]) -> set[str]:
+        """Collect pane IDs from every level of the managed participant tree."""
+        panes: set[str] = set()
+        pending = list(tree)
+        while pending:
+            node = pending.pop()
+            pane = node.get("tmux_pane")
+            if isinstance(pane, str):
+                panes.add(pane)
+            children = node.get("children")
+            if isinstance(children, list):
+                pending.extend(child for child in children if isinstance(child, dict))
+        return panes
 
     async def poll_tree(
         self,
@@ -105,15 +125,37 @@ class PollingController:
         client: DaemonClient,
         renderer: Callable[..., list[TreeLine]],
     ) -> TreeRefreshResult:
-        """Fetch the participant tree and unmanaged panes, render to lines."""
+        """Fetch the participant tree and periodically refresh unmanaged panes."""
         try:
             tree = await client.call("participants.tree")
             assert isinstance(tree, list)
-            unmanaged = await client.call("participants.unmanaged")
-            assert isinstance(unmanaged, list)
         except Exception as exc:
             logger.debug("tree refresh failed: %s", exc)
             return TreeRefreshResult(lines=None)
+
+        now = monotonic()
+        unmanaged_due = (
+            self._unmanaged_polled_at is None
+            or now - self._unmanaged_polled_at >= REGIE_UNMANAGED_POLL_INTERVAL_SECONDS
+        )
+        if unmanaged_due:
+            # Record attempts as well as successes so a failing process-table scan is not retried
+            # on every one-second tree tick.
+            self._unmanaged_polled_at = now
+            try:
+                unmanaged = await client.call("participants.unmanaged")
+                assert isinstance(unmanaged, list)
+            except Exception as exc:
+                logger.debug("unmanaged pane refresh failed: %s", exc)
+                if self._unmanaged is None:
+                    return TreeRefreshResult(lines=None)
+            else:
+                self._unmanaged = unmanaged
+
+        if self._unmanaged is None:
+            return TreeRefreshResult(lines=None)
+        managed_panes = self._managed_panes(tree)
+        unmanaged = [row for row in self._unmanaged if row.get("pane") not in managed_panes]
         lines = renderer(tree, unmanaged, cwd_segments=cwd_segments)
         return TreeRefreshResult(lines=lines)
 

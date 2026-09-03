@@ -289,7 +289,7 @@ async def test_reconciliation_updates_an_existing_leaf_description(daemon, tmux)
         assert "updated saved description" in str(leaf.render()).splitlines()[2]
 
 
-async def test_reconciliation_does_not_restart_an_unchanged_description_marquee(daemon, tmux):
+async def test_reconciliation_does_not_repaint_unchanged_visible_content(daemon, tmux, monkeypatch):
     description = "a durable participant description that is much wider than this sidebar"
     daemon["answers"]["participants.tree"] = [
         {**PARENT, "description": description, "last_activity": 1.0, "children": []}
@@ -305,6 +305,14 @@ async def test_reconciliation_does_not_restart_an_unchanged_description_marquee(
             leaf._tick_marquee()
         timer = leaf._marquee_timer
         rendered = str(leaf.render())
+        updates: list[object] = []
+        original_update = leaf.update
+
+        def record_update(content="", *, layout=True):
+            updates.append(content)
+            return original_update(content, layout=layout)
+
+        monkeypatch.setattr(leaf, "update", record_update)
 
         daemon["answers"]["participants.tree"] = [
             {**PARENT, "description": description, "last_activity": 2.0, "children": []}
@@ -315,6 +323,39 @@ async def test_reconciliation_does_not_restart_an_unchanged_description_marquee(
         assert leaf._marquee_offset == 6
         assert leaf._marquee_timer is timer
         assert str(leaf.render()) == rendered
+        assert updates == []
+
+
+async def test_reconciliation_repaints_visible_changes_and_syncs_spinner(daemon, tmux, monkeypatch):
+    daemon["answers"]["participants.tree"] = [dict(PARENT, children=[])]
+    app = make_app()
+    async with app.run_test():
+        leaf = _panel(app)._key_widgets[("p", PARENT["id"])]
+        updates: list[object] = []
+        original_update = leaf.update
+
+        def record_update(content="", *, layout=True):
+            updates.append(content)
+            return original_update(content, layout=layout)
+
+        monkeypatch.setattr(leaf, "update", record_update)
+
+        daemon["answers"]["participants.tree"] = [
+            {**PARENT, "status": "working", "cwd": "/tmp/changed", "children": []}
+        ]
+        await app._refresh_tree()
+
+        assert len(updates) == 1
+        assert leaf._timer is not None
+        assert "/tmp/changed" in str(leaf.render())
+
+        daemon["answers"]["participants.tree"] = [
+            {**PARENT, "status": "idle", "cwd": "/tmp/changed", "children": []}
+        ]
+        await app._refresh_tree()
+
+        assert len(updates) == 2
+        assert leaf._timer is None
 
 
 async def test_a_disappeared_participant_is_unmounted(daemon, tmux):
@@ -645,15 +686,13 @@ async def test_zebra_stripe_updates_after_insertion(daemon, tmux):
 
 async def test_zebra_stripe_ignores_separator_rows(daemon, tmux):
     """A separator between participants must not consume parity."""
+    daemon["answers"]["participants.tree"] = [dict(PARENT, children=[])]
+    daemon["answers"]["participants.unmanaged"] = [
+        {"pane": "%99", "harness": "codex", "cwd": "/tmp/other"}
+    ]
     app = make_app()
     async with app.run_test():
         panel = _panel(app)
-
-        daemon["answers"]["participants.tree"] = [dict(PARENT, children=[])]
-        daemon["answers"]["participants.unmanaged"] = [
-            {"pane": "%99", "harness": "codex", "cwd": "/tmp/other"}
-        ]
-        await app._refresh_tree()
 
         participant_widgets = [
             panel._key_widgets[k]
@@ -758,6 +797,9 @@ async def test_spinner_frame_advances_and_wraps(daemon, tmux):
     async with app.run_test():
         panel = _panel(app)
         child_widget = panel._key_widgets[("p", CHILD["id"])]
+        # This test drives ticks directly; stop the live timer so mount timing cannot race it.
+        child_widget._stop_timer()
+        child_widget._frame = 0
         assert child_widget._frame == 0
         child_widget._tick()
         assert child_widget._frame == 1

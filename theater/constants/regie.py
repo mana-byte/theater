@@ -90,6 +90,9 @@ REGIE_LEAF_SPINNER_INTERVAL = 0.1
 #: Hovered overflowing participant-description marquee interval in seconds.
 REGIE_LEAF_MARQUEE_INTERVAL = 0.12
 
+#: Cadence for discovering unmanaged tmux panes. Managed participants remain on the tree cadence.
+REGIE_UNMANAGED_POLL_INTERVAL_SECONDS = 5.0
+
 #: Stationary frames before a participant-description marquee starts or repeats.
 REGIE_LEAF_MARQUEE_PAUSE_FRAMES = 8
 

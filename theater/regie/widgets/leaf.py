@@ -282,6 +282,7 @@ class AgentLeaf(Static):
             or cont_prefix != self._cont_prefix
             or participant_detail != self._participant_detail
         )
+        previous_label = self._render_label()
         if detail_changed:
             self._stop_marquee()
         self._node = node
@@ -289,7 +290,9 @@ class AgentLeaf(Static):
         self._cont_prefix = cont_prefix
         self._participant_detail = participant_detail
         self._is_first_root = is_first_root
-        self.update(self._render_label(), layout=False)
+        label = self._render_label()
+        if label != previous_label:
+            self.update(label, layout=False)
         if node.get("status") == "working":
             self._start_timer()
         else:
