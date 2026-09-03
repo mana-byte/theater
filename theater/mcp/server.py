@@ -465,9 +465,13 @@ def build(
         response_format: optional JSON Schema hint, guidance only. Pass a
                    JSON object or null. Theater parses the whole final answer with
                    json.loads — no schema validation, fence stripping, or retry.
-        Fails with `human_present` (human at the pane), `busy` (target
-        processing), `transcript_untrusted` or `transcript_identity_lost`
-        (transcript needs binding).
+        Fails with `human_present` (human at the pane), `busy` (target is
+        working or already owns an outstanding send), `transcript_untrusted`
+        or `transcript_identity_lost` (transcript needs binding). If a busy
+        target is your direct child and the new prompt should replace its
+        current turn, call interrupt_session, wait until list_participants
+        reports status="idle", then retry send. Otherwise wait for it to
+        become idle; only a direct parent may interrupt a participant.
         """
         return await tools.send_prompt(
             session,
@@ -489,7 +493,9 @@ def build(
         This can discard an in-progress response or tool call. It does not
         kill the participant, close its pane, delete its worktree, change its
         status directly, or wait for confirmation; the observer remains the
-        authority on when the child becomes idle.
+        authority on when the child becomes idle. After `interrupted=true`,
+        wait until list_participants reports status="idle" before sending a
+        replacement prompt.
         """
         return await tools.interrupt_session(session, target=target)
 

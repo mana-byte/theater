@@ -50,6 +50,35 @@ async def test_parent_interrupts_a_working_child_by_live_name(
     assert daemon.store.running_jobs_for_target(child.id) == []
 
 
+async def test_parent_waits_for_idle_before_sending_after_interrupt(
+    client, daemon, fake_tmux, monkeypatch
+):
+    from theater.tmux import client as tmux
+
+    parent, child = await _working_child(daemon, fake_tmux)
+    delivered_keys = []
+
+    async def deliver_keys(pane, keys, *, inter_key_delay_seconds=None):
+        delivered_keys.append((pane, keys, inter_key_delay_seconds))
+
+    monkeypatch.setattr(tmux, "deliver_keys", deliver_keys)
+
+    result = await client.call("participant.interrupt", target=child.id, caller_id=parent.id)
+    assert result == {"id": child.id, "interrupted": True}
+
+    with pytest.raises(RemoteError) as still_working:
+        await client.call("send", target=child.id, prompt="replacement", caller_id=parent.id)
+    assert still_working.value.code == "busy"
+    assert "interrupt_session" in still_working.value.message
+
+    daemon.registry.set_status(child.id, Status.IDLE)
+    job = await client.call("send", target=child.id, prompt="replacement", caller_id=parent.id)
+
+    assert job["state"] == "running"
+    assert delivered_keys == [("%1", ("Escape",), None)]
+    assert fake_tmux.sent == [("%1", "replacement")]
+
+
 async def test_interrupt_returns_without_injection_when_child_is_not_working(
     client, daemon, fake_tmux, monkeypatch
 ):

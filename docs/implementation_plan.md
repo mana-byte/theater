@@ -333,7 +333,7 @@ Injection into an already-running session. The only part of the design that depe
 **Build**
 - Inbound delivery via `send-keys`, gated on target status from phase 2
 - `theater/tmux/presence.py` — human detection; `human_present` error back to the caller
-- Per-target queueing when the target is busy
+- Per-target rejection when the target is busy
 
 **Exit criteria:** an agent `send`s to a hand-started peer mid-session, the prompt arrives intact, the reply resolves the handle. Typing into the target pane and re-sending produces `human_present` rather than a corrupted input line.
 
@@ -346,7 +346,7 @@ Injection into an already-running session. The only part of the design that depe
 | `human_present(pane_id)` | Checks `pane_in_mode` (copy mode), `pane_active` + `session_attached` (attached human), and `capture-pane` scrape (non-empty input buffer). Tuned for false negatives over false positives. |
 | `send` daemon method | Checks addressability, human presence, busy state; delivers via `send-keys`; creates a `send` job. The job finishes when the observer detects the next turn-end from the target. |
 | `send` MCP tool | `send(target_id, prompt)` returns a handle. Caller passes it to `await_sessions`. |
-| `busy` rejection | If the target has a running `send` job, the call fails with `busy`. After the job finishes, a new send succeeds. |
+| `busy` rejection | If the target is `WORKING` or has a running `send` job, the call fails with `busy`. A direct parent may interrupt, wait for `IDLE`, and retry; otherwise it waits for completion. |
 | `HumanPresent`, `Busy` error classes | Structured error codes for the caller to handle. |
 | `JobKind.SEND` | The job system now handles both `spawn` and `send` jobs uniformly. |
 

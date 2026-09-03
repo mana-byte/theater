@@ -31,6 +31,7 @@ from theater.models import (
     JobState,
     NotAddressable,
     StaleTarget,
+    Status,
     Tier,
     TranscriptIdentityLost,
     TranscriptUntrusted,
@@ -232,6 +233,19 @@ def _check_transcript_send_preflight(daemon, target, refuse: Callable[..., NoRet
     )
 
 
+def _working_busy_message(target, caller_id: str) -> str:
+    message = f"participant {target.id!r} is working; not injecting a new prompt."
+    if target.parent_id == caller_id:
+        return (
+            f"{message} Call interrupt_session(target={target.id!r}), wait until "
+            "list_participants reports status='idle', then retry send."
+        )
+    return (
+        f"{message} Wait until list_participants reports status='idle', then retry send; "
+        "only the participant's direct parent may interrupt it."
+    )
+
+
 @method("send")
 async def _send(daemon, params: dict) -> dict:
     """Send a prompt to an already-running agent by pasting into its pane."""
@@ -267,6 +281,14 @@ async def _send(daemon, params: dict) -> dict:
     await _check_approval_modal(daemon, target, refuse)
 
     _check_transcript_send_preflight(daemon, target, refuse)
+
+    # Re-read after awaited preflights so activity changes block delivery.
+    target = daemon.registry.get(target_id)
+    if target.status is Status.WORKING:
+        refuse(
+            Busy(_working_busy_message(target, caller_id)),
+            reason="busy",
+        )
 
     # There must be no await from this snapshot through reservation. Completion
     # consumes the oldest running job, so a replacement must close every expired

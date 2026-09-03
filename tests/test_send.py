@@ -25,6 +25,7 @@ from theater.harness.observation import (
     ScreenKind,
     ScreenReading,
 )
+from theater.models import Status
 from theater.protocol import RemoteError
 
 _JSON_SCHEMA_PREFIX = (
@@ -260,6 +261,39 @@ async def test_send_to_busy_target_rejected(client, fake_tmux, daemon):
     # Only the first prompt was delivered
     assert len(fake_tmux.sent) == 1
     assert fake_tmux.sent[0] == ("%1", "first")
+
+
+async def test_send_to_working_target_without_a_job_is_rejected(client, fake_tmux, daemon):
+    target = await _target(client, daemon)
+    daemon.registry.set_status(target["id"], Status.WORKING)
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call("send", target=target["id"], prompt="replacement")
+
+    assert exc.value.code == "busy"
+    assert "status='idle'" in exc.value.message
+    assert fake_tmux.sent == []
+    assert daemon.store.running_jobs_for_target(target["id"]) == []
+
+
+async def test_send_rechecks_working_status_after_awaited_preflights(
+    client, fake_tmux, daemon, monkeypatch
+):
+    target = await _target(client, daemon)
+    import theater.daemon.rpc.sending as sending_mod
+
+    async def becomes_working(_pane_id):
+        daemon.registry.set_status(target["id"], Status.WORKING)
+        return False
+
+    monkeypatch.setattr(sending_mod, "human_present", becomes_working)
+
+    with pytest.raises(RemoteError) as exc:
+        await client.call("send", target=target["id"], prompt="too late")
+
+    assert exc.value.code == "busy"
+    assert fake_tmux.sent == []
+    assert daemon.store.running_jobs_for_target(target["id"]) == []
 
 
 async def test_send_allowed_after_job_exceeds_ttl(client, fake_tmux, daemon, monkeypatch):

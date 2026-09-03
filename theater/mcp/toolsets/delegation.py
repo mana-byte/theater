@@ -206,8 +206,11 @@ async def send_prompt(
     The prompt is typed directly into the target's pane. The target must
     be addressable (Spawned or Adopted). If a human is present at the
     target pane, the call fails with `human_present` — never inject into
-    a session a human is using. If the target is already processing a
-    send prompt, the call fails with `busy`.
+    a session a human is using. If the target is working or already owns
+    an outstanding send prompt, the call fails with `busy`. To replace a
+    direct child's current turn, call `interrupt_session`, wait until
+    `list_participants` reports it idle, then retry the send. Only a direct
+    parent may interrupt a participant.
 
     ``target_id`` may be a participant id or a name. Names work only
     while the participant is live; a dead participant's name is null and

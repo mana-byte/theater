@@ -525,13 +525,16 @@ the participant is marked dead immediately rather than left as a
 ghost the régie would draw forever.
 
 **`send`** — prompt is typed into an existing pane with `send-keys`, after
-three gates:
+four gates:
 
 ```
 addressable?  →  no  →  not_addressable
 human at the pane?  →  yes  →  human_present
+participant working?  →  yes  →  busy
 already running a send?  →  yes  →  busy
 ```
+
+A direct parent may interrupt, wait for `IDLE`, and retry `send`.
 
 Then the job is created with handle `<target_id>#<seq>`.
 
