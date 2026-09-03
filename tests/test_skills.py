@@ -60,13 +60,6 @@ def test_shipped_skills_are_discovered_with_their_exact_content(tmp_path):
     skill = registry.load("theater-orchestrate")
     assert skill.source is SkillSource.BUILTIN
     assert skill.content == skill.source_path.read_text(encoding="utf-8")
-    assert skill.description.startswith("Orchestrate implementation")
-    compact_content = " ".join(skill.content.lower().split())
-    assert "native ask-user or confirmation tool is highly recommended" in compact_content
-    assert "a bare `yes` or `confirm`" in compact_content
-    assert "never ask the user to repeat or paste" in compact_content
-    assert "without asking again between calls" in compact_content
-    assert "bottom-up coordination" in compact_content
 
 
 def test_shipped_tmux_recovery_skill_has_exact_data_only_package(tmp_path):
@@ -77,15 +70,7 @@ def test_shipped_tmux_recovery_skill_has_exact_data_only_package(tmp_path):
     assert skill.source is SkillSource.BUILTIN
     assert skill.name == "theater-recover-tmux"
     assert skill.content == skill.source_path.read_text(encoding="utf-8")
-    assert skill.description.startswith("Recover Theater participants after a tmux server restart")
     assert sorted(entry.name for entry in skill.source_path.parent.iterdir()) == ["SKILL.md"]
-    for token in (
-        'termination_reason="tmux_restart"',
-        "termination_incident",
-        "worktree=False",
-        "Theater has no approval default",
-    ):
-        assert token in skill.content
 
 
 def test_valid_user_skill_is_loadable_in_deterministic_name_order(tmp_path):

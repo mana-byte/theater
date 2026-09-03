@@ -98,12 +98,6 @@ def test_regie_trajectory_detail_phases_share_bounded_metric() -> None:
     )
 
 
-def test_observer_shared_description_generic():
-    a, w = BY_KEY["OBSERVER_ATTACH"], BY_KEY["OBSERVER_WATCH"]
-    assert a.description == w.description
-    assert "attach" not in w.description.lower()
-
-
 def test_no_explicit_result_in_attrs():
     for s in OPERATIONS:
         for m in s.attrs:

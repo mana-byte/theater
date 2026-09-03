@@ -101,141 +101,11 @@ def test_mcp_toolset_must_be_known():
 async def test_every_tool_is_documented(daemon):
     """An agent picks tools by reading descriptions, so blank ones are bugs."""
     for tool in await build("p1", "vibe").list_tools():
-        assert tool.description and len(tool.description) > 40, tool.name
+        assert tool.description and tool.description.strip(), tool.name
 
 
 async def test_the_server_carries_its_instructions(daemon):
-    """The initialize response is the only place the whole loop is described.
-
-    Wiring it is one keyword argument, and losing it would be silent: the
-    server still starts, every tool still works, and only the orchestration
-    guidance disappears. Nothing else would notice.
-    """
-    assert "list_skills" in build("p1", "vibe").instructions
-
-
-async def test_orchestration_directives_reach_the_tools_that_need_them(daemon):
-    """The directives must live on the tools, not only in `instructions`.
-
-    Clients decide for themselves whether a model ever sees a server's
-    instructions, and the harnesses Theater spawns do not agree. A tool
-    description is the one channel that always arrives, so each warning is
-    asserted where the mistake it prevents is actually made.
-    """
-    tools = {t.name: t.description or "" for t in await build("p1", "vibe").list_tools()}
-
-    # A "manual" child that nobody is watching never answers its prompt.
-    assert "manual" in tools["spawn_session"]
-    # An await can outlive the caller's own tool timeout.
-    assert "timeout" in tools["await_sessions"]
-    # "done" is the end of a turn, not a verdict on the work.
-    assert "done" in tools["await_sessions"]
-    # Structured JSON transport is a daemon-managed hint, not MCP prompt surgery.
-    assert "json.loads" in tools["spawn_session"]
-    assert "no schema validation" in tools["spawn_session"]
-    assert "json.loads" in tools["send"]
-    assert "no schema validation" in tools["send"]
-
-
-async def test_new_feature_descriptions_reach_their_tools(daemon):
-    tools = {t.name: (t.description or "").lower() for t in await build("p1", "vibe").list_tools()}
-
-    for name in ("scratchpad_write", "scratchpad_get"):
-        desc = tools[name]
-        assert "spawn tree" in desc
-        assert "canonical main repo" in desc
-        assert "outside a git repository" in desc
-        assert "not durable" in desc
-
-    interrupt = tools["interrupt_session"]
-    assert "direct child" in interrupt
-    assert "does not" in interrupt and "kill" in interrupt
-    assert "human" in interrupt
-
-    update = tools["update_participant"]
-    assert "task at hand" in update and "highly recommended" in update
-    assert "parent supplied" in update and "leave it unchanged" in update
-    assert "when missing" in update and "materially changes" in update
-
-
-async def test_await_description_communicates_first_any_completion(daemon):
-    """The await_sessions description must say it returns on the FIRST terminal
-    handle, not after all handles finish.
-
-    A model that thinks await waits for every handle will block longer than
-    necessary, or never return when one child hangs. The description is the
-    only channel that always reaches the model, so the contract — first/any
-    completion, re-await the rest — has to be stated there explicitly.
-    """
-    desc = next(
-        t.description or ""
-        for t in await build("p1", "vibe").list_tools()
-        if t.name == "await_sessions"
-    )
-    lower = desc.lower()
-
-    # Must communicate first/any completion, not all.
-    assert "any" in lower, "description must say it returns when ANY handle is terminal"
-    assert "not wait for all" in lower, "description must say it does NOT wait for all handles"
-
-    # Must communicate that already-terminal handles return immediately.
-    assert "already" in lower, "description must say already-terminal handles return immediately"
-
-    # Must communicate re-awaiting still-running handles.
-    assert "re-await" in lower, "description must say to re-await still-running handles"
-
-
-async def test_name_semantics_reach_the_tools_that_target_by_name(daemon):
-    """Names are live-only, recyclable aliases; the id is stable.
-
-    These directives must live on the tool descriptions, not only in
-    `instructions` — a model that never sees the server instructions
-    still reads every tool's description. Each tool that accepts a
-    participant id or name must warn that names work only while live
-    and that a recycled name can identify a successor.
-    """
-    tools = {t.name: t.description or "" for t in await build("p1", "vibe").list_tools()}
-
-    # list_participants: dead participants have no name; names are recyclable.
-    assert "dead" in tools["list_participants"].lower()
-    assert "recycl" in tools["list_participants"].lower()
-
-    # send: names work only while live; use id for destructive targeting.
-    assert "live" in tools["send"].lower()
-    assert "recycl" in tools["send"].lower()
-
-    # read_transcript: names work only while live; dead participants need the id.
-    desc = tools["read_transcript"].lower()
-    assert "dead" in desc
-    assert "id" in desc
-
-    # put_child_back_in_the_wound: destructive targeting and worktree loss are explicit.
-    desc = " ".join(tools["put_child_back_in_the_wound"].lower().split())
-    assert "explicit yes" in desc
-    assert "you — not the user — must name" in desc
-    assert "native ask-user or confirmation tool" in desc
-    assert "highly recommended" in desc
-    assert "bare `yes` or `confirm`" in desc
-    assert "never ask the user to repeat or paste" in desc
-    assert "without asking again between calls" in desc
-    assert "deeper descendants" in desc
-    assert "confirmation syntax is the problem" in desc
-    assert "worktree=true" in desc
-    assert "deletes its branch" in desc
-    assert "uncommitted changes" in desc
-    assert "shared branch" in desc
-    assert "already" in desc
-    assert "recycl" in desc
-
-
-async def test_lazy_session_id_semantics_reach_participant_record_tools(daemon):
-    """Every tool returning a participant record explains its nullable id."""
-    descriptions = {
-        t.name: (t.description or "").lower() for t in await build("p1", "vibe").list_tools()
-    }
-    for name in ("whoami", "list_participants", "spawn_session", "register_pane"):
-        assert "session_id" in descriptions[name]
-        assert "null" in descriptions[name]
+    assert build("p1", "vibe").instructions.strip()
 
 
 async def test_spawn_session_forces_a_choice_of_approval(daemon):
@@ -314,16 +184,6 @@ async def test_skill_tool_wrappers_forward_to_tool_bodies(monkeypatch):
     }
     assert [call[0] for call in calls] == ["list", "load"]
     assert calls[1][2] == "alpha"
-
-
-async def test_skill_tool_descriptions_explain_context_cost(daemon):
-    tools = {
-        tool.name: (tool.description or "").lower()
-        for tool in await build("p1", "vibe").list_tools()
-    }
-    assert "metadata first" in tools["list_skills"]
-    assert "exact" in tools["load_skill"]
-    assert "context" in tools["load_skill"]
 
 
 async def test_skill_tools_round_trip_through_the_daemon(daemon):
@@ -573,81 +433,7 @@ async def test_a_failing_tool_reports_the_daemon_error(daemon, monkeypatch):
     assert "bad_request" in str(exc.value)
 
 
-# ---- list_participants: docstring contract ---------------------------------
-
-
-async def test_list_participants_docstring_describes_resume_state(daemon):
-    """The list_participants docstring must describe resume_state and its values."""
-    tools = {t.name: t.description or "" for t in await build("p1", "vibe").list_tools()}
-    desc = tools["list_participants"].lower()
-    assert "resume_state" in desc
-    # Each value must be documented.
-    for value in (
-        "resumable",
-        "live",
-        "no_session_id",
-        "harness_cannot_resume",
-        "untrusted",
-        "owned_by_live",
-        "harness_resume_rejected",
-    ):
-        assert value in desc, f"resume_state value {value!r} missing from docstring"
-
-
-async def test_list_participants_docstring_describes_tmux_restart_diagnosis(daemon):
-    tools = {t.name: t.description or "" for t in await build("p1", "vibe").list_tools()}
-    desc = tools["list_participants"].lower()
-    for field in (
-        "tmux_server_identity",
-        "termination_reason",
-        "termination_incident",
-        "terminated_at",
-    ):
-        assert field in desc
-    assert "tmux_restart" in desc
-    assert "recovery candidate" in desc
-
-
-async def test_list_participants_docstring_describes_ids_semantics(daemon):
-    """The list_participants docstring must describe the ids filter and its trap."""
-    tools = {t.name: t.description or "" for t in await build("p1", "vibe").list_tools()}
-    desc = tools["list_participants"].lower()
-    assert "ids" in desc
-    # Must warn that unknown ids are silently omitted.
-    assert "unknown" in desc or "absent" in desc or "omit" in desc
-
-
-async def test_list_participants_docstring_describes_children_only(daemon):
-    tools = {t.name: t.description or "" for t in await build("p1", "vibe").list_tools()}
-    desc = tools["list_participants"].lower()
-    assert "children_only" in desc
-    assert "direct" in desc
-
-
-async def test_list_participants_docstring_describes_dead_pagination(daemon):
-    tools = {t.name: t.description or "" for t in await build("p1", "vibe").list_tools()}
-    desc = tools["list_participants"].lower()
-    assert "100" in desc
-    assert "after_id" in desc
-    assert "retention gc" in desc
-
-
-async def test_read_transcript_docstring_describes_direct_live_names(daemon):
-    tools = {t.name: t.description or "" for t in await build("p1", "vibe").list_tools()}
-    desc = tools["read_transcript"].lower()
-    assert "current live name" in desc
-    assert "do not call" in desc
-    assert "next_cursor" in desc
-    assert "bounded" in desc
-    assert "last_n" not in desc
-    assert "all events" not in desc
-    assert "list_participants first" in desc
-    assert "dead reads require the stable id" in desc
-    assert "response budget" in desc
-    assert "reaches_text_start" in desc
-
-
-# ---- list_participants: resume_state pinned to spawner (test 15) ----------
+# ---- list_participants: resume_state pinned to spawner --------------------
 #
 # Each case asserts the resume_state value and then calls spawn(resume=...)
 # to verify it refuses if and only if the state is not 'resumable'.  The

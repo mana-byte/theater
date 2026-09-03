@@ -26,7 +26,7 @@ const SWITCH_MARKER = ".theater-pi-switch.json";
 const SWITCHES_DIR = ".theater-pi-switches";
 const SWITCH_MARKER_VERSION = 1;
 
-// --- Durable lifecycle markers (inlined; see tests/pi_bridge_lifecycle_helpers.ts) ---
+// --- Durable lifecycle markers ------------------------------------------------
 //
 // Pi does NOT expose auto_retry_start to extensions (internal _emit only) and the
 // extension agent_end event drops willRetry, so there is no extension-visible

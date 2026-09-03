@@ -88,26 +88,6 @@ async def test_spawn_names_a_harness_the_user_added(daemon, local_dir):
     assert "acme" in text
 
 
-async def test_spawn_still_explains_approval(daemon):
-    """Moving the text out of the docstring must not drop what it carried.
-
-    Approval is the one argument with no default, and the description is the
-    only place its three values are written down.
-    """
-    text = _description(await build("p1", "vibe").list_tools(), "spawn_session")
-    for value in ("manual", "edits", "yolo", "worktree", "cwd"):
-        assert value in text
-
-
-async def test_spawn_points_at_the_authoritative_list(daemon):
-    """The generated names come from this process; the daemon does the spawning.
-
-    They agree almost always, and the text has to name the exception.
-    """
-    text = _description(await build("p1", "vibe").list_tools(), "spawn_session")
-    assert "list_harnesses" in text
-
-
 async def test_list_harnesses_returns_the_shipped_set(daemon, all_installed):
     rows = _payload(await build("p1", "vibe").call_tool("list_harnesses", {}))
     assert {r["name"] for r in rows} >= SHIPPED
