@@ -226,8 +226,8 @@ class McpServerManifest:
 
 
 @dataclass(frozen=True, slots=True)
-class McpServerSpec:
-    """A canonical loaded MCP server ready for core-owned launch orchestration."""
+class CompiledMcpPlugin:
+    """A canonical MCP plugin with validated configuration ready to plan launches."""
 
     name: str
     description: str
@@ -237,14 +237,14 @@ class McpServerSpec:
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or HARNESS_NAME.fullmatch(self.name) is None:
-            raise ValueError("MCP server name must be canonical")
-        _require_nonblank_text(self.description, "MCP server description")
+            raise ValueError("MCP plugin name must be canonical")
+        _require_nonblank_text(self.description, "MCP plugin description")
         if not isinstance(self.capabilities, frozenset) or not self.capabilities:
-            raise TypeError("MCP server capabilities must be a non-empty frozenset")
+            raise TypeError("MCP plugin capabilities must be a non-empty frozenset")
         if any(not isinstance(capability, PluginCapability) for capability in self.capabilities):
-            raise TypeError("MCP server capabilities must contain PluginCapability values")
+            raise TypeError("MCP plugin capabilities must contain PluginCapability values")
         if not isinstance(self.launch, McpLaunchManifest):
-            raise TypeError("MCP server launch must be an McpLaunchManifest")
+            raise TypeError("MCP plugin launch must be an McpLaunchManifest")
         object.__setattr__(self, "capabilities", frozenset(self.capabilities))
         object.__setattr__(self, "config", _freeze_config(self.config))
 
@@ -259,9 +259,24 @@ class McpServerSpec:
             raise TypeError("MCP launch planner must return an McpLaunchPlan")
         return result
 
-    def plan(self, *, participant_id: str, cwd: Path | str) -> McpLaunchPlan:
-        """Short alias for ``plan_launch``."""
-        return self.plan_launch(participant_id=participant_id, cwd=cwd)
+
+@dataclass(frozen=True, slots=True)
+class McpServerSpec:
+    """A renderer-ready stdio endpoint for one participant."""
+
+    name: str
+    command: str
+    args: tuple[str, ...] | Sequence[str] = ()
+    env: Mapping[str, str] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or HARNESS_NAME.fullmatch(self.name) is None:
+            raise ValueError("MCP server name must be canonical")
+        _require_nonblank_text(self.command, "MCP server command")
+        if len(self.command) > MCP_PLUGIN_LAUNCH_MAX_VALUE_CHARS or "\0" in self.command:
+            raise ValueError("MCP server command is too long or contains a NUL byte")
+        object.__setattr__(self, "args", _freeze_argv(self.args))
+        object.__setattr__(self, "env", _freeze_env(self.env))
 
 
 def _freeze_argv(value: object) -> tuple[str, ...]:
@@ -379,6 +394,7 @@ __all__ = [
     "MCP_PLUGIN_API_VERSION",
     "MISSING",
     "PLUGIN_API_VERSION",
+    "CompiledMcpPlugin",
     "ConfigField",
     "ConfigKind",
     "ConfigSchema",

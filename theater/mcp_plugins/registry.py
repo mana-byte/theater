@@ -14,7 +14,7 @@ from theater.config import Config, ConfigError
 from theater.constants.core import HARNESS_NAME
 from theater.mcp_plugins import builtin
 from theater.mcp_plugins.compiler import compile_manifest
-from theater.mcp_plugins.contracts import McpServerSpec
+from theater.mcp_plugins.contracts import CompiledMcpPlugin
 from theater.mcp_plugins.loading import (
     LOCAL,
     SHIPPED,
@@ -31,8 +31,8 @@ from theater.plugins.namespace import (
 
 logger = logging.getLogger("theater.mcp_plugins")
 
-#: The separate live registry for canonical MCP-server specs.
-MCP_SERVERS: dict[str, McpServerSpec] = {}
+#: The separate live registry for canonical configured MCP plugins.
+MCP_SERVERS: dict[str, CompiledMcpPlugin] = {}
 
 #: Selected package result by canonical name, for diagnostics and future rendering.
 _PLUGINS: dict[str, LoadedMcpPlugin] = {}
@@ -55,7 +55,7 @@ class McpPluginDiagnostic:
 class McpPluginCatalog:
     """An immutable point-in-time view of the independent MCP-server registry."""
 
-    _servers: Mapping[str, McpServerSpec]
+    _servers: Mapping[str, CompiledMcpPlugin]
     diagnostics: tuple[McpPluginDiagnostic, ...]
 
     def __post_init__(self) -> None:
@@ -67,12 +67,12 @@ class McpPluginCatalog:
         object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
 
     @property
-    def servers(self) -> tuple[McpServerSpec, ...]:
-        """Enabled, validated MCP servers in canonical name order."""
+    def servers(self) -> tuple[CompiledMcpPlugin, ...]:
+        """Enabled, validated MCP plugins in canonical name order."""
         return tuple(self._servers.values())
 
-    def get(self, name: str) -> McpServerSpec:
-        """Return one canonical server spec, or raise a clear lookup error."""
+    def get(self, name: str) -> CompiledMcpPlugin:
+        """Return one compiled MCP plugin, or raise a clear lookup error."""
         try:
             return self._servers[name]
         except KeyError as exc:
@@ -185,8 +185,8 @@ def catalog() -> McpPluginCatalog:
     return McpPluginCatalog(dict(MCP_SERVERS), tuple(_DIAGNOSTICS))
 
 
-def get(name: str) -> McpServerSpec:
-    """Look up one enabled MCP-server spec from the live registry."""
+def get(name: str) -> CompiledMcpPlugin:
+    """Look up one enabled compiled MCP plugin from the live registry."""
     return catalog().get(name)
 
 

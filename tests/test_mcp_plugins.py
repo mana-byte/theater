@@ -9,6 +9,7 @@ import pytest
 from theater import config, harness, paths
 from theater.mcp_plugins import (
     MANIFEST_API_VERSION,
+    CompiledMcpPlugin,
     McpConfigField,
     McpConfigKind,
     McpConfigSchema,
@@ -16,6 +17,7 @@ from theater.mcp_plugins import (
     McpLaunchPlan,
     McpPluginError,
     McpServerManifest,
+    McpServerSpec,
     PluginCapability,
     registry,
 )
@@ -94,13 +96,14 @@ def test_enabled_plugin_resolves_immutable_config_once_and_redacts(tmp_path, mon
     assert registry.install(loaded, local_dir=local, shipped_dir=shipped) == ["acme"]
     monkeypatch.setenv("ACME_TEST_TOKEN", "later-secret")
 
-    spec = registry.get("acme")
-    assert spec.config["endpoint"] == "https://acme.invalid"
-    assert spec.config["token"].value == "first-secret"
-    assert "first-secret" not in repr(spec.config)
+    plugin = registry.get("acme")
+    assert isinstance(plugin, CompiledMcpPlugin)
+    assert plugin.config["endpoint"] == "https://acme.invalid"
+    assert plugin.config["token"].value == "first-secret"
+    assert "first-secret" not in repr(plugin.config)
     with pytest.raises(TypeError):
-        spec.config["endpoint"] = "other"  # type: ignore[index]
-    plan = spec.plan_launch(participant_id="p-1", cwd=tmp_path)
+        plugin.config["endpoint"] = "other"  # type: ignore[index]
+    plan = plugin.plan_launch(participant_id="p-1", cwd=tmp_path)
     assert plan.command == "acme-server"
     assert plan.argv == ("--id", "p-1")
     assert plan.files == {Path("public/config.txt"): "https://acme.invalid"}
@@ -233,6 +236,40 @@ def test_enabled_broken_shipped_package_is_fatal(tmp_path):
 def test_launch_plan_rejects_invalid_artifacts_and_process_values(plan):
     with pytest.raises((TypeError, ValueError)):
         plan()
+
+
+def test_mcp_server_spec_is_an_immutable_renderer_ready_stdio_endpoint():
+    server = McpServerSpec(
+        name="acme",
+        command="acme-server",
+        args=["--stdio", "--quiet"],
+        env={"ACME_MODE": "test"},
+    )
+
+    assert server.name == "acme"
+    assert server.command == "acme-server"
+    assert server.args == ("--stdio", "--quiet")
+    assert server.env == {"ACME_MODE": "test"}
+    assert tuple(McpServerSpec.__dataclass_fields__) == ("name", "command", "args", "env")
+    assert not hasattr(server, "capabilities")
+    assert not hasattr(server, "config")
+    assert not hasattr(server, "launch")
+    with pytest.raises(TypeError):
+        server.env["ACME_MODE"] = "other"  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"name": "Bad", "command": "acme-server"},
+        {"name": "acme", "command": "   "},
+        {"name": "acme", "command": "acme-server", "args": "--stdio"},
+        {"name": "acme", "command": "acme-server", "env": {"BAD-NAME": "x"}},
+    ],
+)
+def test_mcp_server_spec_rejects_invalid_endpoint_values(kwargs):
+    with pytest.raises((TypeError, ValueError)):
+        McpServerSpec(**kwargs)
 
 
 def test_mcp_config_shell_rejects_bad_structure_but_not_disabled_plugin_values(tmp_path):
