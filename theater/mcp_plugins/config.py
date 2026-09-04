@@ -53,8 +53,8 @@ def resolve_config(
         raise McpConfigResolutionError(plugin, None, "configuration must be a table")
     for key in raw:
         if not isinstance(key, str) or key not in schema.fields:
-            field = key if isinstance(key, str) else None
-            raise McpConfigResolutionError(plugin, field, "is not declared by this plugin")
+            unknown_field = key if isinstance(key, str) else None
+            raise McpConfigResolutionError(plugin, unknown_field, "is not declared by this plugin")
 
     resolved: dict[str, object] = {}
     secret_environment = os.environ if environ is None else environ
@@ -118,7 +118,10 @@ def _resolve_value(
     value: object,
     environ: Mapping[str, str],
 ) -> object:
-    resolver = _VALUE_RESOLVERS.get(field.kind)
+    kind = field.kind
+    if not isinstance(kind, McpConfigKind):
+        _fail(plugin, name, "has an unsupported configuration kind")
+    resolver = _VALUE_RESOLVERS.get(kind)
     if resolver is None:
         _fail(plugin, name, "has an unsupported configuration kind")
     return resolver(plugin, name, field, value, environ)

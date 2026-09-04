@@ -230,8 +230,7 @@ def test_pi_launch_advertises_only_yolo_and_builds_isolated_argv(tmp_path, monke
 
 def test_pi_bridge_isolates_non_core_mcp_startup_failures() -> None:
     bridge = (
-        Path(__file__).parents[1]
-        / "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts"
+        Path(__file__).parents[1] / "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts"
     ).read_text(encoding="utf-8")
 
     assert 'const CORE_MCP_SERVERS = new Set(["theater", "theater_wait"]);' in bridge

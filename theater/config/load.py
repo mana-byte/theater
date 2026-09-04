@@ -88,14 +88,13 @@ def load(path: Path | None = None) -> Config:
         reasoning, reasoning_sources = _build_reasoning(target, raw[REASONING_SECTION])
         sources.update(reasoning_sources)
 
-    mcp = None
     if MCP_SECTION in raw:
         mcp, mcp_sources = _build_mcp(target, raw[MCP_SECTION])
         sources.update(mcp_sources)
+        built[MCP_SECTION] = mcp
 
     return Config(
         **built,
-        **({"mcp": mcp} if mcp is not None else {}),
         models=models,
         reasoning=reasoning,
         sources=sources,

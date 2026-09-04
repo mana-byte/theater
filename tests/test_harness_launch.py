@@ -202,11 +202,7 @@ def test_shipped_renderers_receive_core_and_extra_stdio_servers(tmp_path, harnes
     elif harness == "codex":
         assert 'mcp_servers.metrics.command="metrics-mcp"' in plan.argv
         assert 'mcp_servers.metrics.args=["--scope", "participant"]' in plan.argv
-        assert [
-            value
-            for value in plan.argv
-            if value.startswith("mcp_servers.metrics.env.")
-        ] == [
+        assert [value for value in plan.argv if value.startswith("mcp_servers.metrics.env.")] == [
             'mcp_servers.metrics.env.METRICS_TOKEN="launch-local"',
             'mcp_servers.metrics.env.METRICS_LABEL="needs quotes"',
         ]

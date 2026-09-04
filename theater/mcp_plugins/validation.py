@@ -7,6 +7,7 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from math import isfinite
 from pathlib import Path
+from typing import NoReturn
 
 from theater.constants.core import HARNESS_NAME
 from theater.constants.plugins import MCP_PLUGIN_CONFIG_MAX_FIELDS, MCP_PLUGIN_DESCRIPTION_MAX_CHARS
@@ -182,7 +183,10 @@ def _validate_choices(name: str, path: str, spec: McpConfigField) -> None:
 
 
 def _validate_default(name: str, path: str, spec: McpConfigField, value: object) -> None:
-    validator = _DEFAULT_VALIDATORS.get(spec.kind)
+    kind = spec.kind
+    if not isinstance(kind, McpConfigKind):
+        _fail(name, f"{path}.kind", "must be an McpConfigKind")
+    validator = _DEFAULT_VALIDATORS.get(kind)
     if validator is None:
         _fail(name, f"{path}.kind", "must be an McpConfigKind")
     validator(name, path, spec, value)
@@ -290,7 +294,7 @@ _DEFAULT_VALIDATORS: Mapping[McpConfigKind, _DefaultValidator] = {
 }
 
 
-def _fail(name: str, path: str, message: str) -> None:
+def _fail(name: str, path: str, message: str) -> NoReturn:
     raise McpManifestValidationError(name, path, message)
 
 

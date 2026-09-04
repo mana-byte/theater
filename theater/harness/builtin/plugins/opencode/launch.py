@@ -25,7 +25,7 @@ from .observer import data_dir
 def plan_launch(context: LaunchContext) -> LaunchPlan:
     participant_id = context.participant_id
     config_path = context.config_path
-    config = {
+    config: dict[str, object] = {
         "$schema": "https://opencode.ai/config.json",
     }
     native_plugin_path = plugin_path(config_path)
