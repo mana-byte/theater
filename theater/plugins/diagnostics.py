@@ -69,7 +69,7 @@ def _harness_rows(
     for plugin in plugins:
         row = _base_row("harness", plugin, enabled=plugin.name not in disabled)
         if plugin.name in conflicts:
-            rows.append(_broken(row, _cross_kind_error(plugin.name)))
+            rows.append(_conflict(row, plugin.name))
         elif plugin.name in disabled:
             row["state"] = "disabled"
             rows.append(row)
@@ -111,7 +111,7 @@ def _mcp_rows(
         is_selected = selected_plugin == plugin
         row = _base_row("mcp_server", plugin, enabled=plugin.name in enabled)
         if plugin.name in conflicts:
-            rows.append(_broken(row, _cross_kind_error(plugin.name)))
+            rows.append(_conflict(row, plugin.name))
         elif plugin in duplicates:
             row["state"] = "duplicate"
             row["error"] = (
@@ -213,12 +213,22 @@ def _broken(row: dict[str, Any], error: str) -> dict[str, Any]:
     return row
 
 
+def _conflict(row: dict[str, Any], name: str) -> dict[str, Any]:
+    row["state"] = "conflict"
+    row["error"] = _cross_kind_error(name)
+    return row
+
+
 def _canonical(name: str) -> bool:
     return HARNESS_NAME.fullmatch(name) is not None
 
 
 def _cross_kind_error(name: str) -> str:
-    return f"canonical plugin name {name!r} is claimed by both a harness and an MCP-server package"
+    return (
+        f"canonical plugin name {name!r} is claimed by both a harness and an MCP-server "
+        "package; this cross-kind conflict prevents daemon startup. Rename or remove one package "
+        "(including a disabled package) so their canonical names differ"
+    )
 
 
 def _safe_error(error: str | None, *, fallback: str = "manifest could not be loaded") -> str:

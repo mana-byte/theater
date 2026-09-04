@@ -44,6 +44,11 @@ creates a participant-scoped credential file and injects its path through
 `THEATER_PLUGIN_CREDENTIAL_PATH`. Do not copy that credential into logs,
 arguments, or public artifacts.
 
+Plugin Python is trusted. Do not unwrap a `SecretValue` into argv or public
+artifacts. When a harness cannot provide a private transport, write the secret
+to a 0600 private artifact and place only that artifact's path in the
+environment.
+
 ## Native sidecar
 
 A native Python sidecar uses `TheaterPluginClient` directly. It reads the
@@ -87,3 +92,9 @@ cleaned up. Capability grants do not bypass Theater's normal identity, rails,
 human-presence, or runtime authorization checks. A broken local package is
 diagnostic and non-fatal; an enabled broken package shipped by Theater remains
 fatal because it is a product defect.
+
+Cross-kind name collisions are different: a harness package and an MCP-server
+package may not share a canonical directory name. Every discovered package
+reserves its name before import, including disabled packages, so this conflict
+prevents daemon startup. Rename or remove one package; `theater plugins` marks
+the condition as `conflict`.
