@@ -16,7 +16,6 @@ from theater import paths
 from theater.constants.cli import TRANSCRIPT_RECEIPT_COMMAND
 from theater.harness.base import (
     APPROVALS,
-    SERVER_NAME,
     LaunchPlan,
     ResumeLaunchOverlay,
     theater_binary,
@@ -69,14 +68,6 @@ def _claude_receipt_settings(participant_id: str, token_path: Path) -> dict:
 
 def plan_launch(context: LaunchContext) -> LaunchPlan:
     """Build Claude's launch plan and isolated receipt-hook settings."""
-    config = {
-        "mcpServers": {
-            SERVER_NAME: {
-                "command": theater_binary(),
-                "args": ["mcp", "--id", context.participant_id],
-            }
-        }
-    }
     settings_path = _claude_settings_path(context.participant_id)
     token_path = paths.observation_dir("claude", context.participant_id) / "receipt-token"
     argv = ["claude", f"--mcp-config={context.config_path}", f"--settings={settings_path}"]
@@ -97,7 +88,6 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
     return LaunchPlan(
         argv=argv,
         files={
-            context.config_path: json.dumps(config, indent=2) + "\n",
             settings_path: json.dumps(
                 _claude_receipt_settings(context.participant_id, token_path), indent=2
             )

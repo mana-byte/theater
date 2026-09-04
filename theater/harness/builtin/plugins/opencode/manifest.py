@@ -20,6 +20,7 @@ from theater.harness.contracts.manifest import (
     IdentityManifest,
     InterruptPlan,
     LaunchManifest,
+    McpRenderingManifest,
     ModelDiscoveryManifest,
     ObservationManifest,
     OtelChannelManifest,
@@ -36,6 +37,7 @@ from .observer import (
     source_factory,
     validate_receipt,
 )
+from .render_mcp import render_mcp_servers
 
 _NATIVE_HOOKS = HookChannelManifest(
     declaration=ChannelDeclaration(id="native-hooks", kind=ChannelKind.HOOK),
@@ -95,6 +97,7 @@ MANIFEST = HarnessManifest(
         interrupt=InterruptPlan(keys=("Escape", "Escape"), inter_key_delay_seconds=0.05)
     ),
     models=ModelDiscoveryManifest(discoverer=discover_models),
+    mcp=McpRenderingManifest(renderer=render_mcp_servers),
 )
 
 

@@ -9,9 +9,11 @@ from theater.harness.contracts.manifest import (
     ControlManifest,
     HarnessManifest,
     InterruptPlan,
+    McpRenderingManifest,
 )
 
 from .launch import LAUNCH, _resume_launch_overlay, _resume_preflight
+from .mcp import render_mcp_servers
 from .observation import OBSERVATION, observation_for
 
 MANIFEST = HarnessManifest(
@@ -23,6 +25,7 @@ MANIFEST = HarnessManifest(
     launch=LAUNCH,
     observation=OBSERVATION,
     controls=ControlManifest(interrupt=InterruptPlan(keys=("Escape",))),
+    mcp=McpRenderingManifest(renderer=render_mcp_servers),
 )
 
 

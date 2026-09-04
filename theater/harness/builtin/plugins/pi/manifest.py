@@ -20,6 +20,7 @@ from theater.harness.contracts.manifest import (
     IdentityManifest,
     InterruptPlan,
     LaunchManifest,
+    McpRenderingManifest,
     ObservationManifest,
     OtelChannelManifest,
     ScreenManifest,
@@ -29,6 +30,7 @@ from theater.harness.transcript import file_stream_floor
 
 from .constants import PI_BINARY
 from .launch import plan_launch, resume_launch_overlay
+from .mcp import render_mcp_servers
 from .observer import (
     PiObserver,
     admit_operator_candidate,
@@ -100,6 +102,7 @@ def manifest_for_root(root: Path | None = None) -> HarnessManifest:
             enrichments=(_NATIVE_HOOKS, _NATIVE_OTEL),
         ),
         controls=ControlManifest(interrupt=InterruptPlan(keys=("Escape",))),
+        mcp=McpRenderingManifest(renderer=render_mcp_servers),
     )
 
 

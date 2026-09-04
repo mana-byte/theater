@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 from shipped import ClaudeCodeHarness, ClaudeCodeObserver
 
+from theater.harness import theater_mcp_servers
 from theater.models import BadRequest
 
 SESSION = "b67b4276-f8b8-43ed-9987-0b5b3828c8cd"
@@ -247,10 +248,19 @@ def test_the_config_written_alongside_names_this_participant(tmp_path):
         prompt="hi",
         config_path=tmp_path / "mcp.json",
         approval="manual",
+        mcp_servers=theater_mcp_servers("p-abc", "claude"),
     )
-    config = json.loads(next(iter(plan.files.values())))
-    server = next(iter(config["mcpServers"].values()))
-    assert server["args"] == ["mcp", "--id", "p-abc"]
+    config = json.loads(plan.files[tmp_path / "mcp.json"])
+    assert config["mcpServers"]["theater"]["args"] == [
+        "mcp",
+        "--id",
+        "p-abc",
+        "--harness",
+        "claude",
+        "--toolset",
+        "control",
+    ]
+    assert config["mcpServers"]["theater_wait"]["args"][-1] == "wait"
 
 
 # ---- timestamps -----------------------------------------------------------

@@ -15,6 +15,7 @@ import pytest
 from theater.daemon.spawner import Spawner, SpawnRequest
 from theater.daemon.store import Store
 from theater.daemon.trajectory.project import fact_to_record
+from theater.harness import theater_mcp_servers
 from theater.harness.builtin.plugins.pi import bootstrap
 from theater.harness.builtin.plugins.pi.constants import (
     PI_ISOLATION_MARKER,
@@ -34,6 +35,7 @@ from theater.harness.builtin.plugins.pi.screen import classify_screen
 from theater.harness.contracts.callbacks import LaunchContext, ResumeContext, ScreenContext
 from theater.harness.contracts.events import EventKind
 from theater.harness.contracts.observation import ScreenConfidence, ScreenKind
+from theater.harness.manifests.compiler import compile_manifest
 from theater.models import Participant, Status
 from theater.resume_floor import UNKNOWN_FLOOR, encode_floor
 from theater.trajectory.enums import (
@@ -173,15 +175,14 @@ def test_pi_launch_advertises_only_yolo_and_builds_isolated_argv(tmp_path, monke
     monkeypatch.setenv("THEATER_HOME", str(tmp_path / "theater-home"))
     config_path = tmp_path / "mcp.json"
 
-    plan = plan_launch(
-        LaunchContext(
-            participant_id="pi-child",
-            prompt="inspect this",
-            config_path=config_path,
-            approval="yolo",
-            model="openai/gpt-5.6",
-            reasoning_effort="high",
-        )
+    plan = compile_manifest("pi", MANIFEST).plan_launch(
+        participant_id="pi-child",
+        prompt="inspect this",
+        config_path=config_path,
+        approval="yolo",
+        model="openai/gpt-5.6",
+        reasoning_effort="high",
+        mcp_servers=theater_mcp_servers("pi-child", "pi"),
     )
 
     session_dir = tmp_path / "theater-home" / "observations" / "pi" / "pi-child" / "sessions"
@@ -215,6 +216,8 @@ def test_pi_launch_advertises_only_yolo_and_builds_isolated_argv(tmp_path, monke
         "pi-child",
         "--harness",
         "pi",
+        "--toolset",
+        "control",
     ]
     # Pi has no Theater-enforced permission prompt or sandbox, so the launch
     # contract must advertise only the behavior plan_launch produces.

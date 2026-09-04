@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import shutil
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 
 from theater.harness.contracts.channels import ChannelKind
+from theater.mcp_plugins import McpServerSpec
 
 
 def theater_binary() -> str:
@@ -83,6 +85,64 @@ class LaunchPlan:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "channel_credentials", tuple(self.channel_credentials))
+
+
+@dataclass(frozen=True, slots=True)
+class McpRenderContext:
+    """The base plan and participant-scoped stdio servers for one renderer."""
+
+    participant_id: str
+    config_path: Path
+    plan: LaunchPlan
+    servers: tuple[McpServerSpec, ...] | Sequence[McpServerSpec]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.participant_id, str) or not self.participant_id.strip():
+            raise TypeError("MCP render participant_id must be a non-blank string")
+        if not isinstance(self.config_path, Path):
+            raise TypeError("MCP render config_path must be a Path")
+        if not isinstance(self.plan, LaunchPlan):
+            raise TypeError("MCP render plan must be a LaunchPlan")
+        if isinstance(self.servers, (str, bytes)) or not isinstance(self.servers, Sequence):
+            raise TypeError("MCP render servers must be a sequence of McpServerSpec values")
+        servers = tuple(self.servers)
+        if any(not isinstance(server, McpServerSpec) for server in servers):
+            raise TypeError("MCP render servers must contain only McpServerSpec values")
+        object.__setattr__(self, "servers", servers)
+
+
+@dataclass(frozen=True, slots=True)
+class McpRenderOverlay:
+    """The bounded argv, environment, and public-file changes from one renderer."""
+
+    argv: tuple[str, ...] | Sequence[str] = ()
+    argv_insert_at: int | None = None
+    env: Mapping[str, str] = field(default_factory=dict)
+    files: Mapping[Path, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.argv, (str, bytes)) or not isinstance(self.argv, Sequence):
+            raise TypeError("MCP render argv must be a sequence of strings")
+        argv = tuple(self.argv)
+        if any(not isinstance(value, str) for value in argv):
+            raise TypeError("MCP render argv must contain only strings")
+        if self.argv_insert_at is not None and (
+            type(self.argv_insert_at) is not int or self.argv_insert_at < 0
+        ):
+            raise TypeError("MCP render argv_insert_at must be a non-negative integer or None")
+        if not isinstance(self.env, Mapping) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in self.env.items()
+        ):
+            raise TypeError("MCP render env must be a mapping of strings")
+        if not isinstance(self.files, Mapping) or any(
+            not isinstance(path, Path) or not isinstance(contents, str)
+            for path, contents in self.files.items()
+        ):
+            raise TypeError("MCP render files must be a mapping of Path to string")
+        object.__setattr__(self, "argv", argv)
+        object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
+        object.__setattr__(self, "files", MappingProxyType(dict(self.files)))
 
 
 @dataclass(frozen=True, slots=True)

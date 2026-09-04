@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 from shipped import OpenCodeHarness, OpenCodeObserver
 
-from theater.harness import EventKind
+from theater.harness import EventKind, theater_mcp_servers
 from theater.harness.builtin.plugins.opencode.constants import HISTORY_MESSAGE_BATCH
 from theater.harness.manifests.compiler import ManifestHarnessObserver
 from theater.models import BadRequest, Participant, Status
@@ -204,13 +204,22 @@ def test_the_id_travels_in_a_merged_config_file(tmp_path):
         prompt="say hello",
         config_path=config,
         approval="manual",
+        mcp_servers=theater_mcp_servers("abc123", "opencode"),
     )
 
     assert plan.argv == ["opencode", "--prompt", "say hello"]
     assert plan.env == {"OPENCODE_CONFIG": str(config)}
     document = json.loads(plan.files[config])
     server = document["mcp"]["theater"]
-    assert server["command"][-3:] == ["mcp", "--id", "abc123"]
+    assert server["command"][1:] == [
+        "mcp",
+        "--id",
+        "abc123",
+        "--harness",
+        "opencode",
+        "--toolset",
+        "control",
+    ]
     assert server["enabled"] is True
     plugin = tmp_path / "abc.opencode.mjs"
     assert document["plugin"] == [plugin.resolve().as_uri()]

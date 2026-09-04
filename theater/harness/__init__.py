@@ -76,6 +76,7 @@ from theater.harness.contracts.manifest import (
     InterruptPlan,
     LaunchManifest,
     LineageManifest,
+    McpRenderingManifest,
     ModelDiscoveryManifest,
     ObservationManifest,
     OtelChannelManifest,
@@ -118,6 +119,7 @@ from theater.harness.registry.capabilities import (
     supports_reasoning,
     supports_resume,
 )
+from theater.harness.registry.mcp import theater_mcp_servers
 from theater.harness.registry.claims import (  # noqa: F401
     _observation_keys_for,
 )
@@ -196,6 +198,7 @@ __all__ = [
     "LineageManifest",
     "LoadedPlugin",
     "ManifestValidationError",
+    "McpRenderingManifest",
     "ModelDiscoveryManifest",
     "NativeChild",
     "ObservationManifest",
@@ -240,5 +243,6 @@ __all__ = [
     "supports_reasoning",
     "supports_resume",
     "theater_binary",
+    "theater_mcp_servers",
     "validate_manifest",
 ]

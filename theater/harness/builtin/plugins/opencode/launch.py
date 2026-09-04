@@ -8,7 +8,6 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from theater import paths
-from theater.harness.base import SERVER_NAME, theater_binary
 from theater.harness.contracts.callbacks import (
     LaunchContext,
     ModelDiscoveryContext,
@@ -28,13 +27,6 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
     config_path = context.config_path
     config = {
         "$schema": "https://opencode.ai/config.json",
-        "mcp": {
-            SERVER_NAME: {
-                "type": "local",
-                "enabled": True,
-                "command": [theater_binary(), "mcp", "--id", participant_id],
-            }
-        },
     }
     native_plugin_path = plugin_path(config_path)
     token_path = paths.observation_dir("opencode", participant_id) / "receipt-token"
