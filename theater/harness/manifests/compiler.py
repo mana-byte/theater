@@ -20,7 +20,13 @@ from theater.harness.contracts.callbacks import (
 from theater.harness.contracts.channels import ChannelDeclaration
 from theater.harness.contracts.context import ParticipantObservationContext
 from theater.harness.contracts.harness import Harness, LaunchParameterSupport
-from theater.harness.contracts.launch import LaunchPlan, NativeChild, ResumeLaunchOverlay
+from theater.harness.contracts.launch import (
+    LaunchPlan,
+    McpRenderContext,
+    McpRenderOverlay,
+    NativeChild,
+    ResumeLaunchOverlay,
+)
 from theater.harness.contracts.manifest import (
     EnrichmentManifest,
     HarnessManifest,
@@ -29,6 +35,7 @@ from theater.harness.contracts.manifest import (
 from theater.harness.contracts.observation import HarnessObserver, ScreenKind, ScreenReading
 from theater.harness.contracts.source import Source, StreamPoint, TranscriptCandidate
 from theater.harness.manifests.validation import validate_manifest
+from theater.mcp_plugins import McpServerSpec
 from theater.models import BadRequest, Participant
 from theater.provenance import TranscriptProvenance
 
@@ -230,6 +237,7 @@ class _CompiledHarness(Harness):
         self.aliases = manifest.aliases
         self.observer = ManifestHarnessObserver(manifest.observation, harness_name=name)
         self._launch = manifest.launch
+        self._mcp = manifest.mcp
         self._models = manifest.models
         self.controls = manifest.controls
         self.resume_takes_prompt = manifest.launch.resume_takes_prompt
@@ -250,6 +258,7 @@ class _CompiledHarness(Harness):
         model: str | None = None,
         reasoning_effort: str | None = None,
         resume: str | None = None,
+        mcp_servers: tuple[McpServerSpec, ...] = (),
     ) -> LaunchPlan:
         if approval not in self._launch.approvals:
             choices = ", ".join(self._launch.approvals)
@@ -274,7 +283,52 @@ class _CompiledHarness(Harness):
         )
         if not isinstance(plan, LaunchPlan):
             raise TypeError("manifest launch planner must return a LaunchPlan")
-        return plan
+        if self._mcp is None:
+            return plan
+        render_plan = LaunchPlan(
+            argv=list(plan.argv),
+            env=dict(plan.env),
+            files=dict(plan.files),
+            private_files=dict(plan.private_files),
+            session_id=plan.session_id,
+            receipt_token=plan.receipt_token,
+            receipt_token_path=plan.receipt_token_path,
+            transcript_domain=plan.transcript_domain,
+            channel_credentials=plan.channel_credentials,
+        )
+        overlay = self._mcp.renderer(
+            McpRenderContext(
+                participant_id=participant_id,
+                config_path=config_path,
+                plan=render_plan,
+                servers=mcp_servers,
+            )
+        )
+        if not isinstance(overlay, McpRenderOverlay):
+            raise TypeError("manifest MCP renderer must return an McpRenderOverlay")
+        if overlay.argv_insert_at is not None:
+            if overlay.argv_insert_at > len(plan.argv):
+                raise TypeError(
+                    "manifest MCP renderer requested argv_insert_at outside the base plan"
+                )
+            argv = [
+                *plan.argv[: overlay.argv_insert_at],
+                *overlay.argv,
+                *plan.argv[overlay.argv_insert_at :],
+            ]
+        else:
+            argv = [*plan.argv, *overlay.argv]
+        return LaunchPlan(
+            argv=argv,
+            env={**plan.env, **overlay.env},
+            files={**plan.files, **overlay.files},
+            private_files=dict(plan.private_files),
+            session_id=plan.session_id,
+            receipt_token=plan.receipt_token,
+            receipt_token_path=plan.receipt_token_path,
+            transcript_domain=plan.transcript_domain,
+            channel_credentials=plan.channel_credentials,
+        )
 
     def resume_launch_overlay(
         self,

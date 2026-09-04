@@ -46,6 +46,7 @@ from theater.harness.contracts.manifest import (
     InterruptPlan,
     LaunchManifest,
     LineageManifest,
+    McpRenderingManifest,
     ModelDiscoveryManifest,
     ObservationManifest,
     OtelChannelManifest,
@@ -103,6 +104,7 @@ def validate_manifest(name: str, manifest: HarnessManifest) -> None:
     _validate_controls(name, manifest.controls)
     _validate_observation(name, manifest.observation)
     _validate_models(name, manifest.models)
+    _validate_mcp(name, manifest.mcp)
 
 
 def _validate_name(name: object) -> None:
@@ -231,6 +233,15 @@ def _validate_launch_options(name: str, launch: LaunchManifest) -> None:
     }:
         _fail(name, "launch.resume_strategy", "must be 'continue' or 'fork'")
     _validate_resume_options(name, launch)
+
+
+def _validate_mcp(name: str, mcp: object) -> None:
+    if mcp is None:
+        return
+    if not isinstance(mcp, McpRenderingManifest):
+        _fail(name, "mcp", f"expected McpRenderingManifest or null, got {type(mcp).__name__}")
+    if not callable(mcp.renderer):
+        _fail(name, "mcp.renderer", "must be callable")
 
 
 def _validate_resume_options(name: str, launch: LaunchManifest) -> None:

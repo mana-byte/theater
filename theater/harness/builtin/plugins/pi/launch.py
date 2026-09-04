@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
 from theater import paths
 from theater.harness.contracts.callbacks import LaunchContext, ResumeContext
-from theater.harness.contracts.launch import LaunchPlan, ResumeLaunchOverlay, theater_binary
+from theater.harness.contracts.launch import LaunchPlan, ResumeLaunchOverlay
 from theater.models import BadRequest
 
 from .constants import PI_ISOLATION_MARKER, PI_LAUNCH_ENV, PI_SESSIONS_DIRNAME
@@ -23,17 +22,9 @@ def participant_root(participant_id: str) -> Path:
 
 
 def plan_launch(context: LaunchContext) -> LaunchPlan:
-    """Give Pi an isolated session id and a launch-local Theater MCP endpoint."""
+    """Give Pi an isolated session id and its MCP bridge launch arguments."""
     session_id = context.participant_id
     session_dir = participant_root(context.participant_id)
-    config = {
-        "mcpServers": {
-            "theater": {
-                "command": theater_binary(),
-                "args": ["mcp", "--id", context.participant_id, "--harness", "pi"],
-            }
-        }
-    }
     argv = [
         sys.executable,
         "-m",
@@ -58,7 +49,7 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
         "--theater-mcp-config",
         str(context.config_path),
     ]
-    files = {context.config_path: json.dumps(config, indent=2) + "\n"}
+    files = {}
     env: dict[str, str] = dict(PI_LAUNCH_ENV)
     files[session_dir / PI_ISOLATION_MARKER] = marker_text(
         participant_id=context.participant_id,

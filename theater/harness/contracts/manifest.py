@@ -14,6 +14,7 @@ from theater.constants.harness import (
 from theater.harness.contracts.callbacks import (
     HookInstaller,
     LaunchPlanner,
+    McpRenderer,
     ModelDiscoverer,
     NativeChildrenReader,
     OperatorCandidateAdmitter,
@@ -58,6 +59,13 @@ class LaunchManifest:
         if isinstance(self.approvals, (str, bytes)):
             raise TypeError("launch.approvals must be a sequence of approval policies")
         object.__setattr__(self, "approvals", tuple(self.approvals))
+
+
+@dataclass(frozen=True, slots=True)
+class McpRenderingManifest:
+    """The native renderer for participant-scoped stdio MCP endpoints."""
+
+    renderer: McpRenderer
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +227,7 @@ class HarnessManifest:
     binaries: frozenset[str] = frozenset()
     aliases: tuple[str, ...] = ()
     models: ModelDiscoveryManifest | None = None
+    mcp: McpRenderingManifest | None = None
     _binaries_are_text: bool = field(init=False, repr=False, compare=False)
     _aliases_are_text: bool = field(init=False, repr=False, compare=False)
 
@@ -240,6 +249,7 @@ __all__ = [
     "InterruptPlan",
     "LaunchManifest",
     "LineageManifest",
+    "McpRenderingManifest",
     "ModelDiscoveryManifest",
     "ObservationManifest",
     "OtelChannelManifest",

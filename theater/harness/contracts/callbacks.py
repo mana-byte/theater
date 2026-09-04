@@ -13,7 +13,13 @@ from theater.harness.contracts.values import freeze_json_mapping
 
 if TYPE_CHECKING:
     from theater.harness.contracts.channels import ChannelFact, OtelRecord
-    from theater.harness.contracts.launch import LaunchPlan, NativeChild, ResumeLaunchOverlay
+    from theater.harness.contracts.launch import (
+        LaunchPlan,
+        McpRenderContext,
+        McpRenderOverlay,
+        NativeChild,
+        ResumeLaunchOverlay,
+    )
     from theater.harness.contracts.observation import ScreenReading
     from theater.harness.contracts.source import Source, StreamPoint, TranscriptCandidate
     from theater.models import Participant
@@ -237,6 +243,12 @@ class LaunchPlanner(Protocol):
     def __call__(self, context: LaunchContext) -> LaunchPlan: ...
 
 
+class McpRenderer(Protocol):
+    """Render participant-scoped stdio MCP endpoints for one native harness."""
+
+    def __call__(self, context: McpRenderContext) -> McpRenderOverlay: ...
+
+
 class ResumePlanner(Protocol):
     """Build the safe overlay for a selected resume predecessor."""
 
@@ -343,6 +355,7 @@ __all__ = [
     "HookInstaller",
     "LaunchContext",
     "LaunchPlanner",
+    "McpRenderer",
     "ModelDiscoverer",
     "ModelDiscoveryContext",
     "NativeChildrenContext",

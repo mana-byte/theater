@@ -42,6 +42,7 @@ from theater.models import BadRequest
 if TYPE_CHECKING:
     from theater.harness.contracts.manifest import ControlManifest
     from theater.harness.contracts.observation import HarnessObserver
+    from theater.mcp_plugins import McpServerSpec
     from theater.models import Participant
 
 #: No default anywhere — the whole safety story for a child nobody is watching.
@@ -92,6 +93,7 @@ class Harness(ABC):
         config_path: Path,
         approval: str,
         model: str | None = None,
+        mcp_servers: tuple[McpServerSpec, ...] = (),
     ) -> LaunchPlan:
         """Describe how to start this harness. Pure: writes nothing itself.
 
@@ -104,6 +106,9 @@ class Harness(ABC):
         than dropping the caller's choice on the floor. That omission is the
         compatibility story: an adapter written before this parameter existed
         keeps working for every launch that does not name a model.
+
+        `mcp_servers` is an optional generic rendering input. Older adapters
+        may omit it; the public launch funnel forwards it only when accepted.
 
         `reasoning_effort` follows the same pattern as `model` but is not in
         this abstract signature — it is added per-adapter, and the funnel

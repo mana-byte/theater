@@ -2,61 +2,23 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from theater.harness.base import (
-    SERVER_NAME,
     LaunchPlan,
     ResumeLaunchOverlay,
-    theater_binary,
 )
 from theater.harness.contracts.callbacks import LaunchContext, ResumeContext
 from theater.harness.transcript.discovery import root_domain_overlay
 
 from .observer import CodexObserver
 
-_WAIT_SERVER_NAME = f"{SERVER_NAME}_wait"
-
 
 def plan_launch(context: LaunchContext) -> LaunchPlan:
-    command = json.dumps(theater_binary())
-    control_args = json.dumps(
-        [
-            "mcp",
-            "--id",
-            context.participant_id,
-            "--harness",
-            "codex",
-            "--toolset",
-            "control",
-        ]
-    )
-    wait_args = json.dumps(
-        [
-            "mcp",
-            "--id",
-            context.participant_id,
-            "--harness",
-            "codex",
-            "--toolset",
-            "wait",
-        ]
-    )
     argv = ["codex"]
     if context.resume is not None:
         argv.append("fork")
         argv.append(context.resume)
-    argv += [
-        "-c",
-        f"mcp_servers.{SERVER_NAME}.command={command}",
-        "-c",
-        f"mcp_servers.{SERVER_NAME}.args={control_args}",
-        "-c",
-        f"mcp_servers.{_WAIT_SERVER_NAME}.command={command}",
-        "-c",
-        f"mcp_servers.{_WAIT_SERVER_NAME}.args={wait_args}",
-    ]
     if context.model:
         argv += ["--model", context.model]
     if context.reasoning_effort:

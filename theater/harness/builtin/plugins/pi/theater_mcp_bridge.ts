@@ -117,7 +117,7 @@ interface ToolResultContent {
 	readonly text?: string;
 	[key: string]: unknown;
 }
-function joinErrorText(content: ToolResultContent[] | undefined, toolName: string): string {
+function joinErrorText(content: ToolResultContent[] | undefined, server: string, toolName: string): string {
 	const parts: string[] = [];
 	if (Array.isArray(content)) {
 		for (const item of content) {
@@ -125,7 +125,7 @@ function joinErrorText(content: ToolResultContent[] | undefined, toolName: strin
 		}
 	}
 	if (parts.length > 0) return parts.join("\n");
-	return `Theater tool ${toolName} returned an error`;
+	return `${server} MCP tool ${toolName} returned an error`;
 }
 
 function acquireBridge(): symbol | undefined {
@@ -284,6 +284,7 @@ function registerTranscriptSwitches(pi: ExtensionAPI): void {
 }
 
 interface ServerConfig {
+	name: string;
 	command: string;
 	args: string[];
 	env?: Record<string, string>;
@@ -328,43 +329,54 @@ function configFlag(argv: string[]): string | undefined {
 	return undefined;
 }
 
-async function loadConfig(path: string): Promise<ServerConfig> {
+async function loadConfig(path: string): Promise<ServerConfig[]> {
 	let document: unknown;
 	try {
 		document = JSON.parse(await readFile(path, "utf8"));
 	} catch (error) {
 		throw new Error(`cannot read Theater MCP config ${path}: ${(error as Error).message}`);
 	}
-	if (!record(document) || !record(document.mcpServers) || !record(document.mcpServers.theater)) {
-		throw new Error(`Theater MCP config ${path} must define mcpServers.theater`);
+	if (!record(document) || !record(document.mcpServers)) {
+		throw new Error(`Theater MCP config ${path} must define an mcpServers object`);
 	}
-	const server = document.mcpServers.theater;
-	if (typeof server.command !== "string" || !server.command.trim()) {
-		throw new Error(`Theater MCP config ${path} has no executable theater command`);
+	const servers = Object.entries(document.mcpServers);
+	if (servers.length === 0) {
+		throw new Error(`Theater MCP config ${path} must define at least one MCP server`);
 	}
-	if (server.args !== undefined && (!Array.isArray(server.args) || !server.args.every((arg) => typeof arg === "string"))) {
-		throw new Error(`Theater MCP config ${path} has invalid theater arguments`);
+	return servers.map(([name, value]) => loadServerConfig(path, name, value));
+}
+
+function loadServerConfig(path: string, name: string, value: unknown): ServerConfig {
+	if (!name.trim() || !record(value)) {
+		throw new Error(`Theater MCP config ${path} has an invalid server entry`);
+	}
+	if (typeof value.command !== "string" || !value.command.trim()) {
+		throw new Error(`Theater MCP config ${path} has no executable for ${name}`);
+	}
+	if (value.args !== undefined && (!Array.isArray(value.args) || !value.args.every((arg) => typeof arg === "string"))) {
+		throw new Error(`Theater MCP config ${path} has invalid arguments for ${name}`);
 	}
 	if (
-		server.env !== undefined &&
-		(!record(server.env) || !Object.values(server.env).every((value) => typeof value === "string"))
+		value.env !== undefined &&
+		(!record(value.env) || !Object.values(value.env).every((entry) => typeof entry === "string"))
 	) {
-		throw new Error(`Theater MCP config ${path} has invalid theater environment`);
+		throw new Error(`Theater MCP config ${path} has invalid environment for ${name}`);
 	}
 	return {
-		command: server.command,
-		args: (server.args as string[] | undefined) ?? [],
-		env: server.env as Record<string, string> | undefined,
+		name,
+		command: value.command,
+		args: (value.args as string[] | undefined) ?? [],
+		env: value.env as Record<string, string> | undefined,
 	};
 }
 
-function tools(result: unknown): Tool[] {
+function tools(result: unknown, server: string): Tool[] {
 	if (!record(result) || !Array.isArray(result.tools)) {
-		throw new Error("Theater MCP tools/list returned no tools array");
+		throw new Error(`${server} MCP tools/list returned no tools array`);
 	}
 	return result.tools.map((value) => {
 		if (!record(value) || typeof value.name !== "string" || !value.name || !record(value.inputSchema)) {
-			throw new Error("Theater MCP tools/list returned an invalid tool definition");
+			throw new Error(`${server} MCP tools/list returned an invalid tool definition`);
 		}
 		return {
 			name: value.name,
@@ -374,7 +386,7 @@ function tools(result: unknown): Tool[] {
 	});
 }
 
-class TheaterClient {
+class McpClient {
 	private child: ChildProcessWithoutNullStreams | undefined;
 	private nextId = 1;
 	private pending = new Map<number, Pending>();
@@ -399,7 +411,7 @@ class TheaterClient {
 	}
 
 	async listTools(): Promise<Tool[]> {
-		return tools(await this.request("tools/list", undefined, undefined, STARTUP_TIMEOUT_MS));
+		return tools(await this.request("tools/list", undefined, undefined, STARTUP_TIMEOUT_MS), this.config.name);
 	}
 
 	async callTool(name: string, arguments_: unknown, signal?: AbortSignal): Promise<ToolResult> {
@@ -409,7 +421,7 @@ class TheaterClient {
 	async close(): Promise<void> {
 		if (this.closed) return;
 		this.closed = true;
-		this.fail(new Error("Theater MCP bridge closed"));
+		this.fail(new Error(`${this.config.name} MCP bridge closed`));
 		this.child?.kill();
 		this.child = undefined;
 	}
@@ -424,16 +436,16 @@ class TheaterClient {
 		child.stdout.setEncoding("utf8");
 		child.stdout.on("data", (chunk: string) => this.consume(chunk));
 		child.stderr.resume();
-		child.on("error", (error) => this.fail(new Error(`Theater MCP process failed: ${error.message}`)));
+		child.on("error", (error) => this.fail(new Error(`${this.config.name} MCP process failed: ${error.message}`)));
 		child.on("exit", (code, signal) => {
-			if (!this.closed) this.fail(new Error(`Theater MCP process exited (${code ?? signal ?? "unknown"})`));
+			if (!this.closed) this.fail(new Error(`${this.config.name} MCP process exited (${code ?? signal ?? "unknown"})`));
 		});
 	}
 
 	private consume(chunk: string): void {
 		this.buffer += chunk;
 		if (this.buffer.length > MAX_FRAME_CHARS && !this.buffer.includes("\n")) {
-			this.fail(new Error("Theater MCP emitted an oversized JSON-RPC frame"));
+			this.fail(new Error(`${this.config.name} MCP emitted an oversized JSON-RPC frame`));
 			return;
 		}
 		for (;;) {
@@ -443,14 +455,14 @@ class TheaterClient {
 			this.buffer = this.buffer.slice(newline + 1);
 			if (!line.trim()) continue;
 			if (line.length > MAX_FRAME_CHARS) {
-				this.fail(new Error("Theater MCP emitted an oversized JSON-RPC frame"));
+				this.fail(new Error(`${this.config.name} MCP emitted an oversized JSON-RPC frame`));
 				return;
 			}
 			let response: Response;
 			try {
 				response = JSON.parse(line) as Response;
 			} catch {
-				this.fail(new Error("Theater MCP emitted malformed JSON-RPC"));
+				this.fail(new Error(`${this.config.name} MCP emitted malformed JSON-RPC`));
 				return;
 			}
 			if (typeof response.id !== "number") continue;
@@ -473,7 +485,7 @@ class TheaterClient {
 		const id = this.nextId++;
 		return new Promise<unknown>((resolve, reject) => {
 			if (signal?.aborted) {
-				reject(new Error("Theater MCP request cancelled"));
+				reject(new Error(`${this.config.name} MCP request cancelled`));
 				return;
 			}
 			const abort = () => {
@@ -482,7 +494,7 @@ class TheaterClient {
 				} catch {
 					// The pending request still receives its local cancellation below.
 				}
-				this.finish(id)?.reject(new Error("Theater MCP request cancelled"));
+				this.finish(id)?.reject(new Error(`${this.config.name} MCP request cancelled`));
 			};
 			const pending: Pending = { resolve, reject, timeout: undefined, removeAbort: undefined };
 			if (signal) {
@@ -491,7 +503,7 @@ class TheaterClient {
 			}
 			if (timeoutMs) {
 				pending.timeout = setTimeout(() => {
-					this.finish(id)?.reject(new Error(`Theater MCP ${method} timed out`));
+					this.finish(id)?.reject(new Error(`${this.config.name} MCP ${method} timed out`));
 				}, timeoutMs);
 			}
 			this.pending.set(id, pending);
@@ -504,7 +516,7 @@ class TheaterClient {
 	}
 
 	private send(message: object): void {
-		if (this.closed || !this.child?.stdin.writable) throw new Error("Theater MCP process is not available");
+		if (this.closed || !this.child?.stdin.writable) throw new Error(`${this.config.name} MCP process is not available`);
 		this.child.stdin.write(`${JSON.stringify(message)}\n`);
 	}
 
@@ -526,8 +538,8 @@ class TheaterClient {
 	}
 }
 
-function toolName(name: string): string {
-	return `theater__${name.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+function toolName(server: string, name: string): string {
+	return `${server.replace(/[^a-zA-Z0-9_-]/g, "_")}__${name.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 }
 
 export default async function theaterMcpBridge(pi: ExtensionAPI) {
@@ -562,51 +574,52 @@ export default async function theaterMcpBridge(pi: ExtensionAPI) {
 		registerLifecycleMarkers(pi);
 	}
 
-	let client: TheaterClient | undefined;
+	const clients: McpClient[] = [];
 	try {
-		client = new TheaterClient(await loadConfig(configPath));
-		await client.initialize();
-		const discovered = await client.listTools();
-		// Narrow to a defined client for the execute closure: the outer `client`
-		// binding stays `| undefined` for the teardown paths, but every tool
-		// registered below captures this non-undefined reference.
-		const activeClient = client;
-		for (const tool of discovered) {
-			pi.registerTool({
-				name: toolName(tool.name),
-				label: `theater/${tool.name}`,
-				description: tool.description ?? `Theater MCP tool ${tool.name}`,
-				promptSnippet: `Theater: ${tool.description ?? tool.name}`,
-				parameters: Type.Unsafe(tool.inputSchema),
-				async execute(_id, params, signal) {
-					if (signal?.aborted) return { content: [{ type: "text", text: "Cancelled" }], details: {} };
-					try {
-						const result = await activeClient.callTool(tool.name, params, signal);
-						const content = (result.content ?? []).map((item) => ({
-							type: "text" as const,
-							text: item.text ?? JSON.stringify(item),
-						}));
-						if (result.isError) {
-							// Preserve the actionable text the server returned rather
-							// than replacing it with a generic message.  A failed
-							// tool is still a failure: the joined text becomes the
-							// thrown error so Pi surfaces the real reason.
-							throw new Error(joinErrorText(result.content, tool.name));
-						}
-						return { content, details: { tool: tool.name } };
-					} catch (error) {
+		const registered = new Set<string>();
+		for (const server of await loadConfig(configPath)) {
+			const client = new McpClient(server);
+			clients.push(client);
+			await client.initialize();
+			for (const tool of await client.listTools()) {
+				const name = toolName(server.name, tool.name);
+				if (registered.has(name)) throw new Error(`MCP tools collide after Pi name normalization: ${name}`);
+				registered.add(name);
+				pi.registerTool({
+					name,
+					label: `${server.name}/${tool.name}`,
+					description: tool.description ?? `${server.name} MCP tool ${tool.name}`,
+					promptSnippet: `${server.name}: ${tool.description ?? tool.name}`,
+					parameters: Type.Unsafe(tool.inputSchema),
+					async execute(_id, params, signal) {
 						if (signal?.aborted) return { content: [{ type: "text", text: "Cancelled" }], details: {} };
-						throw error;
-					}
-				},
-			});
+						try {
+							const result = await client.callTool(tool.name, params, signal);
+							const content = (result.content ?? []).map((item) => ({
+								type: "text" as const,
+								text: item.text ?? JSON.stringify(item),
+							}));
+							if (result.isError) {
+								// Preserve the actionable text the server returned rather
+								// than replacing it with a generic message. A failed tool
+								// is still a failure, so Pi surfaces its actual reason.
+								throw new Error(joinErrorText(result.content, server.name, tool.name));
+							}
+							return { content, details: { server: server.name, tool: tool.name } };
+						} catch (error) {
+							if (signal?.aborted) return { content: [{ type: "text", text: "Cancelled" }], details: {} };
+							throw error;
+						}
+					},
+				});
+			}
 		}
 	} catch (error) {
 		// Any setup failure — config read/parse, process startup, tool listing,
 		// or tool registration — must not strand the process-wide lease.  Close
 		// the client when one was created and release exactly once, then rethrow
 		// with the original context.
-		if (client) await client.close();
+		await Promise.all(clients.map((client) => client.close()));
 		releaseBridge(bridgeLease);
 		throw error instanceof Error
 			? error
@@ -615,7 +628,7 @@ export default async function theaterMcpBridge(pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		// Each replacement creates a fresh extension instance. Tear down this
 		// instance before the next factory acquires a new process-wide lease.
-		if (client) await client.close();
+		await Promise.all(clients.map((client) => client.close()));
 		releaseBridge(bridgeLease);
 	});
 }

@@ -8,6 +8,9 @@ from theater.constants.tmux import TMUX_DEFAULT_SESSION
 #: Name the theater MCP server is registered under inside each harness.
 HARNESS_MCP_SERVER_NAME = "theater"
 
+#: Separate stdio lane for waits so cancellation cannot block control calls.
+HARNESS_MCP_WAIT_SERVER_NAME = f"{HARNESS_MCP_SERVER_NAME}_wait"
+
 #: Per-tool MCP call timeout; 340 = MAX_AWAIT (300s) + 40s client slack. Duplicated, not imported.
 HARNESS_MCP_TOOL_TIMEOUT_SECONDS = 340.0
 

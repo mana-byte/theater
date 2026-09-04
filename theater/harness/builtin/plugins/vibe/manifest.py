@@ -22,6 +22,7 @@ from theater.harness.contracts.manifest import (
     InterruptPlan,
     LaunchManifest,
     LineageManifest,
+    McpRenderingManifest,
     ModelDiscoveryManifest,
     ObservationManifest,
     OtelChannelManifest,
@@ -31,6 +32,7 @@ from theater.harness.contracts.manifest import (
 from theater.harness.transcript import file_stream_floor
 
 from .launch import discover_models, plan_launch, resume_launch_overlay
+from .mcp import render_mcp_servers
 from .observer import (
     VibeObserver,
     admit_operator_candidate,
@@ -123,6 +125,7 @@ def manifest_for_roots(
         ),
         controls=ControlManifest(interrupt=InterruptPlan(keys=("Escape",))),
         models=ModelDiscoveryManifest(discoverer=discover_models),
+        mcp=McpRenderingManifest(renderer=render_mcp_servers),
     )
 
 
