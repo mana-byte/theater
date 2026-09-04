@@ -1,7 +1,7 @@
 """Launch-plan construction, receipt pre-flight, identity recording, plan-file writes.
 
-These run during ``reserve`` after the participant exists but before the
-worktree is created — so a rejected plan leaves nothing behind.
+These run during ``reserve`` after the participant and any requested worktree
+exist.
 """
 
 from __future__ import annotations

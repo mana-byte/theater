@@ -88,6 +88,8 @@ class Spawner:
         self._reconcile_tmux = reconcile_tmux
         self._tmux_reconcile_lock = tmux_reconcile_lock
         self._named_locks: dict[str, asyncio.Lock] = {}
+        self._provisional_named_worktrees: set[str] = set()
+        self._joined_named_worktrees: set[str] = set()
 
     def _named_lock(self, repo_root: str) -> asyncio.Lock:
         return self._named_locks.setdefault(repo_root, asyncio.Lock())
@@ -128,6 +130,8 @@ class Spawner:
             ) from None
 
         try:
+            with timing.span(SPAWN_WORKTREE, id=participant.id, kind=req.worktree or None):
+                child_cwd = await self._prepare_worktree(req, participant)
             plan = self._build_plan(req, participant, resume_overlay)
             minted_token = self._validate_receipt_plan(plan, participant)
             if minted_token is not None:
@@ -136,8 +140,6 @@ class Spawner:
             plan = self._install_otel_plan(plan, participant, harness.observer)
             paths.ensure_home()
             self._record_plan_artifacts(participant, plan)
-            with timing.span(SPAWN_WORKTREE, id=participant.id, kind=req.worktree or None):
-                child_cwd = await self._prepare_worktree(req, participant)
             self._record_launch_identity(participant, plan, harness.observer)
 
             if resume_predecessor is not None:
@@ -152,6 +154,8 @@ class Spawner:
             await self.cleanup_reservation(participant)
             raise
 
+        self._provisional_named_worktrees.discard(participant.id)
+        self._joined_named_worktrees.discard(participant.id)
         return Reservation(
             participant=participant,
             plan=plan,
@@ -233,6 +237,7 @@ class Spawner:
                 root=root,
                 name=req.worktree,
                 base_branch=req.base_branch,
+                reservation_id=participant.id,
             )
         else:
             child_cwd = await workers.to_thread(
@@ -325,16 +330,27 @@ class Spawner:
         """Clean a failed reservation unless a reset diagnosis preserves its worktree."""
         current = self.registry.store.get_participant(participant.id)
         if current is not None and current.termination_reason == TMUX_RESTART_TERMINATION_REASON:
+            self._provisional_named_worktrees.discard(participant.id)
+            self._joined_named_worktrees.discard(participant.id)
             return
         participant = current or participant
+        discard_named_branch = participant.id in self._provisional_named_worktrees
+        preserve_joined_worktree = participant.id in self._joined_named_worktrees
         try:
-            await self.retire(participant, delete_branch=True)
+            if not preserve_joined_worktree:
+                if discard_named_branch:
+                    await self._retire(participant, delete_branch=True, delete_named_branch=True)
+                else:
+                    await self.retire(participant, delete_branch=True)
         except BaseException:
             logger.warning(
                 "retire raised for %s; proceeding to mark_dead",
                 participant.id,
                 exc_info=True,
             )
+        finally:
+            self._provisional_named_worktrees.discard(participant.id)
+            self._joined_named_worktrees.discard(participant.id)
         self.registry.mark_dead(participant.id)
 
     async def _resolve_session(self, requested: str | None, cwd: str) -> str:
@@ -346,7 +362,12 @@ class Spawner:
         return await tmux.ensure_session(TMUX_DEFAULT_SESSION, cwd=cwd)
 
     async def _spawn_named_worktree(
-        self, *, root: str, name: str, base_branch: str | None
+        self,
+        *,
+        root: str,
+        name: str,
+        base_branch: str | None,
+        reservation_id: str | None = None,
     ) -> tuple[str, str]:
         """Create or join a named shared worktree, serialized per repo."""
         canonical_root = (
@@ -379,7 +400,20 @@ class Spawner:
                     expected_path=existing["path"],
                     expected_branch=existing["branch"],
                 )
+                if reservation_id is not None:
+                    self._joined_named_worktrees.add(reservation_id)
                 return existing["path"], existing["branch"]
+
+            def record_created(result: tuple[str, str]) -> None:
+                store.upsert_named_worktree(
+                    repo_root=canonical_root,
+                    name=name,
+                    branch=result[1],
+                    path=result[0],
+                    base_branch=base_branch,
+                )
+                if reservation_id is not None:
+                    self._provisional_named_worktrees.add(reservation_id)
 
             path, branch = await _uncancellable(
                 workers.to_thread,
@@ -388,21 +422,9 @@ class Spawner:
                 repo_root=canonical_root,
                 name=name,
                 base_branch=base_branch,
-                reconcile=lambda r: store.upsert_named_worktree(
-                    repo_root=canonical_root,
-                    name=name,
-                    branch=r[1],
-                    path=r[0],
-                    base_branch=base_branch,
-                ),
+                reconcile=record_created,
             )
-            store.upsert_named_worktree(
-                repo_root=canonical_root,
-                name=name,
-                branch=branch,
-                path=path,
-                base_branch=base_branch,
-            )
+            record_created((path, branch))
             return path, branch
 
     async def kill_pane(
@@ -460,6 +482,15 @@ class Spawner:
         branch; only the directory is removed when the last live
         participant leaves. Failure is logged, never raised.
         """
+        await self._retire(p, delete_branch=delete_branch, delete_named_branch=False)
+
+    async def _retire(
+        self,
+        p: Participant,
+        *,
+        delete_branch: bool,
+        delete_named_branch: bool,
+    ) -> None:
         if not (p.branch and p.branch.startswith(worktree_mod.BRANCH_PREFIX)):
             return
 
@@ -505,7 +536,7 @@ class Spawner:
                     label="retire.remove_named",
                     repo_root=root,
                     name=named["name"],
-                    delete_branch=False,
+                    delete_branch=delete_named_branch,
                     reconcile=lambda r: (
                         self.registry.store.delete_named_worktree(
                             repo_root=named["repo_root"], name=named["name"]

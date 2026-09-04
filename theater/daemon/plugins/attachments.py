@@ -111,6 +111,8 @@ def emit_registry_diagnostic_omissions(participant: Participant, *, store) -> No
     available = {plugin.name for plugin in snapshot.servers}
     emitted: set[str] = set()
     for diagnostic in sorted(snapshot.diagnostics, key=lambda item: (item.name, item.error)):
+        if not diagnostic.requested:
+            continue
         if diagnostic.name in available or diagnostic.name in emitted:
             continue
         emitted.add(diagnostic.name)

@@ -52,6 +52,7 @@ class McpPluginDiagnostic:
     error: str
     path: Path | None = None
     source: str | None = None
+    requested: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +117,7 @@ def install(
                 name=duplicate.name,
                 path=duplicate.path,
                 source=duplicate.source,
+                requested=duplicate.name in enabled,
                 error=(
                     f"multiple {duplicate.source} MCP-server packages reserve canonical name "
                     f"{duplicate.name!r}; none is enabled"
@@ -133,6 +135,7 @@ def install(
             McpPluginDiagnostic(
                 name=name,
                 error=f"enabled MCP-server package {name!r} was not found",
+                requested=True,
             )
         )
 
@@ -146,6 +149,7 @@ def install(
                     path=plugin.path,
                     source=plugin.source,
                     error=plugin.error,
+                    requested=name in enabled,
                 )
             )
             continue
@@ -161,6 +165,7 @@ def install(
                     path=loaded.path,
                     source=loaded.source,
                     error=loaded.error or "package did not produce a manifest",
+                    requested=True,
                 )
             )
             continue
@@ -173,6 +178,7 @@ def install(
                     path=loaded.path,
                     source=loaded.source,
                     error=f"enabled configuration could not be used: {exc}",
+                    requested=True,
                 )
             )
             continue
@@ -183,6 +189,7 @@ def install(
                     path=loaded.path,
                     source=loaded.source,
                     error=f"MCP server name {name!r} is reserved by Theater",
+                    requested=True,
                 )
             )
             continue

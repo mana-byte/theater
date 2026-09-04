@@ -54,7 +54,7 @@ class ChannelCredential:
 
     kind: ChannelKind
     channel_id: str
-    token: str
+    token: str = field(repr=False)
     token_path: Path
 
     def __post_init__(self) -> None:
@@ -71,17 +71,17 @@ class LaunchPlan:
     #: Files to write before the window is created, path -> contents.
     files: dict[Path, str] = field(default_factory=dict)
     #: Files containing launch secrets, written mode 0600 by the daemon.
-    private_files: dict[Path, str] = field(default_factory=dict)
+    private_files: dict[Path, str] = field(default_factory=dict, repr=False)
     #: Exact native session id; persisted before tmux starts to avoid cwd guessing.
     session_id: str | None = None
     #: Core-populated output, not plugin input; filled by the spawner before any file write.
-    receipt_token: str | None = None
+    receipt_token: str | None = field(default=None, repr=False)
     #: Where the daemon writes receipt_token (0600) and deletes on death; core-owned.
     receipt_token_path: Path | None = None
     #: Resolved transcript namespace; persisted before launch so collision policy is stable.
     transcript_domain: str | None = None
     #: Core-populated native channel credentials; plugins never receive token bytes.
-    channel_credentials: tuple[ChannelCredential, ...] = ()
+    channel_credentials: tuple[ChannelCredential, ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "channel_credentials", tuple(self.channel_credentials))

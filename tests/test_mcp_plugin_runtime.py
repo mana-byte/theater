@@ -6,6 +6,7 @@ import asyncio
 import io
 import json
 import stat
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +15,7 @@ import pytest
 from theater import paths
 from theater.cli.commands import plugin as plugin_cli
 from theater.client import CALL_TIMEOUT, DaemonClient
+from theater.config import Config
 from theater.constants.plugins import MCP_PLUGIN_SPAWN_OMISSION_MAX
 from theater.daemon.persistence.store import Store
 from theater.daemon.plugins.credentials import mint_credential
@@ -22,7 +24,10 @@ from theater.daemon.registry import Registry
 from theater.daemon.schema import participant_mcp_plugins
 from theater.daemon.spawning import planning
 from theater.daemon.spawning.models import SpawnRequest
+from theater.daemon.spawning.service import Spawner
 from theater.harness.base import LaunchPlan
+from theater.harness.contracts.channels import ChannelKind
+from theater.harness.contracts.launch import ChannelCredential
 from theater.mcp_plugins import (
     MCP_PLUGIN_API_VERSION,
     CompiledMcpPlugin,
@@ -60,14 +65,18 @@ def _plugin(
 @pytest.fixture
 def isolated_mcp_registry():
     prior = dict(mcp_registry.MCP_SERVERS)
+    prior_plugins = dict(mcp_registry._PLUGINS)
     prior_diagnostics = list(mcp_registry._DIAGNOSTICS)
     mcp_registry.MCP_SERVERS.clear()
+    mcp_registry._PLUGINS.clear()
     mcp_registry._DIAGNOSTICS.clear()
     try:
         yield mcp_registry.MCP_SERVERS
     finally:
         mcp_registry.MCP_SERVERS.clear()
         mcp_registry.MCP_SERVERS.update(prior)
+        mcp_registry._PLUGINS.clear()
+        mcp_registry._PLUGINS.update(prior_plugins)
         mcp_registry._DIAGNOSTICS.clear()
         mcp_registry._DIAGNOSTICS.extend(prior_diagnostics)
 
@@ -83,6 +92,16 @@ def _request() -> SpawnRequest:
 
 def _write_credential(path: Path, credential: str) -> None:
     planning.write_plan_files(LaunchPlan(argv=[], private_files={path: credential + "\n"}))
+
+
+def _init_git_repo(path: Path) -> None:
+    path.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True)
+    (path / "README.md").write_text("# test\n")
+    subprocess.run(["git", "add", "."], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=path, check=True, capture_output=True)
 
 
 def _attach_credential(
@@ -157,6 +176,69 @@ def test_sidecar_planning_materializes_confined_artifacts_and_a_0600_credential(
     row = registry.store.conn.execute(participant_mcp_plugins.select()).first()
     assert row is not None
     assert credential_path.read_text().strip() not in json.dumps(dict(row._mapping))
+
+
+def test_launch_plan_repr_redacts_sidecar_and_native_credentials():
+    channel = ChannelCredential(
+        kind=ChannelKind.HOOK,
+        channel_id="native",
+        token="channel-token-secret",
+        token_path=Path("/tmp/channel-token"),
+    )
+    plan = LaunchPlan(
+        argv=["fake"],
+        private_files={
+            Path("/tmp/plugin-credential"): "sidecar-credential-secret",
+            Path("/tmp/private-artifact"): "private-artifact-secret",
+        },
+        receipt_token="receipt-token-secret",
+        channel_credentials=(channel,),
+    )
+
+    rendered = repr(plan)
+    for secret in (
+        "sidecar-credential-secret",
+        "private-artifact-secret",
+        "receipt-token-secret",
+        "channel-token-secret",
+    ):
+        assert secret not in rendered
+    assert "channel-token-secret" not in repr(channel)
+
+
+async def test_sidecar_planner_receives_the_persisted_worktree_cwd(
+    monkeypatch, registry, isolated_mcp_registry, rendering_sidecars, tmp_path
+):
+    source = tmp_path / "source"
+    _init_git_repo(source)
+    planned_cwds: list[Path] = []
+
+    def sidecar_plan(context) -> McpLaunchPlan:
+        planned_cwds.append(context.cwd)
+        return McpLaunchPlan(command="acme-server")
+
+    isolated_mcp_registry["acme"] = _plugin(planner=sidecar_plan)
+    monkeypatch.setattr(
+        planning,
+        "plan_launch",
+        lambda _harness, **_kwargs: LaunchPlan(argv=["fake"]),
+    )
+    spawner = Spawner(registry)
+    reservation = await spawner.reserve(
+        SpawnRequest(
+            harness="vibe",
+            prompt="",
+            cwd=str(source),
+            approval="manual",
+            worktree=True,
+        )
+    )
+    try:
+        assert Path(reservation.child_cwd) != source
+        assert planned_cwds == [Path(reservation.child_cwd)]
+        assert registry.get(reservation.participant.id).cwd == reservation.child_cwd
+    finally:
+        await spawner.cleanup_reservation(reservation.participant)
 
 
 def test_symlinked_or_broken_sidecars_are_omitted_without_failing_the_harness_plan(
@@ -344,7 +426,7 @@ def test_registry_diagnostics_emit_bounded_safe_spawn_omissions(
 ):
     for index in range(MCP_PLUGIN_SPAWN_OMISSION_MAX + 1):
         mcp_registry._DIAGNOSTICS.append(
-            McpPluginDiagnostic(name=f"broken{index}", error=f"secret-{index}")
+            McpPluginDiagnostic(name=f"broken{index}", error=f"secret-{index}", requested=True)
         )
     participant = registry.create_spawned(harness="fake", cwd="/tmp")
 
@@ -362,6 +444,37 @@ def test_registry_diagnostics_emit_bounded_safe_spawn_omissions(
     ]
     assert len(omissions) == MCP_PLUGIN_SPAWN_OMISSION_MAX
     assert all("secret-" not in event["payload"]["error"] for event in omissions)
+
+
+def test_disabled_malformed_package_does_not_emit_a_spawn_omission(
+    monkeypatch, registry, isolated_mcp_registry, rendering_sidecars, tmp_path
+):
+    package = tmp_path / "mcp_servers" / "broken"
+    package.mkdir(parents=True)
+    assert (
+        mcp_registry.install(
+            Config(),
+            local_dir=package.parent,
+            shipped_dir=tmp_path / "shipped",
+        )
+        == []
+    )
+    (diagnostic,) = mcp_registry.diagnostics()
+    assert diagnostic.name == "broken"
+    assert diagnostic.requested is False
+
+    participant = registry.create_spawned(harness="fake", cwd="/tmp")
+    monkeypatch.setattr(
+        planning,
+        "plan_launch",
+        lambda _harness, **_kwargs: LaunchPlan(argv=["fake"]),
+    )
+
+    assert planning.build_plan(_request(), participant, None, registry=registry).argv == ["fake"]
+    assert not any(
+        event["kind"] == "mcp_plugin.omitted" and event["payload"]["stage"] == "registry"
+        for event in registry.store.bus_tail(limit=20)
+    )
 
 
 def _rendered_codex_server_names(plan: LaunchPlan) -> set[str]:

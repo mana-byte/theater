@@ -831,9 +831,7 @@ def _init_repo(path: Path) -> Path:
 
 
 async def test_rejected_plan_leaves_no_named_branch(registry, monkeypatch, tmp_path):
-    """Point 9: a launch plan rejected by receipt pre-flight leaves no named
-    worktree branch behind, because plan construction and pre-flight run before
-    _prepare_worktree."""
+    """A pre-flight rejection removes its provisional named worktree branch."""
     import subprocess
 
     monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
@@ -866,3 +864,40 @@ async def test_rejected_plan_leaves_no_named_branch(registry, monkeypatch, tmp_p
         check=False,
     )
     assert result.stdout.strip() == "", f"named branch was left behind: {result.stdout!r}"
+
+
+async def test_rejected_plan_preserves_an_existing_named_worktree(registry, monkeypatch, tmp_path):
+    import subprocess
+
+    monkeypatch.setattr("theater.daemon.spawning.service.shutil.which", lambda b: f"/usr/bin/{b}")
+    repo = _init_repo(tmp_path / "repo")
+    spawner = Spawner(registry)
+    worktree, _branch = await spawner._spawn_named_worktree(
+        root=str(repo), name="retained-name", base_branch=None
+    )
+
+    def reject(_plan, _participant):
+        raise BadRequest("plan rejected")
+
+    monkeypatch.setattr(spawner, "_validate_receipt_plan", reject)
+
+    with pytest.raises(BadRequest, match="plan rejected"):
+        await spawner.reserve(
+            SpawnRequest(
+                harness="vibe",
+                prompt="say hello",
+                cwd=str(repo),
+                approval="edits",
+                worktree="retained-name",
+            )
+        )
+
+    assert Path(worktree).is_dir()
+    result = subprocess.run(  # noqa: ASYNC221
+        ["git", "rev-parse", "--verify", "theater/named/retained-name"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
