@@ -41,6 +41,14 @@ def supports_resume(harness: Harness) -> bool:
     return harness.launch_parameter_support.resume
 
 
+def supports_mcp_rendering(harness: str) -> bool:
+    """Whether a harness explicitly accepts and renders generic MCP specs."""
+    found = get(harness)
+    return bool(getattr(found, "supports_mcp_rendering", False)) and _accepts_keyword(
+        found.plan_launch, "mcp_servers"
+    )
+
+
 def check_resume(harness: str, resume: str | None) -> None:
     """Raise if this harness cannot honour a resume request."""
     if resume is not None and not supports_resume(get(harness)):
@@ -97,6 +105,8 @@ def plan_launch(
 
 def _accepts_keyword(callback: object, name: str) -> bool:
     """Whether a legacy adapter accepts a new optional keyword."""
+    if not callable(callback):
+        return False
     try:
         parameters = inspect.signature(callback).parameters.values()
     except (TypeError, ValueError):

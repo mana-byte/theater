@@ -12,6 +12,7 @@ from types import MappingProxyType
 from theater import paths
 from theater.config import Config, ConfigError
 from theater.constants.core import HARNESS_NAME
+from theater.constants.harness import HARNESS_MCP_SERVER_NAME, HARNESS_MCP_WAIT_SERVER_NAME
 from theater.mcp_plugins import builtin
 from theater.mcp_plugins.compiler import compile_manifest
 from theater.mcp_plugins.contracts import CompiledMcpPlugin
@@ -30,6 +31,8 @@ from theater.plugins.namespace import (
 )
 
 logger = logging.getLogger("theater.mcp_plugins")
+
+_RESERVED_SERVER_NAMES = frozenset({HARNESS_MCP_SERVER_NAME, HARNESS_MCP_WAIT_SERVER_NAME})
 
 #: The separate live registry for canonical configured MCP plugins.
 MCP_SERVERS: dict[str, CompiledMcpPlugin] = {}
@@ -170,6 +173,16 @@ def install(
                     path=loaded.path,
                     source=loaded.source,
                     error=f"enabled configuration could not be used: {exc}",
+                )
+            )
+            continue
+        if name in _RESERVED_SERVER_NAMES:
+            _append_diagnostic(
+                McpPluginDiagnostic(
+                    name=name,
+                    path=loaded.path,
+                    source=loaded.source,
+                    error=f"MCP server name {name!r} is reserved by Theater",
                 )
             )
             continue

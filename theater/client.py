@@ -30,13 +30,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 import os
 import subprocess
 import sys
 from pathlib import Path
 
 from theater import paths, protocol
-from theater.constants.daemon import RPC_DEFAULT_MAX_WAIT_SECONDS
+from theater.constants.daemon import RPC_DEFAULT_MAX_WAIT_SECONDS, RPC_MAX_AWAIT_SECONDS
 from theater.observability.engine import span as timing_span
 from theater.protocol import RemoteError
 from theater.tmux import client as tmux
@@ -166,8 +167,26 @@ class DaemonClient:
         budget plus slack; everything else shares CALL_TIMEOUT.
         """
         if method == "jobs.await":
-            return float(params.get("max_wait", RPC_DEFAULT_MAX_WAIT_SECONDS)) + CALL_TIMEOUT
+            return DaemonClient._await_timeout(params)
+        if method == "plugin.call" and params.get("operation") == "jobs.await":
+            nested = params.get("params")
+            if isinstance(nested, dict):
+                return DaemonClient._await_timeout(nested)
         return CALL_TIMEOUT
+
+    @staticmethod
+    def _await_timeout(params: dict) -> float:
+        """Derive a bounded reply budget for an await-shaped parameter object."""
+        raw = params.get("max_wait", RPC_DEFAULT_MAX_WAIT_SECONDS)
+        if isinstance(raw, bool):
+            return CALL_TIMEOUT
+        try:
+            wait = float(raw)
+        except (TypeError, ValueError):
+            return CALL_TIMEOUT
+        if not math.isfinite(wait):
+            return CALL_TIMEOUT
+        return min(max(wait, 0.0), RPC_MAX_AWAIT_SECONDS) + CALL_TIMEOUT
 
     async def call(self, method: str, **params) -> object:
         async with self._lock:

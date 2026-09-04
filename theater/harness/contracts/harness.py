@@ -81,6 +81,8 @@ class Harness(ABC):
     launch_parameter_support: LaunchParameterSupport = LaunchParameterSupport()
     #: Explicit native controls compiled from the manifest.
     controls: ControlManifest | None = None
+    #: Whether this harness explicitly renders generic MCP server specs.
+    supports_mcp_rendering: bool = False
 
     # ---- launching ------------------------------------------------------
 

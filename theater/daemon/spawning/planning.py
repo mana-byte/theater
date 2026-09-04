@@ -16,15 +16,17 @@ from theater import paths
 from theater.daemon.artifacts import artifacts_for_plan
 from theater.daemon.plugins.attachments import (
     PlannedMcpSidecar,
+    emit_registry_diagnostic_omissions,
     merge_sidecars,
     omit_conflicting_sidecars,
+    omit_unrenderable_sidecars,
     plan_sidecars,
     revoke_sidecars,
     sidecar_specs,
 )
 from theater.daemon.spawning.models import SpawnRequest
 from theater.harness import get as get_harness
-from theater.harness import plan_launch
+from theater.harness import plan_launch, supports_mcp_rendering, theater_mcp_servers
 from theater.harness.base import LaunchPlan, ResumeLaunchOverlay, theater_binary
 from theater.harness.contracts.callbacks import (
     HookInstallContext,
@@ -35,6 +37,7 @@ from theater.harness.contracts.callbacks import (
 from theater.harness.contracts.channels import ChannelKind
 from theater.harness.contracts.launch import ChannelCredential
 from theater.harness.contracts.manifest import HookChannelManifest, OtelChannelManifest
+from theater.mcp_plugins import McpServerSpec
 from theater.models import BadRequest, Participant
 from theater.provenance import TranscriptProvenance
 
@@ -61,31 +64,27 @@ def build_plan(
     """Construct the launch plan, including best-effort configured sidecars."""
     sidecars: tuple[PlannedMcpSidecar, ...] = ()
     if registry is not None:
-        sidecars = plan_sidecars(
-            participant,
-            cwd=participant.cwd or req.cwd,
-            store=registry.store,
-        )
+        emit_registry_diagnostic_omissions(participant, store=registry.store)
+        if supports_mcp_rendering(req.harness):
+            sidecars = plan_sidecars(
+                participant,
+                cwd=participant.cwd or req.cwd,
+                store=registry.store,
+            )
+        else:
+            omit_unrenderable_sidecars(participant, store=registry.store)
 
     try:
-        plan = _harness_plan(req, participant, overlay, mcp_servers=sidecar_specs(sidecars))
-    except TypeError as exc:
-        if not _missing_mcp_servers_keyword(exc):
-            raise
-        if registry is not None and sidecars:
-            revoke_sidecars(
-                sidecars,
-                participant=participant,
-                store=registry.store,
-                reason="the installed harness launch funnel does not accept mcp_servers",
-            )
-        sidecars = ()
-        plan = _legacy_harness_plan(req, participant, overlay)
+        plan = _harness_plan(
+            req, participant, overlay, mcp_servers=_mcp_servers(req, participant, sidecars)
+        )
     except Exception as exc:
         if registry is None or not sidecars:
             raise
         try:
-            plan = _harness_plan(req, participant, overlay, mcp_servers=())
+            plan = _harness_plan(
+                req, participant, overlay, mcp_servers=_mcp_servers(req, participant, ())
+            )
         except Exception:
             raise exc from None
         revoke_sidecars(
@@ -107,7 +106,12 @@ def build_plan(
         )
         if accepted != sidecars:
             sidecars = accepted
-            plan = _harness_plan(req, participant, overlay, mcp_servers=sidecar_specs(sidecars))
+            plan = _harness_plan(
+                req,
+                participant,
+                overlay,
+                mcp_servers=_mcp_servers(req, participant, sidecars),
+            )
             accepted = omit_conflicting_sidecars(
                 sidecars,
                 plan,
@@ -120,10 +124,19 @@ def build_plan(
                     req,
                     participant,
                     overlay,
-                    mcp_servers=sidecar_specs(sidecars),
+                    mcp_servers=_mcp_servers(req, participant, sidecars),
                 )
         plan = merge_sidecars(plan, sidecars)
     return plan
+
+
+def _mcp_servers(
+    req: SpawnRequest,
+    participant: Participant,
+    sidecars: tuple[PlannedMcpSidecar, ...],
+) -> tuple[McpServerSpec, ...]:
+    """Compose Theater's control endpoints with successful sidecars."""
+    return (*theater_mcp_servers(participant.id, req.harness), *sidecar_specs(sidecars))
 
 
 def _harness_plan(
@@ -131,7 +144,7 @@ def _harness_plan(
     participant: Participant,
     overlay: ResumeLaunchOverlay | None,
     *,
-    mcp_servers,
+    mcp_servers: tuple[McpServerSpec, ...],
 ) -> LaunchPlan:
     """Call the harness funnel against its frozen sidecar keyword interface."""
     config_path = paths.mcp_config_path(participant.id)
@@ -147,30 +160,7 @@ def _harness_plan(
         model=req.model,
         reasoning_effort=req.reasoning_effort,
         resume=resume_reference,
-        mcp_servers=mcp_servers,  # type: ignore[call-arg]
-    )
-    return _merge_overlay(plan, overlay)
-
-
-def _legacy_harness_plan(
-    req: SpawnRequest,
-    participant: Participant,
-    overlay: ResumeLaunchOverlay | None,
-) -> LaunchPlan:
-    """Compatibility fallback while an older harness funnel is installed."""
-    config_path = paths.mcp_config_path(participant.id)
-    resume_reference = req.resume
-    if overlay is not None and overlay.resume_reference is not None:
-        resume_reference = overlay.resume_reference
-    plan = plan_launch(
-        req.harness,
-        participant_id=participant.id,
-        prompt=req.prompt,
-        config_path=config_path,
-        approval=req.approval,
-        model=req.model,
-        reasoning_effort=req.reasoning_effort,
-        resume=resume_reference,
+        mcp_servers=mcp_servers,
     )
     return _merge_overlay(plan, overlay)
 
@@ -184,10 +174,6 @@ def _merge_overlay(plan: LaunchPlan, overlay: ResumeLaunchOverlay | None) -> Lau
     if overlay.transcript_domain is not None:
         transcript_domain = overlay.transcript_domain
     return replace(plan, env=env, transcript_domain=transcript_domain)
-
-
-def _missing_mcp_servers_keyword(exc: TypeError) -> bool:
-    return "unexpected keyword argument 'mcp_servers'" in str(exc)
 
 
 def validate_receipt_plan(plan: LaunchPlan, participant: Participant) -> str | None:

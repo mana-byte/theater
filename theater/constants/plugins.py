@@ -23,3 +23,6 @@ MCP_PLUGIN_CREDENTIAL_PATH_ENV = "THEATER_PLUGIN_CREDENTIAL_PATH"
 #: Bounded credential-file and wire-token sizes keep malformed sidecars from
 #: turning authentication into unbounded file or SQLite work.
 MCP_PLUGIN_CREDENTIAL_MAX_CHARS = 512
+
+#: One participant gets at most this many registry-omission audit events.
+MCP_PLUGIN_SPAWN_OMISSION_MAX = 64

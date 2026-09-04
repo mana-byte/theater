@@ -207,6 +207,23 @@ def test_unknown_enabled_and_broken_local_packages_are_diagnostics_not_config_er
     assert "not found" in messages["missing"]
 
 
+@pytest.mark.parametrize("name", ("theater", "theater_wait"))
+def test_enabled_plugin_cannot_claim_a_reserved_core_server_name(tmp_path, monkeypatch, name):
+    local = tmp_path / "mcp_servers"
+    write_plugin(local, name)
+    monkeypatch.setenv("ACME_TEST_TOKEN", "secret")
+    settings = config.Config(
+        mcp=config.McpSection(
+            enabled=[name],
+            plugins={name: {"token": {"env": "ACME_TEST_TOKEN"}}},
+        )
+    )
+
+    assert registry.install(settings, local_dir=local, shipped_dir=tmp_path / "shipped") == []
+    assert {item.name for item in registry.diagnostics()} == {name}
+    assert "reserved by Theater" in registry.diagnostics()[0].error
+
+
 def test_enabled_broken_shipped_package_is_fatal(tmp_path):
     shipped = tmp_path / "shipped"
     package = shipped / "broken"

@@ -11,7 +11,12 @@ from types import MappingProxyType
 
 from theater import paths
 from theater.constants.daemon import BUS_KIND_MCP_PLUGIN_OMITTED
-from theater.constants.plugins import MCP_PLUGIN_API_VERSION, MCP_PLUGIN_CREDENTIAL_PATH_ENV
+from theater.constants.harness import HARNESS_MCP_SERVER_NAME, HARNESS_MCP_WAIT_SERVER_NAME
+from theater.constants.plugins import (
+    MCP_PLUGIN_API_VERSION,
+    MCP_PLUGIN_CREDENTIAL_PATH_ENV,
+    MCP_PLUGIN_SPAWN_OMISSION_MAX,
+)
 from theater.daemon.plugins.credentials import CredentialMaterial, mint_credential
 from theater.harness.base import LaunchPlan
 from theater.mcp_plugins.contracts import (
@@ -26,6 +31,7 @@ from theater.models import Participant
 logger = logging.getLogger("theater.mcp_plugins.runtime")
 
 _CREDENTIAL_FILENAME = ".theater-plugin-credential"
+_RESERVED_SERVER_NAMES = frozenset({HARNESS_MCP_SERVER_NAME, HARNESS_MCP_WAIT_SERVER_NAME})
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +62,16 @@ def plan_sidecars(
     planned: list[PlannedMcpSidecar] = []
     for plugin in catalog().servers:
         root = paths.participant_mcp_plugin_dir(participant.id, plugin.name)
+        if plugin.name in _RESERVED_SERVER_NAMES:
+            _rollback_failed_sidecar(store, participant, plugin.name, root)
+            _omit(
+                store,
+                participant,
+                plugin,
+                stage="planning",
+                exc=ValueError(f"MCP server name {plugin.name!r} is reserved by Theater"),
+            )
+            continue
         try:
             sidecar = _plan_sidecar(plugin, participant_id=participant.id, cwd=cwd)
             _prepare_artifact_root(sidecar)
@@ -74,6 +90,39 @@ def plan_sidecars(
             continue
         planned.append(sidecar)
     return tuple(planned)
+
+
+def omit_unrenderable_sidecars(participant: Participant, *, store) -> None:
+    """Record configured sidecars omitted by a harness without a generic renderer."""
+    for plugin in catalog().servers:
+        root = paths.participant_mcp_plugin_dir(participant.id, plugin.name)
+        _rollback_failed_sidecar(store, participant, plugin.name, root)
+        reason = (
+            f"MCP server name {plugin.name!r} is reserved by Theater"
+            if plugin.name in _RESERVED_SERVER_NAMES
+            else "the selected harness does not render generic MCP server specifications"
+        )
+        _omit(store, participant, plugin, stage="rendering", exc=ValueError(reason))
+
+
+def emit_registry_diagnostic_omissions(participant: Participant, *, store) -> None:
+    """Turn unavailable enabled registry entries into bounded spawn audit events."""
+    snapshot = catalog()
+    available = {plugin.name for plugin in snapshot.servers}
+    emitted: set[str] = set()
+    for diagnostic in sorted(snapshot.diagnostics, key=lambda item: (item.name, item.error)):
+        if diagnostic.name in available or diagnostic.name in emitted:
+            continue
+        emitted.add(diagnostic.name)
+        _record_omission(
+            store,
+            participant,
+            plugin_name=diagnostic.name,
+            stage="registry",
+            detail=_safe_registry_diagnostic(diagnostic.error),
+        )
+        if len(emitted) >= MCP_PLUGIN_SPAWN_OMISSION_MAX:
+            break
 
 
 def omit_conflicting_sidecars(
@@ -306,9 +355,26 @@ def _omit(
     exc: Exception,
 ) -> None:
     detail = _safe_error(plugin, exc)
+    _record_omission(
+        store,
+        participant,
+        plugin_name=plugin.name,
+        stage=stage,
+        detail=detail,
+    )
+
+
+def _record_omission(
+    store,
+    participant: Participant,
+    *,
+    plugin_name: str,
+    stage: str,
+    detail: str,
+) -> None:
     logger.warning(
         "omitting MCP plugin %s for %s during %s: %s",
-        plugin.name,
+        plugin_name,
         participant.id,
         stage,
         detail,
@@ -317,10 +383,10 @@ def _omit(
         store.bus_append(
             BUS_KIND_MCP_PLUGIN_OMITTED,
             to_id=participant.id,
-            payload={"plugin": plugin.name, "stage": stage, "error": detail},
+            payload={"plugin": plugin_name, "stage": stage, "error": detail[:500]},
         )
     except Exception:
-        logger.exception("could not record MCP plugin omission for %s", plugin.name)
+        logger.exception("could not record MCP plugin omission for %s", plugin_name)
 
 
 def _safe_error(plugin: CompiledMcpPlugin, exc: Exception) -> str:
@@ -329,6 +395,12 @@ def _safe_error(plugin: CompiledMcpPlugin, exc: Exception) -> str:
         if isinstance(value, SecretValue):
             detail = detail.replace(value.value, "<redacted>")
     return detail[:500]
+
+
+def _safe_registry_diagnostic(detail: str) -> str:
+    if detail.endswith(" is reserved by Theater"):
+        return detail[:500]
+    return "enabled plugin was unavailable in the daemon registry"
 
 
 def _canonical_path(path: Path) -> Path:
@@ -356,8 +428,10 @@ def _paths_overlap(left: Path, right: Path) -> bool:
 
 __all__ = [
     "PlannedMcpSidecar",
+    "emit_registry_diagnostic_omissions",
     "merge_sidecars",
     "omit_conflicting_sidecars",
+    "omit_unrenderable_sidecars",
     "plan_sidecars",
     "revoke_sidecars",
     "sidecar_specs",

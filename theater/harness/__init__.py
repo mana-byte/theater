@@ -115,11 +115,11 @@ from theater.harness.registry.capabilities import (
     check_reasoning,
     check_resume,
     plan_launch,
+    supports_mcp_rendering,
     supports_model,
     supports_reasoning,
     supports_resume,
 )
-from theater.harness.registry.mcp import theater_mcp_servers
 from theater.harness.registry.claims import (  # noqa: F401
     _observation_keys_for,
 )
@@ -157,6 +157,7 @@ from theater.harness.registry.lookup import (
     normalize,
     observation_lookup,
 )
+from theater.harness.registry.mcp import theater_mcp_servers
 from theater.harness.transcript.observer import TranscriptObserver
 from theater.harness.transcript.source import TranscriptSource
 
@@ -239,6 +240,7 @@ __all__ = [
     "observation_lookup",
     "plan_launch",
     "status_after",
+    "supports_mcp_rendering",
     "supports_model",
     "supports_reasoning",
     "supports_resume",

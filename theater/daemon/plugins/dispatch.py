@@ -25,6 +25,7 @@ OperationHandler = Callable[[object, dict[str, Any], str], Awaitable[Any]]
 _IDENTITY_FIELDS = frozenset(
     {"actor", "actor_id", "caller", "caller_id", "from", "from_id", "parent", "parent_id"}
 )
+_PARENT_FILTER_OPERATIONS = frozenset({"participants.list", "participants.read"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +72,11 @@ async def dispatch(
             required=spec.capability.value,
             granted=sorted(capability.value for capability in record.grants),
         )
-    return await spec.handler(daemon, _without_identity(params), record.participant_id)
+    return await spec.handler(
+        daemon,
+        _without_identity(params, preserve_parent_id=operation in _PARENT_FILTER_OPERATIONS),
+        record.participant_id,
+    )
 
 
 def operation_catalog() -> tuple[dict[str, str], ...]:
@@ -86,8 +91,14 @@ def operation_catalog() -> tuple[dict[str, str], ...]:
     )
 
 
-def _without_identity(params: Mapping[str, object]) -> dict[str, Any]:
-    return {key: value for key, value in params.items() if key not in _IDENTITY_FIELDS}
+def _without_identity(
+    params: Mapping[str, object], *, preserve_parent_id: bool = False
+) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in params.items()
+        if key not in _IDENTITY_FIELDS or (preserve_parent_id and key == "parent_id")
+    }
 
 
 def _with_actor(
