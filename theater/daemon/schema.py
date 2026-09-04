@@ -164,6 +164,22 @@ participant_artifacts = Table(
 
 Index("idx_participant_artifacts_participant", participant_artifacts.c.participant_id)
 
+# The daemon stores a verifier, never a plugin credential.  One row is one
+# participant-scoped stdio sidecar and remains authoritative after a restart.
+participant_mcp_plugins = Table(
+    "participant_mcp_plugins",
+    metadata,
+    Column("participant_id", Text, primary_key=True),
+    Column("plugin_name", Text, primary_key=True),
+    Column("api_version", Integer, nullable=False),
+    Column("credential_id", Text, nullable=False, unique=True),
+    Column("credential_verifier", Text, nullable=False),
+    Column("grants", Text, nullable=False),
+    Column("credential_path", Text, nullable=False),
+)
+
+Index("idx_participant_mcp_plugins_participant", participant_mcp_plugins.c.participant_id)
+
 # Named shared worktrees: key is (repo_root, name); only Theater-created worktrees appear here.
 named_worktrees = Table(
     "named_worktrees",

@@ -49,6 +49,7 @@ EXPECTED_COMMANDS = {
     "mcp",
     "models",
     "name",
+    "plugin",
     "regie",
     "restart",
     "spawn",

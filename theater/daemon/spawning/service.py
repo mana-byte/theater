@@ -266,7 +266,7 @@ class Spawner:
         self, req: SpawnRequest, participant: Participant, overlay: ResumeLaunchOverlay | None
     ) -> LaunchPlan:
         """Launch plan construction via the planning module."""
-        return build_plan(req, participant, overlay)
+        return build_plan(req, participant, overlay, registry=self.registry)
 
     @staticmethod
     def _install_hook_plan(plan: LaunchPlan, participant: Participant, observer) -> LaunchPlan:

@@ -1,5 +1,6 @@
 """MCP-server plugin contracts, loading, and independent registry."""
 
+from theater.constants.plugins import MCP_PLUGIN_CREDENTIAL_PATH_ENV
 from theater.mcp_plugins.compiler import compile_manifest
 from theater.mcp_plugins.config import (
     McpConfigResolutionError,
@@ -58,6 +59,7 @@ __all__ = [
     "MANIFEST_API_VERSION",
     "MANIFEST_FILENAME",
     "MCP_PLUGIN_API_VERSION",
+    "MCP_PLUGIN_CREDENTIAL_PATH_ENV",
     "MCP_SERVERS",
     "MISSING",
     "PLUGIN_API_VERSION",

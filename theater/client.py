@@ -194,7 +194,12 @@ class DaemonClient:
                     raise
                 if not msg.get("ok"):
                     error = msg.get("error") or {}
-                    exc = RemoteError(error.get("code", "error"), error.get("message", ""))
+                    details = error.get("details")
+                    exc = RemoteError(
+                        error.get("code", "error"),
+                        error.get("message", ""),
+                        details if isinstance(details, dict) else None,
+                    )
                     raise exc
                 return msg.get("result")
 

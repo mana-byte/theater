@@ -181,7 +181,43 @@ def _add_process_parsers(sub) -> None:
     )
 
 
-def _parser() -> argparse.ArgumentParser:
+def _add_plugin_parser(sub) -> None:
+    """Register the JSON-only sidecar compatibility gateway."""
+    plugin = sub.add_parser(
+        "plugin",
+        help="Call one capability-scoped MCP-plugin operation using JSON stdin/stdout.",
+        description=(
+            "Compatibility gateway for a Theater-launched MCP-plugin sidecar. "
+            "Run `theater plugin call OPERATION`, provide exactly one JSON object on stdin, "
+            "and read exactly one JSON envelope from stdout. The gateway reads the credential "
+            "path injected in THEATER_PLUGIN_CREDENTIAL_PATH (or --credential-file), authenticates "
+            "every call, and permits only Theater's documented plugin operations. It cannot "
+            "forward "
+            "an arbitrary daemon RPC method. Errors use {ok:false,error:{code,message,details?}}."
+        ),
+    )
+    commands = plugin.add_subparsers(dest="plugin_command", required=True)
+    call = commands.add_parser(
+        "call",
+        help="Call OPERATION with one JSON-object stdin payload and emit one JSON envelope.",
+        description=(
+            "OPERATION is one of the documented plugin operations, such as sessions.send, "
+            "participants.list, jobs.await, or scratchpad.write. Its JSON-object stdin payload "
+            "contains only that operation's normal parameters. Actor, caller, parent, and from "
+            "identity fields are ignored and replaced from the authenticated sidecar credential."
+        ),
+    )
+    call.add_argument("operation", help="Explicit capability-scoped plugin operation name.")
+    call.add_argument(
+        "--credential-file",
+        default=None,
+        help=(
+            "Override the injected credential path; intended for compatibility wrappers and tests."
+        ),
+    )
+
+
+def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     p = argparse.ArgumentParser(
         prog="theater",
         description="Cross-harness orchestration for coding agents.",
@@ -196,6 +232,7 @@ def _parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=False, action=_HiddenSubParsersAction)
 
     _add_process_parsers(sub)
+    _add_plugin_parser(sub)
     _add_receipt_parser(sub)
 
     ls = sub.add_parser("ls", help="List participants.")

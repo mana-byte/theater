@@ -245,6 +245,27 @@ class BadRequest(TheaterError):
     code = "bad_request"
 
 
+class PluginAuthenticationFailed(TheaterError):
+    """A sidecar credential is malformed, revoked, stale, or invalid."""
+
+    code = "plugin_auth_failed"
+
+
+class CapabilityDenied(TheaterError):
+    """An authenticated sidecar lacks the capability required by an operation."""
+
+    code = "capability_denied"
+
+    def __init__(self, *, required: str, granted: tuple[str, ...] | list[str]) -> None:
+        self.required = required
+        self.granted = tuple(granted)
+        self.details = {"required": self.required, "granted": list(self.granted)}
+        super().__init__(
+            f"plugin operation requires capability {required!r}; "
+            f"granted capabilities are {', '.join(self.granted) or '(none)'}"
+        )
+
+
 class NotAddressable(TheaterError):
     code = "not_addressable"
 

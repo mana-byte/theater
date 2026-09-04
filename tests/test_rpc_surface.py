@@ -20,6 +20,7 @@ EXPECTED_RPC_METHODS = {
     "participant.interrupt",
     "participant.rename",
     "participant.update",
+    "plugin.call",
     "participant.status",
     "participants.get",
     "participants.list",

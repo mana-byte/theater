@@ -45,6 +45,10 @@ RECEIPT_TOKEN_PREFIX = "receipt_token:"
 #: Meta key prefix for participant-scoped native channel credentials.
 CHANNEL_CREDENTIAL_PREFIX = "channel_credential:"
 
+#: Audit event for an enabled MCP sidecar omitted for one participant.  Omission
+#: is intentionally non-fatal: the harness still starts without that sidecar.
+BUS_KIND_MCP_PLUGIN_OMITTED = "mcp_plugin.omitted"
+
 #: Meta key for the stable loopback endpoint used by native OTel channels.
 CHANNEL_OTEL_RECEIVER_PORT_META_KEY = "channel_otel_receiver_port"
 

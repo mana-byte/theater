@@ -64,6 +64,7 @@ def test_migrations_created_the_alembic_version_table(store):
         "budgets",
         "tree_kv",
         "participant_artifacts",
+        "participant_mcp_plugins",
         "named_worktrees",
         "usage",
     } <= tables
@@ -84,6 +85,19 @@ def test_migrations_created_the_alembic_version_table(store):
     assert "terminated_at" in col_names
     assert "resumed_from_id" in col_names
     assert "description" in col_names
+
+    plugin_cols = store.conn.exec_driver_sql(
+        "PRAGMA table_info(participant_mcp_plugins)"
+    ).fetchall()
+    assert {
+        "participant_id",
+        "plugin_name",
+        "api_version",
+        "credential_id",
+        "credential_verifier",
+        "grants",
+        "credential_path",
+    } == {row[1] for row in plugin_cols}
 
     usage_cols = store.conn.exec_driver_sql("PRAGMA table_info(usage)").fetchall()
     assert "harness" in {row[1] for row in usage_cols}

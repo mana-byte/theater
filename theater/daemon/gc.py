@@ -169,6 +169,7 @@ async def sweep(
     await _sweep_artifact_orphans(store, retention.batch, exclude=deleted_participant_ids)
     store.cleanup_receipt_tokens()
     store.cleanup_channel_credentials()
+    store.cleanup_mcp_plugin_credentials()
     await asyncio.sleep(0)
 
     result = SweepResult(

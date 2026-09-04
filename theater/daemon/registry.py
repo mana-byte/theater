@@ -513,11 +513,13 @@ class Registry:
             self._names.pop(pid, None)
             self.store.delete_receipt_token(pid)
             self.store.delete_channel_credentials(pid)
+            self.store.delete_mcp_plugin_credentials(pid)
             self._cleanup_participant(pid)
             return
         self.store.set_status(pid, Status.DEAD)
         self.store.delete_receipt_token(pid)
         self.store.delete_channel_credentials(pid)
+        self.store.delete_mcp_plugin_credentials(pid)
         self._cleanup_participant(pid)
         self._names.pop(pid, None)
         self.store.bus_append("participant.dead", to_id=pid)
@@ -526,6 +528,7 @@ class Registry:
         for p in participants:
             self.store.delete_receipt_token(p.id)
             self.store.delete_channel_credentials(p.id)
+            self.store.delete_mcp_plugin_credentials(p.id)
             self._cleanup_participant(p.id)
             self._names.pop(p.id, None)
 

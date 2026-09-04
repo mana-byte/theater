@@ -73,6 +73,11 @@ def participant_artifacts_dir(participant_id: str) -> Path:
     return home() / "artifacts" / participant_id
 
 
+def participant_mcp_plugin_dir(participant_id: str, plugin_name: str) -> Path:
+    """Private launch-artifact root for one participant MCP sidecar."""
+    return participant_artifacts_dir(participant_id) / "mcp" / plugin_name
+
+
 def observations_dir() -> Path:
     """Root for participant-scoped observation state."""
     return home() / "observations"

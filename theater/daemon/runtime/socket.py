@@ -105,21 +105,22 @@ async def dispatch(daemon, line: bytes, *, methods) -> bytes:
     fields: dict[str, Any] = {"caller": params.get("caller_id")}
     if spec.key == "RPC_SERVER":
         fields["method"] = name
-    error: tuple[str, str] | None
+    error: tuple[str, str, dict[str, Any] | None] | None
     with timing.span(spec, parent_context=parent_context, **fields) as sp:
         try:
             result = await handler(daemon, params)
         except TheaterError as exc:
             sp.set_result("error", error_type=exc.code)
-            error = (exc.code, str(exc))
+            details = getattr(exc, "details", None)
+            error = (exc.code, str(exc), details if isinstance(details, dict) else None)
         except Exception as exc:
             et = f"{type(exc).__module__}.{type(exc).__qualname__}"
             sp.set_result("error", error_type=et)
             logger.exception("handler %s failed", name)
-            error = ("internal", f"{type(exc).__name__}: {exc}")
+            error = ("internal", f"{type(exc).__name__}: {exc}", None)
         else:
             error = None
 
     if error is not None:
-        return protocol.err(req_id, *error)
+        return protocol.err(req_id, error[0], error[1], details=error[2])
     return protocol.ok(req_id, result)

@@ -32,6 +32,7 @@ from theater.cli.commands.participants import (
     cmd_name,
     cmd_spawn,
 )
+from theater.cli.commands.plugin import cmd_plugin_call
 from theater.cli.commands.process import (
     cmd_daemon,
     cmd_mcp,
@@ -44,6 +45,7 @@ COMMANDS = {
     None: cmd_launch,
     "daemon": cmd_daemon,
     "mcp": cmd_mcp,
+    "plugin": cmd_plugin_call,
     TRANSCRIPT_RECEIPT_COMMAND: cmd_transcript_receipt,
     "claude-receipt": cmd_claude_receipt,
     "harness-event": cmd_harness_event,

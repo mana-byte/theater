@@ -36,6 +36,7 @@ from theater.daemon.persistence.repositories.artifacts import ArtifactRepository
 from theater.daemon.persistence.repositories.bus import BusRepository
 from theater.daemon.persistence.repositories.channels import ChannelCredentialRepository
 from theater.daemon.persistence.repositories.jobs import JobRepository
+from theater.daemon.persistence.repositories.mcp_plugins import McpPluginCredentialRepository
 from theater.daemon.persistence.repositories.metadata import MetadataRepository
 from theater.daemon.persistence.repositories.participants import ParticipantRepository
 from theater.daemon.persistence.repositories.receipts import ReceiptRepository
@@ -72,6 +73,7 @@ class Store:
         self._meta = MetadataRepository(self._db)
         self._receipts = ReceiptRepository(self._db, self._meta, self._participants)
         self._channels = ChannelCredentialRepository(self._db, self._meta, self._participants)
+        self._mcp_plugins = McpPluginCredentialRepository(self._db, self._participants)
         self._scratchpad = ScratchpadRepository(self._db)
         self._worktrees = WorktreeRepository(self._db)
         self._usage = UsageRepository(self._db)
@@ -438,6 +440,49 @@ class Store:
 
     def cleanup_channel_credentials(self) -> int:
         return self._channels.cleanup()
+
+    # ---- MCP-plugin sidecar credentials -------------------------------
+
+    def set_mcp_plugin_credential(
+        self,
+        participant_id: str,
+        *,
+        plugin_name: str,
+        api_version: int,
+        credential_id: str,
+        credential_verifier: str,
+        grants,
+        credential_path: str,
+    ) -> None:
+        """Persist one sidecar verifier and its exact launch-time grants."""
+        self._mcp_plugins.set(
+            participant_id,
+            plugin_name=plugin_name,
+            api_version=api_version,
+            credential_id=credential_id,
+            credential_verifier=credential_verifier,
+            grants=grants,
+            credential_path=credential_path,
+        )
+
+    def get_mcp_plugin_credential(self, credential_id: str):
+        """Return an active sidecar credential record by its public selector."""
+        return self._mcp_plugins.get_by_credential_id(credential_id)
+
+    def mcp_plugin_credentials(self, participant_id: str):
+        """Return durable attached-sidecar facts for one participant."""
+        return self._mcp_plugins.list_for_participant(participant_id)
+
+    def delete_mcp_plugin_credential(self, participant_id: str, plugin_name: str) -> None:
+        """Revoke one sidecar before it can use its credential again."""
+        self._mcp_plugins.delete_plugin(participant_id, plugin_name)
+
+    def delete_mcp_plugin_credentials(self, participant_id: str) -> None:
+        """Revoke every sidecar credential belonging to a participant."""
+        self._mcp_plugins.delete_participant(participant_id)
+
+    def cleanup_mcp_plugin_credentials(self) -> int:
+        return self._mcp_plugins.cleanup()
 
     def record_transcript_receipt(
         self,

@@ -14,6 +14,7 @@ from theater.daemon.rpc import (  # noqa: F401
     interruption,
     jobs,
     participants,
+    plugins,
     recall,
     scratchpad,
     sending,

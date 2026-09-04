@@ -15,3 +15,11 @@ MCP_PLUGIN_LAUNCH_MAX_ENV = 128
 MCP_PLUGIN_LAUNCH_MAX_ARTIFACTS = 64
 MCP_PLUGIN_LAUNCH_MAX_TEXT_CHARS = 1_048_576
 MCP_PLUGIN_LAUNCH_MAX_VALUE_CHARS = 16_384
+
+#: Injected into every configured MCP-plugin sidecar.  The path names a
+#: participant-private, core-written credential file; planners never see its bytes.
+MCP_PLUGIN_CREDENTIAL_PATH_ENV = "THEATER_PLUGIN_CREDENTIAL_PATH"
+
+#: Bounded credential-file and wire-token sizes keep malformed sidecars from
+#: turning authentication into unbounded file or SQLite work.
+MCP_PLUGIN_CREDENTIAL_MAX_CHARS = 512

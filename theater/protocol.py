@@ -112,14 +112,24 @@ def ok(req_id: int, result: Any) -> bytes:
     return encode({"id": req_id, "ok": True, "result": result})
 
 
-def err(req_id: int, code: str, message: str) -> bytes:
-    return encode({"id": req_id, "ok": False, "error": {"code": code, "message": message}})
+def err(
+    req_id: int,
+    code: str,
+    message: str,
+    *,
+    details: Mapping[str, Any] | None = None,
+) -> bytes:
+    error: dict[str, Any] = {"code": code, "message": message}
+    if details is not None:
+        error["details"] = dict(details)
+    return encode({"id": req_id, "ok": False, "error": error})
 
 
 class RemoteError(Exception):
     """An error the daemon reported, re-raised on the client side."""
 
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, details: Mapping[str, Any] | None = None):
         super().__init__(f"{code}: {message}")
         self.code = code
         self.message = message
+        self.details = dict(details) if details is not None else None
