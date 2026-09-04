@@ -77,10 +77,13 @@ capability-scoped plugin operations; it cannot become an arbitrary daemon RPC
 tunnel. Use `--credential-file` only for a wrapper or test that needs to pass
 the injected path explicitly.
 
-Plugin code is untrusted extension code. A manifest can launch only its own
-participant-scoped sidecar and artifact space; a credential is bound to one
-participant and is revoked when that participant is cleaned up. Capability
-grants do not bypass Theater's normal identity, rails, human-presence, or
-runtime authorization checks. A broken local package is diagnostic and
-non-fatal; an enabled broken package shipped by Theater remains fatal because
-it is a product defect.
+Plugin manifests and launched commands are trusted Python and OS processes:
+they run with the daemon user's filesystem, process, and network authority.
+The capability credential constrains only authenticated Theater plugin RPCs;
+it is not a process, filesystem, or network sandbox. `McpLaunchPlan` confines
+the artifact paths Theater writes, not the paths a plugin command can access.
+A credential is participant-scoped and revoked when that participant is
+cleaned up. Capability grants do not bypass Theater's normal identity, rails,
+human-presence, or runtime authorization checks. A broken local package is
+diagnostic and non-fatal; an enabled broken package shipped by Theater remains
+fatal because it is a product defect.

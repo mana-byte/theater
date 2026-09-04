@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shlex
+import shutil
 import sys
+import tempfile
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
+from mcp import ClientSession
+from mcp.client.stdio import StdioServerParameters, stdio_client
 
 from theater import config
 from theater.mcp_plugins import registry
@@ -27,38 +32,55 @@ def clean_registry():
     registry._DIAGNOSTICS.clear()
 
 
-def _module(plugin) -> object:
-    return sys.modules[plugin.launch.planner.__module__]
+async def _tool_call(
+    plan, *, name: str, arguments: dict, env: dict[str, str]
+) -> tuple[set[str], object]:
+    parameters = StdioServerParameters(
+        command=plan.command,
+        args=list(plan.argv),
+        env={**plan.env, **env},
+    )
+    async with (
+        stdio_client(parameters) as (read_stream, write_stream),
+        ClientSession(read_stream, write_stream) as session,
+    ):
+        await session.initialize()
+        tools = await session.list_tools()
+        result = await session.call_tool(name, arguments)
+    payload = (
+        result.structured_content
+        if result.structured_content is not None
+        else json.loads(result.content[0].text)
+    )
+    return {tool.name for tool in tools.tools}, payload
 
 
-def test_native_fixture_discovers_configures_launches_and_uses_typed_client(tmp_path, monkeypatch):
+async def test_native_fixture_launches_a_stdio_mcp_server_and_uses_typed_client(tmp_path):
     settings = config.Config(
         mcp=config.McpSection(enabled=["native"], plugins={"native": {"label": "ready"}})
     )
     assert registry.install(settings, local_dir=FIXTURES, shipped_dir=tmp_path / "shipped") == [
         "native"
     ]
-    plugin = registry.get("native")
-    plan = plugin.plan_launch(participant_id="p-native", cwd=tmp_path)
-    assert plan.command == sys.executable
-    assert plan.argv[-1] == "ready"
+    credential = tmp_path / "credential"
+    credential.write_text("fixture-credential\n", encoding="utf-8")
+    plan = registry.get("native").plan_launch(participant_id="p-native", cwd=tmp_path)
+    assert plan.env == {"FIXTURE_NATIVE_LABEL": "ready"}
 
-    class Client:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_exc):
-            return None
-
-        async def list_participants(self):
-            return [{"id": "p-native"}]
-
-    module = _module(plugin)
-    monkeypatch.setattr(module, "TheaterPluginClient", Client)
-    assert asyncio.run(module.participants()) == [{"id": "p-native"}]
+    tools, payload = await _tool_call(
+        plan,
+        name="list_fixture_participants",
+        arguments={},
+        env={
+            "THEATER_PLUGIN_CREDENTIAL_PATH": str(credential),
+            "THEATER_PLUGIN_FIXTURE_RESPONSE": '[{"id":"p-native"}]',
+        },
+    )
+    assert tools == {"list_fixture_participants"}
+    assert payload == {"result": [{"id": "p-native"}]}
 
 
-def test_compat_fixture_configures_launch_and_uses_json_gateway(tmp_path, monkeypatch):
+async def test_compat_fixture_launches_a_stdio_mcp_server_through_the_json_gateway(tmp_path):
     settings = config.Config(
         mcp=config.McpSection(
             enabled=["compat"], plugins={"compat": {"endpoint": "https://api.invalid"}}
@@ -67,29 +89,55 @@ def test_compat_fixture_configures_launch_and_uses_json_gateway(tmp_path, monkey
     assert registry.install(settings, local_dir=FIXTURES, shipped_dir=tmp_path / "shipped") == [
         "compat"
     ]
-    plugin = registry.get("compat")
-    assert plugin.plan_launch(participant_id="p-compat", cwd=tmp_path).env == {
-        "FIXTURE_ENDPOINT": "https://api.invalid"
-    }
+    gateway_dir = tmp_path / "bin"
+    gateway_dir.mkdir()
+    gateway = gateway_dir / "theater"
+    gateway.write_text(
+        f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -m theater.cli "$@"\n',
+        encoding="utf-8",
+    )
+    gateway.chmod(0o700)
+    credential = tmp_path / "credential"
+    credential.write_text("fixture-credential\n", encoding="utf-8")
+    plan = registry.get("compat").plan_launch(participant_id="p-compat", cwd=tmp_path)
+    assert plan.env == {"FIXTURE_ENDPOINT": "https://api.invalid"}
 
-    observed = {}
+    theater_home = Path(tempfile.mkdtemp(prefix="theater-mcp-"))
+    received: dict = {}
 
-    def run(command, **kwargs):
-        observed["command"] = command
-        observed["payload"] = json.loads(kwargs["input"])
-        return SimpleNamespace(stdout='{"ok":true,"result":{"id":"p-compat"}}')
+    async def daemon(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        request = json.loads(await reader.readline())
+        received.update(request)
+        writer.write(
+            json.dumps({"id": request["id"], "ok": True, "result": {"id": "p-compat"}}).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
 
-    module = _module(plugin)
-    monkeypatch.setattr(module.subprocess, "run", run)
-    assert module.participant("p-compat", credential_file="/tmp/credential") == {"id": "p-compat"}
-    assert observed == {
-        "command": [
-            "theater",
-            "plugin",
-            "call",
-            "participants.get",
-            "--credential-file",
-            "/tmp/credential",
-        ],
-        "payload": {"id": "p-compat"},
+    server = await asyncio.start_unix_server(daemon, path=theater_home / "daemon.sock")
+    try:
+        tools, payload = await _tool_call(
+            plan,
+            name="get_fixture_participant",
+            arguments={"participant_id": "p-compat"},
+            env={
+                "THEATER_HOME": str(theater_home),
+                "THEATER_PLUGIN_CREDENTIAL_PATH": str(credential),
+                "PATH": f"{gateway_dir}{os.pathsep}{os.environ['PATH']}",
+            },
+        )
+    finally:
+        server.close()
+        await server.wait_closed()
+        shutil.rmtree(theater_home)
+
+    assert tools == {"get_fixture_participant"}
+    assert payload == {"id": "p-compat", "source": "existing-server"}
+    assert received["method"] == "plugin.call"
+    assert received["params"] == {
+        "credential": "fixture-credential",
+        "operation": "participants.get",
+        "params": {"id": "p-compat"},
     }

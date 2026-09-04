@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
@@ -23,7 +22,6 @@ from theater.mcp_plugins.loading import discover as discover_mcp
 from theater.mcp_plugins.loading import load_plugin as load_mcp
 
 _RESERVED_MCP_NAMES = frozenset({HARNESS_MCP_SERVER_NAME, HARNESS_MCP_WAIT_SERVER_NAME})
-_UNSAFE_EXCEPTION = re.compile(r": (?:[A-Za-z_][A-Za-z0-9_.]*Error|Exception|SystemExit)\b")
 
 
 def describe(
@@ -49,25 +47,50 @@ def describe(
     mcp_names = {plugin.name for plugin in mcps if _canonical(plugin.name)}
     conflicts = harness_names & mcp_names
     disabled_harnesses = set(config.harness.disabled)
-    rows = [
-        _harness_row(plugin, disabled=plugin.name in disabled_harnesses, conflicts=conflicts)
-        for plugin in harnesses
-    ]
+    rows = _harness_rows(harnesses, disabled=disabled_harnesses, conflicts=conflicts)
     rows.extend(_mcp_rows(mcps, config, conflicts))
     return sorted(rows, key=lambda row: (row["kind"], row["name"], row["source"] or ""))
 
 
-def _harness_row(plugin: LoadedPlugin, *, disabled: bool, conflicts: set[str]) -> dict[str, Any]:
-    row = _base_row("harness", plugin, enabled=not disabled)
-    if plugin.name in conflicts:
-        return _broken(row, _cross_kind_error(plugin.name))
-    if disabled:
-        row["state"] = "disabled"
-        return row
-    loaded = harness_importer.load_plugin(plugin)
-    if loaded.error is not None or loaded.manifest is None:
-        return _broken(row, _safe_error(loaded.error))
-    manifest = loaded.manifest
+def _harness_rows(
+    plugins: list[LoadedPlugin], *, disabled: set[str], conflicts: set[str]
+) -> list[dict[str, Any]]:
+    loaded: dict[Path, LoadedPlugin] = {}
+    local_valid: set[str] = set()
+    for plugin in plugins:
+        if plugin.name in disabled or plugin.name in conflicts:
+            continue
+        result = harness_importer.load_plugin(plugin)
+        loaded[plugin.path] = result
+        if plugin.source == LOCAL and result.manifest is not None and result.error is None:
+            local_valid.add(plugin.name)
+
+    rows: list[dict[str, Any]] = []
+    for plugin in plugins:
+        row = _base_row("harness", plugin, enabled=plugin.name not in disabled)
+        if plugin.name in conflicts:
+            rows.append(_broken(row, _cross_kind_error(plugin.name)))
+        elif plugin.name in disabled:
+            row["state"] = "disabled"
+            rows.append(row)
+        else:
+            result = loaded[plugin.path]
+            if plugin.error is not None:
+                rows.append(_broken(row, _structural_error(plugin.error)))
+            elif result.error is not None or result.manifest is None:
+                rows.append(_broken(row, _safe_error(result.error)))
+            elif plugin.source == SHIPPED and plugin.name in local_valid:
+                row["state"] = "overridden"
+                row["error"] = "a local harness package with this canonical name takes precedence"
+                rows.append(row)
+            else:
+                rows.append(_loaded_harness_row(row, result))
+    return rows
+
+
+def _loaded_harness_row(row: dict[str, Any], plugin: LoadedPlugin) -> dict[str, Any]:
+    assert plugin.manifest is not None
+    manifest = plugin.manifest
     row.update(
         state="loaded",
         manifest_api_version=manifest.api_version,
@@ -81,7 +104,7 @@ def _mcp_rows(
     plugins: list[LoadedMcpPlugin], config: Config, conflicts: set[str]
 ) -> list[dict[str, Any]]:
     enabled = set(config.mcp.enabled)
-    selected = _selected(plugins)
+    selected, duplicates = _selected(plugins)
     rows: list[dict[str, Any]] = []
     for plugin in plugins:
         selected_plugin = selected.get(plugin.name)
@@ -89,6 +112,13 @@ def _mcp_rows(
         row = _base_row("mcp_server", plugin, enabled=plugin.name in enabled)
         if plugin.name in conflicts:
             rows.append(_broken(row, _cross_kind_error(plugin.name)))
+        elif plugin in duplicates:
+            row["state"] = "duplicate"
+            row["error"] = (
+                f"multiple {plugin.source} MCP-server packages reserve canonical name "
+                f"{plugin.name!r}; none is enabled"
+            )
+            rows.append(row)
         elif not is_selected:
             row["state"] = "overridden"
             row["error"] = "a local MCP-server package with this canonical name takes precedence"
@@ -99,7 +129,7 @@ def _mcp_rows(
         elif plugin.name in _RESERVED_MCP_NAMES:
             rows.append(_broken(row, f"MCP server name {plugin.name!r} is reserved by Theater"))
         elif plugin.error is not None:
-            rows.append(_broken(row, _safe_error(plugin.error)))
+            rows.append(_broken(row, _structural_error(plugin.error)))
         else:
             rows.append(_loaded_mcp_row(row, plugin, config))
     found = {plugin.name for plugin in plugins if _canonical(plugin.name)}
@@ -141,7 +171,9 @@ def _loaded_mcp_row(row: dict[str, Any], plugin: LoadedMcpPlugin, config: Config
     return row
 
 
-def _selected(plugins: Iterable[LoadedMcpPlugin]) -> dict[str, LoadedMcpPlugin]:
+def _selected(
+    plugins: Iterable[LoadedMcpPlugin],
+) -> tuple[dict[str, LoadedMcpPlugin], frozenset[LoadedMcpPlugin]]:
     by_name: dict[str, dict[str, list[LoadedMcpPlugin]]] = {
         SHIPPED: defaultdict(list),
         LOCAL: defaultdict(list),
@@ -149,11 +181,14 @@ def _selected(plugins: Iterable[LoadedMcpPlugin]) -> dict[str, LoadedMcpPlugin]:
     for plugin in plugins:
         by_name[plugin.source][plugin.name].append(plugin)
     selected: dict[str, LoadedMcpPlugin] = {}
+    duplicates: set[LoadedMcpPlugin] = set()
     for source in (SHIPPED, LOCAL):
         for name, group in by_name[source].items():
             if len(group) == 1:
                 selected[name] = group[0]
-    return selected
+            else:
+                duplicates.update(group)
+    return selected, frozenset(duplicates)
 
 
 def _base_row(
@@ -187,11 +222,20 @@ def _cross_kind_error(name: str) -> str:
 
 
 def _safe_error(error: str | None, *, fallback: str = "manifest could not be loaded") -> str:
-    """Keep arbitrary plugin exception values and configured values out of diagnostics."""
+    """Expose only diagnostics Theater generated from package structure or manifest kind."""
     if not error:
         return fallback
-    if _UNSAFE_EXCEPTION.search(error) or "failed:" in error:
-        return fallback
+    if "MANIFEST is a HarnessManifest" in error:
+        return "manifest exports HarnessManifest; MCP-server packages require McpServerManifest"
+    if "MANIFEST is a McpServerManifest" in error:
+        return "manifest exports McpServerManifest; harness packages require HarnessManifest"
+    if "MANIFEST is the class" in error:
+        return "manifest exports a class rather than a manifest instance"
+    return fallback
+
+
+def _structural_error(error: str) -> str:
+    """Normalize a pre-import discovery error emitted by Theater's package scanner."""
     return " ".join("".join(char if char.isprintable() else " " for char in error).split())
 
 
