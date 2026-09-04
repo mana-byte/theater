@@ -20,6 +20,26 @@ The directory name is canonical. A package cannot also export a
 broken, and loaded packages. Disabled MCP packages are discovered but their
 Python is not imported.
 
+An enabled plugin may register static Theater skills by canonical name:
+
+```python
+MANIFEST = McpServerManifest(
+    ...,
+    skills=("acme-usage",),
+)
+```
+
+Each declared skill lives at `skills/<name>/SKILL.md` inside the plugin package.
+Theater validates and freezes these files when the daemon loads the plugin;
+the sidecar cannot register or change skills at runtime. Registered skills use
+the existing `list_skills` and `load_skill` tools and identify their owning
+plugin in returned metadata. Names share the global skill namespace. Colliding
+plugin registrations are omitted with diagnostics and never override an
+existing skill. A missing or malformed declared package makes the enabled
+plugin invalid. Disabled plugins contribute no skills and their skill files are
+not read. Registration needs no `PluginCapability`; `SKILLS_READ` only lets a
+running sidecar consume Theater's skill catalog.
+
 Enable a sidecar explicitly:
 
 ```toml

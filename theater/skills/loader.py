@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import os
 import stat
+from collections.abc import Sequence
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -65,7 +66,14 @@ def is_canonical_name(name: str) -> bool:
     return len(name) <= SKILL_NAME_MAX_CHARS and SKILL_NAME.fullmatch(name) is not None
 
 
-def _load_package(package_name: str, *, source: SkillSource, root: Path, root_fd: int) -> Skill:
+def _load_package(
+    package_name: str,
+    *,
+    source: SkillSource,
+    root: Path,
+    root_fd: int,
+    provider: str | None = None,
+) -> Skill:
     """Load one package through the already-open discovery root."""
     name = package_name
     if not is_canonical_name(name):
@@ -108,7 +116,39 @@ def _load_package(package_name: str, *, source: SkillSource, root: Path, root_fd
         content=content,
         source=source,
         source_path=root / name / SKILL_FILENAME,
+        provider=provider,
     )
+
+
+def load_declared_skills(
+    root: Path,
+    names: Sequence[str],
+    *,
+    provider: str,
+) -> tuple[Skill, ...]:
+    """Load explicitly declared MCP-plugin skills from one package-owned root."""
+    if not names:
+        return ()
+    root_fd = _open_directory(root, "MCP-plugin skill root")
+    assert root_fd is not None
+    try:
+        loaded: list[Skill] = []
+        for name in names:
+            try:
+                loaded.append(
+                    _load_package(
+                        name,
+                        source=SkillSource.MCP_PLUGIN,
+                        root=root,
+                        root_fd=root_fd,
+                        provider=provider,
+                    )
+                )
+            except SkillValidationError as exc:
+                raise SkillValidationError(f"registered skill {name!r}: {exc}") from exc
+        return tuple(loaded)
+    finally:
+        _close_fd(root_fd)
 
 
 def _open_directory(

@@ -286,6 +286,52 @@ def test_user_builtin_name_collision_cannot_override_shipped_skill(tmp_path):
     assert "builtin/theater-debate/SKILL.md" in rejection.error
 
 
+def test_plugin_skills_are_added_without_overriding_existing_names(tmp_path):
+    write_skill(tmp_path, "existing")
+    unique = Skill(
+        "plugin-guide",
+        "Plugin guide.",
+        "plugin guide",
+        SkillSource.MCP_PLUGIN,
+        Path("/plugins/acme/skills/plugin-guide/SKILL.md"),
+        "acme",
+    )
+    conflict = Skill(
+        "existing",
+        "Conflicting guide.",
+        "conflict",
+        SkillSource.MCP_PLUGIN,
+        Path("/plugins/acme/skills/existing/SKILL.md"),
+        "acme",
+    )
+
+    snapshot = discover(user_dir=tmp_path, plugin_skills=(unique, conflict))
+
+    assert snapshot.load("plugin-guide") == unique
+    assert snapshot.load("existing").source is SkillSource.USER
+    assert [(item.name, item.provider) for item in snapshot.rejections] == [("existing", "acme")]
+
+
+def test_duplicate_plugin_skill_names_register_neither_definition(tmp_path):
+    skills = tuple(
+        Skill(
+            "shared-guide",
+            f"Guide from {provider}.",
+            provider,
+            SkillSource.MCP_PLUGIN,
+            Path(f"/plugins/{provider}/skills/shared-guide/SKILL.md"),
+            provider,
+        )
+        for provider in ("acme", "other")
+    )
+
+    snapshot = discover(user_dir=tmp_path, plugin_skills=skills)
+
+    with pytest.raises(UnknownSkill):
+        snapshot.load("shared-guide")
+    assert {item.provider for item in snapshot.rejections} == {"acme", "other"}
+
+
 def test_invalid_user_skill_is_diagnostic_but_invalid_builtin_is_fatal(tmp_path):
     write_raw(tmp_path, "broken-user", "---\nname: broken-user\n---\n")
 
@@ -444,17 +490,39 @@ async def test_skill_rpc_serializes_snapshots_and_maps_load_errors(monkeypatch):
         "broken",
         "frontmatter must contain exactly name and description",
     )
-    snapshot = SkillRegistry({"alpha": skill}, (rejection,))
+    plugin_skill = Skill(
+        "plugin-guide",
+        "Plugin guide.",
+        "# Plugin guide\n",
+        SkillSource.MCP_PLUGIN,
+        Path("/tmp/plugins/acme/skills/plugin-guide/SKILL.md"),
+        "acme",
+    )
+    snapshot = SkillRegistry({"alpha": skill, "plugin-guide": plugin_skill}, (rejection,))
     discoveries = []
 
-    def fake_discover():
+    def fake_discover(*, plugin_skills=()):
+        assert tuple(plugin_skills) == (plugin_skill,)
         discoveries.append(None)
         return snapshot
 
     monkeypatch.setattr(skills_rpc.registry, "discover", fake_discover)
+    monkeypatch.setattr(
+        skills_rpc.mcp_registry,
+        "catalog",
+        lambda: SimpleNamespace(registered_skills=(plugin_skill,)),
+    )
 
     assert await skills_rpc._skills_list(None, {"ignored": True}) == {
-        "skills": [{"name": "alpha", "description": "A useful skill.", "source": "user"}],
+        "skills": [
+            {"name": "alpha", "description": "A useful skill.", "source": "user"},
+            {
+                "name": "plugin-guide",
+                "description": "Plugin guide.",
+                "source": "mcp_plugin",
+                "plugin": "acme",
+            },
+        ],
         "rejections": [
             {
                 "source": "user",

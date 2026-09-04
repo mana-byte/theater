@@ -167,6 +167,7 @@ def _loaded_mcp_row(row: dict[str, Any], plugin: LoadedMcpPlugin, config: Config
         manifest_api_version=loaded.manifest.api_version,
         description=compiled.description,
         capabilities=sorted(capability.value for capability in compiled.capabilities),
+        skills=[skill.name for skill in loaded.skills],
     )
     return row
 
@@ -241,6 +242,8 @@ def _safe_error(error: str | None, *, fallback: str = "manifest could not be loa
         return "manifest exports McpServerManifest; harness packages require HarnessManifest"
     if "MANIFEST is the class" in error:
         return "manifest exports a class rather than a manifest instance"
+    if "registered skill" in error or "MCP-plugin skill root" in error:
+        return "a declared MCP-plugin skill package is invalid or missing"
     return fallback
 
 

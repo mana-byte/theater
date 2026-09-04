@@ -59,7 +59,7 @@ def cmd_skills(args) -> int:
 
     rejections = data.get("rejections") or []
     if rejections:
-        print("\nrejected user skill packages:")
+        print("\nrejected skill packages:")
         for rejection in rejections:
             name = _terminal_line(rejection.get("name"), "unnamed")
             path = _terminal_line(rejection.get("path"), "unknown path")

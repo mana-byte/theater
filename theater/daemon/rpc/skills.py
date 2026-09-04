@@ -4,31 +4,42 @@ from __future__ import annotations
 
 from theater.daemon.rpc.params import _string_param
 from theater.daemon.rpc.router import method
+from theater.mcp_plugins import registry as mcp_registry
 from theater.models import BadRequest, NotFound
 from theater.skills import is_canonical_name, registry
 from theater.skills.models import UnknownSkill
 
 
 def _skill_metadata(skill) -> dict[str, str]:
-    return {
+    metadata = {
         "name": skill.name,
         "description": skill.description,
         "source": str(skill.source),
     }
+    if skill.provider is not None:
+        metadata["plugin"] = skill.provider
+    return metadata
 
 
 def _rejection_diagnostic(rejection) -> dict[str, str | None]:
-    return {
+    diagnostic = {
         "source": str(rejection.source),
         "path": str(rejection.source_path),
         "name": rejection.name,
         "error": rejection.error,
     }
+    if rejection.provider is not None:
+        diagnostic["plugin"] = rejection.provider
+    return diagnostic
+
+
+def _snapshot():
+    return registry.discover(plugin_skills=mcp_registry.catalog().registered_skills)
 
 
 @method("skills.list")
 async def _skills_list(daemon, params: dict) -> dict:
-    snapshot = registry.discover()
+    snapshot = _snapshot()
     return {
         "skills": [_skill_metadata(skill) for skill in snapshot.skills],
         "rejections": [_rejection_diagnostic(rejection) for rejection in snapshot.rejections],
@@ -50,7 +61,7 @@ async def _skills_load(daemon, params: dict) -> dict:
             "call skills.list and pass one returned name"
         )
     try:
-        skill = registry.discover().load(name)
+        skill = _snapshot().load(name)
     except UnknownSkill as exc:
         raise NotFound(
             f"skill {name!r} is not available; call skills.list to select an installed skill"

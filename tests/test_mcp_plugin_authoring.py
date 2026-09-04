@@ -62,6 +62,12 @@ async def test_native_fixture_launches_a_stdio_mcp_server_and_uses_typed_client(
     assert registry.install(settings, local_dir=FIXTURES, shipped_dir=tmp_path / "shipped") == [
         "native"
     ]
+    (skill,) = registry.catalog().registered_skills
+    assert (skill.name, skill.provider, skill.source.value) == (
+        "native-fixture",
+        "native",
+        "mcp_plugin",
+    )
     credential = tmp_path / "credential"
     credential.write_text("fixture-credential\n", encoding="utf-8")
     plan = registry.get("native").plan_launch(participant_id="p-native", cwd=tmp_path)

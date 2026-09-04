@@ -323,7 +323,9 @@ Read the [MCP-server plugin guide](docs/mcp-server-plugins.md) for native
 
 Theater ships `theater-orchestrate` and `theater-debate`. User skills live at
 `$THEATER_HOME/skills/<name>/SKILL.md` and are data-only: Theater never executes
-scripts or Python from a skill package.
+scripts or Python from a skill package. Enabled MCP-server plugins may also
+declare package-owned skills, which appear through the same `list_skills` and
+`load_skill` tools with their plugin owner identified.
 
 ## Observability
 

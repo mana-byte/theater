@@ -215,8 +215,12 @@ discovery from consuming agent context.
 
 Packages live at `theater/skills/builtin/<name>/SKILL.md` or
 `$THEATER_HOME/skills/<name>/SKILL.md`. A package contains no executable code or
-auxiliary files. Bundled names are authoritative; invalid user packages are
-reported, while an invalid bundled package is fatal.
+auxiliary files. Enabled MCP-server manifests may explicitly register packages
+at `skills/<name>/SKILL.md` inside their own directory. Those files are loaded
+once with the plugin and merged into the same global namespace. Bundled and
+user names remain authoritative; conflicting plugin registrations are rejected
+without disabling their sidecars. Invalid declared plugin skill packages make
+that plugin invalid.
 
 ---
 

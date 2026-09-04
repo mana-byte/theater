@@ -24,6 +24,8 @@ from theater.plugins.loading import (
 from theater.plugins.loading import (
     synthetic_package_name as _shared_synthetic_package_name,
 )
+from theater.skills.loader import load_declared_skills
+from theater.skills.models import Skill, SkillValidationError
 
 PACKAGE_PREFIX = "theater_mcp_server_pkg_"
 
@@ -40,6 +42,7 @@ class LoadedMcpPlugin:
     source: str
     name: str
     manifest: McpServerManifest | None = None
+    skills: tuple[Skill, ...] = ()
     error: str | None = None
 
 
@@ -116,11 +119,21 @@ def load_plugin(plugin: LoadedMcpPlugin) -> LoadedMcpPlugin:
     except (Exception, SystemExit) as exc:
         _cleanup_package(package_name)
         return _broken(plugin, f"{manifest_path}: validation failed: {exc!r}")
+    try:
+        skills = load_declared_skills(
+            plugin.path / "skills",
+            manifest.skills,
+            provider=plugin.name,
+        )
+    except SkillValidationError as exc:
+        _cleanup_package(package_name)
+        return _broken(plugin, f"{plugin.path}: {exc}")
     return LoadedMcpPlugin(
         path=plugin.path,
         source=plugin.source,
         name=plugin.name,
         manifest=manifest,
+        skills=skills,
     )
 
 

@@ -11,6 +11,7 @@ class SkillSource(StrEnum):
     """Where a validated skill was discovered."""
 
     BUILTIN = "builtin"
+    MCP_PLUGIN = "mcp_plugin"
     USER = "user"
 
 
@@ -23,6 +24,7 @@ class Skill:
     content: str
     source: SkillSource
     source_path: Path
+    provider: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +35,7 @@ class SkillRejection:
     source_path: Path
     name: str | None
     error: str
+    provider: str | None = None
 
 
 class SkillValidationError(ValueError):

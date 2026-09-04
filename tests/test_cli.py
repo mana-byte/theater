@@ -682,7 +682,7 @@ def test_skills_uses_the_running_daemon_and_renders_diagnostics(monkeypatch, cap
     assert cli.cmd_skills(parse("skills")) == 0
     out = capsys.readouterr().out
     assert "alpha" in out and "An alpha skill." in out
-    assert "rejected user skill packages" in out
+    assert "rejected skill packages" in out
     assert "/tmp/skills/broken" in out and "invalid frontmatter" in out
 
 

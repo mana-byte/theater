@@ -228,11 +228,13 @@ reports what loaded and why anything was rejected.
 ## When adding a skill
 
 Write one data-only package at `$THEATER_HOME/skills/<name>/SKILL.md`, or under
-`theater/skills/builtin/` for a shipped skill. It may contain only `SKILL.md`;
-frontmatter contains exactly `name` and `description`, with the canonical name
-matching the folder. Do not add scripts, Python imports, references, templates,
-project scanning, or silent overrides. The daemon owns discovery; MCP tools
-only forward `skills.list` and `skills.load`.
+`theater/skills/builtin/` for a shipped skill. An MCP-server plugin may declare
+names in its manifest and place packages under `skills/<name>/SKILL.md`. A skill
+package may contain only `SKILL.md`; frontmatter contains exactly `name` and
+`description`, with the canonical name matching the folder. Do not add scripts,
+Python imports, references, templates, project scanning, or silent overrides.
+The daemon owns discovery; MCP tools only forward `skills.list` and
+`skills.load`.
 
 ## Further reading
 

@@ -327,9 +327,9 @@ def build(
     async def list_skills() -> dict:
         """List skill metadata first, before choosing one to load.
 
-        Returns names, descriptions, sources, and any rejected user skill
-        packages, without instruction content. Choose a listed exact name
-        before calling load_skill.
+        Returns names, descriptions, sources, plugin owners when applicable,
+        and rejected packages or registrations, without instruction content.
+        Choose a listed exact name before calling load_skill.
         """
         return await tools.list_skills(session)
 

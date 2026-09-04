@@ -57,6 +57,7 @@ MANIFEST = McpServerManifest(
     description="Acme test sidecar",
     capabilities=frozenset({{PluginCapability.PARTICIPANTS_READ}}),
     launch=McpLaunchManifest(planner=plan),
+    skills={skills!r},
     config=McpConfigSchema({{
         "endpoint": McpConfigField(McpConfigKind.STRING, default="https://default.invalid"),
         "token": McpConfigField(McpConfigKind.SECRET, required=True),
@@ -65,11 +66,17 @@ MANIFEST = McpServerManifest(
 """
 
 
-def write_plugin(root: Path, name: str = "acme", *, command: str = "acme-server") -> Path:
+def write_plugin(
+    root: Path,
+    name: str = "acme",
+    *,
+    command: str = "acme-server",
+    skills: tuple[str, ...] = (),
+) -> Path:
     package = root / name
     package.mkdir(parents=True)
     manifest = package / "manifest.py"
-    manifest.write_text(MANIFEST.format(command=command), encoding="utf-8")
+    manifest.write_text(MANIFEST.format(command=command, skills=skills), encoding="utf-8")
     return manifest
 
 
@@ -145,6 +152,21 @@ def test_enabled_plugin_resolves_immutable_config_once_and_redacts(tmp_path, mon
     assert plan.files == {Path("public/config.txt"): "https://acme.invalid"}
     assert plan.private_files == {Path("private/token.txt"): "first-secret"}
     assert "first-secret" not in repr(plan)
+
+
+def test_invalid_declared_skill_omits_the_local_plugin(tmp_path, monkeypatch):
+    local = tmp_path / "mcp_servers"
+    write_plugin(local, skills=("missing-skill",))
+    monkeypatch.setenv("ACME_TEST_TOKEN", "secret")
+    settings = config.Config(
+        mcp=config.McpSection(
+            enabled=["acme"],
+            plugins={"acme": {"token": {"env": "ACME_TEST_TOKEN"}}},
+        )
+    )
+
+    assert registry.install(settings, local_dir=local, shipped_dir=tmp_path / "shipped") == []
+    assert "MCP-plugin skill root" in registry.diagnostics()[0].error
 
 
 def test_table_lists_resolve_nested_values_immutably_and_report_indexed_paths(
@@ -425,4 +447,19 @@ def test_manifest_contract_requires_whole_nonempty_capability_set():
         config=McpConfigSchema({"count": McpConfigField(McpConfigKind.INTEGER, minimum=1)}),
     )
     assert manifest.capabilities == frozenset({PluginCapability.JOBS_READ})
+    assert manifest.skills == ()
     assert PluginCapability.SESSIONS_KILL.value == "sessions.kill"
+
+
+@pytest.mark.parametrize("skills", [("Not-Canonical",), ("same", "same")])
+def test_manifest_rejects_invalid_skill_declarations(skills):
+    manifest = McpServerManifest(
+        api_version=MANIFEST_API_VERSION,
+        description="Acme",
+        capabilities=frozenset({PluginCapability.JOBS_READ}),
+        launch=McpLaunchManifest(planner=lambda _context: McpLaunchPlan(command="acme")),
+        skills=skills,
+    )
+
+    with pytest.raises(McpManifestValidationError, match="skills"):
+        validate_manifest("acme", manifest)

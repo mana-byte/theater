@@ -29,6 +29,7 @@ from theater.plugins.namespace import (
     PluginNameReservation,
     reject_cross_kind_collisions,
 )
+from theater.skills.models import Skill
 
 logger = logging.getLogger("theater.mcp_plugins")
 
@@ -61,6 +62,7 @@ class McpPluginCatalog:
 
     _servers: Mapping[str, CompiledMcpPlugin]
     diagnostics: tuple[McpPluginDiagnostic, ...]
+    registered_skills: tuple[Skill, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -69,6 +71,7 @@ class McpPluginCatalog:
             MappingProxyType({name: self._servers[name] for name in sorted(self._servers)}),
         )
         object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
+        object.__setattr__(self, "registered_skills", tuple(self.registered_skills))
 
     @property
     def servers(self) -> tuple[CompiledMcpPlugin, ...]:
@@ -202,7 +205,12 @@ def install(
 
 def catalog() -> McpPluginCatalog:
     """Return the current independent registry as immutable values."""
-    return McpPluginCatalog(dict(MCP_SERVERS), tuple(_DIAGNOSTICS))
+    skills: list[Skill] = []
+    for name in sorted(MCP_SERVERS):
+        loaded = _PLUGINS.get(name)
+        if loaded is not None:
+            skills.extend(loaded.skills)
+    return McpPluginCatalog(dict(MCP_SERVERS), tuple(_DIAGNOSTICS), tuple(skills))
 
 
 def get(name: str) -> CompiledMcpPlugin:

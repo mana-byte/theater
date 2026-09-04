@@ -97,6 +97,8 @@ def cmd_plugins(args) -> int:
             facts.append(str(row["description"]))
         if row.get("capabilities"):
             facts.append(f"capabilities: {', '.join(row['capabilities'])}")
+        if row.get("skills"):
+            facts.append(f"skills: {', '.join(row['skills'])}")
         if row.get("binary"):
             facts.append(f"binary: {row['binary']}")
         if row.get("error"):

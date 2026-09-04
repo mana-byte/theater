@@ -208,6 +208,7 @@ class McpServerManifest:
     capabilities: frozenset[PluginCapability]
     launch: McpLaunchManifest
     config: McpConfigSchema = field(default_factory=McpConfigSchema)
+    skills: tuple[str, ...] | Sequence[str] = ()
     _capabilities_were_frozen: bool = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -220,6 +221,8 @@ class McpServerManifest:
             object.__setattr__(self, "capabilities", frozenset(self.capabilities))
         if isinstance(self.config, Mapping):
             object.__setattr__(self, "config", McpConfigSchema(self.config))
+        if not isinstance(self.skills, (str, bytes)) and isinstance(self.skills, Sequence):
+            object.__setattr__(self, "skills", tuple(self.skills))
 
     @property
     def configuration(self) -> McpConfigSchema:

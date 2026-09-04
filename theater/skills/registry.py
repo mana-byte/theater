@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -61,8 +61,13 @@ class SkillRegistry:
             raise UnknownSkill(f"unknown skill {name!r}") from exc
 
 
-def discover(*, builtin_dir: Path | None = None, user_dir: Path | None = None) -> SkillRegistry:
-    """Build a fresh bounded snapshot with built-ins authoritative over user skills."""
+def discover(
+    *,
+    builtin_dir: Path | None = None,
+    user_dir: Path | None = None,
+    plugin_skills: Iterable[Skill] = (),
+) -> SkillRegistry:
+    """Build a fresh snapshot from built-in, user, and registered plugin skills."""
     user_root = user_dir if user_dir is not None else paths.skills_dir()
     if builtin_dir is None:
         resource = resources.files("theater.skills").joinpath("builtin")
@@ -96,8 +101,55 @@ def discover(*, builtin_dir: Path | None = None, user_dir: Path | None = None) -
             )
             continue
         skills[item.name] = item
+    _merge_plugin_skills(skills, rejections, plugin_skills)
     ordered = {name: skills[name] for name in sorted(skills)}
     return SkillRegistry(ordered, tuple(rejections))
+
+
+def _merge_plugin_skills(
+    skills: dict[str, Skill],
+    rejections: list[SkillRejection],
+    plugin_skills: Iterable[Skill],
+) -> None:
+    groups: dict[str, list[Skill]] = {}
+    for skill in plugin_skills:
+        if not isinstance(skill, Skill) or skill.source is not SkillSource.MCP_PLUGIN:
+            raise TypeError("plugin_skills must contain MCP-plugin Skill values")
+        groups.setdefault(skill.name, []).append(skill)
+    for name in sorted(groups):
+        candidates = groups[name]
+        if len(candidates) > 1:
+            providers = ", ".join(sorted({item.provider or "unknown" for item in candidates}))
+            for candidate in candidates:
+                _append_rejection(
+                    rejections,
+                    _rejection(
+                        candidate.source,
+                        candidate.source_path,
+                        candidate.name,
+                        f"skill name {name!r} is registered by multiple enabled MCP plugins "
+                        f"({providers}); no plugin registration is active",
+                        provider=candidate.provider,
+                    ),
+                )
+            continue
+        candidate = candidates[0]
+        existing = skills.get(name)
+        if existing is not None:
+            _append_rejection(
+                rejections,
+                _rejection(
+                    candidate.source,
+                    candidate.source_path,
+                    candidate.name,
+                    f"MCP plugin {candidate.provider!r} skill at {candidate.source_path} "
+                    f"conflicts with {existing.source.value} skill at {existing.source_path}; "
+                    "the existing skill remains authoritative",
+                    provider=candidate.provider,
+                ),
+            )
+            continue
+        skills[name] = candidate
 
 
 def _scan_root(
@@ -143,8 +195,15 @@ def _append_rejection(rejections: list[SkillRejection], rejection: SkillRejectio
         rejections.append(rejection)
 
 
-def _rejection(source: SkillSource, path: Path, name: str | None, error: str) -> SkillRejection:
-    return SkillRejection(source, path, name, _bounded(error))
+def _rejection(
+    source: SkillSource,
+    path: Path,
+    name: str | None,
+    error: str,
+    *,
+    provider: str | None = None,
+) -> SkillRejection:
+    return SkillRejection(source, path, name, _bounded(error), provider)
 
 
 def _bounded(value: str) -> str:

@@ -81,6 +81,7 @@ def test_projection_is_deterministic_and_redacts_enabled_plugin_failures(
     assert by_key[("mcp_server", "native")]["state"] == "loaded"
     assert by_key[("mcp_server", "native")]["description"] == "Native fixture sidecar"
     assert by_key[("mcp_server", "native")]["capabilities"] == ["participants.read"]
+    assert by_key[("mcp_server", "native")]["skills"] == ["native-fixture"]
     assert by_key[("mcp_server", "compat")]["state"] == "disabled"
     assert by_key[("mcp_server", "bomb")]["error"] == "manifest could not be loaded"
     assert (

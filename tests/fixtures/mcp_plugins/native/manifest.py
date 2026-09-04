@@ -15,5 +15,6 @@ MANIFEST = McpServerManifest(
     description="Native fixture sidecar",
     capabilities=frozenset({PluginCapability.PARTICIPANTS_READ}),
     launch=McpLaunchManifest(planner=plan),
+    skills=("native-fixture",),
     config=McpConfigSchema({"label": McpConfigField(McpConfigKind.STRING, default="native")}),
 )

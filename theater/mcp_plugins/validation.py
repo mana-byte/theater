@@ -11,6 +11,7 @@ from typing import NoReturn
 
 from theater.constants.core import HARNESS_NAME
 from theater.constants.plugins import MCP_PLUGIN_CONFIG_MAX_FIELDS, MCP_PLUGIN_DESCRIPTION_MAX_CHARS
+from theater.constants.skills import SKILL_MAX_COUNT, SKILL_NAME
 from theater.mcp_plugins.contracts import (
     MANIFEST_API_VERSION,
     MISSING,
@@ -54,6 +55,7 @@ def validate_manifest(name: str, manifest: McpServerManifest) -> None:
     _validate_description(name, manifest.description)
     _validate_capabilities(name, manifest)
     _validate_config(name, manifest.config)
+    _validate_skills(name, manifest.skills)
     _validate_launch(name, manifest.launch)
 
 
@@ -92,6 +94,24 @@ def _validate_capabilities(name: str, manifest: McpServerManifest) -> None:
 
 def _validate_config(name: str, schema: object) -> None:
     _validate_schema(name, "config", schema, set(), [0], 0)
+
+
+def _validate_skills(name: str, skills: object) -> None:
+    if not isinstance(skills, tuple):
+        _fail(name, "skills", "must be a sequence of canonical skill names")
+    if len(skills) > SKILL_MAX_COUNT:
+        _fail(name, "skills", f"may contain at most {SKILL_MAX_COUNT} names")
+    seen: set[str] = set()
+    for index, skill_name in enumerate(skills):
+        if not isinstance(skill_name, str) or SKILL_NAME.fullmatch(skill_name) is None:
+            _fail(
+                name,
+                f"skills[{index}]",
+                "must use lowercase ASCII letters, digits, and hyphens",
+            )
+        if skill_name in seen:
+            _fail(name, f"skills[{index}]", f"repeats skill name {skill_name!r}")
+        seen.add(skill_name)
 
 
 def _validate_schema(
