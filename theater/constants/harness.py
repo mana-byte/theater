@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from theater.constants.plugins import PLUGIN_API_VERSION
 from theater.constants.tmux import TMUX_DEFAULT_SESSION
 
 #: Name the theater MCP server is registered under inside each harness.
@@ -14,7 +15,7 @@ HARNESS_MCP_TOOL_TIMEOUT_SECONDS = 340.0
 HARNESS_APPROVAL_POLICIES = ("manual", "edits", "yolo")
 
 #: Supported immutable harness-manifest schema version.
-HARNESS_MANIFEST_API_VERSION = 1
+HARNESS_MANIFEST_API_VERSION = PLUGIN_API_VERSION
 
 #: Compatibility name for the public manifest plugin API version.
 HARNESS_PLUGIN_API_VERSION = HARNESS_MANIFEST_API_VERSION

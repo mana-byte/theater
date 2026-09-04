@@ -12,6 +12,7 @@ from dataclasses import fields
 
 from theater.config.models import (
     _SECTIONS,
+    MCP_SECTION,
     MODELS_SECTION,
     REASONING_SECTION,
     Config,
@@ -32,6 +33,9 @@ def describe(config: Config) -> list[tuple[str, str, str]]:
             value = getattr(section, f.name)
             shown = "(unset)" if value is None else str(value)
             rows.append((dotted, shown, config.source(dotted)))
+    rows.append((f"{MCP_SECTION}.enabled", str(config.mcp.enabled), config.source("mcp.enabled")))
+    for name in sorted(config.mcp.plugins):
+        rows.append((f"{MCP_SECTION}.plugins.{name}", "(configured)", "config.toml"))
     # `[models]` has no fields to enumerate; a harness absent from the file has no row.
     for harness in sorted(config.models):
         dotted = f"{MODELS_SECTION}.{harness}"

@@ -19,7 +19,7 @@ from dataclasses import fields
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
-from theater.config.models import MODELS_SECTION, REASONING_SECTION
+from theater.config.models import MCP_SECTION, MODELS_SECTION, REASONING_SECTION, McpSection
 from theater.constants.core import HARNESS_NAME
 
 
@@ -201,6 +201,58 @@ def _build_reasoning(path: Path, raw: Any) -> tuple[dict[str, list[str]], dict[s
         out[name] = names
         sources[dotted] = "config.toml"
     return out, sources
+
+
+def _build_mcp(path: Path, raw: Any) -> tuple[McpSection, dict[str, str]]:
+    """Parse only the structural shell of `[mcp]` before plugin manifests load."""
+    if not isinstance(raw, dict):
+        _fail(path, f"[{MCP_SECTION}] must be a table, got {type(raw).__name__}")
+    known = {"enabled", "plugins"}
+    for key in raw:
+        if key not in known:
+            _fail(path, f"unknown key '{MCP_SECTION}.{key}' ({_suggest(key, sorted(known))})")
+
+    enabled_raw = raw.get("enabled", [])
+    enabled = _check_str_list(enabled_raw)
+    if enabled is None:
+        _fail(
+            path,
+            f"'{MCP_SECTION}.enabled' must be a list of strings, got {type(enabled_raw).__name__}",
+        )
+    for name in enabled:
+        if HARNESS_NAME.fullmatch(name) is None:
+            _fail(
+                path,
+                f"'{MCP_SECTION}.enabled' contains invalid plugin name {name!r}: "
+                "expected lowercase "
+                "letters, digits, '-' or '_', starting with a letter or digit",
+            )
+    if len(set(enabled)) != len(enabled):
+        duplicate = next(name for name in enabled if enabled.count(name) > 1)
+        _fail(path, f"'{MCP_SECTION}.enabled' lists {duplicate!r} more than once")
+
+    plugins_raw = raw.get("plugins", {})
+    if not isinstance(plugins_raw, dict):
+        _fail(
+            path,
+            f"'[{MCP_SECTION}.plugins]' must be a table, got {type(plugins_raw).__name__}",
+        )
+    plugins: dict[str, dict[str, object]] = {}
+    for name, values in plugins_raw.items():
+        if not isinstance(name, str) or HARNESS_NAME.fullmatch(name) is None:
+            _fail(
+                path,
+                f"'[{MCP_SECTION}.plugins]' has invalid plugin name {name!r}: expected lowercase "
+                "letters, digits, '-' or '_', starting with a letter or digit",
+            )
+        if not isinstance(values, dict):
+            _fail(
+                path,
+                f"'[{MCP_SECTION}.plugins.{name}]' must be a table, got {type(values).__name__}",
+            )
+        plugins[name] = dict(values)
+    sources = {f"{MCP_SECTION}.enabled": "config.toml"} if "enabled" in raw else {}
+    return McpSection(enabled=enabled, plugins=plugins), sources
 
 
 def _check_no_declarations(path: Path, raw: Any) -> None:

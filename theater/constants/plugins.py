@@ -1,0 +1,17 @@
+"""Shared contracts for Theater's package-manifest plugin kinds."""
+
+from __future__ import annotations
+
+#: One public manifest API shared by harness and MCP-server packages.
+PLUGIN_API_VERSION = 1
+MCP_PLUGIN_API_VERSION = PLUGIN_API_VERSION
+MCP_SERVER_MANIFEST_API_VERSION = PLUGIN_API_VERSION
+
+#: MCP-server manifest metadata and launch-plan bounds.
+MCP_PLUGIN_DESCRIPTION_MAX_CHARS = 240
+MCP_PLUGIN_CONFIG_MAX_FIELDS = 64
+MCP_PLUGIN_LAUNCH_MAX_ARGV = 128
+MCP_PLUGIN_LAUNCH_MAX_ENV = 128
+MCP_PLUGIN_LAUNCH_MAX_ARTIFACTS = 64
+MCP_PLUGIN_LAUNCH_MAX_TEXT_CHARS = 1_048_576
+MCP_PLUGIN_LAUNCH_MAX_VALUE_CHARS = 16_384

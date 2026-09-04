@@ -8,13 +8,10 @@ from typing import TYPE_CHECKING
 
 from theater.config import ConfigError
 from theater.harness.contracts.harness import Harness
+from theater.plugins.loading import LOCAL, SHIPPED
 
 if TYPE_CHECKING:
     from theater.harness.contracts.manifest import HarnessManifest
-
-#: Where a plugin came from.
-SHIPPED = "shipped"
-LOCAL = "local"
 
 
 class PluginError(ConfigError):

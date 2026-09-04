@@ -98,6 +98,11 @@ def harnesses_dir() -> Path:
     return home() / "harnesses"
 
 
+def mcp_servers_dir() -> Path:
+    """Python MCP-server plugin packages, imported only when enabled."""
+    return home() / "mcp_servers"
+
+
 def skills_dir() -> Path:
     """Data-only skill packages, one ``SKILL.md`` directory each."""
     return home() / "skills"
@@ -113,5 +118,6 @@ def ensure_home() -> Path:
     (root / "artifacts").mkdir(parents=True, exist_ok=True)
     observations_dir().mkdir(parents=True, exist_ok=True)
     harnesses_dir().mkdir(parents=True, exist_ok=True)
+    mcp_servers_dir().mkdir(parents=True, exist_ok=True)
     skills_dir().mkdir(parents=True, exist_ok=True)
     return root

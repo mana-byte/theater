@@ -252,6 +252,15 @@ stale_running_days = 7
 disabled = []
 
 
+[mcp]
+
+# MCP sidecars are local package plugins under $THEATER_HOME/mcp_servers. They
+# are off unless named here; each enabled package may declare a flat config
+# table under [mcp.plugins.<name>]. Secrets there use exactly { env = "NAME" }
+# or { file = "/path" }, and are resolved once when Theater starts.
+enabled = []
+
+
 [models]
 
 # What `theater spawn --model` may name, per harness. One key per harness, each

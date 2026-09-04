@@ -13,6 +13,7 @@ from pathlib import Path
 
 from theater import paths
 from theater.config import Config, ConfigError
+from theater.constants.core import HARNESS_NAME
 from theater.harness import builtin, loading
 from theater.harness.loading.models import LOCAL, SHIPPED, LoadedPlugin, PluginError
 from theater.harness.registry import (
@@ -30,6 +31,8 @@ from theater.harness.registry.claims import (
     claim_observation_keys,
     release_claims,
 )
+from theater.mcp_plugins import registry as mcp_registry
+from theater.plugins.namespace import PluginNameReservation
 
 logger = logging.getLogger("theater.harness")
 
@@ -39,6 +42,8 @@ def install(
     *,
     local_dir: Path | None = None,
     shipped_dir: Path | None = None,
+    mcp_local_dir: Path | None = None,
+    mcp_shipped_dir: Path | None = None,
 ) -> list[str]:
     """Rebuild the registry from the shipped and local plugin directories.
 
@@ -48,6 +53,8 @@ def install(
     Returns the registered names, sorted.
     """
     disabled = set(config.harness.disabled)
+    shipped_root = shipped_dir if shipped_dir is not None else builtin.plugin_dir()
+    local_root = local_dir if local_dir is not None else paths.harnesses_dir()
 
     HARNESSES.clear()
     _ALIASES.clear()
@@ -56,13 +63,20 @@ def install(
     _OBSERVATION_KEYS.clear()
     _BROKEN.clear()
 
+    mcp_registry.install(
+        config,
+        local_dir=mcp_local_dir,
+        shipped_dir=mcp_shipped_dir,
+        reserved_harnesses=_reserved_harness_names(shipped_root, local_root),
+    )
+
     shipped = loading.scan(
-        shipped_dir if shipped_dir is not None else builtin.plugin_dir(),
+        shipped_root,
         source=SHIPPED,
         skip=disabled,
     )
     local = loading.scan(
-        local_dir if local_dir is not None else paths.harnesses_dir(),
+        local_root,
         source=LOCAL,
         skip=disabled,
     )
@@ -102,6 +116,27 @@ def install(
             claim_observation_keys(extra, found.name, str(found.path))
 
     return sorted(HARNESSES)
+
+
+def _reserved_harness_names(
+    shipped_dir: Path,
+    local_dir: Path,
+) -> tuple[PluginNameReservation, ...]:
+    """Reserve every discovered canonical harness name before either kind imports."""
+    discovered = [
+        *loading.discover(shipped_dir, source=SHIPPED),
+        *loading.discover(local_dir, source=LOCAL),
+    ]
+    return tuple(
+        PluginNameReservation(
+            kind="harness",
+            name=plugin.name,
+            path=plugin.path,
+            source=plugin.source,
+        )
+        for plugin in discovered
+        if HARNESS_NAME.fullmatch(plugin.name) is not None
+    )
 
 
 def _reject(found: LoadedPlugin, config: Config) -> None:

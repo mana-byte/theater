@@ -18,12 +18,14 @@ from typing import Any
 from theater import paths
 from theater.config.models import (
     _SECTIONS,
+    MCP_SECTION,
     MODELS_SECTION,
     REASONING_SECTION,
     Config,
 )
 from theater.config.validation import (
     ConfigError,
+    _build_mcp,
     _build_models,
     _build_reasoning,
     _build_section,
@@ -49,6 +51,7 @@ def load(path: Path | None = None) -> Config:
     sources: dict[str, str] = {}
     for name, cls in _SECTIONS.items():
         sources.update(_defaults_for(name, cls))
+    sources[f"{MCP_SECTION}.enabled"] = "default"
 
     if not target.exists():
         return Config(sources=sources, path=target, exists=False)
@@ -60,7 +63,7 @@ def load(path: Path | None = None) -> Config:
     except OSError as exc:
         raise ConfigError(f"{target}: cannot read: {exc}") from exc
 
-    legal = [*_SECTIONS, MODELS_SECTION, REASONING_SECTION]
+    legal = [*_SECTIONS, MCP_SECTION, MODELS_SECTION, REASONING_SECTION]
     for key in raw:
         if key not in legal:
             _fail(target, f"unknown section [{key}] ({_suggest(key, legal)})")
@@ -85,8 +88,14 @@ def load(path: Path | None = None) -> Config:
         reasoning, reasoning_sources = _build_reasoning(target, raw[REASONING_SECTION])
         sources.update(reasoning_sources)
 
+    mcp = None
+    if MCP_SECTION in raw:
+        mcp, mcp_sources = _build_mcp(target, raw[MCP_SECTION])
+        sources.update(mcp_sources)
+
     return Config(
         **built,
+        **({"mcp": mcp} if mcp is not None else {}),
         models=models,
         reasoning=reasoning,
         sources=sources,

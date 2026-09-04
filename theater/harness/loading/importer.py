@@ -13,11 +13,6 @@ descendant module inserted for that package are removed from
 
 from __future__ import annotations
 
-import hashlib
-import importlib.machinery
-import importlib.util
-import sys
-import types
 from pathlib import Path
 
 from theater.harness.contracts.manifest import HarnessManifest
@@ -25,13 +20,21 @@ from theater.harness.loading.discovery import MANIFEST_FILENAME
 from theater.harness.loading.models import LoadedPlugin
 from theater.harness.manifests.compiler import compile_manifest
 from theater.harness.manifests.validation import ManifestValidationError
+from theater.plugins.loading import (
+    cleanup_package as _cleanup_shared_package,
+)
+from theater.plugins.loading import (
+    import_manifest as _import_shared_manifest,
+)
+from theater.plugins.loading import (
+    synthetic_package_name as _shared_synthetic_package_name,
+)
 
 PACKAGE_PREFIX = "theater_harness_pkg_"
 
 
 def _synthetic_package_name(directory: Path, source: str) -> str:
-    digest = hashlib.md5(str(directory.resolve()).encode(), usedforsecurity=False).hexdigest()[:12]
-    return f"{PACKAGE_PREFIX}{source}_{digest}"
+    return _shared_synthetic_package_name(directory, source, prefix=PACKAGE_PREFIX)
 
 
 def load_plugin(plugin: LoadedPlugin) -> LoadedPlugin:
@@ -49,10 +52,12 @@ def load_plugin(plugin: LoadedPlugin) -> LoadedPlugin:
     manifest_path = directory / MANIFEST_FILENAME
     pkg_name = _synthetic_package_name(directory, plugin.source)
 
-    _cleanup_package(pkg_name)
-
     try:
-        manifest_module = _import_manifest(pkg_name, directory, manifest_path)
+        manifest_module, _ = _import_shared_manifest(
+            directory,
+            plugin.source,
+            prefix=PACKAGE_PREFIX,
+        )
     except KeyboardInterrupt:
         _cleanup_package(pkg_name)
         raise
@@ -126,53 +131,9 @@ def load_plugin(plugin: LoadedPlugin) -> LoadedPlugin:
     )
 
 
-def _import_manifest(pkg_name: str, directory: Path, manifest_path: Path) -> types.ModuleType:
-    """Create the synthetic package and import its manifest submodule."""
-    _create_synthetic_package(pkg_name, directory)
-
-    manifest_full = f"{pkg_name}.manifest"
-    spec = importlib.util.spec_from_file_location(
-        manifest_full,
-        manifest_path,
-        submodule_search_locations=None,
-    )
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot create spec for {manifest_path}")
-    module = importlib.util.module_from_spec(spec)
-    module.__package__ = pkg_name
-    sys.modules[manifest_full] = module
-    try:
-        spec.loader.exec_module(module)
-    except (Exception, SystemExit):
-        sys.modules.pop(manifest_full, None)
-        raise
-    except KeyboardInterrupt:
-        sys.modules.pop(manifest_full, None)
-        raise
-    return module
-
-
-def _create_synthetic_package(pkg_name: str, directory: Path) -> types.ModuleType:
-    existing = sys.modules.get(pkg_name)
-    if existing is not None:
-        return existing
-
-    spec = importlib.machinery.ModuleSpec(pkg_name, loader=None, is_package=True)
-    spec.submodule_search_locations = [str(directory)]
-    package = types.ModuleType(pkg_name)
-    package.__spec__ = spec
-    package.__path__ = [str(directory)]
-    package.__package__ = pkg_name
-    sys.modules[pkg_name] = package
-    return package
-
-
 def _cleanup_package(pkg_name: str) -> None:
     """Remove the synthetic package and every descendant from sys.modules."""
-    prefix = f"{pkg_name}."
-    to_remove = [key for key in list(sys.modules) if key == pkg_name or key.startswith(prefix)]
-    for key in to_remove:
-        sys.modules.pop(key, None)
+    _cleanup_shared_package(pkg_name)
 
 
 __all__ = ["PACKAGE_PREFIX", "load_plugin"]

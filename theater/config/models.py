@@ -95,6 +95,16 @@ class HarnessSection:
 
 
 @dataclass(frozen=True, slots=True)
+class McpSection:
+    """Raw MCP-server enablement and per-plugin tables pending manifest resolution."""
+
+    #: No sidecars run unless they are explicitly named here.
+    enabled: list[str] = field(default_factory=list)
+    #: Kept raw until an enabled package contributes its declarative schema.
+    plugins: dict[str, dict[str, object]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class RegieSection:
     #: Not validated here: importing Textual's legal names would pull the TUI stack in.
     theme: str | None = None
@@ -193,6 +203,9 @@ MODELS_SECTION = "models"
 #: Same shape as `[models]`, keyed by harness name. Parsed by `_build_reasoning`.
 REASONING_SECTION = "reasoning"
 
+#: Parsed separately because plugin keys and values require a loaded manifest schema.
+MCP_SECTION = "mcp"
+
 
 @dataclass(frozen=True, slots=True)
 class Config:
@@ -203,6 +216,7 @@ class Config:
     observer: ObserverSection = field(default_factory=ObserverSection)
     retention: RetentionSection = field(default_factory=RetentionSection)
     harness: HarnessSection = field(default_factory=HarnessSection)
+    mcp: McpSection = field(default_factory=McpSection)
     regie: RegieSection = field(default_factory=RegieSection)
     observability: ObservabilitySection = field(default_factory=ObservabilitySection)
     #: Harness name -> models `spawn --model` may name. An allowlist; empty means no selection.

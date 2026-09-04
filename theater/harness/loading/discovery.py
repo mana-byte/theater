@@ -14,8 +14,7 @@ from pathlib import Path
 
 from theater.constants.core import HARNESS_NAME
 from theater.harness.loading.models import LoadedPlugin
-
-MANIFEST_FILENAME = "manifest.py"
+from theater.plugins.loading import MANIFEST_FILENAME, discover_packages
 
 
 def discover(root: Path, *, source: str, skip: Iterable[str] = ()) -> list[LoadedPlugin]:
@@ -24,77 +23,23 @@ def discover(root: Path, *, source: str, skip: Iterable[str] = ()) -> list[Loade
     A missing root returns an empty list. Disabled names are filtered
     before any import or side effect. Results are ordered by directory name.
     """
-    skipped = set(skip)
-    if not root.is_dir():
-        return []
-
-    results: list[LoadedPlugin] = []
-
-    entries = sorted(
-        (entry for entry in root.iterdir() if not entry.name.startswith(".")),
-        key=lambda e: e.name,
-    )
-
-    for entry in entries:
-        name = entry.name
-        if name.startswith("_"):
-            continue
-        stem = entry.stem if entry.is_file() and name.endswith(".py") else name
-        if stem in skipped:
-            continue
-
-        if entry.is_file() and name.endswith(".py"):
-            results.append(_legacy_result(entry, source))
-            continue
-
-        if entry.is_file():
-            continue
-
-        if not entry.is_dir():
-            continue
-
-        if not HARNESS_NAME.fullmatch(name):
-            results.append(
-                LoadedPlugin(
-                    path=entry,
-                    source=source,
-                    name=name,
-                    error=f"{entry}: directory name {name!r} is not a valid harness name. "
-                    "Use lowercase letters, digits, '_' or '-', starting with a "
-                    "letter or digit — see docs/harness-plugins.md",
-                )
-            )
-            continue
-
-        manifest_path = entry / MANIFEST_FILENAME
-        if not manifest_path.is_file():
-            results.append(
-                LoadedPlugin(
-                    path=entry,
-                    source=source,
-                    name=name,
-                    error=f"{entry}: has no {MANIFEST_FILENAME}. "
-                    f"A plugin directory must contain {MANIFEST_FILENAME} exporting MANIFEST "
-                    "— see docs/harness-plugins.md",
-                )
-            )
-            continue
-
-        results.append(LoadedPlugin(path=entry, source=source, name=name))
-
-    return results
-
-
-def _legacy_result(path: Path, source: str) -> LoadedPlugin:
-    stem = path.stem
-    return LoadedPlugin(
-        path=path,
+    candidates = discover_packages(
+        root,
         source=source,
-        name=stem,
-        error=f"{path}: legacy single-file plugin. "
-        f"Move {path.name} to {stem}/manifest.py and export MANIFEST "
-        "— see docs/harness-plugins.md",
+        kind="harness",
+        name_pattern=HARNESS_NAME,
+        skip=skip,
+        guide="docs/harness-plugins.md",
     )
+    return [
+        LoadedPlugin(
+            path=candidate.path,
+            source=candidate.source,
+            name=candidate.name,
+            error=candidate.error,
+        )
+        for candidate in candidates
+    ]
 
 
 __all__ = ["MANIFEST_FILENAME", "discover"]

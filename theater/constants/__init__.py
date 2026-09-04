@@ -8,6 +8,7 @@ rule and validation floor re-exported from `core` and `limits`.
 
 from theater.constants.core import HARNESS_NAME
 from theater.constants.limits import MIN_INTERVAL
+from theater.constants.plugins import PLUGIN_API_VERSION
 
 # SQLite timestamps and retention cutoffs use seconds; float keeps SQL division real.
 SECONDS_PER_DAY = 86_400.0
@@ -25,6 +26,7 @@ __all__ = [
     "HARNESS_NAME",
     "MICROCENTS_PER_DOLLAR",
     "MIN_INTERVAL",
+    "PLUGIN_API_VERSION",
     "SECONDS_PER_DAY",
     "USAGE_AVERAGE_WINDOW_DAYS",
     "USAGE_AVERAGE_WINDOW_HOURS",
