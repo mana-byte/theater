@@ -20,6 +20,7 @@ from theater.mcp_plugins.contracts import (
 )
 
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_OMIT = object()
 
 
 class McpConfigResolutionError(ValueError):
@@ -40,7 +41,7 @@ def resolve_config(
     *,
     environ: Mapping[str, str] | None = None,
 ) -> Mapping[str, object]:
-    """Resolve one enabled plugin's flat values into immutable planner input."""
+    """Resolve one enabled plugin's values into immutable planner input."""
     if not isinstance(schema, McpConfigSchema):
         raise McpConfigResolutionError(
             plugin,
@@ -49,36 +50,103 @@ def resolve_config(
         )
     if raw is None:
         raw = {}
+    secret_environment = os.environ if environ is None else environ
+    return _resolve_schema(plugin, schema, raw, secret_environment, None, set())
+
+
+def _resolve_schema(
+    plugin: str,
+    schema: McpConfigSchema,
+    raw: object,
+    environ: Mapping[str, str],
+    path: str | None,
+    active: set[int],
+) -> Mapping[str, object]:
     if not isinstance(raw, Mapping):
-        raise McpConfigResolutionError(plugin, None, "configuration must be a table")
+        if path is None:
+            raise McpConfigResolutionError(plugin, None, "configuration must be a table")
+        _fail(plugin, path, "must be a table")
+    fields = _schema_fields(plugin, schema, path)
+    identity = id(schema)
+    if identity in active:
+        _fail(plugin, path, "configuration schema is cyclic")
+    active.add(identity)
+    try:
+        _validate_raw_keys(plugin, path, raw, fields)
+        resolved: dict[str, object] = {}
+        for field_name, field in fields.items():
+            value = _resolve_field(
+                plugin,
+                _field_path(path, field_name),
+                field_name,
+                field,
+                raw,
+                environ,
+                active,
+            )
+            if value is not _OMIT:
+                resolved[field_name] = value
+        return MappingProxyType(resolved)
+    finally:
+        active.remove(identity)
+
+
+def _field_path(parent: str | None, field: str) -> str:
+    return field if parent is None else f"{parent}.{field}"
+
+
+def _schema_fields(
+    plugin: str,
+    schema: McpConfigSchema,
+    path: str | None,
+) -> Mapping[str, McpConfigField]:
+    if not isinstance(schema.fields, Mapping) or any(
+        not isinstance(key, str) for key in schema.fields
+    ):
+        _invalid_schema(plugin, path)
+    return schema.fields
+
+
+def _invalid_schema(plugin: str, path: str | None) -> NoReturn:
+    if path is None:
+        raise McpConfigResolutionError(
+            plugin,
+            None,
+            "manifest declares no valid configuration schema",
+        )
+    _fail(plugin, path, "has an invalid table item schema")
+
+
+def _validate_raw_keys(
+    plugin: str,
+    path: str | None,
+    raw: Mapping[object, object],
+    fields: Mapping[str, McpConfigField],
+) -> None:
     for key in raw:
-        if not isinstance(key, str) or key not in schema.fields:
-            unknown_field = key if isinstance(key, str) else None
+        if not isinstance(key, str) or key not in fields:
+            unknown_field = _field_path(path, key) if isinstance(key, str) else path
             raise McpConfigResolutionError(plugin, unknown_field, "is not declared by this plugin")
 
-    resolved: dict[str, object] = {}
-    secret_environment = os.environ if environ is None else environ
-    for field_name, field in schema.fields.items():
-        if field_name not in raw:
-            if field.default is not MISSING:
-                resolved[field_name] = _resolve_value(
-                    plugin,
-                    field_name,
-                    field,
-                    field.default,
-                    secret_environment,
-                )
-            elif field.required:
-                raise McpConfigResolutionError(plugin, field_name, "is required")
-            continue
-        resolved[field_name] = _resolve_value(
-            plugin,
-            field_name,
-            field,
-            raw[field_name],
-            secret_environment,
-        )
-    return MappingProxyType(resolved)
+
+def _resolve_field(
+    plugin: str,
+    path: str,
+    field_name: str,
+    field: object,
+    raw: Mapping[object, object],
+    environ: Mapping[str, str],
+    active: set[int],
+) -> object:
+    if not isinstance(field, McpConfigField):
+        _fail(plugin, path, "has an invalid table item schema")
+    if field_name not in raw:
+        if field.default is MISSING:
+            if field.required:
+                raise McpConfigResolutionError(plugin, path, "is required")
+            return _OMIT
+        return _resolve_value(plugin, path, field, field.default, environ, active)
+    return _resolve_value(plugin, path, field, raw[field_name], environ, active)
 
 
 def parse_secret_reference(plugin: str, field: str, value: object) -> SecretReference:
@@ -117,10 +185,13 @@ def _resolve_value(
     field: McpConfigField,
     value: object,
     environ: Mapping[str, str],
+    active: set[int],
 ) -> object:
     kind = field.kind
     if not isinstance(kind, McpConfigKind):
         _fail(plugin, name, "has an unsupported configuration kind")
+    if kind is McpConfigKind.TABLE_LIST:
+        return _resolve_table_list(plugin, name, field, value, environ, active)
     resolver = _VALUE_RESOLVERS.get(kind)
     if resolver is None:
         _fail(plugin, name, "has an unsupported configuration kind")
@@ -215,6 +286,32 @@ def _resolve_string_list(
     return items
 
 
+def _resolve_table_list(
+    plugin: str,
+    name: str,
+    field: McpConfigField,
+    value: object,
+    environ: Mapping[str, str],
+    active: set[int],
+) -> tuple[Mapping[str, object], ...]:
+    if isinstance(value, (str, bytes, Mapping)) or not isinstance(value, Sequence):
+        _fail(plugin, name, "must be a list of tables")
+    item_schema = field.item_schema
+    if not isinstance(item_schema, McpConfigSchema):
+        _fail(plugin, name, "has an invalid table item schema")
+    if field.min_items is not None and len(value) < field.min_items:
+        _fail(plugin, name, f"must contain at least {field.min_items} items")
+    if field.max_items is not None and len(value) > field.max_items:
+        _fail(plugin, name, f"must contain at most {field.max_items} items")
+    items: list[Mapping[str, object]] = []
+    for index, item in enumerate(value):
+        item_path = f"{name}[{index}]"
+        if not isinstance(item, Mapping):
+            _fail(plugin, item_path, "must be a table")
+        items.append(_resolve_schema(plugin, item_schema, item, environ, item_path, active))
+    return tuple(items)
+
+
 def _resolve_secret_value(
     plugin: str,
     name: str,
@@ -276,7 +373,7 @@ _VALUE_RESOLVERS: Mapping[McpConfigKind, _ValueResolver] = {
 }
 
 
-def _fail(plugin: str, field: str, message: str) -> NoReturn:
+def _fail(plugin: str, field: str | None, message: str) -> NoReturn:
     raise McpConfigResolutionError(plugin, field, message)
 
 

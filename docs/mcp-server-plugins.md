@@ -20,7 +20,7 @@ The directory name is canonical. A package cannot also export a
 broken, and loaded packages. Disabled MCP packages are discovered but their
 Python is not imported.
 
-Enable a sidecar explicitly and keep configuration flat:
+Enable a sidecar explicitly:
 
 ```toml
 [mcp]
@@ -36,6 +36,28 @@ Config fields are declared by `McpConfigSchema`. Secret fields accept only
 and never appear in `theater plugins` output. Capabilities are explicit,
 whole-manifest grants: declare the exact `PluginCapability` values needed.
 There is no ambient daemon access.
+
+`McpConfigKind.TABLE_LIST` declares a generic array of tables. Give it an
+`item_schema`; nested fields use the same scalar, secret, default, and required
+rules as top-level fields:
+
+```python
+McpConfigSchema({
+    "channels": McpConfigField(
+        McpConfigKind.TABLE_LIST,
+        item_schema=McpConfigSchema({
+            "folder_uid": McpConfigField(McpConfigKind.STRING, required=True),
+            "token": McpConfigField(McpConfigKind.SECRET, required=True),
+        }),
+    ),
+})
+```
+
+```toml
+[[mcp.plugins.acme.channels]]
+folder_uid = "inbox"
+token = { env = "ACME_CHANNEL_TOKEN" }
+```
 
 The launch planner returns an `McpLaunchPlan`. Its command, argv, and
 environment describe the stdio process; `files` and `private_files` are

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -12,14 +13,20 @@ from theater.mcp_plugins import (
     CompiledMcpPlugin,
     McpConfigField,
     McpConfigKind,
+    McpConfigResolutionError,
     McpConfigSchema,
+    McpLaunchContext,
     McpLaunchManifest,
     McpLaunchPlan,
+    McpManifestValidationError,
     McpPluginError,
     McpServerManifest,
     McpServerSpec,
     PluginCapability,
+    SecretValue,
+    compile_manifest,
     registry,
+    validate_manifest,
 )
 from theater.mcp_plugins.loading import LOCAL, discover, load_plugin
 
@@ -66,6 +73,35 @@ def write_plugin(root: Path, name: str = "acme", *, command: str = "acme-server"
     return manifest
 
 
+def manifest_with_config(schema: McpConfigSchema) -> McpServerManifest:
+    return McpServerManifest(
+        api_version=MANIFEST_API_VERSION,
+        description="Table-list test sidecar",
+        capabilities=frozenset({PluginCapability.PARTICIPANTS_READ}),
+        launch=McpLaunchManifest(planner=lambda _context: McpLaunchPlan(command="table-list")),
+        config=schema,
+    )
+
+
+def table_list_schema(*, max_items: int | None = 2) -> McpConfigSchema:
+    return McpConfigSchema(
+        {
+            "channels": McpConfigField(
+                McpConfigKind.TABLE_LIST,
+                min_items=1,
+                max_items=max_items,
+                item_schema=McpConfigSchema(
+                    {
+                        "folder_uid": McpConfigField(McpConfigKind.STRING, required=True),
+                        "label": McpConfigField(McpConfigKind.STRING, default="Inbox"),
+                        "token": McpConfigField(McpConfigKind.SECRET, required=True),
+                    }
+                ),
+            )
+        }
+    )
+
+
 @pytest.fixture(autouse=True)
 def clean_mcp_registry():
     registry.MCP_SERVERS.clear()
@@ -109,6 +145,82 @@ def test_enabled_plugin_resolves_immutable_config_once_and_redacts(tmp_path, mon
     assert plan.files == {Path("public/config.txt"): "https://acme.invalid"}
     assert plan.private_files == {Path("private/token.txt"): "first-secret"}
     assert "first-secret" not in repr(plan)
+
+
+def test_table_lists_resolve_nested_values_immutably_and_report_indexed_paths(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("CHANNEL_TOKEN", "channel-secret")
+    values = {"channels": [{"folder_uid": "inbox", "token": {"env": "CHANNEL_TOKEN"}}]}
+    plugin = compile_manifest("acme", manifest_with_config(table_list_schema()), values)
+    channels = plugin.config["channels"]
+
+    assert McpConfigKind.TABLE_LIST.value == "list[table]"
+    assert isinstance(channels, tuple)
+    assert isinstance(channels[0], Mapping)
+    assert channels[0]["label"] == "Inbox"
+    assert isinstance(channels[0]["token"], SecretValue)
+    assert "channel-secret" not in repr(plugin.config)
+    with pytest.raises(TypeError):
+        channels[0]["label"] = "Other"  # type: ignore[index]
+
+    context = McpLaunchContext(participant_id="p-1", cwd=tmp_path, config=plugin.config)
+    with pytest.raises(TypeError):
+        context.config["channels"][0]["label"] = "Other"  # type: ignore[index]
+    with pytest.raises(McpConfigResolutionError) as error:
+        compile_manifest(
+            "acme",
+            manifest_with_config(table_list_schema()),
+            {"channels": [values["channels"][0], {"token": {"env": "CHANNEL_TOKEN"}}]},
+        )
+    assert error.value.field == "channels[1].folder_uid"
+
+
+@pytest.mark.parametrize(
+    "channels, field",
+    [
+        ("not-a-list", "channels"),
+        (["not-a-table"], "channels[0]"),
+        ([], "channels"),
+        (
+            [
+                {"folder_uid": "one", "token": {"env": "CHANNEL_TOKEN"}},
+                {"folder_uid": "two", "token": {"env": "CHANNEL_TOKEN"}},
+            ],
+            "channels",
+        ),
+    ],
+)
+def test_table_lists_require_table_items_and_honor_bounds(channels, field):
+    with pytest.raises(McpConfigResolutionError) as error:
+        compile_manifest(
+            "acme",
+            manifest_with_config(table_list_schema(max_items=1)),
+            {"channels": channels},
+        )
+    assert error.value.field == field
+
+
+def test_table_list_schemas_require_valid_acyclic_item_schemas():
+    for item_schema in (None, object()):
+        schema = McpConfigSchema(
+            {"channels": McpConfigField(McpConfigKind.TABLE_LIST, item_schema=item_schema)}
+        )
+        with pytest.raises(McpManifestValidationError):
+            validate_manifest("acme", manifest_with_config(schema))
+
+    cyclic = McpConfigSchema()
+    object.__setattr__(
+        cyclic,
+        "fields",
+        {"again": McpConfigField(McpConfigKind.TABLE_LIST, item_schema=cyclic)},
+    )
+    schema = McpConfigSchema(
+        {"channels": McpConfigField(McpConfigKind.TABLE_LIST, item_schema=cyclic)}
+    )
+
+    with pytest.raises(McpManifestValidationError, match="cyclic"):
+        validate_manifest("acme", manifest_with_config(schema))
 
 
 def test_mcp_server_root_is_created_under_theater_home(theater_home):

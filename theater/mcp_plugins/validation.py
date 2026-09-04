@@ -23,6 +23,8 @@ from theater.mcp_plugins.contracts import (
 )
 
 _FIELD_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+_MAX_SCHEMA_DEPTH = 16
+_MAX_SCHEMA_FIELDS = MCP_PLUGIN_CONFIG_MAX_FIELDS * _MAX_SCHEMA_DEPTH
 
 
 class McpManifestValidationError(ValueError):
@@ -89,22 +91,54 @@ def _validate_capabilities(name: str, manifest: McpServerManifest) -> None:
 
 
 def _validate_config(name: str, schema: object) -> None:
+    _validate_schema(name, "config", schema, set(), [0], 0)
+
+
+def _validate_schema(
+    name: str,
+    path: str,
+    schema: object,
+    active: set[int],
+    field_count: list[int],
+    depth: int,
+) -> None:
     if not isinstance(schema, McpConfigSchema):
-        _fail(name, "config", f"expected McpConfigSchema, got {type(schema).__name__}")
+        _fail(name, path, f"expected McpConfigSchema, got {type(schema).__name__}")
+    if depth > _MAX_SCHEMA_DEPTH:
+        _fail(name, path, f"may nest at most {_MAX_SCHEMA_DEPTH} table schemas deep")
     if not isinstance(schema.fields, Mapping):
-        _fail(name, "config.fields", "must be a mapping of field names to McpConfigField values")
+        _fail(name, f"{path}.fields", "must be a mapping of field names to McpConfigField values")
     if len(schema.fields) > MCP_PLUGIN_CONFIG_MAX_FIELDS:
-        _fail(name, "config.fields", f"may contain at most {MCP_PLUGIN_CONFIG_MAX_FIELDS} fields")
-    for field_name, spec in schema.fields.items():
-        path = f"config.{field_name}" if isinstance(field_name, str) else "config.<invalid>"
-        if not isinstance(field_name, str) or _FIELD_NAME.fullmatch(field_name) is None:
-            _fail(name, path, "field names must be flat ASCII identifiers")
-        if not isinstance(spec, McpConfigField):
-            _fail(name, path, f"expected McpConfigField, got {type(spec).__name__}")
-        _validate_field(name, path, spec)
+        _fail(name, f"{path}.fields", f"may contain at most {MCP_PLUGIN_CONFIG_MAX_FIELDS} fields")
+    identity = id(schema)
+    if identity in active:
+        _fail(name, path, "must not contain a cyclic table schema")
+    field_count[0] += len(schema.fields)
+    if field_count[0] > _MAX_SCHEMA_FIELDS:
+        _fail(name, path, f"may contain at most {_MAX_SCHEMA_FIELDS} fields in total")
+    active.add(identity)
+    try:
+        for field_name, spec in schema.fields.items():
+            field_path = (
+                f"{path}.{field_name}" if isinstance(field_name, str) else f"{path}.<invalid>"
+            )
+            if not isinstance(field_name, str) or _FIELD_NAME.fullmatch(field_name) is None:
+                _fail(name, field_path, "field names must be flat ASCII identifiers")
+            if not isinstance(spec, McpConfigField):
+                _fail(name, field_path, f"expected McpConfigField, got {type(spec).__name__}")
+            _validate_field(name, field_path, spec, active, field_count, depth)
+    finally:
+        active.remove(identity)
 
 
-def _validate_field(name: str, path: str, spec: McpConfigField) -> None:
+def _validate_field(
+    name: str,
+    path: str,
+    spec: McpConfigField,
+    active: set[int],
+    field_count: list[int],
+    depth: int,
+) -> None:
     if not isinstance(spec.kind, McpConfigKind):
         _fail(name, f"{path}.kind", "must be an McpConfigKind")
     if type(spec.required) is not bool:
@@ -120,6 +154,14 @@ def _validate_field(name: str, path: str, spec: McpConfigField) -> None:
         _fail(name, f"{path}.path_must_be_absolute", "must be a boolean")
     if spec.kind is not McpConfigKind.PATH and (spec.path_must_exist or spec.path_must_be_absolute):
         _fail(name, path, "path constraints require kind=PATH")
+    if spec.kind is McpConfigKind.TABLE_LIST:
+        if spec.item_schema is None:
+            _fail(name, f"{path}.item_schema", "is required for kind=TABLE_LIST")
+        _validate_schema(
+            name, f"{path}.item_schema", spec.item_schema, active, field_count, depth + 1
+        )
+    elif spec.item_schema is not None:
+        _fail(name, f"{path}.item_schema", "requires kind=TABLE_LIST")
     if spec.default is not MISSING:
         _validate_default(name, f"{path}.default", spec, spec.default)
 
@@ -161,8 +203,8 @@ def _validate_limits(name: str, path: str, spec: McpConfigField) -> None:
         ):
             _fail(name, path, "min_length must not exceed max_length")
     if spec.min_items is not None or spec.max_items is not None:
-        if spec.kind is not McpConfigKind.STRING_LIST:
-            _fail(name, path, "item bounds require kind=STRING_LIST")
+        if spec.kind not in {McpConfigKind.STRING_LIST, McpConfigKind.TABLE_LIST}:
+            _fail(name, path, "item bounds require kind=STRING_LIST or TABLE_LIST")
         if (
             spec.min_items is not None
             and spec.max_items is not None
@@ -235,6 +277,39 @@ def _validate_list_default(name: str, path: str, spec: McpConfigField, value: ob
     _check_item_constraints(name, path, spec, len(value))
 
 
+def _validate_table_list_default(name: str, path: str, spec: McpConfigField, value: object) -> None:
+    if isinstance(value, (str, bytes, Mapping)) or not isinstance(value, Sequence):
+        _fail(name, path, "must be a sequence of tables")
+    _check_item_constraints(name, path, spec, len(value))
+    item_schema = spec.item_schema
+    if not isinstance(item_schema, McpConfigSchema):
+        _fail(name, path, "must declare a valid item_schema")
+    for index, item in enumerate(value):
+        item_path = f"{path}[{index}]"
+        if not isinstance(item, Mapping):
+            _fail(name, item_path, "must be a table")
+        _validate_table_default_item(name, item_path, item_schema, item)
+
+
+def _validate_table_default_item(
+    name: str,
+    path: str,
+    schema: McpConfigSchema,
+    value: Mapping[object, object],
+) -> None:
+    for key in value:
+        if not isinstance(key, str) or key not in schema.fields:
+            key_path = f"{path}.{key}" if isinstance(key, str) else path
+            _fail(name, key_path, "is not declared by this plugin")
+    for field_name, spec in schema.fields.items():
+        field_path = f"{path}.{field_name}"
+        if field_name not in value:
+            if spec.required:
+                _fail(name, field_path, "is required")
+            continue
+        _validate_default(name, field_path, spec, value[field_name])
+
+
 def _validate_secret_default(
     name: str,
     path: str,
@@ -290,6 +365,7 @@ _DEFAULT_VALIDATORS: Mapping[McpConfigKind, _DefaultValidator] = {
     McpConfigKind.BOOLEAN: _validate_boolean_default,
     McpConfigKind.PATH: _validate_path_default,
     McpConfigKind.STRING_LIST: _validate_list_default,
+    McpConfigKind.TABLE_LIST: _validate_table_list_default,
     McpConfigKind.SECRET: _validate_secret_default,
 }
 

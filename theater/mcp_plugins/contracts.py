@@ -51,7 +51,7 @@ class PluginCapability(StrEnum):
 
 
 class McpConfigKind(StrEnum):
-    """The flat value kinds a plugin may declare in its configuration schema."""
+    """The value kinds a plugin may declare in its configuration schema."""
 
     STRING = "string"
     INTEGER = "integer"
@@ -60,6 +60,7 @@ class McpConfigKind(StrEnum):
     PATH = "path"
     STRING_LIST = "list[str]"
     LIST_OF_STRING = "list[str]"
+    TABLE_LIST = "list[table]"
     SECRET = "secret"
 
 
@@ -73,7 +74,7 @@ MISSING = _Missing()
 
 @dataclass(frozen=True, slots=True)
 class McpConfigField:
-    """One flat, declarative MCP-plugin configuration field."""
+    """One declarative MCP-plugin configuration field."""
 
     kind: McpConfigKind | str
     required: bool = False
@@ -87,6 +88,7 @@ class McpConfigField:
     max_items: int | None = None
     path_must_exist: bool = False
     path_must_be_absolute: bool = False
+    item_schema: McpConfigSchema | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.kind, str):
@@ -106,7 +108,7 @@ class McpConfigField:
 
 @dataclass(frozen=True, slots=True)
 class McpConfigSchema:
-    """A named, flat mapping of configuration fields for one plugin."""
+    """A named mapping of configuration fields for one plugin."""
 
     fields: Mapping[str, McpConfigField] = field(default_factory=dict)
 
@@ -352,27 +354,42 @@ def _relative_artifact_path(value: object, label: str) -> Path:
 
 
 def _freeze_config(value: object) -> Mapping[str, object]:
+    return _freeze_config_mapping(value, set())
+
+
+def _freeze_config_mapping(value: object, active: set[int]) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise TypeError("MCP launch config must be a mapping")
-    frozen: dict[str, object] = {}
-    for key, item in value.items():
-        if not isinstance(key, str):
-            raise TypeError("MCP launch config keys must be strings")
-        frozen[key] = _freeze_config_value(item)
-    return MappingProxyType(frozen)
+    identity = id(value)
+    if identity in active:
+        raise ValueError("MCP launch config must not contain cycles")
+    active.add(identity)
+    try:
+        frozen: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("MCP launch config keys must be strings")
+            frozen[key] = _freeze_config_value(item, active)
+        return MappingProxyType(frozen)
+    finally:
+        active.remove(identity)
 
 
-def _freeze_config_value(value: object) -> object:
+def _freeze_config_value(value: object, active: set[int]) -> object:
     if value is None or type(value) in (bool, int) or isinstance(value, (str, Path, SecretValue)):
         return value
     if type(value) is float:
         if not isfinite(value):
             raise ValueError("MCP launch config numbers must be finite")
         return value
+    if isinstance(value, Mapping):
+        return _freeze_config_mapping(value, active)
     if isinstance(value, tuple) and all(isinstance(item, str) for item in value):
         return tuple(value)
     if isinstance(value, list) and all(isinstance(item, str) for item in value):
         return tuple(value)
+    if isinstance(value, tuple) and all(isinstance(item, Mapping) for item in value):
+        return tuple(_freeze_config_mapping(item, active) for item in value)
     raise TypeError("MCP launch config values must be validated immutable plugin values")
 
 
