@@ -97,35 +97,24 @@ def build_plan(
         )
         sidecars = ()
 
-    if registry is not None and sidecars:
+    while registry is not None and sidecars:
         accepted = omit_conflicting_sidecars(
             sidecars,
             plan,
             participant=participant,
             store=registry.store,
         )
-        if accepted != sidecars:
-            sidecars = accepted
-            plan = _harness_plan(
-                req,
-                participant,
-                overlay,
-                mcp_servers=_mcp_servers(req, participant, sidecars),
-            )
-            accepted = omit_conflicting_sidecars(
-                sidecars,
-                plan,
-                participant=participant,
-                store=registry.store,
-            )
-            if accepted != sidecars:
-                sidecars = accepted
-                plan = _harness_plan(
-                    req,
-                    participant,
-                    overlay,
-                    mcp_servers=_mcp_servers(req, participant, sidecars),
-                )
+        if accepted == sidecars:
+            break
+        sidecars = accepted
+        plan = _harness_plan(
+            req,
+            participant,
+            overlay,
+            mcp_servers=_mcp_servers(req, participant, sidecars),
+        )
+
+    if registry is not None and sidecars:
         plan = merge_sidecars(plan, sidecars)
     return plan
 

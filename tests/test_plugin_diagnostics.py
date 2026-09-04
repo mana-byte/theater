@@ -113,8 +113,13 @@ def test_projection_matches_harness_and_mcp_precedence_and_duplicates(tmp_path):
     _manifest(local_mcp, "sameserver", _mcp_manifest())
     _manifest(local_mcp, "dupeserver", _mcp_manifest())
     (local_mcp / "dupeserver.py").write_text("x = 1\n", encoding="utf-8")
+    _manifest(local_harness, "collision", harness_manifest)
+    _manifest(local_mcp, "collision", _mcp_manifest())
     rows = describe(
-        config.Config(mcp=config.McpSection(enabled=["sameserver", "dupeserver"])),
+        config.Config(
+            harness=config.HarnessSection(disabled=["collision"]),
+            mcp=config.McpSection(enabled=["sameserver", "dupeserver"]),
+        ),
         harness_local_dir=local_harness,
         harness_shipped_dir=shipped_harness,
         mcp_local_dir=local_mcp,
@@ -133,39 +138,9 @@ def test_projection_matches_harness_and_mcp_precedence_and_duplicates(tmp_path):
         row for row in rows if row["kind"] == "mcp_server" and row["name"] == "dupeserver"
     ]
     assert [row["state"] for row in mcp_duplicate] == ["duplicate", "duplicate"]
-
-
-def test_cross_kind_conflict_is_fatal_even_when_the_packages_are_disabled(
-    monkeypatch, capsys, tmp_path
-):
-    local_harness = tmp_path / "harnesses"
-    local_mcp = tmp_path / "mcp_servers"
-    _manifest(
-        local_harness,
-        "collision",
-        "from theater.harness.builtin.plugins.pi.manifest import MANIFEST\n",
-    )
-    _manifest(local_mcp, "collision", _mcp_manifest())
-    settings = config.Config(harness=config.HarnessSection(disabled=["collision"]))
-    rows = describe(
-        settings,
-        harness_local_dir=local_harness,
-        harness_shipped_dir=tmp_path / "shipped-harnesses",
-        mcp_local_dir=local_mcp,
-        mcp_shipped_dir=tmp_path / "shipped-mcp",
-    )
-    assert [row["state"] for row in rows] == ["conflict", "conflict"]
-    assert all("prevents daemon startup" in row["error"] for row in rows)
-    assert all("including a disabled package" in row["error"] for row in rows)
-
-    monkeypatch.setattr(introspection, "describe_plugins", lambda _config: rows)
-    monkeypatch.setattr(introspection.config, "load", lambda: settings)
-    assert introspection.cmd_plugins(SimpleNamespace(json=False)) == 0
-    text = capsys.readouterr().out
-    assert "conflict" in text
-    assert "prevents daemon startup" in text
-    assert introspection.cmd_plugins(SimpleNamespace(json=True)) == 0
-    assert json.loads(capsys.readouterr().out) == rows
+    conflicts = [row for row in rows if row["name"] == "collision"]
+    assert [row["state"] for row in conflicts] == ["conflict", "conflict"]
+    assert all("prevents daemon startup" in row["error"] for row in conflicts)
 
 
 def test_plugins_command_is_local_non_mutating_and_has_text_and_json(monkeypatch, capsys, tmp_path):

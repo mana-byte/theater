@@ -41,13 +41,11 @@ The launch planner returns an `McpLaunchPlan`. Its command, argv, and
 environment describe the stdio process; `files` and `private_files` are
 relative text artifacts confined to that participant and plugin. Theater
 creates a participant-scoped credential file and injects its path through
-`THEATER_PLUGIN_CREDENTIAL_PATH`. Do not copy that credential into logs,
-arguments, or public artifacts.
-
-Plugin Python is trusted. Do not unwrap a `SecretValue` into argv or public
-artifacts. When a harness cannot provide a private transport, write the secret
-to a 0600 private artifact and place only that artifact's path in the
-environment.
+`THEATER_PLUGIN_CREDENTIAL_PATH`. Theater stores the command, argv, and
+environment in a 0600 launch descriptor; the harness sees only a runner and
+that descriptor's path. Plugin Python remains trusted: do not copy secrets into
+logs or `files`, and prefer the environment or `private_files` over process
+arguments that may be visible to the operating system.
 
 ## Native sidecar
 

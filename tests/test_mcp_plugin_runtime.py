@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 import stat
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -156,26 +158,97 @@ def test_sidecar_planning_materializes_confined_artifacts_and_a_0600_credential(
     assert [item.name for item in observed[0]] == ["theater", "theater_wait", "acme"]
     spec = observed[0][-1]
     assert spec.name == "acme"
-    assert spec.args == ("--stdio",)
-    credential_path = Path(spec.env["THEATER_PLUGIN_CREDENTIAL_PATH"])
+    rendered_spec = json.dumps({"command": spec.command, "args": spec.args, "env": dict(spec.env)})
+    assert "acme-server" not in rendered_spec
+    assert "--stdio" not in rendered_spec
+    assert "ACME_MODE" not in rendered_spec
     root = paths.participant_mcp_plugin_dir(participant.id, "acme")
-    assert credential_path.parent == root
     assert set(plan.files) == {root / "public/config.json"}
     assert root / "private/config.secret" in plan.private_files
-    assert credential_path in plan.private_files
+    (record,) = registry.store.mcp_plugin_credentials(participant.id)
+    credential_path = Path(record.credential_path)
+    assert credential_path.parent.resolve() == root.resolve()
+    assert credential_path.resolve() in {path.resolve() for path in plan.private_files}
 
     planning.record_plan_artifacts(participant, plan, registry)
     planning.write_plan_files(plan)
-    assert stat.S_IMODE(credential_path.stat().st_mode) == 0o600
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in plan.private_files)
     assert stat.S_IMODE(credential_path.parent.stat().st_mode) == 0o700
 
-    (record,) = registry.store.mcp_plugin_credentials(participant.id)
     assert record.plugin_name == "acme"
     assert record.api_version == MCP_PLUGIN_API_VERSION
     assert record.grants == frozenset({PluginCapability.PARTICIPANTS_READ})
     row = registry.store.conn.execute(participant_mcp_plugins.select()).first()
     assert row is not None
     assert credential_path.read_text().strip() not in json.dumps(dict(row._mapping))
+
+
+def test_private_sidecar_launch_executes_with_its_environment(
+    monkeypatch, registry, isolated_mcp_registry, rendering_sidecars
+):
+    secret = "sidecar-environment-secret"
+    isolated_mcp_registry["acme"] = _plugin(
+        planner=lambda _context: McpLaunchPlan(
+            command=sys.executable,
+            argv=("-c", "import os; print(os.environ['PLUGIN_TOKEN'])"),
+            env={"PLUGIN_TOKEN": secret},
+        )
+    )
+    participant = registry.create_spawned(harness="fake", cwd="/tmp")
+    rendered = []
+
+    def harness_plan(_harness, *, mcp_servers=(), **_kwargs) -> LaunchPlan:
+        rendered.append(mcp_servers[-1])
+        return LaunchPlan(argv=["fake"])
+
+    monkeypatch.setattr(planning, "plan_launch", harness_plan)
+    plan = planning.build_plan(_request(), participant, None, registry=registry)
+    planning.write_plan_files(plan)
+    spec = rendered[0]
+
+    result = subprocess.run(
+        [spec.command, *spec.args],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, **spec.env},
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == secret
+    assert secret not in repr(spec)
+
+
+@pytest.mark.parametrize(
+    ("harness", "approval"),
+    (
+        ("claude", "manual"),
+        ("codex", "manual"),
+        ("opencode", "manual"),
+        ("pi", "yolo"),
+        ("vibe", "manual"),
+    ),
+)
+def test_sidecar_environment_is_private_across_shipped_harnesses(
+    harness, approval, registry, isolated_mcp_registry
+):
+    secret = "sidecar-environment-secret"
+    isolated_mcp_registry["acme"] = _plugin(
+        planner=lambda _context: McpLaunchPlan(
+            command="acme-server",
+            argv=("--token", secret),
+            env={"ACME_TOKEN": secret},
+        )
+    )
+    participant = registry.create_spawned(harness=harness, cwd="/tmp")
+    request = SpawnRequest(harness=harness, prompt="", cwd="/tmp", approval=approval)
+
+    plan = planning.build_plan(request, participant, None, registry=registry)
+
+    assert secret not in "\0".join(plan.argv)
+    assert secret not in json.dumps(plan.env)
+    assert all(secret not in contents for contents in plan.files.values())
+    assert any(secret in contents for contents in plan.private_files.values())
 
 
 def test_launch_plan_repr_redacts_sidecar_and_native_credentials():
@@ -284,20 +357,52 @@ def test_sidecar_artifact_collisions_are_omitted_without_overwriting_harness_fil
     isolated_mcp_registry["acme"] = _plugin(planner=sidecar_plan)
     participant = registry.create_spawned(harness="fake", cwd="/tmp")
     root = paths.participant_mcp_plugin_dir(participant.id, "acme")
-    observed: list[tuple] = []
 
     def harness_plan(_harness, *, mcp_servers=(), **_kwargs) -> LaunchPlan:
-        observed.append(mcp_servers)
         return LaunchPlan(argv=["fake"], files={root / "config" / "harness.json": "{}"})
 
     monkeypatch.setattr(planning, "plan_launch", harness_plan)
     plan = planning.build_plan(_request(), participant, None, registry=registry)
 
-    assert [item.name for item in observed[0]] == ["theater", "theater_wait", "acme"]
-    assert [item.name for item in observed[1]] == ["theater", "theater_wait"]
     assert plan.files == {root / "config" / "harness.json": "{}"}
     assert registry.store.mcp_plugin_credentials(participant.id) == ()
     assert root / ".theater-plugin-credential" not in plan.private_files
+
+
+def test_sidecar_collision_filter_converges_after_each_renderer_change(
+    monkeypatch, registry, isolated_mcp_registry, rendering_sidecars
+):
+    for name in ("alpha", "beta", "gamma"):
+        isolated_mcp_registry[name] = _plugin(
+            name=name,
+            planner=lambda _context: McpLaunchPlan(
+                command="sidecar",
+                files={Path("config"): "sidecar"},
+            ),
+        )
+    participant = registry.create_spawned(harness="fake", cwd="/tmp")
+    roots = {
+        name: paths.participant_mcp_plugin_dir(participant.id, name)
+        for name in ("alpha", "beta", "gamma")
+    }
+
+    def harness_plan(_harness, *, mcp_servers=(), **_kwargs) -> LaunchPlan:
+        names = [server.name for server in mcp_servers]
+        if "alpha" in names:
+            path = roots["alpha"] / "config" / "harness.json"
+        elif "beta" in names:
+            path = roots["beta"] / "config" / "harness.json"
+        elif "gamma" in names:
+            path = roots["gamma"] / "config" / "harness.json"
+        else:
+            path = Path("/tmp/core-config.json")
+        return LaunchPlan(argv=["fake"], files={path: "{}"})
+
+    monkeypatch.setattr(planning, "plan_launch", harness_plan)
+    plan = planning.build_plan(_request(), participant, None, registry=registry)
+
+    assert plan.files == {Path("/tmp/core-config.json"): "{}"}
+    assert registry.store.mcp_plugin_credentials(participant.id) == ()
 
 
 def test_sidecar_persistence_failure_rolls_back_its_record_and_empty_root(

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import stat
+import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PureWindowsPath
@@ -31,6 +33,7 @@ from theater.models import Participant
 logger = logging.getLogger("theater.mcp_plugins.runtime")
 
 _CREDENTIAL_FILENAME = ".theater-plugin-credential"
+_LAUNCH_FILENAME = ".theater-plugin-launch.json"
 _RESERVED_SERVER_NAMES = frozenset({HARNESS_MCP_SERVER_NAME, HARNESS_MCP_WAIT_SERVER_NAME})
 
 
@@ -206,9 +209,10 @@ def _plan_sidecar(
     files = _absolute_artifacts(root, launch.files, label="files")
     private_files = _absolute_artifacts(root, launch.private_files, label="private_files")
     credential_path = root / _CREDENTIAL_FILENAME
+    launch_path = root / _LAUNCH_FILENAME
     artifact_paths = (*files, *private_files)
-    if _first_path_collision((credential_path,), artifact_paths) is not None:
-        raise ValueError("MCP launch artifact collides with the reserved credential file")
+    if _first_path_collision((credential_path, launch_path), artifact_paths) is not None:
+        raise ValueError("MCP launch artifact collides with a reserved Theater file")
     collision = _first_path_collision(artifact_paths, ())
     if collision is not None:
         first, second = collision
@@ -219,14 +223,18 @@ def _plan_sidecar(
     if MCP_PLUGIN_CREDENTIAL_PATH_ENV in env:
         raise ValueError(f"MCP launch env may not set reserved {MCP_PLUGIN_CREDENTIAL_PATH_ENV!r}")
     env[MCP_PLUGIN_CREDENTIAL_PATH_ENV] = str(credential_path)
+    private_files[launch_path] = json.dumps(
+        {"command": launch.command, "argv": list(launch.argv), "env": env},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return PlannedMcpSidecar(
         plugin=plugin,
         participant_id=participant_id,
         spec=McpServerSpec(
             name=plugin.name,
-            command=launch.command,
-            args=launch.argv,
-            env=env,
+            command=sys.executable,
+            args=("-m", "theater.mcp_plugins.runner", str(launch_path)),
         ),
         root=root,
         files=files,
