@@ -14,6 +14,7 @@ from theater.cli.commands.introspection import (
     cmd_config,
     cmd_harnesses,
     cmd_models,
+    cmd_plugins,
     cmd_stats,
 )
 from theater.cli.commands.launch import cmd_launch
@@ -58,6 +59,7 @@ COMMANDS = {
     "bind": cmd_bind,
     "adopt": cmd_adopt,
     "harnesses": cmd_harnesses,
+    "plugins": cmd_plugins,
     "skills": cmd_skills,
     "stats": cmd_stats,
     "gc": cmd_gc,

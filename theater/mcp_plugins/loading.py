@@ -93,11 +93,17 @@ def load_plugin(plugin: LoadedMcpPlugin) -> LoadedMcpPlugin:
             f"Use `MANIFEST = {manifest.__name__}(...)`",
         )
     if not isinstance(manifest, McpServerManifest):
+        guidance = ""
+        if type(manifest).__name__ == "HarnessManifest":
+            guidance = (
+                " Harness packages belong in $THEATER_HOME/harnesses/<name>/manifest.py; "
+                "a package may export only one manifest kind"
+            )
         _cleanup_package(package_name)
         return _broken(
             plugin,
             f"{manifest_path}: MANIFEST is a {type(manifest).__name__}, which is not a "
-            "McpServerManifest",
+            f"McpServerManifest.{guidance}",
         )
     try:
         validate_manifest(plugin.name, manifest)

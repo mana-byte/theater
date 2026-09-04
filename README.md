@@ -100,6 +100,7 @@ Install and authenticate at least one supported CLI, then:
 
 ```sh
 theater harnesses
+theater plugins
 theater
 ```
 
@@ -307,6 +308,16 @@ packages are rejected with diagnostics instead of partially loading.
 Read the [harness plugin guide](docs/harness-plugins.md) before writing an
 adapter. A real adapter defines launch behavior, durable observation, turn
 boundaries, resume semantics, and optional native signal enrichment.
+
+### MCP-server plugins
+
+MCP-server packages are participant-scoped stdio sidecars under
+`$THEATER_HOME/mcp_servers/`. They are disabled until explicitly enabled and
+can use only their declared capability grants. Use `theater plugins` to inspect
+both harness and MCP-server packages locally, without starting the daemon.
+
+Read the [MCP-server plugin guide](docs/mcp-server-plugins.md) for native
+`TheaterPluginClient` sidecars and compatibility wrappers using `theater plugin call`.
 
 ### Agent skills
 

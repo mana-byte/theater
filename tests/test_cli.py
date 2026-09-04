@@ -50,6 +50,7 @@ EXPECTED_COMMANDS = {
     "models",
     "name",
     "plugin",
+    "plugins",
     "regie",
     "restart",
     "spawn",

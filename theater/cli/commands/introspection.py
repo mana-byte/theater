@@ -16,6 +16,7 @@ from theater.client import DaemonClient, call_sync
 from theater.constants.harness import HARNESS_CHANNEL_HEALTH_DIAGNOSTIC_MAX_CHARS
 from theater.formatting import clip_harness, pad_to_width, tilde
 from theater.harness import HARNESSES, describe
+from theater.plugins.diagnostics import describe as describe_plugins
 from theater.protocol import RemoteError
 
 
@@ -73,6 +74,35 @@ def cmd_harnesses(args) -> int:
     if fallback:
         # Worth saying which list this is: a daemon already up may hold a different one.
         print(f"\n{fallback} — read from this process's registry")
+    return 0
+
+
+def cmd_plugins(args) -> int:
+    """Diagnose package plugins locally, without installing a live registry."""
+    rows = describe_plugins(config.load())
+    if args.json:
+        print(json.dumps(rows, indent=2, sort_keys=True))
+        return 0
+    if not rows:
+        print("no plugin packages discovered")
+        return 0
+    print(f"{'KIND':<11} {'NAME':<18} {'SOURCE':<8} {'STATE':<11} PATH")
+    for row in rows:
+        print(
+            f"{row['kind']:<11} {row['name']:<18} {(row['source'] or '-'):<8} "
+            f"{row['state']:<11} {tilde(row['path']) if row['path'] else '-'}"
+        )
+        facts = []
+        if row.get("description"):
+            facts.append(str(row["description"]))
+        if row.get("capabilities"):
+            facts.append(f"capabilities: {', '.join(row['capabilities'])}")
+        if row.get("binary"):
+            facts.append(f"binary: {row['binary']}")
+        if row.get("error"):
+            facts.append(f"error: {row['error']}")
+        facts.append(f"manifest: {tilde(row['manifest_path']) if row['manifest_path'] else '-'}")
+        print(f"   {' · '.join(facts)}")
     return 0
 
 

@@ -41,6 +41,7 @@ from theater.cli.commands.introspection import (  # noqa: F401
     cmd_config,
     cmd_harnesses,
     cmd_models,
+    cmd_plugins,
     cmd_stats,
 )
 from theater.cli.commands.maintenance import (  # noqa: F401
@@ -121,6 +122,7 @@ def main(argv: list[str] | None = None) -> int:
             "config",
             "harness-event",
             "plugin",
+            "plugins",
             "skills",
         }:
             harness_registry.install(config.load())

@@ -336,6 +336,12 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     harnesses = sub.add_parser("harnesses", help="List the coding CLIs Theater knows how to drive.")
     harnesses.add_argument("--json", action="store_true")
 
+    plugins = sub.add_parser(
+        "plugins",
+        help="Diagnose local harness and MCP-server plugin packages without starting the daemon.",
+    )
+    plugins.add_argument("--json", action="store_true")
+
     skills = sub.add_parser("skills", help="List declarative agent skills from the running daemon.")
     skills.add_argument("--json", action="store_true")
 

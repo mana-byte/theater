@@ -258,6 +258,8 @@ disabled = []
 # are off unless named here; each enabled package may declare a flat config
 # table under [mcp.plugins.<name>]. Secrets there use exactly { env = "NAME" }
 # or { file = "/path" }, and are resolved once when Theater starts.
+# `theater plugins` inspects both harness and MCP-server packages locally and
+# redacts resolved config and secrets. Writing one: docs/mcp-server-plugins.md.
 enabled = []
 
 
