@@ -228,6 +228,23 @@ def test_pi_launch_advertises_only_yolo_and_builds_isolated_argv(tmp_path, monke
     assert plan.env["PI_TELEMETRY"] == "0"
 
 
+def test_pi_bridge_isolates_non_core_mcp_startup_failures() -> None:
+    bridge = (
+        Path(__file__).parents[1]
+        / "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts"
+    ).read_text(encoding="utf-8")
+
+    assert 'const CORE_MCP_SERVERS = new Set(["theater", "theater_wait"]);' in bridge
+    assert (
+        "await registerServerTools(pi, server, client, registered);\n\t\t\t\tclients.push(client);"
+        in bridge
+    )
+    assert (
+        "await client.close();\n\t\t\t\tif (CORE_MCP_SERVERS.has(server.name)) throw error;"
+        in bridge
+    )
+
+
 def test_pi_launch_argv_is_independent_of_approval_and_manifest_rejects_other_modes(
     tmp_path, monkeypatch
 ) -> None:

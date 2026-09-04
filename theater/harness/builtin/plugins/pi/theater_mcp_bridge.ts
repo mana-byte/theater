@@ -20,6 +20,7 @@ import { Type } from "typebox";
 const OWNER = Symbol.for("theater.pi.mcp-bridge.owner");
 const STARTUP_TIMEOUT_MS = 10_000;
 const MAX_FRAME_CHARS = 1024 * 1024;
+const CORE_MCP_SERVERS = new Set(["theater", "theater_wait"]);
 const IDLE_STATUS_KEY = "theater.pi.idle";
 const IDLE_STATUS_TEXT = "Theater: idle";
 const SWITCH_MARKER = ".theater-pi-switch.json";
@@ -542,6 +543,50 @@ function toolName(server: string, name: string): string {
 	return `${server.replace(/[^a-zA-Z0-9_-]/g, "_")}__${name.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 }
 
+async function registerServerTools(
+	pi: ExtensionAPI,
+	server: ServerConfig,
+	client: McpClient,
+	registered: Set<string>,
+): Promise<void> {
+	const discovered = await client.listTools();
+	const names = discovered.map((tool) => ({ tool, name: toolName(server.name, tool.name) }));
+	const localNames = new Set<string>();
+	for (const { name } of names) {
+		if (registered.has(name) || localNames.has(name)) {
+			throw new Error(`MCP tools collide after Pi name normalization: ${name}`);
+		}
+		localNames.add(name);
+	}
+	for (const { tool, name } of names) {
+		pi.registerTool({
+			name,
+			label: `${server.name}/${tool.name}`,
+			description: tool.description ?? `${server.name} MCP tool ${tool.name}`,
+			promptSnippet: `${server.name}: ${tool.description ?? tool.name}`,
+			parameters: Type.Unsafe(tool.inputSchema),
+			async execute(_id, params, signal) {
+				if (signal?.aborted) return { content: [{ type: "text", text: "Cancelled" }], details: {} };
+				try {
+					const result = await client.callTool(tool.name, params, signal);
+					const content = (result.content ?? []).map((item) => ({
+						type: "text" as const,
+						text: item.text ?? JSON.stringify(item),
+					}));
+					if (result.isError) {
+						throw new Error(joinErrorText(result.content, server.name, tool.name));
+					}
+					return { content, details: { server: server.name, tool: tool.name } };
+				} catch (error) {
+					if (signal?.aborted) return { content: [{ type: "text", text: "Cancelled" }], details: {} };
+					throw error;
+				}
+			},
+		});
+	}
+	for (const { name } of names) registered.add(name);
+}
+
 export default async function theaterMcpBridge(pi: ExtensionAPI) {
 	const launchConfigPath = configFlag(process.argv);
 	if (launchConfigPath?.trim()) {
@@ -579,39 +624,13 @@ export default async function theaterMcpBridge(pi: ExtensionAPI) {
 		const registered = new Set<string>();
 		for (const server of await loadConfig(configPath)) {
 			const client = new McpClient(server);
-			clients.push(client);
-			await client.initialize();
-			for (const tool of await client.listTools()) {
-				const name = toolName(server.name, tool.name);
-				if (registered.has(name)) throw new Error(`MCP tools collide after Pi name normalization: ${name}`);
-				registered.add(name);
-				pi.registerTool({
-					name,
-					label: `${server.name}/${tool.name}`,
-					description: tool.description ?? `${server.name} MCP tool ${tool.name}`,
-					promptSnippet: `${server.name}: ${tool.description ?? tool.name}`,
-					parameters: Type.Unsafe(tool.inputSchema),
-					async execute(_id, params, signal) {
-						if (signal?.aborted) return { content: [{ type: "text", text: "Cancelled" }], details: {} };
-						try {
-							const result = await client.callTool(tool.name, params, signal);
-							const content = (result.content ?? []).map((item) => ({
-								type: "text" as const,
-								text: item.text ?? JSON.stringify(item),
-							}));
-							if (result.isError) {
-								// Preserve the actionable text the server returned rather
-								// than replacing it with a generic message. A failed tool
-								// is still a failure, so Pi surfaces its actual reason.
-								throw new Error(joinErrorText(result.content, server.name, tool.name));
-							}
-							return { content, details: { server: server.name, tool: tool.name } };
-						} catch (error) {
-							if (signal?.aborted) return { content: [{ type: "text", text: "Cancelled" }], details: {} };
-							throw error;
-						}
-					},
-				});
+			try {
+				await client.initialize();
+				await registerServerTools(pi, server, client, registered);
+				clients.push(client);
+			} catch (error) {
+				await client.close();
+				if (CORE_MCP_SERVERS.has(server.name)) throw error;
 			}
 		}
 	} catch (error) {
