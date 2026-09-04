@@ -181,7 +181,7 @@ def test_shipped_renderers_receive_core_and_extra_stdio_servers(tmp_path, harnes
         name="metrics",
         command="metrics-mcp",
         args=("--scope", "participant"),
-        env={"METRICS_TOKEN": "launch-local"},
+        env={"METRICS_TOKEN": "launch-local", "METRICS_LABEL": "needs quotes"},
     )
     plan = plan_launch(
         harness,
@@ -197,12 +197,20 @@ def test_shipped_renderers_receive_core_and_extra_stdio_servers(tmp_path, harnes
         assert servers["metrics"] == {
             "command": "metrics-mcp",
             "args": ["--scope", "participant"],
-            "env": {"METRICS_TOKEN": "launch-local"},
+            "env": {"METRICS_TOKEN": "launch-local", "METRICS_LABEL": "needs quotes"},
         }
     elif harness == "codex":
         assert 'mcp_servers.metrics.command="metrics-mcp"' in plan.argv
         assert 'mcp_servers.metrics.args=["--scope", "participant"]' in plan.argv
-        assert 'mcp_servers.metrics.env={"METRICS_TOKEN": "launch-local"}' in plan.argv
+        assert [
+            value
+            for value in plan.argv
+            if value.startswith("mcp_servers.metrics.env.")
+        ] == [
+            'mcp_servers.metrics.env.METRICS_TOKEN="launch-local"',
+            'mcp_servers.metrics.env.METRICS_LABEL="needs quotes"',
+        ]
+        assert not any(value.startswith("mcp_servers.metrics.env={") for value in plan.argv)
         servers = {"theater", "theater_wait", "metrics"}
     elif harness == "opencode":
         servers = json.loads(plan.files[tmp_path / "opencode.json"])["mcp"]
@@ -210,7 +218,7 @@ def test_shipped_renderers_receive_core_and_extra_stdio_servers(tmp_path, harnes
             "type": "local",
             "enabled": True,
             "command": ["metrics-mcp", "--scope", "participant"],
-            "environment": {"METRICS_TOKEN": "launch-local"},
+            "environment": {"METRICS_TOKEN": "launch-local", "METRICS_LABEL": "needs quotes"},
         }
     else:
         entries = json.loads(plan.env["VIBE_MCP_SERVERS"])
@@ -221,7 +229,7 @@ def test_shipped_renderers_receive_core_and_extra_stdio_servers(tmp_path, harnes
             "command": "metrics-mcp",
             "args": ["--scope", "participant"],
             "tool_timeout_sec": 340.0,
-            "env": {"METRICS_TOKEN": "launch-local"},
+            "env": {"METRICS_TOKEN": "launch-local", "METRICS_LABEL": "needs quotes"},
         }
     assert set(servers) == {"theater", "theater_wait", "metrics"}
 
