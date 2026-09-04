@@ -18,7 +18,7 @@ def render_mcp_servers(context: McpRenderContext) -> McpRenderOverlay:
             "-c",
             f"{prefix}.args={json.dumps(list(server.args))}",
         ]
-        if server.env:
-            argv += ["-c", f"{prefix}.env={json.dumps(dict(server.env))}"]
+        for key, value in server.env.items():
+            argv += ["-c", f"{prefix}.env.{key}={json.dumps(value)}"]
     insert_at = 3 if context.plan.argv[1:2] == ["fork"] else 1
     return McpRenderOverlay(argv=argv, argv_insert_at=insert_at)
