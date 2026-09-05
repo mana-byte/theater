@@ -12,9 +12,11 @@ not import from the daemon to do it.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from enum import StrEnum
 
 from theater import proc
+from theater.daemon import workers
 from theater.harness import HARNESSES, observation_lookup
 
 
@@ -69,15 +71,26 @@ def detect_harness(
             name = match_binary(root_comm, HARNESSES)
             if name:
                 return name
-        if snapshot is not None:
-            comms = descendant_comms(pane_pid, snapshot)
-        else:
+        if snapshot is None:
             comms = descendant_comms(pane_pid)
+        else:
+            comms = descendant_comms(pane_pid, snapshot)
         for comm in comms:
             name = match_binary(comm, HARNESSES)
             if name:
                 return name
     return "unknown"
+
+
+async def detect_harness_async(
+    pane_command: str, pane_pid: int, *, detector: Callable[..., str]
+) -> str:
+    """Detect a pane harness without running process probes on the event loop."""
+    name = match_binary(pane_command, HARNESSES)
+    if name:
+        return name
+    snapshot = await workers.to_thread(proc.ProcessSnapshot.capture, label="harness_detect")
+    return detector(pane_command, pane_pid, snapshot=snapshot)
 
 
 #: Interactive shells a pane falls back to when the program exits; not exhaustive.

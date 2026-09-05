@@ -1499,7 +1499,7 @@ async def test_adopt_detects_harness_from_pane_command(client, fake_tmux, monkey
     # Simulate that: foreground is "theater", but descendants include "vibe".
     import theater.daemon.harness_detect as harness_detect_mod
 
-    monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid: ["vibe"])
+    monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid, snapshot=None: ["vibe"])
 
     fake_tmux.visible_panes = [_make_pane("%5", command="theater", cwd="/tmp/proj")]
     record = await client.call("adopt", pane="%5", cwd="/tmp/proj")
@@ -1512,7 +1512,9 @@ async def test_adopt_detects_harness_from_pane_command(client, fake_tmux, monkey
 async def test_adopt_detects_claude(client, fake_tmux, monkeypatch):
     import theater.daemon.harness_detect as harness_detect_mod
 
-    monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid: ["claude"])
+    monkeypatch.setattr(
+        harness_detect_mod, "descendant_comms", lambda pid, snapshot=None: ["claude"]
+    )
 
     fake_tmux.visible_panes = [_make_pane("%6", command="theater", cwd="/tmp/cla")]
     record = await client.call("adopt", pane="%6")
@@ -1545,7 +1547,7 @@ async def test_adopt_override_harness(client, fake_tmux, monkeypatch):
 async def test_adopt_unknown_command_yields_unknown_harness(client, fake_tmux, monkeypatch):
     import theater.daemon.harness_detect as harness_detect_mod
 
-    monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid: ["zsh"])
+    monkeypatch.setattr(harness_detect_mod, "descendant_comms", lambda pid, snapshot=None: ["zsh"])
 
     fake_tmux.visible_panes = [_make_pane("%8", command="zsh")]
     record = await client.call("adopt", pane="%8")

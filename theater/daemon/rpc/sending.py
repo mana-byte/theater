@@ -15,6 +15,7 @@ from theater.daemon.harness_detect import (
     PaneHarnessVerdict,
     compare_detected_harness,
     detect_harness,
+    detect_harness_async,
 )
 from theater.daemon.rpc.params import (
     _prompt_with_response_format,
@@ -135,7 +136,7 @@ async def _check_pane_identity(daemon, target, refuse: Callable[..., NoReturn]) 
             reason="pane_replaced",
         )
 
-    found = detect_harness(pane.current_command, pane.pane_pid)
+    found = await detect_harness_async(pane.current_command, pane.pane_pid, detector=detect_harness)
     verdict = compare_detected_harness(normalize(target.harness), found, pane.current_command)
     if verdict is PaneHarnessVerdict.MATCH:
         return

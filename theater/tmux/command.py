@@ -19,6 +19,7 @@ and the behaviour cannot.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import subprocess
 from dataclasses import dataclass
 
@@ -59,9 +60,13 @@ class Pane:
         parts = line.split(_FORMAT_SEP)
         if len(parts) != 7:
             raise TmuxError(f"unexpected list-panes row: {line!r}")
+        try:
+            pane_pid = int(parts[1])
+        except ValueError:
+            raise TmuxError(f"unexpected list-panes row: {line!r}") from None
         return cls(
             pane_id=parts[0],
-            pane_pid=int(parts[1]),
+            pane_pid=pane_pid,
             cwd=parts[2],
             window_id=parts[3],
             session=parts[4],
@@ -119,7 +124,9 @@ async def run(*args: str, check: bool = True, input_text: str | None = None) -> 
             )
             out, err = await asyncio.wait_for(communicate, timeout=_run_timeout())
         except TimeoutError:
-            proc.kill()
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            await proc.wait()
             raise TmuxError(f"tmux {' '.join(args)} timed out") from None
         if proc.returncode != 0:
             sp.set_result("error", error_type="tmux_error")
