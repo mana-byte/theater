@@ -215,11 +215,13 @@ batches of 50; ledger page 30; sentence and tip typing pacing; every observer ti
 
 ## Step 4 — Close
 
-Changes apply on `theater restart` — offer to run it, saying it restarts the daemon,
-which reads the file once at start. The régie is not restarted by it: a régie that is
+Each Theater process reads the file once, at its own start. `theater restart` — offer
+to run it — restarts only the daemon. Two things it does not touch: a régie that is
 already open picks up config-dependent visuals (theme, sidebar width) only when it is
-closed and relaunched. Summarize what was discovered, what was written where, what was
-deliberately left absent (grants and pinned defaults), and what stays at its default.
-Say plainly that theater-configure switched itself off in `[skills] disabled`, and that
-undoing it is removing the name from that list and running `theater restart` again. Do
-not create a report file.
+closed and relaunched, and agents that are already running keep their old telemetry
+export settings until they are relaunched, because each agent's MCP process configures
+observability from the file at startup. Summarize what was discovered, what was written
+where, what was deliberately left absent (grants and pinned defaults), and what stays
+at its default. Say plainly that theater-configure switched itself off in
+`[skills] disabled`, and that undoing it is removing the name from that list and
+running `theater restart` again. Do not create a report file.
