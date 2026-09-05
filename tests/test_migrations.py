@@ -257,6 +257,32 @@ def test_source_checkpoint_migration_preserves_the_latest_pi_cursor(theater_home
     assert row == ("cursor",)
 
 
+def test_touch_path_migration_purges_legacy_escapes(theater_home):
+    path = paths.db_path()
+    store = Store(path)
+    store.close()
+
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        with engine.connect() as conn:
+            cfg = Config()
+            cfg.set_main_option("script_location", str(MIGRATIONS))
+            cfg.attributes["connection"] = conn
+            command.downgrade(cfg, "0026")
+            for raw_path in ("/tmp/secret", "../escape", "foo/../bar.py", "safe.py"):
+                conn.exec_driver_sql(
+                    "INSERT INTO touch (job_handle, path, mode) VALUES (?, ?, ?)",
+                    ("legacy", raw_path, "read"),
+                )
+            command.upgrade(cfg, "head")
+            conn.commit()
+            rows = conn.exec_driver_sql("SELECT path FROM touch ORDER BY id").fetchall()
+    finally:
+        engine.dispose()
+
+    assert rows == [("safe.py",)]
+
+
 def test_bus_ids_are_never_reused(store):
     """AUTOINCREMENT, not bare rowid: `bus_tail(after_id=)` is a cursor."""
     first = store.bus_append("a")

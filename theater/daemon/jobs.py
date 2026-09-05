@@ -63,6 +63,7 @@ from theater.daemon.blob import blob_sha
 from theater.daemon.schema import jobs as jobs_table
 from theater.daemon.schema import touch as touch_table
 from theater.daemon.store import Store
+from theater.daemon.touch_paths import normalize_touch_path
 from theater.harness.base import EventPath
 from theater.models import Job, JobKind, JobState, now
 
@@ -114,10 +115,13 @@ class TouchAccumulator:
     def observe(self, paths: tuple[EventPath, ...]) -> None:
         """Record paths from one event. Hashes new paths immediately."""
         for ep in paths:
-            if ep.path not in self._before:
-                self._paths.append(ep.path)
-                self._before[ep.path] = blob_sha(Path(self.cwd) / ep.path)
-            self._mode[ep.path] = ep.mode
+            path = normalize_touch_path(self.cwd, ep.path)
+            if path is None:
+                continue
+            if path not in self._before:
+                self._paths.append(path)
+                self._before[path] = blob_sha(Path(self.cwd) / path)
+            self._mode[path] = ep.mode
 
     def rows(self, job_handle: str) -> list[dict]:
         """The touch rows for this job, with ``sha_after`` computed now.
@@ -129,7 +133,9 @@ class TouchAccumulator:
         """
         result = []
         for path in self._paths:
-            sha_after = blob_sha(Path(self.cwd) / path)
+            safe_path = normalize_touch_path(self.cwd, path)
+            # A symlink may have escaped since observation; never hash it.
+            sha_after = None if safe_path is None else blob_sha(Path(self.cwd) / safe_path)
             result.append(
                 {
                     "job_handle": job_handle,

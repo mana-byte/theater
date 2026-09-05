@@ -35,6 +35,7 @@ from theater.constants.daemon import TRANSCRIPT_READABLE_KINDS
 from theater.daemon import workers
 from theater.daemon.observer import history_correlation_is_ambiguous
 from theater.daemon.schema import jobs, touch
+from theater.daemon.touch_paths import is_canonical_touch_path
 from theater.harness import HARNESSES, normalize
 from theater.harness.transcript.observer import open_participant_source
 from theater.models import BadRequest
@@ -108,6 +109,12 @@ async def _read_job(
         raise BadRequest(f"no job {handle!r}")
     j = row._mapping
 
+    target_id = j["target_id"]
+    try:
+        participant = registry.get(target_id) if target_id is not None else None
+    except Exception:
+        participant = None
+
     touch_rows = store.conn.execute(
         select(
             touch.c.path,
@@ -126,6 +133,9 @@ async def _read_job(
             "sha_after": r._mapping["sha_after"],
         }
         for r in touch_rows
+        if participant is not None
+        and participant.cwd is not None
+        and is_canonical_touch_path(participant.cwd, r._mapping["path"])
     ]
 
     brief = {
@@ -143,7 +153,6 @@ async def _read_job(
     }
 
     # A job whose target was None (CLI spawn, no target) has no transcript to read.
-    target_id = j["target_id"]
     if target_id is None:
         brief["transcript"] = {
             "available": False,
@@ -151,9 +160,8 @@ async def _read_job(
         }
         return brief
 
-    try:
-        p = registry.get(target_id)
-    except Exception:
+    p = participant
+    if p is None:
         # The participant was forgotten — the job still happened; only the transcript is gone.
         brief["transcript"] = {
             "available": False,
