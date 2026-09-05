@@ -452,6 +452,21 @@ async def test_job_segment_missing_transcript_still_returns_metadata(registry, t
     assert "no longer" in result["transcript"]["reason"]
 
 
+async def test_job_segment_filters_legacy_touch_paths(registry, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    _make_job(registry.store, registry, handle="filtered", target_cwd=str(project))
+    _add_touch(registry.store, handle="filtered", path="/tmp/secret", sha_before="a", sha_after="b")
+    _add_touch(registry.store, handle="filtered", path="../escape", sha_before="a", sha_after="b")
+    _add_touch(registry.store, handle="filtered", path="safe.py", sha_before="a", sha_after="b")
+
+    result = await read_segment(
+        "filtered", store=registry.store, registry=registry, cwd=str(tmp_path)
+    )
+
+    assert [path["path"] for path in result["paths"]] == ["safe.py"]
+
+
 async def test_job_segment_with_no_target_returns_metadata_only(registry, tmp_path):
     """A job whose target_id is None (a CLI spawn with no target) has
     no transcript to read. The metadata is still there."""

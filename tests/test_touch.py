@@ -11,8 +11,51 @@ from __future__ import annotations
 from theater.daemon.blob import blob_sha
 from theater.daemon.jobs import JobManager, TouchAccumulator
 from theater.daemon.schema import touch
+from theater.daemon.touch_paths import normalize_touch_path
 from theater.harness.base import EventPath
 from theater.models import JobState
+
+
+def test_touch_path_validation(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    assert normalize_touch_path(root, str(tmp_path / "outside")) is None
+    assert normalize_touch_path(root, "../escape") is None
+    assert normalize_touch_path(root, "foo/../bar.py") == "bar.py"
+    acc = TouchAccumulator(cwd=str(root))
+    acc.observe((EventPath(path="foo/../bar.py", mode="read"),))
+    assert acc.rows("h1")[0]["path"] == "bar.py"
+
+    outside = tmp_path / "outside-dir"
+    outside.mkdir()
+    (root / "escape").symlink_to(outside, target_is_directory=True)
+    assert normalize_touch_path(root, "escape/file.py") is None
+
+    (root / "other" / "sub").mkdir(parents=True)
+    (root / "link").symlink_to(root / "other" / "sub", target_is_directory=True)
+    assert normalize_touch_path(root, "link/../file.py") is None
+
+
+def test_touch_accumulator_skips_rejected_paths(tmp_path):
+    acc = TouchAccumulator(cwd=str(tmp_path))
+    acc.observe((EventPath(path="../escape", mode="read"),))
+    assert acc.rows("h1") == []
+
+
+def test_touch_accumulator_revalidates_before_hashing(tmp_path):
+    inside = tmp_path / "inside"
+    outside = tmp_path.parent
+    inside.mkdir()
+    (inside / "file.py").write_bytes(b"inside")
+    link = tmp_path / "link"
+    link.symlink_to(inside, target_is_directory=True)
+
+    acc = TouchAccumulator(cwd=str(tmp_path))
+    acc.observe((EventPath(path="link/file.py", mode="read"),))
+    link.unlink()
+    link.symlink_to(outside, target_is_directory=True)
+
+    assert acc.rows("h1")[0]["sha_after"] is None
 
 
 def test_touch_indexes_exist(store):
