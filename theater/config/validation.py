@@ -73,6 +73,11 @@ def _check_str_list(value: Any) -> list[str] | None:
     return list(value)
 
 
+def _check_str_tuple(value: Any) -> tuple[str, ...] | None:
+    parsed = _check_str_list(value)
+    return tuple(parsed) if parsed is not None else None
+
+
 #: Dispatch on the written form; annotations are strings under `from __future__ import annotations`.
 _CHECKERS = {
     "bool": (_check_bool, "true or false"),
@@ -82,6 +87,7 @@ _CHECKERS = {
     "str | None": (_check_str, "a string"),
     "list[str]": (_check_str_list, "a list of strings"),
     "list[str] | None": (_check_str_list, "a list of strings"),
+    "tuple[str, ...]": (_check_str_tuple, "a list of strings"),
 }
 
 

@@ -252,6 +252,17 @@ stale_running_days = 7
 disabled = []
 
 
+[skills]
+
+# Bundled skills to leave out of the registry, by name. User-installed skills
+# and skills supplied by enabled MCP plugins are unaffected.
+#
+# Disabled bundled skills are still validated when the registry is built, so a
+# broken Theater installation remains a fatal error rather than being hidden by
+# this setting. Names that Theater does not bundle are ignored.
+disabled = []
+
+
 [mcp]
 
 # MCP sidecars are local package plugins under $THEATER_HOME/plugins. They are

@@ -49,6 +49,12 @@ def test_empty_file_is_all_defaults_but_exists():
     assert loaded.rails.budget == 20
 
 
+def test_absent_skills_section_has_an_empty_denylist():
+    loaded = cfg.load()
+
+    assert loaded.skills.disabled == ()
+
+
 # ---- reading ------------------------------------------------------------
 
 
@@ -107,6 +113,15 @@ def test_participant_detail_accepts_description():
     assert cfg.load().regie.participant_detail == "description"
 
 
+def test_skills_disabled_parses_as_an_immutable_permissive_denylist():
+    write('[skills]\ndisabled = ["theater-orchestrate", "not-installed"]\n')
+
+    loaded = cfg.load()
+
+    assert loaded.skills.disabled == ("theater-orchestrate", "not-installed")
+    assert loaded.source("skills.disabled") == "config.toml"
+
+
 def test_describe_reports_source_per_key():
     write("[rails]\nbudget = 7\n")
     rows = {key: (value, source) for key, value, source in cfg.describe(cfg.load())}
@@ -123,6 +138,16 @@ def test_unknown_key_suggests_the_real_one():
     with pytest.raises(cfg.ConfigError) as exc:
         cfg.load()
     assert "depth_cap" in str(exc.value)
+
+
+def test_unknown_skills_key_is_fatal_and_suggests_disabled():
+    write("[skills]\ndisable = []\n")
+
+    with pytest.raises(cfg.ConfigError) as exc:
+        cfg.load()
+
+    assert "skills.disable" in str(exc.value)
+    assert "disabled" in str(exc.value)
 
 
 def test_unknown_section_is_fatal_and_suggests():

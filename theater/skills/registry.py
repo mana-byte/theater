@@ -66,8 +66,12 @@ def discover(
     builtin_dir: Path | None = None,
     user_dir: Path | None = None,
     plugin_skills: Iterable[Skill] = (),
+    disabled: Iterable[str] = (),
 ) -> SkillRegistry:
-    """Build a fresh snapshot from built-in, user, and registered plugin skills."""
+    """Build a fresh snapshot.
+
+    ``disabled`` applies only to built-ins, all of which are validated before filtering.
+    """
     user_root = user_dir if user_dir is not None else paths.skills_dir()
     if builtin_dir is None:
         resource = resources.files("theater.skills").joinpath("builtin")
@@ -81,7 +85,12 @@ def discover(
             f"invalid bundled skill at {builtin_rejection.source_path}: {builtin_rejection.error}. "
             "Reinstall Theater or repair its packaged SKILL.md."
         )
-    skills = {item.name: item for item in builtins if isinstance(item, Skill)}
+    disabled_names = set(disabled)
+    skills = {
+        item.name: item
+        for item in builtins
+        if isinstance(item, Skill) and item.name not in disabled_names
+    }
     rejections: list[SkillRejection] = []
     for item in _scan_root(user_root, SkillSource.USER, required=False):
         if isinstance(item, SkillRejection):

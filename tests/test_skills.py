@@ -63,6 +63,27 @@ def test_shipped_skills_are_discovered_with_their_exact_content(tmp_path):
     assert skill.content == skill.source_path.read_text(encoding="utf-8")
 
 
+def test_disabled_builtin_is_absent_from_the_registry(tmp_path):
+    registry = discover(user_dir=tmp_path, disabled=("theater-orchestrate",))
+
+    assert [skill.name for skill in registry.skills] == [
+        "theater-debate",
+        "theater-recover-tmux",
+    ]
+    with pytest.raises(UnknownSkill):
+        registry.load("theater-orchestrate")
+
+
+def test_unknown_disabled_builtin_name_is_tolerated(tmp_path):
+    registry = discover(user_dir=tmp_path, disabled=("not-a-bundled-skill",))
+
+    assert [skill.name for skill in registry.skills] == [
+        "theater-debate",
+        "theater-orchestrate",
+        "theater-recover-tmux",
+    ]
+
+
 def test_shipped_tmux_recovery_skill_has_exact_data_only_package(tmp_path):
     registry = discover(user_dir=tmp_path)
 
@@ -345,7 +366,11 @@ def test_invalid_user_skill_is_diagnostic_but_invalid_builtin_is_fatal(tmp_path)
     builtin = tmp_path / "builtin"
     write_raw(builtin, "broken-builtin", "---\nname: broken-builtin\n---\n")
     with pytest.raises(BuiltinSkillError, match="invalid bundled skill"):
-        discover(builtin_dir=builtin, user_dir=tmp_path / "empty")
+        discover(
+            builtin_dir=builtin,
+            user_dir=tmp_path / "empty",
+            disabled=("broken-builtin",),
+        )
 
 
 def test_empty_user_root_is_allowed(tmp_path):
@@ -503,10 +528,15 @@ async def test_skill_rpc_serializes_snapshots_and_maps_load_errors(monkeypatch):
     )
     snapshot = SkillRegistry({"alpha": skill, "plugin-guide": plugin_skill}, (rejection,))
     discoveries = []
+    daemon = SimpleNamespace(
+        config=SimpleNamespace(
+            skills=SimpleNamespace(disabled=("theater-orchestrate",)),
+        )
+    )
 
-    def fake_discover(*, plugin_skills=()):
+    def fake_discover(*, plugin_skills=(), disabled=()):
         assert tuple(plugin_skills) == (plugin_skill,)
-        discoveries.append(None)
+        discoveries.append(tuple(disabled))
         return snapshot
 
     monkeypatch.setattr(skills_rpc.registry, "discover", fake_discover)
@@ -516,7 +546,7 @@ async def test_skill_rpc_serializes_snapshots_and_maps_load_errors(monkeypatch):
         lambda: SimpleNamespace(registered_skills=(plugin_skill,)),
     )
 
-    assert await skills_rpc._skills_list(None, {"ignored": True}) == {
+    assert await skills_rpc._skills_list(daemon, {"ignored": True}) == {
         "skills": [
             {"name": "alpha", "description": "A useful skill.", "source": "user"},
             {
@@ -535,17 +565,17 @@ async def test_skill_rpc_serializes_snapshots_and_maps_load_errors(monkeypatch):
             }
         ],
     }
-    assert await skills_rpc._skills_load(None, {"name": "alpha"}) == {
+    assert await skills_rpc._skills_load(daemon, {"name": "alpha"}) == {
         "name": "alpha",
         "description": "A useful skill.",
         "source": "user",
         "content": skill.content,
     }
-    assert len(discoveries) == 2
+    assert discoveries == [("theater-orchestrate",), ("theater-orchestrate",)]
 
     with pytest.raises(BadRequest, match=r"skills\.list"):
-        await skills_rpc._skills_load(None, {"name": "not/a-skill"})
+        await skills_rpc._skills_load(daemon, {"name": "not/a-skill"})
     with pytest.raises(BadRequest, match="non-empty string"):
-        await skills_rpc._skills_load(None, {"name": ""})
+        await skills_rpc._skills_load(daemon, {"name": ""})
     with pytest.raises(NotFound, match=r"skills\.list"):
-        await skills_rpc._skills_load(None, {"name": "missing"})
+        await skills_rpc._skills_load(daemon, {"name": "missing"})
