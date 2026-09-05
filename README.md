@@ -111,6 +111,10 @@ The bare `theater` command is the normal entry point:
 - Commands that need the daemon start it on demand.
 - Quitting the régie detaches the client; it does not kill the agents or daemon.
 
+> **Tip:** you don't have to edit `config.toml` by hand — there's a built-in
+> `theater-configure` skill in the Theater MCP. Just tell your agent to use the
+> theater configure skill in the Theater MCP and it will set the app up with you.
+
 Supported harness packages ship for:
 
 | Claude Code | Codex | opencode | Vibe |
