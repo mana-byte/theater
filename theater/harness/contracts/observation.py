@@ -74,9 +74,6 @@ class ScreenReading:
     treat ``unknown`` as ``prompt`` because the cost of being wrong there is a
     cosmetic mislabel. The consumer decides — encoding a single resolution
     here would re-create the boolean's ambiguity in a richer type.
-
-    See ``docs/v1.6_observation.md`` (lines 81-95) and
-    ``docs/v1.7_hardening.md`` (lines 223-228, 496-505) for the design history.
     """
 
     kind: ScreenKind

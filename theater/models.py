@@ -12,7 +12,7 @@ from theater.transcript_identity import TRANSCRIPT_IDENTITY_LOST_CODE
 
 
 class Tier(StrEnum):
-    """How a participant reached the registry. See init_idea_grilled.md §6."""
+    """How a participant reached the registry."""
 
     SPAWNED = "spawned"  # daemon created the pane; identity by construction
     ADOPTED = "adopted"  # pre-existing pane, self-registered
@@ -291,9 +291,9 @@ class AwaitingDecision(TheaterError):
 
     A `send` is delivered by pasting into the target's tmux pane. At an
     approval prompt, Enter is a button press, not text, so an injected prompt
-    can auto-approve a tool call the human never saw (`docs/v1.6_observation.md`
-    lines 88-91). This gate refuses a send when a fresh `capture-pane` reads
-    `approval` or `trust` at `high` confidence.
+    can auto-approve a tool call the human never saw. This gate refuses a send
+    when a fresh `capture-pane` reads `approval` or `trust` at `high`
+    confidence.
 
     Temporary, unlike `NotAddressable` (permanent) and `StaleTarget` (the
     address is dead): the modal is a transient screen the human will dismiss,
@@ -301,8 +301,7 @@ class AwaitingDecision(TheaterError):
     never `approval`, so it stays reachable — which is why the gate reads a
     fresh capture rather than the stored `Status`. `AWAITING_INPUT` is a
     display hint tuned to accept false negatives; using it as a control signal
-    would make a stuck `WORKING` pane unreachable (`docs/v1.7_hardening.md`
-    lines 188-191, 223-228).
+    would make a stuck `WORKING` pane unreachable.
 
     This gate also removes the only mechanism by which an agent could answer
     a child's approval dialog. That is intended: the alternative is a parent

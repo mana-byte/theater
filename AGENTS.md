@@ -251,7 +251,6 @@ plugin skills are unaffected.
 ## Further reading
 
 - [`docs/architecture.md`](docs/architecture.md) — why every piece is shaped this way (the authoritative doc)
-- [`docs/init_idea_grilled.md`](docs/init_idea_grilled.md) — the original design interrogation
 - [`docs/harness-plugins.md`](docs/harness-plugins.md) — writing an adapter
 - [`config.example.toml`](config.example.toml) — every setting at its default
 - `docs/v2_*.md` — where the project is heading (recall, régie)

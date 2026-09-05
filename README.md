@@ -356,7 +356,6 @@ See [AGENTS.md](AGENTS.md) for invariants and repository conventions.
 - [Architecture](docs/architecture.md) — why Theater is shaped this way.
 - [Harness plugin guide](docs/harness-plugins.md) — build a new adapter.
 - [Configuration reference](config.example.toml) — every supported setting.
-- [Acceptance guide](docs/acceptance.md) — verify the real tmux workflow.
 
 <div align="center">
 

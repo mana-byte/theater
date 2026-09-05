@@ -4,9 +4,8 @@ This document explains *why* Theater is shaped the way it is. The README covers
 what the commands do; this covers the constraints that produced them, and the
 alternatives that were rejected along the way.
 
-Read `docs/init_idea_grilled.md` for the original design interrogation. This
-document tracks the current state of the code, and where the two disagree, the
-code wins.
+This document tracks the current state of the code, and where the two
+disagree, the code wins.
 
 ---
 
@@ -661,9 +660,7 @@ did not, and both were unreachable from MCP — the guard existed and never ran.
 
 The budget rail **rejects the next spawn and nothing else**. It does not kill
 anything already running. An earlier `hard_stop_tree` was deleted in v1.1
-because it killed nothing — it walked the tree and did no work. Note that
-`docs/implementation_plan.md:374` still describes the old intent; that file is
-a historical planning record and has been left unedited.
+because it killed nothing — it walked the tree and did no work.
 
 ---
 

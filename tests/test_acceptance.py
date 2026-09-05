@@ -10,7 +10,7 @@ The spec's acceptance test is:
 This file automates everything that can be tested without real harnesses:
 spawn → await → result, fan-out, lineage tree, restart reconciliation,
 depth cap, and cycle detection. The parts that need real Vibe/Claude
-sessions are documented as a manual procedure in docs/acceptance.md.
+sessions are manual procedures outside this suite.
 
 These tests are deliberately end-to-end: they go through the socket,
 through the daemon, and through the real JobManager + Observer wiring.
