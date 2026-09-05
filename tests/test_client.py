@@ -342,7 +342,7 @@ def test_await_gets_its_own_budget():
 
 
 def test_await_timeout_handles_huge_max_wait():
-    assert DaemonClient._await_timeout({"max_wait": 10**400}) == client_mod.CALL_TIMEOUT
+    assert DaemonClient._timeout_for("jobs.await", {"max_wait": 10**400}) == client_mod.CALL_TIMEOUT
 
 
 # ---- autostart herd ----------------------------------------------------

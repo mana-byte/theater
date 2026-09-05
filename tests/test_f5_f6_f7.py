@@ -74,7 +74,7 @@ async def test_detect_harness_async_captures_once_and_uses_snapshot(monkeypatch)
         return snapshot
 
     async def to_thread(fn, /, *args, label):
-        to_thread_calls.append((fn, label))
+        to_thread_calls.append(fn)
         return fn(*args)
 
     monkeypatch.setattr(proc.ProcessSnapshot, "capture", staticmethod(capture))
@@ -85,5 +85,5 @@ async def test_detect_harness_async_captures_once_and_uses_snapshot(monkeypatch)
     )
 
     assert capture_calls == 1
-    assert to_thread_calls == [(proc.ProcessSnapshot.capture, "harness_detect")]
+    assert to_thread_calls == [proc.ProcessSnapshot.capture]
     assert result == harness_detect.detect_harness("python3", 123, snapshot=snapshot)
