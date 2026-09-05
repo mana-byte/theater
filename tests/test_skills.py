@@ -53,6 +53,7 @@ def test_shipped_skills_are_discovered_with_their_exact_content(tmp_path):
     registry = discover(user_dir=tmp_path)
 
     assert [skill.name for skill in registry.skills] == [
+        "theater-configure",
         "theater-debate",
         "theater-orchestrate",
         "theater-recover-tmux",
@@ -81,6 +82,7 @@ def test_valid_user_skill_is_loadable_in_deterministic_name_order(tmp_path):
 
     assert [skill.name for skill in registry.skills] == [
         "alpha",
+        "theater-configure",
         "theater-debate",
         "theater-orchestrate",
         "theater-recover-tmux",
@@ -350,6 +352,7 @@ def test_empty_user_root_is_allowed(tmp_path):
     registry = discover(user_dir=tmp_path / "missing")
 
     assert [skill.name for skill in registry.skills] == [
+        "theater-configure",
         "theater-debate",
         "theater-orchestrate",
         "theater-recover-tmux",

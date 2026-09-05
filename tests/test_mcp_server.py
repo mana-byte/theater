@@ -191,6 +191,7 @@ async def test_skill_tools_round_trip_through_the_daemon(daemon):
 
     listed = _payload(await mcp.call_tool("list_skills", {}))
     assert [skill["name"] for skill in listed["skills"]] == [
+        "theater-configure",
         "theater-debate",
         "theater-orchestrate",
         "theater-recover-tmux",
