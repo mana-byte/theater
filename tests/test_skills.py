@@ -67,6 +67,7 @@ def test_disabled_builtin_is_absent_from_the_registry(tmp_path):
     registry = discover(user_dir=tmp_path, disabled=("theater-orchestrate",))
 
     assert [skill.name for skill in registry.skills] == [
+        "theater-configure",
         "theater-debate",
         "theater-recover-tmux",
     ]
@@ -78,6 +79,7 @@ def test_unknown_disabled_builtin_name_is_tolerated(tmp_path):
     registry = discover(user_dir=tmp_path, disabled=("not-a-bundled-skill",))
 
     assert [skill.name for skill in registry.skills] == [
+        "theater-configure",
         "theater-debate",
         "theater-orchestrate",
         "theater-recover-tmux",
