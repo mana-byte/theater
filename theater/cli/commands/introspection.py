@@ -379,7 +379,7 @@ def cmd_stats(args) -> int:
     A high rate for one harness is a parser problem. A high rate everywhere is
     a problem with how turn ends are matched to jobs.
     """
-    data = call_sync("stats", window=args.window)
+    data = call_sync("stats") if args.window is None else call_sync("stats", window=args.window)
     assert isinstance(data, dict)
     if args.json:
         print(json.dumps(data, indent=2))

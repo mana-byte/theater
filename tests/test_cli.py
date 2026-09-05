@@ -1100,6 +1100,7 @@ def test_stats_json_is_the_daemon_answer(answers, capsys):
     data = {"since": 0, "harnesses": [], "refusals": []}
     answers["replies"] = {"stats": data}
     assert cli.cmd_stats(parse("stats", "--json")) == 0
+    assert answers["calls"] == [("stats", {})]
     assert json.loads(capsys.readouterr().out) == data
 
 

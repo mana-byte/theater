@@ -153,4 +153,4 @@ def pick(taken: Iterable[str]) -> str:
 
 def is_valid_name(name: str) -> bool:
     """Whether *name* satisfies the rename format rules."""
-    return _NAME_RE.match(name) is not None
+    return _NAME_RE.fullmatch(name) is not None

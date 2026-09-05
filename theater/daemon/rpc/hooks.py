@@ -51,7 +51,7 @@ async def _harness_event(daemon, params: dict) -> dict:  # noqa: PLR0912
     channel_id = _string_param(params, "channel", method_name=HARNESS_EVENT_RPC)
     event = _string_param(params, "event", method_name=HARNESS_EVENT_RPC)
     delivery_id = _optional_string_param(params, "delivery_id", method_name=HARNESS_EVENT_RPC)
-    if not token.strip() or len(token) > HARNESS_HOOK_TOKEN_MAX_CHARS:
+    if not token.strip() or len(token) > HARNESS_HOOK_TOKEN_MAX_CHARS or not token.isascii():
         raise BadRequest("harness event credential is invalid")
     try:
         validate_hook_identifier(channel_id, "channel")

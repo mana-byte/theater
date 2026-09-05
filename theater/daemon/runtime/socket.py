@@ -11,6 +11,7 @@ import contextlib
 import json
 import logging
 import socket as _socket
+from collections.abc import Mapping
 from typing import Any
 
 from theater import protocol, timing
@@ -92,14 +93,26 @@ async def dispatch(daemon, line: bytes, *, methods) -> bytes:
     except json.JSONDecodeError as exc:
         return protocol.err(0, "bad_request", f"malformed json: {exc}")
 
-    req_id = msg.get("id", 0)
+    if not isinstance(msg, dict):
+        return protocol.err(0, "bad_request", "request must be a JSON object")
+
+    raw_id = msg.get("id", 0)
+    req_id = raw_id if type(raw_id) is int else 0
     name = msg.get("method")
-    params = msg.get("params") or {}
+    if not isinstance(name, str):
+        return protocol.err(req_id, "bad_request", "method must be a string")
+    if "params" not in msg:
+        params = {}
+    else:
+        params = msg["params"]
+        if not isinstance(params, dict):
+            return protocol.err(req_id, "bad_request", "params must be a JSON object")
     handler = methods.get(name)
     if handler is None:
         return protocol.err(req_id, "unknown_method", f"no method {name!r}")
 
-    parent_context = extract_trace_context(msg.get("_meta"))
+    raw_meta = msg.get("_meta")
+    parent_context = extract_trace_context(raw_meta) if isinstance(raw_meta, Mapping) else None
 
     spec = RPC_AWAIT if name == "jobs.await" else RPC_SERVER
     fields: dict[str, Any] = {"caller": params.get("caller_id")}

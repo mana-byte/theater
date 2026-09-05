@@ -23,7 +23,7 @@ from theater.constants.daemon import (
     RPC_MAX_AWAIT_SECONDS as MAX_AWAIT,  # noqa: F401
 )
 from theater.daemon.rails import check_cycle, check_wait_cycle
-from theater.daemon.rpc.params import _require
+from theater.daemon.rpc.params import _finite_number_param, _require
 from theater.daemon.rpc.router import method
 from theater.models import BadRequest, Job, JobState, new_id
 from theater.transcript_identity import (
@@ -109,7 +109,11 @@ async def _jobs_await(daemon, params: dict) -> list[dict]:
     handles = params.get("handles") or []
     if not handles:
         raise BadRequest("at least one handle is required")
-    max_wait = min(max(float(params.get("max_wait", DEFAULT_MAX_WAIT)), 0.0), _max_await())
+    raw_max_wait = params.get("max_wait", DEFAULT_MAX_WAIT)
+    max_wait = min(
+        max(_finite_number_param(raw_max_wait, "max_wait", method_name="jobs.await"), 0.0),
+        _max_await(),
+    )
     caller_id = params.get("caller_id")
 
     known = {h: daemon.jobs.get(h) for h in handles}

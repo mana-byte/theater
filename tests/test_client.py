@@ -229,6 +229,24 @@ async def test_unparseable_request_error_is_surfaced(daemon_factory):
         await client.aclose()
 
 
+async def test_non_object_reply_drops_connection_and_reconnects(daemon_factory):
+    async def handler(msg):
+        if msg["id"] == 1:
+            return [b"5\n"]
+        return [protocol.ok(msg["id"], "ok")]
+
+    daemon = await daemon_factory(handler)
+    client = _client()
+    try:
+        with pytest.raises(ConnectionError):
+            await client.call("ping")
+        assert client._writer is None
+        assert await client.call("ping") == "ok"
+        assert daemon.connections == 2
+    finally:
+        await client.aclose()
+
+
 async def test_remote_error_is_raised_not_desynced(daemon_factory):
     """An error reply consumes the request, so the next call stays aligned."""
 
@@ -321,6 +339,10 @@ def test_await_gets_its_own_budget():
     default = DaemonClient._timeout_for("ping", {})
     waiting = DaemonClient._timeout_for("jobs.await", {"max_wait": 60.0})
     assert waiting > default + 59
+
+
+def test_await_timeout_handles_huge_max_wait():
+    assert DaemonClient._await_timeout({"max_wait": 10**400}) == client_mod.CALL_TIMEOUT
 
 
 # ---- autostart herd ----------------------------------------------------

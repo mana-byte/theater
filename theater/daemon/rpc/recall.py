@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from theater.daemon import workers
-from theater.daemon.rpc.params import _require
+from theater.daemon.rpc.params import _integer_param, _require
 from theater.daemon.rpc.router import method
 from theater.models import BadRequest
 
@@ -27,7 +27,7 @@ async def _recall(daemon, params: dict) -> dict:
     paths = _require(params, "paths")
     if not isinstance(paths, list) or not paths:
         raise BadRequest("paths must be a non-empty list")
-    depth = int(params.get("depth", 5))
+    depth = _integer_param(params.get("depth", 5), "depth", method_name="recall")
     caller_cwd = params.get("caller_cwd")
     # Pre-fetch git calls off the event loop, then pass them in so recall() forks nothing.
     effective_cwd = caller_cwd or str(Path.cwd())

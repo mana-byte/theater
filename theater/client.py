@@ -184,7 +184,7 @@ class DaemonClient:
             return CALL_TIMEOUT
         try:
             wait = float(raw)
-        except (TypeError, ValueError):
+        except (OverflowError, TypeError, ValueError):
             return CALL_TIMEOUT
         if not math.isfinite(wait):
             return CALL_TIMEOUT
@@ -250,6 +250,8 @@ class DaemonClient:
             except json.JSONDecodeError as exc:
                 # Half a line left by a cancelled read — unrecoverable, raise as a connection fault.
                 raise ConnectionError(f"truncated reply from daemon: {exc}") from exc
+            if not isinstance(msg, dict):
+                raise ConnectionError("daemon sent a non-object reply")
             got = msg.get("id")
             # The daemon answers with id 0 when it could not parse the request to echo one.
             if got in (req_id, 0):

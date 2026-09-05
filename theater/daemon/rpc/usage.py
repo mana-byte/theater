@@ -7,16 +7,18 @@ from datetime import date, datetime, time, timedelta
 from sqlalchemy import func, select
 
 from theater.constants import SECONDS_PER_DAY, USAGE_AVERAGE_WINDOW_DAYS
+from theater.daemon.rpc.params import _finite_number_param, _integer_param
 from theater.daemon.rpc.router import method
 from theater.daemon.schema import bus, jobs
 from theater.harness import describe
-from theater.models import now
+from theater.models import BadRequest, now
 
 
 @method("bus.tail")
 async def _bus_tail(daemon, params: dict) -> list[dict]:
     return daemon.store.bus_tail(
-        limit=int(params.get("limit", 100)), after_id=int(params.get("after_id", 0))
+        limit=_integer_param(params.get("limit", 100), "limit", method_name="bus.tail"),
+        after_id=_integer_param(params.get("after_id", 0), "after_id", method_name="bus.tail"),
     )
 
 
@@ -48,7 +50,12 @@ async def _stats(daemon, params: dict) -> dict:
     running counts in the window it was asked in.
     """
     window = params.get("window")
-    since = None if window in (None, "") else now() - float(window) * 3600.0
+    hours = (
+        None
+        if "window" not in params
+        else _finite_number_param(window, "window", method_name="stats")
+    )
+    since = None if hours is None else now() - hours * 3600.0
     return {
         "since": since,
         "coverage": _retention_floor(daemon),
@@ -61,7 +68,12 @@ async def _stats(daemon, params: dict) -> dict:
 async def _usage_totals(daemon, params: dict) -> dict:
     """Aggregate token and cost totals across all participants."""
     window = params.get("window")
-    since = None if window in (None, "") else now() - float(window) * 3600.0
+    hours = (
+        None
+        if "window" not in params
+        else _finite_number_param(window, "window", method_name="usage_totals")
+    )
+    since = None if hours is None else now() - hours * 3600.0
     return {
         "since": since,
         **daemon.store.usage_totals(since=since),
@@ -72,9 +84,18 @@ async def _usage_totals(daemon, params: dict) -> dict:
 async def _usage_summary(daemon, params: dict) -> dict:
     """Aggregate footer usage windows in one synchronous SQLite scan."""
     window = params.get("window")
-    hours = 24.0 if window in (None, "") else float(window)
+    hours = (
+        24.0
+        if "window" not in params
+        else _finite_number_param(window, "window", method_name="usage_summary")
+    )
     timestamp = now()
-    requested_period = params.get("period")
+    if "period" not in params:
+        requested_period = None
+    else:
+        requested_period = params["period"]
+        if not isinstance(requested_period, str):
+            raise BadRequest("usage_summary parameter 'period' must be a string")
     since = _calendar_period_since(requested_period, timestamp)
     resolved_period = requested_period if since is not None else None
     if since is None:

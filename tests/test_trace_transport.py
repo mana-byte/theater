@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import subprocess
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from theater import protocol
-from theater.daemon.runtime.socket import dispatch
+from theater.daemon.runtime.socket import dispatch, handle_connection
 
 TIMING = "theater.timing"
 
@@ -36,9 +39,109 @@ async def test_dispatch_malformed_meta_ignored():
     assert json.loads(resp)["ok"] is True
 
 
+@pytest.mark.parametrize("payload", [5, [], "hi", None, True])
+async def test_dispatch_json_primitive_is_a_bad_request_with_id_zero(payload):
+    response = await dispatch(SimpleNamespace(), json.dumps(payload).encode(), methods={})
+
+    decoded = json.loads(response)
+    assert decoded["id"] == 0
+    assert decoded["error"]["code"] == "bad_request"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"id": 7, "method": 42},
+        {"id": 7, "method": "ping", "params": None},
+    ],
+)
+async def test_dispatch_rejects_invalid_request_fields_with_the_usable_id(payload):
+    response = await dispatch(SimpleNamespace(), json.dumps(payload).encode(), methods={})
+
+    decoded = json.loads(response)
+    assert decoded["id"] == 7
+    assert decoded["error"]["code"] == "bad_request"
+
+
+@pytest.mark.parametrize("req_id", [True, "7", 7.0, None])
+async def test_dispatch_uses_id_zero_for_non_integer_ids(req_id):
+    async def _ping(_daemon, _params):
+        return True
+
+    response = await dispatch(
+        SimpleNamespace(),
+        json.dumps({"id": req_id, "method": "ping"}).encode(),
+        methods={"ping": _ping},
+    )
+
+    decoded = json.loads(response)
+    assert decoded["id"] == 0
+    assert decoded["ok"] is True
+
+
+async def test_dispatch_defaults_absent_params_to_an_object():
+    seen = []
+
+    async def _ping(daemon, params):
+        seen.append(params)
+        return True
+
+    response = await dispatch(
+        SimpleNamespace(), b'{"id":1,"method":"ping"}', methods={"ping": _ping}
+    )
+
+    assert json.loads(response)["ok"] is True
+    assert seen == [{}]
+
+
+async def test_malformed_request_does_not_close_the_connection():
+    class Writer:
+        def __init__(self):
+            self.responses = []
+
+        def write(self, response):
+            self.responses.append(response)
+
+        async def drain(self):
+            pass
+
+        def close(self):
+            pass
+
+        async def wait_closed(self):
+            pass
+
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"5\n" + protocol.request(1, "ping"))
+    reader.feed_eof()
+    writer = Writer()
+    daemon = SimpleNamespace(_conns=set())
+
+    async def _ping(_daemon, _params):
+        return True
+
+    async def _dispatch(line):
+        return await dispatch(
+            daemon,
+            line,
+            methods={"ping": _ping},
+        )
+
+    daemon._dispatch = _dispatch
+    await handle_connection(daemon, reader, writer)
+
+    assert [json.loads(response)["error"]["code"] for response in writer.responses[:1]] == [
+        "bad_request"
+    ]
+    assert json.loads(writer.responses[1])["result"] is True
+
+
 async def test_dispatch_invalid_request_creates_no_timing_span(caplog):
     caplog.set_level(logging.DEBUG, logger=TIMING)
     await dispatch(SimpleNamespace(), b"not json\n", methods={})
+    await dispatch(SimpleNamespace(), b"5\n", methods={})
+    await dispatch(SimpleNamespace(), b'{"id":1,"method":42}', methods={})
+    await dispatch(SimpleNamespace(), b'{"id":1,"method":"ping","params":null}', methods={})
     await dispatch(SimpleNamespace(), b'{"id":1,"method":"nope"}', methods={})
     assert caplog.records == []
 
