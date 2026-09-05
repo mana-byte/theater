@@ -230,6 +230,27 @@ capability grants. Use `theater plugins` to inspect both kinds locally without s
 Read the [MCP-server plugin guide](docs/mcp-server-plugins.md) for native
 `TheaterPluginClient` sidecars and compatibility wrappers using `theater plugin call`.
 
+<details>
+<summary>Example: an alert subscriber plugin</summary>
+
+You run coding agents in Theater and want them to react to production alerts
+without you relaying anything. Subscribe an agent to a Grafana channel once;
+from then on every firing arrives as a prompt in that agent's session. It
+wakes up, investigates, and files the root cause, so the next time the same
+alert fires it is already understood. A flapping alert is coalesced behind a
+cooldown, so the agent is interrupted once instead of forty times, and when an
+agent dies its subscription is reclaimed and handed on.
+
+The part a normal MCP server cannot do is the waking. MCP has no
+server-initiated turn — an ordinary MCP server can answer questions about
+alerts, but it can never knock. This one runs as a Theater MCP-server plugin,
+so with the `send to sessions` grant its alerts are delivered through the
+participant's tmux pane as ordinary user messages. If the agent is busy, the
+letter simply waits in that subscriber's queue and is delivered when the
+agent is free — no interruption, no lost alert.
+
+</details>
+
 ### Agent skills
 
 Theater ships `theater-orchestrate`, `theater-debate`, `theater-configure`,
