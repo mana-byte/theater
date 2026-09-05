@@ -251,25 +251,15 @@ theater restart                # apply config without killing agents
 Configuration is machine-scoped at `$THEATER_HOME/config.toml` (normally
 `~/.theater/config.toml`). There is no project-local configuration file.
 
-```sh
-mkdir -p ~/.theater
-cp config.example.toml ~/.theater/config.toml
-theater config
-```
+The intended way to set it up is to let an agent do it: any participant with the
+Theater MCP server can load the `theater-configure` skill through its skill-listing
+tool and follow it. The skill interviews you in plain language, discovers what it
+can from the machine on its own, writes exactly what you chose, validates the
+file with `theater config` and `theater models`, and switches itself off when
+done.
 
-A minimal example:
-
-```toml
-[theater]
-favourite = "claude"
-
-[regie]
-theme = "nord"
-bus_visible = true
-```
-
-The optional `[models]` and `[reasoning]` sections are exact per-harness
-allowlists. See [config.example.toml](config.example.toml) for every setting.
+`theater config path` prints where the file lives, and
+[config.example.toml](config.example.toml) documents every supported setting.
 
 <details>
 <summary><strong>Adopt a hand-started agent</strong></summary>
