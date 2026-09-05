@@ -95,6 +95,12 @@ class HarnessSection:
 
 
 @dataclass(frozen=True, slots=True)
+class SkillsSection:
+    #: A denylist for bundled skills only. Unknown names are tolerated.
+    disabled: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class McpSection:
     """Raw MCP-server enablement and per-plugin tables pending manifest resolution."""
 
@@ -193,6 +199,7 @@ _SECTIONS: dict[str, type] = {
     "observer": ObserverSection,
     "retention": RetentionSection,
     "harness": HarnessSection,
+    "skills": SkillsSection,
     "regie": RegieSection,
     "observability": ObservabilitySection,
 }
@@ -216,6 +223,7 @@ class Config:
     observer: ObserverSection = field(default_factory=ObserverSection)
     retention: RetentionSection = field(default_factory=RetentionSection)
     harness: HarnessSection = field(default_factory=HarnessSection)
+    skills: SkillsSection = field(default_factory=SkillsSection)
     mcp: McpSection = field(default_factory=McpSection)
     regie: RegieSection = field(default_factory=RegieSection)
     observability: ObservabilitySection = field(default_factory=ObservabilitySection)

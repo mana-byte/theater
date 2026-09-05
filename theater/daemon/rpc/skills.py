@@ -33,13 +33,16 @@ def _rejection_diagnostic(rejection) -> dict[str, str | None]:
     return diagnostic
 
 
-def _snapshot():
-    return registry.discover(plugin_skills=mcp_registry.catalog().registered_skills)
+def _snapshot(daemon):
+    return registry.discover(
+        plugin_skills=mcp_registry.catalog().registered_skills,
+        disabled=daemon.config.skills.disabled,
+    )
 
 
 @method("skills.list")
 async def _skills_list(daemon, params: dict) -> dict:
-    snapshot = _snapshot()
+    snapshot = _snapshot(daemon)
     return {
         "skills": [_skill_metadata(skill) for skill in snapshot.skills],
         "rejections": [_rejection_diagnostic(rejection) for rejection in snapshot.rejections],
@@ -61,7 +64,7 @@ async def _skills_load(daemon, params: dict) -> dict:
             "call skills.list and pass one returned name"
         )
     try:
-        skill = _snapshot().load(name)
+        skill = _snapshot(daemon).load(name)
     except UnknownSkill as exc:
         raise NotFound(
             f"skill {name!r} is not available; call skills.list to select an installed skill"
