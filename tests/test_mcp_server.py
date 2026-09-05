@@ -12,6 +12,7 @@ import json
 
 import pytest
 
+from theater import paths
 from theater.client import DaemonClient
 from theater.daemon.server import Daemon
 from theater.mcp import tools as mcp_tools
@@ -202,6 +203,32 @@ async def test_skill_tools_round_trip_through_the_daemon(daemon):
     assert loaded["name"] == "theater-orchestrate"
     assert loaded["source"] == "builtin"
     assert loaded["content"].startswith("---\nname: theater-orchestrate\n")
+
+
+async def test_a_disabled_skill_is_hidden_from_list_and_refused_on_load(theater_home):
+    paths.config_path().write_text('[skills]\ndisabled = ["theater-configure"]\n')
+
+    d = Daemon()
+    await d.start()
+    try:
+        mcp = build("p1", "vibe")
+
+        listed = _payload(await mcp.call_tool("list_skills", {}))
+        assert [skill["name"] for skill in listed["skills"]] == [
+            "theater-debate",
+            "theater-orchestrate",
+            "theater-recover-tmux",
+        ]
+
+        with pytest.raises(Exception) as exc:
+            await mcp.call_tool("load_skill", {"name": "theater-configure"})
+        assert "not_found" in str(exc.value)
+
+        loaded = _payload(await mcp.call_tool("load_skill", {"name": "theater-debate"}))
+        assert loaded["name"] == "theater-debate"
+        assert loaded["content"].startswith("---\nname: theater-debate\n")
+    finally:
+        await d.aclose()
 
 
 async def test_read_transcript_schema_uses_target_not_target_id(daemon):

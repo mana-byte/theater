@@ -101,9 +101,10 @@ One round at a time; later questions may depend on earlier answers. Multi-select
 ### Round 2 — grants and plugins
 
 Models and thinking levels are reproducible from the machine, so they are filled by
-discovery, never asked. Say once in the summary, plainly, that a listed model or thinking
-level is a spending allowance — an agent that can spawn may use it without asking a
-human — so the user knows what was granted.
+discovery, never asked. Tell the user during this round, before anything is written, and
+again in the closing summary, plainly, that a listed model or thinking level is a spending
+allowance — an agent that can spawn may use it without asking a human — so the user knows
+what was granted before the file takes effect.
 
 3. `[models]`, per harness — write the set the step 1 recipe produced for each
    installed CLI, whole and unfiltered, in the CLI's own spelling (exact and
@@ -116,14 +117,15 @@ human — so the user knows what was granted.
    a key for them. Matching is exact.
 5. `[mcp] enabled` — only if MCP plugin packages were found: "Do you want any of these
    extras switched on?" Options: the plugin names, multi-select. Some plugins need
-   settings of their own before they will actually switch on — `theater models` and
-   `theater config` report such a plugin as "omitting". For each chosen plugin that
-   does, in order:
+   settings of their own before they will actually switch on — `theater plugins` shows
+   each one's state and error. For each chosen plugin that does, in order:
    - Check whether the plugin ships a configure skill of its own —
-     `plugins/<name>/skills/` under the home; reading the directory needs no daemon,
-     while `theater skills` (which lists them too) needs one running. If a configure
-     skill is there, load it and follow it to fill the plugin's `[mcp.plugins.<name>]`
-     table; that is the preferred path.
+     `plugins/<name>/skills/` under the home; reading the directory needs no daemon.
+     If a configure skill is there, load it through your own skill-loading MCP tool or
+     `theater skills` (both need a daemon) and follow it to fill the plugin's
+     `[mcp.plugins.<name>]` table; that is the preferred path. With no daemon
+     reachable, read that `SKILL.md` file directly and follow it — the direct read is
+     instructions for you only, and nothing enters the skill registry through it.
    - If it ships none, ask plainly: "This extra needs its own custom settings before it
      will switch on — leave it off for now, or switch it on and you set it up yourself
      later?" Leave off: the name is not written into `enabled`. Switch on and DIY:
@@ -131,7 +133,10 @@ human — so the user knows what was granted.
      `[mcp.plugins.<name>]` table by hand.
 6. `[skills] disabled` — "Theater ships a few built-in helpers your agents can load —
    any of them switched off?" Options: the built-in skill names, multi-select,
-   recommend none. The names come from `theater skills` (needs a daemon) or your own
+   recommend none. Say in the question that this configure helper switches itself off
+   at the end of the session by design, so "none" still ends with it disabled — the
+   user who wants it kept can say so, and that counts as asking to keep it enabled.
+   The names come from `theater skills` (needs a daemon) or your own
    skill-listing MCP tool; if neither is reachable, skip the question and write
    nothing. A name in the list is simply not offered to agents. Disabling is presence,
    not refusal — built-in skills stay validated, and an unknown name in the list is
@@ -195,8 +200,10 @@ batches of 50; ledger page 30; sentence and tip typing pacing; every observer ti
   Model and effort spellings are the CLI's own, exact and case-sensitive.
 - Last write of the session: add `theater-configure` itself to `[skills] disabled`.
   The skill's work is done once the file validates, and a disabled configure skill
-  cannot be loaded by accident later. If the list already holds names, append — never
-  drop one. Skip this only if the user asks to keep the skill enabled.
+  cannot be loaded by accident later. This is the one deliberate exception to writing
+  only what the user chose — it was announced in the interview's question 6, and the
+  user overrules it by asking to keep the skill enabled. If the list already holds
+  names, append — never drop one.
 - Never write a secret into the file. An MCP plugin's secrets belong in its
   `[mcp.plugins.<name>]` table as `{ env = "NAME" }` or `{ file = "/path" }`; filling
   that table is the plugin's own configure skill's job when it ships one, otherwise
@@ -206,9 +213,11 @@ batches of 50; ledger page 30; sentence and tip typing pacing; every observer ti
 
 ## Step 4 — Close
 
-Changes apply on `theater restart` — offer to run it, saying it restarts the daemon and the
-régie. Summarize what was discovered, what was written where, what was deliberately left
-absent (grants and pinned defaults), and what stays at its default. Say plainly that
-theater-configure switched itself off in `[skills] disabled`, and that undoing it is
-removing the name from that list and running `theater restart` again. Do not create a
-report file.
+Changes apply on `theater restart` — offer to run it, saying it restarts the daemon,
+which reads the file once at start. The régie is not restarted by it: a régie that is
+already open picks up config-dependent visuals (theme, sidebar width) only when it is
+closed and relaunched. Summarize what was discovered, what was written where, what was
+deliberately left absent (grants and pinned defaults), and what stays at its default.
+Say plainly that theater-configure switched itself off in `[skills] disabled`, and that
+undoing it is removing the name from that list and running `theater restart` again. Do
+not create a report file.
