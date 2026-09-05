@@ -12,7 +12,7 @@ from theater.constants.daemon import (
     PARTICIPANTS_LIST_MAX_LIMIT,
 )
 from theater.daemon import workers
-from theater.daemon.harness_detect import detect_harness, match_binary
+from theater.daemon.harness_detect import detect_harness, detect_harness_async, match_binary
 from theater.daemon.rpc.params import _require
 from theater.daemon.rpc.router import method
 from theater.daemon.runtime.tmux_reconcile import reconcile_tmux_inventory_locked
@@ -371,7 +371,9 @@ async def _adopt(daemon, params: dict) -> dict:
         harness = (
             normalize(override)
             if override
-            else detect_harness(match.current_command, match.pane_pid)
+            else await detect_harness_async(
+                match.current_command, match.pane_pid, detector=detect_harness
+            )
         )
         if cwd is None:
             cwd = match.cwd
