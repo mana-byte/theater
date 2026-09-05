@@ -5,7 +5,7 @@ what the commands do; this covers the constraints that produced them, and the
 alternatives that were rejected along the way.
 
 Read `docs/init_idea_grilled.md` for the original design interrogation. This
-document is the state of the code as of v1.1, and where the two disagree, the
+document tracks the current state of the code, and where the two disagree, the
 code wins.
 
 ---
@@ -103,7 +103,8 @@ Three routes, in descending order of confidence:
 
 Route 1 exists because of a specific bug in the middle of the stack: the MCP
 SDK replaces the inherited environment with a six-variable allowlist
-(`mcp/client/stdio/__init__.py:127`). Environment variables set on the tmux
+(`DEFAULT_INHERITED_ENV_VARS` in the SDK's `mcp/client/stdio.py`). Environment
+variables set on the tmux
 window do not reach the MCP server process. `$TMUX_PANE` is lost the same way,
 which is why `register_pane` exists as an adoption fallback — the agent reads
 its own pane id with its shell tool and hands it over, because it can see what
@@ -201,10 +202,13 @@ without `_meta`, and no protocol version bump is needed. Trace metadata lives
 in `_meta`, never inside `params` — handlers must not see or reject it.
 Receivers ignore unknown or malformed `_meta` keys.
 
-The daemon exposes 39 methods (`theater/daemon/rpc/`); the MCP server
-exposes 16 tools to agents (`theater/mcp/server.py`), namespaced `theater_*`.
-The two sets are not the same and should not be: `shutdown`, `adopt`, and
-`bus.tail` are operator verbs, not agent verbs.
+The daemon exposes 43 methods (`theater/daemon/rpc/`); the MCP server
+exposes 18 tools to agents (`theater/mcp/server.py`), registered under bare
+names — namespacing is by server name, not a tool prefix. Agents in fact see
+two servers: `theater` carries everything except `await_sessions`, which lives
+on a separate `theater_wait` stdio server so a cancelled long wait can never
+delay a control call. The two sets are not the same and should not be:
+`shutdown`, `adopt`, and `bus.tail` are operator verbs, not agent verbs.
 
 Skills use the same boundary. `skills.list` and `skills.load` discover and
 validate packages in the daemon; the MCP tools only forward. Listing returns
@@ -221,6 +225,14 @@ once with the plugin and merged into the same global namespace. Bundled and
 user names remain authoritative; conflicting plugin registrations are rejected
 without disabling their sidecars. Invalid declared plugin skill packages make
 that plugin invalid.
+
+Built-ins can be refused individually through the `[skills] disabled` list in
+`config.toml` — a built-in-only denylist. User and plugin skills are
+unaffected; every built-in is validated *before* the denylist filters, so a
+broken Theater installation stays fatal rather than being hidden by the
+setting; names Theater does not bundle are tolerated. The daemon threads the
+list into `skills.list` and `skills.load` alike, so a disabled built-in is
+neither listed nor loadable.
 
 ---
 
@@ -255,6 +267,11 @@ archived database is for reference only and must not be restored into the new ho
 | `touch` | which paths each job changed, and the shas it moved them between |
 | `meta` | small key/value durable state — currently the send-sequence counter |
 | `budgets` | per-tree accounting — created, not yet used |
+| `tree_kv` | sibling scratchpad: small coordination facts scoped to a spawn tree and repo |
+| `participant_artifacts` | validated participant-owned files, recorded for GC |
+| `participant_mcp_plugins` | one row per participant-scoped plugin sidecar: credential verifier, grants, path |
+| `named_worktrees` | named shared worktrees Theater created, keyed by repo and name |
+| `usage` | per-participant model usage samples, for `theater stats` and cost estimation |
 
 The store is **synchronous on purpose**. Every call is a local SQLite
 statement measured in microseconds; wrapping them in a thread pool to satisfy
@@ -314,6 +331,10 @@ Three things make it safe:
 - **Jobs are filtered on `finished_at`, never `created_at`.** A running job has
   `finished_at = NULL`, and `NULL < x` is never true in SQL, so no sweep can
   delete a job a caller is still awaiting.
+- **Abandoned running jobs are reaped separately.** A job whose daemon died
+  keeps `finished_at = NULL` forever; `stale_running_days` (7) marks such a
+  row `crashed` with `error_code = "abandoned"`, so immortality has an
+  explicit backstop instead of being the default.
 - **The send-sequence counter lives in `meta`.** It used to be re-seeded from
   `MAX(jobs)` at every start; once old jobs can be deleted that regresses the
   counter and re-mints handles the pruned jobs already used, silently corrupting
@@ -353,7 +374,7 @@ the observer uses, when a caller needs the untruncated text.
 
 ## 6. Observation
 
-The observer (`theater/daemon/observation/service.py`, ~790 lines) tails
+The observer (`theater/daemon/observation/service.py`) tails
 the transcript files the harnesses already write.
 `theater/daemon/observer.py` is a compatibility facade that re-exports the
 observation package.
@@ -500,8 +521,9 @@ legitimate sends constantly. Copy mode is narrow, but it is never wrong.
 
 ```
 RELOCATE_TIMEOUT      = 5.0    # Vibe rotates its session dir per turn
-AWAITING_INPUT_TIMEOUT = 10.0  # quiet long enough to be a prompt, not a pause
+AWAITING_INPUT_TIMEOUT = 1.5   # no transcript growth before checking the screen
 RESCUE_TIMEOUT         = 60.0  # quiet long enough that a turn end was missed
+SCREEN_INTERVAL        = 1.0   # no-transcript harnesses: the screen is the only turn-end evidence
 POLL_INTERVAL          = 0.25
 SEARCH_INTERVAL        = 2.0
 SYNC_INTERVAL          = 1.0
@@ -563,7 +585,7 @@ Then the job is created with handle `<target_id>#<seq>`.
 ### Completion
 
 The caller does not get a callback. It gets a handle, and calls
-`await_sessions(handles, max_wait=60)`.
+`await_sessions(handles, max_wait=150)`.
 
 ```
 caller                    daemon                    target
@@ -634,7 +656,7 @@ caller -> target is refused when target can already reach caller. Two peers
 awaiting each other share no ancestry, so this is the only rail that sees
 them.
 
-Both need `caller_id`, which `theater_await_sessions` passes. Until v1.5 it
+Both need `caller_id`, which `await_sessions` passes. Until v1.5 it
 did not, and both were unreachable from MCP — the guard existed and never ran.
 
 The budget rail **rejects the next spawn and nothing else**. It does not kill
@@ -671,8 +693,8 @@ output is a shared SQLite database and none of those questions has an answer for
 it — four stubs to say "not applicable" meant the interface was describing one
 particular way of observing rather than observation itself.
 
-Every adapter is a named package loaded under one manifest contract. The four
-that ship — `claude`, `codex`, `opencode`, `vibe` — live entirely under
+Every adapter is a named package loaded under one manifest contract. The five
+that ship — `claude`, `codex`, `opencode`, `pi`, `vibe` — live entirely under
 `theater/harness/builtin/plugins/<harness>/`, each with `manifest.py` exporting
 one immutable `MANIFEST`. Local packages use the same shape at
 `$THEATER_HOME/plugins/<name>/manifest.py`; the directory name is canonical,
@@ -703,7 +725,7 @@ TUI understands. Interruption never sets participant status directly—the
 observer remains authoritative.
 
 This inbound harness OTel channel is distinct from `theater/observability/`,
-which exports Theater's own daemon, CLI, and régie telemetry. All four shipped
+which exports Theater's own daemon, CLI, and régie telemetry. All five shipped
 plugins declare richer hooks and native OTel explicitly but currently mark them
 unavailable; their durable transcript/database sources remain authoritative
 until safety and live-evidence gates pass.
@@ -714,12 +736,14 @@ harness without a parser. A config schema can only express the shallow half of
 an adapter, so the deep half was untested-by-construction: nothing that shipped
 used the extension point. Now the shipped adapters exercise it on every run.
 
-The four are genuinely different, which is the interface's real test. Claude
+The five are genuinely different, which is the interface's real test. Claude
 Code writes one JSONL per project directory. Vibe rotates its session directory
 per turn, which is the entire reason `RELOCATE_TIMEOUT` exists. Codex writes
 date-sharded rollout files and marks a turn end with an explicit
 `task_complete` — or `turn_aborted`, which counts too, since an abandoned turn
-still has to release a waiting caller.
+still has to release a waiting caller. opencode keeps its session in a SQLite
+database rather than transcript files. Pi writes JSONL sessions and rotates
+them deliberately on `/new`.
 
 `parse` takes `clip_text: bool` rather than always clipping, because the same
 parser serves two consumers with opposite needs: the bus wants a one-line
@@ -805,12 +829,21 @@ theater/
 ├── paths.py            $THEATER_HOME layout
 ├── formatting.py       shared CLI/régie rendering, no rich/textual
 ├── proc.py             process facts from ps / proc / lsof
+├── names.py            live-only participant name aliases (recyclable masks)
+├── provenance.py       transcript-provenance predicates (trusted vs untrusted)
+├── transcript_identity.py  shared transcript identity and location canonicalisation
+├── resume_floor.py     persisted pre-launch stream-position fact for resume
+├── plugin_client.py    typed async client for participant-scoped plugin sidecars
+├── plugins/            shared plugin catalog, loading, and diagnostics (both kinds)
+├── mcp_plugins/        MCP-server plugin contracts, registry, runner, validation
+├── pricing/            token cost estimation from usage records
 ├── daemon/
 │   ├── observation/    watch loop, identity, completion, status policy
 │   ├── persistence/    SQLite repositories and store (sync on purpose)
 │   │   ├── database.py · repositories/ (participants, jobs, bus, metadata,
-│   │   │   receipts, channels, scratchpad, statistics, usage, worktrees)
-│   ├── rpc/            @method handlers, including trajectory snapshot/follow/history
+│   │   │   receipts, channels, scratchpad, statistics, usage, worktrees,
+│   │   │   artifacts, mcp_plugins)
+│   ├── rpc/            @method handlers, including trajectory snapshot/follow/close/locate/search
 │   ├── runtime/        socket dispatch, lifecycle, maintenance loops
 │   ├── spawning/       launch planning, resume, service
 │   ├── worktrees/      repository, unique and named worktree implementations
@@ -837,17 +870,22 @@ theater/
 │   ├── normalization/  bounded cross-harness value and timestamp conversion
 │   ├── registry/       lookup, install, capabilities, claims
 │   ├── transcript/     source, observer, attachment, bounded history reader
-│   ├── builtin/plugins/  claude/, codex/, opencode/, vibe/ package manifests and native code
+│   ├── builtin/plugins/  claude/, codex/, opencode/, pi/, vibe/ package manifests and native code
 │   ├── base.py · observation.py · source.py   compatibility facades
 │   └── plugins.py      generic loader compatibility facade
-├── mcp/                server composition, session, toolsets, compatibility facade
-├── tmux/               client, commands, panes, buffers, presence, delivery, facts, options
+├── skills/             declarative SKILL.md validation, discovery, immutable registry
+│   └── builtin/        theater-configure · theater-debate · theater-orchestrate · theater-recover-tmux
+├── mcp/                theater + theater_wait server composition, session, toolsets
+├── tmux/               client, command, panes, buffers, presence, delivery, facts, options
 └── regie/              Textual app composition, palette, bus view
     ├── controllers/    session, navigation, polling, staging, surface, animation, usage
+    ├── animations/     reusable animation state and frame helpers
+    ├── dashboard/      unstaged welcome content and widgets
     ├── render/         tree layout, glyphs, routing
     ├── widgets/        chrome, leaf, tree, usage breakdown and footer
     ├── trajectory/     participant trajectory presentation
-    │   ├── controller.py · state.py · projection.py · messages.py · view.py
+    │   ├── controller.py · state.py · models.py · projection.py · messages.py ·
+    │   │   view.py · search.py · navigation.py · enums.py
     │   ├── analysis/     cached diagnostic models
     │   ├── inspection/   bounded detail projection and links
     │   ├── render/       pure ordering, pagination, row, and timeline projection
@@ -867,14 +905,12 @@ and widgets. Compatibility facades remain only for established import paths.
 
 ## 12. Known gaps
 
-- **`Participant.pid` is always `None`.** `registry.attach_pane` nulled it from
-  a keyword nobody passed. Now an explicit gap rather than a silent one.
 - **`budgets` table is unused.** Token and cost accounting is written but never
   read; the budget rail counts participants instead.
-- **tmux behaviour is not covered by tests.** tmux is unavailable in the
-  development sandbox, so `tmux/panes.py` asserts argv in tests and the real
-  behaviour is verified by hand. Modules that do this say so in their
-  docstring.
+- **tmux behaviour is tested only where tmux exists.** `tests/test_tmux_rig.py`
+  drives a real private tmux server and asserts on exact pty bytes, but it is
+  marked `tmux` and self-skips when tmux is absent — a sandbox without tmux
+  silently loses that coverage (see AGENTS.md).
 - **`AWAITING_INPUT` is a display hint.** Never let it gate a control decision;
   that is what `pane_in_mode` is for.
 - **Human presence is narrow.** Copy mode only. An agent-aware prompt matcher

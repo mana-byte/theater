@@ -42,8 +42,12 @@ as `$THEATER_HOME/plugins/acme.py` is never executed. It receives this
 actionable migration diagnostic:
 
 ```text
-legacy single-file plugin. Move acme.py to acme/manifest.py and export MANIFEST
+$THEATER_HOME/plugins/acme.py: legacy single-file plugin. Move acme.py to
+acme/manifest.py and export MANIFEST for a harness package
 ```
+
+(The real message is path-prefixed and names the package kind — "a harness
+package" or "an MCP-server package".)
 
 Move its helpers into `acme/`, change sibling imports to relative imports, and
 replace `HARNESS` with `MANIFEST`. Restart the daemon after an install or edit.
@@ -352,7 +356,12 @@ durable primary should also implement, where its storage permits:
 - `refresh()` when a transcript location can rotate;
 - `probe_identity_loss()` only as bounded loss evidence, not a new binding;
 - `admit_exact_location(location=..., session_id=...)` for exact receipt-led
-  attachment, if the source supports receipts.
+  attachment, if the source supports receipts;
+- `revoke_attachment()` to withdraw a previously committed attachment;
+- the checkpoint quartet `source_checkpoint()` / `pending_source_checkpoint()` /
+  `acknowledge_source_checkpoint()` / `rollback_source_checkpoint()` when the
+  store needs durable-cursor consistency;
+- `health_snapshot()` to report bounded channel health.
 
 `aclose()` releases handles/subscriptions and must be idempotent. The primary
 source remains the authority for attachment, identity, completion inputs, and
@@ -399,6 +408,7 @@ return contract owns and never reach Theater's SQLite connection.
 | `observation.identity.*` | typed context → `StreamPoint`/`TranscriptCandidate` | Exact identity and recovery. |
 | `observation.lineage.native_children` | `NativeChildrenContext → Sequence[NativeChild]` | Native sub-agent display facts. |
 | `models.discoverer` | `ModelDiscoveryContext → Sequence[str]` | Optional model-list suggestion. |
+| `mcp.renderer` | `McpRenderContext → McpRenderOverlay` | Native MCP server rendering for the harness. |
 
 The compiler checks callback presence and returned runtime values, while the
 manifest validator checks its structural contract. Keep callback modules beside
@@ -431,9 +441,11 @@ The preflight receives a trusted predecessor and may reject before reservation;
 it is also used for a dead participant's resume projection, so it must be
 synchronous, bounded, and side-effect-free. The planner receives a trusted
 predecessor and all trusted matching session owners, then returns
-`ResumeLaunchOverlay(env=..., transcript_domain=..., cwd=...)`. The overlay may
-only adjust those fields and an optional authoritative launch `cwd`; core
-applies a cwd override before it creates the successor participant.
+`ResumeLaunchOverlay(env=..., transcript_domain=..., cwd=..., resume_reference=...)`.
+Those four fields are the only things a plugin may influence around a resume —
+`resume_reference` hands `plan_launch` an alternate native resume reference
+(`None` preserves the requested native session id); core applies a non-None
+`cwd` override before it creates the successor participant.
 `resume_strategy` is `"continue"` or `"fork"` and defaults to `"continue"`;
 `resume_takes_prompt` defaults to `True` and must be set to `False` when the
 native resume command cannot carry a new prompt. A predecessor with a
@@ -517,7 +529,7 @@ logs, metrics, and spans.
 
 ### Current shipped state
 
-Claude, Codex, OpenCode, and Vibe explicitly declare richer hook and native
+Claude, Codex, OpenCode, Pi, and Vibe explicitly declare richer hook and native
 OTel channels, but all are currently unavailable. Their durable transcript or
 database sources remain authoritative until safety and evidence gates pass.
 Do not advertise an unimplemented native integration.

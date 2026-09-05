@@ -311,11 +311,14 @@ Read the [MCP-server plugin guide](docs/mcp-server-plugins.md) for native
 
 ### Agent skills
 
-Theater ships `theater-orchestrate` and `theater-debate`. User skills live at
+Theater ships `theater-orchestrate`, `theater-debate`, `theater-configure`,
+and `theater-recover-tmux`. User skills live at
 `$THEATER_HOME/skills/<name>/SKILL.md` and are data-only: Theater never executes
 scripts or Python from a skill package. Enabled MCP-server plugins may also
 declare package-owned skills, which appear through the same `list_skills` and
-`load_skill` tools with their plugin owner identified.
+`load_skill` tools with their plugin owner identified. Any bundled skill can be
+switched off individually with the `[skills] disabled` list in
+`config.toml`.
 
 ## Observability
 

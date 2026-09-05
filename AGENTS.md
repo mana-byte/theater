@@ -17,7 +17,7 @@ processes:
   forwards, never touches SQLite or tmux directly.
 - **régie** — a Textual TUI; also just a client, holds no state the daemon lacks.
 
-Python 3.12+, ~71,700 lines, 141 test modules. `theater` is the CLI entry point
+Python 3.12+, ~86,200 lines, 155 test modules. `theater` is the CLI entry point
 (`theater.cli:main`).
 
 ## The one constraint
@@ -85,6 +85,14 @@ theater/
 ├── paths.py            $THEATER_HOME layout
 ├── formatting.py       shared CLI/régie rendering — imports neither rich nor textual
 ├── proc.py             process facts from `ps` / `/proc` / `lsof`: descendants, open files
+├── names.py            live-only participant name aliases (recyclable masks)
+├── provenance.py       transcript-provenance predicates (trusted vs untrusted)
+├── transcript_identity.py  shared transcript identity and location canonicalisation
+├── resume_floor.py     persisted pre-launch stream-position fact for resume
+├── plugin_client.py    typed async client for participant-scoped plugin sidecars
+├── plugins/            shared plugin catalog, loading, and diagnostics (both kinds)
+├── mcp_plugins/        MCP-server plugin contracts, registry, runner, validation
+├── pricing/            token cost estimation from usage records
 ├── daemon/             the registry server (only writer of SQLite + tmux)
 │   ├── observation/    status policy, job completion, rescue, identity, screen, turns
 │   │   ├── service.py  the watch loop and observation orchestration root
@@ -116,13 +124,13 @@ theater/
 │   ├── normalization/   shared bounded value and timestamp conversion
 │   ├── registry/       plugin lookup, install, capabilities, claims
 │   ├── transcript/     transcript-file source, observer, attachment, bounded history
-│   ├── builtin/plugins/   claude/, codex/, opencode/, vibe/ package manifests and all native code
+│   ├── builtin/plugins/   claude/, codex/, opencode/, pi/, vibe/ package manifests and all native code
 │   ├── base.py         compatibility facade — re-exports contracts
 │   ├── observation.py  compatibility facade — re-exports contracts + transcript
 │   ├── source.py       compatibility facade — re-exports contracts + transcript
 │   └── plugins.py      generic loader compatibility facade
 ├── skills/             declarative SKILL.md validation, discovery, immutable registry
-│   └── builtin/        theater-orchestrate/ · theater-debate/
+│   └── builtin/        theater-configure · theater-debate · theater-orchestrate · theater-recover-tmux
 ├── mcp/                server.py (18 agent tools) · session.py · toolsets/
 │   ├── toolsets/       delegation, participants, recall, transcripts, skills
 │   ├── server.py       composition surface — registers @mcp.tool entries
@@ -235,7 +243,10 @@ package may contain only `SKILL.md`; frontmatter contains exactly `name` and
 `description`, with the canonical name matching the folder. Do not add scripts,
 Python imports, references, templates, project scanning, or silent overrides.
 The daemon owns discovery; MCP tools only forward `skills.list` and
-`skills.load`.
+`skills.load`. Users can refuse individual built-ins through the
+`[skills] disabled` list in `config.toml` — a built-in-only denylist that
+validates before filtering, so a broken bundled skill stays fatal; user and
+plugin skills are unaffected.
 
 ## Further reading
 

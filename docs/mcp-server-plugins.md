@@ -37,7 +37,9 @@ plugin in returned metadata. Names share the global skill namespace. Colliding
 plugin registrations are omitted with diagnostics and never override an
 existing skill. A missing or malformed declared package makes the enabled
 plugin invalid. Disabled plugins contribute no skills and their skill files are
-not read. Registration needs no `PluginCapability`; `SKILLS_READ` only lets a
+not read. The `[skills] disabled` list in `config.toml` filters only bundled
+skills — plugin-registered skills are unaffected by it. Registration needs no
+`PluginCapability`; `SKILLS_READ` only lets a
 running sidecar consume Theater's skill catalog.
 
 Enable a sidecar explicitly:
