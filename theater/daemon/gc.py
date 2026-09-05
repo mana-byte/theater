@@ -1,6 +1,6 @@
 """The garbage-collection engine and its daemon loop.
 
-The SQLite database at ``~/.theater/theater.db`` grows without bound.
+The SQLite database grows without bound unless retained data is swept.
 Measured on a real machine over 4.26 days: 32.05 MB total, of which the
 ``bus`` table was 30.20 MB (94.2%) growing at 7.1 MB/day — about 2.6 GB/year.
 This module is the sweep that bounds it.
@@ -16,9 +16,8 @@ The sweep runs in six phases, in this order:
 3. **Participants** — the three-clause gated delete. After the jobs phase,
    so a participant whose last job just went becomes eligible in the same
    sweep.
-4. **Participant artifacts** — remove generated files and observation roots
-   only for participants whose rows were deleted, then clean orphaned metadata
-   and legacy files in bounded work.
+4. **Participant artifacts** — remove participant roots only after their rows
+   are deleted, then clean orphaned metadata and roots in bounded work.
 5. **scratchpad** — delete rows whose spawn tree has no live participant.
    Computes the roots of all live participants through lineage.root_of()
    and retains those, deleting everything else in bounded batches.
@@ -406,7 +405,7 @@ async def _sweep_artifact_orphans(
     *,
     exclude: frozenset[str] = frozenset(),
 ) -> None:
-    """Retry recorded or legacy artifacts whose participant row is absent."""
+    """Retry recorded artifacts and remove orphan participant roots."""
     retained_ids = frozenset(
         participant.id for participant in store.list_participants(include_dead=True)
     )
@@ -451,12 +450,10 @@ async def _sweep_artifact_orphans(
         candidates = await workers.to_thread(
             orphan_paths,
             retained_ids | exclude,
-            label="gc.discover_legacy_artifacts",
+            label="gc.discover_orphan_participants",
         )
     except Exception as exc:
-        logger.warning(
-            "legacy participant artifact discovery deferred; retry on the next GC: %s", exc
-        )
+        logger.warning("participant root discovery deferred; retry on the next GC: %s", exc)
         return
     for offset in range(0, len(candidates), batch):
         candidates_batch = tuple(
@@ -471,13 +468,13 @@ async def _sweep_artifact_orphans(
             failures = await workers.to_thread(
                 cleanup_orphan_paths,
                 candidates_batch,
-                label="gc.legacy_artifacts",
+                label="gc.orphan_participants",
             )
         except Exception as exc:
             failures = (f"unexpected cleanup failure: {exc}",)
         if failures:
             logger.warning(
-                "legacy participant artifact cleanup deferred; retry on the next GC: %s",
+                "orphan participant cleanup deferred; retry on the next GC: %s",
                 "; ".join(failures),
             )
         await asyncio.sleep(0)

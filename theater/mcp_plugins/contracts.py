@@ -143,11 +143,12 @@ class SecretValue:
 
 @dataclass(frozen=True, slots=True)
 class McpLaunchContext:
-    """The only participant facts passed to a synchronous sidecar planner."""
+    """Inputs passed to a synchronous sidecar planner."""
 
     participant_id: str
     cwd: Path | str
     config: Mapping[str, object]
+    state_dir: Path | str
 
     def __post_init__(self) -> None:
         _require_nonblank_text(self.participant_id, "MCP launch participant_id")
@@ -155,7 +156,10 @@ class McpLaunchContext:
             raise ValueError("MCP launch cwd must not be blank")
         if not isinstance(self.cwd, (str, Path)):
             raise TypeError("MCP launch cwd must be a path")
+        if not isinstance(self.state_dir, (str, Path)):
+            raise TypeError("MCP launch state_dir must be a path")
         object.__setattr__(self, "cwd", Path(self.cwd))
+        object.__setattr__(self, "state_dir", Path(self.state_dir))
         object.__setattr__(self, "config", _freeze_config(self.config))
 
 
@@ -253,10 +257,21 @@ class CompiledMcpPlugin:
         object.__setattr__(self, "capabilities", frozenset(self.capabilities))
         object.__setattr__(self, "config", _freeze_config(self.config))
 
-    def plan_launch(self, *, participant_id: str, cwd: Path | str) -> McpLaunchPlan:
-        """Invoke the manifest's synchronous planner with no core credentials."""
+    def plan_launch(
+        self, *, participant_id: str, cwd: Path | str, state_dir: Path | str | None = None
+    ) -> McpLaunchPlan:
+        """Invoke the manifest's synchronous planner."""
+        if state_dir is None:
+            from theater import paths
+
+            state_dir = paths.plugin_state_dir(self.name)
         result = self.launch.planner(
-            McpLaunchContext(participant_id=participant_id, cwd=cwd, config=self.config)
+            McpLaunchContext(
+                participant_id=participant_id,
+                cwd=cwd,
+                config=self.config,
+                state_dir=state_dir,
+            )
         )
         if inspect.isawaitable(result):
             raise TypeError("MCP launch planner must be synchronous")

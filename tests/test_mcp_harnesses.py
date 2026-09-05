@@ -35,12 +35,12 @@ async def daemon(theater_home):
 
 @pytest.fixture
 def local_dir(tmp_path):
-    """Stand-in for `$THEATER_HOME/harnesses`.
+    """Stand-in for `$THEATER_HOME/plugins`.
 
     Its twin in test_harness_plugins is a fixture, and fixtures do not cross
     modules; only the two helpers do.
     """
-    d = tmp_path / "harnesses"
+    d = tmp_path / "plugins"
     d.mkdir()
     return d
 

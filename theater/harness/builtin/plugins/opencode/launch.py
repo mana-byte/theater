@@ -29,7 +29,7 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
         "$schema": "https://opencode.ai/config.json",
     }
     native_plugin_path = plugin_path(config_path)
-    token_path = paths.observation_dir("opencode", participant_id) / "receipt-token"
+    token_path = paths.participant_observation_dir(participant_id, "opencode") / "receipt-token"
     config["plugin"] = [native_plugin_path.resolve().as_uri()]
     argv = ["opencode"]
     if context.model:

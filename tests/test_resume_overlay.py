@@ -793,7 +793,7 @@ def test_validation_does_not_create_marker_key(tmp_path, monkeypatch):
     from theater import paths
 
     paths.ensure_home()
-    key_path = paths.home() / _MARKER_KEY
+    key_path = paths.keys_dir() / _MARKER_KEY
     # Create a marker first (this creates the key), then delete the key so
     # validation must cope without it.
     domain = tmp_path / "domain"

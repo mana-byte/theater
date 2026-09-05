@@ -88,7 +88,7 @@ def test_launch_uses_a_core_owned_generic_receipt_token(tmp_path, monkeypatch):
         approval="manual",
     )
 
-    token_path = paths.observation_dir("opencode", "participant") / "receipt-token"
+    token_path = paths.participant_observation_dir("participant", "opencode") / "receipt-token"
     plugin = config.with_suffix(".opencode.mjs")
     source = plan.files[plugin]
     assert plan.receipt_token_path == token_path

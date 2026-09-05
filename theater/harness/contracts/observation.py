@@ -202,7 +202,7 @@ class HarnessObserver(ABC):
         that derives a reading from the existing boolean: ``is_idle_screen``
         True maps to ``kind=prompt, confidence=low``, and False maps to
         ``kind=unknown, confidence=low``. Third-party plugins living in
-        ``$THEATER_HOME/harnesses`` that only implement the boolean keep
+        ``$THEATER_HOME/plugins`` that only implement the boolean keep
         working unchanged — a later phase will override this method
         per-harness to return ``approval``/``trust``/``working`` with
         ``high`` confidence where the CLI exposes the information.

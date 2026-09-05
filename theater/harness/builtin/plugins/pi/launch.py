@@ -18,7 +18,7 @@ _THEATER_MCP_BRIDGE = Path(__file__).with_name("theater_mcp_bridge.ts")
 
 def participant_root(participant_id: str) -> Path:
     """The Theater-owned Pi session directory for one participant."""
-    return paths.observation_dir("pi", participant_id) / PI_SESSIONS_DIRNAME
+    return paths.participant_observation_dir(participant_id, "pi") / PI_SESSIONS_DIRNAME
 
 
 def plan_launch(context: LaunchContext) -> LaunchPlan:

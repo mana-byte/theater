@@ -15,7 +15,7 @@ from theater import paths
 from theater.config import Config, ConfigError
 from theater.constants.core import HARNESS_NAME
 from theater.harness import builtin, loading
-from theater.harness.loading.models import LOCAL, SHIPPED, LoadedPlugin, PluginError
+from theater.harness.loading.models import SHIPPED, LoadedPlugin, PluginError
 from theater.harness.registry import (
     _ALIASES,
     _BINARIES,
@@ -32,6 +32,7 @@ from theater.harness.registry.claims import (
     release_claims,
 )
 from theater.mcp_plugins import registry as mcp_registry
+from theater.plugins.catalog import scan as scan_user_plugins
 from theater.plugins.namespace import PluginNameReservation
 
 logger = logging.getLogger("theater.harness")
@@ -42,7 +43,6 @@ def install(
     *,
     local_dir: Path | None = None,
     shipped_dir: Path | None = None,
-    mcp_local_dir: Path | None = None,
     mcp_shipped_dir: Path | None = None,
 ) -> list[str]:
     """Rebuild the registry from the shipped and local plugin directories.
@@ -54,7 +54,11 @@ def install(
     """
     disabled = set(config.harness.disabled)
     shipped_root = shipped_dir if shipped_dir is not None else builtin.plugin_dir()
-    local_root = local_dir if local_dir is not None else paths.harnesses_dir()
+    local_root = local_dir if local_dir is not None else paths.plugins_dir()
+    user_plugins = scan_user_plugins(
+        local_root,
+        skip=disabled - set(config.mcp.enabled),
+    )
 
     HARNESSES.clear()
     _ALIASES.clear()
@@ -65,9 +69,10 @@ def install(
 
     mcp_registry.install(
         config,
-        local_dir=mcp_local_dir,
         shipped_dir=mcp_shipped_dir,
-        reserved_harnesses=_reserved_harness_names(shipped_root, local_root),
+        local_plugins=user_plugins.mcp_servers,
+        local_rejections=user_plugins.rejected,
+        reserved_harnesses=_reserved_harness_names(shipped_root, user_plugins.harnesses),
     )
 
     shipped = loading.scan(
@@ -75,11 +80,9 @@ def install(
         source=SHIPPED,
         skip=disabled,
     )
-    local = loading.scan(
-        local_root,
-        source=LOCAL,
-        skip=disabled,
-    )
+    local = list(user_plugins.harnesses)
+    for rejected in user_plugins.rejected:
+        logger.warning("skipping plugin %s: %s", rejected.path, rejected.error)
 
     for found in [*shipped, *local]:
         if found.name in disabled:
@@ -120,12 +123,12 @@ def install(
 
 def _reserved_harness_names(
     shipped_dir: Path,
-    local_dir: Path,
+    local: tuple[LoadedPlugin, ...],
 ) -> tuple[PluginNameReservation, ...]:
     """Reserve every discovered canonical harness name before either kind imports."""
     discovered = [
         *loading.discover(shipped_dir, source=SHIPPED),
-        *loading.discover(local_dir, source=LOCAL),
+        *local,
     ]
     return tuple(
         PluginNameReservation(

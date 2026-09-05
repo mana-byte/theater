@@ -4,10 +4,10 @@ MCP-server plugins are participant-scoped stdio sidecars rendered into a
 participant's harness. They add no tools to Theater itself: the daemon remains
 the policy authority and sole SQLite writer.
 
-Put a package at `$THEATER_HOME/mcp_servers/<name>/`:
+Put a package at `$THEATER_HOME/plugins/<name>/`:
 
 ```text
-mcp_servers/
+plugins/
   acme/
     manifest.py
     server.py
@@ -15,10 +15,10 @@ mcp_servers/
 
 `manifest.py` exports exactly one immutable `MANIFEST = McpServerManifest(...)`.
 The directory name is canonical. A package cannot also export a
-`HarnessManifest`; harness packages belong under `$THEATER_HOME/harnesses/`.
+`HarnessManifest`; both kinds share the same plugin catalog, and each package
+must declare exactly one kind.
 `theater plugins` reports both kinds together, including disabled, missing,
-broken, and loaded packages. Disabled MCP packages are discovered but their
-Python is not imported.
+broken, and loaded packages.
 
 An enabled plugin may register static Theater skills by canonical name:
 
@@ -89,6 +89,22 @@ that descriptor's path. Plugin Python remains trusted: do not copy secrets into
 logs or `files`, and prefer the environment or `private_files` over process
 arguments that may be visible to the operating system.
 
+`McpLaunchContext.state_dir` is the plugin's private global state directory.
+Theater creates it under `var/state/plugins/<name>/`; the plugin chooses its
+own filenames and schema:
+
+```python
+from theater.mcp_plugins import McpLaunchContext, McpLaunchPlan
+
+
+def plan(context: McpLaunchContext) -> McpLaunchPlan:
+    database = context.state_dir / "state.db"
+    return McpLaunchPlan(command="acme-server", env={"ACME_DATABASE": str(database)})
+```
+
+Do not expose this location as a machine-specific configuration field. Theater
+does not migrate or clean up a plugin's database.
+
 ## Native sidecar
 
 A native Python sidecar uses `TheaterPluginClient` directly. It reads the
@@ -134,7 +150,7 @@ diagnostic and non-fatal; an enabled broken package shipped by Theater remains
 fatal because it is a product defect.
 
 Cross-kind name collisions are different: a harness package and an MCP-server
-package may not share a canonical directory name. Every discovered package
-reserves its name before import, including disabled packages, so this conflict
-prevents daemon startup. Rename or remove one package; `theater plugins` marks
-the condition as `conflict`.
+package may not share a canonical directory name. Classification reserves every
+package name, including MCP packages that are not enabled. A name in
+`[harness].disabled` is skipped before import unless `[mcp].enabled` also names
+it. Rename or remove either package; `theater plugins` marks the conflict.

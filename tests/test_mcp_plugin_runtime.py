@@ -114,7 +114,7 @@ def _attach_credential(
     name: str = "acme",
 ):
     material = mint_credential()
-    credential_path = paths.participant_mcp_plugin_dir(participant_id, name) / "credential"
+    credential_path = paths.participant_plugin_dir(participant_id, name) / "credential"
     _write_credential(credential_path, material.credential)
     store.set_mcp_plugin_credential(
         participant_id,
@@ -131,7 +131,10 @@ def _attach_credential(
 def test_sidecar_planning_materializes_confined_artifacts_and_a_0600_credential(
     monkeypatch, registry, isolated_mcp_registry, rendering_sidecars
 ):
-    def sidecar_plan(_context) -> McpLaunchPlan:
+    state_dirs: list[Path] = []
+
+    def sidecar_plan(context) -> McpLaunchPlan:
+        state_dirs.append(context.state_dir)
         return McpLaunchPlan(
             command="acme-server",
             argv=("--stdio",),
@@ -162,7 +165,10 @@ def test_sidecar_planning_materializes_confined_artifacts_and_a_0600_credential(
     assert "acme-server" not in rendered_spec
     assert "--stdio" not in rendered_spec
     assert "ACME_MODE" not in rendered_spec
-    root = paths.participant_mcp_plugin_dir(participant.id, "acme")
+    root = paths.participant_plugin_dir(participant.id, "acme")
+    assert state_dirs == [paths.plugin_state_dir("acme")]
+    assert state_dirs[0].is_dir()
+    assert stat.S_IMODE(state_dirs[0].stat().st_mode) == 0o700
     assert set(plan.files) == {root / "public/config.json"}
     assert root / "private/config.secret" in plan.private_files
     (record,) = registry.store.mcp_plugin_credentials(participant.id)
@@ -320,7 +326,7 @@ def test_symlinked_or_broken_sidecars_are_omitted_without_failing_the_harness_pl
     good = _plugin(name="good")
 
     def bad_plan(context) -> McpLaunchPlan:
-        plugin_root = paths.participant_mcp_plugin_dir(context.participant_id, "bad")
+        plugin_root = paths.participant_plugin_dir(context.participant_id, "bad")
         plugin_root.mkdir(parents=True, exist_ok=True)
         (plugin_root / "nested").symlink_to(tmp_path / "outside")
         return McpLaunchPlan(command="bad-server", files={Path("nested/config"): "x"})
@@ -356,7 +362,7 @@ def test_sidecar_artifact_collisions_are_omitted_without_overwriting_harness_fil
 
     isolated_mcp_registry["acme"] = _plugin(planner=sidecar_plan)
     participant = registry.create_spawned(harness="fake", cwd="/tmp")
-    root = paths.participant_mcp_plugin_dir(participant.id, "acme")
+    root = paths.participant_plugin_dir(participant.id, "acme")
 
     def harness_plan(_harness, *, mcp_servers=(), **_kwargs) -> LaunchPlan:
         return LaunchPlan(argv=["fake"], files={root / "config" / "harness.json": "{}"})
@@ -382,7 +388,7 @@ def test_sidecar_collision_filter_converges_after_each_renderer_change(
         )
     participant = registry.create_spawned(harness="fake", cwd="/tmp")
     roots = {
-        name: paths.participant_mcp_plugin_dir(participant.id, name)
+        name: paths.participant_plugin_dir(participant.id, name)
         for name in ("alpha", "beta", "gamma")
     }
 
@@ -410,7 +416,7 @@ def test_sidecar_persistence_failure_rolls_back_its_record_and_empty_root(
 ):
     isolated_mcp_registry["acme"] = _plugin()
     participant = registry.create_spawned(harness="fake", cwd="/tmp")
-    root = paths.participant_mcp_plugin_dir(participant.id, "acme")
+    root = paths.participant_plugin_dir(participant.id, "acme")
     persist = registry.store.set_mcp_plugin_credential
 
     def persist_then_fail(*args, **kwargs) -> None:
@@ -554,7 +560,7 @@ def test_registry_diagnostics_emit_bounded_safe_spawn_omissions(
 def test_disabled_malformed_package_does_not_emit_a_spawn_omission(
     monkeypatch, registry, isolated_mcp_registry, rendering_sidecars, tmp_path
 ):
-    package = tmp_path / "mcp_servers" / "broken"
+    package = tmp_path / "plugins" / "broken"
     package.mkdir(parents=True)
     assert (
         mcp_registry.install(
@@ -564,9 +570,7 @@ def test_disabled_malformed_package_does_not_emit_a_spawn_omission(
         )
         == []
     )
-    (diagnostic,) = mcp_registry.diagnostics()
-    assert diagnostic.name == "broken"
-    assert diagnostic.requested is False
+    assert mcp_registry.diagnostics() == ()
 
     participant = registry.create_spawned(harness="fake", cwd="/tmp")
     monkeypatch.setattr(

@@ -34,7 +34,7 @@ def cmd_daemon(args) -> int:
         if stderr_token is not None:
             from theater import paths
 
-            delete_generation_file(generation_path(paths.logs_dir(), stderr_token))
+            delete_generation_file(generation_path(paths.daemon_stderr_logs_dir(), stderr_token))
         print(f"theater: {exc}", file=sys.stderr)
         return 1
     except RuntimeError as exc:

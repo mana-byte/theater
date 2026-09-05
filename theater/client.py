@@ -109,7 +109,9 @@ class DaemonClient:
         from theater.constants.observability import STDERR_TOKEN_RETRIES
         from theater.observability.logging import create_generation_file, delete_generation_file
 
-        path, token, fd = create_generation_file(paths.logs_dir(), retries=STDERR_TOKEN_RETRIES)
+        path, token, fd = create_generation_file(
+            paths.daemon_stderr_logs_dir(), retries=STDERR_TOKEN_RETRIES
+        )
         child_stderr = os.fdopen(fd, "wb", closefd=True)
         popened = False
         try:
@@ -156,7 +158,7 @@ class DaemonClient:
             ) from last
         raise ConnectionError(
             f"daemon did not come up within {START_TIMEOUT}s; see {paths.log_path()} "
-            f"or {paths.logs_dir() / 'daemon.*.stderr.log'}"
+            f"or {paths.daemon_stderr_logs_dir() / '*.log'}"
         ) from last
 
     @staticmethod

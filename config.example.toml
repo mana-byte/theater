@@ -242,8 +242,8 @@ stale_running_days = 7
 # tree, drawn with the unknown icon — hiding a session that exists would be
 # worse than admitting Theater cannot read it.
 #
-# The name is matched against the plugin's filename before the file is
-# imported, and against the harness name afterwards. Matching the filename
+# The name is matched against the plugin's directory before the manifest is
+# imported, and against the harness name afterwards. Matching the directory name
 # first is what lets you switch off a plugin that fails on import — the case
 # where you need this most, and the one an allowlist of names could not reach.
 #
@@ -254,8 +254,8 @@ disabled = []
 
 [mcp]
 
-# MCP sidecars are local package plugins under $THEATER_HOME/mcp_servers. They
-# are off unless named here; each enabled package may declare a flat config
+# MCP sidecars are local package plugins under $THEATER_HOME/plugins. They are
+# off unless named here; each enabled package may declare a flat config
 # table under [mcp.plugins.<name>]. Secrets there use exactly { env = "NAME" }
 # or { file = "/path" }, and are resolved once when Theater starts.
 # `theater plugins` inspects both harness and MCP-server packages locally and

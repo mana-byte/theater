@@ -301,7 +301,7 @@ and `theater bind ID CANDIDATE --confirm-id ID` for operator recovery.
 
 ### Harness plugins
 
-Add a package at `$THEATER_HOME/harnesses/<name>/manifest.py` exporting one
+Add a package at `$THEATER_HOME/plugins/<name>/manifest.py` exporting one
 immutable `MANIFEST`. Local packages can override shipped packages; invalid
 packages are rejected with diagnostics instead of partially loading.
 
@@ -311,10 +311,10 @@ boundaries, resume semantics, and optional native signal enrichment.
 
 ### MCP-server plugins
 
-MCP-server packages are participant-scoped stdio sidecars under
-`$THEATER_HOME/mcp_servers/`. They are disabled until explicitly enabled and
-can use only their declared capability grants. Use `theater plugins` to inspect
-both harness and MCP-server packages locally, without starting the daemon.
+MCP-server packages are participant-scoped stdio sidecars installed in the same
+`$THEATER_HOME/plugins/` catalog as harness packages. Each package declares exactly one kind.
+MCP-server packages are disabled until explicitly enabled and can use only their declared
+capability grants. Use `theater plugins` to inspect both kinds locally without starting the daemon.
 
 Read the [MCP-server plugin guide](docs/mcp-server-plugins.md) for native
 `TheaterPluginClient` sidecars and compatibility wrappers using `theater plugin call`.
@@ -330,7 +330,7 @@ declare package-owned skills, which appear through the same `list_skills` and
 ## Observability
 
 Human-readable daemon and régie logs are always available under
-`$THEATER_HOME/logs/`. Optional OTLP traces, metrics, and structured logs are
+`$THEATER_HOME/var/logs/`. Optional OTLP traces, metrics, and structured logs are
 off by default:
 
 ```sh

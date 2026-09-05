@@ -630,7 +630,7 @@ def test_codex_output_scrolled_past_the_composer_is_not_idle():
 class _BooleanOnlyObserver(HarnessObserver):
     """A stub observer that implements only ``is_idle_screen``.
 
-    This is the shape a third-party plugin in ``$THEATER_HOME/harnesses`` has
+    This is the shape a third-party plugin in ``$THEATER_HOME/plugins`` has
     today: it answers the boolean and nothing else. The default
     ``screen_reading`` shim must keep it working without any code change.
     """

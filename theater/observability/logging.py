@@ -26,7 +26,7 @@ from theater.constants.observability import (
 
 FORMATTER_FMT = "%(asctime)s %(levelname)-7s %(name)s %(message)s"
 _TOKEN_PATTERN = re.compile(r"^[0-9a-f]+$")
-_GENERATION_PATTERN = re.compile(rf"^daemon\.([0-9a-f]{{{STDERR_TOKEN_HEX_LEN}}})\.stderr\.log$")
+_GENERATION_PATTERN = re.compile(rf"^([0-9a-f]{{{STDERR_TOKEN_HEX_LEN}}})\.log$")
 _REGIE_IDENTITY_PATTERN = re.compile(r"^(?:pane|pid)-[0-9]+$")
 _REGIE_GENERATION_PATTERN = re.compile(
     r"^(?P<identity>(?:pane|pid)-[0-9]+)\.log(?:\.(?:[1-9][0-9]*))?$"
@@ -91,7 +91,7 @@ def generate_token() -> str:
 def generation_path(directory: Path, token: str) -> Path:
     if not validate_token(token):
         raise ValueError(f"invalid stderr token: {token!r}")
-    return directory / f"daemon.{token}.stderr.log"
+    return directory / f"{token}.log"
 
 
 def create_generation_file(
@@ -131,7 +131,7 @@ def prune_stderr_generations(
     retain: int = STDERR_GENERATIONS,
 ) -> int:
     """Prune generations by mtime while pinning current."""
-    pattern = "daemon.*.stderr.log"
+    pattern = "*.log"
     files: list[tuple[float, Path]] = []
     for entry in directory.glob(pattern):
         if _GENERATION_PATTERN.fullmatch(entry.name) is None:

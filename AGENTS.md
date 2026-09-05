@@ -205,14 +205,15 @@ theater/
   observability setup and shutdown; `cmd_daemon` owns only argument translation
   and exit codes. `runtime.configure()` is called exactly once — global tracer
   providers cannot be reset safely, so a second configure attempt is rejected.
-  `logs/daemon.log` (rotating) and `logs/daemon.<token>.stderr.log` (raw crash output)
+  `var/logs/daemon/daemon.log` (rotating) and `var/logs/daemon/stderr/<token>.log`
+  (raw crash output)
   are never the same file. Gauge sampling runs on the daemon event loop because
   Store's SQLite connection is loop-thread-only; exporter callbacks read only a
   cache and never query SQLite. See §13 of architecture.md.
 
 ## When adding a harness
 
-Write a named package: `$THEATER_HOME/harnesses/<name>/manifest.py` exporting
+Write a named package: `$THEATER_HOME/plugins/<name>/manifest.py` exporting
 one immutable `MANIFEST`. The folder name is canonical; use relative sibling
 modules and only public `theater.harness.contracts` APIs. Local packages
 override shipped packages, disabled names are skipped before import, and a

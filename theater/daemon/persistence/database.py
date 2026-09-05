@@ -15,6 +15,8 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import Connection, create_engine, event, inspect
 
+from theater import paths
+
 MIGRATIONS = Path(__file__).parent.parent / "migrations"
 
 #: The revision a pre-Alembic database is already at. See ``_stamp_legacy``.
@@ -48,7 +50,7 @@ class Database:
 
     def __init__(self, path: Path):
         self.path = path
-        path.parent.mkdir(parents=True, exist_ok=True)
+        paths.ensure_private_file(path)
         self.engine = create_engine(f"sqlite:///{path}")
         event.listen(self.engine, "connect", _set_pragmas)
 

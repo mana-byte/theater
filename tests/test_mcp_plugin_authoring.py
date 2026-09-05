@@ -6,16 +6,14 @@ import asyncio
 import json
 import os
 import shlex
-import shutil
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
-from theater import config
+from theater import config, paths
 from theater.mcp_plugins import registry
 
 FIXTURES = Path(__file__).parent / "fixtures" / "mcp_plugins"
@@ -86,7 +84,9 @@ async def test_native_fixture_launches_a_stdio_mcp_server_and_uses_typed_client(
     assert payload == {"result": [{"id": "p-native"}]}
 
 
-async def test_compat_fixture_launches_a_stdio_mcp_server_through_the_json_gateway(tmp_path):
+async def test_compat_fixture_launches_a_stdio_mcp_server_through_the_json_gateway(
+    tmp_path, theater_home
+):
     settings = config.Config(
         mcp=config.McpSection(
             enabled=["compat"], plugins={"compat": {"endpoint": "https://api.invalid"}}
@@ -108,7 +108,6 @@ async def test_compat_fixture_launches_a_stdio_mcp_server_through_the_json_gatew
     plan = registry.get("compat").plan_launch(participant_id="p-compat", cwd=tmp_path)
     assert plan.env == {"FIXTURE_ENDPOINT": "https://api.invalid"}
 
-    theater_home = Path(tempfile.mkdtemp(prefix="theater-mcp-"))
     received: dict = {}
 
     async def daemon(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -122,7 +121,7 @@ async def test_compat_fixture_launches_a_stdio_mcp_server_through_the_json_gatew
         writer.close()
         await writer.wait_closed()
 
-    server = await asyncio.start_unix_server(daemon, path=theater_home / "daemon.sock")
+    server = await asyncio.start_unix_server(daemon, path=paths.socket_path())
     try:
         tools, payload = await _tool_call(
             plan,
@@ -137,7 +136,6 @@ async def test_compat_fixture_launches_a_stdio_mcp_server_through_the_json_gatew
     finally:
         server.close()
         await server.wait_closed()
-        shutil.rmtree(theater_home)
 
     assert tools == {"get_fixture_participant"}
     assert payload == {"id": "p-compat", "source": "existing-server"}

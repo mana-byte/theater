@@ -20,6 +20,8 @@ from theater.mcp_plugins.compiler import compile_manifest
 from theater.mcp_plugins.loading import LOCAL, SHIPPED, LoadedMcpPlugin
 from theater.mcp_plugins.loading import discover as discover_mcp
 from theater.mcp_plugins.loading import load_plugin as load_mcp
+from theater.plugins.catalog import RejectedPlugin, SkippedPlugin
+from theater.plugins.catalog import scan as scan_user_plugins
 
 _RESERVED_MCP_NAMES = frozenset({HARNESS_MCP_SERVER_NAME, HARNESS_MCP_WAIT_SERVER_NAME})
 
@@ -27,21 +29,24 @@ _RESERVED_MCP_NAMES = frozenset({HARNESS_MCP_SERVER_NAME, HARNESS_MCP_WAIT_SERVE
 def describe(
     config: Config,
     *,
-    harness_local_dir: Path | None = None,
+    local_dir: Path | None = None,
     harness_shipped_dir: Path | None = None,
-    mcp_local_dir: Path | None = None,
     mcp_shipped_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Inspect package manifests locally without mutating either live registry."""
+    user = scan_user_plugins(
+        local_dir or paths.plugins_dir(),
+        skip=set(config.harness.disabled) - set(config.mcp.enabled),
+    )
     harnesses = [
         *harness_discovery.discover(
             harness_shipped_dir or harness_builtin.plugin_dir(), source=SHIPPED
         ),
-        *harness_discovery.discover(harness_local_dir or paths.harnesses_dir(), source=LOCAL),
+        *user.harnesses,
     ]
     mcps = [
         *discover_mcp(mcp_shipped_dir or mcp_builtin.plugin_dir(), source=SHIPPED),
-        *discover_mcp(mcp_local_dir or paths.mcp_servers_dir(), source=LOCAL),
+        *user.mcp_servers,
     ]
     harness_names = {plugin.name for plugin in harnesses if _canonical(plugin.name)}
     mcp_names = {plugin.name for plugin in mcps if _canonical(plugin.name)}
@@ -49,6 +54,8 @@ def describe(
     disabled_harnesses = set(config.harness.disabled)
     rows = _harness_rows(harnesses, disabled=disabled_harnesses, conflicts=conflicts)
     rows.extend(_mcp_rows(mcps, config, conflicts))
+    rows.extend(_rejected_rows(user.rejected, config))
+    rows.extend(_skipped_rows(user.skipped))
     return sorted(rows, key=lambda row: (row["kind"], row["name"], row["source"] or ""))
 
 
@@ -60,7 +67,11 @@ def _harness_rows(
     for plugin in plugins:
         if plugin.name in disabled or plugin.name in conflicts:
             continue
-        result = harness_importer.load_plugin(plugin)
+        result = (
+            plugin
+            if plugin.harness is not None and plugin.manifest is not None
+            else harness_importer.load_plugin(plugin)
+        )
         loaded[plugin.path] = result
         if plugin.source == LOCAL and result.manifest is not None and result.error is None:
             local_valid.add(plugin.name)
@@ -150,7 +161,7 @@ def _mcp_rows(
 
 
 def _loaded_mcp_row(row: dict[str, Any], plugin: LoadedMcpPlugin, config: Config) -> dict[str, Any]:
-    loaded = load_mcp(plugin)
+    loaded = plugin if plugin.manifest is not None else load_mcp(plugin)
     if loaded.error is not None or loaded.manifest is None:
         return _broken(row, _safe_error(loaded.error))
     try:
@@ -172,9 +183,27 @@ def _loaded_mcp_row(row: dict[str, Any], plugin: LoadedMcpPlugin, config: Config
     return row
 
 
+def _rejected_rows(plugins: Iterable[RejectedPlugin], config: Config) -> list[dict[str, Any]]:
+    enabled = set(config.mcp.enabled)
+    rows = []
+    for plugin in plugins:
+        row = _base_row("plugin", plugin, enabled=plugin.name in enabled)
+        rows.append(_broken(row, _safe_error(plugin.error)))
+    return rows
+
+
+def _skipped_rows(plugins: Iterable[SkippedPlugin]) -> list[dict[str, Any]]:
+    rows = []
+    for plugin in plugins:
+        row = _base_row("plugin", plugin, enabled=False)
+        row["state"] = "disabled"
+        rows.append(row)
+    return rows
+
+
 def _selected(
     plugins: Iterable[LoadedMcpPlugin],
-) -> tuple[dict[str, LoadedMcpPlugin], frozenset[LoadedMcpPlugin]]:
+) -> tuple[dict[str, LoadedMcpPlugin], tuple[LoadedMcpPlugin, ...]]:
     by_name: dict[str, dict[str, list[LoadedMcpPlugin]]] = {
         SHIPPED: defaultdict(list),
         LOCAL: defaultdict(list),
@@ -182,18 +211,21 @@ def _selected(
     for plugin in plugins:
         by_name[plugin.source][plugin.name].append(plugin)
     selected: dict[str, LoadedMcpPlugin] = {}
-    duplicates: set[LoadedMcpPlugin] = set()
+    duplicates: list[LoadedMcpPlugin] = []
     for source in (SHIPPED, LOCAL):
         for name, group in by_name[source].items():
             if len(group) == 1:
                 selected[name] = group[0]
             else:
-                duplicates.update(group)
-    return selected, frozenset(duplicates)
+                duplicates.extend(group)
+    return selected, tuple(duplicates)
 
 
 def _base_row(
-    kind: str, plugin: LoadedPlugin | LoadedMcpPlugin, *, enabled: bool
+    kind: str,
+    plugin: LoadedPlugin | LoadedMcpPlugin | RejectedPlugin | SkippedPlugin,
+    *,
+    enabled: bool,
 ) -> dict[str, Any]:
     manifest_path = plugin.path / "manifest.py" if plugin.path.is_dir() else plugin.path
     return {

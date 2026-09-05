@@ -60,6 +60,8 @@ def run_migrations_online() -> None:
             context.run_migrations()
         return
 
+    paths.ensure_home()
+    paths.ensure_private_file(paths.db_path())
     engine = create_engine(_url())
     try:
         with engine.connect() as conn:

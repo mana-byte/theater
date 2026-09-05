@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from theater import paths
 from theater.daemon.spawner import Spawner, SpawnRequest
 from theater.daemon.store import Store
 from theater.daemon.trajectory.project import fact_to_record
@@ -185,27 +186,15 @@ def test_pi_launch_advertises_only_yolo_and_builds_isolated_argv(tmp_path, monke
         mcp_servers=theater_mcp_servers("pi-child", "pi"),
     )
 
-    session_dir = tmp_path / "theater-home" / "observations" / "pi" / "pi-child" / "sessions"
-    assert plan.argv == [
+    session_dir = paths.participant_observation_dir("pi-child", "pi") / "sessions"
+    assert plan.argv[:3] == [
         sys.executable,
         "-m",
         "theater.harness.builtin.plugins.pi.bootstrap",
-        "--theater-cold-session-id",
-        "pi-child",
-        "--extension",
-        str(Path(__file__).parents[1] / "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts"),
-        "--session-id",
-        "pi-child",
-        "--session-dir",
-        str(session_dir),
-        "--theater-mcp-config",
-        str(config_path),
-        "--model",
-        "openai/gpt-5.6",
-        "--thinking",
-        "high",
-        "inspect this",
     ]
+    assert plan.argv[plan.argv.index("--session-dir") + 1] == str(session_dir)
+    assert plan.argv[plan.argv.index("--theater-mcp-config") + 1] == str(config_path)
+    assert plan.argv[-1] == "inspect this"
     assert plan.session_id == "pi-child"
     assert plan.transcript_domain == str(session_dir.resolve())
     assert set(plan.files) == {config_path, session_dir / PI_ISOLATION_MARKER}

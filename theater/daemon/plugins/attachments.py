@@ -64,7 +64,7 @@ def plan_sidecars(
     """Plan and persist every usable configured sidecar without failing a spawn."""
     planned: list[PlannedMcpSidecar] = []
     for plugin in catalog().servers:
-        root = paths.participant_mcp_plugin_dir(participant.id, plugin.name)
+        root = paths.participant_plugin_dir(participant.id, plugin.name)
         if plugin.name in _RESERVED_SERVER_NAMES:
             _rollback_failed_sidecar(store, participant, plugin.name, root)
             _omit(
@@ -98,7 +98,7 @@ def plan_sidecars(
 def omit_unrenderable_sidecars(participant: Participant, *, store) -> None:
     """Record configured sidecars omitted by a harness without a generic renderer."""
     for plugin in catalog().servers:
-        root = paths.participant_mcp_plugin_dir(participant.id, plugin.name)
+        root = paths.participant_plugin_dir(participant.id, plugin.name)
         _rollback_failed_sidecar(store, participant, plugin.name, root)
         reason = (
             f"MCP server name {plugin.name!r} is reserved by Theater"
@@ -202,10 +202,11 @@ def _plan_sidecar(
     participant_id: str,
     cwd: str,
 ) -> PlannedMcpSidecar:
-    launch = plugin.plan_launch(participant_id=participant_id, cwd=cwd)
+    state_dir = paths.plugin_state_dir(plugin.name)
+    launch = plugin.plan_launch(participant_id=participant_id, cwd=cwd, state_dir=state_dir)
     if not isinstance(launch, McpLaunchPlan):
         raise TypeError("MCP launch planner did not return an McpLaunchPlan")
-    root = paths.participant_mcp_plugin_dir(participant_id, plugin.name)
+    root = paths.participant_plugin_dir(participant_id, plugin.name)
     files = _absolute_artifacts(root, launch.files, label="files")
     private_files = _absolute_artifacts(root, launch.private_files, label="private_files")
     credential_path = root / _CREDENTIAL_FILENAME
@@ -282,6 +283,7 @@ def _relative_path(value: object, label: str) -> Path:
 def _prepare_artifact_root(sidecar: PlannedMcpSidecar) -> None:
     paths.ensure_home()
     _ensure_directory_chain(sidecar.root)
+    _ensure_directory_chain(paths.plugin_state_dir(sidecar.plugin.name))
     targets = (*sidecar.files, *sidecar.private_files, sidecar.credential_path)
     for target in targets:
         _ensure_relative_parent(sidecar.root, target.parent)

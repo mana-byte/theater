@@ -8,6 +8,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 from theater import paths
 from theater.config import Config, ConfigError
@@ -30,6 +31,10 @@ from theater.plugins.namespace import (
     reject_cross_kind_collisions,
 )
 from theater.skills.models import Skill
+
+if TYPE_CHECKING:
+    from theater.harness.loading.models import LoadedPlugin
+    from theater.plugins.catalog import RejectedPlugin
 
 logger = logging.getLogger("theater.mcp_plugins")
 
@@ -95,6 +100,8 @@ def install(
     *,
     local_dir: Path | None = None,
     shipped_dir: Path | None = None,
+    local_plugins: Iterable[LoadedMcpPlugin] | None = None,
+    local_rejections: Iterable[RejectedPlugin] = (),
     reserved_harnesses: Iterable[PluginNameReservation] | Mapping[str, Path] = (),
 ) -> list[str]:
     """Rebuild the MCP-server registry without making local failures fatal.
@@ -107,10 +114,15 @@ def install(
     _DIAGNOSTICS.clear()
 
     shipped_root = shipped_dir if shipped_dir is not None else builtin.plugin_dir()
-    local_root = local_dir if local_dir is not None else paths.mcp_servers_dir()
     shipped = discover(shipped_root, source=SHIPPED)
-    local = discover(local_root, source=LOCAL)
-    _check_namespace(reserved_harnesses, [*shipped, *local])
+    local, rejections, harnesses = _local_packages(
+        config,
+        local_dir=local_dir,
+        local_plugins=local_plugins,
+        local_rejections=local_rejections,
+        reserved_harnesses=reserved_harnesses,
+    )
+    _check_namespace(harnesses, [*shipped, *local])
 
     enabled = set(config.mcp.enabled)
     selected, duplicates = _select_packages(shipped, local)
@@ -133,6 +145,20 @@ def install(
         for plugin in [*shipped, *local]
         if HARNESS_NAME.fullmatch(plugin.name) is not None
     }
+    known_names.update(
+        plugin.name for plugin in rejections if HARNESS_NAME.fullmatch(plugin.name) is not None
+    )
+    for rejected in rejections:
+        if rejected.name in enabled:
+            _append_diagnostic(
+                McpPluginDiagnostic(
+                    name=rejected.name,
+                    path=rejected.path,
+                    source=rejected.source,
+                    error=rejected.error,
+                    requested=True,
+                )
+            )
     for name in sorted(enabled - known_names):
         _append_diagnostic(
             McpPluginDiagnostic(
@@ -158,7 +184,7 @@ def install(
             continue
         if name not in enabled:
             continue
-        loaded = load_plugin(plugin)
+        loaded = plugin if plugin.manifest is not None else load_plugin(plugin)
         _PLUGINS[name] = loaded
         if loaded.error is not None or loaded.manifest is None:
             _reject_shipped(loaded, enabled=True)
@@ -249,17 +275,50 @@ def _select_packages(
     return selected, tuple(duplicates)
 
 
+def _local_packages(
+    config: Config,
+    *,
+    local_dir: Path | None,
+    local_plugins: Iterable[LoadedMcpPlugin] | None,
+    local_rejections: Iterable[RejectedPlugin],
+    reserved_harnesses: Iterable[PluginNameReservation] | Mapping[str, Path],
+) -> tuple[
+    list[LoadedMcpPlugin],
+    tuple[RejectedPlugin, ...],
+    tuple[PluginNameReservation, ...],
+]:
+    harnesses = _normalize_harness_reservations(reserved_harnesses)
+    if local_plugins is not None:
+        return list(local_plugins), tuple(local_rejections), harnesses
+
+    from theater.plugins.catalog import scan as scan_user_plugins
+
+    user_plugins = scan_user_plugins(
+        local_dir if local_dir is not None else paths.plugins_dir(),
+        skip=set(config.harness.disabled) - set(config.mcp.enabled),
+    )
+    return (
+        list(user_plugins.mcp_servers),
+        user_plugins.rejected,
+        (*harnesses, *_harness_reservations(user_plugins.harnesses)),
+    )
+
+
+def _normalize_harness_reservations(
+    values: Iterable[PluginNameReservation] | Mapping[str, Path],
+) -> tuple[PluginNameReservation, ...]:
+    if isinstance(values, Mapping):
+        return tuple(
+            PluginNameReservation("harness", name, path, "unknown") for name, path in values.items()
+        )
+    return tuple(values)
+
+
 def _check_namespace(
     reserved_harnesses: Iterable[PluginNameReservation] | Mapping[str, Path],
     plugins: Iterable[LoadedMcpPlugin],
 ) -> None:
-    if isinstance(reserved_harnesses, Mapping):
-        harnesses = tuple(
-            PluginNameReservation(kind="harness", name=name, path=path, source="unknown")
-            for name, path in reserved_harnesses.items()
-        )
-    else:
-        harnesses = tuple(reserved_harnesses)
+    harnesses = _normalize_harness_reservations(reserved_harnesses)
     mcp = tuple(
         PluginNameReservation(
             kind="MCP server",
@@ -274,6 +333,15 @@ def _check_namespace(
         reject_cross_kind_collisions(harnesses, mcp)
     except NamespaceCollision as exc:
         raise ConfigError(str(exc)) from exc
+
+
+def _harness_reservations(
+    plugins: Iterable[LoadedPlugin],
+) -> tuple[PluginNameReservation, ...]:
+    return tuple(
+        PluginNameReservation("harness", plugin.name, plugin.path, plugin.source)
+        for plugin in plugins
+    )
 
 
 def _append_diagnostic(diagnostic: McpPluginDiagnostic) -> None:

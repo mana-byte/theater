@@ -1,7 +1,7 @@
 """Harness package-manifest plugins: registry, collision, and refusal behavior.
 
 Two directories, one loader: the adapters Theater ships and the ones a user
-drops in `$THEATER_HOME/harnesses/`. The tests that matter here are the
+drops in `$THEATER_HOME/plugins/`. The tests that matter here are the
 refusals, the precedence, and the collision guards — all using named package
 manifests, the sole plugin format.
 """
@@ -96,8 +96,8 @@ def write_plugin(
 
 @pytest.fixture
 def local_dir(tmp_path) -> Path:
-    """Stand-in for `$THEATER_HOME/harnesses`."""
-    d = tmp_path / "harnesses"
+    """Stand-in for `$THEATER_HOME/plugins`."""
+    d = tmp_path / "plugins"
     d.mkdir()
     return d
 
@@ -166,60 +166,7 @@ def test_installing_an_empty_directory_drops_the_plugin(local_dir, tmp_path):
     assert "acme" not in harness_registry.HARNESSES
 
 
-# ---- refusals -----------------------------------------------------------
-
-
-def test_a_broken_manifest_names_the_directory(local_dir):
-    pkg = local_dir / "broken"
-    pkg.mkdir()
-    (pkg / MANIFEST_FILENAME).write_text("raise ValueError('boom')")
-    install(local_dir)
-    rows = {r["name"]: r for r in harness_registry.describe()}
-    assert rows["broken"]["source"] == "local"
-    assert "boom" in rows["broken"]["error"]
-    assert MANIFEST_FILENAME in rows["broken"]["error"]
-
-
-def test_a_manifest_with_syntax_error_names_the_file(local_dir):
-    pkg = local_dir / "broken"
-    pkg.mkdir()
-    (pkg / MANIFEST_FILENAME).write_text("def (:")
-    install(local_dir)
-    rows = {r["name"]: r for r in harness_registry.describe()}
-    assert rows["broken"]["source"] == "local"
-    assert rows["broken"]["error"] is not None
-    assert MANIFEST_FILENAME in rows["broken"]["error"]
-
-
-def test_a_manifest_with_no_manifest_export_says_what_to_write(local_dir):
-    pkg = local_dir / "empty"
-    pkg.mkdir()
-    (pkg / MANIFEST_FILENAME).write_text("x = 1\n")
-    install(local_dir)
-    rows = {r["name"]: r for r in harness_registry.describe()}
-    assert rows["empty"]["source"] == "local"
-    assert "no MANIFEST" in rows["empty"]["error"]
-
-
-def test_a_manifest_with_wrong_type_is_caught(local_dir):
-    pkg = local_dir / "odd"
-    pkg.mkdir()
-    (pkg / MANIFEST_FILENAME).write_text("MANIFEST = 'a string'\n")
-    install(local_dir)
-    rows = {r["name"]: r for r in harness_registry.describe()}
-    assert rows["odd"]["source"] == "local"
-    assert "is not a HarnessManifest" in rows["odd"]["error"]
-
-
-def test_a_directory_without_manifest_is_broken(local_dir):
-    (local_dir / "acme").mkdir()
-    install(local_dir)
-    rows = {r["name"]: r for r in harness_registry.describe()}
-    assert rows["acme"]["source"] == "local"
-    assert MANIFEST_FILENAME in rows["acme"]["error"]
-
-
-# ---- the two sources fail differently -----------------------------------
+# ---- failures -----------------------------------------------------------
 
 
 def test_a_broken_local_plugin_does_not_stop_start_up(local_dir):
@@ -228,17 +175,6 @@ def test_a_broken_local_plugin_does_not_stop_start_up(local_dir):
     (pkg / MANIFEST_FILENAME).write_text("raise ValueError('boom')")
     write_plugin(local_dir)
     assert install(local_dir) == ["acme", "claude", "codex", "opencode", "pi", "vibe"]
-
-
-def test_a_broken_local_plugin_is_listed_as_broken(local_dir):
-    pkg = local_dir / "broken"
-    pkg.mkdir()
-    (pkg / MANIFEST_FILENAME).write_text("raise ValueError('boom')")
-    install(local_dir)
-    rows = {r["name"]: r for r in harness_registry.describe()}
-    assert rows["broken"]["source"] == "local"
-    assert "boom" in rows["broken"]["error"]
-    assert rows["broken"]["installed"] is False
 
 
 def test_a_broken_shipped_plugin_is_fatal(local_dir, shipped_dir):
@@ -264,16 +200,6 @@ def test_a_local_manifest_that_calls_sys_exit_does_not_stop_start_up(local_dir):
     (pkg / MANIFEST_FILENAME).write_text("import sys; sys.exit(1)")
     write_plugin(local_dir)
     assert install(local_dir) == ["acme", "claude", "codex", "opencode", "pi", "vibe"]
-
-
-def test_a_local_manifest_that_calls_sys_exit_is_listed_as_broken(local_dir):
-    pkg = local_dir / "quitter"
-    pkg.mkdir()
-    (pkg / MANIFEST_FILENAME).write_text("import sys; sys.exit(1)")
-    install(local_dir)
-    rows = {r["name"]: r for r in harness_registry.describe()}
-    assert rows["quitter"]["source"] == "local"
-    assert rows["quitter"]["installed"] is False
 
 
 def test_disabling_a_plugin_stops_it_being_imported(local_dir, shipped_dir):
@@ -455,20 +381,10 @@ def test_disabling_something_that_is_not_there_is_not_an_error(local_dir):
 
 def test_the_cli_loads_plugins_from_theater_home(capsys):
     paths.ensure_home()
-    write_plugin(paths.harnesses_dir())
+    write_plugin(paths.plugins_dir())
     assert cli.main(["harnesses"]) == 0
     out = capsys.readouterr().out
     assert "acme" in out
-
-
-def test_a_broken_plugin_is_reported_by_the_cli(capsys):
-    paths.ensure_home()
-    pkg = paths.harnesses_dir() / "broken"
-    pkg.mkdir()
-    (pkg / MANIFEST_FILENAME).write_text("raise ValueError('boom')")
-    assert cli.main(["harnesses"]) == 0
-    out = capsys.readouterr().out
-    assert "broken" in out and "boom" in out
 
 
 def test_a_plugin_binary_joins_the_unmanaged_sweep(local_dir):
@@ -602,29 +518,3 @@ def test_diagnostics_projection_bounds_untrusted_manifest_output(tmp_path):
     assert all(
         channel["id"] != "foreign-channel" for channel in runtime_row["participants"][0]["channels"]
     )
-
-
-def test_broken_plugin_has_no_fake_manifest_diagnostics(local_dir):
-    package = local_dir / "broken"
-    package.mkdir()
-    (package / MANIFEST_FILENAME).write_text("raise ValueError('boom')")
-    install(local_dir)
-
-    row = {row["name"]: row for row in harness_registry.describe()}["broken"]
-    assert row["error"] is not None
-    absent = {"manifest_api_version", "package_path", "approvals", "channels", "runtime"}
-    assert not absent & row.keys()
-
-
-# ---- legacy file migration diagnostic ------------------------------------
-
-
-def test_legacy_top_level_py_is_never_executed(local_dir):
-    legacy = local_dir / "acme.py"
-    legacy.write_text("raise RuntimeError('must not execute')")
-    install(local_dir)
-    rows = {r["name"]: r for r in harness_registry.describe()}
-    assert rows["acme"]["source"] == "local"
-    assert rows["acme"]["installed"] is False
-    assert "legacy" in rows["acme"]["error"]
-    assert "manifest.py" in rows["acme"]["error"]

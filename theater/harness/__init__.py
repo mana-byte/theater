@@ -1,7 +1,7 @@
 """Harness registry — compatibility façade.
 
 Every adapter is a package manifest. The ones Theater ships live in
-`builtin/plugins/`, the ones a user writes live in `$THEATER_HOME/harnesses/`,
+`builtin/plugins/`, the ones a user writes live in `$THEATER_HOME/plugins/`,
 and both are read by :mod:`theater.harness.loading` under the same contract.
 There is no built-in tier. Each adapter is two objects: a `Harness` that knows
 how to launch the CLI, and the `HarnessObserver` it carries, which knows how

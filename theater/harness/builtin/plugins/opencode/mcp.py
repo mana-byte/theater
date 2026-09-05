@@ -31,7 +31,7 @@ def plugin_path(config_path: Path) -> Path:
 def catalog_path(participant_id: str, correlation_dir: Path | None = None) -> Path:
     if correlation_dir is not None:
         return correlation_dir / f"{participant_id}.{MCP_CATALOG_FILENAME}"
-    return paths.observation_dir("opencode", participant_id) / MCP_CATALOG_FILENAME
+    return paths.participant_observation_dir(participant_id, "opencode") / MCP_CATALOG_FILENAME
 
 
 def _bounded_name(value: object) -> str | None:

@@ -94,7 +94,7 @@ def load_plugin(plugin: LoadedPlugin) -> LoadedPlugin:
         guidance = ""
         if type(manifest).__name__ == "McpServerManifest":
             guidance = (
-                " MCP-server packages belong in $THEATER_HOME/mcp_servers/<name>/manifest.py; "
+                " MCP-server packages belong in $THEATER_HOME/plugins/<name>/manifest.py; "
                 "a package may export only one manifest kind"
             )
         _cleanup_package(pkg_name)

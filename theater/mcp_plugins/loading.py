@@ -99,7 +99,7 @@ def load_plugin(plugin: LoadedMcpPlugin) -> LoadedMcpPlugin:
         guidance = ""
         if type(manifest).__name__ == "HarnessManifest":
             guidance = (
-                " Harness packages belong in $THEATER_HOME/harnesses/<name>/manifest.py; "
+                " Harness packages belong in $THEATER_HOME/plugins/<name>/manifest.py; "
                 "a package may export only one manifest kind"
             )
         _cleanup_package(package_name)

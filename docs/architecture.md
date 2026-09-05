@@ -45,7 +45,7 @@ layer become optional. Until then they are load-bearing.
   │  └──────┬───────┘       └──────┬───────┘      └──────┬──────┘ │
   └─────────┼──────────────────────┼─────────────────────┼────────┘
             │                      │                     │
-            │  NDJSON over unix socket ($THEATER_HOME/daemon.sock)
+            │  NDJSON over unix socket ($THEATER_HOME/var/run/daemon.sock)
             │                      │                     │
             ▼                      ▼                     ▼
    ┌───────────────────────────────────────────────────────────────┐
@@ -226,8 +226,26 @@ that plugin invalid.
 
 ## 5. State
 
-One SQLite file, `$THEATER_HOME/theater.db`, owned exclusively by the daemon —
+One SQLite file, `$THEATER_HOME/var/state/theater.db`, owned exclusively by the daemon —
 every other process reaches it over the unix socket.
+
+The home root contains the user-managed `config.toml`, `plugins/`, and `skills/` entries.
+Theater-managed state, runtime files, logs, and participant data live under `var/`. Each
+participant owns one `var/participants/<id>/` subtree, while plugin-global state lives under
+`var/state/plugins/<name>/`.
+
+### Clean-break home migration
+
+The home-layout change does not migrate runtime state:
+
+1. Stop Theater, including MCP sidecars and the daemon.
+2. Stage `config.toml` and the complete `skills/` tree outside `$THEATER_HOME`.
+3. Archive or discard the old home, then create or reinstall the fresh layout.
+4. Restore `config.toml` and `skills/`, removing obsolete plugin `state_path` settings.
+5. Reinstall or relink user plugins under `$THEATER_HOME/plugins/`, then start Theater.
+
+The database, participants, transcripts, logs, usage history, and plugin state start empty. An
+archived database is for reference only and must not be restored into the new home.
 
 | Table | Holds |
 |---|---|
@@ -657,7 +675,7 @@ Every adapter is a named package loaded under one manifest contract. The four
 that ship — `claude`, `codex`, `opencode`, `vibe` — live entirely under
 `theater/harness/builtin/plugins/<harness>/`, each with `manifest.py` exporting
 one immutable `MANIFEST`. Local packages use the same shape at
-`$THEATER_HOME/harnesses/<name>/manifest.py`; the directory name is canonical,
+`$THEATER_HOME/plugins/<name>/manifest.py`; the directory name is canonical,
 relative sibling imports are isolated, and a local package overrides a shipped
 one. Disabled names are skipped before import. A legacy top-level local `.py`
 is never executed and is retained only as an actionable migration diagnostic.
@@ -910,7 +928,7 @@ configuration says export is enabled.
 
 The daemon has two log files that must never share an inode:
 
-- **`logs/daemon.log`** — the routine human-readable log. A `RotatingFileHandler`
+- **`var/logs/daemon/daemon.log`** — the routine human-readable log. A `RotatingFileHandler`
   attaches directly to the `theater` logger with the existing formatter
   (`%(asctime)s %(levelname)-7s %(name)s %(message)s`). Rotation is **always
   active**, regardless of whether OTLP export is enabled — this is the fix for
@@ -919,9 +937,9 @@ The daemon has two log files that must never share an inode:
   output. A direct foreground daemon (`theater daemon`) also attaches a stderr
   handler with the same formatter; an autostarted daemon does not mirror routine
   logs into raw stderr.
-- **`logs/daemon.<token>.stderr.log`** — raw crash output. When `DaemonClient`
+- **`var/logs/daemon/stderr/<token>.log`** — raw crash output. When `DaemonClient`
   autostarts a daemon, the parent generates 12 lowercase hex chars with
-  `secrets.token_hex(6)`, creates a mode-0600 file under `THEATER_HOME/logs`, and
+  `secrets.token_hex(6)`, creates a mode-0600 file in that directory, and
   passes the same open fd as the child's stdout and stderr. The child does not
   reopen or redirect stderr — it inherited the correct descriptor. Token
   exists only for safe cleanup, pruning, and error reporting.
@@ -936,8 +954,8 @@ generation; the current path is pinned regardless of mtime. Only `LockHeld`
 (the singleton race loser) deletes its own generation — every other failure
 keeps it, whether before or after lock acquisition.
 
-Each régie writes a rotating `logs/regie/pane-<id>.log`, with a
-`logs/regie/pid-<pid>.log` fallback when no pane identity is available. Per-pane
+Each régie writes a rotating `var/logs/regie/pane-<id>.log`, with a
+`var/logs/regie/pid-<pid>.log` fallback when no pane identity is available. Per-pane
 files prevent two régie processes from rotating the same inode. Startup keeps
 the current and live-pane generations, plus a small bounded number of newest
 inactive generations; each base file and its `.1`, `.2`, … backups count as one
@@ -1080,8 +1098,8 @@ broken query does not suppress others. `stop()` is awaited before `Store.close()
 Raw stderr generation files are intentionally not rotated while a daemon is
 alive. They normally contain only interpreter or native crash output and
 accidental direct writes; routine Python logs go to the bounded rotating
-`logs/daemon.log`. Per-generation retention (3 files total, including current) bounds
+`var/logs/daemon/daemon.log`. Per-generation retention (3 files total, including current) bounds
 old files, not one pathological current generation. Rotating an arbitrary
 inherited file descriptor requires a pipe or fd-reopen protocol; phase 1
 deliberately avoids that complexity. The observed growth source — 25 MB/9 h of
-routine logs — is moved to the bounded rotating `logs/daemon.log`.
+routine logs — is moved to the bounded rotating `var/logs/daemon/daemon.log`.

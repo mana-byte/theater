@@ -18,8 +18,9 @@ logger = logging.getLogger("theater.harness.vibe")
 
 
 def participant_root(participant_id: str, correlation_root: Path | None = None) -> Path:
-    base = correlation_root or paths.home() / "observations" / "vibe"
-    return base / participant_id
+    if correlation_root is not None:
+        return correlation_root / participant_id
+    return paths.participant_observation_dir(participant_id, "vibe")
 
 
 class VibeIdentityMixin:

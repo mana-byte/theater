@@ -12,7 +12,7 @@ from pathlib import Path
 
 from theater import paths
 
-from .constants import _MARKER_KEY, _MARKER_VERSION, ISOLATION_MARKER
+from .constants import _MARKER_VERSION, ISOLATION_MARKER
 
 
 def _canonical(path: Path) -> Path:
@@ -21,8 +21,9 @@ def _canonical(path: Path) -> Path:
 
 def _marker_key() -> bytes:
     """Read or create the daemon-local Vibe domain signing key."""
-    key_path = paths.home() / _MARKER_KEY
-    key_path.parent.mkdir(parents=True, exist_ok=True)
+    key_path = paths.marker_key_path("vibe")
+    key_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    key_path.parent.chmod(0o700)
     try:
         return key_path.read_bytes()
     except FileNotFoundError:
@@ -35,7 +36,7 @@ def _marker_key() -> bytes:
 
 def _marker_key_readonly() -> bytes | None:
     """Read the signing key without creating it during validation."""
-    key_path = paths.home() / _MARKER_KEY
+    key_path = paths.marker_key_path("vibe")
     try:
         return key_path.read_bytes()
     except FileNotFoundError:

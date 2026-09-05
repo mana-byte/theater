@@ -12,7 +12,7 @@ from pathlib import Path
 
 from theater import paths
 
-from .constants import PI_ISOLATION_MARKER, PI_MARKER_KEY, PI_MARKER_VERSION
+from .constants import PI_ISOLATION_MARKER, PI_MARKER_VERSION
 
 
 def canonical(path: Path) -> Path:
@@ -20,12 +20,13 @@ def canonical(path: Path) -> Path:
 
 
 def _key_path() -> Path:
-    return paths.home() / PI_MARKER_KEY
+    return paths.marker_key_path("pi")
 
 
 def _marker_key() -> bytes:
     path = _key_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
     try:
         return path.read_bytes()
     except FileNotFoundError:

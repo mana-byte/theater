@@ -205,7 +205,7 @@ def validate_receipt_plan(plan: LaunchPlan, participant: Participant) -> str | N
             "refusing to write a token through a symlink"
         )
     # The receipt token path must live under the harness's observation dir.
-    obs_dir = paths.observation_dir(participant.harness, participant.id)
+    obs_dir = paths.participant_observation_dir(participant.id, participant.harness)
     try:
         resolved_token = plan.receipt_token_path.resolve(strict=False)
         resolved_obs = obs_dir.resolve(strict=False)
@@ -245,7 +245,7 @@ def install_hook_plan(plan: LaunchPlan, participant: Participant, observer) -> L
     for channel in channels:
         if not channel.bindings or channel.installer is None:
             continue
-        token_path = paths.observation_dir(participant.harness, participant.id) / (
+        token_path = paths.participant_observation_dir(participant.id, participant.harness) / (
             f"hook-{channel.declaration.id}.token"
         )
         _validate_channel_token_path(token_path, participant, reserved)
@@ -314,7 +314,7 @@ def install_otel_plan(plan: LaunchPlan, participant: Participant, observer, runt
         installer = channel.installer
         if installer is None:
             continue
-        token_path = paths.observation_dir(participant.harness, participant.id) / (
+        token_path = paths.participant_observation_dir(participant.id, participant.harness) / (
             f"otel-{channel.declaration.id}.token"
         )
         _validate_channel_token_path(token_path, participant, reserved)
@@ -389,7 +389,7 @@ def _reject_inherited_otel_environment(overlay: OtelInstallOverlay, header_env: 
 def _validate_channel_token_path(path, participant: Participant, reserved: set) -> None:
     if path.is_symlink():
         raise BadRequest("native channel token path is a symlink")
-    obs_dir = paths.observation_dir(participant.harness, participant.id)
+    obs_dir = paths.participant_observation_dir(participant.id, participant.harness)
     try:
         path.resolve(strict=False).relative_to(obs_dir.resolve(strict=False))
     except ValueError:
@@ -410,7 +410,9 @@ def _merge_channel_overlay(
     participant,
     kind: ChannelKind,
 ) -> None:
-    obs_dir = paths.observation_dir(participant.harness, participant.id).resolve(strict=False)
+    obs_dir = paths.participant_observation_dir(participant.id, participant.harness).resolve(
+        strict=False
+    )
     label = "hook" if kind is ChannelKind.HOOK else "native OTel"
     for key, value in overlay_env.items():
         if not isinstance(key, str) or not key or not isinstance(value, str):
@@ -515,17 +517,30 @@ def write_plan_files(plan: LaunchPlan) -> None:
 
 
 def _write_launch_file(path: Path, contents: str, *, private: bool) -> None:
-    """Write one prevalidated artifact without following a final-path symlink."""
+    """Write one prevalidated artifact."""
     if path.is_symlink() or path.parent.is_symlink():
         raise BadRequest(f"launch artifact path {path!r} contains a symlink")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.parent.is_symlink():
-        raise BadRequest(f"launch artifact parent {path.parent!r} is a symlink")
-    if private:
-        path.parent.chmod(0o700)
+    _ensure_private_parent(path.parent)
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags, 0o600 if private else 0o666)
     if private:
         os.fchmod(fd, 0o600)
     with os.fdopen(fd, "w") as fh:
         fh.write(contents)
+
+
+def _ensure_private_parent(directory: Path) -> None:
+    root = paths.participants_dir()
+    try:
+        relative = directory.relative_to(root)
+    except ValueError as exc:
+        raise BadRequest(
+            f"launch artifact directory {directory!r} is outside participant data"
+        ) from exc
+    current = root
+    for component in relative.parts:
+        current /= component
+        if current.is_symlink():
+            raise BadRequest(f"launch artifact directory {current!r} is a symlink")
+        current.mkdir(mode=0o700, exist_ok=True)
+        current.chmod(0o700)

@@ -39,8 +39,8 @@ async def daemon(theater_home):
 
 @pytest.fixture
 def local_dir(tmp_path):
-    """Stand-in for `$THEATER_HOME/harnesses`."""
-    d = tmp_path / "harnesses"
+    """Stand-in for `$THEATER_HOME/plugins`."""
+    d = tmp_path / "plugins"
     d.mkdir()
     return d
 

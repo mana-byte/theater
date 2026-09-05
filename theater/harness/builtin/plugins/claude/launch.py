@@ -28,8 +28,7 @@ from .constants import CLAUDE_RECEIPT_EVENTS
 
 
 def _claude_settings_path(participant_id: str) -> Path:
-    """Launch-specific Claude settings for receipt hooks."""
-    return paths.launch_artifacts_dir() / f"{participant_id}.settings.json"
+    return paths.participant_launch_dir(participant_id) / "claude.settings.json"
 
 
 def _receipt_hook_command(participant_id: str, token_path: Path) -> str:
@@ -69,7 +68,9 @@ def _claude_receipt_settings(participant_id: str, token_path: Path) -> dict:
 def plan_launch(context: LaunchContext) -> LaunchPlan:
     """Build Claude's launch plan and isolated receipt-hook settings."""
     settings_path = _claude_settings_path(context.participant_id)
-    token_path = paths.observation_dir("claude", context.participant_id) / "receipt-token"
+    token_path = (
+        paths.participant_observation_dir(context.participant_id, "claude") / "receipt-token"
+    )
     argv = ["claude", f"--mcp-config={context.config_path}", f"--settings={settings_path}"]
     native_session_id = str(uuid.uuid4())
     argv.append(f"--session-id={native_session_id}")

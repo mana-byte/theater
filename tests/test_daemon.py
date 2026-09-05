@@ -208,7 +208,7 @@ async def test_a_freshly_spawned_participant_is_idle_before_hello(client, fake_t
 
 async def test_spawn_writes_a_config_for_claude(client, fake_tmux):
     record = await client.call("spawn", harness="claude", prompt="hi", approval="yolo", cwd="/tmp")
-    config = paths.mcp_config_dir() / f"{record['id']}.json"
+    config = paths.mcp_config_path(record["id"])
     assert config.exists()
     assert record["id"] in config.read_text()
     assert "--dangerously-skip-permissions" in fake_tmux.windows[0]["command"]

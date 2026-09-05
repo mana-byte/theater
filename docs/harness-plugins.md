@@ -7,11 +7,11 @@ implementation.
 
 ## Package layout and loading
 
-Place a local plugin under `$THEATER_HOME/harnesses/` (normally
-`~/.theater/harnesses/`):
+Place a local plugin under `$THEATER_HOME/plugins/` (normally
+`~/.theater/plugins/`):
 
 ```text
-$THEATER_HOME/harnesses/
+$THEATER_HOME/plugins/
 └── acme/
     ├── manifest.py
     ├── launch.py
@@ -22,7 +22,8 @@ $THEATER_HOME/harnesses/
 The directory name, here `acme`, is the canonical harness name. It must use
 lowercase letters, digits, `_`, or `-`, starting with a letter or digit.
 `manifest.py` exports one root value named `MANIFEST`; there is no separate
-manifest name field.
+manifest name field. The value must be exactly one `HarnessManifest`; the same
+catalog also accepts packages containing exactly one `McpServerManifest`.
 
 The loader imports each directory as an isolated synthetic package. Relative
 imports such as `from .source import source_factory` work, sibling modules in
@@ -35,9 +36,9 @@ shipped plugin stops startup; a broken local plugin is skipped. The
 `theater harnesses` command reports loaded and rejected plugins at the behavior
 level; its output schema is not an authoring API.
 
-`[harness].disabled` filters a directory name before import, so it can disable
+`[harness].disabled` filters a harness package before import, so it can disable
 a plugin that would otherwise fail during import. A top-level legacy file such
-as `$THEATER_HOME/harnesses/acme.py` is never executed. It receives this
+as `$THEATER_HOME/plugins/acme.py` is never executed. It receives this
 actionable migration diagnostic:
 
 ```text

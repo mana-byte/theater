@@ -121,7 +121,7 @@ def clean_mcp_registry():
 
 
 def test_enabled_plugin_resolves_immutable_config_once_and_redacts(tmp_path, monkeypatch):
-    local = tmp_path / "mcp_servers"
+    local = tmp_path / "plugins"
     shipped = tmp_path / "shipped"
     write_plugin(local)
     config_path = tmp_path / "config.toml"
@@ -155,7 +155,7 @@ def test_enabled_plugin_resolves_immutable_config_once_and_redacts(tmp_path, mon
 
 
 def test_invalid_declared_skill_omits_the_local_plugin(tmp_path, monkeypatch):
-    local = tmp_path / "mcp_servers"
+    local = tmp_path / "plugins"
     write_plugin(local, skills=("missing-skill",))
     monkeypatch.setenv("ACME_TEST_TOKEN", "secret")
     settings = config.Config(
@@ -186,7 +186,12 @@ def test_table_lists_resolve_nested_values_immutably_and_report_indexed_paths(
     with pytest.raises(TypeError):
         channels[0]["label"] = "Other"  # type: ignore[index]
 
-    context = McpLaunchContext(participant_id="p-1", cwd=tmp_path, config=plugin.config)
+    context = McpLaunchContext(
+        participant_id="p-1",
+        cwd=tmp_path,
+        config=plugin.config,
+        state_dir=tmp_path / "state",
+    )
     with pytest.raises(TypeError):
         context.config["channels"][0]["label"] = "Other"  # type: ignore[index]
     with pytest.raises(McpConfigResolutionError) as error:
@@ -245,14 +250,13 @@ def test_table_list_schemas_require_valid_acyclic_item_schemas():
         validate_manifest("acme", manifest_with_config(schema))
 
 
-def test_mcp_server_root_is_created_under_theater_home(theater_home):
-    paths.ensure_home()
-    assert paths.mcp_servers_dir() == theater_home / "mcp_servers"
-    assert paths.mcp_servers_dir().is_dir()
+def test_user_plugins_share_one_root(theater_home):
+    assert paths.plugins_dir() == theater_home / "plugins"
+    assert paths.plugins_dir().is_dir()
 
 
 def test_harness_registry_installs_enabled_mcp_servers_at_startup(tmp_path, monkeypatch):
-    local = tmp_path / "mcp_servers"
+    local = tmp_path / "plugins"
     write_plugin(local)
     monkeypatch.setenv("ACME_TEST_TOKEN", "secret")
     settings = config.Config(
@@ -265,9 +269,8 @@ def test_harness_registry_installs_enabled_mcp_servers_at_startup(tmp_path, monk
     assert (
         harness.install(
             settings,
-            local_dir=tmp_path / "local-harnesses",
+            local_dir=local,
             shipped_dir=tmp_path / "shipped-harnesses",
-            mcp_local_dir=local,
             mcp_shipped_dir=tmp_path / "shipped-mcp",
         )
         == []
@@ -275,8 +278,8 @@ def test_harness_registry_installs_enabled_mcp_servers_at_startup(tmp_path, monk
     assert registry.get("acme").name == "acme"
 
 
-def test_disabled_package_is_discovered_without_importing_its_manifest(tmp_path):
-    local = tmp_path / "mcp_servers"
+def test_disabled_broken_package_is_omitted_without_a_diagnostic(tmp_path):
+    local = tmp_path / "plugins"
     package = local / "bomb"
     package.mkdir(parents=True)
     (package / "manifest.py").write_text("raise RuntimeError('must not import')", encoding="utf-8")
@@ -287,20 +290,19 @@ def test_disabled_package_is_discovered_without_importing_its_manifest(tmp_path)
 
 
 def test_disabled_package_still_reserves_the_global_canonical_name(tmp_path):
-    local = tmp_path / "mcp_servers"
+    local = tmp_path / "plugins"
     write_plugin(local, "vibe")
 
     with pytest.raises(config.ConfigError, match="conflicts with harness"):
         harness.install(
             config.Config(),
-            local_dir=tmp_path / "no-local-harnesses",
-            mcp_local_dir=local,
+            local_dir=local,
             mcp_shipped_dir=tmp_path / "shipped-mcp",
         )
 
 
 def test_local_package_overrides_shipped_package_of_the_same_kind(tmp_path, monkeypatch):
-    local = tmp_path / "mcp_servers"
+    local = tmp_path / "plugins"
     shipped = tmp_path / "shipped"
     write_plugin(shipped, command="shipped-server")
     write_plugin(local, command="local-server")
@@ -318,7 +320,7 @@ def test_local_package_overrides_shipped_package_of_the_same_kind(tmp_path, monk
 
 
 def test_wrong_manifest_type_is_a_path_qualified_broken_result(tmp_path):
-    root = tmp_path / "mcp_servers"
+    root = tmp_path / "plugins"
     package = root / "wrong"
     package.mkdir(parents=True)
     manifest_path = package / "manifest.py"
@@ -331,7 +333,7 @@ def test_wrong_manifest_type_is_a_path_qualified_broken_result(tmp_path):
 
 
 def test_unknown_enabled_and_broken_local_packages_are_diagnostics_not_config_errors(tmp_path):
-    local = tmp_path / "mcp_servers"
+    local = tmp_path / "plugins"
     (local / "broken").mkdir(parents=True)
     settings = config.Config(mcp=config.McpSection(enabled=["broken", "missing"]))
 
@@ -343,7 +345,7 @@ def test_unknown_enabled_and_broken_local_packages_are_diagnostics_not_config_er
 
 @pytest.mark.parametrize("name", ("theater", "theater_wait"))
 def test_enabled_plugin_cannot_claim_a_reserved_core_server_name(tmp_path, monkeypatch, name):
-    local = tmp_path / "mcp_servers"
+    local = tmp_path / "plugins"
     write_plugin(local, name)
     monkeypatch.setenv("ACME_TEST_TOKEN", "secret")
     settings = config.Config(
@@ -370,7 +372,7 @@ def test_enabled_broken_shipped_package_is_fatal(tmp_path):
     with pytest.raises(McpPluginError, match="broken shipped package"):
         registry.install(
             config.Config(mcp=config.McpSection(enabled=["broken"])),
-            local_dir=tmp_path / "mcp_servers",
+            local_dir=tmp_path / "plugins",
             shipped_dir=shipped,
         )
 

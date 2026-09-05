@@ -85,7 +85,7 @@ class FakeHarness(Harness):
         self.observer = FakeObserver(root=root)
 
     def plan_launch(self, *, participant_id, prompt, config_path, approval, **kwargs):
-        token_path = paths.observation_dir("fake", participant_id) / "receipt-token"
+        token_path = paths.participant_observation_dir(participant_id, "fake") / "receipt-token"
         return LaunchPlan(
             argv=["fake", "--config", str(config_path)],
             files={config_path: "{}\n"},
@@ -214,7 +214,7 @@ def test_preflight_rejects_receipt_plan_against_inheriting_observer(
     harness = InheritingHarness()
     monkeypatch.setattr("theater.daemon.spawning.planning.get_harness", lambda name: harness)
 
-    token_path = paths.observation_dir("inheriting", "p-x") / "receipt-token"
+    token_path = paths.participant_observation_dir("p-x", "inheriting") / "receipt-token"
     plan = LaunchPlan(
         argv=["fake"],
         receipt_token_path=token_path,
@@ -233,7 +233,7 @@ def test_preflight_refuses_plan_that_sets_receipt_token(registry, tmp_path, monk
     harness = FakeHarness()
     monkeypatch.setattr("theater.daemon.spawning.planning.get_harness", lambda name: harness)
 
-    token_path = paths.observation_dir("fake", "p-x") / "receipt-token"
+    token_path = paths.participant_observation_dir("p-x", "fake") / "receipt-token"
     token_path.parent.mkdir(parents=True, exist_ok=True)
     plan = LaunchPlan(
         argv=["fake"],
@@ -269,7 +269,7 @@ def test_preflight_rejects_receipt_path_colliding_with_plan_files(registry, tmp_
     harness = FakeHarness()
     monkeypatch.setattr("theater.daemon.spawning.planning.get_harness", lambda name: harness)
 
-    token_path = paths.observation_dir("fake", "p-x") / "receipt-token"
+    token_path = paths.participant_observation_dir("p-x", "fake") / "receipt-token"
     token_path.parent.mkdir(parents=True, exist_ok=True)
     plan = LaunchPlan(
         argv=["fake"],
@@ -286,7 +286,7 @@ def test_preflight_rejects_existing_symlink_at_receipt_path(registry, tmp_path, 
     harness = FakeHarness()
     monkeypatch.setattr("theater.daemon.spawning.planning.get_harness", lambda name: harness)
 
-    token_path = paths.observation_dir("fake", "p-x") / "receipt-token"
+    token_path = paths.participant_observation_dir("p-x", "fake") / "receipt-token"
     token_path.parent.mkdir(parents=True, exist_ok=True)
     target = tmp_path / "attacker"
     target.write_text("pwned")
@@ -429,7 +429,7 @@ async def test_core_rejects_candidate_with_path_location(fake_daemon, fake_clien
 
 
 def test_receipt_token_deleted_on_death(registry, tmp_path):
-    token_path = paths.observation_dir("fake", "p-fake") / "receipt-token"
+    token_path = paths.participant_observation_dir("p-fake", "fake") / "receipt-token"
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.write_text("secret")
 

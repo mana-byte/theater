@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from shipped import VibeHarness
 
+from theater import paths
 from theater.harness import HARNESSES, Harness, LaunchPlan, plan_launch, theater_mcp_servers
 from theater.harness.base import theater_binary
 from theater.harness.builtin.plugins.vibe.constants import ISOLATION_MARKER
@@ -85,7 +86,7 @@ def test_vibe_cold_spawn_always_gets_an_isolated_transcript_domain(tmp_path, mon
     )
 
     save_dir = Path(plan.env["VIBE_SESSION_LOGGING__SAVE_DIR"])
-    assert save_dir.name == "first"
+    assert save_dir == paths.participant_observation_dir("first", "vibe")
     assert plan.transcript_domain == str(save_dir.resolve())
     assert list(plan.files) == [save_dir / ISOLATION_MARKER]
 
@@ -386,7 +387,7 @@ def test_claude_launch_adds_receipt_hooks_without_editing_user_settings(tmp_path
     settings_path = Path(settings_arg.removeprefix("--settings="))
     settings = json.loads(plan.files[settings_path])
 
-    assert settings_path.name == "abc123.settings.json"
+    assert settings_path == paths.participant_launch_dir("abc123") / "claude.settings.json"
     assert plan.receipt_token_path is not None
     assert plan.receipt_token_path.name == "receipt-token"
     assert plan.receipt_token is None  # core mints the token, not the plugin
