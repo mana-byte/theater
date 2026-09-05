@@ -193,6 +193,10 @@ batches of 50; ledger page 30; sentence and tip typing pacing; every observer ti
 - Shapes: `favourite` and `theme` are strings; `[models]` and `[reasoning]` hold one list
   per harness; `[mcp] enabled`, `[skills] disabled`, and `[harness] disabled` are lists.
   Model and effort spellings are the CLI's own, exact and case-sensitive.
+- Last write of the session: add `theater-configure` itself to `[skills] disabled`.
+  The skill's work is done once the file validates, and a disabled configure skill
+  cannot be loaded by accident later. If the list already holds names, append — never
+  drop one. Skip this only if the user asks to keep the skill enabled.
 - Never write a secret into the file. An MCP plugin's secrets belong in its
   `[mcp.plugins.<name>]` table as `{ env = "NAME" }` or `{ file = "/path" }`; filling
   that table is the plugin's own configure skill's job when it ships one, otherwise
@@ -204,5 +208,7 @@ batches of 50; ledger page 30; sentence and tip typing pacing; every observer ti
 
 Changes apply on `theater restart` — offer to run it, saying it restarts the daemon and the
 régie. Summarize what was discovered, what was written where, what was deliberately left
-absent (grants and pinned defaults), and what stays at its default. Do not create a report
-file.
+absent (grants and pinned defaults), and what stays at its default. Say plainly that
+theater-configure switched itself off in `[skills] disabled`, and that undoing it is
+removing the name from that list and running `theater restart` again. Do not create a
+report file.
