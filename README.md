@@ -49,14 +49,6 @@ https://github.com/user-attachments/assets/c6a7d3f4-5d31-4ad6-93f3-8fdd391c5c5b
 </tr>
 </table>
 
-## 🎟️ Practical workflows
-
-| Issue / task | Normal (mono-CLI) | Theater |
-| --- | --- | --- |
-| **🔎 Research across multiple sources** | One agent visits each source sequentially and synthesizes within a single context. | An orchestrator assigns sources to agents in parallel, compares their evidence, resolves contradictions, and acts on the combined findings. |
-| **🧩 Resolve multiple Linear issues** | Work through the backlog one issue at a time, or manually coordinate several terminals and branches. | Give the orchestrator a list of issues; it identifies independent work and spawns agents into isolated worktrees to investigate, implement, and test concurrently. |
-| **🛡️ Review code changes** | One model reviews the change from one perspective. | Multiple state-of-the-art models review independently, debate disputed findings, and challenge one another to produce a more detailed, better-supported review. |
-
 ## ✨ Why Theater
 
 | | |
@@ -82,17 +74,12 @@ From a clone, `nix develop` opens the complete development environment.
 
 ### From source
 
-This path requires [uv](https://docs.astral.sh/uv/) and Git:
+This path requires [uv](https://docs.astral.sh/uv/):
 
 ```sh
-git clone https://github.com/mana-byte/theater.git
-cd theater
-uv sync --locked
-uv run theater --version
+uv tool install git+https://github.com/mana-byte/theater
+theater --version
 ```
-
-Use `uv run theater ...` from the checkout, or activate the environment and use
-`theater` directly.
 
 ## Quick start
 
@@ -136,119 +123,49 @@ This split follows one hard constraint: MCP has no server-initiated turn. An
 agent calls Theater through MCP; Theater reaches an agent through its tmux pane.
 No pane means the participant can call out, but cannot be called.
 
-## The régie
-
-The régie is both dashboard and control room. Use it to:
-
-- browse the participant tree and durable task descriptions;
-- stage and focus native agent panes without restarting them;
-- inspect request, tool, timing, file, transcript, and usage detail;
-- resume historical sessions from the command palette;
-- watch the live Theater event stream.
-
-Navigation stays terminal-native: `j`/`k` or arrows move through the tree,
-`h`/`l` stage trajectories or panes, `H`/`L` stage and focus immediately,
-`Enter` toggles the selected surface, and `Ctrl+P` opens the command palette.
-Mouse staging, trajectory inspection, and usage expansion are also available.
-
-## Delegate from an agent
-
-Spawned agents receive Theater's MCP server and their participant identity. The
-core loop is intentionally small:
-
-```text
-whoami → list_participants → spawn_session → await_sessions → read_transcript
-```
-
-Agents can also `send` follow-up work, `interrupt_session` without killing a
-child, `recall` relevant history, and update their live name or durable task
-description. `list_skills` exposes optional orchestration instructions only
-when an agent asks for them.
-
-“Done” means a child's turn ended—not that its work is correct. Theater keeps
-the transcript and repository separate so callers still inspect both.
-
-## Worktrees and parallel work
+## Useful commands & keybinds
 
 ```sh
-theater spawn codex "Implement the parser" --approval edits --worktree
-theater spawn vibe "Document the parser" --approval manual --worktree docs
+theater                                          # open the régie and start playing
+theater ls --tree                                # every agent, its lineage, and its state
+theater spawn codex "Fix the flaky test" --approval edits
+theater restart                                  # apply config changes without killing agents
+theater bus -f                                   # follow the live event stream
 ```
 
-- Bare `--worktree` creates an isolated linked worktree with its own index and
-  `HEAD`.
-- `--worktree NAME` joins an explicit shared worktree and branch.
-- Shared worktrees are collaboration, not isolation: agents must own separate
-  files and coordinate Git operations.
+In the régie tree, the keys you will use every day:
 
-## End-to-end example: research to final report
-
-A real project used Theater to turn work history scattered across several
-systems into a sourced internship report:
-
-```text
-Notion ─┐
-Slack ──┤
-Linear ─┼─→ evidence reports ─→ reconciled timeline ─┐
-GitHub ─┘                                            ├─→ section drafts ─→ integration ─→ agent debate ─→ report.typ
-Report criteria ─────────────────────────────────────┘
-```
-
-1. **Load the playbooks.** The lead used Theater's `list_skills` and
-   `load_skill` tools to load `theater-orchestrate` for ownership, supervision,
-   and integration. It later loaded `theater-debate` for the final adversarial
-   review.
-2. **Gather evidence.** The orchestrator spawned four read-only investigators,
-   one each for Notion, Slack, Linear, and GitHub. Each produced a
-   source-specific report from its own isolated worktree.
-3. **Verify the sources.** The reports recorded dates, concrete activity,
-   evidence strength, contradictions, and gaps. Their actual artifacts were
-   inspected before the orchestrator accepted them.
-4. **Reconstruct the timeline.** A synthesis agent reconciled the reports into
-   one chronological dossier, making targeted follow-up queries where sources
-   disagreed instead of inventing a convenient narrative.
-5. **Load the requirements.** The orchestrator fetched the report structure,
-   evaluation criteria, style rules, and confidentiality constraints, then
-   mapped the verified timeline onto those requirements.
-6. **Draft in parallel.** Agents worked on report sections in isolated
-   worktrees. Contributions could overlap: the orchestrator compared them and
-   resolved content or Git conflicts during integration.
-7. **Assemble and debate.** The orchestrator combined the accepted sections
-   into one coherent Typst document, then debated factual, structural, and
-   confidentiality findings with an independent agent. They challenged each
-   other's evidence and resolved substantiated objections before producing
-   `report.typ`.
-
-The human worked primarily with the orchestrator, but never lost access to its
-workers: any investigator, author, or debate peer could be inspected, corrected,
-interrupted, or opened directly in its native pane. The régie also kept the
-model assigned to each task and its cost visible throughout the production.
-
-## Approval and safety
-
-| Mode | Behavior |
+| Key | Action |
 | --- | --- |
-| `manual` | Keep the harness's normal permission prompts. Best for a pane you are watching. |
-| `edits` | Allow edits where the adapter supports it; otherwise fall back conservatively. |
-| `yolo` | Use the harness's unattended/approval-skipping mode. Choose it deliberately. |
+| `j` / `k` | Move through the participant tree (arrow keys work too) |
+| `Enter` | Stage the selected agent |
+| `h` / `l` | Stage the trajectory / live pane, focus on the repeat press |
+| `H` / `L` | Open the trajectory / live pane immediately |
+| `o` | Spawn a fresh session — harness picker |
+| `Ctrl+P` | Command palette — spawn, resume, and views |
+| `Esc` | Return from the trajectory view to the tree |
+| `<prefix> h` | Return to the tree from the staged pane or trajectory |
+| `x` | Kill the selected agent's pane |
+| `q` | Quit the régie — it detaches and kills nothing |
 
-The daemon is the sole writer of Theater's database and the only process that
-creates, destroys, or injects input into participant panes. Human presence is
-checked conservatively before delivery. Killing a worktree-backed child can
-delete its uncollected work, so Theater makes destructive targeting explicit.
+Inside a trajectory view:
 
-## Useful commands
-
-```sh
-theater ls --tree              # participant lineage and state
-theater ls --watch             # live status updates
-theater bus -f                 # follow the event stream
-theater stats --window 24      # recent turn outcomes
-theater models                 # allowed models and reasoning levels
-theater skills                 # available orchestration skills
-theater config                 # resolved machine configuration
-theater restart                # apply config without killing agents
-```
+| Key | Action |
+| --- | --- |
+| `j` / `k` / `h` / `l` | Scroll the view (arrows work too) |
+| `g` / `G` | Jump to the oldest record / resume following the tail |
+| `H` / `L` | Previous / next ledger page |
+| `Enter` | Open the details of the selected record |
+| `Tab` / `Shift+Tab` | Move focus between the timeline and detail regions |
+| `/` | Search the trajectory |
+| `f` | Toggle the filter panel |
+| `d` | Toggle the ledger order — chronological or by duration |
+| `v` | Cycle the diagnostic views |
+| `b` | Go back to the previously viewed record |
+| `r` | Reset the view — clear search, filters, and ordering |
+| `R` | Retry the agent's last turn |
+| `y` | Copy the selected record as text |
+| `Esc` | Return to the tree |
 
 ## Configuration
 
@@ -341,19 +258,6 @@ otlp_enabled = true
 
 Agent log content is excluded unless explicitly enabled. See the complete
 settings in [config.example.toml](config.example.toml).
-
-## Development
-
-```sh
-uv sync --locked
-uv run ruff check
-uv run ruff format --check
-uv run mypy
-uv run pytest --cov
-uv run alembic check
-```
-
-See [AGENTS.md](AGENTS.md) for invariants and repository conventions.
 
 ## Learn more
 
