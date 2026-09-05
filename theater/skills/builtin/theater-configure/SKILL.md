@@ -121,11 +121,13 @@ what was granted before the file takes effect.
    each one's state and error. For each chosen plugin that does, in order:
    - Check whether the plugin ships a configure skill of its own —
      `plugins/<name>/skills/` under the home; reading the directory needs no daemon.
-     If a configure skill is there, load it through your own skill-loading MCP tool or
-     `theater skills` (both need a daemon) and follow it to fill the plugin's
-     `[mcp.plugins.<name>]` table; that is the preferred path. With no daemon
-     reachable, read that `SKILL.md` file directly and follow it — the direct read is
-     instructions for you only, and nothing enters the skill registry through it.
+     If a configure skill is there, follow it to fill the plugin's
+     `[mcp.plugins.<name>]` table. Load it through your own skill-loading MCP tool
+     when its name appears in your skill listing; `theater skills` lists but does
+     not load. Otherwise read that `SKILL.md` file directly and follow it — this
+     includes the common case where a daemon is running but the plugin is disabled
+     or not yet configured, so its skill is absent from the listing; the direct read
+     is instructions for you only, and nothing enters the skill registry through it.
    - If it ships none, ask plainly: "This extra needs its own custom settings before it
      will switch on — leave it off for now, or switch it on and you set it up yourself
      later?" Leave off: the name is not written into `enabled`. Switch on and DIY:
