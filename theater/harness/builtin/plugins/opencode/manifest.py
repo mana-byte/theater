@@ -114,6 +114,7 @@ def manifest_for_paths(
         MANIFEST,
         launch=replace(
             MANIFEST.launch,
+            planner=partial(plan_launch, db=db),
             resume_planner=partial(resume_launch_overlay, db=db),
         ),
         observation=replace(

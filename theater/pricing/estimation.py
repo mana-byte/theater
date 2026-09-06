@@ -13,6 +13,7 @@ _PRICES: dict[str, dict] | None = None
 
 # Maps provider-specific model names to catalog rows with matching public rates.
 _ALIASES = {
+    "mistral/zai-glm-5-3": "mistral/zai-glm-5-2",
     "openai-foundry/zai-glm-5-2": "cloudflare/@cf/zai-org/glm-5.2",
 }
 

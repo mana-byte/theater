@@ -3,7 +3,7 @@
 OPENCODE_PROVIDER_ID_KEY = "providerID"
 OPENCODE_MODEL_ID_KEY = "modelID"
 
-DB_NAME = "opencode-stable.db"
+DB_NAME = "opencode.db"
 MODELS_TIMEOUT = 20
 
 WORKING_MARKERS = ("esc interrupt", "again to interrupt")

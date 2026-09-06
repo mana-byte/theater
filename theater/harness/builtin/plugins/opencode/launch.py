@@ -16,15 +16,16 @@ from theater.harness.contracts.callbacks import (
 from theater.harness.contracts.launch import LaunchPlan, ResumeLaunchOverlay
 from theater.harness.transcript.discovery import root_domain_overlay
 
-from .constants import DB_NAME, MODELS_TIMEOUT
+from .constants import MODELS_TIMEOUT
 from .mcp import plugin_path
 from .native_plugin import render_native_plugin
-from .observer import data_dir
+from .observer import database_path
 
 
-def plan_launch(context: LaunchContext) -> LaunchPlan:
+def plan_launch(context: LaunchContext, *, db: Path | None = None) -> LaunchPlan:
     participant_id = context.participant_id
     config_path = context.config_path
+    database = database_path(db)
     config: dict[str, object] = {
         "$schema": "https://opencode.ai/config.json",
     }
@@ -46,7 +47,10 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
     }
     return LaunchPlan(
         argv=argv,
-        env={"OPENCODE_CONFIG": str(config_path)},
+        env={
+            "OPENCODE_CONFIG": str(config_path),
+            "OPENCODE_DB": str(database),
+        },
         files=files,
         receipt_token_path=token_path,
     )
@@ -55,7 +59,7 @@ def plan_launch(context: LaunchContext) -> LaunchPlan:
 def resume_launch_overlay(context: ResumeContext, *, db: Path | None = None) -> ResumeLaunchOverlay:
     if context.predecessor.transcript_domain is None:
         return ResumeLaunchOverlay()
-    expected = f"opencode://{(db or data_dir() / DB_NAME).resolve()}"
+    expected = f"opencode://{database_path(db)}"
     return root_domain_overlay(context.predecessor, expected, "OpenCode")
 
 

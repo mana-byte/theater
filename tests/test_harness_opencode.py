@@ -2,7 +2,7 @@
 
 Everything here runs against a real SQLite file built by `Recorder`, which
 writes the same four tables and the same event payloads opencode does. The
-shapes were taken from a live `~/.local/share/opencode/opencode-stable.db`
+shapes were taken from a live `~/.local/share/opencode/opencode.db`
 after driving a session that asked a question, ran a tool, and answered — the
 two-step turn is what most of these assertions are about, since a step boundary
 that reads as a turn boundary would resolve a caller's `await_sessions` with an
@@ -199,7 +199,8 @@ def a_turn_with_a_tool(rec) -> None:
 
 def test_the_id_travels_in_a_merged_config_file(tmp_path):
     config = tmp_path / "abc.json"
-    plan = OpenCodeHarness().plan_launch(
+    database = tmp_path / "opencode.db"
+    plan = OpenCodeHarness(db=database).plan_launch(
         participant_id="abc123",
         prompt="say hello",
         config_path=config,
@@ -208,7 +209,10 @@ def test_the_id_travels_in_a_merged_config_file(tmp_path):
     )
 
     assert plan.argv == ["opencode", "--prompt", "say hello"]
-    assert plan.env == {"OPENCODE_CONFIG": str(config)}
+    assert plan.env == {
+        "OPENCODE_CONFIG": str(config),
+        "OPENCODE_DB": str(database.resolve()),
+    }
     document = json.loads(plan.files[config])
     server = document["mcp"]["theater"]
     assert server["command"][1:] == [
@@ -821,6 +825,13 @@ def test_configured_manifest_reads_the_injected_database_and_correlation(rec, wo
     (correlation / "participant.opencode.mjs").write_text("")
     harness = OpenCodeHarness(db=rec.path, correlation_dir=correlation)
     assert isinstance(harness.observer, ManifestHarnessObserver)
+    launch = harness.plan_launch(
+        participant_id="participant",
+        prompt="",
+        config_path=tmp_path / "config.json",
+        approval="manual",
+    )
+    assert launch.env["OPENCODE_DB"] == str(rec.path.resolve())
     candidates = harness.observer.transcript_candidates(cwd=str(workdir))
     assert [candidate.domain for candidate in candidates] == [f"opencode://{rec.path.resolve()}"]
     admitted = harness.observer.admit_operator_candidate(

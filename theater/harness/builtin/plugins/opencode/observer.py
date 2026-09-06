@@ -32,6 +32,11 @@ def data_dir() -> Path:
     return root / "opencode"
 
 
+def database_path(db: Path | None = None) -> Path:
+    """Resolve the database Theater tells OpenCode to write and observes."""
+    return (db or data_dir() / DB_NAME).expanduser().resolve()
+
+
 class OpenCodeObserver:
     has_transcript = True
     trajectory_capabilities = TrajectoryCapabilities(
@@ -51,7 +56,7 @@ class OpenCodeObserver:
     )
 
     def __init__(self, db: Path | None = None, correlation_dir: Path | None = None):
-        self.db = db or data_dir() / DB_NAME
+        self.db = database_path(db)
         self.correlation_dir = correlation_dir
 
     def open_source(

@@ -20,6 +20,10 @@ def test_verified_opencode_alias_uses_its_catalog_row():
     assert _cost("openai-foundry/zai-glm-5-2") == 580_000_000
 
 
+def test_mistral_glm_5_3_uses_glm_5_2_rates():
+    assert _cost("mistral/zai-glm-5-3") == _cost("mistral/zai-glm-5-2")
+
+
 def test_provider_hint_resolves_provider_qualified_catalog_name():
     cost = estimate_cost_usd(
         "FW-GLM-5.2",
