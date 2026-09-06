@@ -6,25 +6,11 @@ description = "Cross-harness orchestration layer for coding agents"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    # 2.0 renamed FastMCP to MCPServer; theater/mcp/server.py uses the new name,
-    # so 1.x will not import. Interop with 1.x *clients* (Vibe ships 1.28.1) is
-    # unaffected: an `initialize` offering 2025-11-25 is echoed back verbatim
-    # (mcp/server/runner.py:425), and the 2026-07-28 revision this SDK also
-    # speaks is only reachable via server/discover, never via the handshake.
     "mcp>=2.0.0",
-    # The régie. Matches Vibe's stack exactly (Python 3.12 + Textual).
     "textual>=0.40.0",
-    # Schema lives in daemon/schema.py as Core metadata; 2.0 for the modern
-    # select()/Row API this store is written against.
     "sqlalchemy>=2.0",
-    # Migrations, and specifically batch mode: SQLite cannot ALTER, so a column
-    # change means copy-table-and-swap. Without it, editing the schema is a
-    # silent no-op against every database that already exists — which is what
-    # v1.2 and earlier actually did. See docs/architecture.md §5.
     "alembic>=1.13",
-    # Declared directly even though MCP brings it transitively.
     "opentelemetry-api>=1.44,<2",
-    # Declarative SKILL.md frontmatter parsed with PyYAML SafeLoader.
     "pyyaml>=6.0",
 ]
 
@@ -65,16 +51,8 @@ dev = [
 exclude-newer = "2 days"
 
 [tool.ruff]
-# 88 would flag 50 lines; 100 flags 5. The wide ones are prose — docstrings and
-# error messages that explain a decision — and folding them costs more than the
-# column saves.
 line-length = 100
 
-# The formatter reaches into Python blocks fenced in Markdown, and the examples
-# in README.md and docs/ align their assignments into columns on purpose — the
-# alignment is what shows the reader which two calls differ. Reflowing them to
-# one-space-around-`=` is a loss in a hand-written teaching example, so prose is
-# the author's and only source is machine-formatted.
 extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
@@ -93,54 +71,21 @@ select = [
     "TRY",
 ]
 ignore = [
-    # The house style is French-flavoured: "régie", "théâtre", em-dashes. These
-    # three rules exist to catch homoglyph attacks in identifiers, which is not
-    # what a docstring saying "régie" is.
     "RUF001", "RUF002", "RUF003",
-
-    # An exception's class name is the CamelCase of its wire code: `Busy` is
-    # `busy`, `HumanPresent` is `human_present` (models.py:147). Adding an
-    # `Error` suffix either desyncs the two or changes the code an agent sees.
     "N818",
-
-    # Long messages are raised inline on purpose. Every error a caller sees is
-    # meant to say what to do about it, and a one-line exception class per
-    # message would bury that.
     "TRY003",
-
-    # Imports inside functions are deliberate: harness plugins are loaded
-    # lazily, and the CLI keeps Textual out of the import path of every
-    # subcommand that is not the régie.
     "PLC0415",
-
-    # 52 hits, nearly all `assert x == 3` in tests, where the literal *is* the
-    # assertion.
     "PLR2004",
-
-    # Complexity ceilings. The reducer takes ten arguments because it reduces
-    # ten facts; a parser returns eight times because it classifies eight
-    # record shapes. Refactoring those to satisfy a counter would make them
-    # worse, and v1.1 already did the modularity pass.
     "PLR0911", "PLR0913", "PLR0917",
-
-    # Our own APIs take `timeout` parameters by design. The rule wants the
-    # caller to wrap in `asyncio.timeout` instead, which would move the
-    # deadline away from the protocol that defines it.
     "ASYNC109",
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# A test that waits for a daemon to converge polls; that is the test, not an
-# accident. Same for touching the filesystem inside an async test body.
 "tests/*" = ["ASYNC110", "ASYNC240"]
 
 [tool.mypy]
 python_version = "3.12"
 files = ["theater"]
-# Lenient on purpose: no --strict, no disallow_untyped_defs. Annotated code is
-# checked, unannotated code is left alone. The payoff we are after is the
-# union-attr class of bug — attribute access on a value that can be None —
-# which this project has shipped more than once.
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -153,22 +98,8 @@ markers = [
 
 [tool.coverage.run]
 source = ["theater"]
-# Line coverage only. Branch coverage is a separate, stricter decision: it would
-# drop the number ~5 points overnight and most of the new misses would be
-# defensive `if not x: return` arms that no test should have to stage.
 
 [tool.coverage.report]
-# The gate. Not wired into `addopts`, because that would make `pytest
-# tests/test_cli.py` fail for measuring one file — run it deliberately:
-#
-#     uv run pytest --cov
-#
-# The floor is 80, well under the ~91% the suite actually reaches: it is there
-# to catch a collapse, not to police every commit. That is roughly 460 lines of
-# slack, so new code can land slightly under-tested without blocking the run.
-# What is *not* covered is deliberate and worth knowing: the daemon's asyncio
-# watcher loops, the tmux subprocess layer below the argv assertions, and the
-# Alembic scaffolding. Everything that decides something is covered.
 fail_under = 80
 show_missing = true
 skip_covered = true
