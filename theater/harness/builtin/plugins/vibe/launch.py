@@ -36,7 +36,7 @@ def plan_launch(
     approval = context.approval
     model = context.model
     resume = context.resume
-    argv = ["vibe"]
+    argv = ["vibe", "--experimental-harness"]
     if approval == "yolo":
         argv.append("--yolo")
     elif approval == "edits":
