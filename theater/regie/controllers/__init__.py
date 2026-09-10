@@ -6,6 +6,7 @@ A controller owns a cohesive piece of behavior that grew too large for
 hold no reference to it.
 """
 
+from theater.regie.controllers.kill import KillController, KillResult
 from theater.regie.controllers.surface import (
     RightSurface,
     SurfaceController,
@@ -14,6 +15,8 @@ from theater.regie.controllers.surface import (
 )
 
 __all__ = [
+    "KillController",
+    "KillResult",
     "RightSurface",
     "SurfaceController",
     "TrajectoryStageOutcome",

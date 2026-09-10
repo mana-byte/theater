@@ -105,6 +105,7 @@ from theater.regie.animations.routes import (  # noqa: F401
     _send_trace_glyph,
 )
 from theater.regie.bus_view import format_bus_line
+from theater.regie.controllers.kill import KillController, KillResult
 from theater.regie.controllers.navigation import NavigationState, UpDecision
 from theater.regie.controllers.polling import PollingController
 from theater.regie.controllers.session import (
@@ -329,6 +330,10 @@ class RegieApp(App):
     def __init__(self, settings: Config | None = None):
         super().__init__()
         self._client: DaemonClient | None = None
+        #: Kills run on a client of their own so a slow participant.kill
+        #: (daemon teardown, worktree cleanup) never holds the shared
+        #: client's request lock — polls and input keep flowing.
+        self._kill_controller: KillController | None = None
         #: The whole config, not just [regie]: palette needs theater.favourite. Injectable.
         self.settings = settings or Config()
         self._cost_window_hours = _COST_WINDOWS.get(self.settings.regie.cost_window, 24.0)
@@ -715,6 +720,12 @@ class RegieApp(App):
     async def on_unmount(self) -> None:
         if self._lag_stopping is not None:
             self._lag_stopping.set()
+        if self._kill_controller is not None:
+            # Cancel in-flight kills and close their dedicated client
+            # before the teardown paths run, so a completion callback can
+            # never race the unmount.
+            await self._kill_controller.aclose()
+            self._kill_controller = None
         try:
             self._stop_leaf_reveal()
             self._stop_leaf_retirement()
@@ -1526,7 +1537,14 @@ class RegieApp(App):
         self._apply_stage_result(result)
 
     async def action_kill(self) -> None:
-        """Kill the selected participant."""
+        """Kill the selected participant without holding the régie's loop.
+
+        ``participant.kill`` can be slow on the daemon side (teardown,
+        worktree cleanup), so the request runs as a background task on a
+        client of its own: the régie keeps processing input and polls while
+        the kill is in flight, repeated presses are coalesced per
+        participant, and the tree refreshes when the daemon answers.
+        """
         if self._usage_keyboard_metric is not None:
             return
         node = selected_participant(self.tree_lines, self.cursor)
@@ -1535,19 +1553,37 @@ class RegieApp(App):
             return
         pid = node.get("id")
         pane = node.get("tmux_pane")
-        if not pid:
+        if not isinstance(pid, str) or not pid:
             self.notify("cannot kill an unmanaged pane", severity="warning")
             return
-        if not self._client:
+        controller = self._ensure_kill_controller()
+        if controller is None:
             return
-        try:
-            await self._client.call("participant.kill", id=pid)
-        except Exception as exc:
-            self.notify(f"kill failed: {exc}", severity="error")
-        else:
+        started = controller.request(
+            pid, on_done=lambda result: self._kill_done(result, pane=pane, pid=pid)
+        )
+        if not started:
+            self.notify("kill already under way", severity="information")
+
+    def _ensure_kill_controller(self) -> KillController | None:
+        """The kill controller, constructed on first use.
+
+        Lazy like the trajectory controller's disposable clients: a régie
+        that never kills opens no extra socket, and the second constructed
+        client is always the kill one, in a stable order for tests.
+        """
+        if self._kill_controller is None and self._client is not None:
+            self._kill_controller = KillController(DaemonClient())
+        return self._kill_controller
+
+    async def _kill_done(self, result: KillResult, *, pane: object, pid: str) -> None:
+        """React to a finished kill on the event loop, off the key path."""
+        if result.ok:
             if pane == self.staged_pane:
                 self.staged_pane = None
             self._leaf_retirement.remove_without_animation(("p", pid))
+        else:
+            self.notify(f"kill failed: {result.error}", severity="error")
         await self._refresh_tree()
 
     def action_spawn(self) -> None:

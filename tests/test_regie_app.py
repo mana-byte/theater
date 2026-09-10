@@ -42,7 +42,7 @@ from theater.regie.dashboard.widgets import (
     WelcomeDashboard,
 )
 from theater.regie.trajectory.enums import DiagnosticView
-from theater.regie.tree import SEND_STYLE, send_path
+from theater.regie.tree import SEND_STYLE, selected_participant, send_path
 from theater.trajectory import (
     ParticipantLink,
     TrajectoryKind,
@@ -333,6 +333,12 @@ def tmux(monkeypatch):
     monkeypatch.setattr(app_mod.panes, "select_pane", select_pane)
     monkeypatch.setattr(app_mod.tmux, "set_buffer", set_buffer)
     return calls
+
+
+def selected_id(app: RegieApp) -> str | None:
+    """The participant id at the cursor, for selection-preservation checks."""
+    node = selected_participant(app.tree_lines, app.cursor)
+    return node.get("id") if node else None
 
 
 def make_app(**regie) -> tuple[RegieApp, list[tuple[str, str]]]:
@@ -2365,16 +2371,134 @@ async def test_live_switch_recovers_when_the_old_pane_has_disappeared(daemon, tm
 # ---- kill ----------------------------------------------------------------
 
 
+def kill_client(daemon) -> FakeClient:
+    """The dedicated client the app constructs on the first kill press.
+
+    The shared client is constructed first at mount, so the second one any
+    test constructs is the kill client (the trajectory clients are lazy and
+    no kill test opens a trajectory view).
+    """
+    assert len(daemon["clients"]) >= 2
+    return daemon["clients"][1]
+
+
+def _gated_kill(gate: asyncio.Event):
+    """A participant.kill answer that only arrives once the gate opens."""
+
+    async def answer(_params):
+        await gate.wait()
+        return {}
+
+    return answer
+
+
+async def _wait_for_calls(client: FakeClient, method: str, count: int) -> None:
+    """Pause until `client` has issued `count` requests for `method`.
+
+    Background-task completion surfaces as the next call it triggers (a
+    tree refresh, a notification), so the tests wait for that rather than
+    sleeping a fixed amount.
+    """
+    for _ in range(500):
+        if len(client.asked(method)) >= count:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"client never reached {count} {method} requests")
+
+
 async def test_kill_asks_the_daemon_and_refreshes(daemon, tmux):
     app, notes = make_app()
     async with app.run_test() as pilot:
         await pilot.press("x")
-        client = daemon["client"]
+        client = kill_client(daemon)
+        await _wait_for_calls(client, "participant.kill", 1)
+        # The kill runs on a client of its own: the shared client never
+        # carries it, so polls never queue behind a slow teardown.
         assert client.asked("participant.kill") == [{"id": PARENT["id"]}]
+        assert daemon["client"].asked("participant.kill") == []
         # A kill changes the tree, so it is re-read rather than waited for.
-        assert len(client.asked("participants.tree")) == 2
+        await _wait_for_calls(daemon["client"], "participants.tree", 2)
+        assert len(daemon["client"].asked("participants.tree")) == 2
     # The row leaving the tree is the feedback; a successful kill says nothing.
     assert notes == []
+
+
+async def test_a_kill_in_flight_does_not_stall_input_or_polling(daemon, tmux):
+    """The headless freeze, as a regression.
+
+    participant.kill holds the issuing client's request lock until the
+    daemon finishes teardown and answers. Awaited in the key action it
+    froze the régie's message loop, and run on the shared client it
+    stalled every poll behind the same lock. The kill now runs on a
+    dedicated client as a background task: the press returns, keys keep
+    being processed, and the shared client keeps answering while the kill
+    is still in flight.
+    """
+    gate = asyncio.Event()
+    daemon["answers"]["participant.kill"] = _gated_kill(gate)
+    app, notes = make_app()
+    async with app.run_test() as pilot:
+        # The press must return while the kill is still in flight.
+        await asyncio.wait_for(pilot.press("x"), timeout=5)
+        client = kill_client(daemon)
+        await _wait_for_calls(client, "participant.kill", 1)
+
+        # Input still flows: the cursor moves while the kill is gated.
+        await asyncio.wait_for(pilot.press("j"), timeout=5)
+        assert app.cursor == 1
+
+        # Polling still flows: the shared client answers a tree poll while
+        # the kill client is still waiting on its reply.
+        tree_calls = len(daemon["client"].asked("participants.tree"))
+        await asyncio.wait_for(app._refresh_tree(), timeout=5)
+        assert len(daemon["client"].asked("participants.tree")) == tree_calls + 1
+
+        gate.set()
+        # The kill completing refreshes the tree on the shared client.
+        await _wait_for_calls(daemon["client"], "participants.tree", tree_calls + 2)
+        assert app.staged_pane is None
+    assert notes == []
+
+
+async def test_repeated_kills_are_coalesced_then_allowed_again(daemon, tmux):
+    """A second press while one kill is in flight starts nothing new, and
+    a press after completion starts a fresh request: repeated kills work,
+    duplicates do not pile up on the daemon."""
+    gate = asyncio.Event()
+    daemon["answers"]["participant.kill"] = _gated_kill(gate)
+    app, notes = make_app()
+    async with app.run_test() as pilot:
+        await asyncio.wait_for(pilot.press("x"), timeout=5)
+        client = kill_client(daemon)
+        await _wait_for_calls(client, "participant.kill", 1)
+
+        await asyncio.wait_for(pilot.press("x"), timeout=5)
+        assert len(client.asked("participant.kill")) == 1
+        assert any("kill already under way" in msg and sev == "information" for msg, sev in notes)
+
+        gate.set()
+        await _wait_for_calls(daemon["client"], "participants.tree", 2)
+
+        # The participant is dead and gone in the daemon's eyes; a fresh
+        # press is a new request the daemon may refuse — and that refusal
+        # is reported, not swallowed.
+        daemon["broken"] = {"participant.kill"}
+        await asyncio.wait_for(pilot.press("x"), timeout=5)
+        await _wait_for_calls(client, "participant.kill", 2)
+        assert len(client.asked("participant.kill")) == 2
+
+
+async def test_a_completed_kill_keeps_the_selection_on_the_survivors(daemon, tmux):
+    """Killing the parent leaves the cursor where the tree allows it, on
+    a participant that still exists — selection survives the refresh."""
+    app, _ = make_app()
+    async with app.run_test() as pilot:
+        await pilot.press("j")
+        assert selected_id(app) == CHILD["id"]
+        daemon["answers"]["participants.tree"] = [dict(CHILD)]
+        await pilot.press("x")
+        await _wait_for_calls(daemon["client"], "participants.tree", 2)
+        assert selected_id(app) == CHILD["id"]
 
 
 async def test_killing_the_staged_participant_clears_the_stale_pane(daemon, tmux):
@@ -2383,6 +2507,7 @@ async def test_killing_the_staged_participant_clears_the_stale_pane(daemon, tmux
         await pilot.press("enter")
         assert app.staged_pane == "%10"
         await pilot.press("x")
+        await _wait_for_calls(daemon["client"], "participants.tree", 2)
         assert app.staged_pane is None
 
 
@@ -2391,6 +2516,7 @@ async def test_a_refused_kill_is_reported(daemon, tmux):
     app, notes = make_app()
     async with app.run_test() as pilot:
         await pilot.press("x")
+        await _wait_for_calls(kill_client(daemon), "participant.kill", 1)
     assert any("kill failed" in msg and sev == "error" for msg, sev in notes)
 
 
@@ -2405,6 +2531,49 @@ async def test_an_unmanaged_pane_cannot_be_killed(daemon, tmux):
         await pilot.press("x")
         assert daemon["client"].asked("participant.kill") == []
     assert any(sev == "warning" for _, sev in notes)
+
+
+async def test_pending_kills_are_cancelled_and_the_client_closed_on_unmount(daemon, tmux):
+    """Quitting with a kill still in flight must not hang, leak the
+    dedicated connection, or leave a destroyed-while-pending task behind."""
+    gate = asyncio.Event()
+    daemon["answers"]["participant.kill"] = _gated_kill(gate)
+    app, _ = make_app()
+    async with app.run_test() as pilot:
+        await asyncio.wait_for(pilot.press("x"), timeout=5)
+        await _wait_for_calls(kill_client(daemon), "participant.kill", 1)
+        # Leave the app: the run_test context exit runs on_unmount.
+    assert kill_client(daemon).closed
+    assert app._kill_controller is None
+
+
+async def test_the_kill_controller_refuses_requests_after_close():
+    """A kill pressed during shutdown starts nothing: the controller is
+    closed, not merely empty."""
+    client = FakeClient({}, set())
+    controller = app_mod.KillController(client)
+    await controller.aclose()
+    assert controller.request("p_1") is False
+    assert client.asked("participant.kill") == []
+
+
+async def test_the_kill_controller_reports_failures_through_the_callback():
+    """The controller surfaces daemon refusals through on_done, never by
+    raising into the task."""
+    client = FakeClient({}, {"participant.kill"})
+    controller = app_mod.KillController(client)
+    results: list[app_mod.KillResult] = []
+
+    async def on_done(result: app_mod.KillResult) -> None:
+        results.append(result)
+
+    assert controller.request("p_1", on_done=on_done) is True
+    await _wait_for_calls(client, "participant.kill", 1)
+    await asyncio.sleep(0)
+    assert [r.ok for r in results] == [False]
+    assert results[0].error is not None
+    assert "participant.kill is unavailable" in results[0].error
+    await controller.aclose()
 
 
 # ---- palette spawn -------------------------------------------------------

@@ -12,6 +12,8 @@ real app through Textual's test pilot. No test sleeps.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from rich.cells import cell_len
 
@@ -431,17 +433,20 @@ async def test_user_killed_child_unmounts_without_retirement(daemon, tmux, monke
         leaf = panel._key_widgets[key]
         _finish_leaf_reveal(app)
         app.cursor = 1
-        client = daemon["client"]
-        original_call = client.call
-
-        async def remove_child(method: str, **params):
-            result = await original_call(method, **params)
-            if method == "participant.kill":
-                daemon["answers"]["participants.tree"] = [dict(PARENT, children=[])]
-            return result
-
-        client.call = remove_child
+        # Kills run as a background task on a dedicated client, so the
+        # test states the post-kill tree up front — the next participants.tree
+        # read is the refresh the completed kill triggers — and waits for
+        # that refresh instead of for the action call to return.
+        shared = daemon["client"]
+        before = len(shared.asked("participants.tree"))
+        daemon["answers"]["participants.tree"] = [dict(PARENT, children=[])]
         await app.action_kill()
+        for _ in range(500):
+            if len(shared.asked("participants.tree")) > before:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("the completed kill never refreshed the tree")
         await pilot.pause()
 
         assert leaf not in panel.children
